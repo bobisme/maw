@@ -576,6 +576,7 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice --check --format json # structured check result
     ///   maw ws merge alice --format json         # structured merge result (success or conflict)
     ///   maw ws merge alice bob --resolve cf-k7mx=alice --resolve cf-r3np=bob
+    ///   maw ws merge alice bob --resolve-all=alice   # resolve all conflicts to alice's version
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -640,6 +641,14 @@ pub enum WorkspaceCommands {
         /// Atom-level IDs (cf-k7mx.0) resolve a specific conflict region (workspace name only).
         #[arg(long = "resolve", value_name = "ID=STRATEGY", conflicts_with = "check", conflicts_with = "plan")]
         resolve: Vec<String>,
+
+        /// Resolve all remaining conflicts to this workspace's version.
+        ///
+        /// Individual --resolve flags take precedence over --resolve-all.
+        ///
+        ///   maw ws merge alice bob --resolve-all=alice
+        #[arg(long = "resolve-all", value_name = "WORKSPACE", conflicts_with = "check", conflicts_with = "plan")]
+        resolve_all: Option<String>,
     },
 
     /// Show detailed conflict information for workspace(s)
@@ -765,6 +774,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             format,
             json,
             resolve,
+            resolve_all,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             if check {
@@ -782,6 +792,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     dry_run,
                     format: fmt,
                     resolve,
+                    resolve_all,
                 },
             )
         }

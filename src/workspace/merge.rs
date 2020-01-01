@@ -700,7 +700,8 @@ pub struct ConflictsOutput {
 ///
 /// When `id_info` is provided, the JSON includes conflict and atom IDs for
 /// use with `--resolve`.
-pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
+#[cfg(test)]
+fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
     conflict_record_to_json_with_id(record, None, &[])
 }
 
@@ -862,6 +863,14 @@ fn print_conflict_report(
     conflicts_with_ids: &[ConflictWithId],
     ws_names: &[String],
 ) {
+    print_conflict_report_with_resolve(conflicts_with_ids, ws_names, None);
+}
+
+fn print_conflict_report_with_resolve(
+    conflicts_with_ids: &[ConflictWithId],
+    ws_names: &[String],
+    prebuilt_resolve_args: Option<&[String]>,
+) {
     println!();
     println!(
         "BUILD: {} conflict(s) detected.",
@@ -887,6 +896,26 @@ fn print_conflict_report(
             "           Workspaces: {}",
             ws_list.join(", ")
         );
+
+        // Show content snippets from each side (up to 5 lines each)
+        for side in &c.record.sides {
+            if let Some(ref content) = side.content {
+                let text = String::from_utf8_lossy(content);
+                let lines: Vec<&str> = text.lines().collect();
+                let preview_lines = 5;
+                let truncated = lines.len() > preview_lines;
+                let shown: Vec<&str> = lines.iter().take(preview_lines).copied().collect();
+                let label = side.workspace_id.as_str();
+                println!("           [{label}]:");
+                for line in &shown {
+                    println!("             {line}");
+                }
+                if truncated {
+                    println!("             ... ({} more lines)", lines.len() - preview_lines);
+                }
+            }
+        }
+
         if !c.atom_ids.is_empty() {
             println!("           Atoms:");
             for (i, atom) in c.record.atoms.iter().enumerate() {
@@ -905,13 +934,19 @@ fn print_conflict_report(
         println!();
     }
 
-    // Build the resolve command template using first workspace name as default
+    // Build the resolve command template
     let ws_args = ws_names.join(" ");
-    let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
-    let resolve_args: Vec<String> = conflicts_with_ids
-        .iter()
-        .map(|c| format!("--resolve {}={default_ws}", c.id))
-        .collect();
+    let resolve_args_owned: Vec<String>;
+    let resolve_args: &[String] = if let Some(prebuilt) = prebuilt_resolve_args {
+        prebuilt
+    } else {
+        let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
+        resolve_args_owned = conflicts_with_ids
+            .iter()
+            .map(|c| format!("--resolve {}={default_ws}", c.id))
+            .collect();
+        &resolve_args_owned
+    };
     println!("To resolve, re-run with --resolve:");
     println!(
         "  maw ws merge {} {}",
@@ -1687,76 +1722,23 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         }
     };
 
-    let conflict_jsons: Vec<ConflictJson> = build_output
-        .conflicts
-        .iter()
-        .map(conflict_record_to_json)
-        .collect();
+    let has_conflicts = !build_output.conflicts.is_empty();
 
-    let has_conflicts = !conflict_jsons.is_empty();
-    let to_fix = if has_conflicts {
-        Some(format!("maw ws merge {}", workspaces.join(" ")))
-    } else {
-        None
-    };
-
-    if format == OutputFormat::Json {
-        let status = if has_conflicts { "conflict" } else { "clean" }.to_string();
-        let message = if has_conflicts {
-            format!(
-                "{} conflict(s) found in {} workspace(s). Resolve them before merging.",
-                conflict_jsons.len(),
-                workspaces.len()
-            )
-        } else {
-            format!(
-                "No conflicts found. {} workspace(s) can be merged cleanly.",
-                workspaces.len()
-            )
-        };
-        let out = ConflictsOutput {
-            status,
-            workspaces: workspaces.to_vec(),
-            has_conflicts,
-            conflict_count: conflict_jsons.len(),
-            conflicts: conflict_jsons,
-            message,
-            to_fix,
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        // Text / pretty output
-        if has_conflicts {
-            println!(
-                "{} conflict(s) found across {} workspace(s):",
-                conflict_jsons.len(),
-                workspaces.len()
-            );
-            println!();
-            for (i, c) in conflict_jsons.iter().enumerate() {
-                println!(
-                    "  [{}/{}] {} ({}: {})",
-                    i + 1,
-                    conflict_jsons.len(),
-                    c.path,
-                    c.reason,
-                    c.reason_description
-                );
-                println!("    Workspaces: {}", c.workspaces.join(", "));
-                if !c.atoms.is_empty() {
-                    println!("    Conflict regions ({} atom(s)):", c.atoms.len());
-                    for atom in &c.atoms {
-                        println!("      {}", atom.summary());
-                    }
-                }
-                println!("    Resolution: {}", c.suggested_resolution);
-                println!();
-            }
-            println!("To merge: maw ws merge {}", workspaces.join(" "));
-            println!(
-                "For JSON: maw ws conflicts {} --format json",
-                workspaces.join(" ")
-            );
+    if !has_conflicts {
+        if format == OutputFormat::Json {
+            let out = ConflictsOutput {
+                status: "clean".to_string(),
+                workspaces: workspaces.to_vec(),
+                has_conflicts: false,
+                conflict_count: 0,
+                conflicts: vec![],
+                message: format!(
+                    "No conflicts found. {} workspace(s) can be merged cleanly.",
+                    workspaces.len()
+                ),
+                to_fix: None,
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
             println!("No conflicts found.");
             println!(
@@ -1766,6 +1748,41 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
             );
             println!("To merge: maw ws merge {}", workspaces.join(" "));
         }
+        return Ok(());
+    }
+
+    // Assign terseid IDs to conflicts
+    let conflicts_with_ids = assign_conflict_ids(&build_output.conflicts);
+
+    if format == OutputFormat::Json {
+        let conflict_jsons: Vec<ConflictJson> = conflicts_with_ids
+            .iter()
+            .map(|c| conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids))
+            .collect();
+        let ws_args = workspaces.join(" ");
+        let default_ws = workspaces.first().map_or("WORKSPACE", |s| s.as_str());
+        let resolve_args: Vec<String> = conflicts_with_ids
+            .iter()
+            .map(|c| format!("--resolve {}={default_ws}", c.id))
+            .collect();
+        let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
+        let out = ConflictsOutput {
+            status: "conflict".to_string(),
+            workspaces: workspaces.to_vec(),
+            has_conflicts: true,
+            conflict_count: conflict_jsons.len(),
+            conflicts: conflict_jsons,
+            message: format!(
+                "{} conflict(s) found in {} workspace(s). Resolve them before merging.",
+                conflicts_with_ids.len(),
+                workspaces.len()
+            ),
+            to_fix: Some(to_fix),
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        // Reuse the same format as merge conflict output
+        print_conflict_report(&conflicts_with_ids, &workspaces.to_vec());
     }
 
     Ok(())
@@ -1900,6 +1917,9 @@ pub struct MergeOptions<'a> {
     pub format: OutputFormat,
     /// Inline conflict resolutions. Each entry is `ID=STRATEGY`.
     pub resolve: Vec<String>,
+    /// Resolve all remaining conflicts to this workspace name.
+    /// Individual `--resolve` flags take precedence.
+    pub resolve_all: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1918,6 +1938,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         dry_run,
         format,
         ref resolve,
+        ref resolve_all,
     } = *opts;
     let ws_to_merge = workspaces.to_vec();
     let text_mode = format != OutputFormat::Json;
@@ -2033,15 +2054,25 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     if !build_output.conflicts.is_empty() {
         let conflicts_with_ids = assign_conflict_ids(&build_output.conflicts);
 
-        if !resolve.is_empty() {
-            // --resolve mode: apply stateless resolutions
-            let parsed = match parse_resolutions(resolve) {
+        let has_resolutions = !resolve.is_empty() || resolve_all.is_some();
+        if has_resolutions {
+            // --resolve / --resolve-all mode: apply stateless resolutions
+            let mut parsed = match parse_resolutions(resolve) {
                 Ok(p) => p,
                 Err(e) => {
                     abort_merge(&manifold_dir, &format!("parse resolutions: {e}"));
                     return Err(e);
                 }
             };
+
+            // Expand --resolve-all for any conflict not already covered
+            if let Some(ws_name) = resolve_all {
+                for c in &conflicts_with_ids {
+                    parsed.entry(c.id.clone())
+                        .or_insert_with(|| Resolution::Workspace(ws_name.clone()));
+                }
+            }
+
             let (resolved_contents, remaining) = match apply_resolutions(
                 &conflicts_with_ids,
                 &parsed,
@@ -2087,10 +2118,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 abort_merge(&manifold_dir, "partially resolved conflicts");
                 let ws_args = ws_to_merge.join(" ");
                 let default_ws = ws_to_merge.first().map_or("WORKSPACE", |s| s.as_str());
-                let resolve_args: Vec<String> = remaining
-                    .iter()
-                    .map(|c| format!("--resolve {}={default_ws}", c.id))
-                    .collect();
+
+                // Include already-resolved IDs so agents can copy-paste the full command
+                let mut resolve_args: Vec<String> = Vec::new();
+                for c in &conflicts_with_ids {
+                    if let Some(res) = parsed.get(&c.id) {
+                        let val = match res {
+                            Resolution::Workspace(name) => name.clone(),
+                            Resolution::Content(p) => format!("content:{}", p.display()),
+                        };
+                        resolve_args.push(format!("--resolve {}={val}", c.id));
+                    }
+                }
+                for c in &remaining {
+                    if !parsed.contains_key(&c.id) {
+                        resolve_args.push(format!("--resolve {}={default_ws}", c.id));
+                    }
+                }
 
                 if format == OutputFormat::Json {
                     let conflict_jsons: Vec<ConflictJson> = remaining
@@ -2120,7 +2164,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         conflicts_with_ids.len(),
                         remaining.len()
                     );
-                    print_conflict_report(&remaining, &ws_to_merge);
+                    print_conflict_report_with_resolve(&remaining, &ws_to_merge, Some(&resolve_args));
                 }
 
                 bail!(
