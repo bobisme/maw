@@ -12,6 +12,7 @@ use crate::format::OutputFormat;
 
 mod advance;
 mod annotate;
+pub(crate) mod capture;
 mod create;
 mod describe;
 mod diff;
