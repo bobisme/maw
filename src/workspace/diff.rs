@@ -169,25 +169,40 @@ fn print_summary(base: &ResolvedRev, head: &ResolvedRev, entries: &[DiffEntry]) 
 }
 
 fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
-    let color = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        "--color=always"
-    } else {
-        "--color=never"
-    };
-    let mut args = vec![
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+
+    let mut diff_args = vec![
         "diff".to_string(),
-        color.to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
         head_rev.to_string(),
     ];
     if !pathspecs.is_empty() {
-        args.push("--".to_string());
-        args.extend(pathspecs.iter().cloned());
+        diff_args.push("--".to_string());
+        diff_args.extend(pathspecs.iter().cloned());
     }
 
-    let patch = git_stdout(root, &args)?;
-    print!("{patch}");
+    if is_tty {
+        // Spawn git with inherited stdio so it uses its configured pager
+        // (core.pager / GIT_PAGER, e.g. delta).
+        let status = Command::new("git")
+            .args(&diff_args)
+            .current_dir(root)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("Failed to run git diff")?;
+        if !status.success() {
+            bail!("git diff exited with status {}", status);
+        }
+    } else {
+        // No tty — capture output, no pager, no color.
+        diff_args.insert(1, "--color=never".to_string());
+        let patch = git_stdout(root, &diff_args)?;
+        print!("{patch}");
+    }
+
     Ok(())
 }
 
