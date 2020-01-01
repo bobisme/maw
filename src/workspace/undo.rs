@@ -215,5 +215,3 @@ fn latest_snapshot_or_head(root: &Path, ws_id: &WorkspaceId, head: &GitOid) -> R
         })
         .unwrap_or_else(|| head.clone()))
 }
-
-

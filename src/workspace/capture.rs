@@ -268,8 +268,8 @@ fn capture_dirty_worktree(
         return Ok(None);
     }
 
-    let commit_oid = GitOid::new(&stash_oid_str)
-        .map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
+    let commit_oid =
+        GitOid::new(&stash_oid_str).map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
 
     // Restore the index to its pre-add state (don't leave staged changes
     // behind — the workspace is about to be destroyed, but be clean anyway)
@@ -317,8 +317,7 @@ fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
         bail!("git rev-parse --git-common-dir failed: {}", stderr.trim());
     }
 
-    let common_dir =
-        std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let common_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let mut root = common_dir
         .parent()
         .context("cannot determine repo root from git common dir")?
@@ -422,7 +421,10 @@ mod tests {
     fn capture_clean_at_epoch_returns_none() {
         let (_dir, root, head_oid) = setup_repo();
         let result = capture_before_destroy(&root, "test-ws", &head_oid).unwrap();
-        assert!(result.is_none(), "clean workspace at epoch should return None");
+        assert!(
+            result.is_none(),
+            "clean workspace at epoch should return None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -443,7 +445,11 @@ mod tests {
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
         assert!(!result.dirty_paths.is_empty());
         assert!(result.dirty_paths.iter().any(|p| p == "dirty.txt"));
-        assert!(result.pinned_ref.starts_with("refs/manifold/recovery/test-ws/"));
+        assert!(
+            result
+                .pinned_ref
+                .starts_with("refs/manifold/recovery/test-ws/")
+        );
 
         // Verify the pinned ref exists and resolves
         let ref_oid = refs::read_ref(&root, &result.pinned_ref).unwrap();
@@ -478,12 +484,7 @@ mod tests {
         // content is in the third parent's tree. Access via the commit's
         // tree directly.
         let tree_output = Command::new("git")
-            .args([
-                "ls-tree",
-                "-r",
-                "--name-only",
-                result.commit_oid.as_str(),
-            ])
+            .args(["ls-tree", "-r", "--name-only", result.commit_oid.as_str()])
             .current_dir(&root)
             .output()
             .unwrap();
@@ -491,8 +492,7 @@ mod tests {
         // The stash commit's tree should include the new file
         // (via the index parent or worktree parent)
         assert!(
-            tree_files.contains("new-file.txt")
-                || output.status.success(),
+            tree_files.contains("new-file.txt") || output.status.success(),
             "captured commit should contain untracked file"
         );
     }

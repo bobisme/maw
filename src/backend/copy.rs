@@ -237,7 +237,7 @@ impl WorkspaceBackend for CopyBackend {
                     epoch: epoch.clone(),
                     state: WorkspaceState::Active,
                     mode: WorkspaceMode::default(),
-                commits_ahead: 0,
+                    commits_ahead: 0,
                 });
             }
             // Partial or mismatched workspace — remove and recreate.
@@ -258,7 +258,7 @@ impl WorkspaceBackend for CopyBackend {
             epoch: epoch.clone(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::default(),
-        commits_ahead: 0,
+            commits_ahead: 0,
         })
     }
 
@@ -297,7 +297,7 @@ impl WorkspaceBackend for CopyBackend {
                 epoch,
                 state: WorkspaceState::Active,
                 mode: WorkspaceMode::default(),
-            commits_ahead: 0,
+                commits_ahead: 0,
             });
         }
         Ok(workspaces)

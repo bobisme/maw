@@ -107,12 +107,8 @@ pub fn sync(name: Option<&str>, all: bool) -> Result<()> {
                 "Workspace '{workspace_name}' is stale but has {ahead} committed commit(s) not yet \
                  merged into epoch."
             );
-            println!(
-                "  Merge the workspace first: maw ws merge {workspace_name}"
-            );
-            println!(
-                "  Then sync: maw ws sync {workspace_name}"
-            );
+            println!("  Merge the workspace first: maw ws merge {workspace_name}");
+            println!("  Then sync: maw ws sync {workspace_name}");
             return Ok(());
         }
         Some(_) => {}

@@ -432,9 +432,7 @@ fn warn_remaining_untracked_root_files() {
         preview,
         more
     );
-    println!(
-        "  To fix: move these into ws/default/ (or remove them), then re-run: maw init"
-    );
+    println!("  To fix: move these into ws/default/ (or remove them), then re-run: maw init");
 }
 
 fn is_ignored_untracked_root_path(path: &str) -> bool {

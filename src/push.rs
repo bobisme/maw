@@ -233,10 +233,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     }
 
     // Move the branch to the epoch commit
-    println!(
-        "Advancing {branch} to current epoch ({})...",
-        epoch_short
-    );
+    println!("Advancing {branch} to current epoch ({})...", epoch_short);
 
     let update = Command::new("git")
         .args(["update-ref", &branch_ref, &epoch_oid])

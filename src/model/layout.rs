@@ -69,7 +69,6 @@ fn init_config_if_missing(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

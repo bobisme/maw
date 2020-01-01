@@ -249,7 +249,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 epoch: epoch.clone(),
                 state: WorkspaceState::Active,
                 mode: WorkspaceMode::default(),
-            commits_ahead: 0,
+                commits_ahead: 0,
             });
         }
 
@@ -297,7 +297,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             epoch: epoch.clone(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::default(),
-        commits_ahead: 0,
+            commits_ahead: 0,
         })
     }
 
@@ -438,7 +438,12 @@ impl WorkspaceBackend for GitWorktreeBackend {
                         let behind = self
                             .count_commits_between(epoch.as_str(), current.as_str())
                             .unwrap_or(1);
-                        (WorkspaceState::Stale { behind_epochs: behind }, 0)
+                        (
+                            WorkspaceState::Stale {
+                                behind_epochs: behind,
+                            },
+                            0,
+                        )
                     }
                 }
                 None => (WorkspaceState::Active, 0),
@@ -563,8 +568,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // 1. All changes (committed + working tree) relative to the epoch.
         // `git diff <epoch>` compares the epoch tree against the current working
         // tree, capturing both committed and uncommitted modifications.
-        let diff_output =
-            Self::git_stdout_in(&ws_path, &["diff", "--name-status", &base_oid])?;
+        let diff_output = Self::git_stdout_in(&ws_path, &["diff", "--name-status", &base_oid])?;
 
         parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
 

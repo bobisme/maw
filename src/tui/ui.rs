@@ -88,7 +88,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled(" maw ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!("{}{}", app.branch_name, epoch_part)),
-        Span::raw(format!("  {ws_count} workspace{}", if ws_count == 1 { "" } else { "s" })),
+        Span::raw(format!(
+            "  {ws_count} workspace{}",
+            if ws_count == 1 { "" } else { "s" }
+        )),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
@@ -120,8 +123,9 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     let ws_count = app.workspaces.len();
     if ws_count == 0 {
         let block = styled_block("No workspaces", false);
-        let text = Paragraph::new("  No agent workspaces found. Create one with: maw ws create <name>")
-            .block(block);
+        let text =
+            Paragraph::new("  No agent workspaces found. Create one with: maw ws create <name>")
+                .block(block);
         frame.render_widget(text, area);
         app.pane_areas.clear();
         return;
@@ -141,7 +145,14 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 None
             };
-            draw_workspace_pane(frame, ws, rect, is_focused, selected, app.overlap_paths.get(&ws.name));
+            draw_workspace_pane(
+                frame,
+                ws,
+                rect,
+                is_focused,
+                selected,
+                app.overlap_paths.get(&ws.name),
+            );
         }
     }
 }
@@ -286,22 +297,16 @@ fn draw_workspace_pane(
                     };
 
                     // Check if this file overlaps with another workspace
-                    let is_overlap = overlap_set
-                        .is_some_and(|set| set.contains(full_path.as_str()));
+                    let is_overlap =
+                        overlap_set.is_some_and(|set| set.contains(full_path.as_str()));
 
                     let display_color = if is_overlap { theme::OVERLAP } else { color };
 
                     let line = Line::from(vec![
                         Span::raw(format!("{indent}  ")),
-                        Span::styled(
-                            status.label(),
-                            Style::default().fg(display_color),
-                        ),
+                        Span::styled(status.label(), Style::default().fg(display_color)),
                         Span::raw(" "),
-                        Span::styled(
-                            name.clone(),
-                            Style::default().fg(display_color),
-                        ),
+                        Span::styled(name.clone(), Style::default().fg(display_color)),
                     ]);
 
                     let style = if is_selected {

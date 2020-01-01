@@ -37,8 +37,10 @@ pub fn annotate(name: &str, key: &str, json_value: &str) -> Result<()> {
     }
 
     // Parse the JSON value into a BTreeMap<String, serde_json::Value>
-    let data: BTreeMap<String, serde_json::Value> = serde_json::from_str(json_value)
-        .with_context(|| format!("Failed to parse annotation value as JSON object: {json_value}"))?;
+    let data: BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(json_value).with_context(|| {
+            format!("Failed to parse annotation value as JSON object: {json_value}")
+        })?;
 
     let root = repo_root()?;
     let status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
