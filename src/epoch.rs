@@ -3,11 +3,8 @@
 //! Provides `maw epoch sync` to resync `refs/manifold/epoch/current` to the
 //! configured branch HEAD without the side effects of `maw init`.
 
-use std::process::Command;
-
 use anyhow::{Result, bail};
 
-use crate::model::types::EpochId;
 use crate::refs as manifold_refs;
 use crate::workspace::{MawConfig, repo_root};
 
@@ -41,12 +38,7 @@ pub fn sync() -> Result<()> {
     };
 
     // Already in sync
-    let epoch_id =
-        EpochId::new(epoch_oid.as_str()).map_err(|e| anyhow::anyhow!("Invalid epoch OID: {e}"))?;
-    let branch_id = EpochId::new(branch_oid.as_str())
-        .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))?;
-
-    if epoch_id == branch_id {
+    if epoch_oid == branch_oid {
         println!(
             "Epoch is already in sync with '{branch}' at {}.",
             &epoch_oid.as_str()[..12]
@@ -54,17 +46,9 @@ pub fn sync() -> Result<()> {
         return Ok(());
     }
 
-    // Verify epoch is ancestor of branch HEAD (fast-forward)
-    if !is_ancestor(&root, &epoch_id, &branch_id)? {
-        bail!(
-            "Cannot sync: epoch ({}) is not an ancestor of '{branch}' ({}).\n  \
-             The branch and epoch have diverged. Run `maw init` to repair.",
-            &epoch_oid.as_str()[..12],
-            &branch_oid.as_str()[..12],
-        );
-    }
-
-    // Advance epoch ref
+    // Update epoch ref unconditionally. This handles both cases:
+    // - epoch behind branch (direct commits advanced branch)
+    // - epoch ahead of branch (merge commit was dropped/reset)
     manifold_refs::write_epoch_current(&root, &branch_oid)
         .map_err(|e| anyhow::anyhow!("Failed to update epoch ref: {e}"))?;
 
@@ -75,27 +59,4 @@ pub fn sync() -> Result<()> {
     );
 
     Ok(())
-}
-
-/// Check if `ancestor` is a git ancestor of `descendant`.
-fn is_ancestor(root: &std::path::Path, ancestor: &EpochId, descendant: &EpochId) -> Result<bool> {
-    let output = Command::new("git")
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            ancestor.as_str(),
-            descendant.as_str(),
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run git merge-base: {e}"))?;
-
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => bail!(
-            "git merge-base failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
-    }
 }
