@@ -806,6 +806,8 @@ pub struct BrownfieldInitResult {
     pub default_workspace: PathBuf,
     /// The epoch₀ OID (the HEAD commit at time of init).
     pub epoch0: EpochId,
+    /// Previous epoch ref value when `maw init` auto-resynced it to branch HEAD.
+    pub epoch_resynced_from: Option<EpochId>,
     /// The branch name, or `None` if HEAD was detached.
     pub head_branch: Option<String>,
     /// `true` if Manifold was already initialized (idempotent no-op).
@@ -824,6 +826,14 @@ impl fmt::Display for BrownfieldInitResult {
             writeln!(f, "  Root:      {}", self.repo_root.display())?;
             writeln!(f, "  Workspace: {}/", self.default_workspace.display())?;
             writeln!(f, "  Epoch₀:    {}", &self.epoch0.as_str()[..12])?;
+            if let Some(prev) = &self.epoch_resynced_from {
+                writeln!(
+                    f,
+                    "  Resynced:  refs/manifold/epoch/current {} -> {}",
+                    &prev.as_str()[..12],
+                    &self.epoch0.as_str()[..12]
+                )?;
+            }
             return Ok(());
         }
 
@@ -965,7 +975,8 @@ pub fn brownfield_init(
         // ghost workspaces from deleted directories.
         let _ = bf_prune_worktrees(&root);
 
-        let epoch0 = match manifold_refs::read_epoch_current(&root) {
+        let mut epoch_resynced_from = None;
+        let mut epoch0 = match manifold_refs::read_epoch_current(&root) {
             Ok(Some(oid)) => {
                 EpochId::new(oid.as_str()).map_err(|e| BrownfieldInitError::GitCommand {
                     command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
@@ -974,6 +985,8 @@ pub fn brownfield_init(
                 })?
             }
             Ok(None) => {
+                // Freshly initialize epoch ref in already-initialized repos
+                // that predate manifold refs.
                 let head = bf_get_head_oid(&root)?;
                 bf_set_epoch_ref(&root, &head)?;
                 head
@@ -986,6 +999,20 @@ pub fn brownfield_init(
                 });
             }
         };
+
+        // If the configured branch tip has moved ahead of epoch/current
+        // (for example via direct commits outside maw), resync epoch/current
+        // so merge COMMIT preflight does not fail with stale expected epoch.
+        let configured_branch = bf_configured_branch(&root);
+        let branch_ref = format!("refs/heads/{configured_branch}");
+        if let Some(branch_head) = bf_get_ref_oid(&root, &branch_ref)?
+            && epoch0 != branch_head
+            && bf_is_ancestor(&root, &epoch0, &branch_head)?
+        {
+            bf_set_epoch_ref(&root, &branch_head)?;
+            epoch_resynced_from = Some(epoch0);
+            epoch0 = branch_head;
+        }
 
         // Self-heal legacy/broken states where ws/default exists but is no
         // longer a registered git worktree (missing .git link/admin record).
@@ -1003,6 +1030,7 @@ pub fn brownfield_init(
             repo_root: root,
             default_workspace: ws_default,
             epoch0,
+            epoch_resynced_from,
             head_branch,
             already_initialized: true,
             dirty_files_at_root: Vec::new(),
@@ -1075,6 +1103,7 @@ pub fn brownfield_init(
         repo_root: root,
         default_workspace: ws_default,
         epoch0,
+        epoch_resynced_from: None,
         head_branch,
         already_initialized: false,
         dirty_files_at_root: dirty_files,
@@ -1326,6 +1355,69 @@ fn bf_ref_exists(root: &Path, ref_name: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn bf_get_ref_oid(root: &Path, ref_name: &str) -> Result<Option<EpochId>, BrownfieldInitError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", ref_name])
+        .current_dir(root)
+        .output()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: format!("git rev-parse --verify {ref_name}"),
+            stderr: format!("failed to spawn: {e}"),
+            exit_code: None,
+        })?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let oid = EpochId::new(&oid).map_err(|e| BrownfieldInitError::GitCommand {
+        command: format!("git rev-parse --verify {ref_name}"),
+        stderr: format!("invalid OID from git: {e}"),
+        exit_code: None,
+    })?;
+    Ok(Some(oid))
+}
+
+fn bf_is_ancestor(
+    root: &Path,
+    ancestor: &EpochId,
+    descendant: &EpochId,
+) -> Result<bool, BrownfieldInitError> {
+    let output = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            ancestor.as_str(),
+            descendant.as_str(),
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: format!(
+                "git merge-base --is-ancestor {} {}",
+                ancestor.as_str(),
+                descendant.as_str()
+            ),
+            stderr: format!("failed to spawn: {e}"),
+            exit_code: None,
+        })?;
+
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(BrownfieldInitError::GitCommand {
+            command: format!(
+                "git merge-base --is-ancestor {} {}",
+                ancestor.as_str(),
+                descendant.as_str()
+            ),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            exit_code: output.status.code(),
+        }),
+    }
 }
 
 fn bf_workspace_branch(ws_path: &Path) -> Option<String> {
@@ -2162,6 +2254,7 @@ mod brownfield_tests {
             repo_root: PathBuf::from("/tmp/myrepo"),
             default_workspace: PathBuf::from("/tmp/myrepo/ws/default"),
             epoch0: EpochId::new(&"b".repeat(40)).unwrap(),
+            epoch_resynced_from: None,
             head_branch: Some("main".to_owned()),
             already_initialized: false,
             dirty_files_at_root: Vec::new(),
@@ -2181,6 +2274,7 @@ mod brownfield_tests {
             repo_root: PathBuf::from("/tmp/myrepo"),
             default_workspace: PathBuf::from("/tmp/myrepo/ws/default"),
             epoch0: EpochId::new(&"c".repeat(40)).unwrap(),
+            epoch_resynced_from: Some(EpochId::new(&"d".repeat(40)).unwrap()),
             head_branch: None,
             already_initialized: true,
             dirty_files_at_root: Vec::new(),
@@ -2188,6 +2282,7 @@ mod brownfield_tests {
         };
         let s = format!("{result}");
         assert!(s.contains("already initialized"));
+        assert!(s.contains("Resynced:"));
     }
 
     #[test]
@@ -2416,6 +2511,17 @@ mod brownfield_tests {
 
         let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
         assert!(result.already_initialized);
+        assert_eq!(
+            result
+                .epoch_resynced_from
+                .as_ref()
+                .map(|epoch| epoch.as_str()),
+            Some(epoch_before.as_str())
+        );
+        assert_eq!(result.epoch0.as_str(), branch_tip);
+
+        let epoch_after = read_ref(root, manifold_refs::EPOCH_CURRENT).unwrap();
+        assert_eq!(epoch_after, branch_tip, "epoch/current should be resynced");
 
         let branch = Command::new("git")
             .args(["symbolic-ref", "--short", "HEAD"])
