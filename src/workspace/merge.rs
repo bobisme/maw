@@ -2006,7 +2006,14 @@ fn to_model_patch_set(root: &Path, patch_set: &CollectedPatchSet) -> Result<Mode
                 );
             }
             ChangeKind::Deleted => {
-                let previous_blob = epoch_blob_oid(root, &patch_set.epoch, &change.path)?;
+                // If the file doesn't exist at the epoch commit, it was added
+                // then deleted in the workspace (net no-op). Skip it rather
+                // than propagating the error from `git rev-parse`.
+                let previous_blob =
+                    match epoch_blob_oid(root, &patch_set.epoch, &change.path) {
+                        Ok(oid) => oid,
+                        Err(_) => continue,
+                    };
                 let file_id = change
                     .file_id
                     .unwrap_or_else(|| file_id_from_blob(&previous_blob));

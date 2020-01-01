@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 use crate::backend::WorkspaceBackend;
 use crate::model::file_id::FileIdMap;
 use crate::model::patch::FileId;
-use crate::model::types::{GitOid, WorkspaceId};
+use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
 use super::types::{ChangeKind, FileChange, PatchSet};
 
@@ -231,7 +231,19 @@ fn collect_one<B: WorkspaceBackend>(
     }
 
     // Deleted files: no content; look up FileId from epoch map.
+    //
+    // Phantom-deletion filter: the snapshot diffs the working tree against the
+    // *current* epoch, but this workspace may be based on an older epoch.
+    // Files added by other workspaces (and already merged into the current
+    // epoch) show up as "Deleted" here because the worker never had them.
+    // These are phantom deletions — skip them so the merge engine doesn't
+    // remove files the worker never touched.
     for path in &snapshot.deleted {
+        if !path_exists_at_commit(repo_root, &epoch, path) {
+            // File doesn't exist at the workspace's base epoch — it was added
+            // after this workspace was created. Not a real deletion.
+            continue;
+        }
         let file_id = file_id_map.id_for_path(path);
         changes.push(FileChange::with_identity(
             path.clone(),
@@ -243,6 +255,22 @@ fn collect_one<B: WorkspaceBackend>(
     }
 
     Ok(PatchSet::new(ws_id.clone(), epoch, changes))
+}
+
+/// Check whether a file path exists in a given git commit's tree.
+///
+/// Uses `git cat-file -e <commit>:<path>` which exits 0 if the object exists
+/// and non-zero otherwise. This is fast (no data transfer) and works for any
+/// tree-ish.
+fn path_exists_at_commit(repo_root: &Path, commit: &EpochId, path: &Path) -> bool {
+    let rev = format!("{}:{}", commit.as_str(), path.display());
+    Command::new("git")
+        .args(["cat-file", "-e", &rev])
+        .current_dir(repo_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Read the current content of a file from a workspace's working tree.

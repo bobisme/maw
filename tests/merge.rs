@@ -197,3 +197,62 @@ fn merge_json_conflict_stdout_is_pure_json() {
         serde_json::from_str(&stdout).expect("merge conflict output should be valid JSON");
     assert_eq!(payload["status"].as_str(), Some("conflict"));
 }
+
+/// Regression test: merging a workspace should not fail when the current epoch
+/// contains files that are absent from the workspace's working tree but also
+/// absent from the workspace's *base* epoch.
+///
+/// Scenario (mirrors the real `cargo vendor` bug):
+///
+/// 1. Epoch advances (via another workspace merge) to include `vendor/pkg/.cargo-ok`.
+/// 2. A stale worker workspace (base epoch = old epoch) never had this file in its
+///    working tree.
+/// 3. `git diff <new_epoch>` in the worker shows `D vendor/pkg/.cargo-ok` because
+///    the file is in the new epoch tree but absent from the working tree.
+/// 4. The patch-set builder previously called `git rev-parse <old_epoch>:vendor/pkg/.cargo-ok`,
+///    which failed with "path does not exist" — crashing the merge.
+/// 5. The fix: skip deletions where the file is absent at the workspace's base epoch
+///    (add-then-delete net no-op from the base epoch's perspective).
+#[test]
+fn merge_skips_phantom_deletion_when_epoch_advanced() {
+    let repo = TestRepo::new();
+
+    // Create both workspaces before advancing the epoch.
+    repo.maw_ok(&["ws", "create", "epoch-advancer"]);
+    repo.maw_ok(&["ws", "create", "worker"]);
+
+    // epoch-advancer brings in vendor/pkg/.cargo-ok and an ordinary file.
+    repo.add_file("epoch-advancer", "vendor/pkg/.cargo-ok", "ok\n");
+    repo.add_file("epoch-advancer", "src/lib.rs", "fn lib() {}\n");
+
+    // Merging epoch-advancer advances the current epoch to E2, which now has
+    // vendor/pkg/.cargo-ok. The worker workspace's base epoch is still E1.
+    repo.maw_ok(&["ws", "merge", "epoch-advancer", "--destroy"]);
+
+    // Worker does some unrelated work. After the epoch advanced, git diff
+    // <new_epoch> in the worker shows vendor/pkg/.cargo-ok as D (present in
+    // new epoch, absent from worker working tree). But the worker's base epoch
+    // (E1) never had that file, so the old code crashed with "path does not exist".
+    repo.add_file("worker", "worker.txt", "worker output\n");
+
+    // This must not fail — the phantom deletion is silently skipped.
+    repo.maw_ok(&["ws", "merge", "worker", "--destroy"]);
+
+    // Worker's real changes are applied.
+    assert_eq!(
+        repo.read_file("default", "worker.txt").as_deref(),
+        Some("worker output\n"),
+        "worker.txt should be present after merge"
+    );
+    // The epoch-advancer's files are intact (not deleted by the worker merge).
+    assert_eq!(
+        repo.read_file("default", "vendor/pkg/.cargo-ok").as_deref(),
+        Some("ok\n"),
+        "vendor file added by epoch-advancer should survive the worker merge"
+    );
+    assert_eq!(
+        repo.read_file("default", "src/lib.rs").as_deref(),
+        Some("fn lib() {}\n"),
+        "src/lib.rs added by epoch-advancer should survive the worker merge"
+    );
+}
