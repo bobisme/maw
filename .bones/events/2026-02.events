@@ -689,5 +689,3 @@
 1772066827812449	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzuwE		item.update	bn-1aw2	{"field":"size","value":"l"}	blake3:3vzt6Y1PYTuunYueK4zTD8Q6Grxf_p3aGR0WAVh_JqE
 1772066827821034	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzvAE		item.update	bn-1aw2	{"field":"urgency","value":"default"}	blake3:wFWILyfm6OwmqQb41g4WtJK2ZcXZrfdSRvneo-pSxao
 1772066827830035	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzvQE		item.update	bn-1aw2	{"field":"labels","value":["ui"]}	blake3:qI0OohXfomoe_I97iDGlocCF7XVbrfGZXuchlHGOsSw
-1772220365294134	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyrwQ		item.move	bn-3v0o	{"state":"done"}	blake3:BFYo9TaGNbYQ_6KJ808opIL1F4gUGvouBIEm7fCG08I
-1772220423673890	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzxgE		item.create	bn-2ux4	{"description":"should at least support fish, zsh, and bash. i think clap supports this.\nwould be amazing if it could intelligentlly complete workspace names for commands like 'maw exec ...' and 'maw ws diff ...'","kind":"task","labels":["cli"],"title":"add 'maw completions fish|zsh|bash'"}	blake3:lvVmtTV3_HkJp7YpuWp79gGxa0YhrcZwxsHeJheZfl8

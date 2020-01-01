@@ -3,7 +3,6 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use clap::ValueEnum;
 use glob::Pattern;
 use serde::Serialize;
 
@@ -13,10 +12,12 @@ use crate::refs as manifold_refs;
 
 use super::{DEFAULT_WORKSPACE, get_backend, repo_root};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffFormat {
-    Summary,
     Patch,
+    Stat,
+    NameOnly,
+    NameStatus,
     Json,
 }
 
@@ -88,15 +89,8 @@ pub fn diff(
     workspace: &str,
     against: Option<&str>,
     format: DiffFormat,
-    name_only: bool,
     paths: &[String],
 ) -> Result<()> {
-    if name_only && matches!(format, DiffFormat::Patch | DiffFormat::Json) {
-        bail!(
-            "--name-only only supports --format summary\n  Fix: maw ws diff {workspace} --name-only\n  Or: maw ws diff {workspace} --format json"
-        );
-    }
-
     let ws_id = WorkspaceId::new(workspace)
         .map_err(|e| anyhow::anyhow!("invalid workspace name '{workspace}': {e}"))?;
 
@@ -114,58 +108,74 @@ pub fn diff(
     let head = materialize_workspace_state(&backend, &root, &ws_id)?;
     let base = resolve_against(&backend, &root, &ws_id, against)?;
 
-    let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
-    entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
-
-    if name_only {
-        let mut names = BTreeSet::new();
-        for e in &entries {
-            names.insert(e.path.clone());
-        }
-        for name in names {
-            println!("{name}");
-        }
-        return Ok(());
-    }
-
     match format {
-        DiffFormat::Summary => print_summary(&base, &head, &entries),
         DiffFormat::Patch => print_patch(&root, &base.rev, &head.rev, &pathspecs)?,
-        DiffFormat::Json => print_json(&ws_id, &base, &head, &entries)?,
+        DiffFormat::Stat => print_stat(&root, &base.rev, &head.rev, &pathspecs)?,
+        DiffFormat::NameOnly | DiffFormat::NameStatus => {
+            let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
+            entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
+            if matches!(format, DiffFormat::NameOnly) {
+                let mut names = BTreeSet::new();
+                for e in &entries {
+                    names.insert(e.path.clone());
+                }
+                for name in names {
+                    println!("{name}");
+                }
+            } else {
+                for e in &entries {
+                    if let Some(old) = &e.old_path {
+                        println!("{}\t{} -> {}", e.status, old, e.path);
+                    } else {
+                        println!("{}\t{}", e.status, e.path);
+                    }
+                }
+            }
+        }
+        DiffFormat::Json => {
+            let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
+            entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
+            print_json(&ws_id, &base, &head, &entries)?;
+        }
     }
 
     Ok(())
 }
 
-fn print_summary(base: &ResolvedRev, head: &ResolvedRev, entries: &[DiffEntry]) {
-    let stats = summarize(entries);
-    println!("Diff: {} -> {}", base.label, head.label);
-    println!("Base: {}", short_oid(&base.oid));
-    println!("Head: {}", short_oid(&head.oid));
-    println!(
-        "Changed: {} file(s) (+{} ~{} -{} r{} c{} o{})",
-        stats.files_changed,
-        stats.added,
-        stats.modified,
-        stats.deleted,
-        stats.renamed,
-        stats.copied,
-        stats.others
-    );
-    println!("Line stats: +{} -{}", stats.additions, stats.deletions);
+fn print_stat(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-    if entries.is_empty() {
-        println!("  (no differences)");
-        return;
+    let mut args = vec![
+        "diff".to_string(),
+        "--stat".to_string(),
+        "--find-renames".to_string(),
+        base_rev.to_string(),
+        head_rev.to_string(),
+    ];
+    if !pathspecs.is_empty() {
+        args.push("--".to_string());
+        args.extend(pathspecs.iter().cloned());
     }
 
-    for e in entries {
-        if let Some(old) = &e.old_path {
-            println!("  {} {} -> {}", e.status, old, e.path);
-        } else {
-            println!("  {} {}", e.status, e.path);
+    if is_tty {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(root)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("Failed to run git diff --stat")?;
+        if !status.success() {
+            bail!("git diff --stat exited with status {}", status);
         }
+    } else {
+        args.insert(1, "--color=never".to_string());
+        let out = git_stdout(root, &args)?;
+        print!("{out}");
     }
+
+    Ok(())
 }
 
 fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
@@ -547,10 +557,6 @@ fn parse_name_status_z(raw: &[u8]) -> Result<Vec<DiffEntry>> {
 
 fn resolve_rev_oid(root: &Path, rev: &str) -> Result<String> {
     git_stdout_simple(root, &["rev-parse", rev])
-}
-
-fn short_oid(oid: &str) -> &str {
-    &oid[..12.min(oid.len())]
 }
 
 fn git_stdout_simple(dir: &Path, args: &[&str]) -> Result<String> {

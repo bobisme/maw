@@ -372,28 +372,25 @@ pub enum WorkspaceCommands {
 
     /// Show differences for a workspace against default/epoch/branch/revision
     ///
-    /// By default compares `<workspace>` against the default workspace state.
+    /// Shows a content diff (patch) by default, like git diff.
     /// Use `--against` to compare against:
     /// - `default` (default behavior)
     /// - `epoch` (refs/manifold/epoch/current)
     /// - `branch:<name>` (e.g., branch:main)
     /// - `oid:<sha>` (or bare sha)
     ///
-    /// Formats:
-    /// - summary: concise file/status list with counts (default)
-    /// - patch: unified diff output
-    /// - json: machine-readable metadata + file-level stats
-    ///
     /// Examples:
     ///   maw ws diff alice
-    ///   maw ws diff alice --against epoch --format json
-    ///   maw ws diff alice --against branch:main --format patch
+    ///   maw ws diff alice src/main.rs
+    ///   maw ws diff alice --stat
     ///   maw ws diff alice --name-only
+    ///   maw ws diff alice --name-status
+    ///   maw ws diff alice --against epoch --format json
     Diff {
         /// Workspace to inspect
         workspace: String,
 
-        /// Path filter(s) — positional, e.g. `maw ws diff alice src/main.rs`
+        /// Path filters (positional, e.g. maw ws diff alice src/main.rs)
         #[arg(trailing_var_arg = true)]
         path_args: Vec<String>,
 
@@ -401,13 +398,21 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         against: Option<String>,
 
-        /// Output format: summary, patch, or json (default: patch when paths given, summary otherwise)
-        #[arg(long, value_enum)]
-        format: Option<diff::DiffFormat>,
+        /// Show diffstat summary (file list with +/- line counts)
+        #[arg(long)]
+        stat: bool,
 
         /// Show changed paths only (one path per line)
         #[arg(long)]
         name_only: bool,
+
+        /// Show status letter and path for each changed file
+        #[arg(long)]
+        name_status: bool,
+
+        /// Output as JSON (machine-readable metadata + file-level stats)
+        #[arg(long)]
+        json: bool,
 
         /// Comma-separated glob filters (e.g., --paths src/**,README*)
         #[arg(long, value_delimiter = ',')]
@@ -809,19 +814,26 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             workspace,
             path_args,
             against,
-            format,
+            stat,
             name_only,
+            name_status,
+            json,
             paths,
         } => {
-            // Merge positional path args with --paths flag.
             let mut all_paths = paths;
             all_paths.extend(path_args);
-            let effective_format = format.unwrap_or(if all_paths.is_empty() {
-                diff::DiffFormat::Summary
+            let format = if json {
+                diff::DiffFormat::Json
+            } else if stat {
+                diff::DiffFormat::Stat
+            } else if name_status {
+                diff::DiffFormat::NameStatus
+            } else if name_only {
+                diff::DiffFormat::NameOnly
             } else {
                 diff::DiffFormat::Patch
-            });
-            diff::diff(&workspace, against.as_deref(), effective_format, name_only, &all_paths)
+            };
+            diff::diff(&workspace, against.as_deref(), format, &all_paths)
         }
         WorkspaceCommands::Overlap {
             ws1,

@@ -5,15 +5,16 @@ use std::process::Command;
 use manifold_common::TestRepo;
 
 #[test]
-fn ws_diff_summary_against_default_reports_modified_paths() {
+fn ws_diff_defaults_to_patch_output() {
     let repo = TestRepo::new();
     repo.seed_files(&[("src/lib.rs", "pub fn answer() -> i32 { 1 }\n")]);
     repo.create_workspace("alice");
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
     let out = repo.maw_ok(&["ws", "diff", "alice"]);
-    assert!(out.contains("Diff: default -> alice"), "output: {out}");
-    assert!(out.contains("M src/lib.rs"), "output: {out}");
+    assert!(out.contains("diff --git a/src/lib.rs b/src/lib.rs"), "expected patch output, got: {out}");
+    assert!(out.contains("-pub fn answer() -> i32 { 1 }"), "output: {out}");
+    assert!(out.contains("+pub fn answer() -> i32 { 2 }"), "output: {out}");
 }
 
 #[test]
@@ -23,7 +24,7 @@ fn ws_diff_json_contract_includes_metadata_and_files() {
     repo.create_workspace("alice");
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
-    let out = repo.maw_ok(&["ws", "diff", "alice", "--format", "json"]);
+    let out = repo.maw_ok(&["ws", "diff", "alice", "--json"]);
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid JSON output");
 
     assert_eq!(json["workspace"].as_str(), Some("alice"));
@@ -35,16 +36,15 @@ fn ws_diff_json_contract_includes_metadata_and_files() {
 }
 
 #[test]
-fn ws_diff_patch_output_is_unified_diff() {
+fn ws_diff_stat_shows_diffstat() {
     let repo = TestRepo::new();
     repo.seed_files(&[("src/lib.rs", "pub fn answer() -> i32 { 1 }\n")]);
     repo.create_workspace("alice");
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
-    let out = repo.maw_ok(&["ws", "diff", "alice", "--format", "patch"]);
-    assert!(out.contains("diff --git a/src/lib.rs b/src/lib.rs"));
-    assert!(out.contains("-pub fn answer() -> i32 { 1 }"));
-    assert!(out.contains("+pub fn answer() -> i32 { 2 }"));
+    let out = repo.maw_ok(&["ws", "diff", "alice", "--stat"]);
+    assert!(out.contains("src/lib.rs"), "output: {out}");
+    assert!(out.contains("1 file changed"), "output: {out}");
 }
 
 #[test]
@@ -60,6 +60,17 @@ fn ws_diff_name_only_outputs_one_path_per_line() {
 }
 
 #[test]
+fn ws_diff_name_status_shows_status_and_path() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "pub fn answer() -> i32 { 1 }\n")]);
+    repo.create_workspace("alice");
+    repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
+
+    let out = repo.maw_ok(&["ws", "diff", "alice", "--name-status"]);
+    assert!(out.contains("M\tsrc/lib.rs"), "output: {out}");
+}
+
+#[test]
 fn ws_diff_supports_epoch_target() {
     let repo = TestRepo::new();
     repo.seed_files(&[("src/lib.rs", "pub fn answer() -> i32 { 1 }\n")]);
@@ -72,8 +83,7 @@ fn ws_diff_supports_epoch_target() {
         "alice",
         "--against",
         "epoch",
-        "--format",
-        "json",
+        "--json",
     ]);
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid JSON output");
     assert_eq!(json["against"]["label"].as_str(), Some("epoch"));
@@ -88,7 +98,7 @@ fn ws_diff_runs_from_default_workspace_cwd() {
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
     let output = Command::new(env!("CARGO_BIN_EXE_maw"))
-        .args(["ws", "diff", "alice", "--format", "json"])
+        .args(["ws", "diff", "alice", "--json"])
         .current_dir(repo.default_workspace())
         .output()
         .expect("failed to execute maw");
@@ -99,6 +109,22 @@ fn ws_diff_runs_from_default_workspace_cwd() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn ws_diff_positional_path_filters() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[
+        ("src/lib.rs", "pub fn answer() -> i32 { 1 }\n"),
+        ("README.md", "# hello\n"),
+    ]);
+    repo.create_workspace("alice");
+    repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
+    repo.modify_file("alice", "README.md", "# goodbye\n");
+
+    let out = repo.maw_ok(&["ws", "diff", "alice", "--name-only", "src/*"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["src/lib.rs"]);
 }
 
 #[test]
