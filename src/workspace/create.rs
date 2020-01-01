@@ -267,6 +267,21 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
              Destroy anyway: maw ws destroy {name} --force"
         );
     }
+
+    if let Some(capture) =
+        super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
+            .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?
+    {
+        let mode = match capture.mode {
+            super::capture::CaptureMode::WorktreeCapture => "worktree",
+            super::capture::CaptureMode::HeadOnly => "head-only",
+        };
+        println!(
+            "Captured workspace '{name}' state for recovery: {mode} -> {}",
+            capture.pinned_ref
+        );
+    }
+
     if touched_count > 0 {
         eprintln!(
             "WARNING: Destroying workspace '{name}' with {touched_count} unmerged change(s) (--force)."
