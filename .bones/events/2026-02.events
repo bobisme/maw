@@ -689,5 +689,3 @@
 1772066827812449	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzuwE		item.update	bn-1aw2	{"field":"size","value":"l"}	blake3:3vzt6Y1PYTuunYueK4zTD8Q6Grxf_p3aGR0WAVh_JqE
 1772066827821034	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzvAE		item.update	bn-1aw2	{"field":"urgency","value":"default"}	blake3:wFWILyfm6OwmqQb41g4WtJK2ZcXZrfdSRvneo-pSxao
 1772066827830035	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzvQE		item.update	bn-1aw2	{"field":"labels","value":["ui"]}	blake3:qI0OohXfomoe_I97iDGlocCF7XVbrfGZXuchlHGOsSw
-1772217877182388	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqwQ		item.move	bn-qg9u	{"reason":"Completed: 10 end-to-end tests covering full destroy/recover lifecycle + fix for reverted bn-5tz7 capture integration","state":"done"}	blake3:W0ugnID7HmQJIK_qr25rHtbPMukP7izId1oZZLW8s-g
-1772217877194652	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyrAQ		item.move	bn-238z	{"reason":"auto-completed: all children of bn-238z are done","state":"done"}	blake3:neL0k_ao8bVEFT1IQyw7rHC7bh44KqkIMF-wH0tJlmQ

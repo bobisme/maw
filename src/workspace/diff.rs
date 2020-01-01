@@ -169,9 +169,14 @@ fn print_summary(base: &ResolvedRev, head: &ResolvedRev, entries: &[DiffEntry]) 
 }
 
 fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
+    let color = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        "--color=always"
+    } else {
+        "--color=never"
+    };
     let mut args = vec![
         "diff".to_string(),
-        "--no-color".to_string(),
+        color.to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
         head_rev.to_string(),

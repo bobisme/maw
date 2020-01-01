@@ -397,9 +397,9 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         against: Option<String>,
 
-        /// Output format: summary, patch, or json
-        #[arg(long, value_enum, default_value = "summary")]
-        format: diff::DiffFormat,
+        /// Output format: summary, patch, or json (default: patch when --paths given, summary otherwise)
+        #[arg(long, value_enum)]
+        format: Option<diff::DiffFormat>,
 
         /// Show changed paths only (one path per line)
         #[arg(long)]
@@ -807,7 +807,14 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             format,
             name_only,
             paths,
-        } => diff::diff(&workspace, against.as_deref(), format, name_only, &paths),
+        } => {
+            let effective_format = format.unwrap_or(if paths.is_empty() {
+                diff::DiffFormat::Summary
+            } else {
+                diff::DiffFormat::Patch
+            });
+            diff::diff(&workspace, against.as_deref(), effective_format, name_only, &paths)
+        }
         WorkspaceCommands::Overlap {
             ws1,
             ws2,
