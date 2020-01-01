@@ -2408,7 +2408,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                  Expected: {}\n  \
                  Actual:   {}\n  \
                  Cause: commits were made directly to '{branch}' outside of maw.\n  \
-                 Fix: run `maw init` to resync the epoch ref to the current branch HEAD,\n  \
+                 Fix: run `maw epoch sync` to resync the epoch ref to the current branch HEAD,\n  \
                  then retry the merge.",
                 &epoch_before_oid.as_str()[..12],
                 &current_branch.as_str()[..12],

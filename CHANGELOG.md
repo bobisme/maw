@@ -2,24 +2,6 @@
 
 All notable changes to maw.
 
-## v0.48.0
-
-### Added
-- **`maw completions` command**. Generate shell completions for fish, bash, and zsh via `maw completions <shell>`.
-- **`maw ws diff` defaults to patch output**. Like `git diff`, content diffs are now shown by default instead of a summary.
-- **`--stat` flag for `maw ws diff`**. Shows diffstat summary (file list with +/- line count bars), replacing the old default summary format.
-- **`--name-status` flag for `maw ws diff`**. Shows status letter and path for each changed file.
-- **`--json` flag for `maw ws diff`**. Replaces `--format json` for machine-readable output.
-- **Positional path args for `maw ws diff`**. Filter by path: `maw ws diff alice src/main.rs`.
-- **Pager support for `maw ws diff`**. When stdout is a TTY, git's configured pager (delta, less, etc.) is used automatically.
-- **Colored diff output**. TTY-aware color in patch and stat modes.
-
-### Fixed
-- **Default workspace detached HEAD**. `maw init` and `maw ws merge` now keep the default workspace attached to the configured branch instead of detaching to a bare SHA. Fixes post-merge state where `git status` showed "HEAD detached".
-
-### Changed
-- **`maw ws list` simplified text output**. Removed epoch/mode/default columns. Now shows name, absolute path, and actionable state annotations (stale, ready to merge, quarantine). Default workspace always sorted first.
-
 ## v0.47.0
 
 ### Added

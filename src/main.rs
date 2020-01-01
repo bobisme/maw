@@ -7,6 +7,7 @@ mod agents;
 mod backend;
 mod config;
 mod doctor;
+mod epoch;
 mod epoch_gc;
 #[allow(dead_code)]
 mod error;
@@ -195,6 +196,15 @@ enum Commands {
     ///   <edit version> && git commit -m "chore: bump to vX.Y.Z"
     Release(release::ReleaseArgs),
 
+    /// Manage the epoch ref
+    ///
+    /// The epoch tracks which commit workspaces branch from. When the
+    /// epoch falls behind the branch (e.g. after direct git commits),
+    /// use `maw epoch sync` to resync without the side effects of
+    /// `maw init`.
+    #[command(subcommand)]
+    Epoch(EpochCommands),
+
     /// Garbage-collect unreferenced epoch snapshots
     ///
     /// Removes `.manifold/epochs/e-<oid>` directories that are no longer
@@ -232,6 +242,16 @@ enum Commands {
     ///   maw merge abandon abc123     # discard quarantine workspace
     #[command(subcommand)]
     Merge(merge_cmd::MergeCommands),
+}
+
+#[derive(Subcommand)]
+enum EpochCommands {
+    /// Resync epoch ref to the configured branch HEAD
+    ///
+    /// Advances refs/manifold/epoch/current to match the branch tip.
+    /// Use this after making direct git commits outside of maw.
+    /// Unlike `maw init`, this only touches the epoch ref.
+    Sync,
 }
 
 fn should_emit_migration_notice(repo_root: &Path) -> bool {
@@ -273,6 +293,9 @@ fn main() {
         Commands::Pull(ref args) => transport::run_pull(args),
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
+        Commands::Epoch(cmd) => match cmd {
+            EpochCommands::Sync => epoch::sync(),
+        },
         Commands::Gc { dry_run } => epoch_gc::run_cli(dry_run),
         Commands::Completions { shell } => {
             clap_complete::generate(

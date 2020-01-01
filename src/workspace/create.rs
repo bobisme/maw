@@ -193,7 +193,33 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
 
     // Try refs/manifold/epoch/current first
     if let Ok(Some(oid)) = manifold_refs::read_epoch_current(root) {
-        return EpochId::new(oid.as_str()).map_err(|e| anyhow::anyhow!("Invalid epoch OID: {e}"));
+        let epoch =
+            EpochId::new(oid.as_str()).map_err(|e| anyhow::anyhow!("Invalid epoch OID: {e}"))?;
+
+        // Check if the configured branch has moved ahead of the epoch.
+        // If so, auto-resync to avoid creating a workspace that can't merge.
+        let config = MawConfig::load(root).unwrap_or_default();
+        let branch = config.branch();
+        let branch_ref = format!("refs/heads/{branch}");
+        if let Ok(Some(branch_oid)) = manifold_refs::read_ref(root, &branch_ref) {
+            if oid != branch_oid {
+                let branch_id = EpochId::new(branch_oid.as_str())
+                    .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))?;
+                // Only auto-resync if epoch is strictly behind (ancestor of branch HEAD)
+                if is_epoch_ancestor(root, &epoch, &branch_id) {
+                    manifold_refs::write_epoch_current(root, &branch_oid)
+                        .map_err(|e| anyhow::anyhow!("Failed to resync epoch: {e}"))?;
+                    eprintln!(
+                        "NOTE: epoch was behind '{branch}' — auto-synced {} → {}",
+                        &oid.as_str()[..12],
+                        &branch_oid.as_str()[..12],
+                    );
+                    return Ok(branch_id);
+                }
+            }
+        }
+
+        return Ok(epoch);
     }
 
     // Fall back to configured branch HEAD
@@ -223,6 +249,25 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
 
     let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
     EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
+}
+
+/// Check if `ancestor` is a git ancestor of `descendant`.
+/// Returns false on any error (conservative — don't auto-resync if unsure).
+fn is_epoch_ancestor(
+    root: &std::path::Path,
+    ancestor: &EpochId,
+    descendant: &EpochId,
+) -> bool {
+    Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            ancestor.as_str(),
+            descendant.as_str(),
+        ])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|o| o.status.code() == Some(0))
 }
 
 #[instrument(fields(workspace = name))]
