@@ -159,7 +159,7 @@ fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
 }
 
 /// Resolve HEAD to a full OID.
-fn resolve_head(ws_path: &Path) -> Result<GitOid> {
+pub(crate) fn resolve_head(ws_path: &Path) -> Result<GitOid> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(ws_path)

@@ -13,6 +13,7 @@ use crate::format::OutputFormat;
 mod advance;
 mod annotate;
 pub(crate) mod capture;
+pub(crate) mod destroy_record;
 mod create;
 mod describe;
 mod diff;
