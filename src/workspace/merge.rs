@@ -28,6 +28,7 @@ use crate::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
 use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
 use crate::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
 use crate::model::conflict::ConflictAtom;
+use tracing::instrument;
 use crate::model::conflict::Region;
 use crate::model::patch::{FileId, PatchSet as ModelPatchSet, PatchValue};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
@@ -1504,7 +1505,7 @@ fn plan_write_artifacts(
                 println!("Plan artifact: {}", path.display());
             }
         }
-        Err(e) => eprintln!("WARNING: Failed to write plan artifact: {e}"),
+        Err(e) => tracing::warn!("Failed to write plan artifact: {e}"),
     }
 
     for patch_set in patch_sets {
@@ -1934,6 +1935,7 @@ pub struct MergeOptions<'a> {
 ///
 /// This uses the Manifold merge engine and state machine.
 #[allow(clippy::too_many_lines)]
+#[instrument(skip(opts), fields(workspaces = ?workspaces))]
 pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let MergeOptions {
         destroy_after,
@@ -2463,7 +2465,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Record merge operations in source workspace histories.
     for warning in record_merge_operations(&root, &sources, &frozen.epoch, &build_output.candidate)
     {
-        eprintln!("WARNING: {warning}");
+        tracing::warn!("{warning}");
     }
 
     // -----------------------------------------------------------------------

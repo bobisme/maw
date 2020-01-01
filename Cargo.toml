@@ -1,12 +1,12 @@
 [package]
 name = "maw"
-version = "0.47.3"
+version = "0.47.1"
 edition = "2024"
 description = "Multi-Agent Workflow coordinator for Manifold git workspaces"
 license = "MIT"
 
 [features]
-default = ["ast-merge"]
+default = ["ast-merge", "otel"]
 ast-merge = [
   "dep:tree-sitter",
   "dep:tree-sitter-rust",
@@ -14,6 +14,13 @@ ast-merge = [
   "dep:tree-sitter-typescript",
   "dep:tree-sitter-javascript",
   "dep:tree-sitter-go",
+]
+otel = [
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:opentelemetry-appender-tracing",
+  "dep:tracing-opentelemetry",
 ]
 
 [dependencies]
@@ -37,6 +44,17 @@ tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-javascript = { version = "0.23", optional = true }
 tree-sitter-go = { version = "0.23", optional = true }
 terseid = "0.1"
+
+# Telemetry (tracing + optional OTLP export)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# OTEL stack (optional, enabled by default)
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true, features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.31", optional = true, default-features = false, features = ["trace", "logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
 proptest = "1"

@@ -27,6 +27,7 @@ mod push;
 mod refs;
 mod release;
 mod status;
+mod telemetry;
 mod transport;
 mod tui;
 mod upgrade;
@@ -112,11 +113,7 @@ enum Commands {
     /// Interactive interface for managing workspaces, viewing commits,
     /// and coordinating agent work. Inspired by lazygit.
     #[command(name = "ui")]
-    Ui {
-        /// Use plain ASCII status markers (M/A/D/R) instead of Nerd Font icons
-        #[arg(long)]
-        ascii: bool,
-    },
+    Ui,
 
     /// Quick repo and workspace status
     Status(status::StatusArgs),
@@ -235,7 +232,7 @@ fn emit_migration_notice_if_needed() {
         return;
     }
 
-    eprintln!("WARNING: Detected legacy jj repo (.jj/ present, .manifold/ missing).");
+    tracing::warn!("Detected legacy jj repo (.jj/ present, .manifold/ missing)");
     eprintln!("IMPORTANT: maw now uses git worktrees instead of jj workspaces.");
     eprintln!("Next: run `maw init` to bootstrap .manifold/ metadata in this repo.");
     eprintln!("If migrating from v1 (.workspaces/), run `maw upgrade` first.");
@@ -243,6 +240,7 @@ fn emit_migration_notice_if_needed() {
 }
 
 fn main() {
+    let _telemetry = telemetry::init();
     let cli = Cli::parse();
     emit_migration_notice_if_needed();
 
@@ -254,7 +252,7 @@ fn main() {
         Commands::Doctor { format, json } => {
             doctor::run(format::OutputFormat::with_json_flag(format, json))
         }
-        Commands::Ui { ascii } => tui::run(ascii),
+        Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
         Commands::Pull(ref args) => transport::run_pull(args),

@@ -418,7 +418,6 @@ mod tests {
         run_git(dir, &["init", "-b", "main"]);
         run_git(dir, &["config", "user.email", "test@test.com"]);
         run_git(dir, &["config", "user.name", "Test"]);
-        run_git(dir, &["config", "commit.gpgsign", "false"]);
     }
 
     /// Run a git command in `dir`, panicking on failure (test helper only).

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use super::app::{App, StatusWarning, TreeNode, flatten_tree, format_time_ago};
+use super::app::{App, TreeNode, flatten_tree, format_time_ago};
 use super::theme;
 
 /// Create a styled block with rounded corners
@@ -23,16 +23,10 @@ fn styled_block(title: &str, is_focused: bool) -> Block<'_> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    // Top-level layout: header + warnings (optional) + overlap bar (optional) + pane grid + footer
-    let has_warnings = !app.warnings.is_empty();
+    // Top-level layout: header + overlap bar (optional) + pane grid + footer
     let has_overlaps = !app.overlaps.is_empty();
 
     let mut constraints = vec![Constraint::Length(1)]; // header
-    if has_warnings {
-        #[allow(clippy::cast_possible_truncation)]
-        let warning_lines = app.warnings.len().min(3) as u16;
-        constraints.push(Constraint::Length(warning_lines));
-    }
     if has_overlaps {
         // One line per unique overlap pair, capped at 3
         #[allow(clippy::cast_possible_truncation)]
@@ -51,14 +45,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let header_area = outer[slot];
     slot += 1;
 
-    let warning_area = if has_warnings {
-        let area = outer[slot];
-        slot += 1;
-        Some(area)
-    } else {
-        None
-    };
-
     let overlap_area = if has_overlaps {
         let area = outer[slot];
         slot += 1;
@@ -73,11 +59,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Draw header
     draw_header(frame, app, header_area);
-
-    // Draw warning bar
-    if let Some(area) = warning_area {
-        draw_warning_bar(frame, app, area);
-    }
 
     // Draw overlap bar
     if let Some(area) = overlap_area {
@@ -104,46 +85,13 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         format!(" @ {}", app.epoch_hash)
     };
 
-    let mut spans = vec![
+    let line = Line::from(vec![
         Span::styled(" maw ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!("{}{}", app.branch_name, epoch_part)),
         Span::raw(format!("  {ws_count} workspace{}", if ws_count == 1 { "" } else { "s" })),
-    ];
-
-    // Inline warning count if any
-    if !app.warnings.is_empty() {
-        spans.push(Span::styled(
-            format!("  {} warning{}", app.warnings.len(), if app.warnings.len() == 1 { "" } else { "s" }),
-            Style::default().fg(theme::WARNING),
-        ));
-    }
-
-    let line = Line::from(spans);
+    ]);
 
     frame.render_widget(Paragraph::new(line), area);
-}
-
-fn draw_warning_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let warn_style = Style::default()
-        .fg(theme::WARNING)
-        .add_modifier(Modifier::BOLD);
-    let text_style = Style::default().fg(theme::WARNING);
-
-    let mut lines = Vec::new();
-    for warning in app.warnings.iter().take(3) {
-        let msg = match warning {
-            StatusWarning::SyncIssue(desc) => format!("main vs origin: {desc}"),
-            StatusWarning::StrayRoot(n) => {
-                format!("root not bare: {n} unexpected file(s) at repo root")
-            }
-        };
-        lines.push(Line::from(vec![
-            Span::styled(" ⚠ ", warn_style),
-            Span::styled(msg, text_style),
-        ]));
-    }
-
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_overlap_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -188,12 +136,12 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     for (i, ws) in app.workspaces.iter().enumerate() {
         if let Some(&rect) = app.pane_areas.get(i) {
             let is_focused = i == app.focused_pane;
-            let (selected, scroll) = if is_focused {
-                (Some(app.selected_row), app.scroll_offset)
+            let selected = if is_focused {
+                Some(app.selected_row)
             } else {
-                (None, 0)
+                None
             };
-            draw_workspace_pane(frame, ws, rect, is_focused, selected, scroll, app.overlap_paths.get(&ws.name), app.ascii);
+            draw_workspace_pane(frame, ws, rect, is_focused, selected, app.overlap_paths.get(&ws.name));
         }
     }
 }
@@ -258,9 +206,7 @@ fn draw_workspace_pane(
     area: Rect,
     is_focused: bool,
     selected: Option<usize>,
-    scroll_offset: usize,
     overlap_set: Option<&std::collections::BTreeSet<String>>,
-    ascii: bool,
 ) {
     // Build title line: name* +N commits Xm ago [stale]
     let mut title_parts = vec![ws.name.clone()];
@@ -280,48 +226,21 @@ fn draw_workspace_pane(
     if ws.is_stale {
         title_parts.push("  stale".to_string());
     }
-    // Append description to title if present
-    if let Some(desc) = &ws.description {
-        title_parts.push(format!("  \u{2014} {desc}")); // em dash
-    }
     let title = title_parts.join("");
 
-    // Build annotation string for bottom title
-    let annotation_line = if ws.annotations.is_empty() {
-        None
+    let block = if ws.is_stale {
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_type(theme::BORDER_TYPE)
+            .border_style(if is_focused {
+                Style::default().fg(theme::FOCUSED)
+            } else {
+                Style::default().fg(theme::STALE)
+            })
     } else {
-        let parts: Vec<String> = ws
-            .annotations
-            .iter()
-            .map(|(k, v)| format!("{k}: {v}"))
-            .collect();
-        Some(parts.join("  "))
+        styled_block(&title, is_focused)
     };
-
-    let border_style = if ws.is_stale {
-        if is_focused {
-            Style::default().fg(theme::FOCUSED)
-        } else {
-            Style::default().fg(theme::STALE)
-        }
-    } else if is_focused {
-        Style::default().fg(theme::FOCUSED)
-    } else {
-        Style::default()
-    };
-
-    let mut block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_type(theme::BORDER_TYPE)
-        .border_style(border_style);
-
-    if let Some(ref ann) = annotation_line {
-        block = block.title_bottom(Line::from(Span::styled(
-            ann.clone(),
-            Style::default().fg(theme::STALE), // dim yellow for annotations
-        )));
-    }
 
     // Flatten file tree for rendering
     let flat = flatten_tree(&ws.file_tree, 0);
@@ -335,7 +254,6 @@ fn draw_workspace_pane(
     let items: Vec<ListItem> = flat
         .iter()
         .enumerate()
-        .skip(scroll_offset)
         .map(|(i, (depth, node))| {
             let indent = "  ".repeat(*depth);
             let is_selected = selected == Some(i);
@@ -344,7 +262,7 @@ fn draw_workspace_pane(
                 TreeNode::Dir {
                     name, collapsed, ..
                 } => {
-                    let arrow = if *collapsed { "▶" } else { "▼" };
+                    let arrow = if *collapsed { ">" } else { "v" };
                     let content = format!("{indent}{arrow} {name}/");
                     let style = if is_selected {
                         Style::default()
@@ -374,9 +292,9 @@ fn draw_workspace_pane(
                     let display_color = if is_overlap { theme::OVERLAP } else { color };
 
                     let line = Line::from(vec![
-                        Span::raw(format!("{indent}")),
+                        Span::raw(format!("{indent}  ")),
                         Span::styled(
-                            status.display(ascii),
+                            status.label(),
                             Style::default().fg(display_color),
                         ),
                         Span::raw(" "),

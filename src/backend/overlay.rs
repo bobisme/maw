@@ -488,7 +488,7 @@ impl OverlayBackend {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             if !stderr.is_empty() {
                 // Log the error but don't fail destroy — we still clean up the dirs.
-                eprintln!("warning: unmount failed: {stderr}");
+                tracing::warn!("unmount failed: {stderr}");
             }
         }
 

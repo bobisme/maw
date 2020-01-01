@@ -462,7 +462,7 @@ fn merge_epoch_ref(root: &Path, dry_run: bool) -> Result<RefMergeResult> {
                         &local.as_str()[..12],
                         &remote.as_str()[..12]
                     );
-                    eprintln!("WARNING: epoch divergence detected.");
+                    tracing::warn!("epoch divergence detected");
                     eprintln!("  {reason}");
                     Ok(RefMergeResult::DivergenceWarned { reason })
                 }

@@ -2,6 +2,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use tracing::instrument;
 
 use crate::transport::ManifoldPushArgs;
 use crate::workspace::{MawConfig, git_cwd, repo_root};
@@ -35,6 +36,7 @@ pub struct PushArgs {
 /// 3. Compares local vs `origin/<branch>` to determine if there's work to push.
 /// 4. Runs `git push origin <branch>`.
 /// 5. Optionally pushes all tags (unless `--no-tags`).
+#[instrument(skip(args), fields(advance = args.advance, no_tags = args.no_tags))]
 pub fn run(args: &PushArgs) -> Result<()> {
     let root = repo_root()?;
     let config = MawConfig::load(&root)?;
@@ -375,7 +377,7 @@ fn push_tags(root: &std::path::Path) -> Result<()> {
             println!("  Pushed tag: {tag}");
         } else {
             let stderr = String::from_utf8_lossy(&push.stderr);
-            eprintln!("  WARNING: Failed to push tag {tag}: {}", stderr.trim());
+            tracing::warn!(tag = %tag, "Failed to push tag: {}", stderr.trim());
         }
     }
 

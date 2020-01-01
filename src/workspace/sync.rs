@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use tracing::instrument;
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
@@ -38,6 +39,7 @@ fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
     }
 }
 
+#[instrument]
 pub fn sync(name: Option<&str>, all: bool) -> Result<()> {
     if all {
         return sync_all();

@@ -3,6 +3,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use tracing::instrument;
 
 use crate::backend::WorkspaceBackend;
 use crate::model::diff::compute_patchset;
@@ -17,6 +18,7 @@ use super::{
     templates::WorkspaceTemplate, workspace_path, workspaces_dir,
 };
 
+#[instrument(skip(template), fields(workspace = name))]
 pub fn create(
     name: &str,
     revision: Option<&str>,
@@ -66,7 +68,7 @@ pub fn create(
         ))?;
 
     if let Err(e) = record_workspace_create_op(&root, &ws_id, &epoch) {
-        eprintln!("WARNING: Failed to record workspace create in history: {e}");
+        tracing::warn!("Failed to record workspace create in history: {e}");
     }
 
     // Write workspace metadata (mode + optional template defaults).
@@ -223,6 +225,7 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
 }
 
+#[instrument(fields(workspace = name))]
 pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot destroy the default workspace");
@@ -291,7 +294,7 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     println!("Destroying workspace '{name}'...");
 
     if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &status.base_epoch) {
-        eprintln!("WARNING: Failed to record workspace destroy in history: {e}");
+        tracing::warn!("Failed to record workspace destroy in history: {e}");
     }
 
     backend
@@ -424,7 +427,7 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     match backend.create(&ws_id, &epoch) {
         Ok(_) => {
             if let Err(e) = record_workspace_create_op(&root, &ws_id, &epoch) {
-                eprintln!("WARNING: Failed to record workspace create in history: {e}");
+                tracing::warn!("Failed to record workspace create in history: {e}");
             }
             // Move contents back from backup, overwriting git-populated files
             restore_backup_overwrite(&temp_backup, &path)?;

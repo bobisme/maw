@@ -13,7 +13,6 @@ use ratatui::{Terminal, layout::Rect, prelude::CrosstermBackend};
 use super::event::{self, AppEvent};
 use super::ui;
 use crate::backend::WorkspaceBackend;
-use crate::push::main_sync_status_inner;
 
 // ---------------------------------------------------------------------------
 // File tree types
@@ -35,25 +34,6 @@ impl FileStatus {
             Self::Added => "A",
             Self::Deleted => "D",
             Self::Renamed => "R",
-        }
-    }
-
-    /// Nerd Font icon for this status.
-    pub const fn icon(self) -> &'static str {
-        match self {
-            Self::Modified => "\u{eade}",  // nf-cod-diff_modified
-            Self::Added => "\u{eadc}",    // nf-cod-diff_added
-            Self::Deleted => "\u{eadf}",   // nf-cod-diff_removed
-            Self::Renamed => "\u{eae0}",   // nf-cod-diff_renamed
-        }
-    }
-
-    /// Return icon or ascii label depending on mode.
-    pub const fn display(self, ascii: bool) -> &'static str {
-        if ascii {
-            self.label()
-        } else {
-            self.icon()
         }
     }
 
@@ -147,33 +127,6 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
     let mut known_dirs: BTreeSet<String> = BTreeSet::new();
 
     for (status, path) in files {
-        // Trailing slash means directory (e.g. untracked dir from git status)
-        let is_dir_entry = path.ends_with('/');
-        let path = path.trim_end_matches('/');
-        if path.is_empty() {
-            continue;
-        }
-
-        if is_dir_entry {
-            // Register the entire path as a directory, no file leaf
-            let parts: Vec<&str> = path.split('/').collect();
-            let mut ancestor = String::new();
-            for part in &parts {
-                let parent = ancestor.clone();
-                if !ancestor.is_empty() {
-                    ancestor.push('/');
-                }
-                ancestor.push_str(part);
-                if known_dirs.insert(ancestor.clone()) {
-                    dir_children
-                        .entry(parent)
-                        .or_default()
-                        .push((part.to_string(), None, ancestor.clone()));
-                }
-            }
-            continue;
-        }
-
         let parts: Vec<&str> = path.split('/').collect();
         // Ensure all ancestor dirs exist
         let mut ancestor = String::new();
@@ -196,7 +149,7 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
                 dir_children
                     .entry(ancestor.clone())
                     .or_default()
-                    .push((part.to_string(), Some(*status), path.to_string()));
+                    .push((part.to_string(), Some(*status), path.clone()));
             }
         }
     }
@@ -237,10 +190,6 @@ pub struct WorkspacePane {
     pub file_tree: Vec<TreeNode>,
     /// Flat list of file paths (for overlap detection).
     pub file_paths: Vec<String>,
-    /// Latest workspace description from oplog (if any).
-    pub description: Option<String>,
-    /// Latest annotations from oplog: key → flattened value string.
-    pub annotations: Vec<(String, String)>,
 }
 
 /// An overlap between two workspaces on a specific file.
@@ -249,19 +198,6 @@ pub struct OverlapEntry {
     pub ws_a: String,
     pub ws_b: String,
     pub path: String,
-}
-
-// ---------------------------------------------------------------------------
-// Status warnings (from maw status)
-// ---------------------------------------------------------------------------
-
-/// A warning condition surfaced in the header bar.
-#[derive(Debug, Clone)]
-pub enum StatusWarning {
-    /// Main branch is not in sync with origin.
-    SyncIssue(String),
-    /// Stray files at repo root (bare repo should have none).
-    StrayRoot(usize),
 }
 
 // ---------------------------------------------------------------------------
@@ -274,14 +210,12 @@ pub struct App {
     pub focused_pane: usize,
     /// Selected row within the focused pane's flattened file tree.
     pub selected_row: usize,
-    /// Scroll offset for the focused pane (first visible row).
-    pub scroll_offset: usize,
     pub should_quit: bool,
     pub show_help: bool,
-    pub ascii: bool,
     pub epoch_hash: String,
     pub branch_name: String,
-    pub warnings: Vec<StatusWarning>,
+    #[allow(dead_code)]
+    pub epoch_status: String,
     pub overlaps: Vec<OverlapEntry>,
     /// Set of file paths that overlap (for highlighting).
     pub overlap_paths: HashMap<String, BTreeSet<String>>,
@@ -291,18 +225,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(ascii: bool) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let mut app = Self {
             workspaces: Vec::new(),
             focused_pane: 0,
             selected_row: 0,
-            scroll_offset: 0,
             should_quit: false,
             show_help: false,
-            ascii,
             epoch_hash: String::new(),
             branch_name: String::new(),
-            warnings: Vec::new(),
+            epoch_status: String::new(),
             overlaps: Vec::new(),
             overlap_paths: HashMap::new(),
             last_refresh: Instant::now(),
@@ -363,14 +295,10 @@ impl App {
             // Navigation within focused pane
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('g') => {
-                self.selected_row = 0;
-                self.ensure_visible();
-            }
+            KeyCode::Char('g') => self.selected_row = 0,
             KeyCode::Char('G') => {
                 let max = self.flat_len_for_focused().saturating_sub(1);
                 self.selected_row = max;
-                self.ensure_visible();
             }
 
             // Toggle collapse
@@ -391,14 +319,11 @@ impl App {
                 // Check which pane was clicked and focus it
                 for (i, area) in self.pane_areas.iter().enumerate() {
                     if area.contains((x, y).into()) {
-                        if self.focused_pane != i {
-                            self.focused_pane = i;
-                            self.scroll_offset = 0;
-                        }
-                        // Calculate which row was clicked (accounting for border + scroll)
-                        let relative_y = y.saturating_sub(area.y + 1); // 1 for top border
+                        self.focused_pane = i;
+                        // Calculate which row was clicked (accounting for border + header)
+                        let relative_y = y.saturating_sub(area.y + 2);
                         let max = self.flat_len_for_pane(i).saturating_sub(1);
-                        self.selected_row = (self.scroll_offset + relative_y as usize).min(max);
+                        self.selected_row = (relative_y as usize).min(max);
                         break;
                     }
                 }
@@ -418,7 +343,6 @@ impl App {
         self.focused_pane =
             (self.focused_pane as i32 + direction).rem_euclid(len) as usize;
         self.selected_row = 0;
-        self.scroll_offset = 0;
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -427,30 +351,9 @@ impl App {
         if max == 0 {
             return;
         }
-        let new = self.selected_row as i32 + direction;
-        self.selected_row = new.clamp(0, max as i32 - 1) as usize;
-        self.ensure_visible();
-    }
-
-    /// Adjust scroll_offset so selected_row is visible within the focused pane.
-    pub fn ensure_visible(&mut self) {
-        // visible_height is set by the UI layer each frame
-        let visible = self.visible_height_for_focused();
-        if visible == 0 {
-            return;
-        }
-        if self.selected_row < self.scroll_offset {
-            self.scroll_offset = self.selected_row;
-        } else if self.selected_row >= self.scroll_offset + visible {
-            self.scroll_offset = self.selected_row - visible + 1;
-        }
-    }
-
-    /// Get visible rows for the focused pane (from pane_areas, minus border+title).
-    fn visible_height_for_focused(&self) -> usize {
-        self.pane_areas
-            .get(self.focused_pane)
-            .map_or(0, |area| area.height.saturating_sub(2) as usize) // 2 for top+bottom border
+        let len = max as i32;
+        self.selected_row =
+            (self.selected_row as i32 + direction).rem_euclid(len) as usize;
     }
 
     fn flat_len_for_focused(&self) -> usize {
@@ -499,13 +402,9 @@ impl App {
         let repo_root = crate::workspace::repo_root().unwrap_or_else(|_| PathBuf::from("."));
 
         // Branch name from maw config (bare repos return "HEAD" from git rev-parse)
-        let branch = if let Ok(config) = crate::workspace::MawConfig::load(&repo_root) {
-            let b = config.branch().to_string();
-            self.branch_name = b.clone();
-            b
-        } else {
-            String::new()
-        };
+        if let Ok(config) = crate::workspace::MawConfig::load(&repo_root) {
+            self.branch_name = config.branch().to_string();
+        }
 
         // Epoch hash from refs/manifold/epoch/current
         if let Some(output) = Command::new("git")
@@ -517,24 +416,6 @@ impl App {
         {
             self.epoch_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
         }
-
-        // Collect warnings from maw status checks
-        self.warnings.clear();
-
-        // Main vs origin sync
-        if !branch.is_empty() {
-            let sync = main_sync_status_inner(&repo_root, &branch);
-            if sync.is_warning() {
-                self.warnings
-                    .push(StatusWarning::SyncIssue(sync.describe()));
-            }
-        }
-
-        // Stray root files
-        let stray = crate::doctor::stray_root_entries(&repo_root);
-        if !stray.is_empty() {
-            self.warnings.push(StatusWarning::StrayRoot(stray.len()));
-        }
     }
 
     fn fetch_workspace_panes() -> Result<Vec<WorkspacePane>> {
@@ -544,48 +425,28 @@ impl App {
 
         let mut panes = Vec::new();
 
-        // Determine the default workspace name so we can skip epoch diff for it.
-        // The default workspace IS the epoch target — diffing it against epoch
-        // would show every file committed since the epoch ref was last advanced.
-        let default_ws_name = crate::workspace::MawConfig::load(&repo_root)
-            .map(|c| c.default_workspace().to_string())
-            .unwrap_or_else(|_| "default".to_string());
-
         for info in &infos {
             let name = info.id.to_string();
+            // Skip default workspace from display (it's the merge target, not an agent workspace)
+            if name == "default" {
+                continue;
+            }
+
             let ws_path = backend.workspace_path(&info.id);
             let is_stale = info.state.is_stale();
 
-            // Get epoch diff: files changed relative to epoch.
-            // Skip for the default workspace — it IS the merge target, so only
-            // dirty (uncommitted) files are meaningful.
-            let mut all_files = if name == default_ws_name {
-                Vec::new()
-            } else {
-                Self::fetch_epoch_diff(&repo_root, &ws_path)
-            };
+            // Get epoch diff: files changed relative to epoch
+            let epoch_files = Self::fetch_epoch_diff(&repo_root, &ws_path);
 
             // Get commit count and last activity
             let (commit_count, last_activity_secs) =
                 Self::fetch_commit_info(&repo_root, &ws_path);
 
-            // Get uncommitted changes and merge into file list
-            let dirty_files = Self::fetch_dirty_files(&ws_path);
-            let is_dirty = !dirty_files.is_empty();
-            // Merge dirty files: dirty status overrides epoch status for same path
-            let epoch_paths: std::collections::HashSet<String> =
-                all_files.iter().map(|(_, p)| p.clone()).collect();
-            for (status, path) in dirty_files {
-                if !epoch_paths.contains(&path) {
-                    all_files.push((status, path));
-                }
-            }
+            // Check for dirty working copy
+            let is_dirty = Self::check_dirty(&ws_path);
 
-            let file_paths: Vec<String> = all_files.iter().map(|(_, p)| p.clone()).collect();
-            let file_tree = build_file_tree(&all_files);
-
-            // Fetch latest description and annotations from oplog
-            let (description, annotations) = Self::fetch_oplog_metadata(&repo_root, &info.id);
+            let file_paths: Vec<String> = epoch_files.iter().map(|(_, p)| p.clone()).collect();
+            let file_tree = build_file_tree(&epoch_files);
 
             panes.push(WorkspacePane {
                 name,
@@ -595,16 +456,10 @@ impl App {
                 is_dirty,
                 file_tree,
                 file_paths,
-                description,
-                annotations,
             });
         }
 
-        panes.sort_by(|a, b| match (a.name == default_ws_name, b.name == default_ws_name) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        });
+        panes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(panes)
     }
 
@@ -700,96 +555,20 @@ impl App {
         (commit_count, last_activity_secs)
     }
 
-    /// Get uncommitted changes as (status, path) pairs. Empty vec = clean.
-    fn fetch_dirty_files(ws_path: &Path) -> Vec<(FileStatus, String)> {
+    /// Check if workspace has uncommitted changes.
+    fn check_dirty(ws_path: &Path) -> bool {
         let output = Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(ws_path)
             .output();
 
-        let Some(output) = output.ok().filter(|o| o.status.success()) else {
-            return Vec::new();
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut files = Vec::new();
-        for line in stdout.lines() {
-            // Porcelain format: XY path (2 status chars + space + path)
-            // Do NOT trim_start — the leading space in X position is meaningful.
-            if line.len() < 4 {
-                continue;
-            }
-            let xy = &line[..2];
-            let path = line[3..].to_string();
-            // Pick the most significant status: staged (X) takes priority, else working tree (Y)
-            let status_char = {
-                let x = xy.as_bytes()[0];
-                let y = xy.as_bytes()[1];
-                match (x, y) {
-                    (b'?', _) => 'A',         // untracked → added
-                    (b'D', _) | (_, b'D') => 'D',
-                    (b'R', _) => 'R',
-                    (b' ', c) | (c, _) => match c {
-                        b'A' => 'A',
-                        b'D' => 'D',
-                        b'R' => 'R',
-                        _ => 'M',
-                    },
-                }
-            };
-            if !path.is_empty() {
-                files.push((FileStatus::from_char(status_char), path));
-            }
-        }
-        files
+        output
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| !o.stdout.is_empty())
     }
 
     /// Compute file-level overlaps across all workspace panes.
-    /// Fetch the latest description and annotations from the workspace oplog.
-    /// Walks at most 20 ops back to find the most recent Describe and Annotate entries.
-    fn fetch_oplog_metadata(
-        repo_root: &Path,
-        ws_id: &crate::model::types::WorkspaceId,
-    ) -> (Option<String>, Vec<(String, String)>) {
-        use crate::oplog::read::walk_chain;
-        use crate::oplog::types::OpPayload;
-
-        let ops = walk_chain(repo_root, ws_id, Some(20), None).unwrap_or_default();
-
-        let mut description: Option<String> = None;
-        let mut annotations: BTreeMap<String, String> = BTreeMap::new();
-
-        for (_oid, op) in &ops {
-            match &op.payload {
-                OpPayload::Describe { message } if description.is_none() => {
-                    description = Some(message.clone());
-                }
-                OpPayload::Annotate { key, data } if !annotations.contains_key(key) => {
-                    // Flatten the JSON data into a compact string
-                    let value = if data.len() == 1 {
-                        // Single-key object: just show the value
-                        let v = data.values().next().unwrap();
-                        format_json_value(v)
-                    } else {
-                        // Multi-key: key=val, key=val
-                        data.iter()
-                            .map(|(k, v)| format!("{k}={}", format_json_value(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    };
-                    annotations.insert(key.clone(), value);
-                }
-                _ => {}
-            }
-            // Stop early if we've found both
-            if description.is_some() && !annotations.is_empty() {
-                // Keep going — might have more annotation keys
-            }
-        }
-
-        (description, annotations.into_iter().collect())
-    }
-
     fn compute_overlaps(&mut self) {
         self.overlaps.clear();
         self.overlap_paths.clear();
@@ -826,17 +605,6 @@ impl App {
 }
 
 /// Format seconds-ago into a human readable string.
-/// Format a JSON value compactly for display.
-fn format_json_value(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Null => "null".to_string(),
-        _ => v.to_string(), // arrays/objects as JSON
-    }
-}
-
 pub fn format_time_ago(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s ago")

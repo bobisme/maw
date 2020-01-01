@@ -429,7 +429,7 @@ fn print_list_json(
     match format.serialize(&envelope) {
         Ok(output) => println!("{output}"),
         Err(e) => {
-            eprintln!("Warning: Failed to serialize to JSON: {e}");
+            tracing::warn!("Failed to serialize to JSON: {e}");
         }
     }
 }

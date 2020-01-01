@@ -24,9 +24,6 @@ pub const FILE_RENAMED: Color = Color::Cyan;
 // Overlap
 pub const OVERLAP: Color = Color::Magenta;
 
-// Warnings (sync issues, stray root files)
-pub const WARNING: Color = Color::LightRed;
-
 // Dirty indicator
 #[allow(dead_code)]
 pub const DIRTY: Color = Color::Yellow;

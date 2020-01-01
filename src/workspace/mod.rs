@@ -899,7 +899,7 @@ pub fn get_backend() -> Result<AnyBackend> {
     AnyBackend::from_kind(resolved, root).or_else(|e| {
         // If the resolved backend fails to initialize (e.g., overlay not
         // available despite detection), fall back to git-worktree and warn.
-        eprintln!("WARNING: Backend init failed ({e}), falling back to git-worktree");
+        tracing::warn!("Backend init failed ({e}), falling back to git-worktree");
         AnyBackend::from_kind(BackendKind::GitWorktree, repo_root()?)
     })
 }

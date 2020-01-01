@@ -154,7 +154,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
             match format.serialize(&status_data) {
                 Ok(output) => println!("{output}"),
                 Err(e) => {
-                    eprintln!("Warning: Failed to serialize status to JSON: {e}");
+                    tracing::warn!("Failed to serialize status to JSON: {e}");
                     print_status_text(default_ws_name, is_stale, None, None, &[]);
                 }
             }

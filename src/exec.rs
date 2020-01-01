@@ -2,6 +2,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use tracing::instrument;
 
 use crate::workspace;
 
@@ -40,6 +41,7 @@ pub struct ExecArgs {
     pub cmd: Vec<String>,
 }
 
+#[instrument(skip(args), fields(workspace = %args.workspace, cmd = ?args.cmd))]
 pub fn run(args: &ExecArgs) -> Result<()> {
     if args.cmd.is_empty() {
         bail!(
@@ -63,9 +65,15 @@ pub fn run(args: &ExecArgs) -> Result<()> {
 
     workspace::auto_sync_if_stale(&args.workspace, &path)?;
 
-    let status = Command::new(&args.cmd[0])
-        .args(&args.cmd[1..])
-        .current_dir(&path)
+    let mut cmd = Command::new(&args.cmd[0]);
+    cmd.args(&args.cmd[1..]).current_dir(&path);
+
+    // Propagate trace context to child process so it joins the same trace
+    if let Some(traceparent) = crate::telemetry::current_traceparent() {
+        cmd.env("TRACEPARENT", traceparent);
+    }
+
+    let status = cmd
         .status()
         .context(format!("Failed to run '{}'", args.cmd[0]))?;
 
