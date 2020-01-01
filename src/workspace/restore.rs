@@ -47,7 +47,23 @@ pub fn restore(name: &str) -> Result<()> {
     println!();
     println!("Note: Workspace '{name}' was recreated at the current epoch.");
     println!("Previous workspace contents are not automatically restored.");
-    println!("If you had uncommitted changes, check git reflog for recovery options.");
+
+    // Check if there are destroy records with snapshots for this workspace
+    if let Ok(root) = repo_root()
+        && super::destroy_record::read_latest_pointer(&root, name)
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        println!();
+        println!("TIP: A snapshot of the destroyed workspace exists.");
+        println!("  To recover the snapshot into this workspace:");
+        println!("    maw ws recover {name} --to <new-name>");
+        println!("  Or inspect what was captured:");
+        println!("    maw ws recover {name}");
+    } else {
+        println!("If you had uncommitted changes, check git reflog for recovery options.");
+    }
 
     Ok(())
 }

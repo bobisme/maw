@@ -14,7 +14,7 @@ mod advance;
 mod annotate;
 pub(crate) mod capture;
 mod create;
-mod destroy_record;
+pub(crate) mod destroy_record;
 mod describe;
 mod diff;
 mod history;
@@ -26,6 +26,7 @@ mod oplog_runtime;
 mod overlap;
 mod clean;
 mod prune;
+mod recover;
 mod restore;
 mod status;
 pub mod sync;
@@ -267,6 +268,41 @@ pub enum WorkspaceCommands {
     Restore {
         /// Name of the workspace to restore
         name: String,
+    },
+
+    /// List, inspect, and recover snapshots from destroyed workspaces
+    ///
+    /// When a workspace is destroyed (via `maw ws destroy --force` or
+    /// `maw ws merge --destroy`), its state is captured as a snapshot.
+    /// Use this command to list destroyed workspaces, inspect their
+    /// snapshots, show individual files, or restore them to a new workspace.
+    ///
+    /// Examples:
+    ///   maw ws recover                          # list destroyed workspaces
+    ///   maw ws recover alice                    # show destroy history for alice
+    ///   maw ws recover alice --show src/main.rs # show a file from the snapshot
+    ///   maw ws recover alice --to alice-restored # restore to a new workspace
+    Recover {
+        /// Name of the destroyed workspace to inspect or recover.
+        /// Omit to list all destroyed workspaces with snapshots.
+        name: Option<String>,
+
+        /// Show a specific file from the latest snapshot.
+        /// The path must be relative (no directory traversal allowed).
+        #[arg(long)]
+        show: Option<String>,
+
+        /// Restore the latest snapshot into a new workspace with this name.
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Output format: text, json, or pretty
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 
     /// List all workspaces
@@ -717,6 +753,35 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             force,
         } => create::destroy(&name, confirm, force),
         WorkspaceCommands::Restore { name } => restore::restore(&name),
+        WorkspaceCommands::Recover {
+            name,
+            show,
+            to,
+            format,
+            json,
+        } => {
+            let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+            match (name, show, to) {
+                // maw ws recover <name> --show <path>
+                (Some(n), Some(path), None) => recover::show_file(&n, &path),
+                // maw ws recover <name> --to <new-name>
+                (Some(n), None, Some(target)) => recover::restore_to(&n, &target),
+                // maw ws recover <name> (inspect)
+                (Some(n), None, None) => recover::show_workspace(&n, fmt),
+                // maw ws recover (list all)
+                (None, None, None) => recover::list_destroyed(fmt),
+                // Invalid combos
+                (None, Some(_), _) => {
+                    anyhow::bail!("--show requires a workspace name.\n  Usage: maw ws recover <name> --show <path>")
+                }
+                (None, _, Some(_)) => {
+                    anyhow::bail!("--to requires a workspace name.\n  Usage: maw ws recover <name> --to <new-name>")
+                }
+                (Some(_), Some(_), Some(_)) => {
+                    anyhow::bail!("Cannot use --show and --to together.\n  Use --show to inspect, or --to to restore.")
+                }
+            }
+        }
         WorkspaceCommands::List {
             verbose,
             format,

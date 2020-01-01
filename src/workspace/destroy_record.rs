@@ -3,46 +3,56 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::types::{EpochId, GitOid};
 
 use super::capture::{CaptureMode, CaptureResult};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestroyReason {
     Destroy,
     MergeDestroy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RecordCaptureMode {
+pub(crate) enum RecordCaptureMode {
     DirtySnapshot,
     HeadOnly,
     None,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct DestroyRecord {
-    workspace_id: String,
-    destroyed_at: String,
-    final_head: String,
-    final_head_ref: Option<String>,
-    snapshot_oid: Option<String>,
-    snapshot_ref: Option<String>,
-    capture_mode: RecordCaptureMode,
-    dirty_files: Vec<String>,
-    base_epoch: String,
-    destroy_reason: DestroyReason,
-    tool_version: String,
+impl std::fmt::Display for RecordCaptureMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DirtySnapshot => write!(f, "dirty_snapshot"),
+            Self::HeadOnly => write!(f, "head_only"),
+            Self::None => write!(f, "none"),
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct LatestPointer {
-    record: String,
-    destroyed_at: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct DestroyRecord {
+    pub workspace_id: String,
+    pub destroyed_at: String,
+    pub final_head: String,
+    pub final_head_ref: Option<String>,
+    pub snapshot_oid: Option<String>,
+    pub snapshot_ref: Option<String>,
+    pub capture_mode: RecordCaptureMode,
+    pub dirty_files: Vec<String>,
+    pub base_epoch: String,
+    pub destroy_reason: DestroyReason,
+    pub tool_version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct LatestPointer {
+    pub record: String,
+    pub destroyed_at: String,
 }
 
 pub fn write_destroy_record(
@@ -140,6 +150,85 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .with_context(|| format!("rename {} -> {}", tmp_path.display(), path.display()))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Read API — used by `maw ws recover`
+// ---------------------------------------------------------------------------
+
+/// Path to the destroy artifacts directory for a workspace.
+pub(crate) fn destroy_dir(root: &Path, workspace_name: &str) -> PathBuf {
+    root.join(".manifold")
+        .join("artifacts")
+        .join("ws")
+        .join(workspace_name)
+        .join("destroy")
+}
+
+/// Read the latest pointer for a destroyed workspace, if any.
+pub(crate) fn read_latest_pointer(root: &Path, workspace_name: &str) -> Result<Option<LatestPointer>> {
+    let latest_path = destroy_dir(root, workspace_name).join("latest.json");
+    if !latest_path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&latest_path)
+        .with_context(|| format!("read {}", latest_path.display()))?;
+    let pointer: LatestPointer =
+        serde_json::from_str(&content).with_context(|| format!("parse {}", latest_path.display()))?;
+    Ok(Some(pointer))
+}
+
+/// Read a specific destroy record by filename.
+pub(crate) fn read_record(root: &Path, workspace_name: &str, filename: &str) -> Result<DestroyRecord> {
+    let record_path = destroy_dir(root, workspace_name).join(filename);
+    let content = fs::read_to_string(&record_path)
+        .with_context(|| format!("read {}", record_path.display()))?;
+    let record: DestroyRecord =
+        serde_json::from_str(&content).with_context(|| format!("parse {}", record_path.display()))?;
+    Ok(record)
+}
+
+/// List all destroy record filenames for a workspace (excluding latest.json).
+pub(crate) fn list_record_files(root: &Path, workspace_name: &str) -> Result<Vec<String>> {
+    let dir = destroy_dir(root, workspace_name);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".json") && name != "latest.json" && !name.starts_with('.') {
+            records.push(name);
+        }
+    }
+    records.sort();
+    Ok(records)
+}
+
+/// List all workspace names that have destroy records.
+pub(crate) fn list_destroyed_workspaces(root: &Path) -> Result<Vec<String>> {
+    let ws_dir = root
+        .join(".manifold")
+        .join("artifacts")
+        .join("ws");
+    if !ws_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&ws_dir).with_context(|| format!("read dir {}", ws_dir.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let ws_name = entry.file_name().to_string_lossy().to_string();
+        let destroy_dir = entry.path().join("destroy");
+        if destroy_dir.join("latest.json").exists() {
+            names.push(ws_name);
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 #[cfg(test)]
