@@ -5,6 +5,7 @@
 mod manifold_common;
 
 use std::process::Command;
+use std::fs;
 
 use manifold_common::TestRepo;
 
@@ -66,6 +67,37 @@ fn destroy_repeated_is_idempotent() {
         second.contains("already absent") || second.contains("No action needed"),
         "expected idempotent destroy message, got: {second}"
     );
+}
+
+#[test]
+fn ws_clean_removes_target_dirs_for_one_or_all_workspaces() {
+    let repo = TestRepo::new();
+
+    repo.create_workspace("agent-a");
+
+    let default_target = repo.workspace_path("default").join("target");
+    let agent_target = repo.workspace_path("agent-a").join("target");
+
+    fs::create_dir_all(&default_target).expect("create default target");
+    fs::write(default_target.join("marker"), "default\n").expect("write default marker");
+    fs::create_dir_all(&agent_target).expect("create agent target");
+    fs::write(agent_target.join("marker"), "agent\n").expect("write agent marker");
+
+    // Clean one named workspace.
+    repo.maw_ok(&["ws", "clean", "agent-a"]);
+    assert!(!agent_target.exists(), "agent workspace target should be removed");
+    assert!(
+        default_target.exists(),
+        "default target should remain when name is specified"
+    );
+
+    // Recreate and clean all workspaces.
+    fs::create_dir_all(&agent_target).expect("recreate agent target");
+    fs::create_dir_all(&default_target).expect("recreate default target");
+
+    repo.maw_ok(&["ws", "clean", "--all"]);
+    assert!(!default_target.exists(), "default target should be removed with --all");
+    assert!(!agent_target.exists(), "agent target should be removed with --all");
 }
 
 #[test]

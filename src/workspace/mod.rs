@@ -20,6 +20,7 @@ mod metadata;
 mod names;
 mod oplog_runtime;
 mod overlap;
+mod clean;
 mod prune;
 mod restore;
 mod status;
@@ -427,6 +428,29 @@ pub enum WorkspaceCommands {
         empty: bool,
     },
 
+    /// Clean build artifacts for workspace(s)
+    ///
+    /// Removes `target/` directories from workspace build contexts to reclaim disk space.
+    /// By default, cleans only the default workspace.
+    /// Use `--all` to clean every active workspace including agent and default workspaces.
+    ///
+    /// This is equivalent to running `cargo clean` in each workspace, but removes the
+    /// build output directory directly for speed and reliability.
+    ///
+    /// Examples:
+    ///   maw ws clean          # clean target/ in ws/default only
+    ///   maw ws clean agent-a   # clean target/ in ws/agent-a only
+    ///   maw ws clean --all    # clean target/ in all workspaces
+    Clean {
+        /// Workspace name (defaults to `default` when omitted)
+        #[arg(conflicts_with = "all")]
+        name: Option<String>,
+
+        /// Clean target directories for all workspaces
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+    },
+
     /// Reconnect an orphaned workspace directory as a git worktree
     ///
     /// Use this to recover a workspace where the worktree tracking was lost
@@ -655,6 +679,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
         WorkspaceCommands::Undo { name } => undo::undo(&name),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
+        WorkspaceCommands::Clean { name, all } => clean::clean(name, all),
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
         WorkspaceCommands::Advance { name, format, json } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
