@@ -179,7 +179,7 @@ impl Default for InitOptions {
 /// 6. Remove common-dir index file
 /// 7. Create `.manifold/` directory structure
 /// 8. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
-/// 9. `git worktree add --detach ws/default <commit>` — default workspace
+/// 9. `git worktree add ws/default <branch>` — default workspace (attached to branch)
 ///
 /// # Errors
 /// Returns [`InitError`] if any step fails. Partial state may remain
@@ -222,8 +222,8 @@ pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, In
     set_epoch_ref(&root, &epoch0_oid)?;
     set_default_workspace_ref(&root, &epoch0_oid)?;
 
-    // 9. Create ws/default/ workspace
-    let ws_default = create_default_workspace(&root, &epoch0_oid)?;
+    // 9. Create ws/default/ workspace (attached to the configured branch)
+    let ws_default = create_default_workspace(&root, &opts.branch)?;
 
     Ok(InitResult {
         repo_root: root,
@@ -376,21 +376,22 @@ fn set_default_workspace_ref(root: &Path, epoch: &EpochId) -> Result<(), InitErr
 }
 
 /// Create the default workspace at `ws/default/` using `git worktree`.
-fn create_default_workspace(root: &Path, epoch: &EpochId) -> Result<PathBuf, InitError> {
+fn create_default_workspace(root: &Path, branch: &str) -> Result<PathBuf, InitError> {
     let ws_dir = root.join("ws");
     std::fs::create_dir_all(&ws_dir)?;
 
     let ws_path = ws_dir.join("default");
 
-    // Use git worktree add --detach to create a workspace not tied to any branch
+    // Create the default workspace attached to the configured branch.
+    // This keeps HEAD on the branch so that `update-ref refs/heads/{branch}`
+    // during merge keeps the worktree in sync.
     run_git(
         root,
         &[
             "worktree",
             "add",
-            "--detach",
             ws_path.to_str().unwrap_or("ws/default"),
-            epoch.as_str(),
+            branch,
         ],
     )?;
 
@@ -938,7 +939,7 @@ pub fn run() -> anyhow::Result<()> {
 /// 8. Remove common-dir index file (bare mode cleanup)
 /// 9. Create `.manifold/` directory structure
 /// 10. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
-/// 11. Create `ws/default/` via `git worktree add --detach`
+/// 11. Create `ws/default/` via `git worktree add` (attached to configured branch)
 /// 12. Remove tracked source files from root (dirty files are kept with warning)
 ///
 /// # Errors
@@ -1082,11 +1083,10 @@ pub fn brownfield_init(
     bf_set_epoch_ref(&root, &epoch0)?;
     bf_set_default_workspace_ref(&root, &epoch0)?;
 
-    // 11. Create ws/default/ worktree at HEAD
+    // 11. Create ws/default/ worktree attached to the configured branch
     let ws_dir = root.join("ws");
     std::fs::create_dir_all(&ws_dir)?;
-    bf_create_default_workspace(&root, &epoch0, &ws_default)?;
-    bf_align_default_workspace_to_configured_branch(&root, &ws_default)?;
+    bf_create_default_workspace(&root, &ws_default)?;
 
     // 12. Remove tracked source files from root (skip dirty ones)
     let cleaned_count = if opts.clean_root_tracked_files {
@@ -1475,7 +1475,7 @@ fn bf_ensure_default_workspace_registered(
 fn bf_repair_default_workspace_registration(
     root: &Path,
     ws_path: &Path,
-    epoch: &EpochId,
+    _epoch: &EpochId,
 ) -> Result<(), BrownfieldInitError> {
     let ws_parent = ws_path.parent().ok_or_else(|| {
         BrownfieldInitError::Io(io::Error::other(
@@ -1499,14 +1499,14 @@ fn bf_repair_default_workspace_registration(
     // Prune stale registration from the moved workspace before re-attaching.
     let _ = bf_prune_worktrees(root);
 
+    let branch = bf_configured_branch(root);
     let add_result = bf_run_git(
         root,
         &[
             "worktree",
             "add",
-            "--detach",
             ws_path.to_str().unwrap_or("ws/default"),
-            epoch.as_str(),
+            &branch,
         ],
     );
 
@@ -1682,17 +1682,16 @@ fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitEr
 /// Create the default workspace at `ws/default/` using `git worktree add`.
 fn bf_create_default_workspace(
     root: &Path,
-    epoch: &EpochId,
     ws_path: &Path,
 ) -> Result<(), BrownfieldInitError> {
+    let branch = bf_configured_branch(root);
     bf_run_git(
         root,
         &[
             "worktree",
             "add",
-            "--detach",
             ws_path.to_str().unwrap_or("ws/default"),
-            epoch.as_str(),
+            &branch,
         ],
     )
 }

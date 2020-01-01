@@ -2479,7 +2479,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Update the default workspace to point to the new epoch
     if default_ws_path.exists() {
-        update_default_workspace(&default_ws_path, &build_output.candidate, text_mode)?;
+        update_default_workspace(&default_ws_path, branch, text_mode)?;
     }
 
     // Destroy source workspaces if requested
@@ -2913,12 +2913,15 @@ fn now_secs() -> u64 {
 /// to the new epoch commit.
 fn update_default_workspace(
     default_ws_path: &Path,
-    new_epoch: &crate::model::types::GitOid,
+    branch: &str,
     text_mode: bool,
 ) -> Result<()> {
-    // Reset the worktree to the new epoch
+    // Checkout the branch by name so default stays attached to it.
+    // The COMMIT phase already advanced refs/heads/{branch} to the new epoch,
+    // so checking out the branch updates the working tree AND keeps HEAD
+    // attached (not detached).
     let output = std::process::Command::new("git")
-        .args(["checkout", "--force", new_epoch.as_str()])
+        .args(["checkout", "--force", branch])
         .current_dir(default_ws_path)
         .output()
         .context("Failed to update default workspace")?;
@@ -2933,10 +2936,9 @@ fn update_default_workspace(
             "Failed to update default workspace to new epoch: {}\n  \
              The merge COMMIT succeeded (refs are updated), but the default workspace \
              working copy could not be checked out.\n  \
-             To fix: git -C {} checkout {}",
+             To fix: git -C {} checkout {branch}",
             stderr.trim(),
             default_ws_path.display(),
-            &new_epoch.as_str()[..12]
         );
     }
 
