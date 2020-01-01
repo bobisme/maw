@@ -374,5 +374,86 @@ fn clean_root_source_files() -> Result<()> {
     }
 
     println!("[OK] Cleaned {removed} tracked file(s) from repo root");
+
+    warn_remaining_untracked_root_files();
+
     Ok(())
+}
+
+/// Warn if untracked files are still present at repo root after cleanup.
+///
+/// In brownfield repos, partially-tracked directories can retain untracked
+/// files (locks/state/cache) even after tracked files are moved to ws/default/.
+/// We surface these explicitly so users don't miss manual cleanup.
+fn warn_remaining_untracked_root_files() {
+    let output = match Command::new("git")
+        .args(["status", "--porcelain=1", "--untracked-files=all"])
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => return,
+    };
+
+    if !output.status.success() {
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut leftover: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .map(str::trim)
+        .filter(|path| !is_ignored_untracked_root_path(path))
+        .map(ToString::to_string)
+        .collect();
+
+    if leftover.is_empty() {
+        return;
+    }
+
+    leftover.sort();
+    leftover.dedup();
+
+    let preview = leftover
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if leftover.len() > 5 {
+        format!(" (+{} more)", leftover.len() - 5)
+    } else {
+        String::new()
+    };
+
+    println!(
+        "[WARN] {} untracked root file(s)/dir(s) remained after init: {}{}",
+        leftover.len(),
+        preview,
+        more
+    );
+    println!(
+        "  To fix: move these into ws/default/ (or remove them), then re-run: maw init"
+    );
+}
+
+fn is_ignored_untracked_root_path(path: &str) -> bool {
+    path == "ws"
+        || path.starts_with("ws/")
+        || path == ".git"
+        || path.starts_with(".git/")
+        || path == ".jj"
+        || path.starts_with(".jj/")
+        || path == ".manifold"
+        || path.starts_with(".manifold/")
+        || path == ".agents"
+        || path.starts_with(".agents/")
+        || path == ".claude"
+        || path.starts_with(".claude/")
+        || path == ".botbus"
+        || path.starts_with(".botbus/")
+        || path == ".crit"
+        || path.starts_with(".crit/")
+        || path == "AGENTS.md"
+        || path == "CLAUDE.md"
 }

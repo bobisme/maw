@@ -1068,6 +1068,9 @@ pub fn brownfield_init(
         0
     };
 
+    // 12b. Warn about untracked files left behind
+    bf_warn_remaining_untracked_root_files(&root);
+
     Ok(BrownfieldInitResult {
         repo_root: root,
         default_workspace: ws_default,
@@ -1675,6 +1678,80 @@ fn bf_clean_root_tracked_files(
     }
 
     Ok(removed)
+}
+
+/// Warn if untracked files are still present at repo root after brownfield cleanup.
+///
+/// In brownfield repos, partially-tracked directories can retain untracked
+/// files (locks/state/cache) even after tracked files are moved to ws/default/.
+/// We surface these explicitly so users don't miss manual cleanup.
+fn bf_warn_remaining_untracked_root_files(root: &Path) {
+    let output = match Command::new("git")
+        .args(["status", "--porcelain=1", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => return,
+    };
+
+    if !output.status.success() {
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let skip_prefixes = [
+        "ws/",
+        ".git/",
+        ".manifold/",
+        ".agents/",
+        ".claude/",
+        ".botbus/",
+        ".crit/",
+    ];
+    let skip_exact = [
+        "ws", ".git", ".manifold", ".agents", ".claude", ".botbus", ".crit", "AGENTS.md",
+        "CLAUDE.md",
+    ];
+
+    let mut leftover: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .map(str::trim)
+        .filter(|path| {
+            !skip_exact.contains(path) && !skip_prefixes.iter().any(|pfx| path.starts_with(pfx))
+        })
+        .map(ToString::to_string)
+        .collect();
+
+    if leftover.is_empty() {
+        return;
+    }
+
+    leftover.sort();
+    leftover.dedup();
+
+    let preview = leftover
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if leftover.len() > 5 {
+        format!(" (+{} more)", leftover.len() - 5)
+    } else {
+        String::new()
+    };
+
+    println!(
+        "[WARN] {} untracked root file(s)/dir(s) remained after init: {}{}",
+        leftover.len(),
+        preview,
+        more
+    );
+    println!(
+        "  To fix: move these into ws/default/ (or remove them), then re-run: maw init"
+    );
 }
 
 /// Run a git command and check for success.
