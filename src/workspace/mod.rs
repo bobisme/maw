@@ -12,6 +12,7 @@ use crate::format::OutputFormat;
 
 mod advance;
 mod create;
+mod describe;
 mod diff;
 mod history;
 mod list;
@@ -182,6 +183,26 @@ pub enum WorkspaceCommands {
         /// `.manifold/workspace-template.json` inside the workspace.
         #[arg(long, value_enum)]
         template: Option<templates::WorkspaceTemplate>,
+    },
+
+    /// Describe (label) the current workspace state
+    ///
+    /// Records a human-readable description in the workspace's operation log.
+    /// The description is visible in `maw ws history` output and serves as a
+    /// checkpoint marker without requiring a merge.
+    ///
+    /// Useful for agents to annotate work in progress, mark review readiness,
+    /// or document workspace milestones.
+    ///
+    /// Examples:
+    ///   maw ws describe alice "wip: implementing auth module"
+    ///   maw ws describe bob "ready for review: auth-module-v1"
+    Describe {
+        /// Name of the workspace to describe
+        name: String,
+
+        /// Description message (e.g., "wip: feature", "ready for review")
+        message: String,
     },
 
     /// Remove a workspace
@@ -629,6 +650,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             };
             create::create(&name, revision.as_deref(), persistent, template)
         }
+        WorkspaceCommands::Describe { name, message } => describe::describe(&name, &message),
         WorkspaceCommands::Destroy {
             name,
             confirm,
