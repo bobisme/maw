@@ -268,26 +268,6 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         );
     }
 
-    if let Some(capture) =
-        super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
-            .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?
-    {
-        let mode = match capture.mode {
-            super::capture::CaptureMode::WorktreeCapture => "worktree",
-            super::capture::CaptureMode::HeadOnly => "head-only",
-        };
-        println!(
-            "Captured workspace '{name}' state for recovery: {mode} -> {}",
-            capture.pinned_ref
-        );
-    }
-
-    if touched_count > 0 {
-        eprintln!(
-            "WARNING: Destroying workspace '{name}' with {touched_count} unmerged change(s) (--force)."
-        );
-    }
-
     if confirm {
         println!("About to destroy workspace '{name}' at {}", path.display());
         println!("This will remove the workspace and delete the directory.");
@@ -306,10 +286,29 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         }
     }
 
-    println!("Destroying workspace '{name}'...");
+    let mut capture_result = None;
+    if force {
+        capture_result = super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
+            .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?;
+    }
+
+    // Determine final head for destroy record before we destroy
+    let final_head = super::capture::resolve_head(&path)
+        .unwrap_or_else(|_| status.base_epoch.oid().clone());
 
     if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &status.base_epoch) {
         tracing::warn!("Failed to record workspace destroy in history: {e}");
+    }
+
+    if let Err(e) = super::destroy_record::write_destroy_record(
+        &root,
+        name,
+        &status.base_epoch,
+        &final_head,
+        capture_result.as_ref(),
+        super::destroy_record::DestroyReason::Destroy,
+    ) {
+        tracing::warn!("Failed to write destroy record: {e}");
     }
 
     backend
@@ -319,7 +318,19 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     // Clean up workspace metadata (best-effort; don't fail destroy if missing).
     let _ = metadata::delete(&root, name);
 
-    println!("Workspace '{name}' destroyed.");
+    if force {
+        if let Some(capture) = capture_result {
+            let short_oid = &capture.commit_oid.as_str()[..12];
+            println!("Snapshot saved: {short_oid}");
+            println!("  Recover with: maw ws recover {name}");
+            println!("Workspace '{name}' destroyed.");
+        } else {
+            println!("Workspace '{name}' destroyed. (nothing to snapshot)");
+        }
+    } else {
+        println!("Workspace '{name}' destroyed.");
+    }
+
     Ok(())
 }
 
