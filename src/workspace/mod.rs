@@ -11,6 +11,7 @@ use crate::config::{BackendKind, ManifoldConfig};
 use crate::format::OutputFormat;
 
 mod advance;
+mod annotate;
 mod create;
 mod describe;
 mod diff;
@@ -203,6 +204,29 @@ pub enum WorkspaceCommands {
 
         /// Description message (e.g., "wip: feature", "ready for review")
         message: String,
+    },
+
+    /// Annotate a workspace with structured metadata
+    ///
+    /// Records a key-value annotation in the workspace's operation log.
+    /// The value must be a JSON object. Annotations are visible in
+    /// `maw ws history --format json` output.
+    ///
+    /// Useful for CI, review tooling, and agents to attach structured
+    /// metadata (e.g., test results, review status, build artifacts).
+    ///
+    /// Examples:
+    ///   maw ws annotate alice test-results '{"passed": 42, "failed": 0}'
+    ///   maw ws annotate bob review-status '{"approved": true, "reviewer": "security"}'
+    Annotate {
+        /// Name of the workspace to annotate
+        name: String,
+
+        /// Annotation key (e.g., "test-results", "review-status")
+        key: String,
+
+        /// Annotation value as a JSON object
+        json_value: String,
     },
 
     /// Remove a workspace
@@ -651,6 +675,11 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             create::create(&name, revision.as_deref(), persistent, template)
         }
         WorkspaceCommands::Describe { name, message } => describe::describe(&name, &message),
+        WorkspaceCommands::Annotate {
+            name,
+            key,
+            json_value,
+        } => annotate::annotate(&name, &key, &json_value),
         WorkspaceCommands::Destroy {
             name,
             confirm,
