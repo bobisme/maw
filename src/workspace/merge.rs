@@ -599,11 +599,11 @@ fn resolve_atoms(
 
 /// Patch the candidate tree with resolved file contents, producing a new commit OID.
 ///
-/// For each resolved path:
-/// 1. `git hash-object -w --stdin` → new blob OID
-/// 2. Read candidate tree with `git ls-tree -r`
-/// 3. Replace blob OIDs for resolved paths
-/// 4. `git mktree` → new tree
+/// Uses a temporary index to handle nested directory structures correctly:
+/// 1. `git hash-object -w --stdin` → new blob OIDs for resolved content
+/// 2. `git read-tree` → populate temp index from candidate tree
+/// 3. `git update-index` → replace blobs for resolved paths
+/// 4. `git write-tree` → new tree OID from the patched index
 /// 5. `git commit-tree` → new commit (same parent as candidate)
 fn patch_candidate_tree(
     root: &Path,
@@ -623,66 +623,56 @@ fn patch_candidate_tree(
         new_blobs.insert(path.to_string_lossy().to_string(), blob_oid.as_str().to_string());
     }
 
-    // 2. Read the candidate tree
-    let ls_output = Command::new("git")
-        .args(["ls-tree", "-r", candidate.as_str()])
+    // 2. Create a temporary index from the candidate tree
+    let tmp_index = tempfile::NamedTempFile::new()
+        .context("Failed to create temp index file")?;
+    let tmp_index_path = tmp_index.path().to_string_lossy().to_string();
+
+    let read_tree = Command::new("git")
+        .args(["read-tree", candidate.as_str()])
+        .env("GIT_INDEX_FILE", &tmp_index_path)
         .current_dir(root)
         .output()
-        .context("Failed to run git ls-tree")?;
-    if !ls_output.status.success() {
+        .context("Failed to run git read-tree")?;
+    if !read_tree.status.success() {
         bail!(
-            "git ls-tree failed: {}",
-            String::from_utf8_lossy(&ls_output.stderr).trim()
+            "git read-tree failed: {}",
+            String::from_utf8_lossy(&read_tree.stderr).trim()
         );
     }
 
-    // 3. Replace blob OIDs for resolved paths
-    let tree_text = String::from_utf8_lossy(&ls_output.stdout);
-    let mut new_tree_lines: Vec<String> = Vec::new();
-    for line in tree_text.lines() {
-        // Format: "mode type oid\tpath"
-        let parts: Vec<&str> = line.splitn(2, '\t').collect();
-        if parts.len() != 2 {
-            new_tree_lines.push(line.to_string());
-            continue;
-        }
-        let path = parts[1];
-        let meta: Vec<&str> = parts[0].splitn(3, ' ').collect();
-        if meta.len() != 3 {
-            new_tree_lines.push(line.to_string());
-            continue;
-        }
-        let (mode, obj_type, _old_oid) = (meta[0], meta[1], meta[2]);
-        if let Some(new_oid) = new_blobs.get(path) {
-            new_tree_lines.push(format!("{mode} {obj_type} {new_oid}\t{path}"));
-        } else {
-            new_tree_lines.push(line.to_string());
+    // 3. Update the index with resolved blobs
+    for (path, blob_oid) in &new_blobs {
+        let cacheinfo = format!("100644,{blob_oid},{path}");
+        let update = Command::new("git")
+            .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
+            .env("GIT_INDEX_FILE", &tmp_index_path)
+            .current_dir(root)
+            .output()
+            .context("Failed to run git update-index")?;
+        if !update.status.success() {
+            bail!(
+                "git update-index failed for {}: {}",
+                path,
+                String::from_utf8_lossy(&update.stderr).trim()
+            );
         }
     }
 
-    // 4. mktree
-    let tree_input = new_tree_lines.join("\n");
-    let mut mktree = Command::new("git")
-        .arg("mktree")
+    // 4. Write the patched tree from the index
+    let write_tree = Command::new("git")
+        .arg("write-tree")
+        .env("GIT_INDEX_FILE", &tmp_index_path)
         .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn git mktree")?;
-    if let Some(mut stdin) = mktree.stdin.take() {
-        stdin
-            .write_all(tree_input.as_bytes())
-            .context("Failed to write to git mktree stdin")?;
-    }
-    let mktree_out = mktree.wait_with_output().context("Failed to wait for git mktree")?;
-    if !mktree_out.status.success() {
+        .output()
+        .context("Failed to run git write-tree")?;
+    if !write_tree.status.success() {
         bail!(
-            "git mktree failed: {}",
-            String::from_utf8_lossy(&mktree_out.stderr).trim()
+            "git write-tree failed: {}",
+            String::from_utf8_lossy(&write_tree.stderr).trim()
         );
     }
-    let new_tree_oid = String::from_utf8_lossy(&mktree_out.stdout).trim().to_string();
+    let new_tree_oid = String::from_utf8_lossy(&write_tree.stdout).trim().to_string();
 
     // 5. commit-tree with the same parent as the candidate
     let parent_output = Command::new("git")
@@ -2084,9 +2074,24 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
         if !resolve.is_empty() {
             // --resolve mode: apply stateless resolutions
-            let parsed = parse_resolutions(resolve)?;
-            let (resolved_contents, remaining) =
-                apply_resolutions(&conflicts_with_ids, &parsed, &workspace_dirs)?;
+            let parsed = match parse_resolutions(resolve) {
+                Ok(p) => p,
+                Err(e) => {
+                    abort_merge(&manifold_dir, &format!("parse resolutions: {e}"));
+                    return Err(e);
+                }
+            };
+            let (resolved_contents, remaining) = match apply_resolutions(
+                &conflicts_with_ids,
+                &parsed,
+                &workspace_dirs,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    abort_merge(&manifold_dir, &format!("apply resolutions: {e}"));
+                    return Err(e);
+                }
+            };
 
             if remaining.is_empty() {
                 // All conflicts resolved — patch the candidate tree
@@ -2094,8 +2099,17 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     "  {} conflict(s) resolved via --resolve.",
                     conflicts_with_ids.len()
                 );
-                let patched =
-                    patch_candidate_tree(&root, &build_output.candidate, &resolved_contents)?;
+                let patched = match patch_candidate_tree(
+                    &root,
+                    &build_output.candidate,
+                    &resolved_contents,
+                ) {
+                    Ok(oid) => oid,
+                    Err(e) => {
+                        abort_merge(&manifold_dir, &format!("patch tree failed: {e:#}"));
+                        bail!("Failed to patch candidate tree with resolutions: {e:#}");
+                    }
+                };
                 textln!("  Patched candidate: {}", &patched.as_str()[..12]);
 
                 // Replace build_output with patched candidate and zero conflicts.
