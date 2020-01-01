@@ -39,6 +39,8 @@ use super::{
     DEFAULT_WORKSPACE, MawConfig, get_backend,
     oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
 };
+use super::capture::capture_before_destroy;
+use super::destroy_record::{DestroyReason, write_destroy_record};
 
 // ---------------------------------------------------------------------------
 // JSON output types for agent-friendly conflict presentation
@@ -2484,7 +2486,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Destroy source workspaces if requested
     if destroy_after {
-        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, text_mode)?;
+        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, &root, text_mode)?;
     }
 
     // Remove merge-state file
@@ -2951,6 +2953,7 @@ fn handle_post_merge_destroy(
     default_ws: &str,
     confirm: bool,
     backend: &impl WorkspaceBackend<Error: std::fmt::Display>,
+    root: &Path,
     text_mode: bool,
 ) -> Result<()> {
     let ws_to_destroy: Vec<String> = ws_to_merge
@@ -2991,15 +2994,93 @@ fn handle_post_merge_destroy(
             }
             continue;
         }
-        if let Ok(ws_id) = WorkspaceId::new(ws_name) {
-            match backend.destroy(&ws_id) {
-                Ok(()) => {
-                    if text_mode {
+        let Ok(ws_id) = WorkspaceId::new(ws_name) else {
+            eprintln!("    WARNING: Invalid workspace name '{ws_name}', skipping");
+            continue;
+        };
+
+        // --- Step 1: Get workspace metadata (path + base epoch) ---
+        let ws_path = backend.workspace_path(&ws_id);
+        let base_epoch = match backend.status(&ws_id) {
+            Ok(status) => status.base_epoch,
+            Err(e) => {
+                eprintln!(
+                    "    WARNING: Could not get status for '{ws_name}': {e}. \
+                     Skipping capture — proceeding with destroy anyway."
+                );
+                eprintln!(
+                    "    HINT: If '{ws_name}' had unmerged work, it may be gone. \
+                     Check git reflog for recovery options."
+                );
+                match backend.destroy(&ws_id) {
+                    Ok(()) => {
+                        if text_mode {
+                            println!("    Destroyed: {ws_name}");
+                        }
+                    }
+                    Err(e2) => eprintln!("    WARNING: Failed to destroy '{ws_name}': {e2}"),
+                }
+                continue;
+            }
+        };
+
+        // --- Step 2: Capture dirty state and pin recovery ref ---
+        let capture_result = capture_before_destroy(&ws_path, ws_name, base_epoch.oid());
+        let capture = match capture_result {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "    WARNING: Failed to capture state for '{ws_name}' before destroy: {e}"
+                );
+                eprintln!(
+                    "    HINT: To attempt manual recovery, run: \
+                     git -C {ws_path} stash list",
+                    ws_path = ws_path.display()
+                );
+                // Emit recovery hint but continue with destroy — merge already succeeded.
+                None
+            }
+        };
+
+        if let Some(ref c) = capture {
+            if text_mode {
+                println!(
+                    "    Captured '{ws_name}' state ({mode}) → {ref_name}",
+                    mode = match c.mode {
+                        super::capture::CaptureMode::WorktreeCapture => "worktree-snapshot",
+                        super::capture::CaptureMode::HeadOnly => "head-only",
+                    },
+                    ref_name = c.pinned_ref
+                );
+            }
+        }
+
+        // --- Step 3: Write append-only destroy record ---
+        let final_head = super::capture::resolve_head(&ws_path)
+            .unwrap_or_else(|_| base_epoch.oid().clone());
+        if let Err(e) = write_destroy_record(
+            root,
+            ws_name,
+            &base_epoch,
+            &final_head,
+            capture.as_ref(),
+            DestroyReason::MergeDestroy,
+        ) {
+            tracing::warn!("Failed to write destroy record for '{ws_name}': {e}");
+        }
+
+        // --- Step 4: Destroy the workspace ---
+        match backend.destroy(&ws_id) {
+            Ok(()) => {
+                if text_mode {
+                    if capture.is_some() {
+                        println!("    Destroyed: {ws_name} (snapshot saved)");
+                    } else {
                         println!("    Destroyed: {ws_name}");
                     }
                 }
-                Err(e) => eprintln!("    WARNING: Failed to destroy {ws_name}: {e}"),
             }
+            Err(e) => eprintln!("    WARNING: Failed to destroy {ws_name}: {e}"),
         }
     }
 
