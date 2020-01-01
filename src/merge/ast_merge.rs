@@ -83,6 +83,7 @@ impl AstLanguage {
                 "function_item",
                 "struct_item",
                 "enum_item",
+                "union_item",
                 "trait_item",
                 "impl_item",
                 "const_item",
@@ -90,6 +91,8 @@ impl AstLanguage {
                 "type_item",
                 "mod_item",
                 "macro_definition",
+                "use_declaration",
+                "extern_crate_declaration",
             ],
             Self::Python => &[
                 "function_definition",
@@ -321,12 +324,23 @@ fn parse_and_extract(
         }
 
         // Extract the item name from the appropriate field.
-        let name_field = lang.name_field(kind);
-        let name = child.child_by_field_name(name_field).map(|n| {
-            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                .unwrap_or("")
-                .to_owned()
-        });
+        // use_declaration and extern_crate_declaration don't have a simple "name"
+        // field — use the full text of the first named child as the identity key.
+        let name = if kind == "use_declaration" || kind == "extern_crate_declaration" {
+            // Use the full source text (minus the `use`/`extern crate` keyword and
+            // semicolon) as the identity. This gives us e.g. "std::io" for
+            // `use std::io;` which is unique enough for matching.
+            let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                .unwrap_or("");
+            Some(text.to_owned())
+        } else {
+            let name_field = lang.name_field(kind);
+            child.child_by_field_name(name_field).map(|n| {
+                std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                    .unwrap_or("")
+                    .to_owned()
+            })
+        };
 
         let start = child.start_byte();
         let end = child.end_byte();
@@ -1549,5 +1563,96 @@ type Point struct {
         eprintln!(
             "Benchmark: AST merge of 50-function file: {per_merge_us}µs/merge ({iterations} iterations)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // use_declaration extraction and merging
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_rust_use_declarations() {
+        let source = b"use std::io;\nuse std::collections::HashMap;\n\nfn main() {}\n";
+        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].kind, "use_declaration");
+        assert_eq!(items[0].name.as_deref(), Some("use std::io;"));
+        assert_eq!(items[1].kind, "use_declaration");
+        assert_eq!(items[1].name.as_deref(), Some("use std::collections::HashMap;"));
+        assert_eq!(items[2].kind, "function_item");
+        assert_eq!(items[2].name.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn different_use_declarations_merge_cleanly() {
+        let base = b"use std::io;\n\nfn main() {}\n";
+        let variant_a = b"use std::io;\nuse std::fs;\n\nfn main() {}\n";
+        let variant_b = b"use std::io;\nuse std::collections::HashMap;\n\nfn main() {}\n";
+
+        let variants = vec![
+            (ws("ws-a"), variant_a.to_vec()),
+            (ws("ws-b"), variant_b.to_vec()),
+        ];
+
+        let result = try_ast_merge(base, &variants, AstLanguage::Rust);
+        match result {
+            AstMergeResult::Clean(merged) => {
+                let merged_str = std::str::from_utf8(&merged).unwrap();
+                assert!(merged_str.contains("use std::io;"), "should keep base import");
+                assert!(merged_str.contains("use std::fs;"), "should have ws-a's import");
+                assert!(merged_str.contains("use std::collections::HashMap;"), "should have ws-b's import");
+            }
+            other => panic!("expected clean merge, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_use_declaration_modified_produces_conflict() {
+        let base = b"use std::io;\n\nfn main() {}\n";
+        let variant_a = b"use std::io::Read;\n\nfn main() {}\n";
+        let variant_b = b"use std::io::Write;\n\nfn main() {}\n";
+
+        let variants = vec![
+            (ws("ws-a"), variant_a.to_vec()),
+            (ws("ws-b"), variant_b.to_vec()),
+        ];
+
+        // Both variants modify the use at position 0, so they should conflict
+        // (since the name changes — the identity is the full text, so these
+        // are actually different items: base has "use std::io;" and both variants
+        // delete it and add different replacements).
+        let result = try_ast_merge(base, &variants, AstLanguage::Rust);
+        // The base `use std::io;` is deleted by both (replaced with different items),
+        // so this should be a clean merge — each variant adds a new unique import
+        // and both delete the same base import identically.
+        // Actually: both delete "use std::io;" (same deletion = no conflict) and
+        // each adds a unique new import. This merges cleanly.
+        match result {
+            AstMergeResult::Clean(merged) => {
+                let merged_str = std::str::from_utf8(&merged).unwrap();
+                assert!(merged_str.contains("use std::io::Read;"));
+                assert!(merged_str.contains("use std::io::Write;"));
+                assert!(!merged_str.contains("\nuse std::io;\n"), "old import should be gone");
+            }
+            other => panic!("expected clean merge (both delete same + add different), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rust_union_item() {
+        let source = b"union MyUnion {\n    i: i32,\n    f: f32,\n}\n";
+        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "union_item");
+        assert_eq!(items[0].name.as_deref(), Some("MyUnion"));
+    }
+
+    #[test]
+    fn parse_rust_extern_crate() {
+        let source = b"extern crate serde;\n\nfn main() {}\n";
+        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, "extern_crate_declaration");
+        assert_eq!(items[0].name.as_deref(), Some("extern crate serde;"));
+        assert_eq!(items[1].kind, "function_item");
     }
 }

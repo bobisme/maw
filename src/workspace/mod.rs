@@ -575,6 +575,7 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice --check               # pre-flight: can we merge cleanly?
     ///   maw ws merge alice --check --format json # structured check result
     ///   maw ws merge alice --format json         # structured merge result (success or conflict)
+    ///   maw ws merge alice bob --interactive      # interactively resolve conflicts
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -623,6 +624,14 @@ pub enum WorkspaceCommands {
         /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+
+        /// Interactively resolve conflicts instead of aborting.
+        ///
+        /// When conflicts are detected, presents each conflict with base/ours/theirs
+        /// content and prompts for resolution: keep ours, keep theirs, edit, or skip.
+        /// Requires a TTY. Not compatible with --format json.
+        #[arg(long, conflicts_with = "check", conflicts_with = "plan")]
+        interactive: bool,
     },
 
     /// Show detailed conflict information for workspace(s)
@@ -747,6 +756,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             check,
             format,
             json,
+            interactive,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             if check {
@@ -763,6 +773,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     message: message.as_deref(),
                     dry_run,
                     format: fmt,
+                    interactive,
                 },
             )
         }

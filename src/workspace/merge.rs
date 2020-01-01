@@ -1354,6 +1354,8 @@ pub struct MergeOptions<'a> {
     /// Output format. `OutputFormat::Json` emits structured JSON for the
     /// conflict report and success summary.
     pub format: OutputFormat,
+    /// Interactively resolve conflicts instead of aborting.
+    pub interactive: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1373,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         message,
         dry_run,
         format,
+        interactive,
     } = *opts;
     let ws_to_merge = workspaces.to_vec();
     let text_mode = format != OutputFormat::Json;
@@ -1484,7 +1487,42 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
-        // Abort the merge — conflicts must be resolved first
+        if interactive {
+            // Interactive mode: prompt user to resolve each conflict
+            textln!(
+                "  {} conflict(s) detected — entering interactive resolution...",
+                build_output.conflicts.len()
+            );
+
+            let (resolved, skipped) =
+                interactive_resolve(&build_output.conflicts, &workspace_dirs)?;
+
+            if skipped > 0 {
+                abort_merge(&manifold_dir, "unresolved conflicts (interactive)");
+                bail!(
+                    "{skipped} conflict(s) were skipped. \
+                     Resolve them and re-run: maw ws merge {}",
+                    ws_to_merge.join(" ")
+                );
+            }
+
+            textln!("  All {resolved} conflict(s) resolved interactively.");
+            textln!("  Commit resolutions and re-run the merge:");
+            for ws_name in &ws_to_merge {
+                textln!(
+                    "    maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve merge conflicts\""
+                );
+            }
+            textln!("    maw ws merge {}", ws_to_merge.join(" "));
+
+            abort_merge(&manifold_dir, "interactive resolution applied — re-run needed");
+            bail!(
+                "Interactive resolution applied to workspace files. \
+                 Commit the changes and re-run the merge."
+            );
+        }
+
+        // Non-interactive: abort with conflict report
         abort_merge(&manifold_dir, "unresolved conflicts");
 
         if format == OutputFormat::Json {
@@ -2174,6 +2212,222 @@ fn record_epoch_after(manifold_dir: &Path, candidate: &crate::model::types::GitO
     state
         .write_atomic(&state_path)
         .map_err(|e| anyhow::anyhow!("write merge-state: {e}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Interactive conflict resolution
+// ---------------------------------------------------------------------------
+
+/// Resolution choice for a single conflicted file.
+enum InteractiveChoice {
+    /// Keep the first workspace's version.
+    Ours,
+    /// Keep the second workspace's version.
+    Theirs,
+    /// Edit in $EDITOR.
+    Edit,
+    /// Skip — leave unresolved.
+    Skip,
+}
+
+/// Interactively resolve conflicts by prompting the user for each conflicted file.
+///
+/// For each conflict, displays the file path, conflict reason, and available sides,
+/// then prompts the user to choose a resolution. Resolved files are written to the
+/// first workspace so a re-run of `maw ws merge` will succeed.
+///
+/// Returns the number of resolved conflicts and the number skipped.
+fn interactive_resolve(
+    conflicts: &[ConflictRecord],
+    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
+) -> Result<(usize, usize)> {
+    use std::io::{BufRead, IsTerminal, stdin, stdout};
+
+    if !stdin().is_terminal() || !stdout().is_terminal() {
+        bail!(
+            "--interactive requires a TTY. For non-interactive use, \
+             use --format json and resolve conflicts programmatically."
+        );
+    }
+
+    let mut resolved = 0usize;
+    let mut skipped = 0usize;
+    let total = conflicts.len();
+
+    for (i, conflict) in conflicts.iter().enumerate() {
+        println!();
+        println!(
+            "=== Conflict {}/{}: {} ===",
+            i + 1,
+            total,
+            conflict.path.display()
+        );
+        println!("  Reason: {}", conflict.reason);
+
+        // Show sides
+        for side in &conflict.sides {
+            let preview = side.content.as_ref().map_or_else(
+                || "(deleted)".to_string(),
+                |c| {
+                    let text = String::from_utf8_lossy(c);
+                    let lines: Vec<&str> = text.lines().take(8).collect();
+                    if text.lines().count() > 8 {
+                        format!("{}\n    ... ({} more lines)", lines.join("\n    "), text.lines().count() - 8)
+                    } else {
+                        lines.join("\n    ")
+                    }
+                },
+            );
+            println!("  [{}] ({:?}):", side.workspace_id, side.kind);
+            println!("    {preview}");
+        }
+
+        // Prompt
+        loop {
+            print!("\n  Resolution [(o)urs / (t)heirs / (e)dit / (s)kip]: ");
+            stdout().flush()?;
+
+            let mut input = String::new();
+            stdin().lock().read_line(&mut input)?;
+            let choice = input.trim().to_lowercase();
+
+            let resolution = match choice.as_str() {
+                "o" | "ours" => InteractiveChoice::Ours,
+                "t" | "theirs" => InteractiveChoice::Theirs,
+                "e" | "edit" => InteractiveChoice::Edit,
+                "s" | "skip" => InteractiveChoice::Skip,
+                _ => {
+                    println!("  Invalid choice. Enter o/t/e/s.");
+                    continue;
+                }
+            };
+
+            match resolution {
+                InteractiveChoice::Skip => {
+                    skipped += 1;
+                    println!("  Skipped.");
+                    break;
+                }
+                InteractiveChoice::Ours => {
+                    if let Some(side) = conflict.sides.first() {
+                        apply_resolution(
+                            &conflict.path,
+                            side.content.as_deref(),
+                            &side.workspace_id,
+                            workspace_dirs,
+                        )?;
+                        resolved += 1;
+                        println!("  Resolved: keeping {} version.", side.workspace_id);
+                    } else {
+                        println!("  No 'ours' side available.");
+                        skipped += 1;
+                    }
+                    break;
+                }
+                InteractiveChoice::Theirs => {
+                    if let Some(side) = conflict.sides.get(1) {
+                        apply_resolution(
+                            &conflict.path,
+                            side.content.as_deref(),
+                            // Apply theirs content to the first workspace so the
+                            // re-run picks it up as the resolved version.
+                            &conflict.sides[0].workspace_id,
+                            workspace_dirs,
+                        )?;
+                        resolved += 1;
+                        println!("  Resolved: keeping {} version.", side.workspace_id);
+                    } else {
+                        println!("  No 'theirs' side available.");
+                        skipped += 1;
+                    }
+                    break;
+                }
+                InteractiveChoice::Edit => {
+                    let editor =
+                        std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+
+                    // Write a temp file with the first side's content for editing
+                    let content = conflict
+                        .sides
+                        .first()
+                        .and_then(|s| s.content.as_ref())
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let tmp_dir = std::env::temp_dir();
+                    let filename = conflict
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let tmp_path = tmp_dir.join(format!("maw-resolve-{filename}"));
+                    std::fs::write(&tmp_path, &content)?;
+
+                    let status = Command::new(&editor)
+                        .arg(&tmp_path)
+                        .stdin(Stdio::inherit())
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            let edited = std::fs::read(&tmp_path)?;
+                            let _ = std::fs::remove_file(&tmp_path);
+                            let ws_id = &conflict.sides[0].workspace_id;
+                            apply_resolution(
+                                &conflict.path,
+                                Some(&edited),
+                                ws_id,
+                                workspace_dirs,
+                            )?;
+                            resolved += 1;
+                            println!("  Resolved: edited version applied.");
+                        }
+                        _ => {
+                            let _ = std::fs::remove_file(&tmp_path);
+                            println!("  Editor failed or was cancelled. Skipping.");
+                            skipped += 1;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok((resolved, skipped))
+}
+
+/// Apply a resolution by writing content to the workspace's copy of the file.
+fn apply_resolution(
+    path: &Path,
+    content: Option<&[u8]>,
+    target_ws: &WorkspaceId,
+    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
+) -> Result<()> {
+    let ws_path = workspace_dirs
+        .get(target_ws)
+        .ok_or_else(|| anyhow::anyhow!("workspace '{}' not found in dirs map", target_ws))?;
+    let file_path = ws_path.join(path);
+
+    match content {
+        Some(data) => {
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&file_path, data)
+                .with_context(|| format!("writing resolution to {}", file_path.display()))?;
+        }
+        None => {
+            // Deletion resolution
+            if file_path.exists() {
+                std::fs::remove_file(&file_path)
+                    .with_context(|| format!("removing {}", file_path.display()))?;
+            }
+        }
+    }
     Ok(())
 }
 
