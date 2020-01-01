@@ -398,6 +398,7 @@ fn create_default_workspace(root: &Path, branch: &str) -> Result<PathBuf, InitEr
     Ok(ws_path)
 }
 
+
 // ---------------------------------------------------------------------------
 // Git command helpers
 // ---------------------------------------------------------------------------
@@ -1679,7 +1680,10 @@ fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitEr
 }
 
 /// Create the default workspace at `ws/default/` using `git worktree add`.
-fn bf_create_default_workspace(root: &Path, ws_path: &Path) -> Result<(), BrownfieldInitError> {
+fn bf_create_default_workspace(
+    root: &Path,
+    ws_path: &Path,
+) -> Result<(), BrownfieldInitError> {
     let branch = bf_configured_branch(root);
     bf_run_git(
         root,
@@ -1797,14 +1801,7 @@ fn bf_warn_remaining_untracked_root_files(root: &Path) {
         ".crit/",
     ];
     let skip_exact = [
-        "ws",
-        ".git",
-        ".manifold",
-        ".agents",
-        ".claude",
-        ".botbus",
-        ".crit",
-        "AGENTS.md",
+        "ws", ".git", ".manifold", ".agents", ".claude", ".botbus", ".crit", "AGENTS.md",
         "CLAUDE.md",
     ];
 
@@ -1843,7 +1840,9 @@ fn bf_warn_remaining_untracked_root_files(root: &Path) {
         preview,
         more
     );
-    println!("  To fix: move these into ws/default/ (or remove them), then re-run: maw init");
+    println!(
+        "  To fix: move these into ws/default/ (or remove them), then re-run: maw init"
+    );
 }
 
 /// Run a git command and check for success.
@@ -2174,6 +2173,7 @@ mod brownfield_tests {
             "src/ should be empty or removed after tracked file cleanup"
         );
     }
+
 
     #[test]
     fn brownfield_is_idempotent() {
@@ -2560,4 +2560,5 @@ mod brownfield_tests {
             "should detect branch from symbolic HEAD"
         );
     }
+
 }

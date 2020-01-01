@@ -4,8 +4,8 @@
 
 mod manifold_common;
 
-use std::fs;
 use std::process::Command;
+use std::fs;
 
 use manifold_common::TestRepo;
 
@@ -85,10 +85,7 @@ fn ws_clean_removes_target_dirs_for_one_or_all_workspaces() {
 
     // Clean one named workspace.
     repo.maw_ok(&["ws", "clean", "agent-a"]);
-    assert!(
-        !agent_target.exists(),
-        "agent workspace target should be removed"
-    );
+    assert!(!agent_target.exists(), "agent workspace target should be removed");
     assert!(
         default_target.exists(),
         "default target should remain when name is specified"
@@ -99,14 +96,8 @@ fn ws_clean_removes_target_dirs_for_one_or_all_workspaces() {
     fs::create_dir_all(&default_target).expect("recreate default target");
 
     repo.maw_ok(&["ws", "clean", "--all"]);
-    assert!(
-        !default_target.exists(),
-        "default target should be removed with --all"
-    );
-    assert!(
-        !agent_target.exists(),
-        "agent target should be removed with --all"
-    );
+    assert!(!default_target.exists(), "default target should be removed with --all");
+    assert!(!agent_target.exists(), "agent target should be removed with --all");
 }
 
 #[test]

@@ -13,10 +13,8 @@ use crate::format::OutputFormat;
 mod advance;
 mod annotate;
 pub(crate) mod capture;
-mod clean;
 mod create;
 mod describe;
-mod destroy_record;
 mod diff;
 mod history;
 mod list;
@@ -25,6 +23,7 @@ mod metadata;
 mod names;
 mod oplog_runtime;
 mod overlap;
+mod clean;
 mod prune;
 mod restore;
 mod status;
@@ -644,12 +643,7 @@ pub enum WorkspaceCommands {
         ///
         /// File-level IDs (cf-k7mx) resolve the whole file.
         /// Atom-level IDs (cf-k7mx.0) resolve a specific conflict region (workspace name only).
-        #[arg(
-            long = "resolve",
-            value_name = "ID=STRATEGY",
-            conflicts_with = "check",
-            conflicts_with = "plan"
-        )]
+        #[arg(long = "resolve", value_name = "ID=STRATEGY", conflicts_with = "check", conflicts_with = "plan")]
         resolve: Vec<String>,
 
         /// Resolve all remaining conflicts to this workspace's version.
@@ -657,12 +651,7 @@ pub enum WorkspaceCommands {
         /// Individual --resolve flags take precedence over --resolve-all.
         ///
         ///   maw ws merge alice bob --resolve-all=alice
-        #[arg(
-            long = "resolve-all",
-            value_name = "WORKSPACE",
-            conflicts_with = "check",
-            conflicts_with = "plan"
-        )]
+        #[arg(long = "resolve-all", value_name = "WORKSPACE", conflicts_with = "check", conflicts_with = "plan")]
         resolve_all: Option<String>,
     },
 

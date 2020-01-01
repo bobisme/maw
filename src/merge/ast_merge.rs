@@ -330,8 +330,8 @@ fn parse_and_extract(
             // Use the full source text (minus the `use`/`extern crate` keyword and
             // semicolon) as the identity. This gives us e.g. "std::io" for
             // `use std::io;` which is unique enough for matching.
-            let text =
-                std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).unwrap_or("");
+            let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                .unwrap_or("");
             Some(text.to_owned())
         } else {
             let name_field = lang.name_field(kind);
@@ -1577,10 +1577,7 @@ type Point struct {
         assert_eq!(items[0].kind, "use_declaration");
         assert_eq!(items[0].name.as_deref(), Some("use std::io;"));
         assert_eq!(items[1].kind, "use_declaration");
-        assert_eq!(
-            items[1].name.as_deref(),
-            Some("use std::collections::HashMap;")
-        );
+        assert_eq!(items[1].name.as_deref(), Some("use std::collections::HashMap;"));
         assert_eq!(items[2].kind, "function_item");
         assert_eq!(items[2].name.as_deref(), Some("main"));
     }
@@ -1600,18 +1597,9 @@ type Point struct {
         match result {
             AstMergeResult::Clean(merged) => {
                 let merged_str = std::str::from_utf8(&merged).unwrap();
-                assert!(
-                    merged_str.contains("use std::io;"),
-                    "should keep base import"
-                );
-                assert!(
-                    merged_str.contains("use std::fs;"),
-                    "should have ws-a's import"
-                );
-                assert!(
-                    merged_str.contains("use std::collections::HashMap;"),
-                    "should have ws-b's import"
-                );
+                assert!(merged_str.contains("use std::io;"), "should keep base import");
+                assert!(merged_str.contains("use std::fs;"), "should have ws-a's import");
+                assert!(merged_str.contains("use std::collections::HashMap;"), "should have ws-b's import");
             }
             other => panic!("expected clean merge, got: {other:?}"),
         }
@@ -1643,14 +1631,9 @@ type Point struct {
                 let merged_str = std::str::from_utf8(&merged).unwrap();
                 assert!(merged_str.contains("use std::io::Read;"));
                 assert!(merged_str.contains("use std::io::Write;"));
-                assert!(
-                    !merged_str.contains("\nuse std::io;\n"),
-                    "old import should be gone"
-                );
+                assert!(!merged_str.contains("\nuse std::io;\n"), "old import should be gone");
             }
-            other => {
-                panic!("expected clean merge (both delete same + add different), got: {other:?}")
-            }
+            other => panic!("expected clean merge (both delete same + add different), got: {other:?}"),
         }
     }
 

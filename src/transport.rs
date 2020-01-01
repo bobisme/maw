@@ -182,7 +182,8 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
         }
 
         // "does not match any" means the local epoch ref doesn't exist yet — OK.
-        if !stderr_trimmed.contains("does not match any") && !stderr_trimmed.contains("src refspec")
+        if !stderr_trimmed.contains("does not match any")
+            && !stderr_trimmed.contains("src refspec")
         {
             bail!("git push epoch ref failed: {stderr_trimmed}");
         }
@@ -201,7 +202,8 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
         let stderr_trimmed = stderr.trim();
 
         // "does not match any" is OK — means no head/* or ws/* refs exist yet.
-        if !stderr_trimmed.contains("does not match any") && !stderr_trimmed.contains("src refspec")
+        if !stderr_trimmed.contains("does not match any")
+            && !stderr_trimmed.contains("src refspec")
         {
             bail!("git push refs/manifold/head/* refs/manifold/ws/* failed: {stderr_trimmed}");
         }

@@ -7,13 +7,11 @@ use tracing::instrument;
 
 use crate::backend::WorkspaceBackend;
 use crate::model::diff::compute_patchset;
-use crate::model::types::{EpochId, GitOid, WorkspaceId, WorkspaceMode};
+use crate::model::types::{EpochId, WorkspaceId, WorkspaceMode};
 use crate::oplog::read::read_head;
 use crate::oplog::types::{OpPayload, Operation};
 use crate::refs as manifold_refs;
 
-use super::capture::capture_before_destroy;
-use super::destroy_record::{DestroyReason, write_destroy_record};
 use super::{
     DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata,
     oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
@@ -227,22 +225,6 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
 }
 
-fn resolve_head_oid(path: &std::path::Path) -> Result<GitOid> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(path)
-        .output()
-        .context("Failed to resolve workspace HEAD")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Cannot resolve workspace HEAD: {}", stderr.trim());
-    }
-
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    GitOid::new(&oid).map_err(|e| anyhow::anyhow!("Invalid workspace HEAD OID: {e}"))
-}
-
 #[instrument(fields(workspace = name))]
 pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
@@ -285,6 +267,21 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
              Destroy anyway: maw ws destroy {name} --force"
         );
     }
+
+    if let Some(capture) =
+        super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
+            .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?
+    {
+        let mode = match capture.mode {
+            super::capture::CaptureMode::WorktreeCapture => "worktree",
+            super::capture::CaptureMode::HeadOnly => "head-only",
+        };
+        println!(
+            "Captured workspace '{name}' state for recovery: {mode} -> {}",
+            capture.pinned_ref
+        );
+    }
+
     if touched_count > 0 {
         eprintln!(
             "WARNING: Destroying workspace '{name}' with {touched_count} unmerged change(s) (--force)."
@@ -311,24 +308,8 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
 
     println!("Destroying workspace '{name}'...");
 
-    let final_head = resolve_head_oid(&path)?;
-    let base_oid = GitOid::new(status.base_epoch.as_str())
-        .map_err(|e| anyhow::anyhow!("Invalid base epoch OID: {e}"))?;
-    let capture = capture_before_destroy(&path, name, &base_oid)?;
-
     if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &status.base_epoch) {
         tracing::warn!("Failed to record workspace destroy in history: {e}");
-    }
-
-    if let Err(e) = write_destroy_record(
-        &root,
-        name,
-        &status.base_epoch,
-        &final_head,
-        capture.as_ref(),
-        DestroyReason::Destroy,
-    ) {
-        tracing::warn!("Failed to write destroy recovery record for '{name}': {e}");
     }
 
     backend
@@ -407,6 +388,8 @@ fn ensure_workspace_oplog_head(
     append_operation_with_runtime_checkpoint(root, ws_id, &create_op, None)
         .map_err(|e| anyhow::anyhow!("bootstrap workspace history: {e}"))
 }
+
+
 
 /// Attach (reconnect) an orphaned workspace directory.
 /// In the git worktree model, this means creating a worktree entry

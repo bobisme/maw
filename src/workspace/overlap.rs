@@ -44,11 +44,7 @@ pub fn overlap(ws1: &str, ws2: &str, format: OutputFormat) -> Result<()> {
         .map(|p| p.display().to_string())
         .collect();
 
-    let risk = if overlap_paths.is_empty() {
-        "low"
-    } else {
-        "high"
-    };
+    let risk = if overlap_paths.is_empty() { "low" } else { "high" };
 
     let output = OverlapOutput {
         workspace_a: touched_a.workspace.clone(),

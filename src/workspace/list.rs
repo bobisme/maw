@@ -80,7 +80,7 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let root = repo_root()?;
 
     // Convert backend workspace info to display structs
-    let workspaces: Vec<WorkspaceInfo> = backend_workspaces
+    let mut workspaces: Vec<WorkspaceInfo> = backend_workspaces
         .iter()
         .map(|ws| {
             let name = ws.id.as_str().to_string();
@@ -112,11 +112,7 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                     format!("{}", ws.state)
                 },
                 mode: format!("{ws_mode}"),
-                path: if verbose {
-                    Some(ws.path.display().to_string())
-                } else {
-                    None
-                },
+                path: Some(ws.path.display().to_string()),
                 behind_epochs: behind,
                 commits_ahead: ws.commits_ahead,
                 template: ws_meta.template.map(|t| t.to_string()),
@@ -125,6 +121,13 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
             }
         })
         .collect();
+
+    // Sort: default first, then alphabetical by name.
+    workspaces.sort_by(|a, b| match (a.is_default, b.is_default) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
 
     // Collect stale workspace warnings, split by mode (exclude quarantine workspaces).
     let stale_persistent: Vec<String> = backend_workspaces
@@ -196,38 +199,33 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-/// Print workspace list in tab-separated text format (agent-friendly).
+/// Print workspace list in minimal text format (agent-friendly).
+///
+/// Output: name, absolute path, and state annotation only when actionable.
+/// Default workspace is always first (sorted upstream).
 fn print_list_text(
     workspaces: &[WorkspaceInfo],
     stale: &[String],
     stale_persistent: &[String],
     stale_ephemeral: &[String],
-    verbose: bool,
+    _verbose: bool,
 ) {
-    if verbose {
-        println!("NAME\tEPOCH\tSTATE\tMODE\tDEFAULT\tPATH");
-    } else {
-        println!("NAME\tEPOCH\tSTATE\tMODE\tDEFAULT");
-    }
     for ws in workspaces {
-        let default_marker = if ws.is_default { "true" } else { "false" };
-        if verbose {
-            let path = ws.path.as_deref().unwrap_or("");
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                ws.name, ws.epoch, ws.state, ws.mode, default_marker, path
-            );
+        let path = ws.path.as_deref().unwrap_or("");
+        let annotation = if ws.state.contains("stale") {
+            " (stale)"
+        } else if ws.commits_ahead > 0 {
+            " (ready to merge)"
+        } else if ws.state == "quarantine" {
+            " (quarantine)"
         } else {
-            println!(
-                "{}\t{}\t{}\t{}\t{}",
-                ws.name, ws.epoch, ws.state, ws.mode, default_marker
-            );
-        }
+            ""
+        };
+        println!("{}\t{}{}", ws.name, path, annotation);
     }
 
     print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
 
-    // Surface actionable merge hints for workspaces with committed work.
     let mergeable: Vec<&str> = workspaces
         .iter()
         .filter(|ws| ws.commits_ahead > 0)
@@ -239,9 +237,6 @@ fn print_list_text(
             println!("Merge ready: maw ws merge {name} --destroy");
         }
     }
-
-    println!();
-    println!("Next: maw exec <name> -- <command>");
 }
 
 /// Print workspace list in colored, human-friendly format.
