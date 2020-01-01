@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 mod agents;
 mod backend;
@@ -204,6 +205,20 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Generate shell completions
+    ///
+    /// Prints shell completion scripts to stdout. Source the output
+    /// in your shell config to enable tab completion for maw commands.
+    ///
+    /// Examples:
+    ///   maw completions fish > ~/.config/fish/completions/maw.fish
+    ///   maw completions bash > ~/.local/share/bash-completion/completions/maw
+    ///   maw completions zsh > ~/.zfunc/_maw
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+
     /// Manage merge quarantine workspaces
     ///
     /// When post-merge validation fails with `on_failure = "quarantine"` or
@@ -259,6 +274,15 @@ fn main() {
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
         Commands::Gc { dry_run } => epoch_gc::run_cli(dry_run),
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "maw",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
         Commands::Merge(ref cmd) => merge_cmd::run(cmd),
     };
 

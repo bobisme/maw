@@ -25,6 +25,7 @@ otel = [
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
 anyhow = "1"
 rand = "0.9"
 ratatui = "0.29"
