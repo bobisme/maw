@@ -1,71 +1,75 @@
 # MAW - Multi-Agent Workflow
 
-An experiment in coordinating multiple AI agents working on the same codebase.
+Coordinate multiple AI agents working on the same codebase using jj workspaces.
 
-## Architecture
+## Install
 
-**jj (Jujutsu)** handles:
-- File isolation via workspaces (shared storage, separate working copies)
-- Lock-free concurrent edits
-- Automatic conflict detection and recording
-- Operation log for history/undo
+```bash
+cargo install --git https://github.com/bobisme/maw
+```
 
-**botbus** handles:
-- Agent registration and identity
-- Intent broadcasting ("I'm working on X")
-- Semantic claims ("I own src/api/**")
-- Real-time observability (TUI)
+Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
 
 ## Quick Start
 
 ```bash
-# Initialize (already done)
-jj git init
-botbus init
+# Check your setup
+maw doctor
 
-# Create a workspace for an agent
-./scripts/agent-workspace.sh create alice
+# Create workspaces for agents
+maw ws create alice
+maw ws create bob
 
-# In that workspace, the agent registers and works
+# Agents work in their workspaces
 cd .workspaces/alice
-export BOTBUS_AGENT=alice
-botbus register --name alice --description "Working on feature X"
-botbus claim "src/feature-x/**"
-# ... do work ...
-jj commit -m "feat: implement feature X"
-botbus release --all
+# ... edit files ...
+jj describe -m "feat: implement feature X"
 
-# Watch all agent activity (from any workspace)
-botbus ui
+# See all agent work
+maw ws status
+
+# Merge all agent work
+maw ws merge --all --destroy
 ```
 
-## Workflow
+## Commands
 
-1. **Agent starts**: Creates workspace, registers with botbus
-2. **Agent claims**: Announces intent via botbus claims
-3. **Agent works**: Edits files in isolated jj workspace
-4. **Agent commits**: Uses jj to commit (conflicts recorded, not blocking)
-5. **Agent finishes**: Releases claims, announces completion
-6. **Human observes**: Uses botbus TUI to watch coordination
+| Command | Description |
+|---------|-------------|
+| `maw ws create <name>` | Create isolated workspace for an agent |
+| `maw ws list` | List all workspaces |
+| `maw ws status` | Show all agent work, conflicts, stale warnings |
+| `maw ws sync` | Handle stale workspace |
+| `maw ws merge --all` | Merge all agent workspaces |
+| `maw ws destroy <name>` | Remove a workspace |
+| `maw doctor` | Check system requirements |
+| `maw agents init` | Add MAW section to AGENTS.md |
 
-## Why This Combination?
+## How It Works
 
-| Need | Tool | Why |
-|------|------|-----|
-| File isolation | jj workspaces | No disk duplication, instant creation |
-| Concurrent edits | jj | Lock-free by design, merges operations |
-| Intent/claims | botbus | Semantic "I own this module" not just file locks |
-| Observability | botbus TUI | Watch agents coordinate in real-time |
-| Conflict handling | jj | Records conflicts in commits, resolve later |
-| History/undo | jj operation log | See what each agent did, undo mistakes |
+Each agent gets an isolated jj workspace in `.workspaces/<name>/`. Workspaces share the repository's backing store (no disk duplication) but have separate working copies.
 
-## Open Questions
+Agents can edit files concurrently without blocking each other. jj records conflicts in commits rather than preventing work - resolve them when merging.
 
-- Do we need tooling that wraps both, or is convention enough?
-- How should agents handle jj conflicts?
-- Should botbus integrate with jj operation log?
+```
+.workspaces/
+  alice/     # Alice's isolated workspace
+  bob/       # Bob's isolated workspace
+  carol/     # Carol's isolated workspace
+```
 
-## Test Notes
+## Why jj?
 
-Agent A edited README
-Agent B edited README
+- **Lock-free**: Multiple agents edit simultaneously, no locks
+- **Instant workspaces**: Shared storage, separate working copies
+- **Conflict recording**: Conflicts are recorded in commits, not blocking
+- **Operation log**: Full history of what each agent did
+
+## Optional Integrations
+
+- **[botbus](https://github.com/anthropics/botbus)**: Agent coordination and claims
+- **[beads](https://github.com/Dicklesworthstone/beads_rust)**: Issue tracking
+
+## License
+
+MIT
