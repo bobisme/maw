@@ -119,7 +119,40 @@ fn workspaces_dir() -> Result<PathBuf> {
 }
 
 fn workspace_path(name: &str) -> Result<PathBuf> {
+    validate_workspace_name(name)?;
     Ok(workspaces_dir()?.join(name))
+}
+
+/// Validate workspace name to prevent path traversal and command injection
+fn validate_workspace_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("Workspace name cannot be empty");
+    }
+
+    if name.starts_with('-') {
+        bail!("Workspace name cannot start with '-' (would be interpreted as a flag)");
+    }
+
+    if name == "." || name == ".." {
+        bail!("Workspace name cannot be '.' or '..'");
+    }
+
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        bail!("Workspace name cannot contain path separators or null bytes");
+    }
+
+    // Only allow alphanumeric, hyphen, underscore
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "Workspace name must contain only letters, numbers, hyphens, and underscores\n\
+             Got: '{name}'"
+        );
+    }
+
+    Ok(())
 }
 
 fn create(name: &str, revision: Option<&str>) -> Result<()> {
@@ -454,25 +487,36 @@ fn merge(
         .context("Failed to check status")?;
 
     let status_text = String::from_utf8_lossy(&status_output.stdout);
-    if status_text.contains("conflict") {
+    let has_conflicts = status_text.contains("conflict");
+
+    if has_conflicts {
         println!();
         println!("WARNING: Merge has conflicts that need resolution.");
         println!("Run `jj status` to see conflicted files.");
     }
 
-    // Optionally destroy workspaces
+    // Optionally destroy workspaces (but not if there are conflicts!)
     if destroy_after {
-        println!();
-        println!("Cleaning up workspaces...");
-        for ws in &ws_to_merge {
-            let path = workspace_path(ws)?;
-            let _ = Command::new("jj")
-                .args(["workspace", "forget", ws])
-                .status();
-            if path.exists() {
-                std::fs::remove_dir_all(&path).ok();
+        if has_conflicts {
+            println!();
+            println!("NOT destroying workspaces due to conflicts.");
+            println!("Resolve conflicts first, then run:");
+            for ws in &ws_to_merge {
+                println!("  maw ws destroy {ws}");
             }
-            println!("  Destroyed: {ws}");
+        } else {
+            println!();
+            println!("Cleaning up workspaces...");
+            for ws in &ws_to_merge {
+                let path = workspace_path(ws)?;
+                let _ = Command::new("jj")
+                    .args(["workspace", "forget", ws])
+                    .status();
+                if path.exists() {
+                    std::fs::remove_dir_all(&path).ok();
+                }
+                println!("  Destroyed: {ws}");
+            }
         }
     }
 
