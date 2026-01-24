@@ -39,82 +39,51 @@ fn maw_instructions() -> String {
 ## Multi-Agent Workflow with MAW
 
 This project uses MAW for coordinating multiple agents via jj workspaces.
-Each agent gets an isolated working copy - you can edit files without blocking other agents.
+Each agent gets an isolated working copy and **their own commit** - you can edit files without blocking other agents.
 
-### Workspace Naming
+### Quick Start
 
-**Your workspace name will be assigned by the coordinator** (human or orchestrating agent).
-If you need to create your own, use:
-- Lowercase alphanumeric with hyphens: `agent-1`, `feature-auth`, `bugfix-123`
-- Check existing workspaces first: `maw ws list`
+```bash
+maw ws create <your-name>      # Creates workspace + your own commit
+cd .workspaces/<your-name>
+# ... edit files ...
+jj describe -m "feat: what you did"
+maw ws status                  # See all agent work
+```
 
 ### Quick Reference
 
 | Task | Command |
 |------|---------|
 | Create workspace | `maw ws create <name>` |
-| List workspaces | `maw ws list` |
 | Check status | `maw ws status` |
 | Sync stale workspace | `maw ws sync` |
 | Merge all work | `maw ws merge --all` |
-| Destroy workspace | `maw ws destroy <name>` |
-
-### Starting Work
-
-```bash
-# Check what workspaces exist
-maw ws list
-
-# Create your workspace (if not already assigned)
-maw ws create <assigned-name>
-cd .workspaces/<assigned-name>
-
-# Start working - jj tracks changes automatically
-jj describe -m "wip: implementing feature X"
-```
 
 ### During Work
 
 ```bash
-# See your changes
-jj diff
-jj status
-
-# Save your work (describe current commit)
-jj describe -m "feat: add feature X"
-
-# Or commit and start fresh
-jj commit -m "feat: add feature X"
-
-# See what other agents are doing
-maw ws status
+jj diff                        # See changes
+jj describe -m "feat: ..."     # Save work to your commit
+jj commit -m "feat: ..."       # Commit and start fresh
 ```
 
-### Handling Stale Workspace
+### Stale Workspace
 
-If you see "working copy is stale", the main repo changed while you were working:
+If you see "working copy is stale":
 
 ```bash
 maw ws sync
 ```
 
-### Finishing Work
+### Conflicts
 
-When done, notify the coordinator. They will merge from the main workspace:
-
-```bash
-# Coordinator runs from main workspace:
-maw ws merge --all --destroy
-```
-
-### Resolving Conflicts
-
-jj records conflicts in commits rather than blocking. If you see conflicts:
+jj records conflicts in commits (non-blocking). If you see conflicts:
 
 ```bash
-jj status  # shows conflicted files
-# Edit the files to resolve (remove conflict markers)
-jj describe -m "resolve: merge conflicts"
+jj status                      # Shows conflicted files
+# Edit files to resolve
+jj describe -m "resolve: ..."
 ```
 
 {MAW_SECTION_END}

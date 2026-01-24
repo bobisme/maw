@@ -202,12 +202,37 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
         bail!("jj workspace add failed");
     }
 
+    // Create a dedicated commit for this agent to own
+    // This prevents divergent commits when multiple agents work concurrently
+    let new_status = Command::new("jj")
+        .args(["new", "-m", &format!("wip: {name} workspace")])
+        .current_dir(&path)
+        .status()
+        .context("Failed to create agent commit")?;
+
+    if !new_status.success() {
+        bail!("Failed to create dedicated commit for workspace");
+    }
+
+    // Get the new commit's change ID for display
+    let change_id = Command::new("jj")
+        .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
+        .current_dir(&path)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
     println!();
-    println!("Workspace created! To start working:");
+    println!("Workspace '{name}' ready!");
+    println!();
+    println!("  Commit: {change_id} (owned by {name})");
+    println!("  Path:   .workspaces/{name}");
+    println!();
+    println!("To start working:");
     println!();
     println!("  cd .workspaces/{name}");
     println!("  # make changes, jj tracks automatically");
-    println!("  jj describe -m \"wip: what you're working on\"");
+    println!("  jj describe -m \"feat: what you're implementing\"");
     println!();
 
     Ok(())
@@ -325,6 +350,36 @@ fn status() -> Result<()> {
         for line in conflicts.lines() {
             println!("  ! {line}");
         }
+        println!();
+    }
+
+    // Check for divergent commits (same change ID, multiple commit IDs)
+    // This can happen when concurrent jj operations modify the same commit
+    let divergent_output = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-T",
+            r#"if(divergent, change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n", "")"#,
+        ])
+        .output()
+        .context("Failed to check for divergent commits")?;
+
+    let divergent = String::from_utf8_lossy(&divergent_output.stdout);
+    if !divergent.trim().is_empty() {
+        println!("=== Divergent Commits (needs cleanup) ===");
+        println!();
+        println!("  WARNING: These commits have divergent versions (same change, multiple commits).");
+        println!("  This usually happens when concurrent operations modified the same commit.");
+        println!();
+        for line in divergent.lines() {
+            if !line.trim().is_empty() {
+                println!("  ~ {line}");
+            }
+        }
+        println!();
+        println!("  To fix: keep one version and abandon the others:");
+        println!("    jj abandon <change-id>/0   # abandon unwanted version");
         println!();
     }
 

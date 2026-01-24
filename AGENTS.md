@@ -7,7 +7,7 @@ This project uses **maw** for workspace management, **jj** (Jujutsu) for version
 ## Quick Start
 
 ```bash
-# Create your workspace
+# Create your workspace (automatically creates a commit you own)
 maw ws create <your-name>
 cd .workspaces/<your-name>
 
@@ -22,6 +22,8 @@ maw ws status
 cd /path/to/main/repo
 maw ws merge --all --destroy
 ```
+
+**Key concept:** Each workspace gets its own commit. You own your commit - no other agent will modify it. This prevents conflicts during concurrent work.
 
 ---
 
@@ -96,6 +98,20 @@ jj status  # shows conflicted files
 # Edit files to resolve (remove conflict markers)
 jj describe -m "resolve: merge conflicts"
 ```
+
+### Handling Divergent Commits
+
+Divergent commits are rare with maw because each agent gets their own commit. But if `maw ws status` shows "Divergent Commits":
+
+```bash
+# View divergent commits
+jj log  # look for (divergent) markers
+
+# Fix by abandoning unwanted versions
+jj abandon <change-id>/0   # keep /1, abandon /0
+```
+
+**Important**: Only modify your own commits. Don't run `jj describe main` or modify other shared commits - this can cause divergence if another agent does the same concurrently.
 
 ---
 
