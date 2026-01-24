@@ -143,6 +143,7 @@ br create --title="..." --type=task --priority=2
 - **Commit messages**: Use conventional commits (`feat:`, `fix:`, `docs:`, etc.)
 - **Co-author**: Include `Co-Authored-By: Claude <noreply@anthropic.com>` in commits
 - **Workspace names**: Lowercase alphanumeric with hyphens/underscores (`agent-1`, `feature-x`)
+- **Versioning**: Use semantic versioning. Tag releases with `v` prefix (`v0.1.0`). Update Cargo.toml version and README install command before tagging.
 
 ---
 
