@@ -48,7 +48,9 @@ This project uses MAW for coordinating multiple agents via jj workspaces.
 | List workspaces | `maw ws list` |
 | Destroy workspace | `maw ws destroy <name>` |
 | See all work | `jj log --all` |
-| Update stale workspace | `jj workspace update-stale` |
+| Check status | `maw ws status` |
+| Sync stale workspace | `maw ws sync` |
+| Merge all work | `maw ws merge --all` |
 
 ### Starting Work
 
@@ -81,7 +83,7 @@ jj log --all
 If you see "working copy is stale", run:
 
 ```bash
-jj workspace update-stale
+maw ws sync
 ```
 
 This happens when the main repo changes while you're working.
@@ -89,14 +91,14 @@ This happens when the main repo changes while you're working.
 ### Finishing Work
 
 ```bash
-# From the main workspace, merge your work
-cd /path/to/main/repo
-jj new <your-change-id> <other-agent-change-id>  # merge multiple
-# or
-jj rebase -r <your-change-id> -d main  # rebase onto main
+# From the main workspace, merge all agent work
+maw ws merge --all
 
-# Clean up your workspace
-maw ws destroy <your-name>
+# Or merge specific workspaces
+maw ws merge alice bob
+
+# Merge and clean up workspaces in one step
+maw ws merge --all --destroy
 ```
 
 ### Resolving Conflicts

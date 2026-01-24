@@ -68,6 +68,33 @@ pub enum WorkspaceCommands {
     /// this command runs `jj workspace update-stale` and shows what changed.
     /// Safe to run even if not stale.
     Sync,
+
+    /// Merge work from agent workspaces
+    ///
+    /// Creates a merge commit combining work from the specified workspaces.
+    /// Use --all to merge all non-default workspaces.
+    ///
+    /// Examples:
+    ///   maw ws merge alice bob       # merge alice and bob's work
+    ///   maw ws merge --all           # merge all agent workspaces
+    ///   maw ws merge --all --destroy # merge all and clean up workspaces
+    Merge {
+        /// Workspace names to merge (ignored if --all is set)
+        #[arg(required_unless_present = "all")]
+        workspaces: Vec<String>,
+
+        /// Merge all non-default workspaces
+        #[arg(long)]
+        all: bool,
+
+        /// Destroy workspaces after successful merge
+        #[arg(long)]
+        destroy: bool,
+
+        /// Custom merge commit message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
 }
 
 pub fn run(cmd: WorkspaceCommands) -> Result<()> {
@@ -77,6 +104,12 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::List { verbose } => list(verbose),
         WorkspaceCommands::Status => status(),
         WorkspaceCommands::Sync => sync(),
+        WorkspaceCommands::Merge {
+            workspaces,
+            all,
+            destroy,
+            message,
+        } => merge(&workspaces, all, destroy, message.as_deref()),
     }
 }
 
@@ -333,6 +366,139 @@ fn sync() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn merge(
+    workspaces: &[String],
+    all: bool,
+    destroy_after: bool,
+    message: Option<&str>,
+) -> Result<()> {
+    // Get list of workspaces to merge
+    let ws_to_merge = if all {
+        get_agent_workspaces()?
+    } else {
+        workspaces.to_vec()
+    };
+
+    if ws_to_merge.is_empty() {
+        println!("No workspaces to merge.");
+        return Ok(());
+    }
+
+    if ws_to_merge.len() == 1 {
+        println!("Only one workspace to merge. Use `jj rebase` to move it to main.");
+        return Ok(());
+    }
+
+    println!("Merging workspaces: {}", ws_to_merge.join(", "));
+    println!();
+
+    // Get the change IDs for each workspace
+    let mut change_ids = Vec::new();
+    let ws_output = Command::new("jj")
+        .args(["workspace", "list"])
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+    for line in ws_list.lines() {
+        if let Some((name, rest)) = line.split_once(':') {
+            let name = name.trim();
+            if ws_to_merge.contains(&name.to_string()) {
+                // Extract change_id (first word after the colon)
+                if let Some(change_id) = rest.trim().split_whitespace().next() {
+                    change_ids.push(change_id.to_string());
+                }
+            }
+        }
+    }
+
+    if change_ids.len() != ws_to_merge.len() {
+        bail!(
+            "Could not find all workspaces. Found {} of {}",
+            change_ids.len(),
+            ws_to_merge.len()
+        );
+    }
+
+    // Build merge commit message
+    let msg = message.map_or_else(
+        || format!("merge: combine work from {}", ws_to_merge.join(", ")),
+        ToString::to_string,
+    );
+
+    // Create merge commit: jj new change1 change2 change3 -m "message"
+    let mut args = vec!["new"];
+    for cid in &change_ids {
+        args.push(cid);
+    }
+    args.push("-m");
+    args.push(&msg);
+
+    let status = Command::new("jj")
+        .args(&args)
+        .status()
+        .context("Failed to run jj new")?;
+
+    if !status.success() {
+        bail!("Failed to create merge commit");
+    }
+
+    println!("Created merge commit: {msg}");
+
+    // Check for conflicts
+    let status_output = Command::new("jj")
+        .args(["status"])
+        .output()
+        .context("Failed to check status")?;
+
+    let status_text = String::from_utf8_lossy(&status_output.stdout);
+    if status_text.contains("conflict") {
+        println!();
+        println!("WARNING: Merge has conflicts that need resolution.");
+        println!("Run `jj status` to see conflicted files.");
+    }
+
+    // Optionally destroy workspaces
+    if destroy_after {
+        println!();
+        println!("Cleaning up workspaces...");
+        for ws in &ws_to_merge {
+            let path = workspace_path(ws)?;
+            let _ = Command::new("jj")
+                .args(["workspace", "forget", ws])
+                .status();
+            if path.exists() {
+                std::fs::remove_dir_all(&path).ok();
+            }
+            println!("  Destroyed: {ws}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Get list of non-default workspace names
+fn get_agent_workspaces() -> Result<Vec<String>> {
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let list = String::from_utf8_lossy(&output.stdout);
+    let mut workspaces = Vec::new();
+
+    for line in list.lines() {
+        if let Some((name, _)) = line.split_once(':') {
+            let name = name.trim();
+            if name != "default" {
+                workspaces.push(name.to_string());
+            }
+        }
+    }
+
+    Ok(workspaces)
 }
 
 fn list(verbose: bool) -> Result<()> {
