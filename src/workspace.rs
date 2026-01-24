@@ -61,6 +61,13 @@ pub enum WorkspaceCommands {
     /// - Any conflicts that need resolution
     /// - Unmerged work across all workspaces
     Status,
+
+    /// Sync workspace with repository (handle stale working copy)
+    ///
+    /// If the working copy is stale (main repo changed while you were working),
+    /// this command runs `jj workspace update-stale` and shows what changed.
+    /// Safe to run even if not stale.
+    Sync,
 }
 
 pub fn run(cmd: WorkspaceCommands) -> Result<()> {
@@ -69,6 +76,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Destroy { name, force } => destroy(&name, force),
         WorkspaceCommands::List { verbose } => list(verbose),
         WorkspaceCommands::Status => status(),
+        WorkspaceCommands::Sync => sync(),
     }
 }
 
@@ -274,6 +282,57 @@ fn get_current_workspace() -> Result<String> {
     }
 
     Ok("default".to_string())
+}
+
+fn sync() -> Result<()> {
+    // First check if we're stale
+    let status_check = Command::new("jj")
+        .args(["status"])
+        .output()
+        .context("Failed to run jj status")?;
+
+    let stderr = String::from_utf8_lossy(&status_check.stderr);
+    let is_stale = stderr.contains("working copy is stale");
+
+    if !is_stale {
+        println!("Workspace is up to date.");
+        return Ok(());
+    }
+
+    println!("Workspace is stale, syncing...");
+    println!();
+
+    // Run update-stale and capture output
+    let update_output = Command::new("jj")
+        .args(["workspace", "update-stale"])
+        .output()
+        .context("Failed to run jj workspace update-stale")?;
+
+    // Show the output
+    let stdout = String::from_utf8_lossy(&update_output.stdout);
+    let stderr = String::from_utf8_lossy(&update_output.stderr);
+
+    if !stdout.trim().is_empty() {
+        println!("{stdout}");
+    }
+    if !stderr.trim().is_empty() {
+        // jj often puts useful info in stderr
+        for line in stderr.lines() {
+            // Skip the "Concurrent modification" noise
+            if !line.contains("Concurrent modification") {
+                println!("{line}");
+            }
+        }
+    }
+
+    if update_output.status.success() {
+        println!();
+        println!("Workspace synced successfully.");
+    } else {
+        bail!("Failed to sync workspace");
+    }
+
+    Ok(())
 }
 
 fn list(verbose: bool) -> Result<()> {
