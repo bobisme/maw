@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod agents;
+mod doctor;
 mod workspace;
 
 /// Multi-Agent Workflow coordinator
@@ -60,6 +61,12 @@ enum Commands {
     /// Manage AGENTS.md instructions
     #[command(subcommand)]
     Agents(agents::AgentsCommands),
+
+    /// Check system requirements and configuration
+    ///
+    /// Verifies that required tools (jj) are installed and optional tools
+    /// (botbus, beads) are available. Also checks if you're in a jj repository.
+    Doctor,
 }
 
 fn main() -> Result<()> {
@@ -68,5 +75,6 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(cmd) => agents::run(cmd),
+        Commands::Doctor => doctor::run(),
     }
 }
