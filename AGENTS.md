@@ -75,12 +75,17 @@ jj commit -m "feat: completed feature"
 ### Staying in Sync
 
 ```bash
-# See all commits across all workspaces
-jj log --all
+# See commits (includes all workspaces by default)
+jj log
 
-# If workspace is stale (main repo changed)
+# See only workspace working copies
+jj log -r 'working_copies()'
+
+# If workspace is stale (another workspace modified shared history)
 maw ws sync
 ```
+
+**Important**: Unlike git worktrees, jj workspaces share the entire repo state. If another workspace modifies a commit in your ancestry, your workspace becomes "stale". Always run `maw ws sync` at the start of a session.
 
 ### Handling Conflicts
 
@@ -150,7 +155,7 @@ br create --title="..." --type=task --priority=2
 ## Architecture
 
 - Workspaces live in `.workspaces/<name>/`
-- Each workspace has its own `.jj/` but shares the backing store
+- Each workspace is a separate working copy sharing the single `.jj/` backing store
 - `.workspaces/` is gitignored
-- `jj log --all` shows commits across all workspaces
+- `jj log` shows commits across all workspaces by default
 - Agents never block each other - conflicts are recorded, not blocking

@@ -3,6 +3,7 @@ use std::process::Command;
 use anyhow::Result;
 
 /// Check system requirements and configuration
+#[allow(clippy::unnecessary_wraps)]
 pub fn run() -> Result<()> {
     println!("MAW Doctor");
     println!("==========");
@@ -77,28 +78,24 @@ fn check_tool(name: &str, args: &[&str], required: bool, install_url: &str) -> b
 }
 
 fn check_jj_repo() -> bool {
-    match Command::new("jj").args(["status"]).output() {
-        Ok(output) if output.status.success() => {
-            println!("[OK] jj repository: found");
-            true
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("no jj repo") || stderr.contains("There is no jj repo") {
-                println!("[WARN] jj repository: not in a jj repo");
-                println!("       Run: jj git init");
-                true // Not fatal, just a warning
-            } else {
-                println!(
-                    "[WARN] jj repository: {}",
-                    stderr.lines().next().unwrap_or("unknown error")
-                );
-                true
-            }
-        }
-        Err(_) => {
-            // jj not installed, already reported above
-            true
+    let Ok(output) = Command::new("jj").args(["status"]).output() else {
+        // jj not installed, already reported above
+        return true;
+    };
+
+    if output.status.success() {
+        println!("[OK] jj repository: found");
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("no jj repo") || stderr.contains("There is no jj repo") {
+            println!("[WARN] jj repository: not in a jj repo");
+            println!("       Run: jj git init");
+        } else {
+            println!(
+                "[WARN] jj repository: {}",
+                stderr.lines().next().unwrap_or("unknown error")
+            );
         }
     }
+    true
 }

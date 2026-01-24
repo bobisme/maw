@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 
-/// Agents subcommands for AGENTS.md management
+/// Agents subcommands for `AGENTS.md` management
 #[derive(Subcommand)]
 pub enum AgentsCommands {
     /// Generate or update AGENTS.md with MAW workflow instructions
@@ -22,9 +22,9 @@ pub enum AgentsCommands {
     Show,
 }
 
-pub fn run(cmd: AgentsCommands) -> Result<()> {
+pub fn run(cmd: &AgentsCommands) -> Result<()> {
     match cmd {
-        AgentsCommands::Init { force } => init(force),
+        AgentsCommands::Init { force } => init(*force),
         AgentsCommands::Show => show(),
     }
 }
@@ -136,8 +136,7 @@ fn init(force: bool) -> Result<()> {
                 let start_idx = content.find(MAW_SECTION_START).unwrap();
                 let end_idx = content
                     .find(MAW_SECTION_END)
-                    .map(|i| i + MAW_SECTION_END.len())
-                    .unwrap_or(content.len());
+                    .map_or(content.len(), |i| i + MAW_SECTION_END.len());
 
                 let new_content = format!(
                     "{}{}{}",
@@ -169,6 +168,7 @@ fn init(force: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn show() -> Result<()> {
     print!("{}", maw_instructions());
     Ok(())

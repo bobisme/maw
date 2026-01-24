@@ -276,12 +276,12 @@ fn status() -> Result<()> {
     // Show current workspace status
     println!("Current: {current_ws}");
     let status_stdout = String::from_utf8_lossy(&stale_check.stdout);
-    if !status_stdout.trim().is_empty() {
+    if status_stdout.trim().is_empty() {
+        println!("  (no changes)");
+    } else {
         for line in status_stdout.lines() {
             println!("  {line}");
         }
-    } else {
-        println!("  (no changes)");
     }
     println!();
 
@@ -340,11 +340,10 @@ fn get_current_workspace() -> Result<String> {
 
     let list = String::from_utf8_lossy(&output.stdout);
     for line in list.lines() {
-        if line.contains('@') {
-            if let Some((name, _)) = line.split_once(':') {
+        if line.contains('@')
+            && let Some((name, _)) = line.split_once(':') {
                 return Ok(name.trim().to_string());
             }
-        }
     }
 
     Ok("default".to_string())
@@ -427,33 +426,9 @@ fn merge(
     println!("Merging workspaces: {}", ws_to_merge.join(", "));
     println!();
 
-    // Get the change IDs for each workspace
-    let mut change_ids = Vec::new();
-    let ws_output = Command::new("jj")
-        .args(["workspace", "list"])
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    for line in ws_list.lines() {
-        if let Some((name, rest)) = line.split_once(':') {
-            let name = name.trim();
-            if ws_to_merge.contains(&name.to_string()) {
-                // Extract change_id (first word after the colon)
-                if let Some(change_id) = rest.trim().split_whitespace().next() {
-                    change_ids.push(change_id.to_string());
-                }
-            }
-        }
-    }
-
-    if change_ids.len() != ws_to_merge.len() {
-        bail!(
-            "Could not find all workspaces. Found {} of {}",
-            change_ids.len(),
-            ws_to_merge.len()
-        );
-    }
+    // Build revision references using workspace@ syntax
+    // This is more reliable than parsing workspace list output
+    let revisions: Vec<String> = ws_to_merge.iter().map(|ws| format!("{ws}@")).collect();
 
     // Build merge commit message
     let msg = message.map_or_else(
@@ -461,10 +436,10 @@ fn merge(
         ToString::to_string,
     );
 
-    // Create merge commit: jj new change1 change2 change3 -m "message"
+    // Create merge commit: jj new ws1@ ws2@ ws3@ -m "message"
     let mut args = vec!["new"];
-    for cid in &change_ids {
-        args.push(cid);
+    for rev in &revisions {
+        args.push(rev);
     }
     args.push("-m");
     args.push(&msg);
@@ -489,8 +464,8 @@ fn merge(
     let status_text = String::from_utf8_lossy(&status_output.stdout);
     let has_conflicts = status_text.contains("conflict");
 
+    println!();
     if has_conflicts {
-        println!();
         println!("WARNING: Merge has conflicts that need resolution.");
         println!("Run `jj status` to see conflicted files.");
     }
@@ -498,7 +473,6 @@ fn merge(
     // Optionally destroy workspaces (but not if there are conflicts!)
     if destroy_after {
         if has_conflicts {
-            println!();
             println!("NOT destroying workspaces due to conflicts.");
             println!("Resolve conflicts first, then run:");
             for ws in &ws_to_merge {
