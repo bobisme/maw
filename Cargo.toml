@@ -1,0 +1,19 @@
+[package]
+name = "maw"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-Agent Workflow coordinator for jj workspaces"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+anyhow = "1"
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

@@ -1,0 +1,13 @@
+# BotBus index (generated)
+.botbus/index.sqlite
+
+# Agent workspaces (each has own .jj, don't track)
+.workspaces/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+
+# Added by cargo
+
+/target
