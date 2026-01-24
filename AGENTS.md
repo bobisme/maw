@@ -25,6 +25,21 @@ maw ws merge --all --destroy
 
 ---
 
+## Workspace Naming
+
+**Your workspace name will be assigned by the coordinator** (human or orchestrating agent).
+
+If you need to create your own workspace:
+- Use lowercase alphanumeric with hyphens: `agent-1`, `feature-auth`, `bugfix-123`
+- Check existing workspaces first: `maw ws list`
+- Don't duplicate existing workspace names
+
+Common patterns:
+- `agent-1`, `agent-2` - numbered agents for parallel work
+- `feature-auth`, `bugfix-123` - task-focused workspaces
+
+---
+
 ## Workspace Commands
 
 | Task | Command |
@@ -81,9 +96,7 @@ jj describe -m "resolve: merge conflicts"
 
 ## Finishing Work
 
-### Merge All Agent Work
-
-From the main workspace (not an agent workspace):
+When done, notify the coordinator. They will merge from the main workspace:
 
 ```bash
 # Merge all agent workspaces into one commit
@@ -129,7 +142,7 @@ br create --title="..." --type=task --priority=2
 
 - **Commit messages**: Use conventional commits (`feat:`, `fix:`, `docs:`, etc.)
 - **Co-author**: Include `Co-Authored-By: Claude <noreply@anthropic.com>` in commits
-- **Workspace names**: Alphanumeric with hyphens/underscores only (e.g., `alice`, `agent_1`)
+- **Workspace names**: Lowercase alphanumeric with hyphens/underscores (`agent-1`, `feature-x`)
 
 ---
 

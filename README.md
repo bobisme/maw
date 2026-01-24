@@ -1,6 +1,10 @@
 # MAW - Multi-Agent Workflow
 
-Coordinate multiple AI agents working on the same codebase using jj workspaces.
+Tooling for coordinating multiple AI coding agents working on the same codebase.
+
+**The problem**: When you spawn multiple AI agents to work on a codebase simultaneously, they step on each other - editing the same files, creating conflicts, losing work.
+
+**The solution**: MAW uses jj (Jujutsu) workspaces to give each agent an isolated working copy. Agents work independently without blocking each other. Conflicts are recorded in commits (not blocking) and resolved when merging.
 
 ## Install
 
@@ -13,24 +17,14 @@ Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
 ## Quick Start
 
 ```bash
-# Check your setup
+# Add MAW instructions to your project's AGENTS.md
+maw agents init
+
+# Verify setup
 maw doctor
-
-# Create workspaces for agents
-maw ws create alice
-maw ws create bob
-
-# Agents work in their workspaces
-cd .workspaces/alice
-# ... edit files ...
-jj describe -m "feat: implement feature X"
-
-# See all agent work
-maw ws status
-
-# Merge all agent work
-maw ws merge --all --destroy
 ```
+
+That's it. Agents reading AGENTS.md will know how to create workspaces and coordinate.
 
 ## Commands
 
@@ -53,10 +47,24 @@ Agents can edit files concurrently without blocking each other. jj records confl
 
 ```
 .workspaces/
-  alice/     # Alice's isolated workspace
-  bob/       # Bob's isolated workspace
-  carol/     # Carol's isolated workspace
+  agent-1/     # First agent's workspace
+  agent-2/     # Second agent's workspace
+  feature-x/   # Task-based workspace
 ```
+
+## Agent Naming Conventions
+
+Workspace names should be:
+- **Lowercase alphanumeric** with hyphens or underscores (`agent-1`, `feature_auth`)
+- **Short and descriptive** - either agent identity or task focus
+- **Created by the coordinator** (human or orchestrating agent), not self-named
+
+Common patterns:
+- `agent-1`, `agent-2`, ... - numbered agents for parallel work
+- `feature-auth`, `bugfix-123` - task-focused workspaces
+- `claude-1`, `claude-2` - model-specific naming
+
+Agents should check `maw ws list` before creating to avoid duplicates.
 
 ## Why jj?
 
@@ -69,7 +77,3 @@ Agents can edit files concurrently without blocking each other. jj records confl
 
 - **[botbus](https://github.com/anthropics/botbus)**: Agent coordination and claims
 - **[beads](https://github.com/Dicklesworthstone/beads_rust)**: Issue tracking
-
-## License
-
-MIT
