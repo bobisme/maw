@@ -52,6 +52,15 @@ pub enum WorkspaceCommands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Show status of current workspace and all agent work
+    ///
+    /// Displays a comprehensive view of:
+    /// - Current workspace state (changes, stale status)
+    /// - All agent workspaces and their commits
+    /// - Any conflicts that need resolution
+    /// - Unmerged work across all workspaces
+    Status,
 }
 
 pub fn run(cmd: WorkspaceCommands) -> Result<()> {
@@ -59,6 +68,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Create { name, revision } => create(&name, revision.as_deref()),
         WorkspaceCommands::Destroy { name, force } => destroy(&name, force),
         WorkspaceCommands::List { verbose } => list(verbose),
+        WorkspaceCommands::Status => status(),
     }
 }
 
@@ -164,6 +174,106 @@ fn destroy(name: &str, force: bool) -> Result<()> {
 
     println!("Workspace destroyed.");
     Ok(())
+}
+
+fn status() -> Result<()> {
+    // Get current workspace name
+    let current_ws = get_current_workspace()?;
+
+    println!("=== Workspace Status ===");
+    println!();
+
+    // Check if stale
+    let stale_check = Command::new("jj")
+        .args(["status"])
+        .output()
+        .context("Failed to run jj status")?;
+
+    let status_output = String::from_utf8_lossy(&stale_check.stderr);
+    let is_stale = status_output.contains("working copy is stale");
+
+    if is_stale {
+        println!("WARNING: Working copy is stale!");
+        println!("  Run: jj workspace update-stale");
+        println!("  Or:  maw ws sync");
+        println!();
+    }
+
+    // Show current workspace status
+    println!("Current: {current_ws}");
+    let status_stdout = String::from_utf8_lossy(&stale_check.stdout);
+    if !status_stdout.trim().is_empty() {
+        for line in status_stdout.lines() {
+            println!("  {line}");
+        }
+    } else {
+        println!("  (no changes)");
+    }
+    println!();
+
+    // Get all workspaces and their commits
+    println!("=== All Agent Work ===");
+    println!();
+
+    let ws_output = Command::new("jj")
+        .args(["workspace", "list"])
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+    for line in ws_list.lines() {
+        if let Some((name, rest)) = line.split_once(':') {
+            let name = name.trim();
+            let is_current = name == current_ws;
+            let marker = if is_current { ">" } else { " " };
+            println!("{marker} {name}: {}", rest.trim());
+        }
+    }
+    println!();
+
+    // Check for conflicts
+    let log_output = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-r",
+            "conflicts()",
+            "-T",
+            r#"change_id.short() ++ " " ++ description.first_line() ++ "\n""#,
+        ])
+        .output()
+        .context("Failed to check for conflicts")?;
+
+    let conflicts = String::from_utf8_lossy(&log_output.stdout);
+    if !conflicts.trim().is_empty() {
+        println!("=== Conflicts ===");
+        println!();
+        for line in conflicts.lines() {
+            println!("  ! {line}");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+fn get_current_workspace() -> Result<String> {
+    // jj workspace list marks current with @
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let list = String::from_utf8_lossy(&output.stdout);
+    for line in list.lines() {
+        if line.contains('@') {
+            if let Some((name, _)) = line.split_once(':') {
+                return Ok(name.trim().to_string());
+            }
+        }
+    }
+
+    Ok("default".to_string())
 }
 
 fn list(verbose: bool) -> Result<()> {
