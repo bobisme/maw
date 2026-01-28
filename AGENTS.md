@@ -20,10 +20,12 @@ maw ws status
 
 # When done, merge all work from main workspace
 cd /path/to/main/repo
-maw ws merge --all --destroy
+maw ws merge alice bob --destroy
 ```
 
 **Key concept:** Each workspace gets its own commit. You own your commit - no other agent will modify it. This prevents conflicts during concurrent work.
+
+**Note:** Your workspace starts with an empty "wip" commit - this is intentional. The empty commit gives you ownership immediately, preventing divergent commits when multiple agents work concurrently. Just describe or commit your changes as you work; empty commits are naturally handled during merge.
 
 ---
 
@@ -50,9 +52,11 @@ Common patterns:
 | List workspaces | `maw ws list` |
 | Check status | `maw ws status` |
 | Handle stale workspace | `maw ws sync` |
-| Merge all agent work | `maw ws merge --all` |
-| Merge and cleanup | `maw ws merge --all --destroy` |
-| Destroy workspace | `maw ws destroy <name>` |
+| Merge agent work | `maw ws merge <a> <b>` |
+| Merge and cleanup | `maw ws merge <a> <b> --destroy` |
+| Destroy workspace | `maw ws destroy <name> --force` |
+
+Note: Use `--force` with destroy in scripts/automation to skip the confirmation prompt.
 
 ---
 
@@ -115,22 +119,106 @@ jj abandon <change-id>/0   # keep /1, abandon /0
 
 ---
 
-## Finishing Work
+## Merging and Releasing
 
-When done, notify the coordinator. They will merge from the main workspace:
+This section covers the full cycle from finished work to a pushed release.
+
+### 1. Merge Agent Work
+
+From the main workspace (not an agent workspace):
 
 ```bash
-# Merge all agent workspaces into one commit
-maw ws merge --all
-
-# Or merge and clean up workspaces
-maw ws merge --all --destroy
-
-# Or merge specific workspaces
+# Merge named agent workspaces into one commit
 maw ws merge alice bob carol
+
+# Merge and clean up workspaces
+maw ws merge alice bob carol --destroy
 ```
 
-Note: If there are conflicts, workspaces won't be destroyed. Resolve conflicts first.
+If there are conflicts, workspaces won't be destroyed. Resolve conflicts first, then destroy manually.
+
+### 2. Review (Optional)
+
+If the change warrants review before pushing:
+
+```bash
+# Verify build and tests
+cargo build --release && cargo test
+
+# Create a crit review (see Crit section below for full details)
+crit reviews create --title "feat: description of change"
+```
+
+After review is approved:
+
+```bash
+crit reviews approve <review_id>
+crit reviews merge <review_id>
+```
+
+### 3. Version Bump (for releases)
+
+```bash
+# Edit Cargo.toml version (e.g., 0.1.0 → 0.2.0)
+# Also update the install command version tag in README.md
+
+jj describe -m "chore: bump version to X.Y.Z
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+### 4. Push to Remote
+
+jj commits are "floating" by default - they exist in history but aren't on any branch/bookmark. You must move `main` before pushing:
+
+```bash
+# Move main to the merge commit
+# @- = parent of working copy (the actual commit with your changes)
+jj bookmark set main -r @-
+
+# Verify main is ahead of origin
+jj log --limit 3
+
+# Push to GitHub
+jj git push
+```
+
+### 5. Tag the Release
+
+```bash
+# Tag the release
+jj tag set vX.Y.Z -r main
+git push origin vX.Y.Z
+
+# Install locally and verify
+cargo install --path .
+maw --version
+```
+
+### First-time Setup (colocated repos)
+
+If `main` bookmark doesn't exist or isn't tracking remote:
+
+```bash
+jj bookmark track main@origin  # Track remote main
+```
+
+### Troubleshooting
+
+**"Nothing to push"** - Bookmark wasn't moved. Check with `jj log` - if your commits aren't ancestors of `main`, run `jj bookmark set main -r <commit>`.
+
+**"Bookmark is behind remote"** - Someone else pushed. Pull first: `jj git fetch && jj rebase -d main@origin`.
+
+### Quick Reference
+
+| Stage | Key Commands |
+|-------|--------------|
+| Merge work | `maw ws merge <a> <b> --destroy` |
+| Create review | `crit reviews create --title "..."` |
+| Approve/merge review | `crit reviews approve <id> && crit reviews merge <id>` |
+| Bump version | Edit `Cargo.toml` + `README.md`, then `jj describe` |
+| Push | `jj bookmark set main -r @-` then `jj git push` |
+| Tag release | `jj tag set vX.Y.Z -r main` then `git push origin vX.Y.Z` |
 
 ---
 
@@ -175,3 +263,129 @@ br create --title="..." --type=task --priority=2
 - `.workspaces/` is gitignored
 - `jj log` shows commits across all workspaces by default
 - Agents never block each other - conflicts are recorded, not blocking
+
+<!-- crit-agent-instructions -->
+
+## Crit: Agent-Centric Code Review
+
+This project uses [crit](https://github.com/anomalyco/botcrit) for distributed code reviews optimized for AI agents.
+
+### Quick Start
+
+```bash
+# Initialize crit in the repository (once)
+crit init
+
+# Create a review for current change
+crit reviews create --title "Add feature X"
+
+# List open reviews
+crit reviews list
+
+# Check reviews needing your attention
+crit reviews list --needs-review --author $BOTBUS_AGENT
+
+# Show review details
+crit reviews show <review_id>
+```
+
+### Adding Comments (Recommended)
+
+The simplest way to comment on code - auto-creates threads:
+
+```bash
+# Add a comment on a specific line (creates thread automatically)
+crit comment <review_id> --file src/main.rs --line 42 "Consider using Option here"
+
+# Add another comment on same line (reuses existing thread)
+crit comment <review_id> --file src/main.rs --line 42 "Good point, will fix"
+
+# Comment on a line range
+crit comment <review_id> --file src/main.rs --line 10-20 "This block needs refactoring"
+```
+
+### Managing Threads
+
+```bash
+# List threads on a review
+crit threads list <review_id>
+
+# Show thread with context
+crit threads show <thread_id>
+
+# Resolve a thread
+crit threads resolve <thread_id> --reason "Fixed in latest commit"
+```
+
+### Voting on Reviews
+
+```bash
+# Approve a review (LGTM)
+crit lgtm <review_id> -m "Looks good!"
+
+# Block a review (request changes)
+crit block <review_id> -r "Need more test coverage"
+```
+
+### Viewing Full Reviews
+
+```bash
+# Show full review with all threads and comments
+crit review <review_id>
+
+# Show with more context lines
+crit review <review_id> --context 5
+
+# List threads with first comment preview
+crit threads list <review_id> -v
+```
+
+### Approving and Merging
+
+```bash
+# Approve a review (changes status to approved)
+crit reviews approve <review_id>
+
+# Mark as merged (after jj squash/merge)
+# Note: Will fail if there are blocking votes
+crit reviews merge <review_id>
+
+# Self-approve and merge in one step (solo workflows)
+crit reviews merge <review_id> --self-approve
+```
+
+### Agent Best Practices
+
+1. **Set your identity** via environment:
+   ```bash
+   export BOTBUS_AGENT=my-agent-name
+   ```
+
+2. **Check for pending reviews** at session start:
+   ```bash
+   crit reviews list --needs-review --author $BOTBUS_AGENT
+   ```
+
+3. **Check status** to see unresolved threads:
+   ```bash
+   crit status <review_id> --unresolved-only
+   ```
+
+4. **Run doctor** to verify setup:
+   ```bash
+   crit doctor
+   ```
+
+### Output Formats
+
+- Default output is TOON (token-optimized, human-readable)
+- Use `--json` flag for machine-parseable JSON output
+
+### Key Concepts
+
+- **Reviews** are anchored to jj Change IDs (survive rebases)
+- **Threads** group comments on specific file locations
+- **crit comment** is the simple way to leave feedback (auto-creates threads)
+- Works across jj workspaces (shared .crit/ in main repo)
+
+<!-- end-crit-agent-instructions -->

@@ -787,12 +787,34 @@ impl App {
     }
 
     fn merge_all_workspaces(&mut self) -> Result<()> {
-        self.log_command("maw ws merge --all");
+        let names: Vec<String> = self
+            .workspaces
+            .iter()
+            .filter(|ws| !ws.is_current)
+            .map(|ws| ws.name.clone())
+            .collect();
+
+        if names.is_empty() {
+            self.popup = Some(Popup::Message {
+                title: "No Workspaces".to_string(),
+                message: "No other workspaces to merge".to_string(),
+                is_error: true,
+            });
+            return Ok(());
+        }
+
+        let cmd_str = format!("maw ws merge {}", names.join(" "));
+        self.log_command(&cmd_str);
+
+        let mut args: Vec<&str> = vec!["ws", "merge"];
+        for name in &names {
+            args.push(name);
+        }
 
         let output = Command::new("maw")
-            .args(["ws", "merge", "--all"])
+            .args(&args)
             .output()
-            .context("Failed to run maw ws merge --all")?;
+            .context("Failed to run maw ws merge")?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);

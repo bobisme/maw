@@ -72,24 +72,22 @@ pub enum WorkspaceCommands {
     /// Merge work from agent workspaces
     ///
     /// Creates a merge commit combining work from the specified workspaces.
-    /// Use --all to merge all non-default workspaces.
     ///
     /// Examples:
-    ///   maw ws merge alice bob       # merge alice and bob's work
-    ///   maw ws merge --all           # merge all agent workspaces
-    ///   maw ws merge --all --destroy # merge all and clean up workspaces
+    ///   maw ws merge alice bob             # merge alice and bob's work
+    ///   maw ws merge alice bob --destroy   # merge and clean up workspaces
     Merge {
-        /// Workspace names to merge (ignored if --all is set)
-        #[arg(required_unless_present = "all")]
+        /// Workspace names to merge
+        #[arg(required = true)]
         workspaces: Vec<String>,
-
-        /// Merge all non-default workspaces
-        #[arg(long)]
-        all: bool,
 
         /// Destroy workspaces after successful merge
         #[arg(long)]
         destroy: bool,
+
+        /// Skip confirmation prompt (use with --destroy)
+        #[arg(short, long)]
+        force: bool,
 
         /// Custom merge commit message
         #[arg(short, long)]
@@ -106,10 +104,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Sync => sync(),
         WorkspaceCommands::Merge {
             workspaces,
-            all,
             destroy,
+            force,
             message,
-        } => merge(&workspaces, all, destroy, message.as_deref()),
+        } => merge(&workspaces, destroy, force, message.as_deref()),
     }
 }
 
@@ -169,20 +167,8 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
 
     println!("Creating workspace '{name}' at .workspaces/{name} ...");
 
-    // Determine base revision
-    let base = revision.map_or_else(
-        || {
-            // Try main, fall back to @
-            let main_exists = Command::new("jj")
-                .args(["log", "-r", "main", "--no-graph", "-T", "''"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-
-            if main_exists { "main" } else { "@" }.to_string()
-        },
-        ToString::to_string,
-    );
+    // Determine base revision - default to @ so agents see orchestrator's current state
+    let base = revision.map_or_else(|| "@".to_string(), ToString::to_string);
 
     // Create the workspace
     let status = Command::new("jj")
@@ -457,16 +443,11 @@ fn sync() -> Result<()> {
 
 fn merge(
     workspaces: &[String],
-    all: bool,
     destroy_after: bool,
+    force: bool,
     message: Option<&str>,
 ) -> Result<()> {
-    // Get list of workspaces to merge
-    let ws_to_merge = if all {
-        get_agent_workspaces()?
-    } else {
-        workspaces.to_vec()
-    };
+    let ws_to_merge = workspaces.to_vec();
 
     if ws_to_merge.is_empty() {
         println!("No workspaces to merge.");
@@ -533,45 +514,54 @@ fn merge(
             for ws in &ws_to_merge {
                 println!("  maw ws destroy {ws}");
             }
+        } else if !force {
+            println!();
+            println!("Will destroy {} workspaces:", ws_to_merge.len());
+            for ws in &ws_to_merge {
+                println!("  - {ws}");
+            }
+            println!();
+            print!("Continue? [y/N] ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Aborted. Workspaces kept. Merge commit still exists.");
+                return Ok(());
+            }
+
+            destroy_workspaces(&ws_to_merge)?;
         } else {
             println!();
-            println!("Cleaning up workspaces...");
-            for ws in &ws_to_merge {
-                let path = workspace_path(ws)?;
-                let _ = Command::new("jj")
-                    .args(["workspace", "forget", ws])
-                    .status();
-                if path.exists() {
-                    std::fs::remove_dir_all(&path).ok();
-                }
-                println!("  Destroyed: {ws}");
-            }
+            destroy_workspaces(&ws_to_merge)?;
         }
+    }
+
+    // Show next steps for pushing
+    if !has_conflicts {
+        println!();
+        println!("To push to remote:");
+        println!("  jj bookmark set main -r @-");
+        println!("  jj git push");
     }
 
     Ok(())
 }
 
-/// Get list of non-default workspace names
-fn get_agent_workspaces() -> Result<Vec<String>> {
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let list = String::from_utf8_lossy(&output.stdout);
-    let mut workspaces = Vec::new();
-
-    for line in list.lines() {
-        if let Some((name, _)) = line.split_once(':') {
-            let name = name.trim();
-            if name != "default" {
-                workspaces.push(name.to_string());
-            }
+fn destroy_workspaces(workspaces: &[String]) -> Result<()> {
+    println!("Cleaning up workspaces...");
+    for ws in workspaces {
+        let path = workspace_path(ws)?;
+        let _ = Command::new("jj")
+            .args(["workspace", "forget", ws])
+            .status();
+        if path.exists() {
+            std::fs::remove_dir_all(&path).ok();
         }
+        println!("  Destroyed: {ws}");
     }
-
-    Ok(workspaces)
+    Ok(())
 }
 
 fn list(verbose: bool) -> Result<()> {

@@ -58,12 +58,26 @@ maw ws status                  # See all agent work
 | Create workspace | `maw ws create <name>` |
 | Check status | `maw ws status` |
 | Sync stale workspace | `maw ws sync` |
-| Merge all work | `maw ws merge --all` |
+| Merge work | `maw ws merge <a> <b>` |
+| Destroy workspace | `maw ws destroy <name> --force` |
+
+**Note:** Your workspace starts with an empty commit. This is intentional - it gives you ownership immediately, preventing conflicts when multiple agents work concurrently.
+
+### Session Start
+
+Always run at the beginning of a session:
+
+```bash
+maw ws sync                    # Handle stale workspace (safe if not stale)
+maw ws status                  # See all agent work
+```
 
 ### During Work
 
 ```bash
 jj diff                        # See changes
+jj log                         # See commit graph
+jj log -r 'working_copies()'   # See all workspace commits
 jj describe -m "feat: ..."     # Save work to your commit
 jj commit -m "feat: ..."       # Commit and start fresh
 ```
@@ -84,6 +98,15 @@ jj records conflicts in commits (non-blocking). If you see conflicts:
 jj status                      # Shows conflicted files
 # Edit files to resolve
 jj describe -m "resolve: ..."
+```
+
+### Pushing to Remote (Coordinator)
+
+After merging workspaces, move the bookmark and push:
+
+```bash
+jj bookmark set main -r @-     # Move main to merge commit
+jj git push                    # Push to remote
 ```
 
 {MAW_SECTION_END}

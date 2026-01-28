@@ -37,7 +37,7 @@ mod workspace;
 ///   2. Agents work independently in .workspaces/<name>/
 ///   3. jj tracks changes automatically (use `jj describe` to save)
 ///   4. Check status with `maw ws status`
-///   5. Merge all agent work: `maw ws merge --all --destroy`
+///   5. Merge agent work: `maw ws merge alice bob`
 ///   6. Conflicts are recorded in commits, resolve and continue
 #[derive(Parser)]
 #[command(name = "maw")]
