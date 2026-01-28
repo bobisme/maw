@@ -9,7 +9,7 @@ Tooling for coordinating multiple AI coding agents working on the same codebase.
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.2.0
+cargo install --git https://github.com/bobisme/maw --tag v0.3.0
 ```
 
 Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
