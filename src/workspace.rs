@@ -548,6 +548,42 @@ fn merge(
         println!("Run `jj status` to see conflicted files.");
     }
 
+    // Check for empty/undescribed commits that would block push
+    let empty_check = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-r",
+            "description(exact:\"\") & ::@- & ~root()",
+            "-T",
+            r#"change_id.short() ++ " " ++ if(empty, "(empty)", "(has changes)") ++ "\n""#,
+        ])
+        .output()
+        .context("Failed to check for undescribed commits")?;
+
+    let empty_commits = String::from_utf8_lossy(&empty_check.stdout);
+    if !empty_commits.trim().is_empty() {
+        let count = empty_commits.lines().filter(|l| !l.trim().is_empty()).count();
+        println!("WARNING: {count} undescribed commit(s) in merge ancestry will block push:");
+        println!();
+        for line in empty_commits.lines() {
+            if !line.trim().is_empty() {
+                println!("  ! {line}");
+            }
+        }
+        println!();
+        println!("Fix: rebase the merge onto a clean base to skip them:");
+        println!("  jj rebase -r @- -d main");
+        println!();
+        println!("Or describe them:");
+        for line in empty_commits.lines() {
+            if let Some(id) = line.split_whitespace().next() {
+                println!("  jj describe {id} -m \"...\"");
+            }
+        }
+        println!();
+    }
+
     // Optionally destroy workspaces (but not if there are conflicts!)
     if destroy_after {
         if has_conflicts {

@@ -105,7 +105,18 @@ jj describe -m "resolve: ..."
 
 ### Pushing to Remote (Coordinator)
 
-After merging workspaces, move the bookmark and push:
+After merging workspaces, `maw ws merge` checks for push blockers and warns you.
+If it reports undescribed commits, fix them before pushing:
+
+```bash
+# Option A: rebase merge onto clean base (skips scaffolding commits)
+jj rebase -r @- -d main
+
+# Option B: describe the empty commits
+jj describe <change-id> -m "workspace setup"
+```
+
+Then move the bookmark and push:
 
 ```bash
 jj bookmark set main -r @-     # Move main to merge commit
