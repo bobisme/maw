@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod agents;
 mod doctor;
+mod init;
 mod tui;
 mod workspace;
 
@@ -63,6 +64,12 @@ enum Commands {
     #[command(subcommand)]
     Agents(agents::AgentsCommands),
 
+    /// Initialize MAW in the current repository
+    ///
+    /// Ensures jj is initialized and .workspaces/ is gitignored.
+    /// Safe to run multiple times.
+    Init,
+
     /// Check system requirements and configuration
     ///
     /// Verifies that required tools (jj) are installed and optional tools
@@ -83,6 +90,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(ref cmd) => agents::run(cmd),
+        Commands::Init => init::run(),
         Commands::Doctor => doctor::run(),
         Commands::Ui => tui::run(),
     }

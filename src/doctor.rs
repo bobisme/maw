@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
@@ -38,6 +39,9 @@ pub fn run() -> Result<()> {
         "https://github.com/Dicklesworthstone/beads_rust",
     );
 
+    // Check .gitignore has .workspaces/
+    all_ok &= check_gitignore();
+
     println!();
     if all_ok {
         println!("All required checks passed!");
@@ -74,6 +78,38 @@ fn check_tool(name: &str, args: &[&str], required: bool, install_url: &str) -> b
                 true
             }
         }
+    }
+}
+
+fn check_gitignore() -> bool {
+    let gitignore = Path::new(".gitignore");
+
+    if !gitignore.exists() {
+        println!("[FAIL] .gitignore: not found");
+        println!("       Run: maw init");
+        return false;
+    }
+
+    let Ok(content) = std::fs::read_to_string(gitignore) else {
+        println!("[FAIL] .gitignore: could not read");
+        return false;
+    };
+
+    let has_entry = content.lines().any(|line| {
+        let line = line.trim();
+        line == ".workspaces"
+            || line == ".workspaces/"
+            || line == "/.workspaces"
+            || line == "/.workspaces/"
+    });
+
+    if has_entry {
+        println!("[OK] .gitignore: .workspaces/ is ignored");
+        true
+    } else {
+        println!("[FAIL] .gitignore: .workspaces/ is NOT ignored");
+        println!("       Run: maw init");
+        false
     }
 }
 

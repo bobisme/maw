@@ -37,6 +37,7 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 | `maw ws jj <name> <args>` | Run jj in a workspace (for sandboxed agents) |
 | `maw ws merge <a> <b>` | Merge named agent workspaces |
 | `maw ws destroy <name>` | Remove a workspace |
+| `maw init` | Initialize MAW (jj + .gitignore) |
 | `maw doctor` | Check system requirements |
 | `maw agents init` | Add MAW section to AGENTS.md |
 

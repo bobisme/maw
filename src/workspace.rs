@@ -247,6 +247,10 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
 }
 
 fn destroy(name: &str, force: bool) -> Result<()> {
+    if name == "default" {
+        bail!("Cannot destroy the default workspace");
+    }
+
     let path = workspace_path(name)?;
 
     if !path.exists() {
@@ -630,6 +634,10 @@ fn merge(
 fn destroy_workspaces(workspaces: &[String]) -> Result<()> {
     println!("Cleaning up workspaces...");
     for ws in workspaces {
+        if ws == "default" {
+            println!("  Skipping default workspace");
+            continue;
+        }
         let path = workspace_path(ws)?;
         let _ = Command::new("jj")
             .args(["workspace", "forget", ws])
