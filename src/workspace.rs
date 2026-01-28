@@ -69,6 +69,27 @@ pub enum WorkspaceCommands {
     /// Safe to run even if not stale.
     Sync,
 
+    /// Run a jj command in an agent's workspace
+    ///
+    /// Proxies jj commands into the specified workspace directory.
+    /// Useful for sandboxed environments (e.g. Claude Code) where
+    /// cd and env vars don't persist between shell calls.
+    ///
+    /// Only runs jj - not arbitrary commands.
+    ///
+    /// Examples:
+    ///   maw ws jj alice diff
+    ///   maw ws jj alice log
+    ///   maw ws jj alice describe -m "feat: new feature"
+    Jj {
+        /// Workspace name to run jj in
+        name: String,
+
+        /// Arguments to pass to jj
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Merge work from agent workspaces
     ///
     /// Creates a merge commit combining work from the specified workspaces.
@@ -102,6 +123,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::List { verbose } => list(verbose),
         WorkspaceCommands::Status => status(),
         WorkspaceCommands::Sync => sync(),
+        WorkspaceCommands::Jj { name, args } => jj_in_workspace(&name, &args),
         WorkspaceCommands::Merge {
             workspaces,
             destroy,
@@ -436,6 +458,26 @@ fn sync() -> Result<()> {
         println!("Workspace synced successfully.");
     } else {
         bail!("Failed to sync workspace");
+    }
+
+    Ok(())
+}
+
+fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
+    let path = workspace_path(name)?;
+
+    if !path.exists() {
+        bail!("Workspace '{name}' does not exist at {}", path.display());
+    }
+
+    let status = Command::new("jj")
+        .args(args)
+        .current_dir(&path)
+        .status()
+        .context("Failed to run jj")?;
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     Ok(())

@@ -52,6 +52,7 @@ Common patterns:
 | List workspaces | `maw ws list` |
 | Check status | `maw ws status` |
 | Handle stale workspace | `maw ws sync` |
+| Run jj in workspace | `maw ws jj <name> <args>` |
 | Merge agent work | `maw ws merge <a> <b>` |
 | Merge and cleanup | `maw ws merge <a> <b> --destroy` |
 | Destroy workspace | `maw ws destroy <name> --force` |

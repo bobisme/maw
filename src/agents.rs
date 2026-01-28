@@ -58,6 +58,7 @@ maw ws status                  # See all agent work
 | Create workspace | `maw ws create <name>` |
 | Check status | `maw ws status` |
 | Sync stale workspace | `maw ws sync` |
+| Run jj in workspace | `maw ws jj <name> <args>` |
 | Merge work | `maw ws merge <a> <b>` |
 | Destroy workspace | `maw ws destroy <name> --force` |
 
@@ -75,12 +76,14 @@ maw ws status                  # See all agent work
 ### During Work
 
 ```bash
-jj diff                        # See changes
-jj log                         # See commit graph
-jj log -r 'working_copies()'   # See all workspace commits
-jj describe -m "feat: ..."     # Save work to your commit
-jj commit -m "feat: ..."       # Commit and start fresh
+maw ws jj <name> diff                        # See changes
+maw ws jj <name> log                         # See commit graph
+maw ws jj <name> log -r 'working_copies()'   # See all workspace commits
+maw ws jj <name> describe -m "feat: ..."     # Save work to your commit
+maw ws jj <name> commit -m "feat: ..."       # Commit and start fresh
 ```
+
+`maw ws jj` runs jj in the workspace directory. Use this instead of `cd .workspaces/<name> && jj ...` — it works reliably in sandboxed environments where cd doesn't persist.
 
 ### Stale Workspace
 

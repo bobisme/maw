@@ -34,6 +34,7 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 | `maw ws list` | List all workspaces |
 | `maw ws status` | Show all agent work, conflicts, stale warnings |
 | `maw ws sync` | Handle stale workspace |
+| `maw ws jj <name> <args>` | Run jj in a workspace (for sandboxed agents) |
 | `maw ws merge <a> <b>` | Merge named agent workspaces |
 | `maw ws destroy <name>` | Remove a workspace |
 | `maw doctor` | Check system requirements |
