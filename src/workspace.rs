@@ -272,14 +272,20 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!("Workspace '{name}' ready!");
     println!();
     println!("  Commit: {change_id} (owned by {name})");
-    println!("  Path:   .workspaces/{name}");
+    println!("  Path:   {}", path.display());
+    println!();
+    println!("  IMPORTANT: All file reads, writes, and edits must use this path.");
+    println!("  This is your working directory for ALL operations, not just bash.");
     println!();
     println!("To start working:");
     println!();
-    println!("  cd .workspaces/{name}");
-    println!("  # make changes, jj tracks automatically");
-    println!("  jj describe -m \"feat: what you're implementing\"");
+    println!("  # Run jj commands via maw (works in sandboxed environments):");
+    println!("  maw ws jj {name} describe -m \"feat: what you're implementing\"");
+    println!("  maw ws jj {name} diff");
+    println!("  maw ws jj {name} log");
     println!();
+    println!("  # Other commands (use absolute workspace path):");
+    println!("  cd {} && cargo test", path.display());
 
     Ok(())
 }
