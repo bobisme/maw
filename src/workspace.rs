@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -171,9 +171,35 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
     }
 }
 
+fn repo_root() -> Result<PathBuf> {
+    let output = Command::new("jj")
+        .args(["root"])
+        .output()
+        .context("Failed to run jj root")?;
+    if !output.status.success() {
+        bail!(
+            "jj root failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+
+    // jj root returns the workspace root, not the repo root.
+    // If we're inside a workspace (.workspaces/<name>/), walk up
+    // to the directory containing .workspaces/.
+    for ancestor in root.ancestors() {
+        if ancestor.file_name().map_or(false, |n| n == ".workspaces") {
+            if let Some(parent) = ancestor.parent() {
+                return Ok(parent.to_path_buf());
+            }
+        }
+    }
+
+    Ok(root)
+}
+
 fn workspaces_dir() -> Result<PathBuf> {
-    let current = std::env::current_dir()?;
-    Ok(current.join(".workspaces"))
+    Ok(repo_root()?.join(".workspaces"))
 }
 
 fn workspace_path(name: &str) -> Result<PathBuf> {
@@ -549,6 +575,12 @@ fn merge(
         return Ok(());
     }
 
+    // Always run merge from the repo root (default workspace context).
+    // If run from inside a workspace, jj new would move that workspace's
+    // working copy instead of default's, then workspace forget would orphan
+    // the merge commit.
+    let root = repo_root()?;
+
     println!("Merging workspaces: {}", ws_to_merge.join(", "));
     println!();
 
@@ -572,6 +604,7 @@ fn merge(
 
     let status = Command::new("jj")
         .args(&args)
+        .current_dir(&root)
         .status()
         .context("Failed to run jj new")?;
 
@@ -584,6 +617,7 @@ fn merge(
     // Check for conflicts
     let status_output = Command::new("jj")
         .args(["status"])
+        .current_dir(&root)
         .output()
         .context("Failed to check status")?;
 
@@ -606,6 +640,7 @@ fn merge(
             "-T",
             r#"change_id.short() ++ " " ++ if(empty, "(empty)", "(has changes)") ++ "\n""#,
         ])
+        .current_dir(&root)
         .output()
         .context("Failed to check for undescribed commits")?;
 
@@ -657,10 +692,10 @@ fn merge(
                 return Ok(());
             }
 
-            destroy_workspaces(&ws_to_merge)?;
+            destroy_workspaces(&ws_to_merge, &root)?;
         } else {
             println!();
-            destroy_workspaces(&ws_to_merge)?;
+            destroy_workspaces(&ws_to_merge, &root)?;
         }
     }
 
@@ -675,16 +710,18 @@ fn merge(
     Ok(())
 }
 
-fn destroy_workspaces(workspaces: &[String]) -> Result<()> {
+fn destroy_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
     println!("Cleaning up workspaces...");
+    let ws_dir = root.join(".workspaces");
     for ws in workspaces {
         if ws == "default" {
             println!("  Skipping default workspace");
             continue;
         }
-        let path = workspace_path(ws)?;
+        let path = ws_dir.join(ws);
         let _ = Command::new("jj")
             .args(["workspace", "forget", ws])
+            .current_dir(root)
             .status();
         if path.exists() {
             std::fs::remove_dir_all(&path).ok();
