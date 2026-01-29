@@ -4,6 +4,28 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
+use rand::seq::IndexedRandom;
+
+const ADJECTIVES: &[&str] = &[
+    "blue", "green", "red", "gold", "silver", "swift", "brave", "calm", "wild", "bold", "keen",
+    "wise", "silent", "fierce", "noble", "cosmic", "crystal", "electric", "frozen", "iron",
+    "lunar", "mystic", "northern", "radiant", "shadow", "ember", "frost", "storm", "stellar",
+    "amber",
+];
+
+const NOUNS: &[&str] = &[
+    "castle", "forest", "river", "mountain", "eagle", "wolf", "phoenix", "falcon", "hawk",
+    "raven", "tiger", "bear", "beacon", "forge", "gateway", "kernel", "oracle", "sentinel",
+    "tower", "fox", "owl", "panther", "viper", "crane", "otter", "lynx", "cedar", "oak", "pine",
+    "reef",
+];
+
+fn generate_workspace_name() -> String {
+    let mut rng = rand::rng();
+    let adj = ADJECTIVES.choose(&mut rng).unwrap_or(&"swift");
+    let noun = NOUNS.choose(&mut rng).unwrap_or(&"agent");
+    format!("{adj}-{noun}")
+}
 
 /// Workspace subcommands
 #[derive(Subcommand)]
@@ -20,7 +42,12 @@ pub enum WorkspaceCommands {
     ///   3. Use 'jj commit' or 'jj describe' to save work
     Create {
         /// Name for the workspace (typically the agent's name)
-        name: String,
+        #[arg(required_unless_present = "random")]
+        name: Option<String>,
+
+        /// Generate a random workspace name
+        #[arg(long)]
+        random: bool,
 
         /// Base revision to start from (default: main or @)
         #[arg(short, long)]
@@ -118,7 +145,18 @@ pub enum WorkspaceCommands {
 
 pub fn run(cmd: WorkspaceCommands) -> Result<()> {
     match cmd {
-        WorkspaceCommands::Create { name, revision } => create(&name, revision.as_deref()),
+        WorkspaceCommands::Create {
+            name,
+            random,
+            revision,
+        } => {
+            let name = if random {
+                generate_workspace_name()
+            } else {
+                name.expect("name is required unless --random is set")
+            };
+            create(&name, revision.as_deref())
+        }
         WorkspaceCommands::Destroy { name, force } => destroy(&name, force),
         WorkspaceCommands::List { verbose } => list(verbose),
         WorkspaceCommands::Status => status(),

@@ -121,6 +121,8 @@ Then move the bookmark and push:
 ```bash
 jj bookmark set main -r @-     # Move main to merge commit
 jj git push                    # Push to remote
+# NOTE: Despite output saying "Changes to push to origin:",
+# the push is ALREADY DONE. Do NOT run git push afterwards.
 ```
 
 {MAW_SECTION_END}

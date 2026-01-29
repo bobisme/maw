@@ -182,6 +182,8 @@ jj log --limit 3
 
 # Push to GitHub
 jj git push
+# NOTE: Despite output saying "Changes to push to origin:",
+# the push is ALREADY DONE. Do NOT run git push afterwards.
 ```
 
 ### 5. Tag the Release
