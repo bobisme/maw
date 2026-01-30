@@ -570,18 +570,17 @@ fn merge(
         return Ok(());
     }
 
-    if ws_to_merge.len() == 1 {
-        println!("Only one workspace to merge. Use `jj rebase` to move it to main.");
-        return Ok(());
-    }
-
     // Always run merge from the repo root (default workspace context).
     // If run from inside a workspace, jj new would move that workspace's
     // working copy instead of default's, then workspace forget would orphan
     // the merge commit.
     let root = repo_root()?;
 
-    println!("Merging workspaces: {}", ws_to_merge.join(", "));
+    if ws_to_merge.len() == 1 {
+        println!("Adopting workspace: {}", ws_to_merge[0]);
+    } else {
+        println!("Merging workspaces: {}", ws_to_merge.join(", "));
+    }
     println!();
 
     // Build revision references using workspace@ syntax
@@ -590,7 +589,13 @@ fn merge(
 
     // Build merge commit message
     let msg = message.map_or_else(
-        || format!("merge: combine work from {}", ws_to_merge.join(", ")),
+        || {
+            if ws_to_merge.len() == 1 {
+                format!("merge: adopt work from {}", ws_to_merge[0])
+            } else {
+                format!("merge: combine work from {}", ws_to_merge.join(", "))
+            }
+        },
         ToString::to_string,
     );
 
