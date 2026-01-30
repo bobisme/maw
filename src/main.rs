@@ -10,8 +10,14 @@ mod workspace;
 /// Multi-Agent Workflow coordinator
 ///
 /// MAW coordinates multiple AI agents on the same codebase using jj
-/// (Jujutsu) workspaces. Each agent gets an isolated working copy —
-/// edit files concurrently without blocking each other.
+/// (Jujutsu), a git-compatible version control system. Each agent gets
+/// an isolated working copy (separate view of the codebase) — edit
+/// files concurrently without blocking each other.
+///
+/// KEY DIFFERENCES FROM GIT:
+///   - No staging area — jj tracks all changes automatically (no git add)
+///   - You're always in a commit — use 'describe' to set the message
+///   - Conflicts are recorded in commits, not blocking
 ///
 /// QUICK START:
 ///
@@ -20,6 +26,7 @@ mod workspace;
 ///   # All file operations use the workspace path shown by create.
 ///   # Run jj commands via maw (works in sandboxed environments):
 ///   maw ws jj <your-name> describe -m "feat: what you did"
+///   #   ('describe' sets the commit message — like git commit --amend -m)
 ///   maw ws jj <your-name> diff
 ///
 ///   # Run other commands with cd:
@@ -32,7 +39,7 @@ mod workspace;
 ///
 ///   1. Create workspace: maw ws create <name>
 ///   2. Edit files under .workspaces/<name>/ (use absolute paths)
-///   3. Run jj via: maw ws jj <name> describe -m "feat: ..."
+///   3. Save work: maw ws jj <name> describe -m "feat: ..."
 ///   4. Check status: maw ws status
 ///   5. Merge work: maw ws merge <name1> <name2>
 ///   6. Conflicts are recorded in commits, resolve and continue

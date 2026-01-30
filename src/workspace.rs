@@ -33,12 +33,14 @@ pub enum WorkspaceCommands {
     /// Create a new workspace for an agent
     ///
     /// Creates an isolated jj workspace in .workspaces/<name>/ with its
-    /// own working copy. All file reads, writes, and edits must use the
-    /// absolute workspace path shown after creation.
+    /// own working copy (a separate view of the codebase, like a git
+    /// worktree but lightweight). All file reads, writes, and edits must
+    /// use the absolute workspace path shown after creation.
     ///
     /// After creation:
     ///   1. Edit files under .workspaces/<name>/ (use absolute paths)
-    ///   2. Run jj via: maw ws jj <name> describe -m "feat: ..."
+    ///   2. Save work: maw ws jj <name> describe -m "feat: ..."
+    ///      ('describe' sets the commit message — like git commit --amend -m)
     ///   3. Run other commands: cd /abs/path/.workspaces/<name> && cmd
     Create {
         /// Name for the workspace (typically the agent's name)
@@ -56,8 +58,8 @@ pub enum WorkspaceCommands {
 
     /// Remove a workspace
     ///
-    /// Forgets the workspace from jj and removes the directory.
-    /// Commit and merge any important changes before destroying.
+    /// Removes the workspace: unregisters it from jj and deletes the
+    /// directory. Merge any important changes first (maw ws merge).
     Destroy {
         /// Name of the workspace to destroy
         name: String,
@@ -71,7 +73,7 @@ pub enum WorkspaceCommands {
     ///
     /// Shows all jj workspaces with their current status including:
     /// - Current commit description
-    /// - Whether the workspace is stale
+    /// - Whether the workspace is stale (out of date with repo)
     /// - Path to the workspace directory
     List {
         /// Show detailed information
@@ -91,8 +93,8 @@ pub enum WorkspaceCommands {
     /// Sync workspace with repository (handle stale working copy)
     ///
     /// Run this at the start of every session. If the working copy is stale
-    /// (another workspace modified shared history), this updates it.
-    /// Safe to run even if not stale.
+    /// (another workspace modified shared commits, so your files are outdated),
+    /// this updates your workspace to match. Safe to run even if not stale.
     Sync,
 
     /// Run a jj command in a workspace
@@ -118,7 +120,7 @@ pub enum WorkspaceCommands {
     ///
     /// Creates a merge commit combining work from the specified workspaces.
     /// Works with one or more workspaces. After merge, check output for
-    /// undescribed commits that may block push.
+    /// undescribed commits (commits with no message) that may block push.
     ///
     /// Examples:
     ///   maw ws merge alice                 # adopt alice's work
@@ -306,7 +308,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!();
     println!("Workspace '{name}' ready!");
     println!();
-    println!("  Commit: {change_id} (owned by {name})");
+    println!("  Commit: {change_id} (your dedicated change — jj's stable ID for this commit)");
     println!("  Path:   {}", path.display());
     println!();
     println!("  IMPORTANT: All file reads, writes, and edits must use this path.");
@@ -314,13 +316,18 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!();
     println!("To start working:");
     println!();
-    println!("  # Run jj commands via maw (works in sandboxed environments):");
+    println!("  # Set your commit message (like git commit --amend -m):");
     println!("  maw ws jj {name} describe -m \"feat: what you're implementing\"");
+    println!();
+    println!("  # View changes (like git diff / git log):");
     println!("  maw ws jj {name} diff");
     println!("  maw ws jj {name} log");
     println!();
     println!("  # Other commands (use absolute workspace path):");
     println!("  cd {} && cargo test", path.display());
+    println!();
+    println!("Note: jj has no staging area — all edits are tracked automatically.");
+    println!("Your changes are always in your commit. Use 'describe' to set the message.");
 
     Ok(())
 }
@@ -384,8 +391,8 @@ fn status() -> Result<()> {
 
     if is_stale {
         println!("WARNING: Working copy is stale!");
-        println!("  Run: jj workspace update-stale");
-        println!("  Or:  maw ws sync");
+        println!("  (Another workspace changed shared history — your files are outdated.)");
+        println!("  Fix: maw ws sync");
         println!();
     }
 
@@ -437,13 +444,16 @@ fn status() -> Result<()> {
     let conflicts = String::from_utf8_lossy(&log_output.stdout);
     if !conflicts.trim().is_empty() {
         println!("=== Conflicts ===");
+        println!("  (jj records conflicts in commits instead of blocking — you can keep working)");
         println!();
         for line in conflicts.lines() {
             println!("  ! {line}");
         }
         println!();
-        println!("  To resolve: edit conflicted files (remove conflict markers),");
-        println!("  then: jj describe -m \"resolve: ...\"");
+        println!("  To resolve: edit conflicted files (look for <<<<<<< markers),");
+        println!("  then set the commit message:");
+        println!("    maw ws jj <name> describe -m \"resolve: ...\"");
+        println!("    ('describe' = set commit message, like git commit --amend -m)");
         println!();
     }
 
@@ -463,8 +473,9 @@ fn status() -> Result<()> {
     if !divergent.trim().is_empty() {
         println!("=== Divergent Commits (needs cleanup) ===");
         println!();
-        println!("  WARNING: These commits have divergent versions (same change, multiple commits).");
-        println!("  This usually happens when concurrent operations modified the same commit.");
+        println!("  WARNING: These commits have divergent versions (same change ID, multiple");
+        println!("  commit versions). This happens when two operations modified the same commit");
+        println!("  concurrently — rare with maw since each agent owns their own commit.");
         println!();
         for line in divergent.lines() {
             if !line.trim().is_empty() {
@@ -472,8 +483,8 @@ fn status() -> Result<()> {
             }
         }
         println!();
-        println!("  To fix: keep one version and abandon the others:");
-        println!("    jj abandon <change-id>/0   # abandon unwanted version");
+        println!("  To fix: keep one version and abandon (delete) the others:");
+        println!("    jj abandon <change-id>/0   # remove the unwanted version");
         println!();
     }
 
@@ -513,7 +524,7 @@ fn sync() -> Result<()> {
         return Ok(());
     }
 
-    println!("Workspace is stale, syncing...");
+    println!("Workspace is stale (another workspace changed shared history), syncing...");
     println!();
 
     // Run update-stale and capture output
@@ -670,7 +681,8 @@ fn merge(
     let empty_commits = String::from_utf8_lossy(&empty_check.stdout);
     if !empty_commits.trim().is_empty() {
         let count = empty_commits.lines().filter(|l| !l.trim().is_empty()).count();
-        println!("WARNING: {count} undescribed commit(s) in merge ancestry will block push:");
+        println!("WARNING: {count} undescribed commit(s) (no message) in merge ancestry.");
+        println!("  jj requires all commits to have descriptions before pushing.");
         println!();
         for line in empty_commits.lines() {
             if !line.trim().is_empty() {
@@ -678,13 +690,14 @@ fn merge(
             }
         }
         println!();
-        println!("Fix: rebase the merge onto a clean base to skip them:");
+        println!("Fix: rebase onto main to skip scaffolding commits:");
         println!("  jj rebase -r @- -d main");
+        println!("  ('rebase' moves a commit to a new parent; @- = the merge commit)");
         println!();
-        println!("Or describe them:");
+        println!("Or give them descriptions:");
         for line in empty_commits.lines() {
             if let Some(id) = line.split_whitespace().next() {
-                println!("  jj describe {id} -m \"...\"");
+                println!("  jj describe {id} -m \"workspace setup\"");
             }
         }
         println!();
@@ -725,8 +738,9 @@ fn merge(
     // Show next steps for pushing
     if !has_conflicts {
         println!();
-        println!("To push to remote:");
+        println!("Next: push to remote:");
         println!("  jj bookmark set main -r @-");
+        println!("    (bookmarks = jj's branches; @- = parent of working copy = your merge commit)");
         println!("  jj git push");
     }
 

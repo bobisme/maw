@@ -38,16 +38,21 @@ fn maw_instructions() -> String {
 
 ## Multi-Agent Workflow with MAW
 
-This project uses MAW for coordinating multiple agents via jj workspaces.
-Each agent gets an isolated working copy and **their own commit** - you can edit files without blocking other agents.
+This project uses MAW for coordinating multiple agents via jj (Jujutsu) workspaces.
+jj is a **git-compatible version control system**. Key differences from git:
+- **No staging area** — all changes are tracked automatically (no `git add`)
+- **Always in a commit** — your work is always saved in a commit; use `describe` to set the message
+- **Conflicts don't block** — jj records conflicts in commits, you resolve them later
+
+Each agent gets an isolated working copy (like a git worktree but lightweight) and **their own commit** — you can edit files without blocking other agents.
 
 ### Quick Start
 
 ```bash
 maw ws create <your-name>      # Creates workspace + your own commit
-cd .workspaces/<your-name>
-# ... edit files ...
-jj describe -m "feat: what you did"
+# Edit files using the absolute workspace path shown by create
+# Set your commit message (like git commit --amend -m):
+maw ws jj <your-name> describe -m "feat: what you did"
 maw ws status                  # See all agent work
 ```
 
@@ -62,7 +67,7 @@ maw ws status                  # See all agent work
 | Merge work | `maw ws merge <a> <b>` |
 | Destroy workspace | `maw ws destroy <name> --force` |
 
-**Note:** Your workspace starts with an empty commit. This is intentional - it gives you ownership immediately, preventing conflicts when multiple agents work concurrently.
+**Note:** Your workspace starts with an empty commit (no file changes yet). This is intentional — it gives you a dedicated commit immediately, preventing conflicts when multiple agents work concurrently. Just use `describe` to set the message as you work.
 
 ### Session Start
 
@@ -76,18 +81,18 @@ maw ws status                  # See all agent work
 ### During Work
 
 ```bash
-maw ws jj <name> diff                        # See changes
-maw ws jj <name> log                         # See commit graph
-maw ws jj <name> log -r 'working_copies()'   # See all workspace commits
-maw ws jj <name> describe -m "feat: ..."     # Save work to your commit
-maw ws jj <name> commit -m "feat: ..."       # Commit and start fresh
+maw ws jj <name> diff                        # See changes (like git diff)
+maw ws jj <name> log                         # See commit history (like git log)
+maw ws jj <name> log -r 'working_copies()'   # See all workspace commits (revset query)
+maw ws jj <name> describe -m "feat: ..."     # Set commit message (like git commit --amend -m)
+maw ws jj <name> commit -m "feat: ..."       # Save current work + start new empty commit
 ```
 
 `maw ws jj` runs jj in the workspace directory. Use this instead of `cd .workspaces/<name> && jj ...` — it works reliably in sandboxed environments where cd doesn't persist.
 
 ### Stale Workspace
 
-If you see "working copy is stale":
+If you see "working copy is stale" (another workspace changed shared history — your files are outdated):
 
 ```bash
 maw ws sync
@@ -95,12 +100,12 @@ maw ws sync
 
 ### Conflicts
 
-jj records conflicts in commits (non-blocking). If you see conflicts:
+jj records conflicts in commits instead of blocking your work. If you see conflicts:
 
 ```bash
-jj status                      # Shows conflicted files
-# Edit files to resolve
-jj describe -m "resolve: ..."
+maw ws jj <name> status                      # Shows conflicted files
+# Edit files to remove <<<<<<< conflict markers (similar to git)
+maw ws jj <name> describe -m "resolve: ..."  # Update commit message
 ```
 
 ### Pushing to Remote (Coordinator)
@@ -110,17 +115,19 @@ If it reports undescribed commits, fix them before pushing:
 
 ```bash
 # Option A: rebase merge onto clean base (skips scaffolding commits)
+# 'rebase' moves a commit to a new parent; @- = parent of working copy (the merge commit)
 jj rebase -r @- -d main
 
-# Option B: describe the empty commits
+# Option B: give the empty commits descriptions
+# <change-id> is jj's stable identifier shown in jj log output
 jj describe <change-id> -m "workspace setup"
 ```
 
-Then move the bookmark and push:
+Then move the bookmark (jj's equivalent of a git branch) and push:
 
 ```bash
-jj bookmark set main -r @-     # Move main to merge commit
-jj git push                    # Push to remote
+jj bookmark set main -r @-     # Point 'main' at the merge commit (@- = parent of working copy)
+jj git push                    # Push to remote (like git push)
 # NOTE: Despite output saying "Changes to push to origin:",
 # the push is ALREADY DONE. Do NOT run git push afterwards.
 ```
