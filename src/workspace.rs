@@ -32,14 +32,14 @@ fn generate_workspace_name() -> String {
 pub enum WorkspaceCommands {
     /// Create a new workspace for an agent
     ///
-    /// Creates an isolated jj workspace in .workspaces/<name>/ where an agent
-    /// can work independently. The workspace shares the repository's backing
-    /// store but has its own working copy.
+    /// Creates an isolated jj workspace in .workspaces/<name>/ with its
+    /// own working copy. All file reads, writes, and edits must use the
+    /// absolute workspace path shown after creation.
     ///
-    /// After creation, the agent should:
-    ///   1. cd .workspaces/<name>
-    ///   2. Start making changes (jj tracks automatically)
-    ///   3. Use 'jj commit' or 'jj describe' to save work
+    /// After creation:
+    ///   1. Edit files under .workspaces/<name>/ (use absolute paths)
+    ///   2. Run jj via: maw ws jj <name> describe -m "feat: ..."
+    ///   3. Run other commands: cd /abs/path/.workspaces/<name> && cmd
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -54,11 +54,10 @@ pub enum WorkspaceCommands {
         revision: Option<String>,
     },
 
-    /// Remove an agent's workspace
+    /// Remove a workspace
     ///
     /// Forgets the workspace from jj and removes the directory.
-    /// Make sure any important changes have been committed and
-    /// merged before destroying.
+    /// Commit and merge any important changes before destroying.
     Destroy {
         /// Name of the workspace to destroy
         name: String,
@@ -91,23 +90,21 @@ pub enum WorkspaceCommands {
 
     /// Sync workspace with repository (handle stale working copy)
     ///
-    /// If the working copy is stale (main repo changed while you were working),
-    /// this command runs `jj workspace update-stale` and shows what changed.
+    /// Run this at the start of every session. If the working copy is stale
+    /// (another workspace modified shared history), this updates it.
     /// Safe to run even if not stale.
     Sync,
 
-    /// Run a jj command in an agent's workspace
+    /// Run a jj command in a workspace
     ///
-    /// Proxies jj commands into the specified workspace directory.
-    /// Useful for sandboxed environments (e.g. Claude Code) where
-    /// cd and env vars don't persist between shell calls.
-    ///
-    /// Only runs jj - not arbitrary commands.
+    /// Use this instead of 'cd .workspaces/<name> && jj ...'.
+    /// Required in sandboxed environments where cd doesn't persist
+    /// between tool calls. Only runs jj — not arbitrary commands.
     ///
     /// Examples:
+    ///   maw ws jj alice describe -m "feat: new feature"
     ///   maw ws jj alice diff
     ///   maw ws jj alice log
-    ///   maw ws jj alice describe -m "feat: new feature"
     Jj {
         /// Workspace name to run jj in
         name: String,
@@ -117,11 +114,14 @@ pub enum WorkspaceCommands {
         args: Vec<String>,
     },
 
-    /// Merge work from agent workspaces
+    /// Merge work from workspaces into default
     ///
     /// Creates a merge commit combining work from the specified workspaces.
+    /// Works with one or more workspaces. After merge, check output for
+    /// undescribed commits that may block push.
     ///
     /// Examples:
+    ///   maw ws merge alice                 # adopt alice's work
     ///   maw ws merge alice bob             # merge alice and bob's work
     ///   maw ws merge alice bob --destroy   # merge and clean up workspaces
     Merge {

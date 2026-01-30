@@ -9,36 +9,32 @@ mod workspace;
 
 /// Multi-Agent Workflow coordinator
 ///
-/// MAW helps coordinate multiple AI agents working on the same codebase
-/// using jj (Jujutsu) workspaces for isolation and concurrent edits.
-///
-/// Each agent gets its own workspace in .workspaces/<name>/ where they
-/// can make changes independently. jj handles merging and conflict
-/// detection automatically - agents never block each other.
+/// MAW coordinates multiple AI agents on the same codebase using jj
+/// (Jujutsu) workspaces. Each agent gets an isolated working copy —
+/// edit files concurrently without blocking each other.
 ///
 /// QUICK START:
 ///
-///   # Create a workspace for an agent
-///   maw ws create alice
+///   maw ws create <your-name>
 ///
-///   # Agent works in their workspace
-///   cd .workspaces/alice
-///   # ... make changes ...
-///   jj describe -m "feat: implement feature X"
+///   # All file operations use the workspace path shown by create.
+///   # Run jj commands via maw (works in sandboxed environments):
+///   maw ws jj <your-name> describe -m "feat: what you did"
+///   maw ws jj <your-name> diff
 ///
-///   # See all agent work from any workspace
-///   jj log --all
+///   # Run other commands with cd:
+///   cd /absolute/path/.workspaces/<your-name> && cargo test
 ///
-///   # When done, destroy the workspace
-///   maw ws destroy alice
+///   # Check all agent work
+///   maw ws status
 ///
 /// WORKFLOW:
 ///
-///   1. Each agent gets a workspace via `maw ws create <name>`
-///   2. Agents work independently in .workspaces/<name>/
-///   3. jj tracks changes automatically (use `jj describe` to save)
-///   4. Check status with `maw ws status`
-///   5. Merge agent work: `maw ws merge alice bob`
+///   1. Create workspace: maw ws create <name>
+///   2. Edit files under .workspaces/<name>/ (use absolute paths)
+///   3. Run jj via: maw ws jj <name> describe -m "feat: ..."
+///   4. Check status: maw ws status
+///   5. Merge work: maw ws merge <name1> <name2>
 ///   6. Conflicts are recorded in commits, resolve and continue
 #[derive(Parser)]
 #[command(name = "maw")]
