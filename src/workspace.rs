@@ -257,7 +257,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     let base = revision.map_or_else(|| "@".to_string(), ToString::to_string);
 
     // Create the workspace
-    let status = Command::new("jj")
+    let output = Command::new("jj")
         .args([
             "workspace",
             "add",
@@ -267,23 +267,32 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
             "-r",
             &base,
         ])
-        .status()
+        .output()
         .context("Failed to run jj workspace add")?;
 
-    if !status.success() {
-        bail!("jj workspace add failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "jj workspace add failed: {}\n  Check: maw doctor\n  Verify name is not already used: maw ws list",
+            stderr.trim()
+        );
     }
 
     // Create a dedicated commit for this agent to own
     // This prevents divergent commits when multiple agents work concurrently
-    let new_status = Command::new("jj")
+    let new_output = Command::new("jj")
         .args(["new", "-m", &format!("wip: {name} workspace")])
         .current_dir(&path)
-        .status()
+        .output()
         .context("Failed to create agent commit")?;
 
-    if !new_status.success() {
-        bail!("Failed to create dedicated commit for workspace");
+    if !new_output.status.success() {
+        let stderr = String::from_utf8_lossy(&new_output.stderr);
+        bail!(
+            "Failed to create dedicated commit for workspace: {}\n  The workspace was created but has no dedicated commit.\n  Try: cd {} && jj new -m \"wip: {name}\"",
+            stderr.trim(),
+            path.display()
+        );
     }
 
     // Get the new commit's change ID for display
@@ -433,6 +442,9 @@ fn status() -> Result<()> {
             println!("  ! {line}");
         }
         println!();
+        println!("  To resolve: edit conflicted files (remove conflict markers),");
+        println!("  then: jj describe -m \"resolve: ...\"");
+        println!();
     }
 
     // Check for divergent commits (same change ID, multiple commit IDs)
@@ -531,7 +543,9 @@ fn sync() -> Result<()> {
         println!();
         println!("Workspace synced successfully.");
     } else {
-        bail!("Failed to sync workspace");
+        bail!(
+            "Failed to sync workspace.\n  Check workspace state: maw ws status\n  Manual fix: jj workspace update-stale"
+        );
     }
 
     Ok(())
@@ -607,14 +621,18 @@ fn merge(
     args.push("-m");
     args.push(&msg);
 
-    let status = Command::new("jj")
+    let merge_output = Command::new("jj")
         .args(&args)
         .current_dir(&root)
-        .status()
+        .output()
         .context("Failed to run jj new")?;
 
-    if !status.success() {
-        bail!("Failed to create merge commit");
+    if !merge_output.status.success() {
+        let stderr = String::from_utf8_lossy(&merge_output.stderr);
+        bail!(
+            "Failed to create merge commit: {}\n  Verify workspaces exist: maw ws list",
+            stderr.trim()
+        );
     }
 
     println!("Created merge commit: {msg}");

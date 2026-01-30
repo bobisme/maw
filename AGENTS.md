@@ -259,6 +259,28 @@ br create --title="..." --type=task --priority=2
 
 ---
 
+## Output Guidelines
+
+MAW is frequently invoked by agents with **no prior context**. Every piece of tool output must be self-contained and actionable.
+
+**Errors** must include:
+- What failed (include stderr from jj when available)
+- How to fix it (exact command to run)
+- Example: `"jj workspace add failed: {stderr}\n  Check: maw doctor"`
+
+**Success output** must include:
+- What happened
+- What to do next (exact commands)
+- Example: `"Workspace 'agent-a' ready!\n  Path: /abs/path\n  maw ws jj agent-a describe -m \"feat: ...\""`
+
+**Principles**:
+- Agents can't remember prior output — every message must stand alone
+- Include copy-pasteable commands, not just descriptions
+- Keep it brief — agents are token-conscious
+- Use structured prefixes where appropriate: `WARNING:`, `IMPORTANT:`, `To fix:`, `Next:`
+
+---
+
 ## Architecture
 
 - Workspaces live in `.workspaces/<name>/`

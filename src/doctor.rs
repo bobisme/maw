@@ -91,7 +91,8 @@ fn check_gitignore() -> bool {
     }
 
     let Ok(content) = std::fs::read_to_string(gitignore) else {
-        println!("[FAIL] .gitignore: could not read");
+        println!("[FAIL] .gitignore: could not read file");
+        println!("       Check file permissions, then run: maw init");
         return false;
     };
 

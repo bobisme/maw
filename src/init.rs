@@ -46,19 +46,23 @@ fn ensure_jj_repo() -> Result<()> {
             vec!["git", "init"]
         };
 
-        let status = Command::new("jj")
+        let init_output = Command::new("jj")
             .args(&args)
-            .status()
+            .output()
             .context("Failed to run jj git init")?;
 
-        if status.success() {
+        if init_output.status.success() {
             if is_git {
                 println!("[OK] jj initialized (colocated with existing git repo)");
             } else {
                 println!("[OK] jj initialized (new git-backed repo)");
             }
         } else {
-            anyhow::bail!("jj git init failed");
+            let init_stderr = String::from_utf8_lossy(&init_output.stderr);
+            anyhow::bail!(
+                "jj git init failed: {}\n  Check jj is installed: jj --version",
+                init_stderr.trim()
+            );
         }
     } else {
         println!("[WARN] jj status returned error: {}", stderr.trim());
