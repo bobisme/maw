@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 mod agents;
 mod doctor;
 mod init;
+mod jj_intro;
 mod tui;
 mod workspace;
 
@@ -85,6 +86,13 @@ enum Commands {
     /// and coordinating agent work. Inspired by lazygit.
     #[command(name = "ui")]
     Ui,
+
+    /// Quick jj reference for git users
+    ///
+    /// Shows jj mental model, git command equivalents, and how to push
+    /// to GitHub. Designed for agents encountering jj for the first time.
+    #[command(name = "jj-intro")]
+    JjIntro,
 }
 
 fn main() -> Result<()> {
@@ -96,5 +104,6 @@ fn main() -> Result<()> {
         Commands::Init => init::run(),
         Commands::Doctor => doctor::run(),
         Commands::Ui => tui::run(),
+        Commands::JjIntro => jj_intro::run(),
     }
 }
