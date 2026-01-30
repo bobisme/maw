@@ -200,6 +200,30 @@ fn repo_root() -> Result<PathBuf> {
     Ok(root)
 }
 
+/// Ensure CWD is the repo root. Mutation commands must run from root
+/// to avoid agent confusion about which workspace context they're in.
+fn ensure_repo_root() -> Result<PathBuf> {
+    let root = repo_root()?;
+    let cwd = std::env::current_dir().context("Could not determine current directory")?;
+
+    // Canonicalize both for reliable comparison (handles symlinks, ..)
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+
+    if cwd_canon != root_canon {
+        bail!(
+            "This command must be run from the repo root.\n\
+             \n  You are in: {}\n  Repo root:  {}\n\
+             \n  Run: cd {} && maw ...",
+            cwd.display(),
+            root.display(),
+            root.display()
+        );
+    }
+
+    Ok(root)
+}
+
 fn workspaces_dir() -> Result<PathBuf> {
     Ok(repo_root()?.join(".workspaces"))
 }
@@ -242,6 +266,7 @@ fn validate_workspace_name(name: &str) -> Result<()> {
 }
 
 fn create(name: &str, revision: Option<&str>) -> Result<()> {
+    ensure_repo_root()?;
     let path = workspace_path(name)?;
 
     if path.exists() {
@@ -337,6 +362,7 @@ fn destroy(name: &str, force: bool) -> Result<()> {
         bail!("Cannot destroy the default workspace");
     }
 
+    ensure_repo_root()?;
     let path = workspace_path(name)?;
 
     if !path.exists() {
@@ -599,7 +625,7 @@ fn merge(
     // If run from inside a workspace, jj new would move that workspace's
     // working copy instead of default's, then workspace forget would orphan
     // the merge commit.
-    let root = repo_root()?;
+    let root = ensure_repo_root()?;
 
     if ws_to_merge.len() == 1 {
         println!("Adopting workspace: {}", ws_to_merge[0]);
