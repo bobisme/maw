@@ -256,6 +256,9 @@ br create --title="..." --type=task --priority=2
 - **Co-author**: Include `Co-Authored-By: Claude <noreply@anthropic.com>` in commits
 - **Workspace names**: Lowercase alphanumeric with hyphens/underscores (`agent-1`, `feature-x`)
 - **Versioning**: Use semantic versioning. Tag releases with `v` prefix (`v0.1.0`). Update Cargo.toml version and README install command before tagging.
+- **Agent identity**: When announcing releases or responding on botbus, use `--agent maw-dev` and post to `#maw` channel.
+- **Issue tracking**: Use `br` (beads) for issue tracking. File beads for bugs and feature requests. Triage community feedback from botbus.
+- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `jj bookmark set main -r @` → `jj git push` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `cargo install --path .` → announce on botbus #maw as maw-dev.
 
 ---
 
@@ -278,6 +281,9 @@ MAW is frequently invoked by agents with **no prior context**. Every piece of to
 - Include copy-pasteable commands, not just descriptions
 - Keep it brief — agents are token-conscious
 - Use structured prefixes where appropriate: `WARNING:`, `IMPORTANT:`, `To fix:`, `Next:`
+- Assume agents have **zero jj knowledge** — maw is their first contact with jj. Every jj concept (describe, working copy, stale, bookmarks, @- syntax) needs a one-line explanation the first time it appears in a given output context
+- All --help text and runtime output must work in **sandboxed environments** where `cd` doesn't persist between tool calls. Never instruct agents to `cd` into a workspace — use `maw ws jj <name>` for jj commands and `cd /absolute/path && cmd` for other commands
+- All file operation instructions must reference **absolute workspace paths**, not relative ones. Agents use Read/Write/Edit tools with absolute paths, not just bash
 
 ---
 
