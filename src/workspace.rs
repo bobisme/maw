@@ -60,13 +60,16 @@ pub enum WorkspaceCommands {
     ///
     /// Removes the workspace: unregisters it from jj and deletes the
     /// directory. Merge any important changes first (maw ws merge).
+    ///
+    /// Non-interactive by default (agents can't respond to prompts).
+    /// Use --confirm for interactive confirmation.
     Destroy {
         /// Name of the workspace to destroy
         name: String,
 
-        /// Skip confirmation prompt
+        /// Prompt for confirmation before destroying
         #[arg(short, long)]
-        force: bool,
+        confirm: bool,
     },
 
     /// List all workspaces
@@ -125,19 +128,19 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws merge alice                 # adopt alice's work
     ///   maw ws merge alice bob             # merge alice and bob's work
-    ///   maw ws merge alice bob --destroy   # merge and clean up workspaces
+    ///   maw ws merge alice bob --destroy   # merge and clean up (non-interactive)
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
         workspaces: Vec<String>,
 
-        /// Destroy workspaces after successful merge
+        /// Destroy workspaces after successful merge (non-interactive by default)
         #[arg(long)]
         destroy: bool,
 
-        /// Skip confirmation prompt (use with --destroy)
+        /// Prompt for confirmation before destroying (use with --destroy)
         #[arg(short, long)]
-        force: bool,
+        confirm: bool,
 
         /// Custom merge commit message
         #[arg(short, long)]
@@ -159,7 +162,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             };
             create(&name, revision.as_deref())
         }
-        WorkspaceCommands::Destroy { name, force } => destroy(&name, force),
+        WorkspaceCommands::Destroy { name, confirm } => destroy(&name, confirm),
         WorkspaceCommands::List { verbose } => list(verbose),
         WorkspaceCommands::Status => status(),
         WorkspaceCommands::Sync => sync(),
@@ -167,9 +170,9 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Merge {
             workspaces,
             destroy,
-            force,
+            confirm,
             message,
-        } => merge(&workspaces, destroy, force, message.as_deref()),
+        } => merge(&workspaces, destroy, confirm, message.as_deref()),
     }
 }
 
@@ -357,7 +360,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn destroy(name: &str, force: bool) -> Result<()> {
+fn destroy(name: &str, confirm: bool) -> Result<()> {
     if name == "default" {
         bail!("Cannot destroy the default workspace");
     }
@@ -369,7 +372,7 @@ fn destroy(name: &str, force: bool) -> Result<()> {
         bail!("Workspace does not exist at {}", path.display());
     }
 
-    if !force {
+    if confirm {
         println!("About to destroy workspace '{name}' at {}", path.display());
         println!("This will forget the workspace and delete the directory.");
         println!();
@@ -611,7 +614,7 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
 fn merge(
     workspaces: &[String],
     destroy_after: bool,
-    force: bool,
+    confirm: bool,
     message: Option<&str>,
 ) -> Result<()> {
     let ws_to_merge = workspaces.to_vec();
@@ -737,7 +740,7 @@ fn merge(
             for ws in &ws_to_merge {
                 println!("  maw ws destroy {ws}");
             }
-        } else if !force {
+        } else if confirm {
             println!();
             println!("Will destroy {} workspaces:", ws_to_merge.len());
             for ws in &ws_to_merge {

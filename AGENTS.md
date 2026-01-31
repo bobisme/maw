@@ -55,9 +55,9 @@ Common patterns:
 | Run jj in workspace | `maw ws jj <name> <args>` |
 | Merge agent work | `maw ws merge <a> <b>` |
 | Merge and cleanup | `maw ws merge <a> <b> --destroy` |
-| Destroy workspace | `maw ws destroy <name> --force` |
+| Destroy workspace | `maw ws destroy <name>` |
 
-Note: Use `--force` with destroy in scripts/automation to skip the confirmation prompt.
+Note: Destroy commands are non-interactive by default (agents can't respond to prompts). Use `--confirm` if you want interactive confirmation.
 
 ---
 
