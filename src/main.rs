@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod agents;
 mod doctor;
+mod format;
 mod init;
 mod jj_intro;
 mod tui;

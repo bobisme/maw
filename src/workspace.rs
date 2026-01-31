@@ -5,6 +5,55 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use rand::seq::IndexedRandom;
+use serde::Serialize;
+
+use crate::format::OutputFormat;
+
+#[derive(Serialize)]
+struct WorkspaceInfo {
+    name: String,
+    is_current: bool,
+    is_default: bool,
+    change_id: String,
+    commit_id: String,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceStatus {
+    current_workspace: String,
+    is_stale: bool,
+    has_changes: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changes: Option<String>,
+    workspaces: Vec<WorkspaceEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    conflicts: Vec<ConflictInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    divergent_commits: Vec<DivergentCommitInfo>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceEntry {
+    name: String,
+    is_current: bool,
+    info: String,
+}
+
+#[derive(Serialize)]
+struct ConflictInfo {
+    change_id: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct DivergentCommitInfo {
+    change_id: String,
+    commit_id: String,
+    description: String,
+}
 
 const ADJECTIVES: &[&str] = &[
     "blue", "green", "red", "gold", "silver", "swift", "brave", "calm", "wild", "bold", "keen",
@@ -82,6 +131,10 @@ pub enum WorkspaceCommands {
         /// Show detailed information
         #[arg(short, long)]
         verbose: bool,
+
+        /// Output format: toon (default), json, or text
+        #[arg(long, default_value = "toon")]
+        format: OutputFormat,
     },
 
     /// Show status of current workspace and all agent work
@@ -91,7 +144,11 @@ pub enum WorkspaceCommands {
     /// - All agent workspaces and their commits
     /// - Any conflicts that need resolution
     /// - Unmerged work across all workspaces
-    Status,
+    Status {
+        /// Output format: toon (default), json, or text
+        #[arg(long, default_value = "toon")]
+        format: OutputFormat,
+    },
 
     /// Sync workspace with repository (handle stale working copy)
     ///
@@ -163,8 +220,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             create(&name, revision.as_deref())
         }
         WorkspaceCommands::Destroy { name, confirm } => destroy(&name, confirm),
-        WorkspaceCommands::List { verbose } => list(verbose),
-        WorkspaceCommands::Status => status(),
+        WorkspaceCommands::List { verbose, format } => list(verbose, format),
+        WorkspaceCommands::Status { format } => status(format),
         WorkspaceCommands::Sync => sync(),
         WorkspaceCommands::Jj { name, args } => jj_in_workspace(&name, &args),
         WorkspaceCommands::Merge {
@@ -402,12 +459,9 @@ fn destroy(name: &str, confirm: bool) -> Result<()> {
     Ok(())
 }
 
-fn status() -> Result<()> {
+fn status(format: OutputFormat) -> Result<()> {
     // Get current workspace name
     let current_ws = get_current_workspace()?;
-
-    println!("=== Workspace Status ===");
-    println!();
 
     // Check if stale
     let stale_check = Command::new("jj")
@@ -415,47 +469,17 @@ fn status() -> Result<()> {
         .output()
         .context("Failed to run jj status")?;
 
-    let status_output = String::from_utf8_lossy(&stale_check.stderr);
-    let is_stale = status_output.contains("working copy is stale");
-
-    if is_stale {
-        println!("WARNING: Working copy is stale!");
-        println!("  (Another workspace changed shared history — your files are outdated.)");
-        println!("  Fix: maw ws sync");
-        println!();
-    }
-
-    // Show current workspace status
-    println!("Current: {current_ws}");
+    let status_stderr = String::from_utf8_lossy(&stale_check.stderr);
+    let is_stale = status_stderr.contains("working copy is stale");
     let status_stdout = String::from_utf8_lossy(&stale_check.stdout);
-    if status_stdout.trim().is_empty() {
-        println!("  (no changes)");
-    } else {
-        for line in status_stdout.lines() {
-            println!("  {line}");
-        }
-    }
-    println!();
 
     // Get all workspaces and their commits
-    println!("=== All Agent Work ===");
-    println!();
-
     let ws_output = Command::new("jj")
         .args(["workspace", "list"])
         .output()
         .context("Failed to run jj workspace list")?;
 
     let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    for line in ws_list.lines() {
-        if let Some((name, rest)) = line.split_once(':') {
-            let name = name.trim();
-            let is_current = name == current_ws;
-            let marker = if is_current { ">" } else { " " };
-            println!("{marker} {name}: {}", rest.trim());
-        }
-    }
-    println!();
 
     // Check for conflicts
     let log_output = Command::new("jj")
@@ -470,7 +494,117 @@ fn status() -> Result<()> {
         .output()
         .context("Failed to check for conflicts")?;
 
-    let conflicts = String::from_utf8_lossy(&log_output.stdout);
+    let conflicts_text = String::from_utf8_lossy(&log_output.stdout);
+
+    // Check for divergent commits
+    let divergent_output = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-T",
+            r#"if(divergent, change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n", "")"#,
+        ])
+        .output()
+        .context("Failed to check for divergent commits")?;
+
+    let divergent_text = String::from_utf8_lossy(&divergent_output.stdout);
+
+    // For text format, use the traditional output
+    if format == OutputFormat::Text {
+        print_status_text(
+            &current_ws,
+            is_stale,
+            &status_stdout,
+            &ws_list,
+            &conflicts_text,
+            &divergent_text,
+        );
+        return Ok(());
+    }
+
+    // For structured formats, parse and serialize
+    match build_status_struct(
+        &current_ws,
+        is_stale,
+        &status_stdout,
+        &ws_list,
+        &conflicts_text,
+        &divergent_text,
+    ) {
+        Ok(status_data) => match format.serialize(&status_data) {
+            Ok(output) => println!("{output}"),
+            Err(e) => {
+                eprintln!("Warning: Failed to serialize status to {format:?}: {}", e);
+                eprintln!("Falling back to text output:");
+                print_status_text(
+                    &current_ws,
+                    is_stale,
+                    &status_stdout,
+                    &ws_list,
+                    &conflicts_text,
+                    &divergent_text,
+                );
+            }
+        },
+        Err(e) => {
+            eprintln!("Warning: Failed to parse status data: {}", e);
+            eprintln!("Falling back to text output:");
+            print_status_text(
+                &current_ws,
+                is_stale,
+                &status_stdout,
+                &ws_list,
+                &conflicts_text,
+                &divergent_text,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Print status in traditional text format
+fn print_status_text(
+    current_ws: &str,
+    is_stale: bool,
+    status_stdout: &str,
+    ws_list: &str,
+    conflicts: &str,
+    divergent: &str,
+) {
+    println!("=== Workspace Status ===");
+    println!();
+
+    if is_stale {
+        println!("WARNING: Working copy is stale!");
+        println!("  (Another workspace changed shared history — your files are outdated.)");
+        println!("  Fix: maw ws sync");
+        println!();
+    }
+
+    println!("Current: {current_ws}");
+    if status_stdout.trim().is_empty() {
+        println!("  (no changes)");
+    } else {
+        for line in status_stdout.lines() {
+            println!("  {line}");
+        }
+    }
+    println!();
+
+    println!("=== All Agent Work ===");
+    println!();
+
+    for line in ws_list.lines() {
+        if let Some((name, rest)) = line.split_once(':') {
+            let name = name.trim();
+            let is_current = name == current_ws;
+            let marker = if is_current { ">" } else { " " };
+            println!("{marker} {name}: {}", rest.trim());
+        }
+    }
+    println!();
+
     if !conflicts.trim().is_empty() {
         println!("=== Conflicts ===");
         println!("  (jj records conflicts in commits instead of blocking — you can keep working)");
@@ -486,19 +620,6 @@ fn status() -> Result<()> {
         println!();
     }
 
-    // Check for divergent commits (same change ID, multiple commit IDs)
-    // This can happen when concurrent jj operations modify the same commit
-    let divergent_output = Command::new("jj")
-        .args([
-            "log",
-            "--no-graph",
-            "-T",
-            r#"if(divergent, change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n", "")"#,
-        ])
-        .output()
-        .context("Failed to check for divergent commits")?;
-
-    let divergent = String::from_utf8_lossy(&divergent_output.stdout);
     if !divergent.trim().is_empty() {
         println!("=== Divergent Commits (needs cleanup) ===");
         println!();
@@ -516,8 +637,78 @@ fn status() -> Result<()> {
         println!("    jj abandon <change-id>/0   # remove the unwanted version");
         println!();
     }
+}
 
-    Ok(())
+/// Build structured status data (resilient to parsing failures)
+fn build_status_struct(
+    current_ws: &str,
+    is_stale: bool,
+    status_stdout: &str,
+    ws_list: &str,
+    conflicts_text: &str,
+    divergent_text: &str,
+) -> Result<WorkspaceStatus> {
+    let has_changes = !status_stdout.trim().is_empty();
+    let changes = if has_changes {
+        Some(status_stdout.to_string())
+    } else {
+        None
+    };
+
+    // Parse workspace list
+    let mut workspaces = Vec::new();
+    for line in ws_list.lines() {
+        if let Some((name, rest)) = line.split_once(':') {
+            let name = name.trim().to_string();
+            let is_current = name == current_ws;
+            workspaces.push(WorkspaceEntry {
+                name,
+                is_current,
+                info: rest.trim().to_string(),
+            });
+        }
+    }
+
+    // Parse conflicts
+    let mut conflicts = Vec::new();
+    for line in conflicts_text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() >= 2 {
+            conflicts.push(ConflictInfo {
+                change_id: parts[0].to_string(),
+                description: parts[1].to_string(),
+            });
+        }
+    }
+
+    // Parse divergent commits
+    let mut divergent_commits = Vec::new();
+    for line in divergent_text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        if parts.len() >= 3 {
+            divergent_commits.push(DivergentCommitInfo {
+                change_id: parts[0].to_string(),
+                commit_id: parts[1].to_string(),
+                description: parts[2].to_string(),
+            });
+        }
+    }
+
+    Ok(WorkspaceStatus {
+        current_workspace: current_ws.to_string(),
+        is_stale,
+        has_changes,
+        changes,
+        workspaces,
+        conflicts,
+        divergent_commits,
+    })
 }
 
 fn get_current_workspace() -> Result<String> {
@@ -797,7 +988,7 @@ fn destroy_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn list(verbose: bool) -> Result<()> {
+fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let output = Command::new("jj")
         .args(["workspace", "list"])
         .output()
@@ -813,41 +1004,124 @@ fn list(verbose: bool) -> Result<()> {
     let list = String::from_utf8_lossy(&output.stdout);
 
     if list.trim().is_empty() {
-        println!("No workspaces found.");
+        // Even for structured formats, return a simple message for empty lists
+        match format {
+            OutputFormat::Text => println!("No workspaces found."),
+            OutputFormat::Json => println!("[]"),
+            OutputFormat::Toon => println!("[]"),
+        }
         return Ok(());
     }
 
-    println!("Workspaces:");
-    println!();
+    // For text format, just print the raw jj output (traditional behavior)
+    if format == OutputFormat::Text {
+        println!("Workspaces:");
+        println!();
 
-    for line in list.lines() {
-        // Parse: "name: change_id commit_id description"
-        if let Some((name, rest)) = line.split_once(':') {
-            let name = name.trim();
-            let rest = rest.trim();
+        for line in list.lines() {
+            if let Some((name, rest)) = line.split_once(':') {
+                let name = name.trim();
+                let rest = rest.trim();
 
-            let is_default = name == "default";
-            let marker = if is_default { "*" } else { " " };
+                let is_default = name == "default";
+                let marker = if is_default { "*" } else { " " };
 
-            if verbose {
-                println!("{marker} {name}");
-                println!("    {rest}");
+                if verbose {
+                    println!("{marker} {name}");
+                    println!("    {rest}");
 
-                // Check if workspace path exists
-                if !is_default {
-                    let path = workspace_path(name)?;
-                    if path.exists() {
-                        println!("    path: {}", path.display());
-                    } else {
-                        println!("    path: (missing!)");
+                    if !is_default {
+                        let path = workspace_path(name)?;
+                        if path.exists() {
+                            println!("    path: {}", path.display());
+                        } else {
+                            println!("    path: (missing!)");
+                        }
                     }
+                    println!();
+                } else {
+                    println!("{marker} {name}: {rest}");
                 }
-                println!();
-            } else {
-                println!("{marker} {name}: {rest}");
             }
+        }
+        return Ok(());
+    }
+
+    // For structured formats (json/toon), parse into data structures
+    // Be resilient: if parsing fails, fall back to raw text
+    let workspaces: Vec<WorkspaceInfo> = match parse_workspace_list(&list, verbose) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("Warning: Failed to parse workspace list: {}", e);
+            eprintln!("Falling back to raw text output:");
+            println!("{list}");
+            return Ok(());
+        }
+    };
+
+    // Serialize to requested format
+    match format.serialize(&workspaces) {
+        Ok(output) => println!("{output}"),
+        Err(e) => {
+            eprintln!("Warning: Failed to serialize to {format:?}: {}", e);
+            eprintln!("Falling back to raw text output:");
+            println!("{list}");
         }
     }
 
     Ok(())
+}
+
+/// Parse jj workspace list output into structured data
+/// Resilient to format changes - returns error if parsing fails
+fn parse_workspace_list(list: &str, include_path: bool) -> Result<Vec<WorkspaceInfo>> {
+    let mut workspaces = Vec::new();
+
+    for line in list.lines() {
+        // Expected format: "name@: change_id commit_id description"
+        // Current workspace has @ marker
+        let Some((name_part, rest)) = line.split_once(':') else {
+            // Skip lines that don't match expected format
+            continue;
+        };
+
+        let name_part = name_part.trim();
+        let is_current = name_part.contains('@');
+        let name = name_part.trim_end_matches('@').trim();
+
+        // Parse rest: "change_id commit_id description..."
+        let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+        if parts.len() < 2 {
+            // Need at least change_id and commit_id
+            bail!("Unexpected workspace line format: {}", line);
+        }
+
+        let change_id = parts[0].to_string();
+        let commit_id = parts[1].to_string();
+        let description = parts[2..].join(" ");
+
+        let path = if include_path && name != "default" {
+            workspace_path(name).ok().and_then(|p| {
+                if p.exists() {
+                    Some(p.display().to_string())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        workspaces.push(WorkspaceInfo {
+            name: name.to_string(),
+            is_current,
+            is_default: name == "default",
+            change_id,
+            commit_id,
+            description,
+            path,
+        });
+    }
+
+    Ok(workspaces)
 }
