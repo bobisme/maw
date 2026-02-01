@@ -50,6 +50,7 @@ Common patterns:
 |------|---------|
 | Create workspace | `maw ws create <name>` |
 | List workspaces | `maw ws list` |
+| Quick status overview | `maw status` |
 | Check status | `maw ws status` |
 | Handle stale workspace | `maw ws sync` |
 | Run jj in workspace | `maw ws jj <name> <args>` |

@@ -6,6 +6,7 @@ mod doctor;
 mod format;
 mod init;
 mod jj_intro;
+mod status;
 mod tui;
 mod workspace;
 
@@ -94,6 +95,9 @@ enum Commands {
     /// to GitHub. Designed for agents encountering jj for the first time.
     #[command(name = "jj-intro")]
     JjIntro,
+
+    /// Brief repo and workspace status
+    Status(status::StatusArgs),
 }
 
 fn main() -> Result<()> {
@@ -106,5 +110,6 @@ fn main() -> Result<()> {
         Commands::Doctor => doctor::run(),
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),
+        Commands::Status(cmd) => status::run(cmd),
     }
 }

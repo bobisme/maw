@@ -9,7 +9,7 @@ Tooling for coordinating multiple AI coding agents working on the same codebase.
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.16.0
+cargo install --git https://github.com/bobisme/maw --tag v0.17.0
 ```
 
 Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
@@ -32,6 +32,7 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 |---------|-------------|
 | `maw ws create <name>` | Create isolated workspace for an agent |
 | `maw ws list` | List all workspaces |
+| `maw status` | Brief repo/workspace status summary |
 | `maw ws status` | Show all agent work, conflicts, stale warnings |
 | `maw ws sync` | Handle stale workspace |
 | `maw ws jj <name> <args>` | Run jj in a workspace (for sandboxed agents) |
