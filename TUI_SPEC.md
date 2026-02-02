@@ -1,6 +1,6 @@
-# MAW TUI Specification
+# maw TUI Specification
 
-A terminal UI for MAW, inspired by lazygit. Built with ratatui.
+A terminal UI for maw, inspired by lazygit. Built with ratatui.
 
 ## Launch
 

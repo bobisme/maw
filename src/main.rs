@@ -12,7 +12,7 @@ mod workspace;
 
 /// Multi-Agent Workflow coordinator
 ///
-/// MAW coordinates multiple AI agents on the same codebase using jj
+/// maw coordinates multiple AI agents on the same codebase using jj
 /// (Jujutsu), a git-compatible version control system. Each agent gets
 /// an isolated working copy (separate view of the codebase) — edit
 /// files concurrently without blocking each other.
@@ -70,7 +70,7 @@ enum Commands {
     #[command(subcommand)]
     Agents(agents::AgentsCommands),
 
-    /// Initialize MAW in the current repository
+    /// Initialize maw in the current repository
     ///
     /// Ensures jj is initialized and .workspaces/ is gitignored.
     /// Safe to run multiple times.

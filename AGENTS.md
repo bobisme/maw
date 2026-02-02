@@ -1,4 +1,4 @@
-# Agent Guide for MAW
+# Agent Guide for maw
 
 This project uses **maw** for workspace management, **jj** (Jujutsu) for version control, and **beads** for issue tracking.
 
@@ -271,7 +271,7 @@ br create --title="..." --type=task --priority=2
 
 ## Output Guidelines
 
-MAW is frequently invoked by agents with **no prior context**. Every piece of tool output must be self-contained and actionable.
+maw is frequently invoked by agents with **no prior context**. Every piece of tool output must be self-contained and actionable.
 
 **Errors** must include:
 - What failed (include stderr from jj when available)

@@ -1,10 +1,12 @@
-# MAW - Multi-Agent Workflow
+# maw - multi-agent workflow
+
+![maw](images/maw.webp)
 
 Tooling for coordinating multiple AI coding agents working on the same codebase.
 
 **The problem**: When you spawn multiple AI agents to work on a codebase simultaneously, they step on each other - editing the same files, creating conflicts, losing work.
 
-**The solution**: MAW uses jj (Jujutsu) workspaces to give each agent an isolated working copy. Agents work independently without blocking each other. Conflicts are recorded in commits (not blocking) and resolved when merging.
+**The solution**: maw uses jj (Jujutsu) workspaces to give each agent an isolated working copy. Agents work independently without blocking each other. Conflicts are recorded in commits (not blocking) and resolved when merging.
 
 ## Install
 
@@ -17,7 +19,7 @@ Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
 ## Quick Start
 
 ```bash
-# Add MAW instructions to your project's AGENTS.md
+# Add maw instructions to your project's AGENTS.md
 maw agents init
 
 # Verify setup
@@ -38,9 +40,9 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 | `maw ws jj <name> <args>` | Run jj in a workspace (for sandboxed agents) |
 | `maw ws merge <a> <b>` | Merge named agent workspaces |
 | `maw ws destroy <name>` | Remove a workspace |
-| `maw init` | Initialize MAW (jj + .gitignore) |
+| `maw init` | Initialize maw (jj + .gitignore) |
 | `maw doctor` | Check system requirements |
-| `maw agents init` | Add MAW section to AGENTS.md |
+| `maw agents init` | Add maw section to AGENTS.md |
 
 ## How It Works
 

@@ -7,18 +7,18 @@ use clap::Subcommand;
 /// Agents subcommands for `AGENTS.md` management
 #[derive(Subcommand)]
 pub enum AgentsCommands {
-    /// Generate or update AGENTS.md with MAW workflow instructions
+    /// Generate or update AGENTS.md with maw workflow instructions
     ///
     /// Creates or updates the AGENTS.md file with instructions for AI agents
-    /// on how to use MAW workspaces. If AGENTS.md already exists, this will
-    /// append or update the MAW section.
+    /// on how to use maw workspaces. If AGENTS.md already exists, this will
+    /// append or update the maw section.
     Init {
-        /// Overwrite existing MAW section if present
+        /// Overwrite existing maw section if present
         #[arg(short, long)]
         force: bool,
     },
 
-    /// Print the MAW section that would be added to AGENTS.md
+    /// Print the maw section that would be added to AGENTS.md
     Show,
 }
 
@@ -36,9 +36,9 @@ fn maw_instructions() -> String {
     format!(
         r#"{MAW_SECTION_START}
 
-## Multi-Agent Workflow with MAW
+## Multi-Agent Workflow with maw
 
-This project uses MAW for coordinating multiple agents via jj (Jujutsu) workspaces.
+This project uses maw for coordinating multiple agents via jj (Jujutsu) workspaces.
 jj is a **git-compatible version control system**. Key differences from git:
 - **No staging area** — all changes are tracked automatically (no `git add`)
 - **Always in a commit** — your work is always saved in a commit; use `describe` to set the message
@@ -161,9 +161,9 @@ fn init(force: bool) -> Result<()> {
                 );
 
                 fs::write(agents_path, new_content).context("Failed to write AGENTS.md")?;
-                println!("Updated MAW section in AGENTS.md");
+                println!("Updated maw section in AGENTS.md");
             } else {
-                println!("MAW section already exists in AGENTS.md");
+                println!("maw section already exists in AGENTS.md");
                 println!("Use --force to overwrite");
                 return Ok(());
             }
@@ -171,13 +171,13 @@ fn init(force: bool) -> Result<()> {
             // Append section
             let new_content = format!("{content}\n{section}");
             fs::write(agents_path, new_content).context("Failed to write AGENTS.md")?;
-            println!("Added MAW section to AGENTS.md");
+            println!("Added maw section to AGENTS.md");
         }
     } else {
         // Create new file
         let content = format!("# Agent Guide\n\n{section}");
         fs::write(agents_path, content).context("Failed to create AGENTS.md")?;
-        println!("Created AGENTS.md with MAW instructions");
+        println!("Created AGENTS.md with maw instructions");
     }
 
     Ok(())

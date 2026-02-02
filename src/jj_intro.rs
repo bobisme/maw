@@ -176,7 +176,7 @@ jj describe -m "resolve: ..."     # Update commit message
 ## More Help
 
 - Full jj docs: https://martinvonz.github.io/jj/
-- MAW agent guide: maw agents show
+- maw agent guide: maw agents show
 - System check: maw doctor
 "#
 }

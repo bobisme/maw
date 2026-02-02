@@ -6,7 +6,7 @@ use anyhow::Result;
 /// Check system requirements and configuration
 #[allow(clippy::unnecessary_wraps)]
 pub fn run() -> Result<()> {
-    println!("MAW Doctor");
+    println!("maw doctor");
     println!("==========");
     println!();
 

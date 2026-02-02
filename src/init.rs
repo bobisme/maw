@@ -4,18 +4,18 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-/// Initialize MAW in the current repository
+/// Initialize maw in the current repository
 ///
 /// Ensures jj is initialized and .workspaces/ is gitignored.
 pub fn run() -> Result<()> {
-    println!("Initializing MAW...");
+    println!("Initializing maw...");
     println!();
 
     ensure_jj_repo()?;
     ensure_workspaces_gitignored()?;
 
     println!();
-    println!("MAW is ready! Next steps:");
+    println!("maw is ready! Next steps:");
     println!("  maw ws create <agent-name>   # Create a workspace");
     println!("  maw agents init              # Add agent instructions to AGENTS.md");
     println!("  maw doctor                   # Verify full setup");
@@ -24,10 +24,9 @@ pub fn run() -> Result<()> {
 }
 
 fn ensure_jj_repo() -> Result<()> {
-    let check = Command::new("jj")
-        .args(["status"])
-        .output()
-        .context("jj not found — install from https://martinvonz.github.io/jj/latest/install-and-setup/")?;
+    let check = Command::new("jj").args(["status"]).output().context(
+        "jj not found — install from https://martinvonz.github.io/jj/latest/install-and-setup/",
+    )?;
 
     if check.status.success() {
         println!("[OK] jj repository already initialized");
@@ -94,12 +93,12 @@ pub fn ensure_workspaces_gitignored() -> Result<()> {
 
         // Append it
         let separator = if content.ends_with('\n') { "" } else { "\n" };
-        let new_content = format!("{content}{separator}\n# MAW agent workspaces\n.workspaces/\n");
+        let new_content = format!("{content}{separator}\n# maw agent workspaces\n.workspaces/\n");
         fs::write(gitignore_path, new_content).context("Failed to update .gitignore")?;
         println!("[OK] Added .workspaces/ to .gitignore");
     } else {
         // Create .gitignore
-        fs::write(gitignore_path, "# MAW agent workspaces\n.workspaces/\n")
+        fs::write(gitignore_path, "# maw agent workspaces\n.workspaces/\n")
             .context("Failed to create .gitignore")?;
         println!("[OK] Created .gitignore with .workspaces/");
     }
