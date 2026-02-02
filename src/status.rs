@@ -10,6 +10,7 @@ use clap::Args;
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const ANSI_ORANGE: &str = "\x1b[38;5;208m";
 const ANSI_BLUE: &str = "\x1b[34m";
+const ANSI_LIGHT_RED: &str = "\x1b[91m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 /// Brief repo/workspace status
@@ -117,28 +118,41 @@ impl StatusSummary {
             "\u{1f620}"
         };
 
-        let mut parts = vec![face.to_string()];
+        let mut out = String::new();
+        out.push_str(face);
+        let mut has_segment = false;
+
+        let mut append_segment = |segment: &str| {
+            if !has_segment {
+                has_segment = true;
+            }
+            out.push_str(segment);
+        };
 
         if self.non_default_workspaces > 0 {
             let count = self.non_default_workspaces.to_string();
-            let workspace = format!("\u{f0253}{count}");
-            parts.push(colorize_orange(&workspace));
+            let workspace = format!("\u{f0645} {count}");
+            let colored = colorize_orange(&workspace);
+            append_segment(&colored);
         }
 
         if self.change_count > 0 {
-            let delta = format!("\u{0394}{}", self.change_count);
-            parts.push(colorize_blue(&delta));
+            let changes = format!("\u{eb43} {}", self.change_count);
+            let colored = colorize_blue(&changes);
+            append_segment(&colored);
         }
 
         if self.git_untracked_count > 0 {
-            parts.push(format!("?{}", self.git_untracked_count));
+            let untracked = format!("?{}", self.git_untracked_count);
+            append_segment(&untracked);
         }
 
         if self.main_sync.is_warning() {
-            parts.push("\u{26a0}".to_string());
+            let warning = colorize_light_red("\u{e726}");
+            append_segment(&warning);
         }
 
-        format!("{}\n", parts.join(" "))
+        format!("{out}\n")
     }
 
     fn render_multiline(&self) -> String {
@@ -185,6 +199,10 @@ fn colorize_orange(value: &str) -> String {
 
 fn colorize_blue(value: &str) -> String {
     format!("{ANSI_BLUE}{value}{ANSI_RESET}")
+}
+
+fn colorize_light_red(value: &str) -> String {
+    format!("{ANSI_LIGHT_RED}{value}{ANSI_RESET}")
 }
 
 impl MainSyncStatus {

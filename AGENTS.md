@@ -226,6 +226,12 @@ jj bookmark track main@origin  # Track remote main
 
 ---
 
+## Release Notes
+
+### Unreleased
+
+- Refine `maw status --status-bar` prompt glyphs and colors for workspace count, change count, and sync warning.
+
 ## Issue Tracking with Beads
 
 ```bash
