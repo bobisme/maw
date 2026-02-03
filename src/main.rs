@@ -10,7 +10,7 @@ mod status;
 mod tui;
 mod workspace;
 
-/// Multi-Agent Workflow coordinator
+/// Multi-Agent Workspaces coordinator
 ///
 /// maw coordinates multiple AI agents on the same codebase using jj
 /// (Jujutsu), a git-compatible version control system. Each agent gets

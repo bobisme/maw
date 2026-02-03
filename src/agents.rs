@@ -36,7 +36,7 @@ fn maw_instructions() -> String {
     format!(
         r#"{MAW_SECTION_START}
 
-## Multi-Agent Workflow with maw
+## Multi-Agent Workspaces with maw
 
 This project uses maw for coordinating multiple agents via jj (Jujutsu) workspaces.
 jj is a **git-compatible version control system**. Key differences from git:

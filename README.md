@@ -1,4 +1,4 @@
-# maw - multi-agent workflow
+# maw - multi-agent workspaces
 
 ![maw](images/maw.webp)
 
