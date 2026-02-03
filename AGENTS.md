@@ -1,4 +1,10 @@
-# Agent Guide for maw
+# maw
+
+Project type: cli
+Tools: `beads`, `maw`, `crit`, `botbus`, `botty`
+Reviewer roles: security
+
+<!-- Add project-specific context below: architecture, conventions, key files, etc. -->
 
 This project uses **maw** for workspace management, **jj** (Jujutsu) for version control, and **beads** for issue tracking.
 
@@ -265,7 +271,7 @@ br create --title="..." --type=task --priority=2
 - **Versioning**: Use semantic versioning. Tag releases with `v` prefix (`v0.1.0`). Update Cargo.toml version and README install command before tagging.
 - **Agent identity**: When announcing releases or responding on botbus, use `--agent maw-dev` and post to `#maw` channel.
 - **Issue tracking**: Use `br` (beads) for issue tracking. File beads for bugs and feature requests. Triage community feedback from botbus.
-- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `jj bookmark set main -r @` → `jj git push` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `cargo install --path .` → announce on botbus #maw as maw-dev.
+- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `jj bookmark set main -r @` → `jj git push` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
 
 ---
 
@@ -302,128 +308,104 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 - `jj log` shows commits across all workspaces by default
 - Agents never block each other - conflicts are recorded, not blocking
 
-<!-- crit-agent-instructions -->
 
-## Crit: Agent-Centric Code Review
+<!-- botbox:managed-start -->
+## Botbox Workflow
 
-This project uses [crit](https://github.com/anomalyco/botcrit) for distributed code reviews optimized for AI agents.
+This project uses the botbox multi-agent workflow.
+
+### Identity
+
+Every command that touches bus or crit requires `--agent <name>`.
+Use `<project>-dev` as your name (e.g., `terseid-dev`). Agents spawned by `agent-loop.sh` receive a random name automatically.
+Run `bus whoami --agent $AGENT` to confirm your identity.
+
+### Lifecycle
+
+**New to the workflow?** Start with [worker-loop.md](.agents/botbox/worker-loop.md) — it covers the complete triage → start → work → finish cycle.
+
+Individual workflow docs:
+
+- [Close bead, merge workspace, release claims, sync](.agents/botbox/finish.md)
+- [groom](.agents/botbox/groom.md)
+- [Verify approval before merge](.agents/botbox/merge-check.md)
+- [Validate toolchain health](.agents/botbox/preflight.md)
+- [Report bugs/features to other projects](.agents/botbox/report-issue.md)
+- [Reviewer agent loop](.agents/botbox/review-loop.md)
+- [Request a review](.agents/botbox/review-request.md)
+- [Handle reviewer feedback (fix/address/defer)](.agents/botbox/review-response.md)
+- [Claim bead, create workspace, announce](.agents/botbox/start.md)
+- [Find work from inbox and beads](.agents/botbox/triage.md)
+- [Change bead status (open/in_progress/blocked/done)](.agents/botbox/update.md)
+- [Full triage-work-finish lifecycle](.agents/botbox/worker-loop.md)
 
 ### Quick Start
 
 ```bash
-# Initialize crit in the repository (once)
-crit init
-
-# Create a review for current change
-crit reviews create --title "Add feature X"
-
-# List open reviews
-crit reviews list
-
-# Check reviews needing your attention
-crit reviews list --needs-review --author $BOTBUS_AGENT
-
-# Show review details
-crit reviews show <review_id>
+AGENT=<project>-dev   # or: AGENT=$(bus generate-name)
+bus whoami --agent $AGENT
+br ready
 ```
 
-### Adding Comments (Recommended)
+### Beads Conventions
 
-The simplest way to comment on code - auto-creates threads:
+- Create a bead for each unit of work before starting.
+- Update status as you progress: `open` → `in_progress` → `closed`.
+- Reference bead IDs in all bus messages.
+- Sync on session end: `br sync --flush-only`.
 
-```bash
-# Add a comment on a specific line (creates thread automatically)
-crit comment <review_id> --file src/main.rs --line 42 "Consider using Option here"
+### Mesh Protocol
 
-# Add another comment on same line (reuses existing thread)
-crit comment <review_id> --file src/main.rs --line 42 "Good point, will fix"
+- Include `-L mesh` on bus messages.
+- Claim bead: `bus claims stake --agent $AGENT "bead://$BOTBOX_PROJECT/<bead-id>" -m "<bead-id>"`.
+- Claim workspace: `bus claims stake --agent $AGENT "workspace://$BOTBOX_PROJECT/$WS" -m "<bead-id>"`.
+- Claim agents before spawning: `bus claims stake --agent $AGENT "agent://role" -m "<bead-id>"`.
+- Release claims when done: `bus claims release --agent $AGENT --all`.
 
-# Comment on a line range
-crit comment <review_id> --file src/main.rs --line 10-20 "This block needs refactoring"
-```
+### Spawning Agents
 
-### Managing Threads
+1. Check if the role is online: `bus agents`.
+2. Claim the agent lease: `bus claims stake --agent $AGENT "agent://role"`.
+3. Spawn with an explicit identity (e.g., via botty or agent-loop.sh).
+4. Announce with `-L spawn-ack`.
 
-```bash
-# List threads on a review
-crit threads list <review_id>
+### Reviews
 
-# Show thread with context
-crit threads show <thread_id>
+- Use `crit` to open and request reviews.
+- If a reviewer is not online, claim `agent://reviewer-<role>` and spawn them.
+- Reviewer agents loop until no pending reviews remain (see review-loop doc).
 
-# Resolve a thread
-crit threads resolve <thread_id> --reason "Fixed in latest commit"
-```
+### Cross-Project Feedback
 
-### Voting on Reviews
+When you encounter issues with tools from other projects:
 
-```bash
-# Approve a review (LGTM)
-crit lgtm <review_id> -m "Looks good!"
+1. Query the `#projects` registry: `bus inbox --agent $AGENT --channels projects --all`
+2. Find the project entry (format: `project:<name> repo:<path> lead:<agent> tools:<tool1>,<tool2>`)
+3. Navigate to the repo, create beads with `br create`
+4. Post to the project channel: `bus send <project> "Filed beads: <ids>. <summary> @<lead>" -L feedback`
 
-# Block a review (request changes)
-crit block <review_id> -r "Need more test coverage"
-```
+See [report-issue.md](.agents/botbox/report-issue.md) for details.
 
-### Viewing Full Reviews
+### Stack Reference
 
-```bash
-# Show full review with all threads and comments
-crit review <review_id>
+| Tool | Purpose | Key commands |
+|------|---------|-------------|
+| bus | Communication, claims, presence | `send`, `inbox`, `claim`, `release`, `agents` |
+| maw | Isolated jj workspaces | `ws create`, `ws merge`, `ws destroy` |
+| br/bv | Work tracking + triage | `ready`, `create`, `close`, `--robot-next` |
+| crit | Code review | `review`, `comment`, `lgtm`, `block` |
+| botty | Agent runtime | `spawn`, `kill`, `tail`, `snapshot` |
 
-# Show with more context lines
-crit review <review_id> --context 5
+### Loop Scripts
 
-# List threads with first comment preview
-crit threads list <review_id> -v
-```
+Scripts in `scripts/` automate agent loops:
 
-### Approving and Merging
+| Script | Purpose |
+|--------|---------|
+| `agent-loop.sh` | Worker: sequential triage-start-work-finish |
+| `dev-loop.sh` | Lead dev: triage, parallel dispatch, merge |
+| `reviewer-loop.sh` | Reviewer: review loop until queue empty |
+| `spawn-security-reviewer.sh` | Spawn a security reviewer |
 
-```bash
-# Approve a review (changes status to approved)
-crit reviews approve <review_id>
-
-# Mark as merged (after jj squash/merge)
-# Note: Will fail if there are blocking votes
-crit reviews merge <review_id>
-
-# Self-approve and merge in one step (solo workflows)
-crit reviews merge <review_id> --self-approve
-```
-
-### Agent Best Practices
-
-1. **Set your identity** via environment:
-   ```bash
-   export BOTBUS_AGENT=my-agent-name
-   ```
-
-2. **Check for pending reviews** at session start:
-   ```bash
-   crit reviews list --needs-review --author $BOTBUS_AGENT
-   ```
-
-3. **Check status** to see unresolved threads:
-   ```bash
-   crit status <review_id> --unresolved-only
-   ```
-
-4. **Run doctor** to verify setup:
-   ```bash
-   crit doctor
-   ```
-
-### Output Formats
-
-- Default output is TOON (token-optimized, human-readable)
-- Use `--json` flag for machine-parseable JSON output
-
-### Key Concepts
-
-- **Reviews** are anchored to jj Change IDs (survive rebases)
-- **Threads** group comments on specific file locations
-- **crit comment** is the simple way to leave feedback (auto-creates threads)
-- Works across jj workspaces (shared .crit/ in main repo)
-
-<!-- end-crit-agent-instructions -->
+Usage: `bash scripts/<script>.sh <project-name> [agent-name]`
+<!-- botbox:managed-end -->
