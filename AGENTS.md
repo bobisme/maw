@@ -189,8 +189,17 @@ jj log --limit 3
 
 # Push to GitHub
 jj git push
-# NOTE: Despite output saying "Changes to push to origin:",
-# the push is ALREADY DONE. Do NOT run git push afterwards.
+```
+
+**Understanding jj push output**: When jj says `Changes to push to origin:` followed by branch/bookmark info, **the push has already completed**. This is different from git which shows "would push" before pushing. jj's output is a confirmation of what was pushed, not a preview.
+
+**Verify push succeeded**:
+```bash
+# Quick verification - compare local and remote main
+jj log -r 'main' --no-graph -T 'commit_id.short() ++ "\n"'
+git ls-remote origin refs/heads/main | cut -c1-12
+
+# If both show the same commit hash prefix, push succeeded
 ```
 
 ### 5. Tag the Release
@@ -218,6 +227,8 @@ jj bookmark track main@origin  # Track remote main
 **"Nothing to push"** - Bookmark wasn't moved. Check with `jj log` - if your commits aren't ancestors of `main`, run `jj bookmark set main -r <commit>`.
 
 **"Bookmark is behind remote"** - Someone else pushed. Pull first: `jj git fetch && jj rebase -d main@origin`.
+
+**"Did push actually happen?"** - jj output says `Changes to push to origin:` but you're unsure if it worked. This message means the push **already completed** (jj reports what it did, not what it will do). To verify: `jj log -r main --no-graph -T 'commit_id.short()'` should match `git ls-remote origin refs/heads/main | cut -c1-12`. If they match, push succeeded.
 
 ### Quick Reference
 

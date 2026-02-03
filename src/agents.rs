@@ -128,8 +128,13 @@ Then move the bookmark (jj's equivalent of a git branch) and push:
 ```bash
 jj bookmark set main -r @-     # Point 'main' at the merge commit (@- = parent of working copy)
 jj git push                    # Push to remote (like git push)
-# NOTE: Despite output saying "Changes to push to origin:",
-# the push is ALREADY DONE. Do NOT run git push afterwards.
+
+# IMPORTANT: When jj says "Changes to push to origin:", the push is ALREADY DONE.
+# jj reports what it pushed, not what it will push. Do NOT run git push afterwards.
+
+# To verify push succeeded (local and remote should match):
+jj log -r main --no-graph -T 'commit_id.short()'
+git ls-remote origin refs/heads/main | cut -c1-12
 ```
 
 {MAW_SECTION_END}
