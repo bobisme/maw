@@ -2,9 +2,32 @@
 
 use std::process::Command;
 
+/// Get the repo root by finding the .jj directory that is NOT inside .workspaces.
+/// Jj workspaces have their own .jj directory pointing back to the main repo,
+/// so we need to find the actual repo root (the one with the backing store).
+fn repo_root() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // Walk up from manifest dir looking for .jj that's not in .workspaces
+    for ancestor in manifest_dir.ancestors() {
+        let jj_dir = ancestor.join(".jj");
+        if jj_dir.exists() {
+            // Check if we're inside .workspaces by looking at the path
+            let path_str = ancestor.to_string_lossy();
+            if !path_str.contains(".workspaces") {
+                return ancestor.to_path_buf();
+            }
+        }
+    }
+
+    // Fallback: just use manifest dir (tests may fail with different error)
+    manifest_dir
+}
+
 fn maw(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_maw"))
         .args(args)
+        .current_dir(repo_root())
         .output()
         .expect("failed to execute maw")
 }

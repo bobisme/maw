@@ -269,6 +269,23 @@ pub enum WorkspaceCommands {
         empty: bool,
     },
 
+    /// Reconnect an orphaned workspace directory to jj's tracking
+    ///
+    /// Use this to recover a workspace where 'jj workspace forget' was run
+    /// but the directory still exists. Re-adds the workspace to jj's tracking.
+    ///
+    /// Examples:
+    ///   maw ws attach orphaned               # reconnect orphaned directory
+    ///   maw ws attach orphaned -r main       # attach at specific revision
+    Attach {
+        /// Name of the workspace directory to attach
+        name: String,
+
+        /// Revision to attach the workspace to (default: main or @)
+        #[arg(short, long)]
+        revision: Option<String>,
+    },
+
     /// Merge work from workspaces into default
     ///
     /// Creates a merge commit combining work from the specified workspaces.
@@ -329,6 +346,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Jj { name, args } => jj_in_workspace(&name, &args),
         WorkspaceCommands::History { name, limit } => history(&name, limit),
         WorkspaceCommands::Prune { force, empty } => prune(force, empty),
+        WorkspaceCommands::Attach { name, revision } => attach(&name, revision.as_deref()),
         WorkspaceCommands::Merge {
             workspaces,
             destroy,
@@ -638,6 +656,185 @@ fn destroy(name: &str, confirm: bool) -> Result<()> {
         .with_context(|| format!("Failed to remove {}", path.display()))?;
 
     println!("Workspace destroyed.");
+    Ok(())
+}
+
+/// Attach (reconnect) an orphaned workspace directory to jj's tracking.
+/// An orphaned workspace is one where 'jj workspace forget' was run but
+/// the directory still exists in .workspaces/.
+fn attach(name: &str, revision: Option<&str>) -> Result<()> {
+    if name == "default" {
+        bail!("Cannot attach the default workspace (it's always tracked)");
+    }
+
+    ensure_repo_root()?;
+    let root = repo_root()?;
+    let path = workspace_path(name)?;
+
+    // Check if directory exists
+    if !path.exists() {
+        bail!(
+            "Workspace directory does not exist at {}\n  \
+             The directory must exist to attach it.\n  \
+             To create a new workspace: maw ws create {name}",
+            path.display()
+        );
+    }
+
+    // Check if workspace is already tracked by jj
+    let ws_output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+    let is_tracked = ws_list.lines().any(|line| {
+        line.split(':')
+            .next()
+            .map(|n| n.trim().trim_end_matches('@') == name)
+            .unwrap_or(false)
+    });
+
+    if is_tracked {
+        bail!(
+            "Workspace '{name}' is already tracked by jj.\n  \
+             Use 'maw ws sync' if the workspace is stale.\n  \
+             Use 'maw ws list' to see all workspaces."
+        );
+    }
+
+    // Determine the revision to attach to (user-specified or default to main)
+    let attach_rev = revision.map_or_else(|| "main".to_string(), ToString::to_string);
+
+    println!("Attaching workspace '{name}' at revision {attach_rev}...");
+
+    // jj workspace add requires an empty directory, so we need to:
+    // 1. Move existing contents to a temp location
+    // 2. Run jj workspace add
+    // 3. Move contents back (excluding newly-created .jj)
+    let temp_backup = root.join(".workspaces").join(format!(".{name}-attach-backup"));
+
+    // Create backup directory
+    std::fs::create_dir_all(&temp_backup)
+        .with_context(|| format!("Failed to create backup directory: {}", temp_backup.display()))?;
+
+    // Move all contents (except .jj) to backup
+    let entries: Vec<_> = std::fs::read_dir(&path)
+        .with_context(|| format!("Failed to read directory: {}", path.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name() != ".jj")
+        .collect();
+
+    for entry in &entries {
+        let src = entry.path();
+        let dst = temp_backup.join(entry.file_name());
+        std::fs::rename(&src, &dst).with_context(|| {
+            format!(
+                "Failed to move {} to backup",
+                entry.file_name().to_string_lossy()
+            )
+        })?;
+    }
+
+    // Remove the .jj directory (stale workspace metadata)
+    let jj_dir = path.join(".jj");
+    if jj_dir.exists() {
+        std::fs::remove_dir_all(&jj_dir).with_context(|| "Failed to remove stale .jj directory")?;
+    }
+
+    // Now the directory should be empty, run jj workspace add
+    let output = Command::new("jj")
+        .args([
+            "workspace",
+            "add",
+            path.to_str().unwrap(),
+            "--name",
+            name,
+            "-r",
+            &attach_rev,
+        ])
+        .current_dir(&root)
+        .output()
+        .context("Failed to run jj workspace add")?;
+
+    if !output.status.success() {
+        // Restore backup on failure
+        for entry in std::fs::read_dir(&temp_backup)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+        {
+            let src = entry.path();
+            let dst = path.join(entry.file_name());
+            let _ = std::fs::rename(&src, &dst);
+        }
+        let _ = std::fs::remove_dir_all(&temp_backup);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Failed to attach workspace: {}\n  \
+             Your files have been restored.\n  \
+             Try: maw ws destroy {name} && maw ws create {name}",
+            stderr.trim()
+        );
+    }
+
+    // Move contents back from backup
+    for entry in std::fs::read_dir(&temp_backup)
+        .with_context(|| "Failed to read backup directory")?
+        .filter_map(|e| e.ok())
+    {
+        let src = entry.path();
+        let dst = path.join(entry.file_name());
+        // If jj created the file, remove it first (jj workspace add populates working copy)
+        if dst.exists() {
+            if dst.is_dir() {
+                std::fs::remove_dir_all(&dst).ok();
+            } else {
+                std::fs::remove_file(&dst).ok();
+            }
+        }
+        std::fs::rename(&src, &dst).with_context(|| {
+            format!(
+                "Failed to restore {} from backup",
+                entry.file_name().to_string_lossy()
+            )
+        })?;
+    }
+
+    // Clean up backup directory
+    std::fs::remove_dir_all(&temp_backup).ok();
+
+    println!();
+    println!("Workspace '{name}' attached!");
+    println!();
+    println!("  Path: {}", path.display());
+    println!();
+    println!("  NOTE: Your local files were preserved. They may differ from the");
+    println!("  revision's files. Run 'maw ws jj {name} status' to see differences.");
+    println!();
+
+    // Check if workspace is stale after attaching
+    let status_check = Command::new("jj")
+        .args(["status"])
+        .current_dir(&path)
+        .output();
+
+    if let Ok(status) = status_check {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if stderr.contains("working copy is stale") {
+            println!("NOTE: Workspace is stale (files may be outdated).");
+            println!("  Fix: maw ws sync");
+            println!();
+        }
+    }
+
+    println!("To continue working:");
+    println!("  maw ws jj {name} status");
+    println!("  maw ws jj {name} log");
+
     Ok(())
 }
 
