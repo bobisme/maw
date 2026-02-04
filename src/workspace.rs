@@ -267,6 +267,7 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice bob             # merge alice and bob's work
     ///   maw ws merge alice bob --destroy   # merge and clean up (non-interactive)
     ///   maw ws merge alice bob --dry-run   # preview merge without committing
+    ///   maw ws merge alice bob --auto-describe  # auto-describe empty scaffolding commits
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -287,6 +288,10 @@ pub enum WorkspaceCommands {
         /// Preview the merge without creating any commits
         #[arg(long)]
         dry_run: bool,
+
+        /// Automatically describe empty commits as 'workspace setup'
+        #[arg(long)]
+        auto_describe: bool,
     },
 }
 
@@ -317,7 +322,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             confirm,
             message,
             dry_run,
-        } => merge(&workspaces, destroy, confirm, message.as_deref(), dry_run),
+            auto_describe,
+        } => merge(&workspaces, destroy, confirm, message.as_deref(), dry_run, auto_describe),
     }
 }
 
@@ -1343,6 +1349,7 @@ fn merge(
     confirm: bool,
     message: Option<&str>,
     dry_run: bool,
+    auto_describe: bool,
 ) -> Result<()> {
     let ws_to_merge = workspaces.to_vec();
 
@@ -1429,27 +1436,62 @@ fn merge(
 
     let empty_commits = String::from_utf8_lossy(&empty_check.stdout);
     if !empty_commits.trim().is_empty() {
-        let count = empty_commits.lines().filter(|l| !l.trim().is_empty()).count();
-        println!("WARNING: {count} undescribed commit(s) (no message) in merge ancestry.");
-        println!("  jj requires all commits to have descriptions before pushing.");
-        println!();
-        for line in empty_commits.lines() {
-            if !line.trim().is_empty() {
+        let commit_lines: Vec<&str> = empty_commits.lines().filter(|l| !l.trim().is_empty()).collect();
+        let count = commit_lines.len();
+
+        if auto_describe {
+            // Auto-describe empty commits
+            println!("Auto-describing {count} undescribed commit(s)...");
+            let mut described = 0;
+            for line in &commit_lines {
+                if let Some(id) = line.split_whitespace().next() {
+                    let describe_result = Command::new("jj")
+                        .args(["describe", id, "-m", "workspace setup"])
+                        .current_dir(&root)
+                        .output();
+
+                    match describe_result {
+                        Ok(output) if output.status.success() => {
+                            println!("  Described {id}: \"workspace setup\"");
+                            described += 1;
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            println!("  Failed to describe {id}: {}", stderr.trim());
+                        }
+                        Err(e) => {
+                            println!("  Failed to describe {id}: {e}");
+                        }
+                    }
+                }
+            }
+            if described > 0 {
+                println!("Auto-described {described} commit(s).");
+            }
+        } else {
+            // Just warn about empty commits
+            println!("WARNING: {count} undescribed commit(s) (no message) in merge ancestry.");
+            println!("  jj requires all commits to have descriptions before pushing.");
+            println!();
+            for line in &commit_lines {
                 println!("  ! {line}");
             }
-        }
-        println!();
-        println!("Fix: rebase onto main to skip scaffolding commits:");
-        println!("  jj rebase -r @- -d main");
-        println!("  ('rebase' moves a commit to a new parent; @- = the merge commit)");
-        println!();
-        println!("Or give them descriptions:");
-        for line in empty_commits.lines() {
-            if let Some(id) = line.split_whitespace().next() {
-                println!("  jj describe {id} -m \"workspace setup\"");
+            println!();
+            println!("Fix: rebase onto main to skip scaffolding commits:");
+            println!("  jj rebase -r @- -d main");
+            println!("  ('rebase' moves a commit to a new parent; @- = the merge commit)");
+            println!();
+            println!("Or give them descriptions:");
+            for line in &commit_lines {
+                if let Some(id) = line.split_whitespace().next() {
+                    println!("  jj describe {id} -m \"workspace setup\"");
+                }
             }
+            println!();
+            println!("Or use --auto-describe to fix automatically:");
+            println!("  maw ws merge {} --auto-describe", ws_to_merge.join(" "));
+            println!();
         }
-        println!();
     }
 
     // Optionally destroy workspaces (but not if there are conflicts!)
