@@ -34,7 +34,7 @@ struct HooksConfig {
 #[derive(Debug, Default, Deserialize)]
 struct MergeConfig {
     /// Paths to auto-resolve from main during merge conflicts.
-    /// Supports glob patterns like ".beads/**" or ".crit/*".
+    /// Supports glob patterns like ".beads/**".
     #[serde(default)]
     auto_resolve_from_main: Vec<String>,
 }

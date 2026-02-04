@@ -121,7 +121,6 @@ fn ensure_maw_config() -> Result<()> {
 # Useful for tracking files that change frequently on main
 auto_resolve_from_main = [
   ".beads/**",
-  ".crit/**",
 ]
 "#;
 
