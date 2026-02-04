@@ -224,6 +224,7 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice                 # adopt alice's work
     ///   maw ws merge alice bob             # merge alice and bob's work
     ///   maw ws merge alice bob --destroy   # merge and clean up (non-interactive)
+    ///   maw ws merge alice bob --dry-run   # preview merge without committing
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -240,6 +241,10 @@ pub enum WorkspaceCommands {
         /// Custom merge commit message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// Preview the merge without creating any commits
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -267,7 +272,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             destroy,
             confirm,
             message,
-        } => merge(&workspaces, destroy, confirm, message.as_deref()),
+            dry_run,
+        } => merge(&workspaces, destroy, confirm, message.as_deref(), dry_run),
     }
 }
 
@@ -1066,11 +1072,119 @@ fn get_conflicted_files(root: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// Preview what a merge would do without creating any commits.
+/// Shows changes in each workspace and potential conflicts.
+fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
+    println!("=== Merge Preview (dry run) ===");
+    println!();
+
+    if workspaces.len() == 1 {
+        println!("Would adopt workspace: {}", workspaces[0]);
+    } else {
+        println!("Would merge workspaces: {}", workspaces.join(", "));
+    }
+    println!();
+
+    // Show changes in each workspace using jj diff --stat
+    println!("=== Changes by Workspace ===");
+    println!();
+
+    for ws in workspaces {
+        println!("--- {} ---", ws);
+
+        // Get diff stats for the workspace using workspace@ syntax
+        let diff_output = Command::new("jj")
+            .args(["diff", "--stat", "-r", &format!("{ws}@")])
+            .current_dir(root)
+            .output()
+            .with_context(|| format!("Failed to get diff for workspace {ws}"))?;
+
+        if !diff_output.status.success() {
+            let stderr = String::from_utf8_lossy(&diff_output.stderr);
+            println!("  Could not get changes: {}", stderr.trim());
+            println!();
+            continue;
+        }
+
+        let diff_text = String::from_utf8_lossy(&diff_output.stdout);
+        if diff_text.trim().is_empty() {
+            println!("  (no changes)");
+        } else {
+            for line in diff_text.lines() {
+                println!("  {line}");
+            }
+        }
+        println!();
+    }
+
+    // Check for potential conflicts using files modified in multiple workspaces
+    if workspaces.len() > 1 {
+        println!("=== Potential Conflicts ===");
+        println!();
+
+        // Get files modified in each workspace
+        let mut workspace_files: Vec<(String, Vec<String>)> = Vec::new();
+
+        for ws in workspaces {
+            let diff_output = Command::new("jj")
+                .args(["diff", "--summary", "-r", &format!("{ws}@")])
+                .current_dir(root)
+                .output()
+                .with_context(|| format!("Failed to get diff summary for {ws}"))?;
+
+            if diff_output.status.success() {
+                let diff_text = String::from_utf8_lossy(&diff_output.stdout);
+                let files: Vec<String> = diff_text
+                    .lines()
+                    .filter_map(|line| {
+                        // Format: "M path/to/file" or "A path/to/file"
+                        line.split_whitespace().nth(1).map(|s| s.to_string())
+                    })
+                    .collect();
+                workspace_files.push((ws.clone(), files));
+            }
+        }
+
+        // Find files modified in multiple workspaces
+        let mut conflict_files: Vec<String> = Vec::new();
+        for i in 0..workspace_files.len() {
+            for j in (i + 1)..workspace_files.len() {
+                let (ws1, files1) = &workspace_files[i];
+                let (ws2, files2) = &workspace_files[j];
+                for file in files1 {
+                    if files2.contains(file) && !conflict_files.contains(file) {
+                        conflict_files.push(file.clone());
+                        println!("  ! {file} - modified in both '{ws1}' and '{ws2}'");
+                    }
+                }
+            }
+        }
+
+        if conflict_files.is_empty() {
+            println!("  (no overlapping changes detected)");
+        } else {
+            println!();
+            println!("  Note: jj records conflicts in commits instead of blocking.");
+            println!("  You can proceed and resolve conflicts after merge if needed.");
+        }
+        println!();
+    }
+
+    println!("=== Summary ===");
+    println!();
+    println!("To perform this merge, run without --dry-run:");
+    println!("  maw ws merge {}", workspaces.join(" "));
+    println!();
+
+    Ok(())
+}
+
 fn merge(
     workspaces: &[String],
     destroy_after: bool,
     confirm: bool,
     message: Option<&str>,
+    dry_run: bool,
 ) -> Result<()> {
     let ws_to_merge = workspaces.to_vec();
 
@@ -1084,6 +1198,11 @@ fn merge(
     // working copy instead of default's, then workspace forget would orphan
     // the merge commit.
     let root = ensure_repo_root()?;
+
+    // Preview mode: show what the merge would do without committing
+    if dry_run {
+        return preview_merge(&ws_to_merge, &root);
+    }
 
     if ws_to_merge.len() == 1 {
         println!("Adopting workspace: {}", ws_to_merge[0]);
