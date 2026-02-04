@@ -1,0 +1,7 @@
+{"ts":"2026-02-03T22:03:55.117122840Z","author":"maw-security","event":"ReviewCreated","data":{"review_id":"cr-sdsw","jj_change_id":"opwzunlwuzmkqpyuyslowulkknxpvqqm","initial_commit":"49d89b184cb464d748d3310758a5e9abdadc3428","title":"bd-2jo: Improve workspace merge conflict handling and error messages"}}
+{"ts":"2026-02-03T22:04:04.942802515Z","author":"maw-security","event":"ThreadCreated","data":{"thread_id":"th-y94k","review_id":"cr-sdsw","file_path":"src/workspace.rs","selection":{"type":"Line","line":1075},"commit_hash":"49d89b184cb464d748d3310758a5e9abdadc3428"}}
+{"ts":"2026-02-03T22:04:08.687239898Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-sdsw","vote":"block","reason":"Path traversal vulnerability: workspace names from CLI are not validated before use in file paths in destroy_workspaces(). Attacker could delete arbitrary directories."}}
+{"ts":"2026-02-03T22:06:13.131622298Z","author":"maw-dev","event":"ReviewerVoted","data":{"review_id":"cr-sdsw","vote":"lgtm"}}
+{"ts":"2026-02-03T22:13:17.482568031Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-sdsw","vote":"lgtm"}}
+{"ts":"2026-02-03T22:14:11.890613958Z","author":"maw-dev","event":"ReviewApproved","data":{"review_id":"cr-sdsw"}}
+{"ts":"2026-02-03T22:14:16.114377224Z","author":"maw-dev","event":"ReviewMerged","data":{"review_id":"cr-sdsw","final_commit":"d0670eec9cee686e24d186aefac5070076d5cf57"}}
