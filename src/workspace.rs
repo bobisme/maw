@@ -214,6 +214,31 @@ pub enum WorkspaceCommands {
         args: Vec<String>,
     },
 
+    /// Clean up orphaned, stale, or empty workspaces
+    ///
+    /// Detects problematic workspaces:
+    /// - Orphaned: directory exists in .workspaces/ but jj forgot the workspace
+    /// - Missing: jj tracks the workspace but the directory is gone
+    /// - Empty (with --empty): workspace has no changes
+    ///
+    /// By default, shows what would be pruned (preview mode).
+    /// Use --force to actually delete.
+    ///
+    /// Examples:
+    ///   maw ws prune              # preview what would be pruned
+    ///   maw ws prune --force      # actually delete orphaned/missing
+    ///   maw ws prune --empty      # preview including empty workspaces
+    ///   maw ws prune --empty --force  # delete all problematic workspaces
+    Prune {
+        /// Actually delete workspaces (default: preview only)
+        #[arg(long)]
+        force: bool,
+
+        /// Also prune workspaces with no changes (empty working copies)
+        #[arg(long)]
+        empty: bool,
+    },
+
     /// Merge work from workspaces into default
     ///
     /// Creates a merge commit combining work from the specified workspaces.
@@ -267,6 +292,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Status { format } => status(format),
         WorkspaceCommands::Sync { all } => sync(all),
         WorkspaceCommands::Jj { name, args } => jj_in_workspace(&name, &args),
+        WorkspaceCommands::Prune { force, empty } => prune(force, empty),
         WorkspaceCommands::Merge {
             workspaces,
             destroy,
@@ -1356,6 +1382,267 @@ fn destroy_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
         }
         println!("  Destroyed: {ws}");
     }
+    Ok(())
+}
+
+/// Result of analyzing workspaces for pruning
+#[derive(Debug)]
+struct PruneAnalysis {
+    /// Directories in .workspaces/ that jj doesn't know about
+    orphaned: Vec<String>,
+    /// Workspaces jj tracks but directories are missing
+    missing: Vec<String>,
+    /// Workspaces with no changes (empty working copies)
+    empty: Vec<String>,
+}
+
+fn prune(force: bool, include_empty: bool) -> Result<()> {
+    let root = repo_root()?;
+    let ws_dir = workspaces_dir()?;
+
+    // Get workspaces jj knows about
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    if !output.status.success() {
+        bail!(
+            "jj workspace list failed: {}\n  To fix: ensure you're in a jj repository",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let ws_list = String::from_utf8_lossy(&output.stdout);
+
+    // Parse jj-tracked workspaces (format: "name@: change_id ..." or "name: change_id ...")
+    let jj_workspaces: std::collections::HashSet<String> = ws_list
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .map(|s| s.trim().trim_end_matches('@').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Get directories in .workspaces/
+    // Security: validate names and skip symlinks to prevent traversal attacks
+    let dir_workspaces: std::collections::HashSet<String> = if ws_dir.exists() {
+        std::fs::read_dir(&ws_dir)
+            .context("Failed to read .workspaces directory")?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let path = entry.path();
+                // Skip symlinks - they could point anywhere
+                if path.is_symlink() {
+                    return false;
+                }
+                path.is_dir()
+            })
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            // Validate name to prevent path traversal
+            .filter(|name| validate_workspace_name(name).is_ok())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let mut analysis = PruneAnalysis {
+        orphaned: Vec::new(),
+        missing: Vec::new(),
+        empty: Vec::new(),
+    };
+
+    // Find orphaned: directories that exist but jj doesn't track
+    for dir_name in &dir_workspaces {
+        if !jj_workspaces.contains(dir_name) {
+            analysis.orphaned.push(dir_name.clone());
+        }
+    }
+
+    // Find missing: jj tracks but directory doesn't exist
+    for jj_ws in &jj_workspaces {
+        if jj_ws == "default" {
+            continue; // default workspace lives at repo root, not in .workspaces/
+        }
+        if !dir_workspaces.contains(jj_ws) {
+            analysis.missing.push(jj_ws.clone());
+        }
+    }
+
+    // Find empty workspaces (if requested)
+    if include_empty {
+        for jj_ws in &jj_workspaces {
+            if jj_ws == "default" {
+                continue;
+            }
+            // Skip workspaces that are already in orphaned or missing lists
+            if analysis.orphaned.contains(jj_ws) || analysis.missing.contains(jj_ws) {
+                continue;
+            }
+            // Check if workspace has changes using jj diff
+            let diff_output = Command::new("jj")
+                .args(["diff", "--stat", "-r", &format!("{jj_ws}@")])
+                .current_dir(&root)
+                .output();
+
+            if let Ok(diff) = diff_output {
+                if diff.status.success() {
+                    let diff_text = String::from_utf8_lossy(&diff.stdout);
+                    if diff_text.trim().is_empty() {
+                        analysis.empty.push(jj_ws.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort for consistent output
+    analysis.orphaned.sort();
+    analysis.missing.sort();
+    analysis.empty.sort();
+
+    // Report findings
+    let total_issues = analysis.orphaned.len() + analysis.missing.len() + analysis.empty.len();
+
+    if total_issues == 0 {
+        println!("No workspaces need pruning.");
+        if !include_empty {
+            println!("  (Use --empty to also check for workspaces with no changes)");
+        }
+        return Ok(());
+    }
+
+    if force {
+        println!("Pruning workspaces...");
+    } else {
+        println!("=== Prune Preview ===");
+        println!("(Use --force to actually delete)");
+    }
+    println!();
+
+    // Handle orphaned directories
+    if !analysis.orphaned.is_empty() {
+        println!(
+            "Orphaned ({} directory exists but jj forgot the workspace):",
+            analysis.orphaned.len()
+        );
+        for name in &analysis.orphaned {
+            let path = ws_dir.join(name);
+            if force {
+                // Defense in depth: check symlink again before deletion
+                if path.is_symlink() {
+                    println!("  ✗ {name}: refused to delete symlink (security)");
+                    continue;
+                }
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    println!("  ✗ {name}: failed to delete - {e}");
+                } else {
+                    println!("  ✓ {name}: deleted");
+                }
+            } else {
+                println!("  - {name}");
+                println!("      Path: {}", path.display());
+            }
+        }
+        println!();
+    }
+
+    // Handle missing workspaces (jj tracks but no directory)
+    if !analysis.missing.is_empty() {
+        println!(
+            "Missing ({} jj tracks workspace but directory is gone):",
+            analysis.missing.len()
+        );
+        for name in &analysis.missing {
+            if force {
+                let forget_result = Command::new("jj")
+                    .args(["workspace", "forget", name])
+                    .current_dir(&root)
+                    .output();
+
+                match forget_result {
+                    Ok(out) if out.status.success() => {
+                        println!("  ✓ {name}: forgotten from jj");
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        println!("  ✗ {name}: failed to forget - {}", stderr.trim());
+                    }
+                    Err(e) => {
+                        println!("  ✗ {name}: failed to forget - {e}");
+                    }
+                }
+            } else {
+                println!("  - {name}");
+                println!("      Would run: jj workspace forget {name}");
+            }
+        }
+        println!();
+    }
+
+    // Handle empty workspaces
+    if !analysis.empty.is_empty() {
+        println!(
+            "Empty ({} workspaces with no changes):",
+            analysis.empty.len()
+        );
+        for name in &analysis.empty {
+            let path = ws_dir.join(name);
+            if force {
+                // Defense in depth: check symlink before deletion
+                if path.is_symlink() {
+                    println!("  ✗ {name}: refused to delete symlink (security)");
+                    continue;
+                }
+                // First forget from jj, then delete directory
+                let _ = Command::new("jj")
+                    .args(["workspace", "forget", name])
+                    .current_dir(&root)
+                    .status();
+
+                if path.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&path) {
+                        println!("  ✗ {name}: failed to delete - {e}");
+                    } else {
+                        println!("  ✓ {name}: deleted");
+                    }
+                } else {
+                    println!("  ✓ {name}: forgotten");
+                }
+            } else {
+                println!("  - {name}");
+                println!("      Path: {}", path.display());
+            }
+        }
+        println!();
+    }
+
+    // Summary
+    if force {
+        let deleted = analysis.orphaned.len() + analysis.empty.len();
+        let forgotten = analysis.missing.len();
+        println!(
+            "Pruned: {} deleted, {} forgotten from jj",
+            deleted, forgotten
+        );
+    } else {
+        println!("=== Summary ===");
+        println!(
+            "Would prune {} workspace(s): {} orphaned, {} missing, {} empty",
+            total_issues,
+            analysis.orphaned.len(),
+            analysis.missing.len(),
+            analysis.empty.len()
+        );
+        println!();
+        println!("To prune:");
+        if include_empty {
+            println!("  maw ws prune --empty --force");
+        } else {
+            println!("  maw ws prune --force");
+        }
+    }
+
     Ok(())
 }
 
