@@ -1277,6 +1277,9 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
         bail!("Workspace '{name}' does not exist at {}", path.display());
     }
 
+    // Check for commands that might cause divergent commits
+    warn_if_targeting_other_commit(name, args, &path);
+
     let status = Command::new("jj")
         .args(args)
         .current_dir(&path)
@@ -1288,6 +1291,102 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Warn if a jj command targets a commit outside this workspace's working copy.
+/// This helps prevent divergent commits from agents modifying shared commits.
+fn warn_if_targeting_other_commit(workspace_name: &str, args: &[String], workspace_path: &Path) {
+    // Commands that modify commits and take an optional revision argument
+    let modifying_commands = ["describe", "edit", "abandon", "backout"];
+
+    let Some(cmd) = args.first() else {
+        return;
+    };
+
+    if !modifying_commands.contains(&cmd.as_str()) {
+        return;
+    }
+
+    // Look for a revision argument (first positional arg that's not a flag)
+    // For describe: `jj describe [revision] [-m msg]`
+    // If no revision given, it defaults to @ which is safe
+    let mut revision_arg: Option<&str> = None;
+    let mut skip_next = false;
+
+    for arg in args.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        // Skip flags and their values
+        if arg.starts_with('-') {
+            // Flags that take a value
+            if matches!(arg.as_str(), "-m" | "--message" | "-r" | "--revision") {
+                skip_next = true;
+            }
+            continue;
+        }
+        // First non-flag arg is the revision
+        revision_arg = Some(arg.as_str());
+        break;
+    }
+
+    // Safe cases: no revision (defaults to @), or explicitly @
+    let Some(rev) = revision_arg else {
+        return;
+    };
+    if rev == "@" {
+        return;
+    }
+
+    // Definitely dangerous: targeting well-known shared refs
+    let dangerous_refs = ["main", "master", "trunk", "@-", "@--", "root()"];
+    let is_dangerous = dangerous_refs.contains(&rev)
+        || rev.starts_with("main@")
+        || rev.starts_with("master@")
+        || rev.contains("::") // revset ranges
+        || rev.contains(".."); // revset ranges
+
+    if is_dangerous {
+        eprintln!();
+        eprintln!("⚠️  WARNING: '{cmd} {rev}' targets a commit outside your workspace.");
+        eprintln!("   This may cause DIVERGENT COMMITS if others are using that commit.");
+        eprintln!();
+        eprintln!("   Safe: `maw ws jj {workspace_name} {cmd}` (targets your working copy @)");
+        eprintln!("   Your workspace commit: run `jj log -r @` to see your change ID");
+        eprintln!();
+        return;
+    }
+
+    // For other revision args, check if it matches the workspace's working copy
+    // Get the workspace's current change ID
+    let output = Command::new("jj")
+        .args(["log", "-r", "@", "--no-graph", "-T", "change_id"])
+        .current_dir(workspace_path)
+        .output();
+
+    let Ok(output) = output else {
+        return; // Can't check, skip warning
+    };
+
+    let workspace_change_id = String::from_utf8_lossy(&output.stdout);
+    let workspace_change_id = workspace_change_id.trim();
+
+    // If the revision matches workspace's change ID (prefix match ok), it's safe
+    if !workspace_change_id.is_empty()
+        && (workspace_change_id.starts_with(rev) || rev.starts_with(workspace_change_id))
+    {
+        return;
+    }
+
+    // Unknown revision that's not our working copy - warn
+    eprintln!();
+    eprintln!("⚠️  WARNING: '{cmd} {rev}' may target a commit outside your workspace.");
+    eprintln!("   Modifying shared commits causes DIVERGENT COMMITS.");
+    eprintln!();
+    eprintln!("   Your workspace's change ID: {workspace_change_id}");
+    eprintln!("   If '{rev}' is not your commit, consider: `maw ws jj {workspace_name} {cmd}`");
+    eprintln!();
 }
 
 /// Show commit history for a workspace
