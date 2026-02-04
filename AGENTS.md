@@ -344,6 +344,28 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 
 **Required flags**: `--actor $AGENT` on mutations, `--author $AGENT` on comments.
 
+### Workspace Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Create workspace | `maw ws create <name>` |
+| List workspaces | `maw ws list` |
+| Merge to main | `maw ws merge <name> --destroy` |
+| Destroy (no merge) | `maw ws destroy <name>` |
+| Run jj in workspace | `maw ws jj <name> <jj-args...>` |
+
+**Avoiding divergent commits**: Each workspace owns ONE commit. Only modify your own.
+
+| Safe | Dangerous |
+|------|-----------|
+| `jj describe` (your working copy) | `jj describe main -m "..."` |
+| `maw ws jj <your-ws> describe -m "..."` | `jj describe <other-change-id>` |
+
+If you see `(divergent)` in `jj log`:
+```bash
+jj abandon <change-id>/0   # keep one, abandon the divergent copy
+```
+
 ### Beads Conventions
 
 - Create a bead before starting work. Update status: `open` → `in_progress` → `closed`.
