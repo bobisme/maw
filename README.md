@@ -84,7 +84,7 @@ Create a `.maw.toml` file in your repo root to customize behavior.
 
 ### Auto-resolve conflicts during merge
 
-Paths like `.beads/` and `.crit/` change frequently on main while agent workspaces are active. This causes merge conflicts in files that are workspace-independent state and shouldn't block merges.
+Paths like `.beads/` change frequently on main while agent workspaces are active. This causes merge conflicts in files that are workspace-independent state and shouldn't block merges.
 
 Configure patterns to auto-resolve from main during `maw ws merge`:
 
@@ -93,11 +93,12 @@ Configure patterns to auto-resolve from main during `maw ws merge`:
 # Paths matching these globs will auto-resolve from main during merge
 auto_resolve_from_main = [
     ".beads/**",
-    ".crit/**",
 ]
 ```
 
 Matching files with conflicts are restored from `main`, while other conflicts still require manual resolution.
+
+**Note on `.crit/`**: Crit v2 uses per-review event logs (`.crit/reviews/<id>/events.jsonl`) instead of a single file. This structure rarely conflicts across workspaces, so auto_resolve is typically not needed.
 
 ## Optional Integrations
 

@@ -248,7 +248,7 @@ jj bookmark track main@origin  # Track remote main
 ### Unreleased
 
 - Add `.maw.toml` config file support with `[merge]` section.
-- Add `auto_resolve_from_main` config to auto-resolve conflicts in specified paths (e.g., `.beads/**`, `.crit/**`) during `maw ws merge`.
+- Add `auto_resolve_from_main` config to auto-resolve conflicts in specified paths (e.g., `.beads/**`) during `maw ws merge`.
 - Refine `maw status --status-bar` prompt glyphs and colors for workspace count, change count, and sync warning.
 
 ## Issue Tracking with Beads
