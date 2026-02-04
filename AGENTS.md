@@ -384,8 +384,11 @@ br ready
 
 ### Reviews
 
-- Use `crit` to open and request reviews.
-- If a reviewer is not online, claim `agent://reviewer-<role>` and spawn them.
+- Use `crit` to create reviews and `@<project>-<role>` mentions to spawn reviewers.
+- To request a security review:
+  1. `crit reviews request <review-id> --reviewers $PROJECT-security --agent $AGENT`
+  2. `bus send --agent $AGENT $PROJECT "Review requested: <review-id> @$PROJECT-security" -L review-request`
+  (The @mention in the bus message triggers the auto-spawn hook)
 - Reviewer agents loop until no pending reviews remain (see review-loop doc).
 
 ### Cross-Project Feedback

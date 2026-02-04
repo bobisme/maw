@@ -267,7 +267,10 @@ If REVIEW is true:
   11. Create review: crit reviews create --agent ${AGENT} --title "<title>" --description "<summary>"
   12. br comments add --actor ${AGENT} --author ${AGENT} <id> "Review requested: <review-id>, workspace: \$WS (\$WS_PATH)"
   13. bus statuses set --agent ${AGENT} "Review: <review-id>"
-  14. bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id>" -L review-request
+  14. Request security review (if project has security reviewer):
+      - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT}
+      - Spawn via @mention: bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id> @${PROJECT}-security" -L review-request
+      (The @mention triggers the auto-spawn hook — without it, no reviewer spawns!)
   15. STOP this iteration — wait for reviewer.
 
 If REVIEW is false:
@@ -319,7 +322,10 @@ For each completed bead with a workspace:
 If REVIEW is true:
   1. crit reviews create --agent ${AGENT} --title "<title>" --description "<summary of changes>"
   2. br comments add --actor ${AGENT} --author ${AGENT} <id> "Review requested: <review-id>"
-  3. bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id>" -L review-request
+  3. Request security review (if project has security reviewer):
+     - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT}
+     - Spawn via @mention: bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id> @${PROJECT}-security" -L review-request
+     (The @mention triggers the auto-spawn hook — without it, no reviewer spawns!)
   4. STOP — wait for reviewer
 
 If REVIEW is false:

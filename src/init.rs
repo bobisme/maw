@@ -13,6 +13,7 @@ pub fn run() -> Result<()> {
 
     ensure_jj_repo()?;
     ensure_workspaces_gitignored()?;
+    ensure_maw_config()?;
 
     println!();
     println!("maw is ready! Next steps:");
@@ -102,6 +103,30 @@ pub fn ensure_workspaces_gitignored() -> Result<()> {
             .context("Failed to create .gitignore")?;
         println!("[OK] Created .gitignore with .workspaces/");
     }
+
+    Ok(())
+}
+
+/// Create default .maw.toml if it doesn't exist
+fn ensure_maw_config() -> Result<()> {
+    let config_path = Path::new(".maw.toml");
+
+    if config_path.exists() {
+        println!("[OK] .maw.toml already exists");
+        return Ok(());
+    }
+
+    let default_config = r#"[merge]
+# Auto-resolve conflicts in these paths by taking main's version
+# Useful for tracking files that change frequently on main
+auto_resolve_from_main = [
+  ".beads/**",
+  ".crit/**",
+]
+"#;
+
+    fs::write(config_path, default_config).context("Failed to create .maw.toml")?;
+    println!("[OK] Created .maw.toml with default config");
 
     Ok(())
 }
