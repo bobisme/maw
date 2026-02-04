@@ -25,3 +25,6 @@
 {"ts":"2026-02-04T05:55:18.477665058Z","author":"maw-dev","event":"ReviewersRequested","data":{"review_id":"cr-14x5","reviewers":["maw-security"]}}
 {"ts":"2026-02-04T05:56:22.291007398Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-14x5","vote":"lgtm"}}
 {"ts":"2026-02-04T05:56:22.299485337Z","author":"maw-security","event":"ReviewApproved","data":{"review_id":"cr-14x5"}}
+{"ts":"2026-02-04T06:02:54.206573614Z","author":"maw-dev","event":"ReviewMerged","data":{"review_id":"cr-rvme","final_commit":"7706a35ff41e7d81cc65b1b3f30637cb1eb36319"}}
+{"ts":"2026-02-04T06:02:54.785807275Z","author":"maw-dev","event":"ReviewMerged","data":{"review_id":"cr-14x5","final_commit":"9bf5777c6eafee7bed665ae71b268751c2bc60b4"}}
+{"ts":"2026-02-04T06:04:01.287060365Z","author":"maw-dev","event":"ReviewMerged","data":{"review_id":"cr-szr4","final_commit":"8a77c90bb2b6ed134a82382f23a140ba124c7d93"}}
