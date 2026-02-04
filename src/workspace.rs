@@ -214,6 +214,23 @@ pub enum WorkspaceCommands {
         args: Vec<String>,
     },
 
+    /// Show commit history for a workspace
+    ///
+    /// Displays a timeline of commits made in the specified workspace,
+    /// making it easy to understand what work was done and when.
+    ///
+    /// Examples:
+    ///   maw ws history alice           # show commits in alice workspace
+    ///   maw ws history alice --limit 5 # show only last 5 commits
+    History {
+        /// Name of the workspace
+        name: String,
+
+        /// Number of commits to show (default: 20)
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Clean up orphaned, stale, or empty workspaces
     ///
     /// Detects problematic workspaces:
@@ -292,6 +309,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Status { format } => status(format),
         WorkspaceCommands::Sync { all } => sync(all),
         WorkspaceCommands::Jj { name, args } => jj_in_workspace(&name, &args),
+        WorkspaceCommands::History { name, limit } => history(&name, limit),
         WorkspaceCommands::Prune { force, empty } => prune(force, empty),
         WorkspaceCommands::Merge {
             workspaces,
@@ -977,6 +995,120 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
+
+    Ok(())
+}
+
+/// Show commit history for a workspace
+fn history(name: &str, limit: usize) -> Result<()> {
+    let root = repo_root()?;
+    validate_workspace_name(name)?;
+
+    // Check if workspace exists
+    let ws_output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+    let workspace_exists = ws_list
+        .lines()
+        .any(|line| {
+            line.split(':')
+                .next()
+                .map(|n| n.trim().trim_end_matches('@') == name)
+                .unwrap_or(false)
+        });
+
+    if !workspace_exists {
+        bail!(
+            "Workspace '{name}' not found.\n  \
+             List workspaces: maw ws list"
+        );
+    }
+
+    // Use revset to get commits specific to this workspace:
+    // {name}@:: gets all commits reachable from the workspace's working copy
+    // ~::main excludes commits already in main (ancestors of main)
+    // This shows commits the workspace has made since diverging from main
+    let revset = format!("{name}@:: & ~::main");
+
+    let output = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-r",
+            &revset,
+            "-T",
+            r#"change_id.short() ++ " " ++ commit_id.short() ++ " " ++ committer.timestamp().format("%Y-%m-%d %H:%M") ++ " " ++ if(description.first_line(), description.first_line(), "(no description)") ++ "\n""#,
+            "-n",
+            &limit.to_string(),
+        ])
+        .current_dir(&root)
+        .output()
+        .context("Failed to get workspace history")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to get history: {}", stderr.trim());
+    }
+
+    let history = String::from_utf8_lossy(&output.stdout);
+
+    if history.trim().is_empty() {
+        println!("Workspace '{name}' has no commits yet.");
+        println!();
+        println!("  (Workspace starts with an empty commit for ownership.");
+        println!("   Edit files and describe your changes to create history.)");
+        println!();
+        println!("  Start working:");
+        println!("    maw ws jj {name} describe -m \"feat: what you're implementing\"");
+        return Ok(());
+    }
+
+    println!("=== Commit History: {name} ===");
+    println!();
+    println!("  change_id      commit        timestamp         description");
+    println!("  ────────────   ──────────    ────────────────  ────────────────────────");
+
+    for line in history.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Format: change_id commit_id date time description
+        // Note: timestamp is "YYYY-MM-DD HH:MM" (two parts separated by space)
+        let parts: Vec<&str> = line.splitn(5, ' ').collect();
+        if parts.len() >= 5 {
+            let change_id = parts[0];
+            let commit_id = parts[1];
+            let date = parts[2];
+            let time = parts[3];
+            let description = parts[4];
+            println!("  {change_id}   {commit_id}    {date} {time}  {description}");
+        } else if parts.len() == 4 {
+            // Might be missing description
+            let change_id = parts[0];
+            let commit_id = parts[1];
+            let date = parts[2];
+            let time = parts[3];
+            println!("  {change_id}   {commit_id}    {date} {time}  (no description)");
+        } else {
+            println!("  {line}");
+        }
+    }
+
+    let line_count = history.lines().filter(|l| !l.trim().is_empty()).count();
+    println!();
+    println!("Showing {} commit(s)", line_count);
+
+    if line_count >= limit {
+        println!("  (Use --limit/-n to show more)");
+    }
+
+    println!();
+    println!("Tip: View full commit details:");
+    println!("  maw ws jj {name} show <change-id>");
 
     Ok(())
 }
