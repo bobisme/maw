@@ -1,13 +1,1 @@
-Completed bd-3bs (Add --dry-run flag to maw ws merge):
-1. Created workspace swift-viper, claimed bead and workspace
-2. Implemented --dry-run flag with preview_merge() function that shows:
-   - Changes per workspace via jj diff --stat
-   - Potential conflicts (files modified in multiple workspaces)
-   - Summary with command to run actual merge
-3. Tested manually with single workspace and multiple workspaces including conflict detection
-4. All tests pass
-5. Requested and received security review cr-3c2d - LGTM
-6. Encountered crit database corruption during merge (events.jsonl truncation) - recovered by restoring workspace.rs from jj history
-7. Pushed to main as commit 4ac88935
-8. Closed bd-3bs with full details
-8 ready beads remain: bd-j2z, bd-dmg, bd-3a8, bd-23b, bd-2v6, bd-10y, bd-2ji, bd-355
+Implemented bd-2v6 (pre/post-merge hooks support) and bd-10y (automatic stale workspace detection) in parallel workspaces. Created workspaces frozen-lynx (for hooks) and electric-forest (for stale detection), implemented both features, merged them, and created review cr-30a3 for security review. Reviewer maw-security spawned via @mention. Awaiting review before merge/push. 2 P4 beads remain (bd-2ji workspace attach, bd-355 workspace metadata).

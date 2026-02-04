@@ -432,6 +432,81 @@ fn validate_workspace_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Check all workspaces for staleness and return list of stale workspace names.
+/// A workspace is stale when another workspace modified shared history,
+/// making the working copy files outdated.
+fn check_stale_workspaces() -> Result<Vec<String>> {
+    let root = repo_root()?;
+    let ws_dir = workspaces_dir()?;
+
+    // Get all workspaces
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(&root)
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&output.stdout);
+
+    // Parse workspace names
+    let workspace_names: Vec<String> = ws_list
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .map(|s| s.trim().trim_end_matches('@').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut stale = Vec::new();
+
+    for ws in &workspace_names {
+        // Validate workspace name (defense-in-depth)
+        if ws != "default" && validate_workspace_name(ws).is_err() {
+            continue;
+        }
+
+        let path = if ws == "default" {
+            root.clone()
+        } else {
+            ws_dir.join(ws)
+        };
+
+        if !path.exists() {
+            continue;
+        }
+
+        // Check if stale by looking at jj status stderr
+        let status = Command::new("jj")
+            .args(["status"])
+            .current_dir(&path)
+            .output();
+
+        if let Ok(out) = status {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("working copy is stale") {
+                stale.push(ws.clone());
+            }
+        }
+    }
+
+    Ok(stale)
+}
+
+/// Print warning about stale workspaces if any are detected.
+fn warn_stale_workspaces() {
+    match check_stale_workspaces() {
+        Ok(stale) if !stale.is_empty() => {
+            eprintln!();
+            eprintln!(
+                "WARNING: {} workspace(s) stale: {}",
+                stale.len(),
+                stale.join(", ")
+            );
+            eprintln!("  Fix: maw ws sync --all");
+        }
+        _ => {}
+    }
+}
+
 fn create(name: &str, revision: Option<&str>) -> Result<()> {
     ensure_repo_root()?;
     let path = workspace_path(name)?;
@@ -1949,6 +2024,8 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                 }
             }
         }
+        // Check for stale workspaces after listing
+        warn_stale_workspaces();
         return Ok(());
     }
 
@@ -1973,6 +2050,9 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
             println!("{list}");
         }
     }
+
+    // Check for stale workspaces after listing
+    warn_stale_workspaces();
 
     Ok(())
 }
