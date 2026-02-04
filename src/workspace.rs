@@ -186,7 +186,14 @@ pub enum WorkspaceCommands {
     /// Run this at the start of every session. If the working copy is stale
     /// (another workspace modified shared commits, so your files are outdated),
     /// this updates your workspace to match. Safe to run even if not stale.
-    Sync,
+    ///
+    /// Use --all to sync all workspaces at once, useful after `jj git fetch`
+    /// or when multiple workspaces may be stale.
+    Sync {
+        /// Sync all workspaces instead of just the current one
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Run a jj command in a workspace
     ///
@@ -253,7 +260,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Destroy { name, confirm } => destroy(&name, confirm),
         WorkspaceCommands::List { verbose, format } => list(verbose, format),
         WorkspaceCommands::Status { format } => status(format),
-        WorkspaceCommands::Sync => sync(),
+        WorkspaceCommands::Sync { all } => sync(all),
         WorkspaceCommands::Jj { name, args } => jj_in_workspace(&name, &args),
         WorkspaceCommands::Merge {
             workspaces,
@@ -760,7 +767,11 @@ fn get_current_workspace() -> Result<String> {
     Ok("default".to_string())
 }
 
-fn sync() -> Result<()> {
+fn sync(all: bool) -> Result<()> {
+    if all {
+        return sync_all();
+    }
+
     // First check if we're stale
     let status_check = Command::new("jj")
         .args(["status"])
@@ -808,6 +819,111 @@ fn sync() -> Result<()> {
         bail!(
             "Failed to sync workspace.\n  Check workspace state: maw ws status\n  Manual fix: jj workspace update-stale"
         );
+    }
+
+    Ok(())
+}
+
+/// Sync all workspaces at once
+fn sync_all() -> Result<()> {
+    let root = repo_root()?;
+
+    // Get all workspaces
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&output.stdout);
+
+    // Parse workspace names (format: "name@: change_id ..." or "name: change_id ...")
+    let workspace_names: Vec<String> = ws_list
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .map(|s| s.trim().trim_end_matches('@').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if workspace_names.is_empty() {
+        println!("No workspaces found.");
+        return Ok(());
+    }
+
+    println!("Syncing {} workspace(s)...", workspace_names.len());
+    println!();
+
+    let mut synced = 0;
+    let mut already_current = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    for ws in &workspace_names {
+        // Validate workspace name to prevent path traversal (defense-in-depth)
+        if ws != "default" {
+            if let Err(_) = validate_workspace_name(ws) {
+                errors.push(format!("{ws}: invalid workspace name (skipped)"));
+                continue;
+            }
+        }
+
+        let path = if ws == "default" {
+            root.clone()
+        } else {
+            root.join(".workspaces").join(ws)
+        };
+
+        if !path.exists() {
+            errors.push(format!("{ws}: directory missing"));
+            continue;
+        }
+
+        // Check if stale
+        let status = Command::new("jj")
+            .args(["status"])
+            .current_dir(&path)
+            .output()
+            .context("Failed to run jj status")?;
+
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if !stderr.contains("working copy is stale") {
+            already_current += 1;
+            continue;
+        }
+
+        // Sync
+        let sync_result = Command::new("jj")
+            .args(["workspace", "update-stale"])
+            .current_dir(&path)
+            .output();
+
+        match sync_result {
+            Ok(out) if out.status.success() => {
+                println!("  ✓ {ws} - synced");
+                synced += 1;
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                errors.push(format!("{ws}: {}", err.trim()));
+            }
+            Err(e) => {
+                errors.push(format!("{ws}: {e}"));
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "Results: {} synced, {} already current, {} errors",
+        synced,
+        already_current,
+        errors.len()
+    );
+
+    if !errors.is_empty() {
+        println!();
+        println!("Errors:");
+        for err in &errors {
+            println!("  - {err}");
+        }
     }
 
     Ok(())
