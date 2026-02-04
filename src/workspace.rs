@@ -15,6 +15,19 @@ use crate::format::OutputFormat;
 struct MawConfig {
     #[serde(default)]
     merge: MergeConfig,
+    #[serde(default)]
+    hooks: HooksConfig,
+}
+
+/// Hook configuration for running commands before/after operations
+#[derive(Debug, Default, Deserialize)]
+struct HooksConfig {
+    /// Commands to run before merge. Merge aborts if any command fails (non-zero exit).
+    #[serde(default)]
+    pre_merge: Vec<String>,
+    /// Commands to run after merge. Warnings are shown on failure but don't abort.
+    #[serde(default)]
+    post_merge: Vec<String>,
 }
 
 /// Merge-specific configuration
@@ -1236,6 +1249,60 @@ fn get_conflicted_files(root: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// Run a list of hook commands. Returns Ok(()) if all succeed or hooks are empty.
+/// For pre-merge hooks: aborts on first failure.
+/// For post-merge hooks: warns but continues on failure.
+fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: bool) -> Result<()> {
+    if hooks.is_empty() {
+        return Ok(());
+    }
+
+    println!("Running {hook_type} hooks...");
+
+    for (i, cmd) in hooks.iter().enumerate() {
+        println!("  [{}/{}] {cmd}", i + 1, hooks.len());
+
+        // Use shell to execute the command (allows pipes, redirects, etc.)
+        // Security note: These commands come from .maw.toml which is checked into
+        // the repo and controlled by the project owner. This is intentional and
+        // similar to how git hooks, npm scripts, and Makefiles work.
+        let output = Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(root)
+            .output()
+            .with_context(|| format!("Failed to execute hook command: {cmd}"))?;
+
+        // Show output if any
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.trim().is_empty() {
+            for line in stdout.lines() {
+                println!("      {line}");
+            }
+        }
+        if !stderr.trim().is_empty() {
+            for line in stderr.lines() {
+                eprintln!("      {line}");
+            }
+        }
+
+        if !output.status.success() {
+            let exit_code = output.status.code().unwrap_or(-1);
+            if abort_on_failure {
+                bail!(
+                    "{hook_type} hook failed (exit code {exit_code}): {cmd}\n  \
+                     Merge aborted. Fix the issue and try again."
+                );
+            } else {
+                eprintln!("  WARNING: {hook_type} hook failed (exit code {exit_code}): {cmd}");
+            }
+        }
+    }
+
+    println!("{hook_type} hooks complete.");
+    Ok(())
+}
+
 /// Preview what a merge would do without creating any commits.
 /// Shows changes in each workspace and potential conflicts.
 fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
@@ -1364,10 +1431,16 @@ fn merge(
     // the merge commit.
     let root = ensure_repo_root()?;
 
+    // Load config early for hooks and auto-resolve settings
+    let config = MawConfig::load(&root)?;
+
     // Preview mode: show what the merge would do without committing
     if dry_run {
         return preview_merge(&ws_to_merge, &root);
     }
+
+    // Run pre-merge hooks (abort on failure)
+    run_hooks(&config.hooks.pre_merge, "pre-merge", &root, true)?;
 
     if ws_to_merge.len() == 1 {
         println!("Adopting workspace: {}", ws_to_merge[0]);
@@ -1415,9 +1488,6 @@ fn merge(
     }
 
     println!("Created merge commit: {msg}");
-
-    // Check for conflicts and auto-resolve if configured
-    let config = MawConfig::load(&root)?;
     let has_conflicts = auto_resolve_conflicts(&root, &config)?;
 
     // Check for empty/undescribed commits that would block push
@@ -1525,6 +1595,9 @@ fn merge(
             destroy_workspaces(&ws_to_merge, &root)?;
         }
     }
+
+    // Run post-merge hooks (warn on failure but don't abort)
+    run_hooks(&config.hooks.post_merge, "post-merge", &root, false)?;
 
     // Show next steps for pushing
     if !has_conflicts {
