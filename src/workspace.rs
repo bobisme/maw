@@ -4,10 +4,41 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
+use glob::Pattern;
 use rand::seq::IndexedRandom;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::format::OutputFormat;
+
+/// Configuration from .maw.toml
+#[derive(Debug, Default, Deserialize)]
+struct MawConfig {
+    #[serde(default)]
+    merge: MergeConfig,
+}
+
+/// Merge-specific configuration
+#[derive(Debug, Default, Deserialize)]
+struct MergeConfig {
+    /// Paths to auto-resolve from main during merge conflicts.
+    /// Supports glob patterns like ".beads/**" or ".crit/*".
+    #[serde(default)]
+    auto_resolve_from_main: Vec<String>,
+}
+
+impl MawConfig {
+    /// Load config from .maw.toml in the repo root, or return defaults if not found.
+    fn load(repo_root: &Path) -> Result<Self> {
+        let config_path = repo_root.join(".maw.toml");
+        if !config_path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", config_path.display()))
+    }
+}
 
 #[derive(Serialize)]
 struct WorkspaceInfo {
@@ -802,6 +833,123 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Check for conflicts after merge and auto-resolve paths matching config patterns.
+/// Returns true if there are remaining (unresolved) conflicts.
+fn auto_resolve_conflicts(root: &Path, config: &MawConfig) -> Result<bool> {
+    // Check for conflicts
+    let status_output = Command::new("jj")
+        .args(["status"])
+        .current_dir(root)
+        .output()
+        .context("Failed to check status")?;
+
+    let status_text = String::from_utf8_lossy(&status_output.stdout);
+    if !status_text.contains("conflict") {
+        return Ok(false);
+    }
+
+    // Get list of conflicted files
+    let conflicted_files = get_conflicted_files(root)?;
+    if conflicted_files.is_empty() {
+        return Ok(false);
+    }
+
+    // Check if we have patterns to auto-resolve
+    let patterns = &config.merge.auto_resolve_from_main;
+    if patterns.is_empty() {
+        println!();
+        println!("WARNING: Merge has conflicts that need resolution.");
+        println!("Run `jj status` to see conflicted files.");
+        return Ok(true);
+    }
+
+    // Compile glob patterns
+    let compiled_patterns: Vec<Pattern> = patterns
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .collect();
+
+    // Find files to auto-resolve
+    let mut auto_resolved = Vec::new();
+    let mut remaining_conflicts = Vec::new();
+
+    for file in &conflicted_files {
+        let matches_pattern = compiled_patterns.iter().any(|pat| pat.matches(file));
+        if matches_pattern {
+            auto_resolved.push(file.clone());
+        } else {
+            remaining_conflicts.push(file.clone());
+        }
+    }
+
+    // Auto-resolve matching files by restoring from main
+    if !auto_resolved.is_empty() {
+        println!();
+        println!(
+            "Auto-resolving {} file(s) from main (via .maw.toml config):",
+            auto_resolved.len()
+        );
+        for file in &auto_resolved {
+            // Restore file from main to resolve conflict
+            let restore_output = Command::new("jj")
+                .args(["restore", "--from", "main", file])
+                .current_dir(root)
+                .output()
+                .context("Failed to restore file from main")?;
+
+            if restore_output.status.success() {
+                println!("  ✓ {file}");
+            } else {
+                let stderr = String::from_utf8_lossy(&restore_output.stderr);
+                println!("  ✗ {file}: {}", stderr.trim());
+                remaining_conflicts.push(file.clone());
+            }
+        }
+    }
+
+    // Report remaining conflicts
+    if !remaining_conflicts.is_empty() {
+        println!();
+        println!(
+            "WARNING: {} conflict(s) remaining that need manual resolution:",
+            remaining_conflicts.len()
+        );
+        for file in &remaining_conflicts {
+            println!("  - {file}");
+        }
+        println!();
+        println!("Run `jj status` to see details.");
+        return Ok(true);
+    }
+
+    println!();
+    println!("All conflicts auto-resolved from main.");
+    Ok(false)
+}
+
+/// Get list of files with conflicts from jj status output.
+fn get_conflicted_files(root: &Path) -> Result<Vec<String>> {
+    // Use jj status to get conflicted files
+    // Format: "C filename" for conflicted files
+    let output = Command::new("jj")
+        .args(["status"])
+        .current_dir(root)
+        .output()
+        .context("Failed to run jj status")?;
+
+    let status_text = String::from_utf8_lossy(&output.stdout);
+    let mut files = Vec::new();
+
+    for line in status_text.lines() {
+        // jj status shows conflicts as "C path/to/file"
+        if let Some(stripped) = line.strip_prefix("C ") {
+            files.push(stripped.trim().to_string());
+        }
+    }
+
+    Ok(files)
+}
+
 fn merge(
     workspaces: &[String],
     destroy_after: bool,
@@ -868,21 +1016,9 @@ fn merge(
 
     println!("Created merge commit: {msg}");
 
-    // Check for conflicts
-    let status_output = Command::new("jj")
-        .args(["status"])
-        .current_dir(&root)
-        .output()
-        .context("Failed to check status")?;
-
-    let status_text = String::from_utf8_lossy(&status_output.stdout);
-    let has_conflicts = status_text.contains("conflict");
-
-    println!();
-    if has_conflicts {
-        println!("WARNING: Merge has conflicts that need resolution.");
-        println!("Run `jj status` to see conflicted files.");
-    }
+    // Check for conflicts and auto-resolve if configured
+    let config = MawConfig::load(&root)?;
+    let has_conflicts = auto_resolve_conflicts(&root, &config)?;
 
     // Check for empty/undescribed commits that would block push
     let empty_check = Command::new("jj")
