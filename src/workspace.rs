@@ -1793,7 +1793,7 @@ fn merge(
     confirm: bool,
     message: Option<&str>,
     dry_run: bool,
-    auto_describe: bool,
+    _auto_describe: bool, // No longer needed with linear merge approach
 ) -> Result<()> {
     let ws_to_merge = workspaces.to_vec();
 
@@ -1827,7 +1827,6 @@ fn merge(
     println!();
 
     // Build revision references using workspace@ syntax
-    // This is more reliable than parsing workspace list output
     let revisions: Vec<String> = ws_to_merge.iter().map(|ws| format!("{ws}@")).collect();
 
     // Build merge commit message
@@ -1842,104 +1841,87 @@ fn merge(
         ToString::to_string,
     );
 
-    // Create merge commit: jj new ws1@ ws2@ ws3@ -m "message"
-    let mut args = vec!["new"];
-    for rev in &revisions {
-        args.push(rev);
-    }
-    args.push("-m");
-    args.push(&msg);
+    // NEW APPROACH: Rebase workspace commits directly onto main for linear history
+    // This skips scaffolding commits and produces a cleaner graph.
 
-    let merge_output = Command::new("jj")
-        .args(&args)
+    // Step 1: Rebase all workspace commits onto main
+    let revset = revisions.join(" | ");
+    let rebase_output = Command::new("jj")
+        .args(["rebase", "-r", &revset, "-d", "main"])
         .current_dir(&root)
         .output()
-        .context("Failed to run jj new")?;
+        .context("Failed to rebase workspace commits")?;
 
-    if !merge_output.status.success() {
-        let stderr = String::from_utf8_lossy(&merge_output.stderr);
+    if !rebase_output.status.success() {
+        let stderr = String::from_utf8_lossy(&rebase_output.stderr);
         bail!(
-            "Failed to create merge commit: {}\n  Verify workspaces exist: maw ws list",
+            "Failed to rebase workspace commits onto main: {}\n  Verify workspaces exist: maw ws list",
             stderr.trim()
         );
     }
 
-    println!("Created merge commit: {msg}");
-    let has_conflicts = auto_resolve_conflicts(&root, &config)?;
+    // Step 2: If multiple workspaces, squash them into one commit
+    if ws_to_merge.len() > 1 {
+        // Squash all but first into the first workspace's commit
+        let first_ws = format!("{}@", ws_to_merge[0]);
+        let others: Vec<String> = ws_to_merge[1..].iter().map(|ws| format!("{ws}@")).collect();
+        let from_revset = others.join(" | ");
 
-    // Check for empty/undescribed commits that would block push
-    let empty_check = Command::new("jj")
-        .args([
-            "log",
-            "--no-graph",
-            "-r",
-            "description(exact:\"\") & ::@- & ~root()",
-            "-T",
-            r#"change_id.short() ++ " " ++ if(empty, "(empty)", "(has changes)") ++ "\n""#,
-        ])
-        .current_dir(&root)
-        .output()
-        .context("Failed to check for undescribed commits")?;
+        let squash_output = Command::new("jj")
+            .args([
+                "squash",
+                "--from",
+                &from_revset,
+                "--into",
+                &first_ws,
+                "-m",
+                &msg,
+            ])
+            .current_dir(&root)
+            .output()
+            .context("Failed to squash workspace commits")?;
 
-    let empty_commits = String::from_utf8_lossy(&empty_check.stdout);
-    if !empty_commits.trim().is_empty() {
-        let commit_lines: Vec<&str> = empty_commits.lines().filter(|l| !l.trim().is_empty()).collect();
-        let count = commit_lines.len();
-
-        if auto_describe {
-            // Auto-describe empty commits
-            println!("Auto-describing {count} undescribed commit(s)...");
-            let mut described = 0;
-            for line in &commit_lines {
-                if let Some(id) = line.split_whitespace().next() {
-                    let describe_result = Command::new("jj")
-                        .args(["describe", id, "-m", "workspace setup"])
-                        .current_dir(&root)
-                        .output();
-
-                    match describe_result {
-                        Ok(output) if output.status.success() => {
-                            println!("  Described {id}: \"workspace setup\"");
-                            described += 1;
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            println!("  Failed to describe {id}: {}", stderr.trim());
-                        }
-                        Err(e) => {
-                            println!("  Failed to describe {id}: {e}");
-                        }
-                    }
-                }
-            }
-            if described > 0 {
-                println!("Auto-described {described} commit(s).");
-            }
-        } else {
-            // Just warn about empty commits
-            println!("WARNING: {count} undescribed commit(s) (no message) in merge ancestry.");
-            println!("  jj requires all commits to have descriptions before pushing.");
-            println!();
-            for line in &commit_lines {
-                println!("  ! {line}");
-            }
-            println!();
-            println!("Fix: rebase onto main to skip scaffolding commits:");
-            println!("  jj rebase -r @- -d main");
-            println!("  ('rebase' moves a commit to a new parent; @- = the merge commit)");
-            println!();
-            println!("Or give them descriptions:");
-            for line in &commit_lines {
-                if let Some(id) = line.split_whitespace().next() {
-                    println!("  jj describe {id} -m \"workspace setup\"");
-                }
-            }
-            println!();
-            println!("Or use --auto-describe to fix automatically:");
-            println!("  maw ws merge {} --auto-describe", ws_to_merge.join(" "));
-            println!();
+        if !squash_output.status.success() {
+            let stderr = String::from_utf8_lossy(&squash_output.stderr);
+            bail!("Failed to squash workspace commits: {}", stderr.trim());
         }
     }
+
+    // Step 3: Move main bookmark to the final commit
+    let final_rev = format!("{}@", ws_to_merge[0]);
+    let bookmark_output = Command::new("jj")
+        .args(["bookmark", "set", "main", "-r", &final_rev])
+        .current_dir(&root)
+        .output()
+        .context("Failed to move main bookmark")?;
+
+    if !bookmark_output.status.success() {
+        let stderr = String::from_utf8_lossy(&bookmark_output.stderr);
+        eprintln!("Warning: Failed to move main bookmark: {}", stderr.trim());
+        eprintln!("  Run manually: jj bookmark set main -r {final_rev}");
+    }
+
+    // Step 4: Abandon orphaned scaffolding commits (empty, undescribed, not on main)
+    // These are the workspace setup commits that got orphaned by rebase
+    let abandon_output = Command::new("jj")
+        .args([
+            "abandon",
+            "empty() & description(exact:'') & ~ancestors(main) & ~root()",
+        ])
+        .current_dir(&root)
+        .output();
+
+    if let Ok(output) = abandon_output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("Abandoned") {
+                println!("Cleaned up scaffolding commits.");
+            }
+        }
+    }
+
+    println!("Merged to main: {msg}");
+    let has_conflicts = auto_resolve_conflicts(&root, &config)?;
 
     // Optionally destroy workspaces (but not if there are conflicts!)
     if destroy_after {
@@ -1980,8 +1962,6 @@ fn merge(
     if !has_conflicts {
         println!();
         println!("Next: push to remote:");
-        println!("  jj bookmark set main -r @-");
-        println!("    (bookmarks = jj's branches; @- = parent of working copy = your merge commit)");
         println!("  jj git push");
     }
 
