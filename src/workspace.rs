@@ -1354,11 +1354,11 @@ fn warn_if_targeting_other_commit(workspace_name: &str, args: &[String], workspa
 
     if is_dangerous {
         eprintln!();
-        eprintln!("⚠️  WARNING: '{cmd} {rev}' targets a commit outside your workspace.");
+        eprintln!("⚠️  WARNING: '{cmd} {rev}' modifies a commit outside your workspace.");
         eprintln!("   This may cause DIVERGENT COMMITS if others are using that commit.");
         eprintln!();
-        eprintln!("   Safe: `maw ws jj {workspace_name} {cmd}` (targets your working copy @)");
-        eprintln!("   Your workspace commit: run `jj log -r @` to see your change ID");
+        eprintln!("   Safe alternative: `maw ws jj {workspace_name} {cmd}` (targets @)");
+        eprintln!("   Undo if needed:   `maw ws jj {workspace_name} undo`");
         eprintln!();
         return;
     }
@@ -1390,7 +1390,8 @@ fn warn_if_targeting_other_commit(workspace_name: &str, args: &[String], workspa
     eprintln!("   Modifying shared commits causes DIVERGENT COMMITS.");
     eprintln!();
     eprintln!("   Your workspace's change ID: {workspace_change_id}");
-    eprintln!("   If '{rev}' is not your commit, consider: `maw ws jj {workspace_name} {cmd}`");
+    eprintln!("   Safe alternative: `maw ws jj {workspace_name} {cmd}` (targets @)");
+    eprintln!("   Undo if needed:   `maw ws jj {workspace_name} undo`");
     eprintln!();
 }
 
