@@ -178,10 +178,15 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ### 4. Push to Remote
 
 ```bash
+# If bookmark is already set (e.g., after maw ws merge):
 maw push
+
+# If you committed directly and need to advance the branch bookmark:
+maw push --advance
 ```
 
-`maw push` handles bookmark management, sync checks, and pushes to origin. It replaces the manual `jj bookmark set main -r @-` + `jj git push` workflow.
+`maw push` pushes the configured branch to origin with sync checks and clear error messages.
+`--advance` moves the branch bookmark to `@-` (parent of working copy) before pushing — use this after committing work directly (not via `maw ws merge`, which sets the bookmark automatically).
 
 **Understanding push output**: When the output says `Changes to push to origin:` followed by branch/bookmark info, **the push has already completed**. This is a confirmation, not a preview.
 
@@ -219,12 +224,18 @@ jj bookmark track main@origin  # Track remote main
 | Create review | `crit reviews create --title "..."` |
 | Approve/merge review | `crit reviews approve <id> && crit reviews merge <id>` |
 | Bump version | Edit `Cargo.toml` + `README.md`, then `jj describe` |
-| Push | `maw push` |
+| Push (after merge) | `maw push` |
+| Push (after direct commit) | `maw push --advance` |
 | Tag release | `jj tag set vX.Y.Z -r main` then `git push origin vX.Y.Z` |
 
 ---
 
 ## Release Notes
+
+### v0.24.0
+
+- Add `maw push --advance` flag — moves the branch bookmark to `@-` (parent of working copy) before pushing. Use after committing directly (version bumps, hotfixes). Without the flag, `maw push` now detects unpushed work at `@-` and suggests `--advance`.
+- Update all agent docs (CLAUDE.md, AGENTS.md, finish.md) to use `maw push` consistently instead of manual `jj bookmark set` + `jj git push`.
 
 ### v0.23.0
 
@@ -268,7 +279,8 @@ br create --title="..." --type=task --priority=2
 - **Versioning**: Use semantic versioning. Tag releases with `v` prefix (`v0.1.0`). Update Cargo.toml version and README install command before tagging.
 - **Agent identity**: When announcing releases or responding on botbus, use `--agent maw-dev` and post to `#maw` channel.
 - **Issue tracking**: Use `br` (beads) for issue tracking. File beads for bugs and feature requests. Triage community feedback from botbus.
-- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `maw push` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
+- **Release announcements**: Always use `bus send --no-hooks --agent maw-dev maw "..."` for release announcements. The `--no-hooks` flag prevents auto-spawn hooks from triggering on announcement messages.
+- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `maw push --advance` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
 
 ---
 

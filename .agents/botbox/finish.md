@@ -76,8 +76,8 @@ jj abandon <merge-commit-id> <empty-commit-ids>
 # 3. Move to your feature commit
 jj edit <feature-commit-id>
 
-# 4. Push
-maw push
+# 4. Push (--advance moves the branch bookmark to your commit)
+maw push --advance
 ```
 
 ### When to escalate

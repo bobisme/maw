@@ -106,10 +106,13 @@ enum Commands {
     /// `jj git push`. Checks sync status first and provides clear
     /// error messages if the branch is behind or doesn't exist.
     ///
+    /// If your working copy parent (@-) has unpushed work but the branch
+    /// bookmark hasn't been moved yet, use --advance to move it first.
+    ///
     /// Configure the branch name in .maw.toml:
     ///   [repo]
     ///   branch = "main"
-    Push,
+    Push(push::PushArgs),
 }
 
 fn main() -> Result<()> {
@@ -123,6 +126,6 @@ fn main() -> Result<()> {
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),
         Commands::Status(cmd) => status::run(cmd),
-        Commands::Push => push::run(),
+        Commands::Push(args) => push::run(&args),
     }
 }

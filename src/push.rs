@@ -2,26 +2,50 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use clap::Args;
 
 use crate::workspace::{repo_root, MawConfig};
+
+#[derive(Args)]
+pub struct PushArgs {
+    /// Move the branch bookmark to @- (parent of working copy) before pushing.
+    ///
+    /// Use this after committing work to advance the branch to your latest
+    /// commit. Without this flag, maw push only pushes if the bookmark is
+    /// already ahead of origin.
+    #[arg(long)]
+    advance: bool,
+}
 
 /// Push the configured branch to its remote.
 ///
 /// Wraps `jj git push` with better UX: checks sync status, provides
 /// clear error messages, and shows what was pushed.
-pub fn run() -> Result<()> {
+pub fn run(args: &PushArgs) -> Result<()> {
     let root = repo_root()?;
     let config = MawConfig::load(&root)?;
     let branch = config.branch();
 
     // Check if branch bookmark exists and get commit info
-    let commit_info = resolve_branch(&root, branch)?;
+    let _commit_info = resolve_branch(&root, branch)?;
+
+    // If --advance, move bookmark to @- before checking status
+    if args.advance {
+        advance_bookmark(&root, branch)?;
+    }
 
     // Check ahead/behind status — bail if behind, return early if up-to-date
     if !should_push(&root, branch)? {
         println!("{branch} is up to date with origin.");
+        // Check if there's unpushed work at @- that could be pushed with --advance
+        if !args.advance {
+            suggest_advance(&root, branch);
+        }
         return Ok(());
     }
+
+    // Re-resolve after potential advance to get updated commit info
+    let commit_info = resolve_branch(&root, branch)?;
 
     // Push
     println!("Pushing {branch} to origin...");
@@ -48,6 +72,40 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Move the branch bookmark to @- (parent of working copy).
+fn advance_bookmark(root: &Path, branch: &str) -> Result<()> {
+    let output = Command::new("jj")
+        .args(["bookmark", "set", branch, "-r", "@-"])
+        .current_dir(root)
+        .output()
+        .context("Failed to run jj bookmark set")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Failed to advance {branch} to @-: {}\n  \
+             Check: jj log --limit 5",
+            stderr.trim()
+        );
+    }
+
+    println!("Advanced {branch} bookmark to @- (parent of working copy).");
+    Ok(())
+}
+
+/// Check if @- is ahead of the branch and print a suggestion if so.
+fn suggest_advance(root: &Path, branch: &str) {
+    // Count commits between branch and @- (exclusive of branch, inclusive of @-)
+    if let Ok(ahead) = count_revset(root, &format!("{branch}..@-"))
+        && ahead > 0
+    {
+        println!(
+            "\n  Your working copy parent (@-) is {ahead} commit(s) ahead of {branch}.\n  \
+             To advance {branch} and push: maw push --advance"
+        );
+    }
 }
 
 /// Verify the branch bookmark exists and return its commit info string.

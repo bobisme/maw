@@ -11,7 +11,7 @@ Tooling for coordinating multiple AI coding agents working on the same codebase.
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.23.0
+cargo install --git https://github.com/bobisme/maw --tag v0.24.0
 ```
 
 Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
@@ -40,7 +40,7 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 | `maw ws jj <name> <args>` | Run jj in a workspace (for sandboxed agents) |
 | `maw ws merge <a> <b>` | Merge named agent workspaces |
 | `maw ws destroy <name>` | Remove a workspace |
-| `maw push` | Push to remote (handles bookmarks automatically) |
+| `maw push [--advance]` | Push to remote (`--advance` moves branch to @- first) |
 | `maw init` | Initialize maw (jj + .gitignore) |
 | `maw doctor` | Check system requirements |
 | `maw agents init` | Add maw section to AGENTS.md |
