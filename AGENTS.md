@@ -402,7 +402,7 @@ The @mention triggers the auto-spawn hook for the reviewer.
 
 When you have questions, feedback, or issues with tools from other projects:
 
-1. Find the project: `bus inbox --agent $AGENT --channels projects --all`
+1. Find the project: `bus history projects -n 50` (the #projects channel has project registry entries)
 2. Post to their channel: `bus send <project> "..." -L feedback`
 3. For bugs/features, create beads in their repo (see [report-issue.md](.agents/botbox/report-issue.md))
 

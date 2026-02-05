@@ -262,6 +262,17 @@ async function runClaude(prompt) {
 async function cleanup() {
 	console.log('Cleaning up...');
 	try {
+		await runCommand('bus', [
+			'send',
+			'--agent',
+			AGENT,
+			PROJECT,
+			`Reviewer ${AGENT} signing off.`,
+			'-L',
+			'agent-idle',
+		]);
+	} catch {}
+	try {
 		await runCommand('bus', ['statuses', 'clear', '--agent', AGENT]);
 	} catch {}
 	try {

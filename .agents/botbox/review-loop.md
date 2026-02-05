@@ -7,7 +7,7 @@ Your identity is `$AGENT`. All bus commands must include `--agent $AGENT`. Run `
 ## Loop
 
 1. Read new review requests:
-   - `bus inbox --agent $AGENT --channel $BOTBOX_PROJECT -n 50`
+   - `bus inbox --agent $AGENT --channels $BOTBOX_PROJECT --mark-read`
    - `bus wait --agent $AGENT -L review-request -t 5` (optional)
 2. Find open reviews: `crit inbox --agent $AGENT --all-workspaces --format=json`
    - The `--all-workspaces` flag searches both the repo root and all jj workspaces

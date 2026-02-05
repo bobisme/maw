@@ -9,7 +9,7 @@ At the end of your work, output exactly one of these completion signals:
 - <promise>BLOCKED</promise> if you encountered an error
 
 1. INBOX:
-   Run: bus inbox --agent {{AGENT}} --channels {{PROJECT}} --mark-read
+   Run: bus inbox --agent {{AGENT}} --mentions --channels {{PROJECT}} --mark-read
    Note any review-request or review-response messages. Ignore task-claim, task-done, spawn-ack, etc.
 
 2. FIND REVIEWS:
