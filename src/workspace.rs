@@ -1271,11 +1271,16 @@ fn sync_all() -> Result<()> {
 }
 
 fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
-    let path = workspace_path(name)?;
-
-    if !path.exists() {
-        bail!("Workspace '{name}' does not exist at {}", path.display());
-    }
+    // Handle "default" workspace specially - it's the repo root, not .workspaces/default
+    let path = if name == "default" {
+        repo_root()?
+    } else {
+        let p = workspace_path(name)?;
+        if !p.exists() {
+            bail!("Workspace '{name}' does not exist at {}", p.display());
+        }
+        p
+    };
 
     // Check for commands that might cause divergent commits
     warn_if_targeting_other_commit(name, args, &path);
