@@ -232,6 +232,11 @@ jj bookmark track main@origin  # Track remote main
 
 ## Release Notes
 
+### v0.25.0
+
+- `maw ws jj` now detects stale workspaces and prints a warning with fix command (`maw ws sync`) before running the jj command (bd-1bi).
+- All workspace path outputs now include trailing `/` for easier copy-paste into file paths (bd-3m9).
+
 ### v0.24.0
 
 - Add `maw push --advance` flag — moves the branch bookmark to `@-` (parent of working copy) before pushing. Use after committing directly (version bumps, hotfixes). Without the flag, `maw push` now detects unpushed work at `@-` and suggests `--advance`.
