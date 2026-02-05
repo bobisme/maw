@@ -623,7 +623,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!("Workspace '{name}' ready!");
     println!();
     println!("  Commit: {change_id} (your dedicated change — jj's stable ID for this commit)");
-    println!("  Path:   {}", path.display());
+    println!("  Path:   {}/", path.display());
     println!();
     println!("  IMPORTANT: All file reads, writes, and edits must use this path.");
     println!("  This is your working directory for ALL operations, not just bash.");
@@ -638,7 +638,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!("  maw ws jj {name} log");
     println!();
     println!("  # Other commands (use absolute workspace path):");
-    println!("  cd {} && cargo test", path.display());
+    println!("  cd {}/ && cargo test", path.display());
     println!();
     println!("Note: jj has no staging area — all edits are tracked automatically.");
     println!("Your changes are always in your commit. Use 'describe' to set the message.");
@@ -840,7 +840,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     println!();
     println!("Workspace '{name}' attached!");
     println!();
-    println!("  Path: {}", path.display());
+    println!("  Path: {}/", path.display());
     println!();
     println!("  NOTE: Your local files were preserved. They may differ from the");
     println!("  revision's files. Run 'maw ws jj {name} status' to see differences.");
@@ -1312,6 +1312,9 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
         p
     };
 
+    // Check for stale workspace and warn (but don't block)
+    warn_if_stale(name, &path);
+
     // Check for commands that might cause divergent commits
     warn_if_targeting_other_commit(name, args, &path);
 
@@ -1326,6 +1329,29 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Check if workspace is stale and print a helpful warning.
+/// Stale means another workspace changed shared history and this workspace's
+/// working copy is outdated.
+fn warn_if_stale(name: &str, path: &Path) {
+    // Quick check - run jj status and see if stderr contains stale warning
+    let output = Command::new("jj")
+        .args(["status"])
+        .current_dir(path)
+        .output();
+
+    if let Ok(out) = output {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("working copy is stale") {
+            eprintln!();
+            eprintln!("⚠️  WARNING: Workspace '{name}' is STALE");
+            eprintln!("   Another workspace changed shared history. Your files may be outdated.");
+            eprintln!();
+            eprintln!("   To fix: maw ws sync");
+            eprintln!();
+        }
+    }
 }
 
 /// Warn if a jj command targets a commit outside this workspace's working copy.
@@ -2189,7 +2215,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
                 }
             } else {
                 println!("  - {name}");
-                println!("      Path: {}", path.display());
+                println!("      Path: {}/", path.display());
             }
         }
         println!();
@@ -2259,7 +2285,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
                 }
             } else {
                 println!("  - {name}");
-                println!("      Path: {}", path.display());
+                println!("      Path: {}/", path.display());
             }
         }
         println!();
@@ -2339,7 +2365,7 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                     if !is_default {
                         let path = workspace_path(name)?;
                         if path.exists() {
-                            println!("    path: {}", path.display());
+                            println!("    path: {}/", path.display());
                         } else {
                             println!("    path: (missing!)");
                         }
