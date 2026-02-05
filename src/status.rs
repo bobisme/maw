@@ -7,6 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
+use crate::workspace::MawConfig;
+
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const ANSI_ORANGE: &str = "\x1b[38;5;208m";
 const ANSI_BLUE: &str = "\x1b[34m";
@@ -302,7 +304,8 @@ fn collect_status() -> Result<StatusSummary> {
     let change_count = jj_change_count.max(git_counts.changes);
     let is_stale = status_stderr.contains("working copy is stale");
 
-    let main_sync = main_sync_status(&root)?;
+    let config = MawConfig::load(&root).unwrap_or_default();
+    let main_sync = main_sync_status(&root, config.branch())?;
 
     Ok(StatusSummary {
         total_workspaces,
@@ -427,8 +430,8 @@ fn git_status_counts(root: &Path) -> Result<GitStatusCounts> {
     Ok(counts)
 }
 
-fn main_sync_status(root: &Path) -> Result<MainSyncStatus> {
-    let main_exists = match revset_exists(root, "main") {
+fn main_sync_status(root: &Path, branch: &str) -> Result<MainSyncStatus> {
+    let main_exists = match revset_exists(root, branch) {
         Ok(exists) => exists,
         Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
     };
@@ -437,7 +440,8 @@ fn main_sync_status(root: &Path) -> Result<MainSyncStatus> {
         return Ok(MainSyncStatus::NoMain);
     }
 
-    let origin_exists = match revset_exists(root, "main@origin") {
+    let origin_ref = format!("{branch}@origin");
+    let origin_exists = match revset_exists(root, &origin_ref) {
         Ok(exists) => exists,
         Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
     };
@@ -446,11 +450,13 @@ fn main_sync_status(root: &Path) -> Result<MainSyncStatus> {
         return Ok(MainSyncStatus::NoRemote);
     }
 
-    let ahead = match count_revset(root, "main@origin..main") {
+    let ahead_revset = format!("{origin_ref}..{branch}");
+    let behind_revset = format!("{branch}..{origin_ref}");
+    let ahead = match count_revset(root, &ahead_revset) {
         Ok(count) => count,
         Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
     };
-    let behind = match count_revset(root, "main..main@origin") {
+    let behind = match count_revset(root, &behind_revset) {
         Ok(count) => count,
         Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
     };

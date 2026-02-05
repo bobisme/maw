@@ -177,30 +177,13 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ### 4. Push to Remote
 
-jj commits are "floating" by default - they exist in history but aren't on any branch/bookmark. You must move `main` before pushing:
-
 ```bash
-# Move main to the merge commit
-# @- = parent of working copy (the actual commit with your changes)
-jj bookmark set main -r @-
-
-# Verify main is ahead of origin
-jj log --limit 3
-
-# Push to GitHub
-jj git push
+maw push
 ```
 
-**Understanding jj push output**: When jj says `Changes to push to origin:` followed by branch/bookmark info, **the push has already completed**. This is different from git which shows "would push" before pushing. jj's output is a confirmation of what was pushed, not a preview.
+`maw push` handles bookmark management, sync checks, and pushes to origin. It replaces the manual `jj bookmark set main -r @-` + `jj git push` workflow.
 
-**Verify push succeeded**:
-```bash
-# Quick verification - compare local and remote main
-jj log -r 'main' --no-graph -T 'commit_id.short() ++ "\n"'
-git ls-remote origin refs/heads/main | cut -c1-12
-
-# If both show the same commit hash prefix, push succeeded
-```
+**Understanding push output**: When the output says `Changes to push to origin:` followed by branch/bookmark info, **the push has already completed**. This is a confirmation, not a preview.
 
 ### 5. Tag the Release
 
@@ -224,11 +207,9 @@ jj bookmark track main@origin  # Track remote main
 
 ### Troubleshooting
 
-**"Nothing to push"** - Bookmark wasn't moved. Check with `jj log` - if your commits aren't ancestors of `main`, run `jj bookmark set main -r <commit>`.
+**Push issues**: `maw push` handles bookmark management automatically. If it fails, it will tell you why and how to fix it. For manual recovery: `jj bookmark set main -r @-` then `jj git push`.
 
 **"Bookmark is behind remote"** - Someone else pushed. Pull first: `jj git fetch && jj rebase -d main@origin`.
-
-**"Did push actually happen?"** - jj output says `Changes to push to origin:` but you're unsure if it worked. This message means the push **already completed** (jj reports what it did, not what it will do). To verify: `jj log -r main --no-graph -T 'commit_id.short()'` should match `git ls-remote origin refs/heads/main | cut -c1-12`. If they match, push succeeded.
 
 ### Quick Reference
 
@@ -238,18 +219,21 @@ jj bookmark track main@origin  # Track remote main
 | Create review | `crit reviews create --title "..."` |
 | Approve/merge review | `crit reviews approve <id> && crit reviews merge <id>` |
 | Bump version | Edit `Cargo.toml` + `README.md`, then `jj describe` |
-| Push | `jj bookmark set main -r @-` then `jj git push` |
+| Push | `maw push` |
 | Tag release | `jj tag set vX.Y.Z -r main` then `git push origin vX.Y.Z` |
 
 ---
 
 ## Release Notes
 
-### Unreleased
+### v0.23.0
 
+- Add `maw push` command — replaces manual `jj bookmark set main -r @-` + `jj git push` workflow. Handles bookmark management, sync checks, and clear error messages.
+- Post-merge: rebase default workspace onto branch so on-disk files reflect the merge immediately.
 - Add `.maw.toml` config file support with `[merge]` section.
 - Add `auto_resolve_from_main` config to auto-resolve conflicts in specified paths (e.g., `.beads/**`) during `maw ws merge`.
 - Refine `maw status --status-bar` prompt glyphs and colors for workspace count, change count, and sync warning.
+- Add `[repo]` config section with `branch` setting (default: `"main"`) — replaces hardcoded `"main"` throughout.
 
 ## Issue Tracking with Beads
 
@@ -284,7 +268,7 @@ br create --title="..." --type=task --priority=2
 - **Versioning**: Use semantic versioning. Tag releases with `v` prefix (`v0.1.0`). Update Cargo.toml version and README install command before tagging.
 - **Agent identity**: When announcing releases or responding on botbus, use `--agent maw-dev` and post to `#maw` channel.
 - **Issue tracking**: Use `br` (beads) for issue tracking. File beads for bugs and feature requests. Triage community feedback from botbus.
-- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `jj bookmark set main -r @` → `jj git push` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
+- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `maw push` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
 
 ---
 

@@ -6,6 +6,7 @@ mod doctor;
 mod format;
 mod init;
 mod jj_intro;
+mod push;
 mod status;
 mod tui;
 mod workspace;
@@ -98,6 +99,17 @@ enum Commands {
 
     /// Brief repo and workspace status
     Status(status::StatusArgs),
+
+    /// Push the main branch to remote
+    ///
+    /// Pushes the configured branch (default: main) to origin using
+    /// `jj git push`. Checks sync status first and provides clear
+    /// error messages if the branch is behind or doesn't exist.
+    ///
+    /// Configure the branch name in .maw.toml:
+    ///   [repo]
+    ///   branch = "main"
+    Push,
 }
 
 fn main() -> Result<()> {
@@ -111,5 +123,6 @@ fn main() -> Result<()> {
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),
         Commands::Status(cmd) => status::run(cmd),
+        Commands::Push => push::run(),
     }
 }

@@ -22,8 +22,7 @@ All steps below are required — they clean up resources, prevent workspace leak
 6. Release all claims held by this agent: `bus claims release --agent $AGENT --all`
 7. Sync the beads ledger: `br sync --flush-only`
 8. **If pushMain is enabled** (check `.botbox.json` for `"pushMain": true`), push to GitHub main:
-   - `jj bookmark set main -r @-`
-   - `jj git push`
+   - `maw push`
    - If push fails, announce: `bus send --agent $AGENT $BOTBOX_PROJECT "Push failed for <bead-id>, manual intervention needed" -L tool-issue`
 9. Announce completion in the project channel: `bus send --agent $AGENT $BOTBOX_PROJECT "Completed <bead-id>: <bead-title>" -L task-done`
 
@@ -77,9 +76,8 @@ jj abandon <merge-commit-id> <empty-commit-ids>
 # 3. Move to your feature commit
 jj edit <feature-commit-id>
 
-# 4. Set main and push
-jj bookmark set main -r @
-jj git push
+# 4. Push
+maw push
 ```
 
 ### When to escalate

@@ -12,11 +12,35 @@ use crate::format::OutputFormat;
 
 /// Configuration from .maw.toml
 #[derive(Debug, Default, Deserialize)]
-struct MawConfig {
+pub struct MawConfig {
     #[serde(default)]
     merge: MergeConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    #[serde(default)]
+    repo: RepoConfig,
+}
+
+/// Repository configuration
+#[derive(Debug, Deserialize)]
+struct RepoConfig {
+    /// Branch name to use for main bookmark (default: "main")
+    #[serde(default = "RepoConfig::default_branch")]
+    branch: String,
+}
+
+impl Default for RepoConfig {
+    fn default() -> Self {
+        Self {
+            branch: "main".to_string(),
+        }
+    }
+}
+
+impl RepoConfig {
+    fn default_branch() -> String {
+        "main".to_string()
+    }
 }
 
 /// Hook configuration for running commands before/after operations
@@ -41,7 +65,7 @@ struct MergeConfig {
 
 impl MawConfig {
     /// Load config from .maw.toml in the repo root, or return defaults if not found.
-    fn load(repo_root: &Path) -> Result<Self> {
+    pub fn load(repo_root: &Path) -> Result<Self> {
         let config_path = repo_root.join(".maw.toml");
         if !config_path.exists() {
             return Ok(Self::default());
@@ -50,6 +74,11 @@ impl MawConfig {
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
         toml::from_str(&content)
             .with_context(|| format!("Failed to parse {}", config_path.display()))
+    }
+
+    /// The configured branch name (default: "main").
+    pub fn branch(&self) -> &str {
+        &self.repo.branch
     }
 }
 
@@ -358,7 +387,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
     }
 }
 
-fn repo_root() -> Result<PathBuf> {
+pub fn repo_root() -> Result<PathBuf> {
     let output = Command::new("jj")
         .args(["root"])
         .output()
@@ -704,8 +733,9 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
         );
     }
 
-    // Determine the revision to attach to (user-specified or default to main)
-    let attach_rev = revision.map_or_else(|| "main".to_string(), ToString::to_string);
+    // Determine the revision to attach to (user-specified or default to configured branch)
+    let config = MawConfig::load(&root)?;
+    let attach_rev = revision.map_or_else(|| config.branch().to_string(), ToString::to_string);
 
     println!("Attaching workspace '{name}' at revision {attach_rev}...");
 
@@ -1511,7 +1541,7 @@ fn history(name: &str, limit: usize) -> Result<()> {
 
 /// Check for conflicts after merge and auto-resolve paths matching config patterns.
 /// Returns true if there are remaining (unresolved) conflicts.
-fn auto_resolve_conflicts(root: &Path, config: &MawConfig) -> Result<bool> {
+fn auto_resolve_conflicts(root: &Path, config: &MawConfig, branch: &str) -> Result<bool> {
     // Check for conflicts
     let status_output = Command::new("jj")
         .args(["status"])
@@ -1562,13 +1592,13 @@ fn auto_resolve_conflicts(root: &Path, config: &MawConfig) -> Result<bool> {
     if !auto_resolved.is_empty() {
         println!();
         println!(
-            "Auto-resolving {} file(s) from main (via .maw.toml config):",
+            "Auto-resolving {} file(s) from {branch} (via .maw.toml config):",
             auto_resolved.len()
         );
         for file in &auto_resolved {
-            // Restore file from main to resolve conflict
+            // Restore file from branch to resolve conflict
             let restore_output = Command::new("jj")
-                .args(["restore", "--from", "main", file])
+                .args(["restore", "--from", branch, file])
                 .current_dir(root)
                 .output()
                 .context("Failed to restore file from main")?;
@@ -1808,8 +1838,9 @@ fn merge(
     // the merge commit.
     let root = ensure_repo_root()?;
 
-    // Load config early for hooks and auto-resolve settings
+    // Load config early for hooks, auto-resolve settings, and branch name
     let config = MawConfig::load(&root)?;
+    let branch = config.branch();
 
     // Preview mode: show what the merge would do without committing
     if dry_run {
@@ -1847,7 +1878,7 @@ fn merge(
     // Step 1: Rebase all workspace commits onto main
     let revset = revisions.join(" | ");
     let rebase_output = Command::new("jj")
-        .args(["rebase", "-r", &revset, "-d", "main"])
+        .args(["rebase", "-r", &revset, "-d", branch])
         .current_dir(&root)
         .output()
         .context("Failed to rebase workspace commits")?;
@@ -1855,7 +1886,7 @@ fn merge(
     if !rebase_output.status.success() {
         let stderr = String::from_utf8_lossy(&rebase_output.stderr);
         bail!(
-            "Failed to rebase workspace commits onto main: {}\n  Verify workspaces exist: maw ws list",
+            "Failed to rebase workspace commits onto {branch}: {}\n  Verify workspaces exist: maw ws list",
             stderr.trim()
         );
     }
@@ -1890,24 +1921,22 @@ fn merge(
     // Step 3: Move main bookmark to the final commit
     let final_rev = format!("{}@", ws_to_merge[0]);
     let bookmark_output = Command::new("jj")
-        .args(["bookmark", "set", "main", "-r", &final_rev])
+        .args(["bookmark", "set", branch, "-r", &final_rev])
         .current_dir(&root)
         .output()
         .context("Failed to move main bookmark")?;
 
     if !bookmark_output.status.success() {
         let stderr = String::from_utf8_lossy(&bookmark_output.stderr);
-        eprintln!("Warning: Failed to move main bookmark: {}", stderr.trim());
-        eprintln!("  Run manually: jj bookmark set main -r {final_rev}");
+        eprintln!("Warning: Failed to move {branch} bookmark: {}", stderr.trim());
+        eprintln!("  Run manually: jj bookmark set {branch} -r {final_rev}");
     }
 
-    // Step 4: Abandon orphaned scaffolding commits (empty, undescribed, not on main)
+    // Step 4: Abandon orphaned scaffolding commits (empty, undescribed, not on branch)
     // These are the workspace setup commits that got orphaned by rebase
+    let abandon_revset = format!("empty() & description(exact:'') & ~ancestors({branch}) & ~root()");
     let abandon_output = Command::new("jj")
-        .args([
-            "abandon",
-            "empty() & description(exact:'') & ~ancestors(main) & ~root()",
-        ])
+        .args(["abandon", &abandon_revset])
         .current_dir(&root)
         .output();
 
@@ -1920,8 +1949,23 @@ fn merge(
         }
     }
 
-    println!("Merged to main: {msg}");
-    let has_conflicts = auto_resolve_conflicts(&root, &config)?;
+    // Step 5: Rebase default workspace onto new branch so on-disk files reflect the merge.
+    // The default workspace's working copy is empty (no changes), so this is safe.
+    let rebase_default = Command::new("jj")
+        .args(["rebase", "-r", "@", "-d", branch])
+        .current_dir(&root)
+        .output();
+
+    if let Ok(output) = rebase_default
+        && !output.status.success()
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Warning: Failed to rebase default workspace onto {branch}: {}", stderr.trim());
+        eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -r @ -d {branch}");
+    }
+
+    println!("Merged to {branch}: {msg}");
+    let has_conflicts = auto_resolve_conflicts(&root, &config, branch)?;
 
     // Optionally destroy workspaces (but not if there are conflicts!)
     if destroy_after {
@@ -1962,7 +2006,7 @@ fn merge(
     if !has_conflicts {
         println!();
         println!("Next: push to remote:");
-        println!("  jj git push");
+        println!("  maw push");
     }
 
     Ok(())
