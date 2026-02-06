@@ -318,8 +318,9 @@ pub enum WorkspaceCommands {
     /// Merge work from workspaces into default
     ///
     /// Creates a merge commit combining work from the specified workspaces.
-    /// Works with one or more workspaces. After merge, check output for
-    /// undescribed commits (commits with no message) that may block push.
+    /// Works with one or more workspaces. Stale workspaces are automatically
+    /// synced before merge to avoid spurious conflicts. After merge, check
+    /// output for undescribed commits (commits with no message) that may block push.
     ///
     /// Examples:
     ///   maw ws merge alice                 # adopt alice's work
@@ -1354,6 +1355,75 @@ fn warn_if_stale(name: &str, path: &Path) {
     }
 }
 
+/// Sync stale workspaces before merge to avoid spurious conflicts.
+///
+/// When a workspace is stale (its base commit is behind main), merging can produce
+/// conflicts even when changes don't overlap - just because the workspace is missing
+/// intermediate commits from main. This is especially problematic for append-only
+/// files where jj's line-based merge would normally just concatenate.
+///
+/// This function checks each workspace being merged and syncs any that are stale,
+/// ensuring all workspace commits are based on current main before the merge.
+fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result<()> {
+    let ws_dir = root.join(".workspaces");
+    let mut synced_count = 0;
+
+    for ws in workspaces {
+        let ws_path = ws_dir.join(ws);
+        if !ws_path.exists() {
+            // Workspace directory doesn't exist - the merge will fail later with a clearer error
+            continue;
+        }
+
+        // Check if workspace is stale
+        let status_output = Command::new("jj")
+            .args(["status"])
+            .current_dir(&ws_path)
+            .output()
+            .with_context(|| format!("Failed to check status of workspace '{ws}'"))?;
+
+        let stderr = String::from_utf8_lossy(&status_output.stderr);
+        if !stderr.contains("working copy is stale") {
+            continue;
+        }
+
+        // Workspace is stale - sync it
+        println!("Syncing stale workspace '{ws}' before merge...");
+
+        let update_output = Command::new("jj")
+            .args(["workspace", "update-stale"])
+            .current_dir(&ws_path)
+            .output()
+            .with_context(|| format!("Failed to sync stale workspace '{ws}'"))?;
+
+        if !update_output.status.success() {
+            let err = String::from_utf8_lossy(&update_output.stderr);
+            bail!(
+                "Failed to sync stale workspace '{ws}': {}\n  \
+                 Manual fix: maw ws sync\n  \
+                 Then retry: maw ws merge {}",
+                err.trim(),
+                workspaces.join(" ")
+            );
+        }
+
+        // Resolve any divergent commits created by the sync
+        resolve_divergent_working_copy(ws_path.to_str().unwrap_or("."))?;
+
+        synced_count += 1;
+    }
+
+    if synced_count > 0 {
+        println!(
+            "Synced {} stale workspace(s). Proceeding with merge.",
+            synced_count
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
 /// Warn if a jj command targets a commit outside this workspace's working copy.
 /// This helps prevent divergent commits from agents modifying shared commits.
 fn warn_if_targeting_other_commit(workspace_name: &str, args: &[String], workspace_path: &Path) {
@@ -1875,6 +1945,12 @@ fn merge(
 
     // Run pre-merge hooks (abort on failure)
     run_hooks(&config.hooks.pre_merge, "pre-merge", &root, true)?;
+
+    // Sync stale workspaces before merge to avoid spurious conflicts.
+    // When a workspace's base commit is behind main, merging can produce conflicts
+    // even when changes don't overlap. Syncing first ensures all workspace commits
+    // are based on current main.
+    sync_stale_workspaces_for_merge(&ws_to_merge, &root)?;
 
     if ws_to_merge.len() == 1 {
         println!("Adopting workspace: {}", ws_to_merge[0]);
