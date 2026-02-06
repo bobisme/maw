@@ -141,9 +141,25 @@ async function getAgentName() {
 	}
 }
 
+// --- Helper: check for unfinished work owned by this agent ---
+async function getUnfinishedBeads() {
+	try {
+		const result = await runCommand('br', ['list', '--status', 'in_progress', '--assignee', AGENT, '--json']);
+		const beads = JSON.parse(result.stdout || '[]');
+		return Array.isArray(beads) ? beads : [];
+	} catch (err) {
+		console.error('Error checking for unfinished beads:', err.message);
+		return [];
+	}
+}
+
 // --- Helper: check if there is work ---
 async function hasWork() {
 	try {
+		// Check for unfinished beads owned by this agent (crash recovery)
+		const unfinished = await getUnfinishedBeads();
+		if (unfinished.length > 0) return true;
+
 		// Check claims (dispatched workers or in-progress beads)
 		const claimsResult = await runCommand('bus', [
 			'claims',
@@ -242,9 +258,7 @@ async function readLastIteration() {
 
 // --- Build dev lead prompt ---
 function buildPrompt(lastIteration) {
-	const pushMainStep = PUSH_MAIN
-		? '\n  14. Push to GitHub: jj bookmark set main -r @- && jj git push (if fails, announce issue).'
-		: '';
+	const pushMainStep = PUSH_MAIN ? '\n  14. Push to GitHub: maw push (if fails, announce issue).' : '';
 
 	const reviewInstructions = REVIEW ? 'REVIEW is true' : 'REVIEW is false';
 
@@ -267,18 +281,45 @@ At the end of your work, output:
    - <promise>COMPLETE</promise> if you completed work or determined no work available
    - <promise>END_OF_STORY</promise> if iteration done but more work remains
 
-## 1. RESUME CHECK (do this FIRST)
+## 1. UNFINISHED WORK CHECK (do this FIRST — crash recovery)
+
+Run: br list --status in_progress --assignee ${AGENT} --json
+
+If any in_progress beads are owned by you, you have unfinished work from a previous session that was interrupted.
+
+For EACH unfinished bead:
+1. Read the bead and its comments: br show <id> and br comments <id>
+2. Check if you still hold claims: bus claims list --agent ${AGENT} --mine
+3. Determine state:
+   - If "Review created: <review-id>" comment exists:
+     * Find the review: crit reviews list --all-workspaces | grep <review-id>
+     * Check review status: crit reviews show <review-id> --path <workspace-path>
+     * If LGTM (approved): Proceed to merge/finish (step 6)
+     * If BLOCKED (changes requested): Follow review-response.md to fix issues, re-request review, then STOP
+     * If PENDING (no votes yet): STOP this iteration — wait for reviewer
+     * If review not found: Check if workspace still exists and create new review if needed
+   - If workspace comment exists but no review comment (work was in progress when session died):
+     * Extract workspace name and path from comments
+     * Verify workspace still exists: maw ws list
+     * If workspace exists: Resume work in that workspace, complete the task, then proceed to review/finish
+     * If workspace was destroyed: Re-create workspace and resume from scratch (check comments for what was done)
+   - If no workspace comment (bead was just started):
+     * Re-create workspace and start fresh
+
+After handling all unfinished beads, proceed to step 2 (RESUME CHECK).
+
+## 2. RESUME CHECK (check for active claims)
 
 Run: bus claims list --agent ${AGENT} --mine
 
-If you hold any claims:
+If you hold any claims not covered by unfinished beads in step 1:
 - bead:// claim with review comment: Check crit review status. If LGTM, proceed to merge/finish.
 - bead:// claim without review: Complete the work, then review or finish.
-- workspace:// claims: These are dispatched workers. Skip to step 6 (MONITOR).
+- workspace:// claims: These are dispatched workers. Skip to step 7 (MONITOR).
 
-If no claims: proceed to step 2 (INBOX).
+If no additional claims: proceed to step 3 (INBOX).
 
-## 2. INBOX
+## 3. INBOX
 
 Run: bus inbox --agent ${AGENT} --channels ${PROJECT} --mark-read
 
@@ -289,7 +330,7 @@ Process each message:
 - Announcements ("Working on...", "Completed...", "online"): ignore, no action
 - Duplicate requests: note existing bead, don't create another
 
-## 3. TRIAGE
+## 4. TRIAGE
 
 Run: br ready --json
 
@@ -301,11 +342,11 @@ GROOM each ready bead:
 - If bead is claimed (check bus claims), skip it
 
 Assess bead count:
-- 0 ready beads (but dispatched workers pending): just monitor, skip to step 6.
-- 1 ready bead: do it yourself sequentially (follow steps 4a below).
-- 2+ ready beads: dispatch workers in parallel (follow steps 4b below).
+- 0 ready beads (but dispatched workers pending): just monitor, skip to step 7.
+- 1 ready bead: do it yourself sequentially (follow steps 5a below).
+- 2+ ready beads: dispatch workers in parallel (follow steps 5b below).
 
-## 4a. SEQUENTIAL (1 bead — do it yourself)
+## 5a. SEQUENTIAL (1 bead — do it yourself)
 
 Same as the standard worker loop:
 1. br update --actor ${AGENT} <id> --status=in_progress
@@ -321,23 +362,27 @@ Same as the standard worker loop:
 10. Describe: maw ws jj \$WS describe -m "<id>: <summary>"
 
 If REVIEW is true:
-  11. Create review: crit reviews create --agent ${AGENT} --title "<title>" --description "<summary>"
-  12. br comments add --actor ${AGENT} --author ${AGENT} <id> "Review requested: <review-id>, workspace: \$WS (\$WS_PATH)"
+  11. CHECK for existing review first:
+      - Run: br comments <id> | grep "Review created:"
+      - If found, extract <review-id> and skip to step 13 (don't create duplicate)
+  12. Create review (only if none exists):
+      - crit reviews create --agent ${AGENT} --title "<id>: <title>" --description "<summary>" --path \$WS_PATH
+      - IMMEDIATELY record: br comments add --actor ${AGENT} --author ${AGENT} <id> "Review created: <review-id> in workspace \$WS"
   13. bus statuses set --agent ${AGENT} "Review: <review-id>"
   14. Request security review (if project has security reviewer):
-      - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT}
+      - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT} --path \$WS_PATH
       - Spawn via @mention: bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id> @${PROJECT}-security" -L review-request
       (The @mention triggers the auto-spawn hook — without it, no reviewer spawns!)
   15. STOP this iteration — wait for reviewer.
 
 If REVIEW is false:
-  11. Merge: maw ws merge \$WS --destroy
+  11. Merge: maw ws merge \$WS --destroy (maw v0.22.0+ produces linear squashed history and auto-moves main)
   12. br close --actor ${AGENT} <id> --reason="Completed"
   13. bus claims release --agent ${AGENT} --all
   14. br sync --flush-only${pushMainStep}
   ${PUSH_MAIN ? '15' : '14'}. bus send --agent ${AGENT} ${PROJECT} "Completed <id>: <title>" -L task-done
 
-## 4b. PARALLEL DISPATCH (2+ beads)
+## 5b. PARALLEL DISPATCH (2+ beads)
 
 For EACH independent ready bead, assess and dispatch:
 
@@ -361,7 +406,7 @@ Read each bead (br show <id>) and select a model based on complexity:
 DO NOT actually spawn background processes — that's handled by bash/botty. Instead, just note:
 "Workers would be spawned here in production. For now, skip to monitoring."
 
-## 5. MONITOR (if workers are dispatched)
+## 6. MONITOR (if workers are dispatched)
 
 Check for completion messages:
 - bus inbox --agent ${AGENT} --channels ${PROJECT} -n 20
@@ -372,28 +417,46 @@ For each completed worker:
 - Read their progress comments: br comments <id>
 - Verify the work looks reasonable (spot check key files)
 
-## 6. FINISH (merge completed work)
+## 7. FINISH (merge completed work)
 
 For each completed bead with a workspace:
 
 If REVIEW is true:
-  1. crit reviews create --agent ${AGENT} --title "<title>" --description "<summary of changes>"
-  2. br comments add --actor ${AGENT} --author ${AGENT} <id> "Review requested: <review-id>"
+  1. CHECK for existing review first:
+     - Run: br comments <id> | grep "Review created:"
+     - If found, extract <review-id> and skip to step 3 (don't create duplicate)
+  2. Create review (only if none exists):
+     - crit reviews create --agent ${AGENT} --title "<id>: <title>" --description "<summary of changes>" --path <ws-path>
+     - IMMEDIATELY record: br comments add --actor ${AGENT} --author ${AGENT} <id> "Review created: <review-id> in workspace <ws-name>"
   3. Request security review (if project has security reviewer):
-     - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT}
+     - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT} --path <ws-path>
      - Spawn via @mention: bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id> @${PROJECT}-security" -L review-request
      (The @mention triggers the auto-spawn hook — without it, no reviewer spawns!)
   4. STOP — wait for reviewer
 
 If REVIEW is false:
-  1. maw ws merge \$WS --destroy
+  1. maw ws merge \$WS --destroy (maw v0.22.0+ produces linear squashed history and auto-moves main)
   2. br close --actor ${AGENT} <id>
   3. br sync --flush-only${pushMainStep}
   4. bus send --agent ${AGENT} ${PROJECT} "Completed <id>: <title>" -L task-done
 
 After finishing all ready work:
   bus claims release --agent ${AGENT} --all
-  Output: <promise>END_OF_STORY</promise> if more beads remain, else <promise>COMPLETE</promise>
+
+## 8. RELEASE CHECK (before signaling COMPLETE)
+
+Before outputting COMPLETE, check if a release is needed:
+
+1. Check for unreleased commits: jj log -r 'tags()..main' --no-graph -T 'description.first_line() ++ "\\n"'
+2. If any commits start with "feat:" or "fix:" (user-visible changes), a release is needed:
+   - Bump version in Cargo.toml/package.json (semantic versioning)
+   - Update changelog if one exists
+   - maw push (if not already pushed)
+   - Tag: jj tag create vX.Y.Z -r main && jj git push --remote origin
+   - Announce: bus send --agent ${AGENT} ${PROJECT} "<project> vX.Y.Z released - <summary>" -L release
+3. If only "chore:", "docs:", "refactor:" commits, no release needed.
+
+Output: <promise>END_OF_STORY</promise> if more beads remain, else <promise>COMPLETE</promise>
 
 Key rules:
 - Triage first, then decide: sequential vs parallel
@@ -439,20 +502,25 @@ async function runClaude(prompt) {
 	});
 }
 
+// Track if we already announced sign-off (to avoid duplicate messages)
+let alreadySignedOff = false;
+
 // --- Cleanup handler ---
 async function cleanup() {
 	console.log('Cleaning up...');
-	try {
-		await runCommand('bus', [
-			'send',
-			'--agent',
-			AGENT,
-			PROJECT,
-			`Dev agent ${AGENT} signing off.`,
-			'-L',
-			'agent-idle',
-		]);
-	} catch {}
+	if (!alreadySignedOff) {
+		try {
+			await runCommand('bus', [
+				'send',
+				'--agent',
+				AGENT,
+				PROJECT,
+				`Dev agent ${AGENT} signing off.`,
+				'-L',
+				'agent-idle',
+			]);
+		} catch {}
+	}
 	try {
 		await runCommand('bus', ['statuses', 'clear', '--agent', AGENT]);
 	} catch {}
@@ -556,6 +624,7 @@ async function main() {
 				'-L',
 				'agent-idle',
 			]);
+			alreadySignedOff = true;
 			break;
 		}
 

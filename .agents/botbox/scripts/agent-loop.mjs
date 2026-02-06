@@ -160,9 +160,7 @@ async function hasWork() {
 
 // --- Build worker prompt ---
 function buildPrompt() {
-	const pushMainStep = PUSH_MAIN
-		? '\n   Push to GitHub: jj bookmark set main -r @- && jj git push (if fails, announce issue).'
-		: '';
+	const pushMainStep = PUSH_MAIN ? '\n   Push to GitHub: maw push (if fails, announce issue).' : '';
 
 	return `You are worker agent "${AGENT}" for project "${PROJECT}".
 
@@ -182,12 +180,14 @@ At the end of your work, output exactly one of these completion signals:
    If you hold a bead:// claim, you have an in-progress bead from a previous iteration.
    - Run: br comments <bead-id> to understand what was done before and what remains.
    - Look for workspace info in comments (workspace name and path).
-   - If a "Review requested: <review-id>" comment exists:
-     * Check review status: crit review <review-id>
+   - If a "Review created: <review-id>" comment exists:
+     * Find the review: crit reviews list --all-workspaces | grep <review-id>
+     * Check review status: crit reviews show <review-id> --path <workspace-path>
      * If LGTM (approved): proceed to FINISH (step 7) — merge the review and close the bead.
      * If BLOCKED (changes requested): follow .agents/botbox/review-response.md to fix issues
        in the workspace, re-request review, then STOP this iteration.
      * If PENDING (no votes yet): STOP this iteration. Wait for the reviewer.
+     * If review not found: Check if workspace still exists and create new review if needed
    - If no review comment (work was in progress when session ended):
      * Read the workspace code to see what's already done.
      * Complete the remaining work in the EXISTING workspace — do NOT create a new one.
@@ -238,11 +238,15 @@ At the end of your work, output exactly one of these completion signals:
 
 6. REVIEW REQUEST:
    Describe the change: maw ws jj \$WS describe -m "<id>: <summary>".
-   Create review: crit reviews create --agent ${AGENT} --title "<title>" --description "<summary>".
-   Add bead comment: br comments add --actor ${AGENT} --author ${AGENT} <id> "Review requested: <review-id>, workspace: \$WS (\$WS_PATH)".
+   CHECK for existing review first:
+     - Run: br comments <id> | grep "Review created:"
+     - If found, extract <review-id> and skip to requesting security review (don't create duplicate)
+   Create review (only if none exists):
+     - crit reviews create --agent ${AGENT} --title "<id>: <title>" --description "<summary>" --path \$WS_PATH
+     - IMMEDIATELY record: br comments add --actor ${AGENT} --author ${AGENT} <id> "Review created: <review-id> in workspace \$WS"
    bus statuses set --agent ${AGENT} "Review: <review-id>".
    Request security review (if project has security reviewer):
-     - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT}
+     - Assign: crit reviews request <review-id> --reviewers ${PROJECT}-security --agent ${AGENT} --path \$WS_PATH
      - Spawn via @mention: bus send --agent ${AGENT} ${PROJECT} "Review requested: <review-id> for <id> @${PROJECT}-security" -L review-request
      (The @mention triggers the auto-spawn hook — without it, no reviewer spawns!)
    Do NOT close the bead. Do NOT merge the workspace. Do NOT release claims.
@@ -256,10 +260,21 @@ At the end of your work, output exactly one of these completion signals:
      crit reviews mark-merged <review-id> --agent ${AGENT}.
    br comments add --actor ${AGENT} --author ${AGENT} <id> "Completed by ${AGENT}".
    br close --actor ${AGENT} <id> --reason="Completed" --suggest-next.
-   maw ws merge \$WS --destroy (if conflict, preserve and announce).
+   maw ws merge \$WS --destroy (maw v0.22.0+ produces linear squashed history and auto-moves main; if conflict, preserve and announce).
    bus claims release --agent ${AGENT} --all.
    br sync --flush-only.${pushMainStep}
    bus send --agent ${AGENT} ${PROJECT} "Completed <id>: <title>" -L task-done.
+   Then proceed to step 8 (RELEASE CHECK).
+
+8. RELEASE CHECK (before signaling COMPLETE):
+   Check for unreleased commits: jj log -r 'tags()..main' --no-graph -T 'description.first_line() ++ "\\n"'
+   If any commits start with "feat:" or "fix:" (user-visible changes), a release is needed:
+   - Bump version in Cargo.toml/package.json (semantic versioning)
+   - Update changelog if one exists
+   - maw push (if not already pushed)
+   - Tag: jj tag create vX.Y.Z -r main && jj git push --remote origin
+   - Announce: bus send --agent ${AGENT} ${PROJECT} "<project> vX.Y.Z released - <summary>" -L release
+   If only "chore:", "docs:", "refactor:" commits, no release needed.
    Output: <promise>COMPLETE</promise>
 
 Key rules:
@@ -310,20 +325,25 @@ async function runClaude(prompt) {
 	});
 }
 
+// Track if we already announced sign-off (to avoid duplicate messages)
+let alreadySignedOff = false;
+
 // --- Cleanup handler ---
 async function cleanup() {
 	console.log('Cleaning up...');
-	try {
-		await runCommand('bus', [
-			'send',
-			'--agent',
-			AGENT,
-			PROJECT,
-			`Agent ${AGENT} signing off.`,
-			'-L',
-			'agent-idle',
-		]);
-	} catch {}
+	if (!alreadySignedOff) {
+		try {
+			await runCommand('bus', [
+				'send',
+				'--agent',
+				AGENT,
+				PROJECT,
+				`Agent ${AGENT} signing off.`,
+				'-L',
+				'agent-idle',
+			]);
+		} catch {}
+	}
 	try {
 		await runCommand('bus', ['statuses', 'clear', '--agent', AGENT]);
 	} catch {}
@@ -420,6 +440,7 @@ async function main() {
 				'-L',
 				'agent-idle',
 			]);
+			alreadySignedOff = true;
 			break;
 		}
 

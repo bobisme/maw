@@ -17,12 +17,14 @@ All steps below are required — they clean up resources, prevent workspace leak
 4. Close the bead: `br close --actor $AGENT <bead-id> --reason="Completed" --suggest-next`
 5. **Merge and destroy the workspace**: `maw ws merge $WS --destroy` (where `$WS` is the workspace name from the start step)
    - The `--destroy` flag is required — it cleans up the workspace after merging
+   - `maw ws merge` now produces linear history: workspace commits are rebased onto main and squashed into a single commit (as of v0.22.0)
+   - Scaffolding commits are automatically abandoned; main bookmark is automatically moved and ready for push
    - If merge fails due to conflicts, do NOT destroy. Instead add a comment: `br comments add --actor $AGENT --author $AGENT <bead-id> "Merge conflict — workspace preserved for manual resolution"` and announce the conflict in the project channel.
    - If the command succeeds but the workspace still exists (`maw ws list`), report: `bus send --agent $AGENT $BOTBOX_PROJECT "Tool issue: maw ws merge --destroy did not remove workspace $WS" -L tool-issue`
 6. Release all claims held by this agent: `bus claims release --agent $AGENT --all`
 7. Sync the beads ledger: `br sync --flush-only`
 8. **If pushMain is enabled** (check `.botbox.json` for `"pushMain": true`), push to GitHub main:
-   - `maw push`
+   - `maw push` (maw v0.24.0+ handles bookmark and push automatically)
    - If push fails, announce: `bus send --agent $AGENT $BOTBOX_PROJECT "Push failed for <bead-id>, manual intervention needed" -L tool-issue`
 9. Announce completion in the project channel: `bus send --agent $AGENT $BOTBOX_PROJECT "Completed <bead-id>: <bead-title>" -L task-done`
 
@@ -47,18 +49,19 @@ A "release" = user-visible changes shipped with a version tag. When in doubt, re
 
 ## Merge Conflict Recovery
 
-If `maw ws merge` shows "WARNING: Merged workspace has diverged from main":
+If `maw ws merge` detects conflicts during the rebase:
 
 ### Quick fix for .beads conflicts only
 
 `.beads/issues.jsonl` often conflicts because multiple agents update it concurrently. If your feature changes are clean and only `.beads/` conflicts:
 
 ```bash
+# From inside the workspace directory
 jj restore --from main .beads/
 jj squash
 ```
 
-Then retry `maw ws merge $WS --destroy`.
+Then retry `maw ws merge $WS --destroy` from the project root.
 
 **Note**: `.crit/` rarely conflicts with crit v2 (per-review event logs). If it does conflict, investigate rather than auto-restoring — it likely means two agents worked on the same review.
 
@@ -76,7 +79,7 @@ jj abandon <merge-commit-id> <empty-commit-ids>
 # 3. Move to your feature commit
 jj edit <feature-commit-id>
 
-# 4. Push (--advance moves the branch bookmark to your commit)
+# 4. Set main and push
 maw push --advance
 ```
 
