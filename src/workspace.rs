@@ -1407,8 +1407,9 @@ fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result
             );
         }
 
-        // Resolve any divergent commits created by the sync
-        resolve_divergent_working_copy(ws_path.to_str().unwrap_or("."))?;
+        // Note: jj workspace update-stale can create divergent commits if the same
+        // change was modified in multiple workspaces. These will be caught by
+        // maw ws status and can be resolved with jj abandon <change-id>/N
 
         synced_count += 1;
     }
