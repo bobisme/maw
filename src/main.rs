@@ -104,7 +104,7 @@ enum Commands {
     /// Upgrade v1 repo (.workspaces/) to v2 bare model (ws/)
     ///
     /// Migrates from the old .workspaces/ layout to the new bare repo model
-    /// with ws/ directory, coord workspace, and git core.bare = true.
+    /// with ws/ directory, default workspace at ws/default/, and git core.bare = true.
     /// Safe to run multiple times — detects v2 and exits early.
     Upgrade,
 
@@ -112,7 +112,7 @@ enum Commands {
     ///
     /// Pushes the configured branch (default: main) to origin using
     /// `jj git push --bookmark <branch>`. Uses --bookmark explicitly so
-    /// the push works from any workspace (including the coord workspace
+    /// the push works from any workspace (including the default workspace
     /// where @ is not an ancestor of the branch).
     ///
     /// Checks sync status first and provides clear error messages if the

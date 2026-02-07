@@ -5,23 +5,12 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 /// Files/dirs at root that should NOT be cleaned after forgetting the default workspace.
-const KEEP_ROOT: &[&str] = &[
-    ".git",
-    ".jj",
-    "ws",
-    ".gitignore",
-    ".maw.toml",
-    ".beads",
-    ".crit",
-    ".agents",
-    ".botbox.json",
-    "notes",
-];
+const KEEP_ROOT: &[&str] = &[".git", ".jj", "ws"];
 
 /// Initialize maw in the current repository (bare repo model)
 ///
 /// Ensures jj is initialized, ws/ is gitignored, and the repo is set up
-/// in bare mode with a coord workspace.
+/// in bare mode with a default workspace at ws/default/.
 pub fn run() -> Result<()> {
     println!("Initializing maw...");
     println!();
@@ -29,18 +18,19 @@ pub fn run() -> Result<()> {
     ensure_jj_repo()?;
     ensure_workspaces_gitignored()?;
     ensure_maw_config()?;
-    forget_default_workspace()?;
+    setup_bare_default_workspace()?;
     set_git_bare_mode()?;
-    create_coord_workspace()?;
     clean_root_source_files()?;
+    ensure_gitignore_in_workspace()?;
+    refresh_workspace_state()?;
 
     let cwd = std::env::current_dir()
         .context("Could not determine current directory")?;
-    let coord_path = cwd.join("ws").join("coord");
+    let default_path = cwd.join("ws").join("default");
 
     println!();
     println!("maw is ready! (bare repo model)");
-    println!("  Coord workspace: {}/", coord_path.display());
+    println!("  Default workspace: {}/", default_path.display());
     println!("  Next: maw ws create <agent-name>");
 
     Ok(())
@@ -156,9 +146,16 @@ auto_resolve_from_main = [
     Ok(())
 }
 
-/// Forget the default workspace if it exists.
-/// In bare repo model, we don't want a default workspace — only coord + agent workspaces.
-fn forget_default_workspace() -> Result<()> {
+/// Move the default workspace from root to ws/default/.
+///
+/// In a fresh jj repo, "default" is at the repo root. We relocate it to
+/// ws/default/ so the root becomes bare (no working copy). If "default"
+/// already exists at ws/default/, this is a no-op.
+fn setup_bare_default_workspace() -> Result<()> {
+    let ws_dir = Path::new("ws");
+    let default_path = ws_dir.join("default");
+
+    // Check current workspace state
     let output = Command::new("jj")
         .args(["workspace", "list"])
         .output()
@@ -172,25 +169,70 @@ fn forget_default_workspace() -> Result<()> {
             .is_some_and(|n| n.trim().trim_end_matches('@') == "default")
     });
 
-    if !has_default {
-        println!("[OK] Default workspace already forgotten");
+    // If default workspace exists at ws/default/, we're already set up
+    if has_default && default_path.exists() {
+        println!("[OK] Default workspace already at ws/default/");
         return Ok(());
     }
 
-    let forget = Command::new("jj")
-        .args(["workspace", "forget", "default"])
-        .output()
-        .context("Failed to run jj workspace forget default")?;
+    // Ensure ws/ directory exists
+    fs::create_dir_all(ws_dir)
+        .with_context(|| format!("Failed to create {}", ws_dir.display()))?;
 
-    if forget.status.success() {
-        println!("[OK] Forgot default workspace");
-    } else {
-        let stderr = String::from_utf8_lossy(&forget.stderr);
-        anyhow::bail!(
-            "Failed to forget default workspace: {}\n  Try: jj workspace forget default",
-            stderr.trim()
-        );
+    // If default exists at root, forget it so we can recreate at ws/default/
+    if has_default {
+        let forget = Command::new("jj")
+            .args(["workspace", "forget", "default"])
+            .output()
+            .context("Failed to forget default workspace")?;
+
+        if !forget.status.success() {
+            let stderr = String::from_utf8_lossy(&forget.stderr);
+            anyhow::bail!(
+                "Failed to forget default workspace: {}\n  Try: jj workspace forget default",
+                stderr.trim()
+            );
+        }
     }
+
+    // Create default workspace at ws/default/, parented on main.
+    // Try with -r main first; fall back to no -r for fresh repos without main.
+    let add = Command::new("jj")
+        .args([
+            "workspace",
+            "add",
+            default_path.to_str().unwrap_or("ws/default"),
+            "--name",
+            "default",
+            "-r",
+            "main",
+        ])
+        .output()
+        .context("Failed to create default workspace at ws/default/")?;
+
+    if !add.status.success() {
+        // main might not exist yet — retry without -r
+        let add_fallback = Command::new("jj")
+            .args([
+                "workspace",
+                "add",
+                default_path.to_str().unwrap_or("ws/default"),
+                "--name",
+                "default",
+            ])
+            .output()
+            .context("Failed to create default workspace at ws/default/")?;
+
+        if !add_fallback.status.success() {
+            let stderr = String::from_utf8_lossy(&add_fallback.stderr);
+            anyhow::bail!(
+                "Failed to create default workspace: {}\n  Try: jj workspace add ws/default --name default",
+                stderr.trim()
+            );
+        }
+    }
+
+    println!("[OK] Created default workspace at ws/default/");
 
     Ok(())
 }
@@ -228,108 +270,38 @@ fn set_git_bare_mode() -> Result<()> {
     Ok(())
 }
 
-/// Create the coord workspace in ws/coord if it doesn't already exist.
-fn create_coord_workspace() -> Result<()> {
-    let ws_dir = Path::new("ws");
-    let coord_path = ws_dir.join("coord");
-
-    // Check if coord workspace already exists in jj
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&output.stdout);
-    let has_coord = ws_list.lines().any(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|n| n.trim().trim_end_matches('@') == "coord")
-    });
-
-    if has_coord && coord_path.exists() {
-        println!("[OK] Coord workspace already exists");
-        return Ok(());
-    }
-
-    // Ensure ws/ directory exists
-    fs::create_dir_all(ws_dir)
-        .with_context(|| format!("Failed to create {}", ws_dir.display()))?;
-
-    if !has_coord {
-        let add = Command::new("jj")
-            .args([
-                "workspace",
-                "add",
-                coord_path.to_str().unwrap_or("ws/coord"),
-                "--name",
-                "coord",
-            ])
-            .output()
-            .context("Failed to run jj workspace add for coord")?;
-
-        if !add.status.success() {
-            let stderr = String::from_utf8_lossy(&add.stderr);
-            anyhow::bail!(
-                "Failed to create coord workspace: {}\n  Try: jj workspace add ws/coord --name coord",
-                stderr.trim()
-            );
-        }
-    }
-
-    // Rebase coord onto main (ignore errors if main doesn't exist yet)
-    let _ = Command::new("jj")
-        .args(["rebase", "-r", "coord@", "-d", "main"])
-        .output();
-
-    println!("[OK] Created coord workspace at ws/coord/");
-
-    Ok(())
-}
-
-/// Clean root source files after forgetting the default workspace.
-/// Only removes files/dirs that are tracked by git at HEAD and not in the keep list.
+/// Clean root directory so only KEEP_ROOT items remain.
+///
+/// Scans the root directory and removes any files/dirs not in the keep list.
+/// This catches both git-tracked files and untracked files (like .gitignore
+/// created during init but not yet committed).
 #[allow(clippy::unnecessary_wraps)]
 pub fn clean_root_source_files() -> Result<()> {
-    let output = Command::new("git")
-        .args(["ls-tree", "--name-only", "HEAD"])
-        .output();
-
-    let Ok(out) = output else {
-        // git ls-tree may fail if no commits yet — that's fine
-        println!("[OK] No tracked files to clean (no HEAD)");
-        return Ok(());
+    let entries = match fs::read_dir(".") {
+        Ok(e) => e,
+        Err(_) => {
+            println!("[OK] Could not read root directory");
+            return Ok(());
+        }
     };
 
-    if !out.status.success() {
-        // No HEAD yet (fresh repo) — nothing to clean
-        println!("[OK] No tracked files to clean (no HEAD)");
-        return Ok(());
-    }
-
-    let tracked = String::from_utf8_lossy(&out.stdout);
     let mut cleaned = 0;
 
-    for entry in tracked.lines() {
-        let entry = entry.trim();
-        if entry.is_empty() {
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden jj/git internals and keep list
+        if KEEP_ROOT.contains(&name_str.as_ref()) {
             continue;
         }
 
-        // Skip entries in the keep list
-        if KEEP_ROOT.contains(&entry) {
-            continue;
-        }
-
-        let path = Path::new(entry);
-        if !path.exists() {
-            continue;
-        }
-
+        let path = entry.path();
         if path.is_dir() {
-            if fs::remove_dir_all(path).is_ok() {
+            if fs::remove_dir_all(&path).is_ok() {
                 cleaned += 1;
             }
-        } else if fs::remove_file(path).is_ok() {
+        } else if fs::remove_file(&path).is_ok() {
             cleaned += 1;
         }
     }
@@ -339,6 +311,53 @@ pub fn clean_root_source_files() -> Result<()> {
     } else {
         println!("[OK] Root already clean");
     }
+
+    Ok(())
+}
+
+/// Ensure .gitignore with ws/ exists in the default workspace.
+///
+/// After clean_root_source_files removes .gitignore from root, it needs
+/// to exist in ws/default/ so jj ignores workspace directories.
+fn ensure_gitignore_in_workspace() -> Result<()> {
+    let ws_gitignore = Path::new("ws").join("default").join(".gitignore");
+
+    if ws_gitignore.exists() {
+        let content = fs::read_to_string(&ws_gitignore).unwrap_or_default();
+        let has_ws = content
+            .lines()
+            .any(|l| matches!(l.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
+        if has_ws {
+            return Ok(());
+        }
+        // Append ws/ to existing .gitignore
+        let separator = if content.ends_with('\n') { "" } else { "\n" };
+        let new_content = format!("{content}{separator}\n# maw agent workspaces\nws/\n");
+        fs::write(&ws_gitignore, new_content).context("Failed to update ws/default/.gitignore")?;
+    } else {
+        fs::write(&ws_gitignore, "# maw agent workspaces\nws/\n")
+            .context("Failed to create ws/default/.gitignore")?;
+    }
+    println!("[OK] Ensured .gitignore in ws/default/");
+
+    Ok(())
+}
+
+/// Refresh jj workspace state after init to prevent stale errors.
+///
+/// After moving the default workspace from root to ws/default/, jj may
+/// have stale working copy state. Running update-stale from inside the
+/// workspace fixes this.
+fn refresh_workspace_state() -> Result<()> {
+    let ws_path = Path::new("ws").join("default");
+    if !ws_path.exists() {
+        return Ok(());
+    }
+
+    let _ = Command::new("jj")
+        .args(["workspace", "update-stale"])
+        .current_dir(&ws_path)
+        .output();
 
     Ok(())
 }

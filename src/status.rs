@@ -268,9 +268,14 @@ fn render(
 fn collect_status() -> Result<StatusSummary> {
     let root = repo_root()?;
 
+    // In bare repo model, root isn't a workspace — run jj from ws/default/
+    // to avoid stale working copy errors.
+    let default_ws = root.join("ws").join("default");
+    let jj_cwd = if default_ws.exists() { &default_ws } else { &root };
+
     let ws_output = Command::new("jj")
         .args(["workspace", "list", "--color=never", "--no-pager"])
-        .current_dir(&root)
+        .current_dir(jj_cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -286,7 +291,7 @@ fn collect_status() -> Result<StatusSummary> {
 
     let status_output = Command::new("jj")
         .args(["status", "--color=never", "--no-pager"])
-        .current_dir(&root)
+        .current_dir(jj_cwd)
         .output()
         .context("Failed to run jj status")?;
 
@@ -321,7 +326,7 @@ fn collect_status() -> Result<StatusSummary> {
 
 fn count_workspaces(list: &str) -> (usize, usize) {
     let mut total = 0;
-    let mut non_coord = 0;
+    let mut non_default = 0;
 
     for line in list.lines() {
         let Some((name_part, _)) = line.split_once(':') else {
@@ -332,12 +337,12 @@ fn count_workspaces(list: &str) -> (usize, usize) {
             continue;
         }
         total += 1;
-        if name != "coord" {
-            non_coord += 1;
+        if name != "default" {
+            non_default += 1;
         }
     }
 
-    (total, non_coord)
+    (total, non_default)
 }
 
 fn parse_jj_change_count(status_stdout: &str) -> usize {

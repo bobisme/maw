@@ -8,8 +8,9 @@ use crate::init::{clean_root_source_files, ensure_workspaces_gitignored};
 
 /// Upgrade a v1 repo (.workspaces/) to v2 bare model (ws/).
 ///
-/// Migrates workspace layout, sets git bare mode, creates coord workspace,
-/// and cleans up the old structure. Idempotent — safe to run multiple times.
+/// Migrates workspace layout, sets git bare mode, moves default workspace
+/// to ws/default/, and cleans up the old structure. Idempotent — safe to
+/// run multiple times.
 pub fn run() -> Result<()> {
     println!("Checking repo for upgrade...");
     println!();
@@ -30,37 +31,34 @@ pub fn run() -> Result<()> {
     fs::create_dir_all("ws").context("Failed to create ws/ directory")?;
     println!("[OK] Created ws/ directory");
 
-    // Step 5: Create coord workspace
-    create_coord_workspace()?;
+    // Step 5: Move default workspace to ws/default/
+    relocate_default_workspace()?;
 
-    // Step 6: Forget default workspace
-    forget_default_workspace()?;
-
-    // Step 7: Set git core.bare = true
+    // Step 6: Set git core.bare = true
     set_git_bare()?;
 
-    // Step 8: Clean root source files
+    // Step 7: Clean root source files
     clean_root_source_files()?;
 
-    // Step 9: Remove old .workspaces/ directory
+    // Step 8: Remove old .workspaces/ directory
     remove_old_workspaces_dir()?;
 
-    // Step 10: Update .gitignore
+    // Step 9: Update .gitignore
     update_gitignore()?;
 
     // Print verification instructions
     let cwd = std::env::current_dir().context("Could not determine current directory")?;
-    let coord_path = cwd.join("ws").join("coord");
+    let default_path = cwd.join("ws").join("default");
 
     println!();
     println!("Upgrade complete! (v1 -> v2 bare repo model)");
     println!();
-    println!("  Coord workspace: {}/", coord_path.display());
+    println!("  Default workspace: {}/", default_path.display());
     println!();
     println!("Verify:");
-    println!("  jj workspace list          # should show coord workspace");
+    println!("  jj workspace list          # should show default at ws/default/");
     println!("  git config core.bare       # should be true");
-    println!("  ls ws/                     # should have coord/");
+    println!("  ls ws/                     # should have default/");
     println!("  ls .workspaces/ 2>/dev/null # should not exist");
     println!();
     println!("Next: maw ws create <agent-name>");
@@ -69,26 +67,9 @@ pub fn run() -> Result<()> {
 }
 
 /// Check if the repo is already in v2 layout.
-/// v2 = ws/ dir exists AND no default workspace in jj.
+/// v2 = ws/default/ directory exists.
 fn is_already_v2() -> Result<bool> {
-    let ws_exists = Path::new("ws").exists();
-    if !ws_exists {
-        return Ok(false);
-    }
-
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&output.stdout);
-    let has_default = ws_list.lines().any(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|n| n.trim().trim_end_matches('@') == "default")
-    });
-
-    Ok(!has_default)
+    Ok(Path::new("ws").join("default").exists())
 }
 
 /// Check for uncommitted changes and auto-commit them as WIP.
@@ -198,61 +179,19 @@ fn destroy_old_workspaces() -> Result<()> {
     Ok(())
 }
 
-/// Create the coord workspace in ws/coord.
-fn create_coord_workspace() -> Result<()> {
-    let coord_path = Path::new("ws").join("coord");
+/// Move the default workspace from root to ws/default/.
+///
+/// In v1, "default" lives at the repo root. We forget it and recreate
+/// at ws/default/ so the root becomes bare.
+fn relocate_default_workspace() -> Result<()> {
+    let default_path = Path::new("ws").join("default");
 
-    // Check if coord already exists
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&output.stdout);
-    let has_coord = ws_list.lines().any(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|n| n.trim().trim_end_matches('@') == "coord")
-    });
-
-    if has_coord && coord_path.exists() {
-        println!("[OK] Coord workspace already exists");
+    if default_path.exists() {
+        println!("[OK] Default workspace already at ws/default/");
         return Ok(());
     }
 
-    if !has_coord {
-        let add = Command::new("jj")
-            .args([
-                "workspace",
-                "add",
-                coord_path.to_str().unwrap_or("ws/coord"),
-                "--name",
-                "coord",
-            ])
-            .output()
-            .context("Failed to create coord workspace")?;
-
-        if !add.status.success() {
-            let stderr = String::from_utf8_lossy(&add.stderr);
-            bail!(
-                "Failed to create coord workspace: {}\n  Try: jj workspace add ws/coord --name coord",
-                stderr.trim()
-            );
-        }
-    }
-
-    // Rebase coord onto main (ignore errors if main doesn't exist yet)
-    let _ = Command::new("jj")
-        .args(["rebase", "-r", "coord@", "-d", "main"])
-        .output();
-
-    println!("[OK] Created coord workspace at ws/coord/");
-
-    Ok(())
-}
-
-/// Forget the default workspace if it exists.
-fn forget_default_workspace() -> Result<()> {
+    // Check if default workspace exists (at root, in v1)
     let output = Command::new("jj")
         .args(["workspace", "list"])
         .output()
@@ -265,25 +204,59 @@ fn forget_default_workspace() -> Result<()> {
             .is_some_and(|n| n.trim().trim_end_matches('@') == "default")
     });
 
-    if !has_default {
-        println!("[OK] Default workspace already forgotten");
-        return Ok(());
+    // Forget the root-based default workspace
+    if has_default {
+        let forget = Command::new("jj")
+            .args(["workspace", "forget", "default"])
+            .output()
+            .context("Failed to forget default workspace")?;
+
+        if !forget.status.success() {
+            let stderr = String::from_utf8_lossy(&forget.stderr);
+            bail!(
+                "Failed to forget default workspace: {}\n  Try: jj workspace forget default",
+                stderr.trim()
+            );
+        }
     }
 
-    let forget = Command::new("jj")
-        .args(["workspace", "forget", "default"])
+    // Recreate default at ws/default/, parented on main.
+    let add = Command::new("jj")
+        .args([
+            "workspace",
+            "add",
+            default_path.to_str().unwrap_or("ws/default"),
+            "--name",
+            "default",
+            "-r",
+            "main",
+        ])
         .output()
-        .context("Failed to forget default workspace")?;
+        .context("Failed to create default workspace at ws/default/")?;
 
-    if forget.status.success() {
-        println!("[OK] Forgot default workspace");
-    } else {
-        let stderr = String::from_utf8_lossy(&forget.stderr);
-        bail!(
-            "Failed to forget default workspace: {}\n  Try: jj workspace forget default",
-            stderr.trim()
-        );
+    if !add.status.success() {
+        // main might not exist — retry without -r
+        let add_fallback = Command::new("jj")
+            .args([
+                "workspace",
+                "add",
+                default_path.to_str().unwrap_or("ws/default"),
+                "--name",
+                "default",
+            ])
+            .output()
+            .context("Failed to create default workspace at ws/default/")?;
+
+        if !add_fallback.status.success() {
+            let stderr = String::from_utf8_lossy(&add_fallback.stderr);
+            bail!(
+                "Failed to create default workspace: {}\n  Try: jj workspace add ws/default --name default",
+                stderr.trim()
+            );
+        }
     }
+
+    println!("[OK] Moved default workspace to ws/default/");
 
     Ok(())
 }

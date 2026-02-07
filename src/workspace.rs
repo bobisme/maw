@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::format::OutputFormat;
 
-/// Coordination workspace name constant
-const COORD_WORKSPACE: &str = "coord";
+/// Default workspace name — the persistent workspace used for merging,
+/// pushing, and coordination. Lives at ws/default/ in the bare repo model.
+const DEFAULT_WORKSPACE: &str = "default";
 
 /// Configuration from .maw.toml
 #[derive(Debug, Default, Deserialize)]
@@ -30,16 +31,16 @@ struct RepoConfig {
     /// Branch name to use for main bookmark (default: "main")
     #[serde(default = "RepoConfig::default_branch")]
     branch: String,
-    /// Coordination workspace name (default: "coord")
-    #[serde(default = "RepoConfig::default_coord_workspace")]
-    coord_workspace: String,
+    /// Default workspace name (default: "default")
+    #[serde(default = "RepoConfig::default_default_workspace")]
+    default_workspace: String,
 }
 
 impl Default for RepoConfig {
     fn default() -> Self {
         Self {
             branch: "main".to_string(),
-            coord_workspace: COORD_WORKSPACE.to_string(),
+            default_workspace: DEFAULT_WORKSPACE.to_string(),
         }
     }
 }
@@ -49,8 +50,8 @@ impl RepoConfig {
         "main".to_string()
     }
 
-    fn default_coord_workspace() -> String {
-        COORD_WORKSPACE.to_string()
+    fn default_default_workspace() -> String {
+        DEFAULT_WORKSPACE.to_string()
     }
 }
 
@@ -75,12 +76,22 @@ struct MergeConfig {
 }
 
 impl MawConfig {
-    /// Load config from .maw.toml in the repo root, or return defaults if not found.
+    /// Load config from .maw.toml.
+    ///
+    /// Checks repo root first, then falls back to ws/default/.maw.toml
+    /// (in bare repos, root has no tracked files — config lives in workspaces).
     pub fn load(repo_root: &Path) -> Result<Self> {
-        let config_path = repo_root.join(".maw.toml");
-        if !config_path.exists() {
+        let root_config = repo_root.join(".maw.toml");
+        let ws_config = repo_root.join("ws").join("default").join(".maw.toml");
+
+        let config_path = if root_config.exists() {
+            root_config
+        } else if ws_config.exists() {
+            ws_config
+        } else {
             return Ok(Self::default());
-        }
+        };
+
         let content = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
         toml::from_str(&content)
@@ -92,9 +103,9 @@ impl MawConfig {
         &self.repo.branch
     }
 
-    /// The configured coordination workspace name (default: "coord").
-    pub fn coord_workspace(&self) -> &str {
-        &self.repo.coord_workspace
+    /// The configured default workspace name (default: "default").
+    pub fn default_workspace(&self) -> &str {
+        &self.repo.default_workspace
     }
 }
 
@@ -102,7 +113,7 @@ impl MawConfig {
 struct WorkspaceInfo {
     name: String,
     is_current: bool,
-    is_coord: bool,
+    is_default: bool,
     change_id: String,
     commit_id: String,
     description: String,
@@ -583,12 +594,12 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!("Creating workspace '{name}' at ws/{name} ...");
 
     // Determine base revision.
-    // In v2 bare model, there's no default workspace so @ can't resolve from root.
-    // Fall back to the configured branch name (e.g. "main").
+    // In v2 bare model, the default workspace is at ws/default/, not root.
+    // @ can't resolve from root (no workspace there), so fall back to the
+    // configured branch name (e.g. "main").
     let base = if let Some(rev) = revision {
         rev.to_string()
     } else {
-        // Check if default workspace exists by trying to resolve @
         let check = Command::new("jj")
             .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()", "--no-pager"])
             .current_dir(&root)
@@ -596,7 +607,6 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
         match check {
             Ok(o) if o.status.success() => "@".to_string(),
             _ => {
-                // No default workspace (v2 bare model) — use configured branch
                 let config = MawConfig::load(&root).unwrap_or_default();
                 config.branch().to_string()
             }
@@ -679,14 +689,14 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
 }
 
 fn destroy(name: &str, confirm: bool) -> Result<()> {
-    if name == COORD_WORKSPACE {
-        bail!("Cannot destroy the coord workspace");
+    if name == DEFAULT_WORKSPACE {
+        bail!("Cannot destroy the default workspace");
     }
-    // Also check config in case coord_workspace is customized
+    // Also check config in case default_workspace is customized
     if let Ok(root) = repo_root() {
         if let Ok(config) = MawConfig::load(&root) {
-            if name == config.coord_workspace() {
-                bail!("Cannot destroy the coord workspace");
+            if name == config.default_workspace() {
+                bail!("Cannot destroy the default workspace");
             }
         }
     }
@@ -732,8 +742,8 @@ fn destroy(name: &str, confirm: bool) -> Result<()> {
 /// An orphaned workspace is one where 'jj workspace forget' was run but
 /// the directory still exists in ws/.
 fn attach(name: &str, revision: Option<&str>) -> Result<()> {
-    if name == COORD_WORKSPACE {
-        bail!("Cannot attach the coord workspace (it's always tracked)");
+    if name == DEFAULT_WORKSPACE {
+        bail!("Cannot attach the default workspace (it's always tracked)");
     }
 
     ensure_repo_root()?;
@@ -1175,7 +1185,7 @@ fn get_current_workspace() -> Result<String> {
             }
     }
 
-    Ok(COORD_WORKSPACE.to_string())
+    Ok(DEFAULT_WORKSPACE.to_string())
 }
 
 fn sync(all: bool) -> Result<()> {
@@ -2346,54 +2356,62 @@ fn merge(
         }
     }
 
-    // Step 5: Rebase coord workspace onto new branch so on-disk files reflect the merge.
-    // The coord workspace's working copy is empty (no changes), so this is safe.
-    let coord_ws = config.coord_workspace();
-    let coord_ws_path = root.join("ws").join(coord_ws);
-    if coord_ws_path.exists() {
-        let rebase_coord = Command::new("jj")
-            .args(["rebase", "-r", &format!("{coord_ws}@"), "-d", branch])
-            .current_dir(&root)
-            .output();
-
-        if let Ok(output) = rebase_coord
-            && !output.status.success()
-        {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: Failed to rebase coord workspace onto {branch}: {}", stderr.trim());
-            eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -r {coord_ws}@ -d {branch}");
-        }
-
-        // Update coord's on-disk files so they reflect the merge immediately.
-        // The rebase above changed the commit graph but didn't update the working copy
-        // because it ran from root, not from inside coord.
-        let update_output = Command::new("jj")
+    // Step 5: Rebase default workspace onto new branch so on-disk files reflect the merge.
+    // The default workspace's working copy is empty (no changes), so this is safe.
+    let default_ws = config.default_workspace();
+    let default_ws_path = root.join("ws").join(default_ws);
+    if default_ws_path.exists() {
+        // The merge operations above (squash, bookmark set) ran from root and
+        // modified the commit graph. The default workspace may now be stale.
+        // Update it BEFORE rebasing to avoid stale errors.
+        let _ = Command::new("jj")
             .args(["workspace", "update-stale"])
-            .current_dir(&coord_ws_path)
+            .current_dir(&default_ws_path)
             .output();
 
-        if let Ok(output) = update_output
+        let rebase_default = Command::new("jj")
+            .args(["rebase", "-r", &format!("{default_ws}@"), "-d", branch])
+            .current_dir(&default_ws_path)
+            .output();
+
+        if let Ok(output) = rebase_default
             && !output.status.success()
         {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: Failed to update coord working copy: {}", stderr.trim());
-            eprintln!("  Run manually: cd {} && jj workspace update-stale", coord_ws_path.display());
+            eprintln!("Warning: Failed to rebase default workspace onto {branch}: {}", stderr.trim());
+            eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -r {default_ws}@ -d {branch}");
         }
 
-        // If update-stale created a divergent commit, auto-resolve it
-        let coord_ws_str = coord_ws_path.to_string_lossy();
-        let _ = resolve_divergent_working_copy(&coord_ws_str);
+        // The rebase may have created a divergent commit — auto-resolve it.
+        let default_ws_str = default_ws_path.to_string_lossy();
+        let _ = resolve_divergent_working_copy(&default_ws_str);
+
+        // Restore on-disk files from the parent commit. After rebasing the
+        // working copy onto the new main, the commit tree is correct but
+        // on-disk files may be missing. `jj restore` writes the parent's
+        // files to disk.
+        let _ = Command::new("jj")
+            .args(["restore"])
+            .current_dir(&default_ws_path)
+            .output();
+
+        // Final update-stale to clear any remaining stale state.
+        // Operations above may have left the workspace stale again.
+        let _ = Command::new("jj")
+            .args(["workspace", "update-stale"])
+            .current_dir(&default_ws_path)
+            .output();
     }
 
     println!("Merged to {branch}: {msg}");
     let has_conflicts = auto_resolve_conflicts(&root, &config, branch)?;
 
     // Optionally destroy workspaces (but not if there are conflicts!)
-    // Never destroy the coord workspace during merge --destroy.
+    // Never destroy the default workspace during merge --destroy.
     if destroy_after {
         let ws_to_destroy: Vec<String> = ws_to_merge
             .iter()
-            .filter(|ws| ws.as_str() != coord_ws)
+            .filter(|ws| ws.as_str() != default_ws)
             .cloned()
             .collect();
 
@@ -2443,15 +2461,19 @@ fn merge(
 fn destroy_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
     println!("Cleaning up workspaces...");
     let ws_dir = root.join("ws");
+    // Run jj commands from inside the default workspace to avoid stale
+    // root working copy errors in the bare repo model.
+    let jj_cwd = ws_dir.join(DEFAULT_WORKSPACE);
+    let jj_cwd = if jj_cwd.exists() { &jj_cwd } else { root };
     for ws in workspaces {
-        if ws == COORD_WORKSPACE {
-            println!("  Skipping coord workspace");
+        if ws == DEFAULT_WORKSPACE {
+            println!("  Skipping default workspace");
             continue;
         }
         let path = ws_dir.join(ws);
         let _ = Command::new("jj")
             .args(["workspace", "forget", ws])
-            .current_dir(root)
+            .current_dir(jj_cwd)
             .status();
         if path.exists() {
             std::fs::remove_dir_all(&path).ok();
@@ -2545,8 +2567,8 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
     // Find empty workspaces (if requested)
     if include_empty {
         for jj_ws in &jj_workspaces {
-            if jj_ws == COORD_WORKSPACE {
-                continue; // don't suggest pruning the coord workspace
+            if jj_ws == DEFAULT_WORKSPACE {
+                continue; // don't suggest pruning the default workspace
             }
             // Skip workspaces that are already in orphaned or missing lists
             if analysis.orphaned.contains(jj_ws) || analysis.missing.contains(jj_ws) {
@@ -2754,8 +2776,8 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                 let name = name.trim();
                 let rest = rest.trim();
 
-                let is_coord = name == COORD_WORKSPACE;
-                let marker = if is_coord { "*" } else { " " };
+                let is_default = name == DEFAULT_WORKSPACE;
+                let marker = if is_default { "*" } else { " " };
 
                 if verbose {
                     println!("{marker} {name}");
@@ -2849,7 +2871,7 @@ fn parse_workspace_list(list: &str, include_path: bool) -> Result<Vec<WorkspaceI
         workspaces.push(WorkspaceInfo {
             name: name.to_string(),
             is_current,
-            is_coord: name == COORD_WORKSPACE,
+            is_default: name == DEFAULT_WORKSPACE,
             change_id,
             commit_id,
             description,

@@ -24,7 +24,7 @@ jj describe -m "feat: what you're implementing"
 # Check status (see all agent work, conflicts, stale warnings)
 maw ws status
 
-# When done, merge all work from the repo root (or coord workspace)
+# When done, merge all work from the repo root (or default workspace)
 cd /path/to/repo/root
 maw ws merge alice bob --destroy
 ```
@@ -133,7 +133,7 @@ This section covers the full cycle from finished work to a pushed release.
 
 ### 1. Merge Agent Work
 
-From the repo root (or coord workspace):
+From the repo root (or default workspace):
 
 ```bash
 # Merge named agent workspaces into one commit
@@ -232,14 +232,23 @@ jj bookmark track main@origin  # Track remote main
 
 ## Release Notes
 
+### v0.26.1
+
+- Rename "coord" workspace to "default" everywhere — matches jj convention, predictable path (`ws/default/`) for external tools.
+- Trim repo root to only `.git/`, `.jj/`, `ws/` — tracked files (`.gitignore`, `.maw.toml`, `.beads/`, etc.) live only in workspaces.
+- `MawConfig::load` falls back to `ws/default/.maw.toml` when root copy doesn't exist.
+- Fix: post-merge `jj restore` ensures on-disk files in default workspace reflect the merge.
+- Fix: `maw ws destroy` and `maw status` run jj from `ws/default/` instead of bare root.
+- Fix: `maw init` creates default workspace with `-r main` so source files are present immediately.
+
 ### v0.26.0
 
-- **v2 bare repo model**: workspaces moved from `.workspaces/` to `ws/`. New persistent `ws/coord/` coordination workspace replaces the default workspace. Repo root is now metadata-only (no source files).
-- `maw push` uses `--bookmark` explicitly — works from any workspace, not just default.
-- `maw ws merge` rebases coord workspace onto branch post-merge (not default).
-- New `maw init` command sets up bare repo model (forget default ws, core.bare=true, create coord).
+- **v2 bare repo model**: workspaces moved from `.workspaces/` to `ws/`. Default workspace relocated to `ws/default/`. Repo root is now metadata-only (no source files).
+- `maw push` uses `--bookmark` explicitly — works from any workspace.
+- `maw ws merge` rebases default workspace onto branch post-merge.
+- New `maw init` command sets up bare repo model (forget default ws, core.bare=true, create default).
 - New `maw upgrade` command migrates v1 repos to v2 layout.
-- Coord workspace protected from `maw ws destroy`.
+- Default workspace protected from `maw ws destroy`.
 
 ### v0.25.0
 
@@ -326,7 +335,7 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 ## Architecture
 
 - **v2 bare repo model**: Workspaces live in `ws/<name>/`
-- `ws/coord/` is the persistent coordination workspace (merge target, push source)
+- `ws/default/` is the default workspace (merge target, push source)
 - No default workspace — repo root is metadata only (`.git/`, `.jj/`, `ws/`, config files)
 - `ws/` is gitignored
 - Each workspace is a separate working copy sharing the single `.jj/` backing store
