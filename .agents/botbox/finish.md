@@ -2,7 +2,7 @@
 
 **Mandatory teardown** after completing work on a bead. Never skip this, even on failure paths.
 
-All steps below are required — they clean up resources, prevent workspace leaks, and ensure the bead ledger stays synchronized. Run **all finish commands** (br, maw, bus) from the **project root**, not from inside `.workspaces/$WS/`. If your shell is cd'd into the workspace, `cd` back to the project root first — `maw ws merge --destroy` deletes the workspace directory and will break your session if you are inside it.
+All steps below are required — they clean up resources, prevent workspace leaks, and ensure the bead ledger stays synchronized. Run **all finish commands** (br, maw, bus) from the **project root**, not from inside `ws/$WS/`. If your shell is cd'd into the workspace, `cd` back to the project root first — `maw ws merge --destroy` deletes the workspace directory and will break your session if you are inside it.
 
 ## Arguments
 

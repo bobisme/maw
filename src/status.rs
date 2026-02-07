@@ -53,7 +53,7 @@ pub fn run(args: StatusArgs) -> Result<()> {
 #[derive(Debug)]
 struct StatusSummary {
     total_workspaces: usize,
-    non_default_workspaces: usize,
+    workspaces: usize,
     change_count: usize,
     jj_change_count: usize,
     git_change_count: usize,
@@ -76,7 +76,7 @@ enum MainSyncStatus {
 impl StatusSummary {
     fn issue_count(&self) -> usize {
         let mut count = 0;
-        if self.non_default_workspaces > 0 {
+        if self.workspaces > 0 {
             count += 1;
         }
         if self.change_count > 0 {
@@ -93,7 +93,7 @@ impl StatusSummary {
 
     fn render_oneline(&self) -> String {
         let mut parts = vec![
-            format!("ws={}", self.non_default_workspaces),
+            format!("ws={}", self.workspaces),
             format!("changes={}", self.change_count),
             format!("untracked={}", self.git_untracked_count),
             format!("main={}", self.main_sync.oneline()),
@@ -131,8 +131,8 @@ impl StatusSummary {
             out.push_str(segment);
         };
 
-        if self.non_default_workspaces > 0 {
-            let count = self.non_default_workspaces.to_string();
+        if self.workspaces > 0 {
+            let count = self.workspaces.to_string();
             let workspace = format!("\u{f0645} {count}");
             let colored = colorize_orange(&workspace);
             append_segment(&colored);
@@ -161,8 +161,8 @@ impl StatusSummary {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
         out.push_str(&format!(
-            "Workspaces: {} non-default ({} total)\n",
-            self.non_default_workspaces, self.total_workspaces
+            "Agent workspaces: {} ({} total)\n",
+            self.workspaces, self.total_workspaces
         ));
 
         if self.change_count == 0 {
@@ -282,7 +282,7 @@ fn collect_status() -> Result<StatusSummary> {
     }
 
     let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let (total_workspaces, non_default_workspaces) = count_workspaces(&ws_list);
+    let (total_workspaces, workspaces) = count_workspaces(&ws_list);
 
     let status_output = Command::new("jj")
         .args(["status", "--color=never", "--no-pager"])
@@ -309,7 +309,7 @@ fn collect_status() -> Result<StatusSummary> {
 
     Ok(StatusSummary {
         total_workspaces,
-        non_default_workspaces,
+        workspaces,
         change_count,
         jj_change_count,
         git_change_count: git_counts.changes,
@@ -321,7 +321,7 @@ fn collect_status() -> Result<StatusSummary> {
 
 fn count_workspaces(list: &str) -> (usize, usize) {
     let mut total = 0;
-    let mut non_default = 0;
+    let mut non_coord = 0;
 
     for line in list.lines() {
         let Some((name_part, _)) = line.split_once(':') else {
@@ -332,12 +332,12 @@ fn count_workspaces(list: &str) -> (usize, usize) {
             continue;
         }
         total += 1;
-        if name != "default" {
-            non_default += 1;
+        if name != "coord" {
+            non_coord += 1;
         }
     }
 
-    (total, non_default)
+    (total, non_coord)
 }
 
 fn parse_jj_change_count(status_stdout: &str) -> usize {
@@ -383,7 +383,7 @@ fn repo_root() -> Result<PathBuf> {
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
 
     for ancestor in root.ancestors() {
-        if ancestor.file_name().map_or(false, |n| n == ".workspaces") {
+        if ancestor.file_name().map_or(false, |n| n == "ws") {
             if let Some(parent) = ancestor.parent() {
                 return Ok(parent.to_path_buf());
             }

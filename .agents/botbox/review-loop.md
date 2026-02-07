@@ -15,7 +15,7 @@ Your identity is `$AGENT`. All bus commands must include `--agent $AGENT`. Run `
    a. Read the review and diff: `crit review <id> --path $WS_PATH` and `crit diff <id> --path $WS_PATH`
       - `crit review <id> --format=json --path $WS_PATH` includes `workspace.path` for reading source files
       - **Use `--path $WS_PATH`** for all crit commands when the review exists in a workspace
-   b. Read the full source files changed in the diff from the **workspace path** (e.g., `.workspaces/$WS/src/file.rs`), not project root
+   b. Read the full source files changed in the diff from the **workspace path** (e.g., `ws/$WS/src/file.rs`), not project root
    c. Read project config (e.g., `Cargo.toml`) for edition and dependency versions
    d. Run static analysis in the workspace: `cd $WS_PATH && cargo clippy 2>&1` — cite warnings in your comments
    e. If unsure about framework or library behavior, use web search to verify before commenting
@@ -40,7 +40,7 @@ Focus on security and correctness. Ground findings in evidence — compiler outp
 When re-review is requested after a block, the author's fixes live in their **workspace**, not on the main branch. The main branch still has the pre-fix code until merge.
 
 1. Get the workspace path from `crit review <id> --format=json --path $WS_PATH` (field: `workspace.path`). This is auto-detected from the change_id.
-2. Read source files from the **workspace path** (e.g., `.workspaces/$WS/src/main.rs`), not from the project root.
+2. Read source files from the **workspace path** (e.g., `ws/$WS/src/main.rs`), not from the project root.
 3. Run static analysis in the workspace: `cd $WS_PATH && cargo clippy 2>&1`
 4. Verify each fix against the original issue — read actual code, don't just trust thread replies.
 5. If all issues are resolved: `crit lgtm <id> --path $WS_PATH`. If issues remain: `crit reply <thread-id> --path $WS_PATH --agent $AGENT "..."` explaining what's still wrong.

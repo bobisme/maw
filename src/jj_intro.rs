@@ -109,7 +109,7 @@ jj git push                # Push to GitHub
 **Use `maw ws jj` for jj commands in workspaces:**
 
 ```bash
-# Instead of: cd .workspaces/alice && jj describe -m "feat: ..."
+# Instead of: cd ws/alice && jj describe -m "feat: ..."
 # Use:        maw ws jj alice describe -m "feat: ..."
 ```
 

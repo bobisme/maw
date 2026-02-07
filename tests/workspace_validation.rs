@@ -2,19 +2,19 @@
 
 use std::process::Command;
 
-/// Get the repo root by finding the .jj directory that is NOT inside .workspaces.
+/// Get the repo root by finding the .jj directory that is NOT inside a workspace dir.
 /// Jj workspaces have their own .jj directory pointing back to the main repo,
 /// so we need to find the actual repo root (the one with the backing store).
 fn repo_root() -> std::path::PathBuf {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    // Walk up from manifest dir looking for .jj that's not in .workspaces
+    // Walk up from manifest dir looking for .jj that's not in ws/ or .workspaces/
     for ancestor in manifest_dir.ancestors() {
         let jj_dir = ancestor.join(".jj");
         if jj_dir.exists() {
-            // Check if we're inside .workspaces by looking at the path
+            // Check if we're inside a workspace dir by looking at the path
             let path_str = ancestor.to_string_lossy();
-            if !path_str.contains(".workspaces") {
+            if !path_str.contains("/ws/") && !path_str.contains(".workspaces") {
                 return ancestor.to_path_buf();
             }
         }

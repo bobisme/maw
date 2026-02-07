@@ -78,7 +78,7 @@ At the end of your work, output exactly one of these completion signals:
 5. RE-REVIEW (if a review-response message indicates the author addressed feedback):
    The author's fixes are in their workspace, not the main branch.
    Check the review-response bus message for the workspace path.
-   Read files from the workspace path (e.g., .workspaces/$WS/src/...).
+   Read files from the workspace path (e.g., ws/$WS/src/...).
    Verify security fixes thoroughly — attackers will probe edge cases.
    If all resolved: crit lgtm <id>. If not: reply on threads explaining what's still vulnerable.
 

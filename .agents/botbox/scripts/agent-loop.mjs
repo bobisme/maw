@@ -254,7 +254,7 @@ At the end of your work, output exactly one of these completion signals:
 3. START: br update --actor ${AGENT} <id> --status=in_progress --owner=${AGENT}.
    bus claims stake --agent ${AGENT} "bead://${PROJECT}/<id>" -m "<id>".
    Create workspace: run maw ws create --random. Note the workspace name AND absolute path
-   from the output (e.g., name "frost-castle", path "/abs/path/.workspaces/frost-castle").
+   from the output (e.g., name "frost-castle", path "/abs/path/ws/frost-castle").
    Store the name as WS and the absolute path as WS_PATH.
    IMPORTANT: All file operations (Read, Write, Edit) must use the absolute WS_PATH.
    For bash commands: cd \$WS_PATH && <command>. For jj commands: maw ws jj \$WS <args>.
@@ -295,7 +295,7 @@ At the end of your work, output exactly one of these completion signals:
 
 7. FINISH (only reached after LGTM from step 0, or if no review needed):
    IMPORTANT: Run ALL finish commands from the project root, not from inside the workspace.
-   If your shell is cd'd into .workspaces/, cd back to the project root first.
+   If your shell is cd'd into ws/, cd back to the project root first.
    If a review was conducted:
      crit reviews mark-merged <review-id> --agent ${AGENT}.
    br comments add --actor ${AGENT} --author ${AGENT} <id> "Completed by ${AGENT}".
@@ -323,7 +323,7 @@ Key rules:
 - If claim denied, pick something else.
 - All bus and crit commands use --agent ${AGENT}.
 - All file operations use the absolute workspace path from maw ws create output. Do NOT cd into the workspace and stay there.
-- Run br commands (br update, br close, br comments, br sync) from the project root, NOT from .workspaces/WS/.
+- Run br commands (br update, br close, br comments, br sync) from the project root, NOT from ws/WS/.
 - If a tool behaves unexpectedly, report it: bus send --agent ${AGENT} ${PROJECT} "Tool issue: <details>" -L tool-issue.
 - STOP after completing one task or determining no work. Do not loop.
 - Always output <promise>COMPLETE</promise> or <promise>BLOCKED</promise> at the end.`;

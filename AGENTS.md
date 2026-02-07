@@ -15,7 +15,7 @@ This project uses **maw** for workspace management, **jj** (Jujutsu) for version
 ```bash
 # Create your workspace (automatically creates a commit you own)
 maw ws create <your-name>
-cd .workspaces/<your-name>
+cd ws/<your-name>
 
 # Work - jj tracks changes automatically
 # ... edit files ...
@@ -24,8 +24,8 @@ jj describe -m "feat: what you're implementing"
 # Check status (see all agent work, conflicts, stale warnings)
 maw ws status
 
-# When done, merge all work from main workspace
-cd /path/to/main/repo
+# When done, merge all work from the repo root (or coord workspace)
+cd /path/to/repo/root
 maw ws merge alice bob --destroy
 ```
 
@@ -133,7 +133,7 @@ This section covers the full cycle from finished work to a pushed release.
 
 ### 1. Merge Agent Work
 
-From the main workspace (not an agent workspace):
+From the repo root (or coord workspace):
 
 ```bash
 # Merge named agent workspaces into one commit
@@ -232,6 +232,15 @@ jj bookmark track main@origin  # Track remote main
 
 ## Release Notes
 
+### v0.26.0
+
+- **v2 bare repo model**: workspaces moved from `.workspaces/` to `ws/`. New persistent `ws/coord/` coordination workspace replaces the default workspace. Repo root is now metadata-only (no source files).
+- `maw push` uses `--bookmark` explicitly — works from any workspace, not just default.
+- `maw ws merge` rebases coord workspace onto branch post-merge (not default).
+- New `maw init` command sets up bare repo model (forget default ws, core.bare=true, create coord).
+- New `maw upgrade` command migrates v1 repos to v2 layout.
+- Coord workspace protected from `maw ws destroy`.
+
 ### v0.25.0
 
 - `maw ws jj` now detects stale workspaces and prints a warning with fix command (`maw ws sync`) before running the jj command (bd-1bi).
@@ -316,9 +325,11 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 
 ## Architecture
 
-- Workspaces live in `.workspaces/<name>/`
+- **v2 bare repo model**: Workspaces live in `ws/<name>/`
+- `ws/coord/` is the persistent coordination workspace (merge target, push source)
+- No default workspace — repo root is metadata only (`.git/`, `.jj/`, `ws/`, config files)
+- `ws/` is gitignored
 - Each workspace is a separate working copy sharing the single `.jj/` backing store
-- `.workspaces/` is gitignored
 - `jj log` shows commits across all workspaces by default
 - Agents never block each other - conflicts are recorded, not blocking
 

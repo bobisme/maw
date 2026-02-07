@@ -88,7 +88,7 @@ maw ws jj <name> describe -m "feat: ..."     # Set commit message (like git comm
 maw ws jj <name> commit -m "feat: ..."       # Save current work + start new empty commit
 ```
 
-`maw ws jj` runs jj in the workspace directory. Use this instead of `cd .workspaces/<name> && jj ...` — it works reliably in sandboxed environments where cd doesn't persist.
+`maw ws jj` runs jj in the workspace directory. Use this instead of `cd ws/<name> && jj ...` — it works reliably in sandboxed environments where cd doesn't persist.
 
 ### Stale Workspace
 

@@ -9,6 +9,7 @@ mod jj_intro;
 mod push;
 mod status;
 mod tui;
+mod upgrade;
 mod workspace;
 
 /// Multi-Agent Workspaces coordinator
@@ -34,7 +35,7 @@ mod workspace;
 ///   maw ws jj <your-name> diff
 ///
 ///   # Run other commands with cd:
-///   cd /absolute/path/.workspaces/<your-name> && cargo test
+///   cd /absolute/path/ws/<your-name> && cargo test
 ///
 ///   # Check all agent work
 ///   maw ws status
@@ -42,7 +43,7 @@ mod workspace;
 /// WORKFLOW:
 ///
 ///   1. Create workspace: maw ws create <name>
-///   2. Edit files under .workspaces/<name>/ (use absolute paths)
+///   2. Edit files under ws/<name>/ (use absolute paths)
 ///   3. Save work: maw ws jj <name> describe -m "feat: ..."
 ///   4. Check status: maw ws status
 ///   5. Merge work: maw ws merge <name1> <name2>
@@ -73,7 +74,7 @@ enum Commands {
 
     /// Initialize maw in the current repository
     ///
-    /// Ensures jj is initialized and .workspaces/ is gitignored.
+    /// Ensures jj is initialized and ws/ is gitignored.
     /// Safe to run multiple times.
     Init,
 
@@ -100,11 +101,22 @@ enum Commands {
     /// Brief repo and workspace status
     Status(status::StatusArgs),
 
+    /// Upgrade v1 repo (.workspaces/) to v2 bare model (ws/)
+    ///
+    /// Migrates from the old .workspaces/ layout to the new bare repo model
+    /// with ws/ directory, coord workspace, and git core.bare = true.
+    /// Safe to run multiple times — detects v2 and exits early.
+    Upgrade,
+
     /// Push the main branch to remote
     ///
     /// Pushes the configured branch (default: main) to origin using
-    /// `jj git push`. Checks sync status first and provides clear
-    /// error messages if the branch is behind or doesn't exist.
+    /// `jj git push --bookmark <branch>`. Uses --bookmark explicitly so
+    /// the push works from any workspace (including the coord workspace
+    /// where @ is not an ancestor of the branch).
+    ///
+    /// Checks sync status first and provides clear error messages if the
+    /// branch is behind or doesn't exist.
     ///
     /// If your working copy parent (@-) has unpushed work but the branch
     /// bookmark hasn't been moved yet, use --advance to move it first.
@@ -122,6 +134,7 @@ fn main() -> Result<()> {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Init => init::run(),
+        Commands::Upgrade => upgrade::run(),
         Commands::Doctor => doctor::run(),
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),

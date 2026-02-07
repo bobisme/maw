@@ -39,7 +39,7 @@ pub fn run() -> Result<()> {
         "https://github.com/Dicklesworthstone/beads_rust",
     );
 
-    // Check .gitignore has .workspaces/
+    // Check .gitignore has ws/
     all_ok &= check_gitignore();
 
     println!();
@@ -98,17 +98,17 @@ fn check_gitignore() -> bool {
 
     let has_entry = content.lines().any(|line| {
         let line = line.trim();
-        line == ".workspaces"
-            || line == ".workspaces/"
-            || line == "/.workspaces"
-            || line == "/.workspaces/"
+        line == "ws"
+            || line == "ws/"
+            || line == "/ws"
+            || line == "/ws/"
     });
 
     if has_entry {
-        println!("[OK] .gitignore: .workspaces/ is ignored");
+        println!("[OK] .gitignore: ws/ is ignored");
         true
     } else {
-        println!("[FAIL] .gitignore: .workspaces/ is NOT ignored");
+        println!("[FAIL] .gitignore: ws/ is NOT ignored");
         println!("       Run: maw init");
         false
     }

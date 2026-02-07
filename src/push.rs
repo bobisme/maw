@@ -19,8 +19,14 @@ pub struct PushArgs {
 
 /// Push the configured branch to its remote.
 ///
-/// Wraps `jj git push` with better UX: checks sync status, provides
-/// clear error messages, and shows what was pushed.
+/// Wraps `jj git push --bookmark <branch>` with better UX: checks sync
+/// status, provides clear error messages, and shows what was pushed.
+///
+/// We pass `--bookmark` explicitly because in the bare-repo model there
+/// is no default jj workspace — `@` points at the coord commit, not the
+/// branch. Without `--bookmark`, jj's default push revset
+/// (`remote_bookmarks(remote=origin)..@`) won't find the main bookmark
+/// since it isn't an ancestor of coord's `@`.
 pub fn run(args: &PushArgs) -> Result<()> {
     let root = repo_root()?;
     let config = MawConfig::load(&root)?;
@@ -50,7 +56,7 @@ pub fn run(args: &PushArgs) -> Result<()> {
     // Push
     println!("Pushing {branch} to origin...");
     let push_output = Command::new("jj")
-        .args(["git", "push"])
+        .args(["git", "push", "--bookmark", branch])
         .current_dir(&root)
         .output()
         .context("Failed to run jj git push")?;

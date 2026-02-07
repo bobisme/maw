@@ -38,7 +38,7 @@ The botbus hook system watches for @mentions. When you send a message containing
 
 3. **Post review details to the bead** for crash recovery:
    ```bash
-   br comments add --actor $AGENT --author $AGENT <bead-id> "Review created: <review-id> in workspace <ws-name> (.workspaces/<ws-name>)"
+   br comments add --actor $AGENT --author $AGENT <bead-id> "Review created: <review-id> in workspace <ws-name> (ws/<ws-name>)"
    ```
    Include: review ID, workspace name, workspace path relative to project root. This lets another agent find the review and workspace if the session crashes.
 

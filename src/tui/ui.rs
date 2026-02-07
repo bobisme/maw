@@ -611,7 +611,7 @@ fn draw_confirm_destroy_popup(frame: &mut Frame, name: &str) {
             Style::default().fg(Color::DarkGray),
         )]),
         Line::from(vec![Span::raw("  - Forget workspace from jj")]),
-        Line::from(vec![Span::raw(format!("  - Delete .workspaces/{name}/"))]),
+        Line::from(vec![Span::raw(format!("  - Delete ws/{name}/"))]),
         Line::from(""),
         Line::from(vec![Span::styled(
             "  y: confirm  n/Esc: cancel",

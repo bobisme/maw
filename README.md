@@ -11,7 +11,7 @@ Tooling for coordinating multiple AI coding agents working on the same codebase.
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.25.0
+cargo install --git https://github.com/bobisme/maw --tag v0.26.0
 ```
 
 Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
@@ -47,12 +47,13 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 
 ## How It Works
 
-Each agent gets an isolated jj workspace in `.workspaces/<name>/`. Workspaces share the repository's backing store (no disk duplication) but have separate working copies.
+Each agent gets an isolated jj workspace in `ws/<name>/`. A persistent `ws/coord/` workspace handles merge and push coordination. The repo root is metadata-only (no source files). Workspaces share the repository's backing store (no disk duplication) but have separate working copies.
 
 Agents can edit files concurrently without blocking each other. jj records conflicts in commits rather than preventing work - resolve them when merging.
 
 ```
-.workspaces/
+ws/
+  coord/       # Coordination workspace (merge/push)
   agent-1/     # First agent's workspace
   agent-2/     # Second agent's workspace
   feature-x/   # Task-based workspace

@@ -20,7 +20,7 @@ maw ui
 ```
 ┌─[1]-Workspaces────────────────┬─[0]-Details─────────────────────────┐
 │ > default        @ main       │ Workspace: agent-1                  │
-│   agent-1        abc123 wip   │ Path: .workspaces/agent-1           │
+│   agent-1        abc123 wip   │ Path: ws/agent-1           │
 │   agent-2        def456 feat  │ Change: abc123                      │
 │   agent-3        (stale)      │ Status: active                      │
 │                               │                                     │
@@ -93,7 +93,7 @@ Context-sensitive detail view based on selected panel:
 **Workspace selected:**
 ```
 Workspace: agent-1
-Path: .workspaces/agent-1
+Path: ws/agent-1
 Change: abc123def456
 Status: active | stale | conflict
 
@@ -229,7 +229,7 @@ Scrollable with `j/k` when focused. Helps users understand what the TUI is doing
 │                                    │
 │  This will:                        │
 │  • Forget workspace from jj        │
-│  • Delete .workspaces/agent-1/     │
+│  • Delete ws/agent-1/     │
 │                                    │
 │  ⚠ Unmerged changes will be lost!  │
 │                                    │
