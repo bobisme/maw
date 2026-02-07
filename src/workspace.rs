@@ -470,7 +470,7 @@ fn workspaces_dir() -> Result<PathBuf> {
     Ok(repo_root()?.join("ws"))
 }
 
-fn workspace_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn workspace_path(name: &str) -> Result<PathBuf> {
     validate_workspace_name(name)?;
     Ok(workspaces_dir()?.join(name))
 }
@@ -1626,7 +1626,7 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
 /// Auto-sync a stale workspace before running a command.
 /// If the workspace is stale, runs update-stale + divergent resolution.
 /// Returns Ok(()) whether or not it was stale (idempotent).
-fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
+pub(crate) fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
     let output = Command::new("jj")
         .args(["status"])
         .current_dir(path)

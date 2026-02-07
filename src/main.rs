@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod agents;
 mod doctor;
+mod exec;
 mod format;
 mod init;
 mod jj_intro;
@@ -34,8 +35,9 @@ mod workspace;
 ///   #   ('describe' sets the commit message — like git commit --amend -m)
 ///   maw ws jj <your-name> diff
 ///
-///   # Run other commands with cd:
-///   cd /absolute/path/ws/<your-name> && cargo test
+///   # Run other tools in your workspace:
+///   maw exec <your-name> -- cargo test
+///   maw exec <your-name> -- br list
 ///
 ///   # Check all agent work
 ///   maw ws status
@@ -108,6 +110,21 @@ enum Commands {
     /// Safe to run multiple times — detects v2 and exits early.
     Upgrade,
 
+    /// Run a command inside a workspace directory
+    ///
+    /// Like `maw ws jj` but for any command — useful for running tools
+    /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
+    /// needing persistent `cd`.
+    ///
+    /// The workspace name is validated (no path traversal). Stale
+    /// workspaces are auto-synced before running the command.
+    ///
+    /// Examples:
+    ///   maw exec alice -- cargo test
+    ///   maw exec alice -- br list
+    ///   maw exec alice -- ls -la src/
+    Exec(exec::ExecArgs),
+
     /// Push the main branch to remote
     ///
     /// Pushes the configured branch (default: main) to origin using
@@ -140,5 +157,6 @@ fn main() -> Result<()> {
         Commands::JjIntro => jj_intro::run(),
         Commands::Status(cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
+        Commands::Exec(args) => exec::run(&args),
     }
 }
