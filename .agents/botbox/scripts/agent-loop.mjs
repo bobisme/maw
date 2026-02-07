@@ -115,6 +115,45 @@ async function getAgentName() {
 	}
 }
 
+// --- Helper: check if a review is pending (don't run Claude, just wait) ---
+async function hasPendingReview() {
+	try {
+		let result = await runCommand('br', ['list', '--status', 'in_progress', '--assignee', AGENT, '--json']);
+		let beads = JSON.parse(result.stdout || '[]');
+		if (!Array.isArray(beads)) beads = [];
+
+		for (let bead of beads) {
+			try {
+				let commentsResult = await runCommand('br', ['comments', bead.id, '--json']);
+				let comments = JSON.parse(commentsResult.stdout || '[]');
+				let arr = Array.isArray(comments) ? comments : comments.comments || [];
+
+				let hasReview = arr.some(
+					(/** @type {any} */ c) =>
+						c.body?.includes('Review created:') ||
+						c.body?.includes('Review requested:') ||
+						c.content?.includes('Review created:') ||
+						c.content?.includes('Review requested:'),
+				);
+				if (!hasReview) continue;
+
+				let hasCompleted = arr.some(
+					(/** @type {any} */ c) =>
+						c.body?.includes('Completed by') || c.content?.includes('Completed by'),
+				);
+				if (hasCompleted) continue;
+
+				return bead.id;
+			} catch {
+				// Can't read comments, skip
+			}
+		}
+	} catch {
+		// Can't list beads, skip
+	}
+	return null;
+}
+
 // --- Helper: check if there is work ---
 async function hasWork() {
 	try {
@@ -188,7 +227,7 @@ At the end of your work, output exactly one of these completion signals:
      * If BLOCKED (changes requested): follow .agents/botbox/review-response.md to fix issues
        in the workspace, re-request review, then STOP this iteration.
      * If PENDING (no votes yet): STOP this iteration. Wait for the reviewer.
-     * If review not found: Check if workspace still exists and create new review if needed
+     * If review not found: DO NOT merge or create a new review. The reviewer may still be starting up (hooks have latency). STOP this iteration and wait. Only create a new review if the workspace was destroyed AND 3+ iterations have passed since the review comment.
    - If no review comment (work was in progress when session ended):
      * Read the workspace code to see what's already done.
      * Complete the remaining work in the EXISTING workspace — do NOT create a new one.
@@ -273,7 +312,7 @@ At the end of your work, output exactly one of these completion signals:
    - Bump version in Cargo.toml/package.json (semantic versioning)
    - Update changelog if one exists
    - maw push (if not already pushed)
-   - Tag: jj tag create vX.Y.Z -r main && jj git push --remote origin
+   - Tag: jj tag set vX.Y.Z -r main && jj git push --remote origin
    - Announce: bus send --agent ${AGENT} ${PROJECT} "<project> vX.Y.Z released - <summary>" -L release
    If only "chore:", "docs:", "refactor:" commits, no release needed.
    Output: <promise>COMPLETE</promise>
@@ -391,24 +430,19 @@ async function main() {
 		process.exit(1);
 	}
 
-	// Refresh or stake agent lease
+	// Stake agent claim (ignore failure — may already be held from previous run)
 	try {
-		await runCommand('bus', ['claims', 'refresh', '--agent', AGENT, `agent://${AGENT}`]);
+		await runCommand('bus', [
+			'claims',
+			'stake',
+			'--agent',
+			AGENT,
+			`agent://${AGENT}`,
+			'-m',
+			`worker-loop for ${PROJECT}`,
+		]);
 	} catch {
-		try {
-			await runCommand('bus', [
-				'claims',
-				'stake',
-				'--agent',
-				AGENT,
-				`agent://${AGENT}`,
-				'-m',
-				`worker-loop for ${PROJECT}`,
-			]);
-		} catch {
-			// Claim held by another agent - they're orchestrating, continue
-			console.log(`Claim held by another agent, continuing`);
-		}
+		// Already held — will refresh in the loop
 	}
 
 	// Announce
@@ -429,6 +463,13 @@ async function main() {
 	for (let i = 1; i <= MAX_LOOPS; i++) {
 		console.log(`\n--- Loop ${i}/${MAX_LOOPS} ---`);
 
+		// Refresh agent claim TTL (ignore failure)
+		try {
+			await runCommand('bus', ['claims', 'refresh', '--agent', AGENT, `agent://${AGENT}`]);
+		} catch {
+			// Claim may have expired or been released — not fatal
+		}
+
 		if (!(await hasWork())) {
 			await runCommand('bus', ['statuses', 'set', '--agent', AGENT, 'Idle']);
 			console.log('No work available. Exiting cleanly.');
@@ -445,6 +486,25 @@ async function main() {
 			break;
 		}
 
+		// Guard: if a review is pending, don't run Claude — just wait
+		let pendingBeadId = await hasPendingReview();
+		if (pendingBeadId) {
+			console.log(`Review pending for ${pendingBeadId} — waiting (not running Claude)`);
+			try {
+				await runCommand('bus', [
+					'statuses',
+					'set',
+					'--agent',
+					AGENT,
+					`Waiting: review for ${pendingBeadId}`,
+					'--ttl',
+					'10m',
+				]);
+			} catch {}
+			await new Promise((resolve) => setTimeout(resolve, 30_000));
+			continue;
+		}
+
 		// Run Claude
 		try {
 			const prompt = buildPrompt();
@@ -453,6 +513,7 @@ async function main() {
 			// Check for completion signals
 			if (result.output.includes('<promise>COMPLETE</promise>')) {
 				console.log('✓ Task cycle complete');
+				alreadySignedOff = true; // Agent likely sent its own sign-off
 			} else if (result.output.includes('<promise>BLOCKED</promise>')) {
 				console.log('⚠ Agent blocked');
 			} else {

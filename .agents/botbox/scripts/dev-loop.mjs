@@ -27,7 +27,7 @@ async function loadConfig() {
 
 			// Project identity (can be overridden by CLI args)
 			PROJECT = project.channel || project.name || '';
-			AGENT = project.default_agent || '';
+			AGENT = project.defaultAgent || project.default_agent || '';
 
 			// Agent settings
 			MODEL = dev.model || '';
@@ -151,6 +151,41 @@ async function getUnfinishedBeads() {
 		console.error('Error checking for unfinished beads:', err.message);
 		return [];
 	}
+}
+
+// --- Helper: check if a review is pending (don't run Claude, just wait) ---
+async function hasPendingReview() {
+	let unfinished = await getUnfinishedBeads();
+	for (let bead of unfinished) {
+		try {
+			let result = await runCommand('br', ['comments', bead.id, '--json']);
+			let comments = JSON.parse(result.stdout || '[]');
+			let arr = Array.isArray(comments) ? comments : comments.comments || [];
+
+			// Look for "Review created:" or "Review requested:" comment
+			let hasReview = arr.some(
+				(/** @type {any} */ c) =>
+					c.body?.includes('Review created:') ||
+					c.body?.includes('Review requested:') ||
+					c.content?.includes('Review created:') ||
+					c.content?.includes('Review requested:'),
+			);
+			if (!hasReview) continue;
+
+			// Check if bead was already completed (has "Completed" comment)
+			let hasCompleted = arr.some(
+				(/** @type {any} */ c) =>
+					c.body?.includes('Completed by') || c.content?.includes('Completed by'),
+			);
+			if (hasCompleted) continue;
+
+			// Has a review comment but no completion — review is still pending
+			return bead.id;
+		} catch {
+			// Can't read comments, skip
+		}
+	}
+	return null;
 }
 
 // --- Helper: check if there is work ---
@@ -305,7 +340,7 @@ For EACH unfinished bead:
      * If LGTM (approved): Proceed to merge/finish (step 6)
      * If BLOCKED (changes requested): Follow review-response.md to fix issues, re-request review, then STOP
      * If PENDING (no votes yet): STOP this iteration — wait for reviewer
-     * If review not found: Check if workspace still exists and create new review if needed
+     * If review not found: DO NOT merge or create a new review. The reviewer may still be starting up (hooks have latency). STOP this iteration and wait. Only create a new review if the workspace was destroyed AND 3+ iterations have passed since the review comment.
    - If workspace comment exists but no review comment (work was in progress when session died):
      * Extract workspace name and path from comments
      * Verify workspace still exists: maw ws list
@@ -461,7 +496,7 @@ Before outputting COMPLETE, check if a release is needed:
    - Bump version in Cargo.toml/package.json (semantic versioning)
    - Update changelog if one exists
    - maw push (if not already pushed)
-   - Tag: jj tag create vX.Y.Z -r main && jj git push --remote origin
+   - Tag: jj tag set vX.Y.Z -r main && jj git push --remote origin
    - Announce: bus send --agent ${AGENT} ${PROJECT} "<project> vX.Y.Z released - <summary>" -L release
 3. If only "chore:", "docs:", "refactor:" commits, no release needed.
 
@@ -577,24 +612,19 @@ async function main() {
 		process.exit(1);
 	}
 
-	// Refresh or stake agent lease
+	// Stake agent claim (ignore failure — may already be held from previous run)
 	try {
-		await runCommand('bus', ['claims', 'refresh', '--agent', AGENT, `agent://${AGENT}`]);
+		await runCommand('bus', [
+			'claims',
+			'stake',
+			'--agent',
+			AGENT,
+			`agent://${AGENT}`,
+			'-m',
+			`dev-loop for ${PROJECT}`,
+		]);
 	} catch {
-		try {
-			await runCommand('bus', [
-				'claims',
-				'stake',
-				'--agent',
-				AGENT,
-				`agent://${AGENT}`,
-				'-m',
-				`dev-loop for ${PROJECT}`,
-			]);
-		} catch {
-			// Claim held by another agent - they're orchestrating, continue
-			console.log(`Claim held by another agent, continuing`);
-		}
+		// Already held — will refresh in the loop
 	}
 
 	// Announce
@@ -621,6 +651,13 @@ async function main() {
 	for (let i = 1; i <= MAX_LOOPS; i++) {
 		console.log(`\n--- Dev loop ${i}/${MAX_LOOPS} ---`);
 
+		// Refresh agent claim TTL (ignore failure)
+		try {
+			await runCommand('bus', ['claims', 'refresh', '--agent', AGENT, `agent://${AGENT}`]);
+		} catch {
+			// Claim may have expired or been released — not fatal
+		}
+
 		if (!(await hasWork())) {
 			await runCommand('bus', ['statuses', 'set', '--agent', AGENT, 'Idle']);
 			console.log('No work available. Exiting cleanly.');
@@ -637,6 +674,26 @@ async function main() {
 			break;
 		}
 
+		// Guard: if a review is pending, don't run Claude — just wait
+		let pendingBeadId = await hasPendingReview();
+		if (pendingBeadId) {
+			console.log(`Review pending for ${pendingBeadId} — waiting (not running Claude)`);
+			try {
+				await runCommand('bus', [
+					'statuses',
+					'set',
+					'--agent',
+					AGENT,
+					`Waiting: review for ${pendingBeadId}`,
+					'--ttl',
+					'10m',
+				]);
+			} catch {}
+			// Wait longer than normal pause — reviews take time
+			await new Promise((resolve) => setTimeout(resolve, 30_000));
+			continue;
+		}
+
 		// Run Claude
 		try {
 			const lastIteration = await readLastIteration();
@@ -646,6 +703,7 @@ async function main() {
 			// Check for completion signals
 			if (result.output.includes('<promise>COMPLETE</promise>')) {
 				console.log('✓ Dev cycle complete - no more work');
+				alreadySignedOff = true; // Agent likely sent its own sign-off
 				break;
 			} else if (result.output.includes('<promise>END_OF_STORY</promise>')) {
 				console.log('✓ Iteration complete - more work remains');
