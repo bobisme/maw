@@ -160,7 +160,7 @@ async function hasWork() {
 		const unfinished = await getUnfinishedBeads();
 		if (unfinished.length > 0) return true;
 
-		// Check claims (dispatched workers or in-progress beads)
+		// Check claims (dispatched workers, in-progress beads, pending reviews)
 		const claimsResult = await runCommand('bus', [
 			'claims',
 			'--agent',
@@ -171,7 +171,14 @@ async function hasWork() {
 			'json',
 		]);
 		const claims = JSON.parse(claimsResult.stdout || '{}');
-		if (claims.claims && claims.claims.length > 0) return true;
+		const claimList = claims.claims || [];
+		// bead:// or workspace:// claims mean active work (don't count agent:// identity claim)
+		const workClaims = claimList.filter(
+			(/** @type {any} */ c) =>
+				Array.isArray(c.patterns) &&
+				c.patterns.some((/** @type {string} */ p) => p.startsWith('bead://') || p.startsWith('workspace://')),
+		);
+		if (workClaims.length > 0) return true;
 
 		// Check inbox
 		const inboxResult = await runCommand('bus', [
@@ -349,7 +356,7 @@ Assess bead count:
 ## 5a. SEQUENTIAL (1 bead — do it yourself)
 
 Same as the standard worker loop:
-1. br update --actor ${AGENT} <id> --status=in_progress
+1. br update --actor ${AGENT} <id> --status=in_progress --owner=${AGENT}
 2. bus claims stake --agent ${AGENT} "bead://${PROJECT}/<id>" -m "<id>"
 3. maw ws create --random — note workspace NAME and absolute PATH
 4. bus claims stake --agent ${AGENT} "workspace://${PROJECT}/\$WS" -m "<id>"
@@ -396,7 +403,7 @@ Read each bead (br show <id>) and select a model based on complexity:
 ### For each bead being dispatched:
 1. maw ws create --random — note NAME and PATH
 2. bus generate-name — get a worker identity
-3. br update --actor ${AGENT} <id> --status=in_progress
+3. br update --actor ${AGENT} <id> --status=in_progress --owner=${AGENT}
 4. bus claims stake --agent ${AGENT} "bead://${PROJECT}/<id>" -m "dispatched to <worker-name>"
 5. bus claims stake --agent ${AGENT} "workspace://${PROJECT}/\$WS" -m "<id>"
 6. br comments add --actor ${AGENT} --author ${AGENT} <id> "Dispatched worker <worker-name> (model: <model>) in workspace \$WS (\$WS_PATH)"

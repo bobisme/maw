@@ -211,7 +211,7 @@ At the end of your work, output exactly one of these completion signals:
    br create + br dep add, then bv --robot-next again. If a bead is claimed
    (bus claims check --agent ${AGENT} "bead://${PROJECT}/<id>"), skip it.
 
-3. START: br update --actor ${AGENT} <id> --status=in_progress.
+3. START: br update --actor ${AGENT} <id> --status=in_progress --owner=${AGENT}.
    bus claims stake --agent ${AGENT} "bead://${PROJECT}/<id>" -m "<id>".
    Create workspace: run maw ws create --random. Note the workspace name AND absolute path
    from the output (e.g., name "frost-castle", path "/abs/path/.workspaces/frost-castle").
