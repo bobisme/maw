@@ -857,7 +857,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
         let stderr = String::from_utf8_lossy(&status.stderr);
         if stderr.contains("working copy is stale") {
             println!("NOTE: Workspace is stale (files may be outdated).");
-            println!("  Fix: maw ws sync");
+            println!("  Fix: maw ws sync {name}");
             println!();
         }
     }
@@ -988,7 +988,7 @@ fn print_status_text(
     if is_stale {
         println!("WARNING: Working copy is stale!");
         println!("  (Another workspace changed shared history — your files are outdated.)");
-        println!("  Fix: maw ws sync");
+        println!("  Fix: maw ws sync {current_ws}");
         println!();
     }
 
@@ -1184,13 +1184,218 @@ fn sync(all: bool) -> Result<()> {
         }
     }
 
-    if update_output.status.success() {
-        println!();
-        println!("Workspace synced successfully.");
-    } else {
+    if !update_output.status.success() {
         bail!(
             "Failed to sync workspace.\n  Check workspace state: maw ws status\n  Manual fix: jj workspace update-stale"
         );
+    }
+
+    // After sync, check for and auto-resolve divergent commits on our working copy.
+    // This happens when update-stale creates a fork of the workspace commit.
+    resolve_divergent_working_copy(".")?;
+
+    println!();
+    println!("Workspace synced successfully.");
+
+    Ok(())
+}
+
+/// After sync, detect and auto-resolve divergent commits on the workspace's
+/// working copy. When `jj workspace update-stale` runs, it can fork the
+/// workspace commit into multiple versions (e.g. change_id/0 and change_id/1).
+/// One typically has the agent's actual work, the other is empty.
+/// This function keeps the non-empty version and abandons the rest.
+fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
+    // Get the working copy's change ID
+    let change_output = Command::new("jj")
+        .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
+        .current_dir(workspace_dir)
+        .output()
+        .context("Failed to get working copy change ID")?;
+
+    let change_id = String::from_utf8_lossy(&change_output.stdout).trim().to_string();
+    if change_id.is_empty() {
+        return Ok(());
+    }
+
+    // Check if this change ID has divergent copies.
+    // Must use change_id() revset function — bare change_id errors on divergent changes.
+    let revset = format!("change_id({})", change_id);
+    let divergent_output = Command::new("jj")
+        .args([
+            "log",
+            "--no-graph",
+            "-r",
+            &revset,
+            "-T",
+            r#"if(divergent, commit_id.short() ++ "\n", "")"#,
+        ])
+        .current_dir(workspace_dir)
+        .output()
+        .context("Failed to check for divergent commits")?;
+
+    let divergent_text = String::from_utf8_lossy(&divergent_output.stdout);
+    let divergent_commits: Vec<&str> = divergent_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+
+    if divergent_commits.len() <= 1 {
+        // No divergence, nothing to do
+        return Ok(());
+    }
+
+    println!();
+    println!(
+        "Detected {} divergent copies of workspace commit {change_id}.",
+        divergent_commits.len()
+    );
+    println!("  (This happens when sync forks your commit. Auto-resolving...)");
+
+    // For each divergent copy, check if it has actual file changes (non-empty diff).
+    // Keep the one with changes, abandon the empty ones.
+    let mut non_empty = Vec::new();
+    let mut empty = Vec::new();
+
+    for commit_id in &divergent_commits {
+        // Use `jj diff` (not --stat) because --stat outputs a summary line
+        // even for empty commits ("0 files changed..."), making empty detection fail.
+        let diff_output = Command::new("jj")
+            .args(["diff", "-r", commit_id])
+            .current_dir(workspace_dir)
+            .output();
+
+        match diff_output {
+            Ok(out) if out.status.success() => {
+                let diff_text = String::from_utf8_lossy(&out.stdout);
+                if diff_text.trim().is_empty() {
+                    empty.push(*commit_id);
+                } else {
+                    non_empty.push(*commit_id);
+                }
+            }
+            _ => {
+                // Can't determine, treat as non-empty (safe default)
+                non_empty.push(*commit_id);
+            }
+        }
+    }
+
+    if non_empty.is_empty() {
+        // All copies are empty — nothing meaningful to keep, leave them as-is.
+        // The agent hasn't made changes yet so divergence doesn't lose work.
+        println!("  All copies are empty (no work to lose). Abandoning all but current.");
+        // Abandon all except the current working copy (@ stays)
+        for commit_id in &empty {
+            let check_current = Command::new("jj")
+                .args([
+                    "log",
+                    "-r",
+                    &format!("@ & {commit_id}"),
+                    "--no-graph",
+                    "-T",
+                    "commit_id.short()",
+                ])
+                .current_dir(workspace_dir)
+                .output();
+
+            let is_current = check_current
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+
+            if !is_current {
+                let _ = Command::new("jj")
+                    .args(["abandon", commit_id])
+                    .current_dir(workspace_dir)
+                    .output();
+                println!("  Abandoned empty copy: {commit_id}");
+            }
+        }
+        return Ok(());
+    }
+
+    // Abandon the empty copies
+    for commit_id in &empty {
+        let abandon_result = Command::new("jj")
+            .args(["abandon", commit_id])
+            .current_dir(workspace_dir)
+            .output();
+
+        match abandon_result {
+            Ok(out) if out.status.success() => {
+                println!("  Abandoned empty copy: {commit_id}");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!("  Warning: Failed to abandon {commit_id}: {}", stderr.trim());
+            }
+            Err(e) => {
+                eprintln!("  Warning: Failed to abandon {commit_id}: {e}");
+            }
+        }
+    }
+
+    // If we still have multiple non-empty copies, we can't auto-resolve safely.
+    // Warn the agent with actionable instructions.
+    if non_empty.len() > 1 {
+        println!();
+        println!("  WARNING: {} non-empty divergent copies remain.", non_empty.len());
+        println!("  Both copies have changes — cannot auto-resolve.");
+        println!("  To fix manually:");
+        println!("    jj log -r 'change_id({change_id})'  # compare the versions");
+        for (i, commit_id) in non_empty.iter().enumerate() {
+            println!("    jj diff -r {commit_id}  # version {i}");
+        }
+        println!("    jj abandon <unwanted-commit-id>  # remove the unwanted one");
+    } else {
+        // If the non-empty copy isn't our working copy, squash it into @
+        let non_empty_id = non_empty[0];
+        let check_current = Command::new("jj")
+            .args([
+                "log",
+                "-r",
+                &format!("@ & {non_empty_id}"),
+                "--no-graph",
+                "-T",
+                "commit_id.short()",
+            ])
+            .current_dir(workspace_dir)
+            .output();
+
+        let is_current = check_current
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+
+        if !is_current {
+            // The working copy is empty but the non-empty copy is elsewhere.
+            // Squash the non-empty one into @ to recover the work.
+            let squash_result = Command::new("jj")
+                .args(["squash", "--from", non_empty_id, "--into", "@"])
+                .current_dir(workspace_dir)
+                .output();
+
+            match squash_result {
+                Ok(out) if out.status.success() => {
+                    println!("  Recovered work from {non_empty_id} into working copy.");
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    eprintln!(
+                        "  WARNING: Could not auto-recover work: {}\n  \
+                         Manual fix: jj squash --from {non_empty_id} --into @",
+                        stderr.trim()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  WARNING: Could not auto-recover work: {e}\n  \
+                         Manual fix: jj squash --from {non_empty_id} --into @"
+                    );
+                }
+            }
+        } else {
+            println!("  Kept non-empty copy: {non_empty_id} (your work is preserved).");
+        }
     }
 
     Ok(())
@@ -1269,7 +1474,12 @@ fn sync_all() -> Result<()> {
 
         match sync_result {
             Ok(out) if out.status.success() => {
-                println!("  ✓ {ws} - synced");
+                // Check for and resolve divergent commits after sync
+                if let Err(e) = resolve_divergent_working_copy(path.to_str().unwrap_or(".")) {
+                    eprintln!("  ✓ {ws} - synced (divergent resolution failed: {e})");
+                } else {
+                    println!("  ✓ {ws} - synced");
+                }
                 synced += 1;
             }
             Ok(out) => {
@@ -1298,6 +1508,49 @@ fn sync_all() -> Result<()> {
         }
     }
 
+    // Re-check for cascade staleness: syncing one workspace can make others stale again
+    if synced > 0 {
+        let mut cascade_stale = Vec::new();
+        for ws in &workspace_names {
+            if ws != "default" && validate_workspace_name(ws).is_err() {
+                continue;
+            }
+            let path = if ws == "default" {
+                root.clone()
+            } else {
+                root.join(".workspaces").join(ws)
+            };
+            if !path.exists() {
+                continue;
+            }
+            let status = Command::new("jj")
+                .args(["status"])
+                .current_dir(&path)
+                .output();
+            if let Ok(out) = status {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("working copy is stale") {
+                    cascade_stale.push(ws.clone());
+                }
+            }
+        }
+        if !cascade_stale.is_empty() {
+            println!();
+            println!(
+                "WARNING: {} workspace(s) became stale again (cascade effect): {}",
+                cascade_stale.len(),
+                cascade_stale.join(", ")
+            );
+            println!("  This happens when syncing one workspace modifies shared history.");
+            println!("  Re-run: maw ws sync --all");
+            println!();
+            println!("  Tip: To avoid cascading, sync only your workspace:");
+            for ws in &cascade_stale {
+                println!("    maw ws sync {ws}");
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1313,8 +1566,10 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
         p
     };
 
-    // Check for stale workspace and warn (but don't block)
-    warn_if_stale(name, &path);
+    // Auto-sync stale workspace before running the command.
+    // Stale workspaces cause jj commands to fail with exit code 1.
+    // Auto-syncing saves 2-3 tool calls per stale encounter.
+    auto_sync_if_stale(name, &path)?;
 
     // Check for commands that might cause divergent commits
     warn_if_targeting_other_commit(name, args, &path);
@@ -1332,27 +1587,45 @@ fn jj_in_workspace(name: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Check if workspace is stale and print a helpful warning.
-/// Stale means another workspace changed shared history and this workspace's
-/// working copy is outdated.
-fn warn_if_stale(name: &str, path: &Path) {
-    // Quick check - run jj status and see if stderr contains stale warning
+/// Auto-sync a stale workspace before running a command.
+/// If the workspace is stale, runs update-stale + divergent resolution.
+/// Returns Ok(()) whether or not it was stale (idempotent).
+fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
     let output = Command::new("jj")
         .args(["status"])
         .current_dir(path)
-        .output();
+        .output()
+        .context("Failed to check workspace status")?;
 
-    if let Ok(out) = output {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("working copy is stale") {
-            eprintln!();
-            eprintln!("⚠️  WARNING: Workspace '{name}' is STALE");
-            eprintln!("   Another workspace changed shared history. Your files may be outdated.");
-            eprintln!();
-            eprintln!("   To fix: maw ws sync");
-            eprintln!();
-        }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("working copy is stale") {
+        return Ok(());
     }
+
+    eprintln!("Workspace '{name}' is stale — auto-syncing before running command...");
+
+    let update_output = Command::new("jj")
+        .args(["workspace", "update-stale"])
+        .current_dir(path)
+        .output()
+        .context("Failed to run jj workspace update-stale")?;
+
+    if !update_output.status.success() {
+        let err = String::from_utf8_lossy(&update_output.stderr);
+        bail!(
+            "Auto-sync failed for workspace '{name}': {}\n  \
+             Manual fix: maw ws sync {name}",
+            err.trim()
+        );
+    }
+
+    // Resolve any divergent commits created by sync
+    resolve_divergent_working_copy(path.to_str().unwrap_or("."))?;
+
+    eprintln!("Workspace '{name}' synced. Proceeding with command.");
+    eprintln!();
+
+    Ok(())
 }
 
 /// Sync stale workspaces before merge to avoid spurious conflicts.
@@ -1407,9 +1680,8 @@ fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result
             );
         }
 
-        // Note: jj workspace update-stale can create divergent commits if the same
-        // change was modified in multiple workspaces. These will be caught by
-        // maw ws status and can be resolved with jj abandon <change-id>/N
+        // Resolve any divergent commits created by the sync
+        resolve_divergent_working_copy(ws_path.to_str().unwrap_or("."))?;
 
         synced_count += 1;
     }
