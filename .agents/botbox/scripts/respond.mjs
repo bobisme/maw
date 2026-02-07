@@ -650,45 +650,32 @@ async function handleDev(route, channel, message) {
     await handleBead({ type: "bead", body: route.body }, channel, message)
   }
 
-  // Spawn dev-loop via botty
-  let spawnArgs = [
-    "spawn",
-    "--env-inherit",
-    "BOTBUS_CHANNEL,BOTBUS_MESSAGE_ID,BOTBUS_AGENT,BOTBUS_HOOK_ID",
-    "--name",
-    AGENT,
-    "--cwd",
-    process.cwd(),
-    "--",
-    "bun",
-    ".agents/botbox/scripts/dev-loop.mjs",
-    PROJECT,
-    AGENT,
-  ]
+  // Exec into dev-loop directly — we're already inside a botty PTY session,
+  // so the dev-loop inherits it. Using botty spawn would kill our own session
+  // (same --name) and orphan the child process.
+  let scriptPath = ".agents/botbox/scripts/dev-loop.mjs"
+  let args = ["bun", scriptPath, PROJECT, AGENT]
+  console.log(`Exec into dev-loop: ${args.join(" ")}`)
 
-  console.log(`Spawning dev-loop: botty ${spawnArgs.join(" ")}`)
-  try {
-    await runCommand("botty", spawnArgs)
-    console.log("Dev-loop spawned successfully")
-    await runCommand("bus", [
-      "send",
-      "--agent",
-      AGENT,
-      channel,
-      `Dev agent spawned — working on it.`,
-      "-L",
-      "spawn-ack",
-    ])
-  } catch (err) {
-    console.error("Error spawning dev-loop:", err.message)
-    await runCommand("bus", [
-      "send",
-      "--agent",
-      AGENT,
-      channel,
-      `Failed to spawn dev-loop: ${err.message}`,
-    ]).catch(() => {})
-  }
+  await runCommand("bus", [
+    "send",
+    "--agent",
+    AGENT,
+    channel,
+    `Dev agent spawned — working on it.`,
+    "-L",
+    "spawn-ack",
+  ]).catch(() => {})
+
+  // Hand off to dev-loop with inherited stdio — this replaces our process
+  let proc = spawn("bun", [scriptPath, PROJECT, AGENT], {
+    stdio: "inherit",
+    env: process.env,
+  })
+  let code = await new Promise((resolve) => {
+    proc.on("close", (c) => resolve(c ?? 1))
+  })
+  process.exit(code)
 }
 
 /**
