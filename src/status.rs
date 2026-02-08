@@ -13,6 +13,7 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const ANSI_ORANGE: &str = "\x1b[38;5;208m";
 const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_LIGHT_RED: &str = "\x1b[91m";
+const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 /// Brief repo/workspace status
@@ -92,17 +93,18 @@ impl StatusSummary {
     }
 
     fn render_oneline(&self) -> String {
+        let check = green_check();
         let mut parts = vec![
-            format!("ws={}", self.workspaces),
-            format!("changes={}", self.change_count),
-            format!("untracked={}", self.git_untracked_count),
-            format!("main={}", self.main_sync.oneline()),
+            format!("ws={}{}", self.workspaces, if self.workspaces == 0 { &check } else { "" }),
+            format!("changes={}{}", self.change_count, if self.change_count == 0 { &check } else { "" }),
+            format!("untracked={}{}", self.git_untracked_count, if self.git_untracked_count == 0 { &check } else { "" }),
+            format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { "" }),
         ];
 
         if self.is_stale {
             parts.push("stale=1".to_string());
         } else {
-            parts.push("stale=0".to_string());
+            parts.push(format!("stale=0{check}"));
         }
 
         format!("{}\n", parts.join(" "))
@@ -158,15 +160,18 @@ impl StatusSummary {
     }
 
     fn render_multiline(&self) -> String {
+        let check = green_check();
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
-        out.push_str(&format!(
-            "Agent workspaces: {} ({} total)\n",
-            self.workspaces, self.total_workspaces
-        ));
+
+        if self.workspaces == 0 {
+            out.push_str(&format!("Agent workspaces: {} ({} total) {check}\n", self.workspaces, self.total_workspaces));
+        } else {
+            out.push_str(&format!("Agent workspaces: {} ({} total)\n", self.workspaces, self.total_workspaces));
+        }
 
         if self.change_count == 0 {
-            out.push_str("Working copy changes: none\n");
+            out.push_str(&format!("Working copy changes: none {check}\n"));
         } else {
             out.push_str(&format!(
                 "Working copy changes: {} (jj={}, git={})\n",
@@ -175,7 +180,7 @@ impl StatusSummary {
         }
 
         if self.git_untracked_count == 0 {
-            out.push_str("Untracked files (git): none\n");
+            out.push_str(&format!("Untracked files (git): none {check}\n"));
         } else {
             out.push_str(&format!(
                 "Untracked files (git): {}\n",
@@ -183,12 +188,16 @@ impl StatusSummary {
             ));
         }
 
-        out.push_str(&format!("Main vs origin: {}\n", self.main_sync.describe()));
+        if matches!(self.main_sync, MainSyncStatus::UpToDate) {
+            out.push_str(&format!("Main vs origin: {} {check}\n", self.main_sync.describe()));
+        } else {
+            out.push_str(&format!("Main vs origin: {}\n", self.main_sync.describe()));
+        }
 
         if self.is_stale {
             out.push_str("Stale workspace: yes (run `maw ws sync`)\n");
         } else {
-            out.push_str("Stale workspace: no\n");
+            out.push_str(&format!("Stale workspace: no {check}\n"));
         }
 
         out
@@ -205,6 +214,10 @@ fn colorize_blue(value: &str) -> String {
 
 fn colorize_light_red(value: &str) -> String {
     format!("{ANSI_LIGHT_RED}{value}{ANSI_RESET}")
+}
+
+fn green_check() -> String {
+    format!("{ANSI_GREEN}✓{ANSI_RESET}")
 }
 
 impl MainSyncStatus {
