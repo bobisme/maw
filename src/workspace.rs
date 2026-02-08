@@ -442,6 +442,21 @@ pub fn repo_root() -> Result<PathBuf> {
     Ok(root)
 }
 
+/// Return the best directory for running jj commands.
+///
+/// In v2 bare repo model, the repo root has no jj workspace — running jj
+/// there produces "working copy is stale" errors. This returns `ws/default/`
+/// when it exists, falling back to the repo root for v1 repos or pre-init.
+pub fn jj_cwd() -> Result<PathBuf> {
+    let root = repo_root()?;
+    let default_ws = root.join("ws").join("default");
+    if default_ws.exists() {
+        Ok(default_ws)
+    } else {
+        Ok(root)
+    }
+}
+
 /// Ensure CWD is the repo root. Mutation commands must run from root
 /// to avoid agent confusion about which workspace context they're in.
 fn ensure_repo_root() -> Result<PathBuf> {
@@ -511,13 +526,13 @@ fn validate_workspace_name(name: &str) -> Result<()> {
 /// A workspace is stale when another workspace modified shared history,
 /// making the working copy files outdated.
 fn check_stale_workspaces() -> Result<Vec<String>> {
-    let root = repo_root()?;
+    let cwd = jj_cwd()?;
     let ws_dir = workspaces_dir()?;
 
     // Get all workspaces
     let output = Command::new("jj")
         .args(["workspace", "list"])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -580,6 +595,7 @@ fn warn_stale_workspaces() {
 
 fn create(name: &str, revision: Option<&str>) -> Result<()> {
     let root = ensure_repo_root()?;
+    let cwd = jj_cwd()?;
     let path = workspace_path(name)?;
 
     if path.exists() {
@@ -602,7 +618,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     } else {
         let check = Command::new("jj")
             .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()", "--no-pager"])
-            .current_dir(&root)
+            .current_dir(&cwd)
             .output();
         match check {
             Ok(o) if o.status.success() => "@".to_string(),
@@ -624,7 +640,7 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
             "-r",
             &base,
         ])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace add")?;
 
@@ -726,8 +742,10 @@ fn destroy(name: &str, confirm: bool) -> Result<()> {
     println!("Destroying workspace '{name}'...");
 
     // Forget from jj (ignore errors if already forgotten)
+    let cwd = jj_cwd()?;
     let _ = Command::new("jj")
         .args(["workspace", "forget", name])
+        .current_dir(&cwd)
         .status();
 
     // Remove directory
@@ -748,6 +766,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 
     ensure_repo_root()?;
     let root = repo_root()?;
+    let cwd = jj_cwd()?;
     let path = workspace_path(name)?;
 
     // Check if directory exists
@@ -763,7 +782,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     // Check if workspace is already tracked by jj
     let ws_output = Command::new("jj")
         .args(["workspace", "list"])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -834,7 +853,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
             "-r",
             &attach_rev,
         ])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace add")?;
 
@@ -919,12 +938,15 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 }
 
 fn status(format: OutputFormat) -> Result<()> {
+    let cwd = jj_cwd()?;
+
     // Get current workspace name
-    let current_ws = get_current_workspace()?;
+    let current_ws = get_current_workspace(&cwd)?;
 
     // Check if stale
     let stale_check = Command::new("jj")
         .args(["status"])
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj status")?;
 
@@ -935,6 +957,7 @@ fn status(format: OutputFormat) -> Result<()> {
     // Get all workspaces and their commits
     let ws_output = Command::new("jj")
         .args(["workspace", "list"])
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -950,6 +973,7 @@ fn status(format: OutputFormat) -> Result<()> {
             "-T",
             r#"change_id.short() ++ " " ++ description.first_line() ++ "\n""#,
         ])
+        .current_dir(&cwd)
         .output()
         .context("Failed to check for conflicts")?;
 
@@ -963,6 +987,7 @@ fn status(format: OutputFormat) -> Result<()> {
             "-T",
             r#"if(divergent, change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n", "")"#,
         ])
+        .current_dir(&cwd)
         .output()
         .context("Failed to check for divergent commits")?;
 
@@ -1170,10 +1195,11 @@ fn build_status_struct(
     })
 }
 
-fn get_current_workspace() -> Result<String> {
+fn get_current_workspace(cwd: &Path) -> Result<String> {
     // jj workspace list marks current with @
     let output = Command::new("jj")
         .args(["workspace", "list"])
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -1193,9 +1219,12 @@ fn sync(all: bool) -> Result<()> {
         return sync_all();
     }
 
+    let cwd = jj_cwd()?;
+
     // First check if we're stale
     let status_check = Command::new("jj")
         .args(["status"])
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj status")?;
 
@@ -1213,6 +1242,7 @@ fn sync(all: bool) -> Result<()> {
     // Run update-stale and capture output
     let update_output = Command::new("jj")
         .args(["workspace", "update-stale"])
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace update-stale")?;
 
@@ -1453,10 +1483,12 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
 /// Sync all workspaces at once
 fn sync_all() -> Result<()> {
     let root = repo_root()?;
+    let cwd = jj_cwd()?;
 
     // Get all workspaces
     let output = Command::new("jj")
         .args(["workspace", "list"])
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -1832,13 +1864,13 @@ fn warn_if_targeting_other_commit(workspace_name: &str, args: &[String], workspa
 
 /// Show commit history for a workspace
 fn history(name: &str, limit: usize) -> Result<()> {
-    let root = repo_root()?;
+    let cwd = jj_cwd()?;
     validate_workspace_name(name)?;
 
     // Check if workspace exists
     let ws_output = Command::new("jj")
         .args(["workspace", "list"])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -1876,7 +1908,7 @@ fn history(name: &str, limit: usize) -> Result<()> {
             "-n",
             &limit.to_string(),
         ])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to get workspace history")?;
 
@@ -2238,6 +2270,7 @@ fn merge(
     }
 
     let root = repo_root()?;
+    let cwd = jj_cwd()?;
 
     // Load config early for hooks, auto-resolve settings, and branch name
     let config = MawConfig::load(&root)?;
@@ -2245,7 +2278,7 @@ fn merge(
 
     // Preview mode: show what the merge would do without committing
     if dry_run {
-        return preview_merge(&ws_to_merge, &root);
+        return preview_merge(&ws_to_merge, &cwd);
     }
 
     // Run pre-merge hooks (abort on failure)
@@ -2286,7 +2319,7 @@ fn merge(
     let revset = revisions.join(" | ");
     let rebase_output = Command::new("jj")
         .args(["rebase", "-r", &revset, "-d", branch])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to rebase workspace commits")?;
 
@@ -2315,7 +2348,7 @@ fn merge(
                 "-m",
                 &msg,
             ])
-            .current_dir(&root)
+            .current_dir(&cwd)
             .output()
             .context("Failed to squash workspace commits")?;
 
@@ -2329,7 +2362,7 @@ fn merge(
     let final_rev = format!("{}@", ws_to_merge[0]);
     let bookmark_output = Command::new("jj")
         .args(["bookmark", "set", branch, "-r", &final_rev])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to move main bookmark")?;
 
@@ -2344,7 +2377,7 @@ fn merge(
     let abandon_revset = format!("empty() & description(exact:'') & ~ancestors({branch}) & ~root()");
     let abandon_output = Command::new("jj")
         .args(["abandon", &abandon_revset])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output();
 
     if let Ok(output) = abandon_output {
@@ -2404,7 +2437,7 @@ fn merge(
     }
 
     println!("Merged to {branch}: {msg}");
-    let has_conflicts = auto_resolve_conflicts(&root, &config, branch)?;
+    let has_conflicts = auto_resolve_conflicts(&cwd, &config, branch)?;
 
     // Optionally destroy workspaces (but not if there are conflicts!)
     // Never destroy the default workspace during merge --destroy.
@@ -2495,13 +2528,13 @@ struct PruneAnalysis {
 }
 
 fn prune(force: bool, include_empty: bool) -> Result<()> {
-    let root = repo_root()?;
+    let cwd = jj_cwd()?;
     let ws_dir = workspaces_dir()?;
 
     // Get workspaces jj knows about
     let output = Command::new("jj")
         .args(["workspace", "list"])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -2577,7 +2610,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
             // Check if workspace has changes using jj diff
             let diff_output = Command::new("jj")
                 .args(["diff", "--stat", "-r", &format!("{jj_ws}@")])
-                .current_dir(&root)
+                .current_dir(&cwd)
                 .output();
 
             if let Ok(diff) = diff_output {
@@ -2652,7 +2685,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
             if force {
                 let forget_result = Command::new("jj")
                     .args(["workspace", "forget", name])
-                    .current_dir(&root)
+                    .current_dir(&cwd)
                     .output();
 
                 match forget_result {
@@ -2692,7 +2725,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
                 // First forget from jj, then delete directory
                 let _ = Command::new("jj")
                     .args(["workspace", "forget", name])
-                    .current_dir(&root)
+                    .current_dir(&cwd)
                     .status();
 
                 if path.exists() {
@@ -2742,8 +2775,10 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
 }
 
 fn list(verbose: bool, format: OutputFormat) -> Result<()> {
+    let cwd = jj_cwd()?;
     let output = Command::new("jj")
         .args(["workspace", "list"])
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 

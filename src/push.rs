@@ -4,7 +4,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
-use crate::workspace::{repo_root, MawConfig};
+use crate::workspace::{jj_cwd, repo_root, MawConfig};
 
 #[derive(Args)]
 pub struct PushArgs {
@@ -22,42 +22,42 @@ pub struct PushArgs {
 /// Wraps `jj git push --bookmark <branch>` with better UX: checks sync
 /// status, provides clear error messages, and shows what was pushed.
 ///
-/// We pass `--bookmark` explicitly because in the bare-repo model there
-/// is no default jj workspace — `@` points at the coord commit, not the
-/// branch. Without `--bookmark`, jj's default push revset
-/// (`remote_bookmarks(remote=origin)..@`) won't find the main bookmark
-/// since it isn't an ancestor of coord's `@`.
+/// We pass `--bookmark` explicitly because in the bare-repo model the
+/// default workspace is at ws/default/, not root. Without `--bookmark`,
+/// jj's default push revset (`remote_bookmarks(remote=origin)..@`) won't
+/// find the main bookmark since it isn't an ancestor of default's `@`.
 pub fn run(args: &PushArgs) -> Result<()> {
     let root = repo_root()?;
+    let cwd = jj_cwd()?;
     let config = MawConfig::load(&root)?;
     let branch = config.branch();
 
     // Check if branch bookmark exists and get commit info
-    let _commit_info = resolve_branch(&root, branch)?;
+    let _commit_info = resolve_branch(&cwd, branch)?;
 
     // If --advance, move bookmark to @- before checking status
     if args.advance {
-        advance_bookmark(&root, branch)?;
+        advance_bookmark(&cwd, branch)?;
     }
 
     // Check ahead/behind status — bail if behind, return early if up-to-date
-    if !should_push(&root, branch)? {
+    if !should_push(&cwd, branch)? {
         println!("{branch} is up to date with origin.");
         // Check if there's unpushed work at @- that could be pushed with --advance
         if !args.advance {
-            suggest_advance(&root, branch);
+            suggest_advance(&cwd, branch);
         }
         return Ok(());
     }
 
     // Re-resolve after potential advance to get updated commit info
-    let commit_info = resolve_branch(&root, branch)?;
+    let commit_info = resolve_branch(&cwd, branch)?;
 
     // Push
     println!("Pushing {branch} to origin...");
     let push_output = Command::new("jj")
         .args(["git", "push", "--bookmark", branch])
-        .current_dir(&root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj git push")?;
 
@@ -81,10 +81,10 @@ pub fn run(args: &PushArgs) -> Result<()> {
 }
 
 /// Move the branch bookmark to @- (parent of working copy).
-fn advance_bookmark(root: &Path, branch: &str) -> Result<()> {
+fn advance_bookmark(cwd: &Path, branch: &str) -> Result<()> {
     let output = Command::new("jj")
         .args(["bookmark", "set", branch, "-r", "@-"])
-        .current_dir(root)
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj bookmark set")?;
 
@@ -102,9 +102,9 @@ fn advance_bookmark(root: &Path, branch: &str) -> Result<()> {
 }
 
 /// Check if @- is ahead of the branch and print a suggestion if so.
-fn suggest_advance(root: &Path, branch: &str) {
+fn suggest_advance(cwd: &Path, branch: &str) {
     // Count commits between branch and @- (exclusive of branch, inclusive of @-)
-    if let Ok(ahead) = count_revset(root, &format!("{branch}..@-"))
+    if let Ok(ahead) = count_revset(cwd, &format!("{branch}..@-"))
         && ahead > 0
     {
         println!(
@@ -115,7 +115,7 @@ fn suggest_advance(root: &Path, branch: &str) {
 }
 
 /// Verify the branch bookmark exists and return its commit info string.
-fn resolve_branch(root: &Path, branch: &str) -> Result<String> {
+fn resolve_branch(cwd: &Path, branch: &str) -> Result<String> {
     let output = Command::new("jj")
         .args([
             "log",
@@ -127,7 +127,7 @@ fn resolve_branch(root: &Path, branch: &str) -> Result<String> {
             "-T",
             r#"commit_id.short() ++ " " ++ description.first_line()"#,
         ])
-        .current_dir(root)
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj log")?;
 
@@ -150,7 +150,7 @@ fn resolve_branch(root: &Path, branch: &str) -> Result<String> {
 
 /// Check sync status. Returns true if there's something to push, false if up-to-date.
 /// Bails if the branch is behind origin (must fetch first).
-fn should_push(root: &Path, branch: &str) -> Result<bool> {
+fn should_push(cwd: &Path, branch: &str) -> Result<bool> {
     let origin_ref = format!("{branch}@origin");
 
     // Check if origin tracking ref exists
@@ -165,7 +165,7 @@ fn should_push(root: &Path, branch: &str) -> Result<bool> {
             "-T",
             "commit_id.short()",
         ])
-        .current_dir(root)
+        .current_dir(cwd)
         .output();
 
     let Ok(output) = origin_check else {
@@ -176,7 +176,7 @@ fn should_push(root: &Path, branch: &str) -> Result<bool> {
     }
 
     // Check if behind
-    if let Ok(behind) = count_revset(root, &format!("{branch}..{origin_ref}"))
+    if let Ok(behind) = count_revset(cwd, &format!("{branch}..{origin_ref}"))
         && behind > 0
     {
         bail!(
@@ -186,7 +186,7 @@ fn should_push(root: &Path, branch: &str) -> Result<bool> {
     }
 
     // Check if ahead
-    if let Ok(ahead) = count_revset(root, &format!("{origin_ref}..{branch}"))
+    if let Ok(ahead) = count_revset(cwd, &format!("{origin_ref}..{branch}"))
         && ahead == 0
     {
         return Ok(false);
@@ -195,7 +195,7 @@ fn should_push(root: &Path, branch: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn count_revset(root: &Path, revset: &str) -> Result<usize> {
+fn count_revset(cwd: &Path, revset: &str) -> Result<usize> {
     let output = Command::new("jj")
         .args([
             "log",
@@ -207,7 +207,7 @@ fn count_revset(root: &Path, revset: &str) -> Result<usize> {
             "-T",
             "commit_id.short()",
         ])
-        .current_dir(root)
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj log")?;
 

@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
-use crate::workspace::MawConfig;
+use crate::workspace::{self, MawConfig};
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const ANSI_ORANGE: &str = "\x1b[38;5;208m";
@@ -266,16 +266,12 @@ fn render(
 }
 
 fn collect_status() -> Result<StatusSummary> {
-    let root = repo_root()?;
-
-    // In bare repo model, root isn't a workspace — run jj from ws/default/
-    // to avoid stale working copy errors.
-    let default_ws = root.join("ws").join("default");
-    let jj_cwd = if default_ws.exists() { &default_ws } else { &root };
+    let root = workspace::repo_root()?;
+    let cwd = workspace::jj_cwd()?;
 
     let ws_output = Command::new("jj")
         .args(["workspace", "list", "--color=never", "--no-pager"])
-        .current_dir(jj_cwd)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -291,7 +287,7 @@ fn collect_status() -> Result<StatusSummary> {
 
     let status_output = Command::new("jj")
         .args(["status", "--color=never", "--no-pager"])
-        .current_dir(jj_cwd)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj status")?;
 
@@ -310,7 +306,7 @@ fn collect_status() -> Result<StatusSummary> {
     let is_stale = status_stderr.contains("working copy is stale");
 
     let config = MawConfig::load(&root).unwrap_or_default();
-    let main_sync = main_sync_status(&root, config.branch())?;
+    let main_sync = main_sync_status(&cwd, config.branch())?;
 
     Ok(StatusSummary {
         total_workspaces,
@@ -371,31 +367,6 @@ fn parse_jj_change_count(status_stdout: &str) -> usize {
     }
 
     count
-}
-
-fn repo_root() -> Result<PathBuf> {
-    let output = Command::new("jj")
-        .args(["root", "--color=never", "--no-pager"])
-        .output()
-        .context("Failed to run jj root")?;
-    if !output.status.success() {
-        bail!(
-            "jj root failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-
-    for ancestor in root.ancestors() {
-        if ancestor.file_name().map_or(false, |n| n == "ws") {
-            if let Some(parent) = ancestor.parent() {
-                return Ok(parent.to_path_buf());
-            }
-        }
-    }
-
-    Ok(root)
 }
 
 #[derive(Default, Debug, Clone, Copy)]

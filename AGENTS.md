@@ -245,6 +245,12 @@ jj bookmark track main@origin  # Track remote main
 
 ## Release Notes
 
+### v0.27.1
+
+- Fix: all jj commands now use `jj_cwd()` helper to run from `ws/default/` instead of bare root. Fixes `maw push`, `maw status`, `maw ws list`, `maw ws create`, `maw ws status`, `maw ws sync`, `maw ws merge`, `maw ws prune`, and `maw ws history` all failing with "working copy is stale" when run from bare root.
+- Doctor uses shared `workspace::jj_cwd()` instead of ad-hoc default workspace detection.
+- Status removes duplicated `repo_root()` helper, uses `workspace::jj_cwd()`.
+
 ### v0.27.0
 
 - New `maw exec <ws> -- <cmd> <args>` command — run any command inside a workspace directory. Validates workspace name (no path traversal), auto-syncs stale workspaces. Generalizes `maw ws jj` to work with any tool (br, bv, crit, cargo, etc.).

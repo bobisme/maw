@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
@@ -21,11 +21,12 @@ pub fn run() -> Result<()> {
         "https://martinvonz.github.io/jj/latest/install-and-setup/",
     );
 
-    // Find repo root (best-effort — may fail if not in a repo)
+    // Find repo root and jj cwd (best-effort — may fail if not in a repo)
     let root = workspace::repo_root().ok();
+    let cwd = workspace::jj_cwd().ok();
 
-    // Check jj repo — run from ws/default if it exists (bare root is always stale)
-    all_ok &= check_jj_repo(root.as_deref());
+    // Check jj repo — uses jj_cwd() to avoid stale errors at bare root
+    all_ok &= check_jj_repo(cwd.as_deref());
 
     // Check ws/default/ exists and looks correct
     all_ok &= check_default_workspace(root.as_deref());
@@ -61,21 +62,11 @@ fn check_tool(name: &str, args: &[&str], install_url: &str) -> bool {
     }
 }
 
-fn default_ws_path(root: Option<&Path>) -> Option<PathBuf> {
-    let path = root?.join("ws").join("default");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
-}
+/// Check if we're in a jj repo. Uses jj_cwd() to avoid stale errors at bare root.
+fn check_jj_repo(cwd: Option<&Path>) -> bool {
+    let cwd = cwd.unwrap_or(Path::new("."));
 
-/// Check if we're in a jj repo. Runs from ws/default/ if it exists to avoid
-/// the stale working copy error that always occurs at the bare root.
-fn check_jj_repo(root: Option<&Path>) -> bool {
-    let cwd = default_ws_path(root).unwrap_or_else(|| PathBuf::from("."));
-
-    let Ok(output) = Command::new("jj").args(["status"]).current_dir(&cwd).output() else {
+    let Ok(output) = Command::new("jj").args(["status"]).current_dir(cwd).output() else {
         // jj not installed — already reported by check_tool
         return true;
     };
