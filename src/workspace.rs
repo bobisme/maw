@@ -1345,11 +1345,13 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
     println!("  (This happens when sync forks your commit. Auto-resolving...)");
 
     // Collect diff and changed-file info for each copy.
+    // diff/changed_files are None when the jj command fails (e.g., commit
+    // already abandoned). We only auto-resolve when we have reliable data.
     struct CopyInfo {
         commit_id: String,
         is_current: bool,
-        diff: String,
-        changed_files: HashSet<String>,
+        diff: Option<String>,
+        changed_files: Option<HashSet<String>>,
     }
 
     let mut copies: Vec<CopyInfo> = Vec::new();
@@ -1365,9 +1367,9 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
 
         let diff = match diff_output {
             Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
             }
-            _ => String::new(),
+            _ => None,
         };
 
         // Changed file paths (for subset comparison).
@@ -1377,15 +1379,15 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
             .current_dir(workspace_dir)
             .output();
 
-        let changed_files: HashSet<String> = match summary_output {
+        let changed_files = match summary_output {
             Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout)
+                Some(String::from_utf8_lossy(&out.stdout)
                     .lines()
                     .filter(|l| !l.trim().is_empty())
                     .filter_map(|l| l.split_whitespace().nth(1).map(String::from))
-                    .collect()
+                    .collect::<HashSet<String>>())
             }
-            _ => HashSet::new(),
+            _ => None,
         };
 
         copies.push(CopyInfo {
@@ -1412,31 +1414,48 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
 
         let other_id = copies[i].commit_id.clone();
 
-        // Case 1: non-@ is empty → abandon
-        if copies[i].diff.is_empty() {
-            abandon_copy(workspace_dir, &other_id, "empty");
+        // If we couldn't read this copy's diff, skip auto-resolve (safe default).
+        let Some(other_diff) = &copies[i].diff else {
+            unresolved.push(other_id);
+            continue;
+        };
 
+        // Case 1: non-@ is empty → abandon
+        if other_diff.is_empty() {
+            abandon_copy(workspace_dir, &other_id, "empty");
             continue;
         }
+
+        // Cases 2-4 require @'s diff data. If unavailable, skip.
+        let (Some(current_diff), Some(current_files)) =
+            (&copies[current_idx].diff, &copies[current_idx].changed_files)
+        else {
+            unresolved.push(other_id);
+            continue;
+        };
 
         // Case 2: identical diffs → abandon non-@ (same changes, different parent)
-        if copies[i].diff == copies[current_idx].diff {
+        if other_diff == current_diff {
             abandon_copy(workspace_dir, &other_id, "identical to @");
-
             continue;
         }
 
-        // Case 3: non-@'s files ⊆ @'s files → abandon non-@ (@ has everything)
-        if copies[i].changed_files.is_subset(&copies[current_idx].changed_files) {
-            abandon_copy(workspace_dir, &other_id, "subset of @");
+        // Cases 3-4 require non-@'s file list. If unavailable, skip.
+        let Some(other_files) = &copies[i].changed_files else {
+            unresolved.push(other_id);
+            continue;
+        };
 
+        // Case 3: non-@'s files ⊆ @'s files → abandon non-@ (@ has everything)
+        if other_files.is_subset(current_files) {
+            abandon_copy(workspace_dir, &other_id, "subset of @");
             continue;
         }
 
         // Case 4: @'s files ⊆ non-@'s files → squash non-@ into @ (recover extra files)
-        if copies[current_idx].changed_files.is_subset(&copies[i].changed_files) {
-            let extra: Vec<&String> = copies[i].changed_files
-                .difference(&copies[current_idx].changed_files)
+        if current_files.is_subset(other_files) {
+            let extra: Vec<&String> = other_files
+                .difference(current_files)
                 .collect();
 
             // JJ_EDITOR=true prevents jj from opening an editor to merge
@@ -1452,7 +1471,6 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
                     println!("  Squashed {other_id} into @ (recovered {} extra file(s): {}).",
                         extra.len(),
                         extra.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", "));
-        
                 }
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
