@@ -663,17 +663,8 @@ async function handleDev(route, channel, message) {
   let args = ["bun", scriptPath, PROJECT, AGENT]
   console.log(`Exec into dev-loop: ${args.join(" ")}`)
 
-  await runCommand("bus", [
-    "send",
-    "--agent",
-    AGENT,
-    channel,
-    `Dev agent spawned — working on it.`,
-    "-L",
-    "spawn-ack",
-  ]).catch(() => {})
-
   // Hand off to dev-loop with inherited stdio — this replaces our process
+  // dev-loop sends its own startup announcement, so no need for a spawn-ack here
   let proc = spawn("bun", [scriptPath, PROJECT, AGENT], {
     stdio: "inherit",
     env: process.env,

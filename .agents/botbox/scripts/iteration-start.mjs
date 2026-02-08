@@ -144,27 +144,33 @@ if (ready && Array.isArray(ready) && ready.length > 0) {
 }
 console.log()
 
-// 3. Reviews assigned to agent
+// 3. Reviews assigned to agent — check each workspace
 console.log(h2("Pending Reviews"))
-let reviews = runJson("maw", ["exec", "default", "--", "crit", "inbox", "--agent", AGENT, "--all-workspaces", "--format", "json"])
-if (reviews) {
-  let awaiting = reviews.reviews_awaiting_vote || []
-  let threads = reviews.threads_with_new_responses || []
-  if (awaiting.length > 0 || threads.length > 0) {
-    if (awaiting.length > 0) {
-      console.log(`   ${awaiting.length} review(s) awaiting vote`)
-      for (let r of awaiting.slice(0, 3)) {
-        console.log(`   ${r.review_id}: ${r.title || r.description || "(no title)"}`)
-      }
+let workspaces = runJson("maw", ["ws", "list", "--format", "json"])
+let allAwaiting = []
+let allThreads = []
+if (workspaces && Array.isArray(workspaces)) {
+  for (let ws of workspaces) {
+    let wsInbox = runJson("maw", ["exec", ws.name, "--", "crit", "inbox", "--agent", AGENT, "--format", "json"])
+    if (wsInbox) {
+      if (wsInbox.reviews_awaiting_vote?.length) allAwaiting.push(...wsInbox.reviews_awaiting_vote)
+      if (wsInbox.threads_with_new_responses?.length) allThreads.push(...wsInbox.threads_with_new_responses)
     }
-    if (threads.length > 0) {
-      console.log(`   ${threads.length} thread(s) with new responses`)
+  }
+}
+let reviews = { reviews_awaiting_vote: allAwaiting, threads_with_new_responses: allThreads }
+if (allAwaiting.length > 0 || allThreads.length > 0) {
+  if (allAwaiting.length > 0) {
+    console.log(`   ${allAwaiting.length} review(s) awaiting vote`)
+    for (let r of allAwaiting.slice(0, 3)) {
+      console.log(`   ${r.review_id}: ${r.title || r.description || "(no title)"}`)
     }
-  } else {
-    console.log(`   ${C.dim}No pending reviews${C.reset}`)
+  }
+  if (allThreads.length > 0) {
+    console.log(`   ${allThreads.length} thread(s) with new responses`)
   }
 } else {
-  console.log(`   ${C.dim}Could not fetch reviews${C.reset}`)
+  console.log(`   ${C.dim}No pending reviews${C.reset}`)
 }
 console.log()
 
@@ -202,7 +208,7 @@ let hasReviews = reviews && ((reviews.reviews_awaiting_vote?.length || 0) + (rev
 if (hasInbox) {
   console.log(hint(`Process inbox: bus inbox --agent ${AGENT} --channels ${PROJECT} --mark-read`))
 } else if (hasReviews) {
-  console.log(hint(`Start review: maw exec default -- crit inbox --agent ${AGENT} --all-workspaces`))
+  console.log(hint(`Start review: maw exec default -- crit inbox --agent ${AGENT}`))
 } else if (hasBeads) {
   let top = ready[0]
   console.log(hint(`Claim top: maw exec default -- br update --actor ${AGENT} ${top.id} --status in_progress`))

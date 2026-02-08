@@ -231,35 +231,59 @@ function runInWorkspace(ws, cmd, args = []) {
 }
 
 // --- Helper: check if there are reviews needing attention ---
-// Returns { hasWork: boolean, inbox: object }
+// Iterates workspaces via maw, runs crit inbox in each one.
+// Returns { hasWork: boolean, inbox: object, error: boolean }
 async function findWork() {
+	// Get workspace list
+	let workspaces;
 	try {
-		// crit inbox --all-workspaces searches both repo root and all jj workspaces
-		// Shows only reviews awaiting this reviewer's response:
-		// - Reviews where reviewer is assigned but hasn't voted
-		// - Reviews that were re-requested after voting
-		// Reviews disappear from inbox after voting until re-requested.
-		const result = await runInDefault('crit', [
-			'inbox',
-			'--agent',
-			AGENT,
-			'--all-workspaces',
-			'--format',
-			'json',
-		]);
-		const inbox = JSON.parse(result.stdout || '{}');
-		const hasReviews =
-			(inbox.reviews_awaiting_vote && inbox.reviews_awaiting_vote.length > 0) ||
-			(inbox.threads_with_new_responses && inbox.threads_with_new_responses.length > 0);
-
-		return {
-			hasWork: hasReviews,
-			inbox,
-		};
+		let result = await runCommand('maw', ['ws', 'list', '--format', 'json']);
+		workspaces = JSON.parse(result.stdout || '[]');
 	} catch (err) {
-		console.error('Error finding work:', err.message);
-		return { hasWork: false, inbox: {} };
+		console.error('Error listing workspaces:', err.message);
+		return { hasWork: false, inbox: {}, error: true };
 	}
+
+	// Check crit inbox in each workspace, aggregate results
+	let allReviews = [];
+	let allThreads = [];
+	let hadError = false;
+
+	for (let ws of workspaces) {
+		try {
+			let result = await runInWorkspace(ws.name, 'crit', [
+				'inbox',
+				'--agent',
+				AGENT,
+				'--format',
+				'json',
+			]);
+			let inbox = JSON.parse(result.stdout || '{}');
+			if (inbox.reviews_awaiting_vote?.length) {
+				allReviews.push(...inbox.reviews_awaiting_vote);
+			}
+			if (inbox.threads_with_new_responses?.length) {
+				allThreads.push(...inbox.threads_with_new_responses);
+			}
+		} catch (err) {
+			console.error(`Error checking crit inbox in workspace ${ws.name}:`, err.message);
+			hadError = true;
+		}
+	}
+
+	let inbox = {
+		reviews_awaiting_vote: allReviews,
+		threads_with_new_responses: allThreads,
+	};
+	let hasReviews = allReviews.length > 0 || allThreads.length > 0;
+
+	return {
+		hasWork: hasReviews,
+		inbox,
+		// Only flag error if we found nothing AND had errors — a single workspace
+		// failing is fine if others succeeded
+		error: hadError && !hasReviews,
+	};
 }
 
 // --- Build reviewer prompt ---
@@ -437,6 +461,13 @@ async function main() {
 
 		const work = await findWork();
 		if (!work.hasWork) {
+			// If findWork errored (e.g. stale working copy), retry after a pause
+			// rather than signing off — the review likely exists but maw/crit failed transiently
+			if (work.error && i === 1) {
+				console.log('findWork failed on first iteration — retrying after pause...');
+				await new Promise((resolve) => setTimeout(resolve, LOOP_PAUSE * 1000));
+				continue;
+			}
 			await runCommand('bus', ['statuses', 'set', '--agent', AGENT, 'Idle']);
 			console.log('No reviews pending. Exiting cleanly.');
 			await runCommand('bus', [
