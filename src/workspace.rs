@@ -122,6 +122,31 @@ struct WorkspaceInfo {
     path: Option<String>,
 }
 
+/// Envelope for `maw ws list --format json/toon` output.
+/// Wraps the workspace array with an advice array so warnings
+/// (stale workspaces, etc.) are machine-readable.
+#[derive(Serialize)]
+struct WorkspaceListEnvelope {
+    workspaces: Vec<WorkspaceInfo>,
+    advice: Vec<Advice>,
+}
+
+/// A single advisory message (warning, info) embedded in structured output.
+#[derive(Serialize)]
+struct Advice {
+    level: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<AdviceDetails>,
+}
+
+/// Extra details for an advice entry.
+#[derive(Serialize)]
+struct AdviceDetails {
+    workspaces: Vec<String>,
+    fix: String,
+}
+
 #[derive(Serialize)]
 struct WorkspaceStatus {
     current_workspace: String,
@@ -2845,11 +2870,15 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let list = String::from_utf8_lossy(&output.stdout);
 
     if list.trim().is_empty() {
-        // Even for structured formats, return a simple message for empty lists
         match format {
             OutputFormat::Text => println!("No workspaces found."),
-            OutputFormat::Json => println!("[]"),
-            OutputFormat::Toon => println!("[]"),
+            OutputFormat::Json | OutputFormat::Toon => {
+                let envelope = WorkspaceListEnvelope {
+                    workspaces: vec![],
+                    advice: vec![],
+                };
+                println!("{}", format.serialize(&envelope)?);
+            }
         }
         return Ok(());
     }
@@ -2900,8 +2929,28 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         }
     };
 
+    // Collect stale workspace warnings into the advice array
+    let advice = match check_stale_workspaces() {
+        Ok(stale) if !stale.is_empty() => {
+            vec![Advice {
+                level: "warn",
+                message: format!("{} workspace(s) stale: {}", stale.len(), stale.join(", ")),
+                details: Some(AdviceDetails {
+                    workspaces: stale,
+                    fix: "maw ws sync --all".to_string(),
+                }),
+            }]
+        }
+        _ => vec![],
+    };
+
+    let envelope = WorkspaceListEnvelope {
+        workspaces,
+        advice,
+    };
+
     // Serialize to requested format
-    match format.serialize(&workspaces) {
+    match format.serialize(&envelope) {
         Ok(output) => println!("{output}"),
         Err(e) => {
             eprintln!("Warning: Failed to serialize to {format:?}: {}", e);
@@ -2909,9 +2958,6 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
             println!("{list}");
         }
     }
-
-    // Check for stale workspaces after listing
-    warn_stale_workspaces();
 
     Ok(())
 }
