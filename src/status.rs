@@ -311,7 +311,13 @@ fn render(
         summary.render_multiline()
     };
 
-    print!("{output}");
+    // In raw mode (watch), \n only moves cursor down without returning to
+    // column 0.  Replace with \r\n so each line starts at the left edge.
+    if watching {
+        print!("{}", output.replace('\n', "\r\n"));
+    } else {
+        print!("{output}");
+    }
     io::stdout().flush().ok();
     Ok(())
 }
