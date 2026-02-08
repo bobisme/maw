@@ -1,11 +1,13 @@
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
-use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use crossterm::cursor;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal;
 
 use crate::workspace::{self, MawConfig};
 
@@ -38,17 +40,53 @@ pub struct StatusArgs {
 
 pub fn run(args: StatusArgs) -> Result<()> {
     if args.watch {
-        loop {
-            let summary = collect_status()?;
-            render(&summary, args.oneline, args.status_bar, args.mouth, true)?;
-            thread::sleep(WATCH_INTERVAL);
-        }
+        watch_loop(&args)?;
     } else {
         let summary = collect_status()?;
         render(&summary, args.oneline, args.status_bar, args.mouth, false)?;
     }
 
     Ok(())
+}
+
+fn watch_loop(args: &StatusArgs) -> Result<()> {
+    terminal::enable_raw_mode().context("Failed to enable raw mode")?;
+    crossterm::execute!(io::stdout(), cursor::Hide).ok();
+
+    let result = watch_loop_inner(args);
+
+    // Always restore terminal state
+    crossterm::execute!(io::stdout(), cursor::Show).ok();
+    terminal::disable_raw_mode().ok();
+
+    result
+}
+
+fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
+    loop {
+        let summary = collect_status()?;
+        render(&summary, args.oneline, args.status_bar, args.mouth, true)?;
+
+        // Poll for quit keys during the sleep interval
+        let deadline = std::time::Instant::now() + WATCH_INTERVAL;
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if event::poll(remaining.min(Duration::from_millis(100)))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
