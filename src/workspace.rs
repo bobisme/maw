@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1282,10 +1283,15 @@ fn sync(all: bool) -> Result<()> {
 /// After sync, detect and auto-resolve divergent commits on the workspace's
 /// working copy. When `jj workspace update-stale` runs, it can fork the
 /// workspace commit into multiple versions (e.g. change_id/0 and change_id/1).
-/// One typically has the agent's actual work, the other is empty.
-/// This function keeps the non-empty version and abandons the rest.
+///
+/// Resolution strategy (never abandons @, which would orphan the workspace pointer):
+/// 1. Empty non-@ copies → abandon
+/// 2. Identical diffs (same changes on different parents) → abandon non-@
+/// 3. Non-@'s files ⊆ @'s files → abandon non-@ (@ is superset)
+/// 4. @'s files ⊆ non-@'s files → squash non-@ into @ (recover extra files)
+/// 5. Overlapping but different → warn with actionable instructions
 fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
-    // Get the working copy's change ID
+    // Get the working copy's change ID and commit ID
     let change_output = Command::new("jj")
         .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
         .current_dir(workspace_dir)
@@ -1296,6 +1302,13 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
     if change_id.is_empty() {
         return Ok(());
     }
+
+    let current_output = Command::new("jj")
+        .args(["log", "-r", "@", "--no-graph", "-T", "commit_id.short()"])
+        .current_dir(workspace_dir)
+        .output()
+        .context("Failed to get current commit ID")?;
+    let current_commit_id = String::from_utf8_lossy(&current_output.stdout).trim().to_string();
 
     // Check if this change ID has divergent copies.
     // Must use change_id() revset function — bare change_id errors on divergent changes.
@@ -1314,13 +1327,13 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
         .context("Failed to check for divergent commits")?;
 
     let divergent_text = String::from_utf8_lossy(&divergent_output.stdout);
-    let divergent_commits: Vec<&str> = divergent_text
+    let divergent_commits: Vec<String> = divergent_text
         .lines()
         .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
         .collect();
 
     if divergent_commits.len() <= 1 {
-        // No divergence, nothing to do
         return Ok(());
     }
 
@@ -1331,153 +1344,175 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
     );
     println!("  (This happens when sync forks your commit. Auto-resolving...)");
 
-    // For each divergent copy, check if it has actual file changes (non-empty diff).
-    // Keep the one with changes, abandon the empty ones.
-    let mut non_empty = Vec::new();
-    let mut empty = Vec::new();
+    // Collect diff and changed-file info for each copy.
+    struct CopyInfo {
+        commit_id: String,
+        is_current: bool,
+        diff: String,
+        changed_files: HashSet<String>,
+    }
+
+    let mut copies: Vec<CopyInfo> = Vec::new();
 
     for commit_id in &divergent_commits {
-        // Use `jj diff` (not --stat) because --stat outputs a summary line
-        // even for empty commits ("0 files changed..."), making empty detection fail.
+        let is_current = *commit_id == current_commit_id;
+
+        // Full diff text (for identity comparison)
         let diff_output = Command::new("jj")
             .args(["diff", "-r", commit_id])
             .current_dir(workspace_dir)
             .output();
 
-        match diff_output {
+        let diff = match diff_output {
             Ok(out) if out.status.success() => {
-                let diff_text = String::from_utf8_lossy(&out.stdout);
-                if diff_text.trim().is_empty() {
-                    empty.push(*commit_id);
-                } else {
-                    non_empty.push(*commit_id);
-                }
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
-            _ => {
-                // Can't determine, treat as non-empty (safe default)
-                non_empty.push(*commit_id);
+            _ => String::new(),
+        };
+
+        // Changed file paths (for subset comparison).
+        // --summary format: "M path/to/file" — extract just the path.
+        let summary_output = Command::new("jj")
+            .args(["diff", "-r", commit_id, "--summary"])
+            .current_dir(workspace_dir)
+            .output();
+
+        let changed_files: HashSet<String> = match summary_output {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| l.split_whitespace().nth(1).map(String::from))
+                    .collect()
             }
-        }
+            _ => HashSet::new(),
+        };
+
+        copies.push(CopyInfo {
+            commit_id: commit_id.clone(),
+            is_current,
+            diff,
+            changed_files,
+        });
     }
 
-    if non_empty.is_empty() {
-        // All copies are empty — nothing meaningful to keep, leave them as-is.
-        // The agent hasn't made changes yet so divergence doesn't lose work.
-        println!("  All copies are empty (no work to lose). Abandoning all but current.");
-        // Abandon all except the current working copy (@ stays)
-        for commit_id in &empty {
-            let check_current = Command::new("jj")
-                .args([
-                    "log",
-                    "-r",
-                    &format!("@ & {commit_id}"),
-                    "--no-graph",
-                    "-T",
-                    "commit_id.short()",
-                ])
-                .current_dir(workspace_dir)
-                .output();
-
-            let is_current = check_current
-                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-                .unwrap_or(false);
-
-            if !is_current {
-                let _ = Command::new("jj")
-                    .args(["abandon", commit_id])
-                    .current_dir(workspace_dir)
-                    .output();
-                println!("  Abandoned empty copy: {commit_id}");
-            }
-        }
+    // Find the @ copy index
+    let Some(current_idx) = copies.iter().position(|c| c.is_current) else {
+        println!("  WARNING: Could not identify @ among divergent copies. Skipping auto-resolve.");
         return Ok(());
-    }
+    };
 
-    // Abandon the empty copies
-    for commit_id in &empty {
-        let abandon_result = Command::new("jj")
-            .args(["abandon", commit_id])
-            .current_dir(workspace_dir)
-            .output();
+    // Process each non-@ copy against @
+    let mut unresolved = Vec::new();
 
-        match abandon_result {
-            Ok(out) if out.status.success() => {
-                println!("  Abandoned empty copy: {commit_id}");
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                eprintln!("  Warning: Failed to abandon {commit_id}: {}", stderr.trim());
-            }
-            Err(e) => {
-                eprintln!("  Warning: Failed to abandon {commit_id}: {e}");
-            }
+    for i in 0..copies.len() {
+        if i == current_idx {
+            continue;
         }
-    }
 
-    // If we still have multiple non-empty copies, we can't auto-resolve safely.
-    // Warn the agent with actionable instructions.
-    if non_empty.len() > 1 {
-        println!();
-        println!("  WARNING: {} non-empty divergent copies remain.", non_empty.len());
-        println!("  Both copies have changes — cannot auto-resolve.");
-        println!("  To fix manually:");
-        println!("    jj log -r 'change_id({change_id})'  # compare the versions");
-        for (i, commit_id) in non_empty.iter().enumerate() {
-            println!("    jj diff -r {commit_id}  # version {i}");
+        let other_id = copies[i].commit_id.clone();
+
+        // Case 1: non-@ is empty → abandon
+        if copies[i].diff.is_empty() {
+            abandon_copy(workspace_dir, &other_id, "empty");
+
+            continue;
         }
-        println!("    jj abandon <unwanted-commit-id>  # remove the unwanted one");
-    } else {
-        // If the non-empty copy isn't our working copy, squash it into @
-        let non_empty_id = non_empty[0];
-        let check_current = Command::new("jj")
-            .args([
-                "log",
-                "-r",
-                &format!("@ & {non_empty_id}"),
-                "--no-graph",
-                "-T",
-                "commit_id.short()",
-            ])
-            .current_dir(workspace_dir)
-            .output();
 
-        let is_current = check_current
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false);
+        // Case 2: identical diffs → abandon non-@ (same changes, different parent)
+        if copies[i].diff == copies[current_idx].diff {
+            abandon_copy(workspace_dir, &other_id, "identical to @");
 
-        if !is_current {
-            // The working copy is empty but the non-empty copy is elsewhere.
-            // Squash the non-empty one into @ to recover the work.
+            continue;
+        }
+
+        // Case 3: non-@'s files ⊆ @'s files → abandon non-@ (@ has everything)
+        if copies[i].changed_files.is_subset(&copies[current_idx].changed_files) {
+            abandon_copy(workspace_dir, &other_id, "subset of @");
+
+            continue;
+        }
+
+        // Case 4: @'s files ⊆ non-@'s files → squash non-@ into @ (recover extra files)
+        if copies[current_idx].changed_files.is_subset(&copies[i].changed_files) {
+            let extra: Vec<&String> = copies[i].changed_files
+                .difference(&copies[current_idx].changed_files)
+                .collect();
+
+            // JJ_EDITOR=true prevents jj from opening an editor to merge
+            // the differing descriptions of the two divergent copies.
             let squash_result = Command::new("jj")
-                .args(["squash", "--from", non_empty_id, "--into", "@"])
+                .args(["squash", "--from", &other_id, "--into", "@"])
+                .env("JJ_EDITOR", "true")
                 .current_dir(workspace_dir)
                 .output();
 
             match squash_result {
                 Ok(out) if out.status.success() => {
-                    println!("  Recovered work from {non_empty_id} into working copy.");
+                    println!("  Squashed {other_id} into @ (recovered {} extra file(s): {}).",
+                        extra.len(),
+                        extra.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", "));
+        
                 }
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    eprintln!(
-                        "  WARNING: Could not auto-recover work: {}\n  \
-                         Manual fix: jj squash --from {non_empty_id} --into @",
-                        stderr.trim()
-                    );
+                    eprintln!("  WARNING: Could not squash {other_id} into @: {}", stderr.trim());
+                    unresolved.push(other_id);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  WARNING: Could not auto-recover work: {e}\n  \
-                         Manual fix: jj squash --from {non_empty_id} --into @"
-                    );
+                    eprintln!("  WARNING: Could not squash {other_id} into @: {e}");
+                    unresolved.push(other_id);
                 }
             }
-        } else {
-            println!("  Kept non-empty copy: {non_empty_id} (your work is preserved).");
+            continue;
         }
+
+        // Case 5: overlapping but different — cannot auto-resolve
+        unresolved.push(other_id);
+    }
+
+    // Report unresolved copies with actionable instructions
+    if !unresolved.is_empty() {
+        println!();
+        println!("  WARNING: {} divergent copy/copies could not be auto-resolved.", unresolved.len());
+        println!("  @ and non-@ have overlapping but different changes.");
+        println!("  To fix manually:");
+        println!("    jj diff -r @                          # see @ changes");
+        for id in &unresolved {
+            println!("    jj diff -r {id:<12}                  # see this copy's changes");
+        }
+        println!();
+        println!("  To merge a copy's extra changes into @:");
+        for id in &unresolved {
+            println!("    jj squash --from {id} --into @");
+        }
+        println!("  IMPORTANT: Do NOT abandon @ — this orphans the workspace pointer.");
+    } else {
+        println!("  Divergence fully resolved.");
     }
 
     Ok(())
+}
+
+/// Abandon a non-@ divergent copy, logging the reason.
+fn abandon_copy(workspace_dir: &str, commit_id: &str, reason: &str) {
+    let result = Command::new("jj")
+        .args(["abandon", commit_id])
+        .current_dir(workspace_dir)
+        .output();
+
+    match result {
+        Ok(out) if out.status.success() => {
+            println!("  Abandoned {reason} copy: {commit_id}");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!("  Warning: Failed to abandon {commit_id}: {}", stderr.trim());
+        }
+        Err(e) => {
+            eprintln!("  Warning: Failed to abandon {commit_id}: {e}");
+        }
+    }
 }
 
 /// Sync all workspaces at once
