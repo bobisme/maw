@@ -245,6 +245,10 @@ jj bookmark track main@origin  # Track remote main
 
 ## Release Notes
 
+### v0.27.2
+
+- Fix: auto-resolve divergent copies when both are non-empty. After `maw ws sync`, if jj forks a workspace commit into divergent copies that both have file changes, maw now resolves them automatically: identical diffs → abandon non-@, file subset → abandon, superset → squash into @. Previously required ~6 manual jj commands that agents frequently got wrong.
+
 ### v0.27.1
 
 - Fix: all jj commands now use `jj_cwd()` helper to run from `ws/default/` instead of bare root. Fixes `maw push`, `maw status`, `maw ws list`, `maw ws create`, `maw ws status`, `maw ws sync`, `maw ws merge`, `maw ws prune`, and `maw ws history` all failing with "working copy is stale" when run from bare root.
