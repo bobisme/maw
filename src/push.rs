@@ -15,6 +15,13 @@ pub struct PushArgs {
     /// already ahead of origin.
     #[arg(long)]
     advance: bool,
+
+    /// Skip pushing git tags.
+    ///
+    /// By default, maw push also pushes any unpushed git tags to origin.
+    /// Use this flag to push only the branch bookmark.
+    #[arg(long)]
+    no_tags: bool,
 }
 
 /// Push the configured branch to its remote.
@@ -75,6 +82,11 @@ pub fn run(args: &PushArgs) -> Result<()> {
         println!("{branch} is up to date with origin.");
     } else {
         println!("  Pushed: {commit_info}");
+    }
+
+    // Push git tags unless --no-tags
+    if !args.no_tags {
+        push_tags(&root)?;
     }
 
     Ok(())
@@ -220,4 +232,54 @@ fn count_revset(cwd: &Path, revset: &str) -> Result<usize> {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .count())
+}
+
+/// Export jj tags to git, then push all tags to origin.
+/// Reports which tags were pushed; stays silent if none.
+fn push_tags(root: &Path) -> Result<()> {
+    // Export jj state (including tags) to the colocated git repo
+    let export = Command::new("jj")
+        .args(["git", "export"])
+        .current_dir(root)
+        .output()
+        .context("Failed to run jj git export")?;
+
+    if !export.status.success() {
+        let stderr = String::from_utf8_lossy(&export.stderr);
+        eprintln!("Warning: jj git export failed: {}", stderr.trim());
+        // Non-fatal — tags may already be exported
+    }
+
+    // Collect local tags before push so we can report what's new
+    let output = Command::new("git")
+        .args(["push", "origin", "--tags", "--porcelain"])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git push --tags")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse porcelain output for pushed tags (lines starting with * or space
+    // followed by refs/tags/). Lines starting with '!' are errors/rejections.
+    let pushed: Vec<&str> = stdout
+        .lines()
+        .filter(|line| {
+            // Porcelain: new tags start with "*\t", updated with " \t"
+            let trimmed = line.trim_start_matches(['*', ' ', '\t']);
+            trimmed.contains("refs/tags/")
+                && !line.starts_with('!')
+        })
+        .filter_map(|line| {
+            // Extract tag name from "refs/tags/vX.Y.Z:refs/tags/vX.Y.Z"
+            line.split("refs/tags/")
+                .nth(1)
+                .and_then(|s| s.split(['\t', ' ', ':']).next())
+        })
+        .collect();
+
+    if !pushed.is_empty() {
+        println!("  Tags pushed: {}", pushed.join(", "));
+    }
+
+    Ok(())
 }
