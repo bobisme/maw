@@ -351,7 +351,7 @@ For EACH unfinished bead:
 2. Check if you still hold claims: bus claims list --agent ${AGENT} --mine
 3. Determine state:
    - If "Review created: <review-id>" comment exists:
-     * Find the review: maw exec $WS -- crit review <review-id>
+     * Find the review: maw exec default -- crit reviews list --all-workspaces | grep <review-id>
      * Check review status: maw exec \$WS -- crit review <review-id>
      * If LGTM (approved): Proceed to merge/finish (step 6)
      * If BLOCKED (changes requested): Follow review-response.md to fix issues, re-request review, then STOP
@@ -512,7 +512,7 @@ Before outputting COMPLETE, check if a release is needed:
    - Bump version in Cargo.toml/package.json (semantic versioning)
    - Update changelog if one exists
    - maw push (if not already pushed)
-   - Tag: maw exec default -- jj tag set vX.Y.Z -r main && maw exec default -- jj git push --remote origin
+   - Tag and push: maw exec default -- jj tag set vX.Y.Z -r main && maw push
    - Announce: bus send --agent ${AGENT} ${PROJECT} "<project> vX.Y.Z released - <summary>" -L release
 3. If only "chore:", "docs:", "refactor:" commits, no release needed.
 

@@ -1,8 +1,10 @@
 {
-  "version": "1.0.12",
+  "version": "1.0.13",
   "project": {
     "name": "maw",
-    "type": ["cli"],
+    "type": [
+      "cli"
+    ],
     "channel": "maw",
     "defaultAgent": "maw-dev",
     "installCommand": "just install"
@@ -16,7 +18,9 @@
   },
   "review": {
     "enabled": true,
-    "reviewers": ["security"]
+    "reviewers": [
+      "security"
+    ]
   },
   "pushMain": true,
   "agents": {

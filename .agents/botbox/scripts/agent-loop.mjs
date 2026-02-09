@@ -237,7 +237,7 @@ At the end of your work, output exactly one of these completion signals:
    - Run: maw exec default -- br comments <bead-id> to understand what was done before and what remains.
    - Look for workspace info in comments (workspace name and path).
    - If a "Review created: <review-id>" comment exists:
-     * Find the review: maw exec $WS -- crit review <review-id>
+     * Find the review: maw exec default -- crit reviews list --all-workspaces | grep <review-id>
      * Check review status: maw exec \$WS -- crit review <review-id>
      * If LGTM (approved): proceed to FINISH (step 7) — merge the review and close the bead.
      * If BLOCKED (changes requested): follow .agents/botbox/review-response.md to fix issues
@@ -326,7 +326,7 @@ At the end of your work, output exactly one of these completion signals:
    - Bump version in Cargo.toml/package.json (semantic versioning)
    - Update changelog if one exists
    - maw push (if not already pushed)
-   - Tag: maw exec default -- jj tag set vX.Y.Z -r main && maw exec default -- jj git push --remote origin
+   - Tag and push: maw exec default -- jj tag set vX.Y.Z -r main && maw push
    - Announce: bus send --agent ${AGENT} ${PROJECT} "<project> vX.Y.Z released - <summary>" -L release
    If only "chore:", "docs:", "refactor:" commits, no release needed.
    Output: <promise>COMPLETE</promise>
