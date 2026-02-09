@@ -2,11 +2,10 @@
   "version": "1.0.12",
   "project": {
     "name": "maw",
-    "type": [
-      "cli"
-    ],
+    "type": ["cli"],
     "channel": "maw",
-    "defaultAgent": "maw-dev"
+    "defaultAgent": "maw-dev",
+    "installCommand": "just install"
   },
   "tools": {
     "beads": true,
@@ -17,11 +16,9 @@
   },
   "review": {
     "enabled": true,
-    "reviewers": [
-      "security"
-    ]
+    "reviewers": ["security"]
   },
-  "pushMain": false,
+  "pushMain": true,
   "agents": {
     "dev": {
       "model": "opus",
