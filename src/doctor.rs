@@ -31,6 +31,9 @@ pub fn run() -> Result<()> {
     // Check ws/default/ exists and looks correct
     all_ok &= check_default_workspace(root.as_deref());
 
+    // Check repo root is bare (no source files leaked)
+    all_ok &= check_root_bare(root.as_deref());
+
     println!();
     if all_ok {
         println!("All checks passed!");
@@ -136,4 +139,52 @@ fn check_default_workspace(root: Option<&Path>) -> bool {
     }
 
     true
+}
+
+/// Check that the repo root is bare — only .git/, .jj/, ws/ allowed.
+/// Source files at root indicate a corrupted v2 layout.
+fn check_root_bare(root: Option<&Path>) -> bool {
+    let Some(root) = root else {
+        return true;
+    };
+
+    let stray = stray_root_entries(root);
+
+    if stray.is_empty() {
+        println!("[OK] repo root: bare (no source files)");
+        return true;
+    }
+
+    println!(
+        "[FAIL] repo root: {} unexpected file(s)/dir(s) — should be bare",
+        stray.len()
+    );
+    for name in &stray {
+        println!("       - {name}");
+    }
+    println!("       Fix: maw init (moves files into ws/default/)");
+    false
+}
+
+/// Allowed entries at the bare repo root.
+/// AGENTS.md and CLAUDE.md are redirect stubs pointing into ws/default/.
+const BARE_ROOT_ALLOWED: &[&str] = &[".git", ".jj", "ws", "AGENTS.md", "CLAUDE.md"];
+
+/// Return names of files/dirs at root that shouldn't be there.
+pub fn stray_root_entries(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if BARE_ROOT_ALLOWED.contains(&name.as_str()) {
+                None
+            } else {
+                Some(name)
+            }
+        })
+        .collect()
 }

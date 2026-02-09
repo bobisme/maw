@@ -9,6 +9,7 @@ use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
+use crate::doctor;
 use crate::workspace::{self, MawConfig};
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -97,6 +98,7 @@ struct StatusSummary {
     untracked_files: Vec<String>,
     is_stale: bool,
     main_sync: MainSyncStatus,
+    stray_root_files: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -113,6 +115,9 @@ enum MainSyncStatus {
 impl StatusSummary {
     fn issue_count(&self) -> usize {
         let mut count = 0;
+        if !self.stray_root_files.is_empty() {
+            count += 1;
+        }
         if !self.workspace_names.is_empty() {
             count += 1;
         }
@@ -131,16 +136,19 @@ impl StatusSummary {
     fn render_oneline(&self) -> String {
         let check = green_check();
         let warn = yellow_warn();
+        let stray = self.stray_root_files.len();
         let ws = self.workspace_names.len();
         let changes = self.changed_files.len();
         let untracked = self.untracked_files.len();
-        let parts = vec![
-            format!("ws={ws}{}", if ws == 0 { &check } else { &warn }),
-            format!("changes={changes}{}", if changes == 0 { &check } else { &warn }),
-            format!("untracked={untracked}{}", if untracked == 0 { &check } else { &warn }),
-            format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { &warn }),
-            format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }),
-        ];
+        let mut parts = Vec::new();
+        if stray > 0 {
+            parts.push(format!("ROOT-NOT-BARE={stray}{warn}"));
+        }
+        parts.push(format!("ws={ws}{}", if ws == 0 { &check } else { &warn }));
+        parts.push(format!("changes={changes}{}", if changes == 0 { &check } else { &warn }));
+        parts.push(format!("untracked={untracked}{}", if untracked == 0 { &check } else { &warn }));
+        parts.push(format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { &warn }));
+        parts.push(format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }));
 
         format!("{}\n", parts.join(" "))
     }
@@ -167,6 +175,10 @@ impl StatusSummary {
             }
             out.push_str(segment);
         };
+
+        if !self.stray_root_files.is_empty() {
+            append_segment(&colorize_light_red("ROOT!"));
+        }
 
         let ws = self.workspace_names.len();
         if ws > 0 {
@@ -199,6 +211,19 @@ impl StatusSummary {
     fn render_multiline(&self) -> String {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
+
+        if !self.stray_root_files.is_empty() {
+            let n = self.stray_root_files.len();
+            out.push_str(&format!(
+                "{} {}: {}\n",
+                colorize_light_red("⚠ ROOT NOT BARE"),
+                colorize_light_red(&format!("{n} unexpected file(s) at repo root")),
+                colorize_light_red("run maw init to fix"),
+            ));
+            for name in &self.stray_root_files {
+                out.push_str(&format!("  - {name}\n"));
+            }
+        }
 
         let ws_count = self.workspace_names.len();
         out.push_str(&status_line(
@@ -390,12 +415,15 @@ fn collect_status() -> Result<StatusSummary> {
     let config = MawConfig::load(&root).unwrap_or_default();
     let main_sync = main_sync_status(&cwd, config.branch())?;
 
+    let stray_root_files = doctor::stray_root_entries(&root);
+
     Ok(StatusSummary {
         workspace_names,
         changed_files,
         untracked_files: git_files.untracked,
         is_stale,
         main_sync,
+        stray_root_files,
     })
 }
 

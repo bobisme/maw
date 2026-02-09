@@ -2225,7 +2225,19 @@ fn merge(
 
     // Load config early for hooks, auto-resolve settings, and branch name
     let config = MawConfig::load(&root)?;
+    let default_ws = config.default_workspace();
     let branch = config.branch();
+
+    // Reject merging the default workspace — it's the merge target, not a source.
+    // Merging it into itself is a no-op that can corrupt the working copy.
+    if ws_to_merge.iter().any(|ws| ws == default_ws) {
+        bail!(
+            "Cannot merge the default workspace — it is the merge target, not a source.\n\
+             \n  To advance {branch} to include your edits in {default_ws}:\n\
+             \n    maw push --advance\n\
+             \n  This moves the {branch} bookmark to your latest commit and pushes."
+        );
+    }
 
     // Preview mode: show what the merge would do without committing
     if dry_run {
@@ -2342,7 +2354,6 @@ fn merge(
 
     // Step 5: Rebase default workspace onto new branch so on-disk files reflect the merge.
     // The default workspace's working copy is empty (no changes), so this is safe.
-    let default_ws = config.default_workspace();
     let default_ws_path = root.join("ws").join(default_ws);
     if default_ws_path.exists() {
         // The merge operations above (squash, bookmark set) ran from root and
