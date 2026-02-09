@@ -62,6 +62,9 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     // Check repo root is bare (no source files leaked)
     checks.push(check_root_bare(root.as_deref()));
 
+    // Check for ghost working copy at root (causes root pollution)
+    checks.push(check_ghost_working_copy(root.as_deref()));
+
     let all_ok = checks.iter().all(|c| c.status == "ok");
 
     match format {
@@ -270,6 +273,38 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
 /// Dotfiles/dotdirs (`.git`, `.jj`, `.claude`, `.pi`, etc.) are always allowed.
 /// AGENTS.md and CLAUDE.md are redirect stubs pointing into ws/default/.
 const BARE_ROOT_ALLOWED: &[&str] = &["ws", "AGENTS.md", "CLAUDE.md"];
+
+/// Check for ghost .jj/working_copy/ at root that causes file materialization.
+/// After `jj workspace forget`, jj leaves behind working copy metadata on disk.
+/// If any jj command runs from root, jj sees the stale metadata and materializes
+/// files into root — polluting the bare repo.
+fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
+    let Some(root) = root else {
+        return DoctorCheck {
+            name: "ghost working copy".to_string(),
+            status: "ok".to_string(),
+            message: "ghost working copy: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    let ghost_wc = root.join(".jj").join("working_copy");
+    if ghost_wc.exists() {
+        DoctorCheck {
+            name: "ghost working copy".to_string(),
+            status: "fail".to_string(),
+            message: "ghost working copy: .jj/working_copy/ exists at root (causes file leaks)".to_string(),
+            fix: Some("Fix: rm -rf .jj/working_copy/  (or run: maw init)".to_string()),
+        }
+    } else {
+        DoctorCheck {
+            name: "ghost working copy".to_string(),
+            status: "ok".to_string(),
+            message: "ghost working copy: none (root has no working copy metadata)".to_string(),
+            fix: None,
+        }
+    }
+}
 
 /// Return names of files/dirs at root that shouldn't be there.
 /// Dotfiles/dotdirs are always allowed (agent config, VCS internals).

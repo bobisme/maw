@@ -195,6 +195,16 @@ fn setup_bare_default_workspace() -> Result<()> {
                 stderr.trim()
             );
         }
+
+        // Remove ghost working copy metadata at root. `jj workspace forget`
+        // removes the workspace from jj's internal state but leaves behind
+        // .jj/working_copy/ on disk. If any jj command later runs from root
+        // (e.g. `workspace update-stale`), jj sees the stale metadata and
+        // materializes files into root — polluting the bare repo.
+        let ghost_wc = Path::new(".jj").join("working_copy");
+        if ghost_wc.exists() {
+            fs::remove_dir_all(&ghost_wc).ok();
+        }
     }
 
     // Create default workspace at ws/default/, parented on main.
@@ -302,6 +312,16 @@ pub fn clean_root_source_files() -> Result<()> {
             }
         } else if fs::remove_file(&path).is_ok() {
             cleaned += 1;
+        }
+    }
+
+    // Also remove ghost .jj/working_copy/ if present — this is left behind
+    // by `jj workspace forget` and causes jj to materialize files at root.
+    let ghost_wc = Path::new(".jj").join("working_copy");
+    if ghost_wc.exists() {
+        if fs::remove_dir_all(&ghost_wc).is_ok() {
+            cleaned += 1;
+            println!("[OK] Removed ghost .jj/working_copy/ (prevents root pollution)");
         }
     }
 
