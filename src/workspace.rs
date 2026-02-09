@@ -148,6 +148,21 @@ struct AdviceDetails {
 }
 
 #[derive(Serialize)]
+struct HistoryEnvelope {
+    workspace: String,
+    commits: Vec<HistoryCommit>,
+    advice: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct HistoryCommit {
+    change_id: String,
+    commit_id: String,
+    timestamp: String,
+    description: String,
+}
+
+#[derive(Serialize)]
 struct WorkspaceStatus {
     current_workspace: String,
     is_stale: bool,
@@ -322,6 +337,10 @@ pub enum WorkspaceCommands {
         /// Number of commits to show (default: 20)
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
+
+        /// Output format: text, json, pretty (auto-detected from TTY)
+        #[arg(long)]
+        format: Option<OutputFormat>,
     },
 
     /// Clean up orphaned, stale, or empty workspaces
@@ -431,7 +450,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                  Use: maw exec {name} -- jj {args_str}"
             );
         }
-        WorkspaceCommands::History { name, limit } => history(&name, limit),
+        WorkspaceCommands::History { name, limit, format } => history(&name, limit, format),
         WorkspaceCommands::Prune { force, empty } => prune(force, empty),
         WorkspaceCommands::Attach { name, revision } => attach(&name, revision.as_deref()),
         WorkspaceCommands::Merge {
@@ -1884,9 +1903,10 @@ fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result
 /// Warn if a jj command targets a commit outside this workspace's working copy.
 /// This helps prevent divergent commits from agents modifying shared commits.
 /// Show commit history for a workspace
-fn history(name: &str, limit: usize) -> Result<()> {
+fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()> {
     let cwd = jj_cwd()?;
     validate_workspace_name(name)?;
+    let format = OutputFormat::resolve(format);
 
     // Check if workspace exists
     let ws_output = Command::new("jj")
@@ -1939,59 +1959,106 @@ fn history(name: &str, limit: usize) -> Result<()> {
 
     let history = String::from_utf8_lossy(&output.stdout);
 
-    if history.trim().is_empty() {
-        println!("Workspace '{name}' has no commits yet.");
-        println!();
-        println!("  (Workspace starts with an empty commit for ownership.");
-        println!("   Edit files and describe your changes to create history.)");
-        println!();
-        println!("  Start working:");
-        println!("    maw ws jj {name} describe -m \"feat: what you're implementing\"");
-        return Ok(());
-    }
-
-    println!("=== Commit History: {name} ===");
-    println!();
-    println!("  change_id      commit        timestamp         description");
-    println!("  ────────────   ──────────    ────────────────  ────────────────────────");
-
+    // Parse commits into structs
+    let mut commits = Vec::new();
     for line in history.lines() {
         if line.trim().is_empty() {
             continue;
         }
         // Format: change_id commit_id date time description
-        // Note: timestamp is "YYYY-MM-DD HH:MM" (two parts separated by space)
         let parts: Vec<&str> = line.splitn(5, ' ').collect();
-        if parts.len() >= 5 {
-            let change_id = parts[0];
-            let commit_id = parts[1];
+        if parts.len() >= 4 {
+            let change_id = parts[0].to_string();
+            let commit_id = parts[1].to_string();
             let date = parts[2];
             let time = parts[3];
-            let description = parts[4];
-            println!("  {change_id}   {commit_id}    {date} {time}  {description}");
-        } else if parts.len() == 4 {
-            // Might be missing description
-            let change_id = parts[0];
-            let commit_id = parts[1];
-            let date = parts[2];
-            let time = parts[3];
-            println!("  {change_id}   {commit_id}    {date} {time}  (no description)");
-        } else {
-            println!("  {line}");
+            let timestamp = format!("{date} {time}");
+            let description = if parts.len() >= 5 {
+                parts[4].to_string()
+            } else {
+                "(no description)".to_string()
+            };
+            commits.push(HistoryCommit {
+                change_id,
+                commit_id,
+                timestamp,
+                description,
+            });
         }
     }
 
-    let line_count = history.lines().filter(|l| !l.trim().is_empty()).count();
-    println!();
-    println!("Showing {line_count} commit(s)");
-
-    if line_count >= limit {
-        println!("  (Use --limit/-n to show more)");
+    if commits.is_empty() {
+        match format {
+            OutputFormat::Json => {
+                let envelope = HistoryEnvelope {
+                    workspace: name.to_string(),
+                    commits: vec![],
+                    advice: vec![],
+                };
+                println!("{}", format.serialize(&envelope)?);
+            }
+            OutputFormat::Text => {
+                println!("Workspace '{name}' has no commits yet.");
+                println!();
+                println!("Next: maw ws jj {name} describe -m \"feat: what you're implementing\"");
+            }
+            OutputFormat::Pretty => {
+                println!("Workspace '{name}' has no commits yet.");
+                println!();
+                println!("  (Workspace starts with an empty commit for ownership.");
+                println!("   Edit files and describe your changes to create history.)");
+                println!();
+                println!("  Start working:");
+                println!("    maw ws jj {name} describe -m \"feat: what you're implementing\"");
+            }
+        }
+        return Ok(());
     }
 
-    println!();
-    println!("Tip: View full commit details:");
-    println!("  maw ws jj {name} show <change-id>");
+    match format {
+        OutputFormat::Json => {
+            let envelope = HistoryEnvelope {
+                workspace: name.to_string(),
+                commits,
+                advice: vec![],
+            };
+            println!("{}", format.serialize(&envelope)?);
+        }
+        OutputFormat::Text => {
+            for commit in &commits {
+                println!(
+                    "{}  {}  {}  {}",
+                    commit.change_id, commit.commit_id, commit.timestamp, commit.description
+                );
+            }
+            println!();
+            println!("Next: maw ws jj {name} diff -r <change_id>");
+        }
+        OutputFormat::Pretty => {
+            println!("=== Commit History: {name} ===");
+            println!();
+            println!("  change_id      commit        timestamp         description");
+            println!("  ────────────   ──────────    ────────────────  ────────────────────────");
+
+            for commit in &commits {
+                println!(
+                    "  {}   {}    {}  {}",
+                    commit.change_id, commit.commit_id, commit.timestamp, commit.description
+                );
+            }
+
+            println!();
+            println!("Showing {} commit(s)", commits.len());
+
+            if commits.len() >= limit {
+                println!("  (Use --limit/-n to show more)");
+            }
+
+            println!();
+            println!("Tip: View full commit details:");
+            println!("  maw ws jj {name} show <change-id>");
+        }
+    }
 
     Ok(())
 }

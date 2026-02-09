@@ -2,110 +2,189 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
+use serde::Serialize;
 
+use crate::format::OutputFormat;
 use crate::workspace;
+
+#[derive(Serialize)]
+struct DoctorEnvelope {
+    checks: Vec<DoctorCheck>,
+    all_ok: bool,
+    advice: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct DoctorCheck {
+    name: String,
+    status: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix: Option<String>,
+}
+
+fn print_check(check: &DoctorCheck) {
+    let prefix = match check.status.as_str() {
+        "ok" => "[OK]",
+        "warn" => "[WARN]",
+        "fail" => "[FAIL]",
+        _ => "[???]",
+    };
+    println!("{} {}", prefix, check.message);
+    if let Some(fix) = &check.fix {
+        println!("       {}", fix);
+    }
+}
 
 /// Check system requirements and configuration
 #[allow(clippy::unnecessary_wraps)]
-pub fn run() -> Result<()> {
-    println!("maw doctor");
-    println!("==========");
-    println!();
-
-    let mut all_ok = true;
+pub fn run(format: Option<OutputFormat>) -> Result<()> {
+    let format = OutputFormat::resolve(format);
+    let mut checks = Vec::new();
 
     // Check jj (required)
-    all_ok &= check_tool(
+    checks.push(check_tool(
         "jj",
         &["--version"],
         "https://martinvonz.github.io/jj/latest/install-and-setup/",
-    );
+    ));
 
     // Find repo root and jj cwd (best-effort — may fail if not in a repo)
     let root = workspace::repo_root().ok();
     let cwd = workspace::jj_cwd().ok();
 
     // Check jj repo — uses jj_cwd() to avoid stale errors at bare root
-    all_ok &= check_jj_repo(cwd.as_deref());
+    checks.push(check_jj_repo(cwd.as_deref()));
 
     // Check ws/default/ exists and looks correct
-    all_ok &= check_default_workspace(root.as_deref());
+    checks.push(check_default_workspace(root.as_deref()));
 
     // Check repo root is bare (no source files leaked)
-    all_ok &= check_root_bare(root.as_deref());
+    checks.push(check_root_bare(root.as_deref()));
 
-    println!();
-    if all_ok {
-        println!("All checks passed!");
-    } else {
-        println!("Some checks failed. See above for details.");
+    let all_ok = checks.iter().all(|c| c.status == "ok");
+
+    match format {
+        OutputFormat::Json => {
+            let envelope = DoctorEnvelope {
+                checks,
+                all_ok,
+                advice: vec![],
+            };
+            println!("{}", format.serialize(&envelope)?);
+        }
+        OutputFormat::Text | OutputFormat::Pretty => {
+            println!("maw doctor");
+            println!("==========");
+            println!();
+
+            for check in &checks {
+                print_check(check);
+            }
+
+            println!();
+            if all_ok {
+                println!("All checks passed!");
+            } else {
+                println!("Some checks failed. See above for details.");
+            }
+        }
     }
 
     Ok(())
 }
 
-fn check_tool(name: &str, args: &[&str], install_url: &str) -> bool {
+fn check_tool(name: &str, args: &[&str], install_url: &str) -> DoctorCheck {
     match Command::new(name).args(args).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let version = version.lines().next().unwrap_or("unknown").trim();
-            println!("[OK] {name}: {version}");
-            true
+            DoctorCheck {
+                name: name.to_string(),
+                status: "ok".to_string(),
+                message: format!("{name}: {version}"),
+                fix: None,
+            }
         }
-        Ok(_) => {
-            println!("[FAIL] {name}: found but returned error");
-            println!("       Install: {install_url}");
-            false
-        }
-        Err(_) => {
-            println!("[FAIL] {name}: not found");
-            println!("       Install: {install_url}");
-            false
-        }
+        Ok(_) => DoctorCheck {
+            name: name.to_string(),
+            status: "fail".to_string(),
+            message: format!("{name}: found but returned error"),
+            fix: Some(format!("Install: {install_url}")),
+        },
+        Err(_) => DoctorCheck {
+            name: name.to_string(),
+            status: "fail".to_string(),
+            message: format!("{name}: not found"),
+            fix: Some(format!("Install: {install_url}")),
+        },
     }
 }
 
 /// Check if we're in a jj repo. Uses `jj_cwd()` to avoid stale errors at bare root.
-fn check_jj_repo(cwd: Option<&Path>) -> bool {
+fn check_jj_repo(cwd: Option<&Path>) -> DoctorCheck {
     let cwd = cwd.unwrap_or(Path::new("."));
 
     let Ok(output) = Command::new("jj").args(["status"]).current_dir(cwd).output() else {
         // jj not installed — already reported by check_tool
-        return true;
+        return DoctorCheck {
+            name: "jj repository".to_string(),
+            status: "ok".to_string(),
+            message: "jj repository: skipped (jj not available)".to_string(),
+            fix: None,
+        };
     };
 
     if output.status.success() {
-        println!("[OK] jj repository: found");
-        true
+        DoctorCheck {
+            name: "jj repository".to_string(),
+            status: "ok".to_string(),
+            message: "jj repository: found".to_string(),
+            fix: None,
+        }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("no jj repo") || stderr.contains("There is no jj repo") {
-            println!("[FAIL] jj repository: not in a jj repo");
-            println!("       Run: maw init");
-            false
+            DoctorCheck {
+                name: "jj repository".to_string(),
+                status: "fail".to_string(),
+                message: "jj repository: not in a jj repo".to_string(),
+                fix: Some("Run: maw init".to_string()),
+            }
         } else {
-            println!(
-                "[WARN] jj repository: {}",
-                stderr.lines().next().unwrap_or("unknown error")
-            );
-            true
+            DoctorCheck {
+                name: "jj repository".to_string(),
+                status: "warn".to_string(),
+                message: format!(
+                    "jj repository: {}",
+                    stderr.lines().next().unwrap_or("unknown error")
+                ),
+                fix: None,
+            }
         }
     }
 }
 
 /// Check that ws/default/ exists and contains the expected repo structure.
-fn check_default_workspace(root: Option<&Path>) -> bool {
+fn check_default_workspace(root: Option<&Path>) -> DoctorCheck {
     let Some(root) = root else {
-        println!("[WARN] default workspace: could not determine repo root");
-        return true;
+        return DoctorCheck {
+            name: "default workspace".to_string(),
+            status: "warn".to_string(),
+            message: "default workspace: could not determine repo root".to_string(),
+            fix: None,
+        };
     };
 
     let default_ws = root.join("ws").join("default");
 
     if !default_ws.exists() {
-        println!("[FAIL] default workspace: ws/default/ does not exist");
-        println!("       Run: maw init");
-        return false;
+        return DoctorCheck {
+            name: "default workspace".to_string(),
+            status: "fail".to_string(),
+            message: "default workspace: ws/default/ does not exist".to_string(),
+            fix: Some("Run: maw init".to_string()),
+        };
     }
 
     // Check that it has a .gitignore with ws/ entry
@@ -116,8 +195,12 @@ fn check_default_workspace(root: Option<&Path>) -> bool {
                 .lines()
                 .any(|l| matches!(l.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
             if !has_ws {
-                println!("[WARN] default workspace: .gitignore missing ws/ entry");
-                println!("       Run: maw init");
+                return DoctorCheck {
+                    name: "default workspace".to_string(),
+                    status: "warn".to_string(),
+                    message: "default workspace: .gitignore missing ws/ entry".to_string(),
+                    fix: Some("Run: maw init".to_string()),
+                };
             }
         }
 
@@ -131,38 +214,56 @@ fn check_default_workspace(root: Option<&Path>) -> bool {
         .unwrap_or(false);
 
     if has_files {
-        println!("[OK] default workspace: ws/default/ exists with source files");
+        DoctorCheck {
+            name: "default workspace".to_string(),
+            status: "ok".to_string(),
+            message: "default workspace: ws/default/ exists with source files".to_string(),
+            fix: None,
+        }
     } else {
-        println!("[WARN] default workspace: ws/default/ exists but appears empty");
-        println!("       Run: maw init");
+        DoctorCheck {
+            name: "default workspace".to_string(),
+            status: "warn".to_string(),
+            message: "default workspace: ws/default/ exists but appears empty".to_string(),
+            fix: Some("Run: maw init".to_string()),
+        }
     }
-
-    true
 }
 
 /// Check that the repo root is bare — only .git/, .jj/, ws/ allowed.
 /// Source files at root indicate a corrupted v2 layout.
-fn check_root_bare(root: Option<&Path>) -> bool {
+fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
     let Some(root) = root else {
-        return true;
+        return DoctorCheck {
+            name: "repo root".to_string(),
+            status: "ok".to_string(),
+            message: "repo root: could not check (no root)".to_string(),
+            fix: None,
+        };
     };
 
     let stray = stray_root_entries(root);
 
     if stray.is_empty() {
-        println!("[OK] repo root: bare (no source files)");
-        return true;
+        DoctorCheck {
+            name: "repo root".to_string(),
+            status: "ok".to_string(),
+            message: "repo root: bare (no source files)".to_string(),
+            fix: None,
+        }
+    } else {
+        let files_list = stray.join(", ");
+        DoctorCheck {
+            name: "repo root".to_string(),
+            status: "fail".to_string(),
+            message: format!(
+                "repo root: {} unexpected file(s)/dir(s) — should be bare: {}",
+                stray.len(),
+                files_list
+            ),
+            fix: Some("Fix: maw init (moves files into ws/default/)".to_string()),
+        }
     }
-
-    println!(
-        "[FAIL] repo root: {} unexpected file(s)/dir(s) — should be bare",
-        stray.len()
-    );
-    for name in &stray {
-        println!("       - {name}");
-    }
-    println!("       Fix: maw init (moves files into ws/default/)");
-    false
 }
 
 /// Non-dotfile entries allowed at the bare repo root.

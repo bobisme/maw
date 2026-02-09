@@ -10,7 +10,9 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
 use crate::doctor;
+use crate::format::OutputFormat;
 use crate::workspace::{self, MawConfig};
+use serde::Serialize;
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const ANSI_ORANGE: &str = "\x1b[38;5;208m";
@@ -38,14 +40,44 @@ pub struct StatusArgs {
     /// Refresh output every couple seconds
     #[arg(long)]
     pub watch: bool,
+
+    /// Output format: text, json, pretty (auto-detected from TTY)
+    #[arg(long)]
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: StatusArgs) -> Result<()> {
+    // Special modes take precedence over format
+    if args.status_bar || args.oneline {
+        let summary = collect_status()?;
+        render(&summary, args.oneline, args.status_bar, args.mouth, false)?;
+        return Ok(());
+    }
+
+    let format = OutputFormat::resolve(args.format);
+
+    // JSON mode: serialize and exit (no watch)
+    if format == OutputFormat::Json {
+        let summary = collect_status()?;
+        let envelope = StatusEnvelope {
+            workspaces: summary.workspace_names.clone(),
+            changed_files: summary.changed_files.clone(),
+            untracked_files: summary.untracked_files.clone(),
+            is_stale: summary.is_stale,
+            main_sync: summary.main_sync.oneline(),
+            stray_root_files: summary.stray_root_files.clone(),
+            advice: vec![],
+        };
+        println!("{}", format.serialize(&envelope)?);
+        return Ok(());
+    }
+
+    // Watch mode (text/pretty only)
     if args.watch {
         watch_loop(&args)?;
     } else {
         let summary = collect_status()?;
-        render(&summary, args.oneline, args.status_bar, args.mouth, false)?;
+        render_with_format(&summary, format, false)?;
     }
 
     Ok(())
@@ -65,9 +97,11 @@ fn watch_loop(args: &StatusArgs) -> Result<()> {
 }
 
 fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
+    let format = OutputFormat::resolve(args.format);
+
     loop {
         let summary = collect_status()?;
-        render(&summary, args.oneline, args.status_bar, args.mouth, true)?;
+        render_with_format(&summary, format, true)?;
 
         // Poll for quit keys during the sleep interval
         let deadline = std::time::Instant::now() + WATCH_INTERVAL;
@@ -88,6 +122,17 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
                 }
         }
     }
+}
+
+#[derive(Serialize)]
+struct StatusEnvelope {
+    workspaces: Vec<String>,
+    changed_files: Vec<String>,
+    untracked_files: Vec<String>,
+    is_stale: bool,
+    main_sync: String,
+    stray_root_files: Vec<String>,
+    advice: Vec<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -150,6 +195,24 @@ impl StatusSummary {
         parts.push(format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }));
 
         format!("{}\n", parts.join(" "))
+    }
+
+    /// Plain text format — no ANSI codes, compact, agent-friendly
+    fn render_text(&self) -> String {
+        let stray = self.stray_root_files.len();
+        let ws = self.workspace_names.len();
+        let changes = self.changed_files.len();
+        let untracked = self.untracked_files.len();
+        let mut parts = Vec::new();
+        if stray > 0 {
+            parts.push(format!("ROOT-NOT-BARE={stray}"));
+        }
+        parts.push(format!("ws={ws}"));
+        parts.push(format!("changes={changes}"));
+        parts.push(format!("untracked={untracked}"));
+        parts.push(format!("main={}", self.main_sync.oneline()));
+        parts.push(format!("default={}", if self.is_stale { "stale" } else { "fresh" }));
+        format!("{}\n", parts.join("  "))
     }
 
     fn render_status_bar(&self, mouth: bool) -> String {
@@ -340,6 +403,34 @@ impl MainSyncStatus {
             Self::Unknown(reason) => format!("unknown ({reason})"),
         }
     }
+}
+
+fn render_with_format(
+    summary: &StatusSummary,
+    format: OutputFormat,
+    watching: bool,
+) -> Result<()> {
+    if watching {
+        print!("\u{1b}[2J\u{1b}[H");
+    }
+
+    let output = match format {
+        OutputFormat::Text => summary.render_text(),
+        OutputFormat::Pretty => summary.render_multiline(),
+        OutputFormat::Json => {
+            bail!("JSON format should be handled before calling render")
+        }
+    };
+
+    // In raw mode (watch), \n only moves cursor down without returning to
+    // column 0.  Replace with \r\n so each line starts at the left edge.
+    if watching {
+        print!("{}", output.replace('\n', "\r\n"));
+    } else {
+        print!("{output}");
+    }
+    io::stdout().flush().ok();
+    Ok(())
 }
 
 fn render(

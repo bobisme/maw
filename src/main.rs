@@ -84,7 +84,11 @@ enum Commands {
     ///
     /// Verifies that required tools (jj) are installed and optional tools
     /// (botbus, beads) are available. Also checks if you're in a jj repository.
-    Doctor,
+    Doctor {
+        /// Output format: text, json, pretty (auto-detected from TTY)
+        #[arg(long)]
+        format: Option<format::OutputFormat>,
+    },
 
     /// Launch the terminal UI
     ///
@@ -152,7 +156,7 @@ fn main() -> Result<()> {
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Init => init::run(),
         Commands::Upgrade => upgrade::run(),
-        Commands::Doctor => doctor::run(),
+        Commands::Doctor { format } => doctor::run(format),
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),
         Commands::Status(cmd) => status::run(cmd),
