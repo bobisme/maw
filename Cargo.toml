@@ -17,6 +17,9 @@ toml = "0.8"
 toon-format = "0.4"
 glob = "0.3"
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints.rust]
 unsafe_code = "forbid"
 
