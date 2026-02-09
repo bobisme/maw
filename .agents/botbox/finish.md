@@ -15,8 +15,9 @@ All steps below are required — they clean up resources, prevent workspace leak
 2. Verify you posted at least one progress comment (`maw exec default -- br comments <bead-id>`). If not, add one now: `maw exec default -- br comments add --actor $AGENT --author $AGENT <bead-id> "Progress: <what was done>"`
 3. Add a completion comment to the bead: `maw exec default -- br comments add --actor $AGENT --author $AGENT <bead-id> "Completed by $AGENT"`
 4. Close the bead: `maw exec default -- br close --actor $AGENT <bead-id> --reason="Completed" --suggest-next`
-5. **Merge and destroy the workspace**: `maw ws merge $WS --destroy` (where `$WS` is the workspace name from the start step)
+5. **Merge and destroy the workspace**: `maw ws merge $WS --destroy` (where `$WS` is the workspace name from the start step — **never `default`**)
    - The `--destroy` flag is required — it cleans up the workspace after merging
+   - **Never merge or destroy the default workspace.** Default is where other workspaces merge into.
    - `maw ws merge` now produces linear history: workspace commits are rebased onto main and squashed into a single commit (as of v0.22.0)
    - Scaffolding commits are automatically abandoned; main bookmark is automatically moved and ready for push
    - If merge fails due to conflicts, do NOT destroy. Instead add a comment: `maw exec default -- br comments add --actor $AGENT --author $AGENT <bead-id> "Merge conflict — workspace preserved for manual resolution"` and announce the conflict in the project channel.

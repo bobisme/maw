@@ -395,6 +395,7 @@ project-root/          ← bare repo (no source files here)
 
 **Key rules:**
 - `ws/default/` is the main workspace — beads, config, and project files live here
+- **Never merge or destroy the default workspace.** It is where other branches merge INTO, not something you merge.
 - Agent workspaces (`ws/<name>/`) are isolated jj commits for concurrent work
 - Use `maw exec <ws> -- <command>` to run commands in a workspace context
 - Use `maw exec default -- br|bv ...` for beads commands (always in default workspace)
@@ -432,6 +433,7 @@ project-root/          ← bare repo (no source files here)
 
 | Safe | Dangerous |
 |------|-----------|
+| `maw ws merge <agent-ws> --destroy` | `maw ws merge default --destroy` (NEVER) |
 | `jj describe` (your working copy) | `jj describe main -m "..."` |
 | `maw exec <your-ws> -- jj describe -m "..."` | `jj describe <other-change-id>` |
 
