@@ -1,6 +1,6 @@
 [package]
 name = "maw"
-version = "0.28.3"
+version = "0.28.4"
 edition = "2024"
 description = "Multi-Agent Workflow coordinator for jj workspaces"
 license = "MIT"

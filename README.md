@@ -11,7 +11,7 @@ Tooling for coordinating multiple AI coding agents working on the same codebase.
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.28.3
+cargo install --git https://github.com/bobisme/maw --tag v0.28.4
 ```
 
 Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.

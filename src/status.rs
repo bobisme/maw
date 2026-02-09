@@ -92,9 +92,9 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
 
 #[derive(Debug)]
 struct StatusSummary {
-    workspaces: usize,
-    change_count: usize,
-    git_untracked_count: usize,
+    workspace_names: Vec<String>,
+    changed_files: Vec<String>,
+    untracked_files: Vec<String>,
     is_stale: bool,
     main_sync: MainSyncStatus,
 }
@@ -113,10 +113,10 @@ enum MainSyncStatus {
 impl StatusSummary {
     fn issue_count(&self) -> usize {
         let mut count = 0;
-        if self.workspaces > 0 {
+        if !self.workspace_names.is_empty() {
             count += 1;
         }
-        if self.change_count > 0 {
+        if !self.changed_files.is_empty() {
             count += 1;
         }
         if self.is_stale {
@@ -131,10 +131,13 @@ impl StatusSummary {
     fn render_oneline(&self) -> String {
         let check = green_check();
         let warn = yellow_warn();
+        let ws = self.workspace_names.len();
+        let changes = self.changed_files.len();
+        let untracked = self.untracked_files.len();
         let parts = vec![
-            format!("ws={}{}", self.workspaces, if self.workspaces == 0 { &check } else { &warn }),
-            format!("changes={}{}", self.change_count, if self.change_count == 0 { &check } else { &warn }),
-            format!("untracked={}{}", self.git_untracked_count, if self.git_untracked_count == 0 { &check } else { &warn }),
+            format!("ws={ws}{}", if ws == 0 { &check } else { &warn }),
+            format!("changes={changes}{}", if changes == 0 { &check } else { &warn }),
+            format!("untracked={untracked}{}", if untracked == 0 { &check } else { &warn }),
             format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { &warn }),
             format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }),
         ];
@@ -165,21 +168,23 @@ impl StatusSummary {
             out.push_str(segment);
         };
 
-        if self.workspaces > 0 {
-            let count = self.workspaces.to_string();
-            let workspace = format!("\u{f0645} {count}");
+        let ws = self.workspace_names.len();
+        if ws > 0 {
+            let workspace = format!("\u{f0645} {ws}");
             let colored = colorize_orange(&workspace);
             append_segment(&colored);
         }
 
-        if self.change_count > 0 {
-            let changes = format!("\u{eb43} {}", self.change_count);
+        let changes = self.changed_files.len();
+        if changes > 0 {
+            let changes = format!("\u{eb43} {changes}");
             let colored = colorize_blue(&changes);
             append_segment(&colored);
         }
 
-        if self.git_untracked_count > 0 {
-            let untracked = format!("?{}", self.git_untracked_count);
+        let untracked = self.untracked_files.len();
+        if untracked > 0 {
+            let untracked = format!("?{untracked}");
             append_segment(&untracked);
         }
 
@@ -195,27 +200,39 @@ impl StatusSummary {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
 
+        let ws_count = self.workspace_names.len();
         out.push_str(&status_line(
             "Non-default workspaces",
-            &if self.workspaces == 0 { "none".to_string() } else { self.workspaces.to_string() },
-            self.workspaces == 0,
+            &if ws_count == 0 { "none".to_string() } else { ws_count.to_string() },
+            ws_count == 0,
         ));
+        for name in &self.workspace_names {
+            out.push_str(&format!("  - {name}\n"));
+        }
 
+        let change_count = self.changed_files.len();
         out.push_str(&status_line(
             "Working copy",
-            &if self.change_count == 0 {
+            &if change_count == 0 {
                 "clean".to_string()
             } else {
-                format!("{} changed files", self.change_count)
+                format!("{change_count} changed files")
             },
-            self.change_count == 0,
+            change_count == 0,
         ));
+        for file in &self.changed_files {
+            out.push_str(&format!("  - {file}\n"));
+        }
 
+        let untracked_count = self.untracked_files.len();
         out.push_str(&status_line(
             "Untracked files",
-            &if self.git_untracked_count == 0 { "none".to_string() } else { self.git_untracked_count.to_string() },
-            self.git_untracked_count == 0,
+            &if untracked_count == 0 { "none".to_string() } else { untracked_count.to_string() },
+            untracked_count == 0,
         ));
+        for file in &self.untracked_files {
+            out.push_str(&format!("  - {file}\n"));
+        }
 
         out.push_str(&status_line(
             "Main vs origin",
@@ -261,9 +278,9 @@ fn colorize_yellow(value: &str) -> String {
 /// `ok`: true → green ✓, false → yellow ⚠ with yellow value.
 fn status_line(label: &str, value: &str, ok: bool) -> String {
     if ok {
-        format!("  {} {label}: {value}\n", green_check())
+        format!("{} {label}: {value}\n", green_check())
     } else {
-        format!("  {} {label}: {}\n", yellow_warn(), colorize_yellow(value))
+        format!("{} {label}: {}\n", yellow_warn(), colorize_yellow(value))
     }
 }
 
@@ -349,7 +366,7 @@ fn collect_status() -> Result<StatusSummary> {
     }
 
     let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let (_total_workspaces, workspaces) = count_workspaces(&ws_list);
+    let workspace_names = non_default_workspace_names(&ws_list);
 
     let status_output = Command::new("jj")
         .args(["status", "--color=never", "--no-pager"])
@@ -366,46 +383,41 @@ fn collect_status() -> Result<StatusSummary> {
 
     let status_stdout = String::from_utf8_lossy(&status_output.stdout);
     let status_stderr = String::from_utf8_lossy(&status_output.stderr);
-    let jj_change_count = parse_jj_change_count(&status_stdout);
-    let git_counts = git_status_counts(&root).unwrap_or(GitStatusCounts::default());
-    let change_count = jj_change_count.max(git_counts.changes);
+    let changed_files = parse_jj_changed_files(&status_stdout);
+    let git_files = git_status_files(&root).unwrap_or_default();
     let is_stale = status_stderr.contains("working copy is stale");
 
     let config = MawConfig::load(&root).unwrap_or_default();
     let main_sync = main_sync_status(&cwd, config.branch())?;
 
     Ok(StatusSummary {
-        workspaces,
-        change_count,
-        git_untracked_count: git_counts.untracked,
+        workspace_names,
+        changed_files,
+        untracked_files: git_files.untracked,
         is_stale,
         main_sync,
     })
 }
 
-fn count_workspaces(list: &str) -> (usize, usize) {
-    let mut total = 0;
-    let mut non_default = 0;
+fn non_default_workspace_names(list: &str) -> Vec<String> {
+    let mut names = Vec::new();
 
     for line in list.lines() {
         let Some((name_part, _)) = line.split_once(':') else {
             continue;
         };
         let name = name_part.trim().trim_end_matches('@').trim();
-        if name.is_empty() {
+        if name.is_empty() || name == "default" {
             continue;
         }
-        total += 1;
-        if name != "default" {
-            non_default += 1;
-        }
+        names.push(name.to_string());
     }
 
-    (total, non_default)
+    names
 }
 
-fn parse_jj_change_count(status_stdout: &str) -> usize {
-    let mut count = 0;
+fn parse_jj_changed_files(status_stdout: &str) -> Vec<String> {
+    let mut files = Vec::new();
     let mut in_changes = false;
 
     for line in status_stdout.lines() {
@@ -415,30 +427,30 @@ fn parse_jj_change_count(status_stdout: &str) -> usize {
         }
 
         if in_changes {
-            if line.trim().is_empty() {
+            if line.trim().is_empty()
+                || line.starts_with("Working copy ")
+                || line.starts_with("Parent commit")
+            {
                 break;
             }
 
-            if line.starts_with("Working copy ") || line.starts_with("Parent commit") {
-                break;
-            }
-
-            if !line.trim().is_empty() {
-                count += 1;
+            // Lines look like "M src/status.rs" or "A new_file.rs"
+            let trimmed = line.trim();
+            if let Some(path) = trimmed.split_whitespace().last() {
+                files.push(path.to_string());
             }
         }
     }
 
-    count
+    files
 }
 
-#[derive(Default, Debug, Clone, Copy)]
-struct GitStatusCounts {
-    changes: usize,
-    untracked: usize,
+#[derive(Default, Debug)]
+struct GitStatusFiles {
+    untracked: Vec<String>,
 }
 
-fn git_status_counts(root: &Path) -> Result<GitStatusCounts> {
+fn git_status_files(root: &Path) -> Result<GitStatusFiles> {
     let output = Command::new("git")
         .args(["status", "--porcelain=1", "--untracked-files=all"])
         .current_dir(root)
@@ -446,27 +458,23 @@ fn git_status_counts(root: &Path) -> Result<GitStatusCounts> {
         .context("Failed to run git status")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let message = format!("{stderr}{stdout}");
-        if message.contains("not a git repository") {
-            return Ok(GitStatusCounts::default());
-        }
-        return Ok(GitStatusCounts::default());
+        return Ok(GitStatusFiles::default());
     }
 
-    let mut counts = GitStatusCounts::default();
+    let mut files = GitStatusFiles::default();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if line.trim().is_empty() {
             continue;
         }
-        counts.changes += 1;
-        if line.trim_start().starts_with("??") {
-            counts.untracked += 1;
+        // Porcelain format: "?? path/to/file" for untracked
+        if line.starts_with("??") {
+            if let Some(path) = line.get(3..) {
+                files.untracked.push(path.trim().to_string());
+            }
         }
     }
 
-    Ok(counts)
+    Ok(files)
 }
 
 fn main_sync_status(root: &Path, branch: &str) -> Result<MainSyncStatus> {
