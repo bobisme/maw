@@ -8,6 +8,7 @@ mod format;
 mod init;
 mod jj_intro;
 mod push;
+mod release;
 mod status;
 mod tui;
 mod upgrade;
@@ -146,6 +147,20 @@ enum Commands {
     ///   [repo]
     ///   branch = "main"
     Push(push::PushArgs),
+
+    /// Tag and push a release
+    ///
+    /// One command to replace the manual release sequence:
+    ///   1. Advance branch bookmark to @- (your version bump commit)
+    ///   2. Push branch to origin
+    ///   3. Create jj tag + git tag
+    ///   4. Push tag to origin
+    ///
+    /// Usage: maw release v0.30.0
+    ///
+    /// Assumes your version bump is already committed. Run this after:
+    ///   jj new && <edit version> && jj describe -m "chore: bump to vX.Y.Z"
+    Release(release::ReleaseArgs),
 }
 
 fn main() -> Result<()> {
@@ -161,6 +176,7 @@ fn main() -> Result<()> {
         Commands::JjIntro => jj_intro::run(),
         Commands::Status(cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
+        Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
     }
 }
