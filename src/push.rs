@@ -47,44 +47,43 @@ pub fn run(args: &PushArgs) -> Result<()> {
         advance_bookmark(&cwd, branch)?;
     }
 
-    // Check ahead/behind status — bail if behind, return early if up-to-date
+    // Check ahead/behind status — bail if behind, skip bookmark push if up-to-date
     if !should_push(&cwd, branch)? {
         println!("{branch} is up to date with origin.");
         // Check if there's unpushed work at @- that could be pushed with --advance
         if !args.advance {
             suggest_advance(&cwd, branch);
         }
-        return Ok(());
-    }
-
-    // Re-resolve after potential advance to get updated commit info
-    let commit_info = resolve_branch(&cwd, branch)?;
-
-    // Push
-    println!("Pushing {branch} to origin...");
-    let push_output = Command::new("jj")
-        .args(["git", "push", "--bookmark", branch])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj git push")?;
-
-    if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr);
-        bail!(
-            "Push failed: {}\n  \
-             Check: jj log -r '{branch}' and jj git fetch",
-            stderr.trim()
-        );
-    }
-
-    let push_stdout = String::from_utf8_lossy(&push_output.stdout);
-    if push_stdout.contains("Nothing changed") {
-        println!("{branch} is up to date with origin.");
     } else {
-        println!("  Pushed: {commit_info}");
+        // Re-resolve after potential advance to get updated commit info
+        let commit_info = resolve_branch(&cwd, branch)?;
+
+        // Push bookmark
+        println!("Pushing {branch} to origin...");
+        let push_output = Command::new("jj")
+            .args(["git", "push", "--bookmark", branch])
+            .current_dir(&cwd)
+            .output()
+            .context("Failed to run jj git push")?;
+
+        if !push_output.status.success() {
+            let stderr = String::from_utf8_lossy(&push_output.stderr);
+            bail!(
+                "Push failed: {}\n  \
+                 Check: jj log -r '{branch}' and jj git fetch",
+                stderr.trim()
+            );
+        }
+
+        let push_stdout = String::from_utf8_lossy(&push_output.stdout);
+        if push_stdout.contains("Nothing changed") {
+            println!("{branch} is up to date with origin.");
+        } else {
+            println!("  Pushed: {commit_info}");
+        }
     }
 
-    // Push git tags unless --no-tags
+    // Push git tags regardless of branch status (unless --no-tags)
     if !args.no_tags {
         push_tags(&root)?;
     }
@@ -237,10 +236,12 @@ fn count_revset(cwd: &Path, revset: &str) -> Result<usize> {
 /// Export jj tags to git, then push all tags to origin.
 /// Reports which tags were pushed; stays silent if none.
 fn push_tags(root: &Path) -> Result<()> {
-    // Export jj state (including tags) to the colocated git repo
+    // Export jj state (including tags) to the colocated git repo.
+    // Run from ws/default/ (not bare root) to avoid stale-workspace errors.
+    let cwd = jj_cwd()?;
     let export = Command::new("jj")
         .args(["git", "export"])
-        .current_dir(root)
+        .current_dir(&cwd)
         .output()
         .context("Failed to run jj git export")?;
 
@@ -259,18 +260,15 @@ fn push_tags(root: &Path) -> Result<()> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Parse porcelain output for pushed tags (lines starting with * or space
-    // followed by refs/tags/). Lines starting with '!' are errors/rejections.
+    // Parse porcelain output for newly pushed tags.
+    // Format: "<flag>\t<from>:<to>\t<summary>"
+    //   * = new ref pushed, = = up to date, ! = rejected
+    // We only report lines starting with '*' (newly pushed).
     let pushed: Vec<&str> = stdout
         .lines()
-        .filter(|line| {
-            // Porcelain: new tags start with "*\t", updated with " \t"
-            let trimmed = line.trim_start_matches(['*', ' ', '\t']);
-            trimmed.contains("refs/tags/")
-                && !line.starts_with('!')
-        })
+        .filter(|line| line.starts_with('*'))
         .filter_map(|line| {
-            // Extract tag name from "refs/tags/vX.Y.Z:refs/tags/vX.Y.Z"
+            // Extract tag name from "*\trefs/tags/vX.Y.Z:refs/tags/vX.Y.Z\t..."
             line.split("refs/tags/")
                 .nth(1)
                 .and_then(|s| s.split(['\t', ' ', ':']).next())
