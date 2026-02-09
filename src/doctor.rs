@@ -166,11 +166,14 @@ fn check_root_bare(root: Option<&Path>) -> bool {
     false
 }
 
-/// Allowed entries at the bare repo root.
+/// Non-dotfile entries allowed at the bare repo root.
+/// Dotfiles/dotdirs (`.git`, `.jj`, `.claude`, `.pi`, etc.) are always allowed.
 /// AGENTS.md and CLAUDE.md are redirect stubs pointing into ws/default/.
-const BARE_ROOT_ALLOWED: &[&str] = &[".git", ".jj", "ws", "AGENTS.md", "CLAUDE.md"];
+const BARE_ROOT_ALLOWED: &[&str] = &["ws", "AGENTS.md", "CLAUDE.md"];
 
 /// Return names of files/dirs at root that shouldn't be there.
+/// Dotfiles/dotdirs are always allowed (agent config, VCS internals).
+/// Source files (src/, Cargo.toml, etc.) indicate a corrupted v2 layout.
 pub fn stray_root_entries(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -180,7 +183,7 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            if BARE_ROOT_ALLOWED.contains(&name.as_str()) {
+            if name.starts_with('.') || BARE_ROOT_ALLOWED.contains(&name.as_str()) {
                 None
             } else {
                 Some(name)

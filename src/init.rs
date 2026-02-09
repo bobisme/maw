@@ -4,8 +4,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-/// Files/dirs at root that should NOT be cleaned after forgetting the default workspace.
-const KEEP_ROOT: &[&str] = &[".git", ".jj", "ws"];
+/// Non-dotfile entries at root that should NOT be cleaned.
+/// Dotfiles/dotdirs (.git, .jj, .claude, .pi, etc.) are always kept.
+/// AGENTS.md and CLAUDE.md are redirect stubs pointing into ws/default/.
+const KEEP_ROOT: &[&str] = &["ws", "AGENTS.md", "CLAUDE.md"];
 
 /// Initialize maw in the current repository (bare repo model)
 ///
@@ -291,8 +293,8 @@ pub fn clean_root_source_files() -> Result<()> {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        // Skip hidden jj/git internals and keep list
-        if KEEP_ROOT.contains(&name_str.as_ref()) {
+        // Skip dotfiles/dotdirs (VCS, agent config) and explicit keep list
+        if name_str.starts_with('.') || KEEP_ROOT.contains(&name_str.as_ref()) {
             continue;
         }
 
