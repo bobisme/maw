@@ -65,6 +65,9 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     // Check for ghost working copy at root (causes root pollution)
     checks.push(check_ghost_working_copy(root.as_deref()));
 
+    // Check git HEAD is not detached (should point to branch ref)
+    checks.push(check_git_head());
+
     let all_ok = checks.iter().all(|c| c.status == "ok");
 
     match format {
@@ -325,4 +328,39 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Check that git HEAD is a symbolic ref pointing to the branch, not detached.
+/// After `maw init`/`maw upgrade`, HEAD should be `refs/heads/main` (or the
+/// configured branch). A detached HEAD causes `git log` and other tools to
+/// show stale history.
+fn check_git_head() -> DoctorCheck {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "HEAD"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let head_ref = String::from_utf8_lossy(&out.stdout);
+            DoctorCheck {
+                name: "git HEAD".to_string(),
+                status: "ok".to_string(),
+                message: format!("git HEAD: {}", head_ref.trim()),
+                fix: None,
+            }
+        }
+        _ => {
+            // HEAD is detached or git failed
+            let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
+            let branch = crate::workspace::MawConfig::load(&root)
+                .map(|c| c.branch().to_string())
+                .unwrap_or_else(|_| "main".to_string());
+            DoctorCheck {
+                name: "git HEAD".to_string(),
+                status: "fail".to_string(),
+                message: "git HEAD: detached (git log shows stale history)".to_string(),
+                fix: Some(format!("Fix: git symbolic-ref HEAD refs/heads/{branch}  (or run: maw init)")),
+            }
+        }
+    }
 }

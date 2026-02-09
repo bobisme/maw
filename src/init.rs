@@ -22,6 +22,7 @@ pub fn run() -> Result<()> {
     ensure_maw_config()?;
     setup_bare_default_workspace()?;
     set_git_bare_mode()?;
+    fix_git_head()?;
     clean_root_source_files()?;
     ensure_gitignore_in_workspace()?;
     refresh_workspace_state()?;
@@ -291,6 +292,50 @@ fn set_git_bare_mode() -> Result<()> {
             "Failed to set git core.bare: {}\n  Try: git config core.bare true",
             stderr.trim()
         );
+    }
+
+    Ok(())
+}
+
+/// Point git HEAD at the main branch ref.
+///
+/// After `jj workspace forget` + `core.bare=true`, HEAD gets stuck at whatever
+/// commit was checked out before the upgrade. jj only exports to branch refs,
+/// not HEAD, so it stays detached forever. This breaks `git log`, GitHub Desktop,
+/// and any tool that relies on HEAD.
+pub fn fix_git_head() -> Result<()> {
+    // Read branch from .maw.toml if available, fall back to "main"
+    let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
+    let branch = crate::workspace::MawConfig::load(&root)
+        .map(|c| c.branch().to_string())
+        .unwrap_or_else(|_| "main".to_string());
+
+    let ref_name = format!("refs/heads/{branch}");
+
+    // Check current HEAD
+    let current = Command::new("git")
+        .args(["symbolic-ref", "HEAD"])
+        .output();
+
+    if let Ok(out) = &current {
+        let val = String::from_utf8_lossy(&out.stdout);
+        if val.trim() == ref_name {
+            println!("[OK] git HEAD already points to {branch}");
+            return Ok(());
+        }
+    }
+
+    let output = Command::new("git")
+        .args(["symbolic-ref", "HEAD", &ref_name])
+        .output()
+        .context("Failed to run git symbolic-ref HEAD")?;
+
+    if output.status.success() {
+        println!("[OK] Set git HEAD -> {ref_name}");
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Non-fatal — HEAD being wrong is annoying but not blocking
+        println!("[WARN] Could not set git HEAD: {}", stderr.trim());
     }
 
     Ok(())

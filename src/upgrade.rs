@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::init::{clean_root_source_files, ensure_workspaces_gitignored};
+use crate::init::{clean_root_source_files, ensure_workspaces_gitignored, fix_git_head};
 
 /// Upgrade a v1 repo (.workspaces/) to v2 bare model (ws/).
 ///
@@ -36,6 +36,9 @@ pub fn run() -> Result<()> {
 
     // Step 6: Set git core.bare = true
     set_git_bare()?;
+
+    // Step 6b: Fix git HEAD (points to branch ref, not detached)
+    fix_git_head()?;
 
     // Step 7: Clean root source files
     clean_root_source_files()?;
