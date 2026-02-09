@@ -197,22 +197,68 @@ impl StatusSummary {
         format!("{}\n", parts.join(" "))
     }
 
-    /// Plain text format — no ANSI codes, compact, agent-friendly
+    /// Plain text format — same structure as pretty but with [OK]/[WARN] instead of colored glyphs
     fn render_text(&self) -> String {
-        let stray = self.stray_root_files.len();
-        let ws = self.workspace_names.len();
-        let changes = self.changed_files.len();
-        let untracked = self.untracked_files.len();
-        let mut parts = Vec::new();
-        if stray > 0 {
-            parts.push(format!("ROOT-NOT-BARE={stray}"));
+        let mut out = String::new();
+        out.push_str("=== maw status ===\n");
+
+        if !self.stray_root_files.is_empty() {
+            let n = self.stray_root_files.len();
+            out.push_str(&format!(
+                "[WARN] ROOT NOT BARE: {n} unexpected file(s) at repo root: run maw init to fix\n"
+            ));
+            for name in &self.stray_root_files {
+                out.push_str(&format!("  - {name}\n"));
+            }
         }
-        parts.push(format!("ws={ws}"));
-        parts.push(format!("changes={changes}"));
-        parts.push(format!("untracked={untracked}"));
-        parts.push(format!("main={}", self.main_sync.oneline()));
-        parts.push(format!("default={}", if self.is_stale { "stale" } else { "fresh" }));
-        format!("{}\n", parts.join("  "))
+
+        let ws_count = self.workspace_names.len();
+        out.push_str(&text_status_line(
+            "Non-default workspaces",
+            &if ws_count == 0 { "none".to_string() } else { ws_count.to_string() },
+            ws_count == 0,
+        ));
+        for name in &self.workspace_names {
+            out.push_str(&format!("  - {name}\n"));
+        }
+
+        let change_count = self.changed_files.len();
+        out.push_str(&text_status_line(
+            "Working copy",
+            &if change_count == 0 {
+                "clean".to_string()
+            } else {
+                format!("{change_count} changed files")
+            },
+            change_count == 0,
+        ));
+        for file in &self.changed_files {
+            out.push_str(&format!("  - {file}\n"));
+        }
+
+        let untracked_count = self.untracked_files.len();
+        out.push_str(&text_status_line(
+            "Untracked files",
+            &if untracked_count == 0 { "none".to_string() } else { untracked_count.to_string() },
+            untracked_count == 0,
+        ));
+        for file in &self.untracked_files {
+            out.push_str(&format!("  - {file}\n"));
+        }
+
+        out.push_str(&text_status_line(
+            "Main vs origin",
+            &self.main_sync.describe(),
+            matches!(self.main_sync, MainSyncStatus::UpToDate),
+        ));
+
+        out.push_str(&text_status_line(
+            "Default workspace",
+            &if self.is_stale { "stale (run: maw ws sync)".to_string() } else { "fresh".to_string() },
+            !self.is_stale,
+        ));
+
+        out
     }
 
     fn render_status_bar(&self, mouth: bool) -> String {
@@ -359,6 +405,15 @@ fn yellow_warn() -> String {
 
 fn colorize_yellow(value: &str) -> String {
     format!("{ANSI_YELLOW}{value}{ANSI_RESET}")
+}
+
+/// Plain text status line with [OK]/[WARN] prefix.
+fn text_status_line(label: &str, value: &str, ok: bool) -> String {
+    if ok {
+        format!("[OK] {label}: {value}\n")
+    } else {
+        format!("[WARN] {label}: {value}\n")
+    }
 }
 
 /// Format a status line with glyph on the left.
