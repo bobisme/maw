@@ -27,122 +27,25 @@ Support three output formats via `--format` flag:
 
 | Format | Audience | Description |
 |--------|----------|-------------|
-| `text` | Agents + pipes | Concise, structured plain text. Default for non-TTY. Token-efficient, parseable by convention. |
-| `pretty` | Humans | Tables, color, box-drawing, alignment. Default for TTY. Never fed to LLMs or parsed. |
-| `json` | Machines | Structured, parseable, stable schema. Object envelope with `advice` array. |
-
-### Format Resolution
-
-Resolution order (first match wins):
-
-1. `--format` flag (explicit override)
-2. `FORMAT` env var
-3. TTY auto-detect: TTY → `pretty`, non-TTY → `text`
+| `text` | Humans + Agents | Concise, readable plain text. Default format. Should be token-efficient by design. |
+| `json` | Machines | Structured, parseable, stable schema |
+| `toon` | Agents (optional) | Ultra-compact token-optimized format. Available but `text` is usually sufficient. |
 
 ```bash
-# Explicit flag always wins
+# Flag takes precedence
 tool items list --format json
 
 # Environment variable sets default
 FORMAT=json tool items list
 
-# TTY auto-detection
-tool items list          # → pretty (if TTY)
-tool items list | jq .   # → text (piped, no TTY)
+# Default to text for interactive terminals
+tool items list
 ```
 
-Agents always get `text` unless they explicitly request `--format json`. The `pretty` format exists solely for humans at a terminal — it is never the target for agent-consumable output.
-
-### JSON Envelope Convention
-
-**Every JSON response is an object.** Never return a bare array. Wrap collections in a named key and always include an `advice` array:
-
-```json
-{
-  "workspaces": [
-    { "name": "frost-castle", "status": "active" }
-  ],
-  "advice": [
-    {
-      "level": "warn",
-      "type": "stale_workspace",
-      "message": "Workspace 'frost-castle' has no changes in 3 days",
-      "details": "Run `maw ws destroy frost-castle` to clean up"
-    }
-  ]
-}
-```
-
-**Rules:**
-- Top-level is always `{}`
-- Collections use a descriptive plural key (`workspaces`, `reviews`, `claims`, `messages`)
-- `advice` array is always present (empty `[]` when nothing to report)
-- Each advice entry: `{ level: "info"|"warn"|"error", type: string, message: string, details?: string }`
-- `type` is a machine-readable slug (`stale_workspace`, `missing_config`, `claim_expired`)
-- `message` is a one-line human summary
-- `details` is optional extended guidance (may include suggested commands)
-
-**Singleton responses** (e.g., `show` commands) return the object directly with an `advice` array:
-
-```json
-{
-  "id": "item-123",
-  "title": "Fix login bug",
-  "status": "open",
-  "advice": []
-}
-```
-
-**Mutation responses** return the result with `advice`:
-
-```json
-{
-  "created": "item-456",
-  "advice": [
-    { "level": "info", "type": "next_step", "message": "Run `tool items update item-456 --status in_progress` to start work" }
-  ]
-}
-```
-
-### Text Output Guidelines
-
-`text` format is the primary format agents consume. Design it for reliable field extraction without JSON parsing overhead.
-
-**Structure rules:**
-- **ID first** — every record starts with its ID (e.g., `item-123  Fix login bug  open`)
-- **One record = one line group** — single-line for list items, indented block for detail views
-- **Inline collections** — short lists joined with `, ` not newline-per-item (e.g., `Labels: bug, urgent`)
-- **Parenthetical metadata** — secondary info in parens (e.g., `item-123  Fix login (P2, 3 comments)`)
-- **Indented sub-properties** — nested data indented 2 spaces under parent
-
-**Consistency rules:**
-- **Fixed delimiters** — use `  ` (two spaces) between fields, `: ` for key-value pairs
-- **No synonyms** — pick one term and use it everywhere (`status` not sometimes `state`)
-- **Predictable field order** — same field order every time for the same command
-
-**Omission rules:**
-- **No prose** — no sentences, no "Successfully created!", no "Here are your results:"
-- **No decoration** — no box-drawing, no emoji, no color codes
-- **No redundancy** — don't echo back the command or repeat known context
-- **Defaults invisible** — don't show fields at their default value unless requested
-
-**LLM considerations:**
-- **Self-labeling** — prefix ambiguous values with their field name (e.g., `Status: open` not just `open`)
-- **Unambiguous delimiters** — fields separated by `  ` (two spaces), never single space (which appears in values)
-- **Suggested next commands** — when there's an obvious workflow, include `Next: <command>`
-
-### Pretty Format
-
-`pretty` format is for humans reading terminal output. No constraints on structure — use whatever makes the data easiest to scan:
-
-- Tables with column alignment
-- ANSI colors and bold/dim
-- Box-drawing characters for structure
-- Progress bars and spinners on stderr
-- Tree views for hierarchical data
-- Summary statistics and counts
-
-**Never** optimize `pretty` for token efficiency or parseability. Its only audience is a human at a terminal. Agents will never see it unless they explicitly request `--format pretty` (which they shouldn't).
+**Implementation notes:**
+- Rust projects: use the `toon-format` crate
+- Detect TTY to choose sensible defaults (text for TTY, json for pipes)
+- `toon` format should be ~90% smaller than json while preserving key information
 
 ## Help and Documentation
 
@@ -163,7 +66,7 @@ Options:
   -t, --title <TITLE>    Item title (required)
   -d, --desc <DESC>      Description
   -p, --priority <1-4>   Priority level [default: 2]
-  --format <FORMAT>      Output format: text|pretty|json [default: auto]
+  --format <FORMAT>      Output format: text|json|toon [default: text]
   -h, --help             Print help
 
 Examples:
@@ -438,4 +341,15 @@ Next: tool items update item-123 --status in_progress
 
 **Don't assume agents have read help.** Give them the command to run next. Be a tl;dr, not a man page.
 
-See the **Text Output Guidelines** section above for detailed `text` format rules. The `pretty` format handles all human-facing presentation. The `text` format is the design target for agent usability.
+The `text` format should be concise and token-efficient by default. Include:
+- IDs and references needed for follow-up commands
+- Status and error information
+- Key data fields
+- **Suggested next commands** when there's an obvious workflow
+
+Omit:
+- Decorative prose ("Successfully completed!")
+- Redundant confirmations
+- Lengthy explanations (put those in --help)
+
+The `toon` format is an ultra-compact alternative when even text is too verbose, but text should be the design target for agent usability.

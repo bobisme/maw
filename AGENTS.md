@@ -440,6 +440,10 @@ If you see `(divergent)` in `jj log`:
 jj abandon <change-id>/0   # keep one, abandon the divergent copy
 ```
 
+**Working copy snapshots**: jj auto-snapshots your working copy before most operations (`jj new`, `jj rebase`, etc.). Edits go into the **current** commit automatically. To put changes in a **new** commit, run `jj new` first, then edit files.
+
+**Always pass `-m`**: Commands like `jj commit`, `jj squash`, and `jj describe` open an editor by default. Agents cannot interact with editors, so always pass `-m "message"` explicitly.
+
 ### Beads Conventions
 
 - Create a bead before starting work. Update status: `open` → `in_progress` → `closed`.

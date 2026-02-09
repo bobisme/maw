@@ -37,7 +37,7 @@ When you've completed multiple beads in a session (or a significant single bead)
 
 **Features or fixes** (user-visible changes):
 - Follow the project's release process:
-  1. Bump version (Cargo.toml, package.json, etc.) using **semantic versioning**
+  1. Run `jj new` to create a release commit, **then** bump version (Cargo.toml, package.json, etc.) using **semantic versioning**. Order matters: jj snapshots the working copy before `jj new`, so edits made before `jj new` go into the previous commit.
   2. Update changelog/release notes if the project has one
   3. Push to main
   4. Tag and push (`jj tag set vX.Y.Z -r main && maw push`)
