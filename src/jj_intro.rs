@@ -7,7 +7,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn jj_intro_text() -> &'static str {
+const fn jj_intro_text() -> &'static str {
     r#"# jj Quick Reference for Git Users
 
 jj is a git-compatible version control system. Your work is backed by git, you

@@ -258,9 +258,12 @@ pub enum WorkspaceCommands {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Output format: toon (default), json, or text
-        #[arg(long, default_value = "toon")]
-        format: OutputFormat,
+        /// Output format: text, json, or pretty
+        ///
+        /// If not specified, auto-detects: pretty for TTY, text for pipes.
+        /// Can also be set via FORMAT env var.
+        #[arg(long)]
+        format: Option<OutputFormat>,
     },
 
     /// Show status of current workspace and all agent work
@@ -271,9 +274,12 @@ pub enum WorkspaceCommands {
     /// - Any conflicts that need resolution
     /// - Unmerged work across all workspaces
     Status {
-        /// Output format: toon (default), json, or text
-        #[arg(long, default_value = "toon")]
-        format: OutputFormat,
+        /// Output format: text, json, or pretty
+        ///
+        /// If not specified, auto-detects: pretty for TTY, text for pipes.
+        /// Can also be set via FORMAT env var.
+        #[arg(long)]
+        format: Option<OutputFormat>,
     },
 
     /// Sync workspace with repository (handle stale working copy)
@@ -415,8 +421,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             create(&name, revision.as_deref())
         }
         WorkspaceCommands::Destroy { name, confirm } => destroy(&name, confirm),
-        WorkspaceCommands::List { verbose, format } => list(verbose, format),
-        WorkspaceCommands::Status { format } => status(format),
+        WorkspaceCommands::List { verbose, format } => list(verbose, OutputFormat::resolve(format)),
+        WorkspaceCommands::Status { format } => status(OutputFormat::resolve(format)),
         WorkspaceCommands::Sync { all } => sync(all),
         WorkspaceCommands::Jj { name, args } => {
             let args_str = args.join(" ");
@@ -456,11 +462,10 @@ pub fn repo_root() -> Result<PathBuf> {
     // If we're inside a workspace (ws/<name>/), walk up
     // to the directory containing ws/.
     for ancestor in root.ancestors() {
-        if ancestor.file_name().map_or(false, |n| n == "ws") {
-            if let Some(parent) = ancestor.parent() {
+        if ancestor.file_name().is_some_and(|n| n == "ws")
+            && let Some(parent) = ancestor.parent() {
                 return Ok(parent.to_path_buf());
             }
-        }
     }
 
     Ok(root)
@@ -509,7 +514,7 @@ fn workspaces_dir() -> Result<PathBuf> {
     Ok(repo_root()?.join("ws"))
 }
 
-pub(crate) fn workspace_path(name: &str) -> Result<PathBuf> {
+pub fn workspace_path(name: &str) -> Result<PathBuf> {
     validate_workspace_name(name)?;
     Ok(workspaces_dir()?.join(name))
 }
@@ -601,21 +606,6 @@ fn check_stale_workspaces() -> Result<Vec<String>> {
     Ok(stale)
 }
 
-/// Print warning about stale workspaces if any are detected.
-fn warn_stale_workspaces() {
-    match check_stale_workspaces() {
-        Ok(stale) if !stale.is_empty() => {
-            eprintln!();
-            eprintln!(
-                "WARNING: {} workspace(s) stale: {}",
-                stale.len(),
-                stale.join(", ")
-            );
-            eprintln!("  Fix: maw ws sync --all");
-        }
-        _ => {}
-    }
-}
 
 fn create(name: &str, revision: Option<&str>) -> Result<()> {
     let root = ensure_repo_root()?;
@@ -733,13 +723,11 @@ fn destroy(name: &str, confirm: bool) -> Result<()> {
         bail!("Cannot destroy the default workspace");
     }
     // Also check config in case default_workspace is customized
-    if let Ok(root) = repo_root() {
-        if let Ok(config) = MawConfig::load(&root) {
-            if name == config.default_workspace() {
+    if let Ok(root) = repo_root()
+        && let Ok(config) = MawConfig::load(&root)
+            && name == config.default_workspace() {
                 bail!("Cannot destroy the default workspace");
             }
-        }
-    }
 
     ensure_repo_root()?;
     let path = workspace_path(name)?;
@@ -814,8 +802,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     let is_tracked = ws_list.lines().any(|line| {
         line.split(':')
             .next()
-            .map(|n| n.trim().trim_end_matches('@') == name)
-            .unwrap_or(false)
+            .is_some_and(|n| n.trim().trim_end_matches('@') == name)
     });
 
     if is_tracked {
@@ -845,7 +832,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     // Move all contents (except .jj) to backup
     let entries: Vec<_> = std::fs::read_dir(&path)
         .with_context(|| format!("Failed to read directory: {}", path.display()))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_name() != ".jj")
         .collect();
 
@@ -887,7 +874,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
             .ok()
             .into_iter()
             .flatten()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
         {
             let src = entry.path();
             let dst = path.join(entry.file_name());
@@ -907,7 +894,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     // Move contents back from backup
     for entry in std::fs::read_dir(&temp_backup)
         .with_context(|| "Failed to read backup directory")?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         let src = entry.path();
         let dst = path.join(entry.file_name());
@@ -1017,46 +1004,9 @@ fn status(format: OutputFormat) -> Result<()> {
 
     let divergent_text = String::from_utf8_lossy(&divergent_output.stdout);
 
-    // For text format, use the traditional output
-    if format == OutputFormat::Text {
-        print_status_text(
-            &current_ws,
-            is_stale,
-            &status_stdout,
-            &ws_list,
-            &conflicts_text,
-            &divergent_text,
-        );
-        return Ok(());
-    }
-
-    // For structured formats, parse and serialize
-    match build_status_struct(
-        &current_ws,
-        is_stale,
-        &status_stdout,
-        &ws_list,
-        &conflicts_text,
-        &divergent_text,
-    ) {
-        Ok(status_data) => match format.serialize(&status_data) {
-            Ok(output) => println!("{output}"),
-            Err(e) => {
-                eprintln!("Warning: Failed to serialize status to {format:?}: {}", e);
-                eprintln!("Falling back to text output:");
-                print_status_text(
-                    &current_ws,
-                    is_stale,
-                    &status_stdout,
-                    &ws_list,
-                    &conflicts_text,
-                    &divergent_text,
-                );
-            }
-        },
-        Err(e) => {
-            eprintln!("Warning: Failed to parse status data: {}", e);
-            eprintln!("Falling back to text output:");
+    // Handle different output formats
+    match format {
+        OutputFormat::Text => {
             print_status_text(
                 &current_ws,
                 is_stale,
@@ -1066,12 +1016,61 @@ fn status(format: OutputFormat) -> Result<()> {
                 &divergent_text,
             );
         }
+        OutputFormat::Pretty => {
+            print_status_pretty(
+                &current_ws,
+                is_stale,
+                &status_stdout,
+                &ws_list,
+                &conflicts_text,
+                &divergent_text,
+                format.should_use_color(),
+            );
+        }
+        OutputFormat::Json => {
+            match build_status_struct(
+                &current_ws,
+                is_stale,
+                &status_stdout,
+                &ws_list,
+                &conflicts_text,
+                &divergent_text,
+            ) {
+                Ok(status_data) => match format.serialize(&status_data) {
+                    Ok(output) => println!("{output}"),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to serialize status to JSON: {e}");
+                        eprintln!("Falling back to text output:");
+                        print_status_text(
+                            &current_ws,
+                            is_stale,
+                            &status_stdout,
+                            &ws_list,
+                            &conflicts_text,
+                            &divergent_text,
+                        );
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse status data: {e}");
+                    eprintln!("Falling back to text output:");
+                    print_status_text(
+                        &current_ws,
+                        is_stale,
+                        &status_stdout,
+                        &ws_list,
+                        &conflicts_text,
+                        &divergent_text,
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
-/// Print status in traditional text format
+/// Print status in compact text format (ID-first, agent-friendly)
 fn print_status_text(
     current_ws: &str,
     is_stale: bool,
@@ -1080,19 +1079,93 @@ fn print_status_text(
     conflicts: &str,
     divergent: &str,
 ) {
-    println!("=== Workspace Status ===");
+    // Current workspace and stale warning
+    println!("workspace: {current_ws}");
+    if is_stale {
+        println!("stale: true");
+        println!("  Fix: maw ws sync {current_ws}");
+    }
+
+    // Changes
+    if status_stdout.trim().is_empty() {
+        println!("changes: none");
+    } else {
+        println!("changes:");
+        for line in status_stdout.lines() {
+            println!("  {line}");
+        }
+    }
     println!();
 
+    // All workspaces
+    println!("workspaces:");
+    for line in ws_list.lines() {
+        if let Some((name, rest)) = line.split_once(':') {
+            let name = name.trim().trim_end_matches('@');
+            let is_current_marker = if name == current_ws { "  (current)" } else { "" };
+            println!("  {}  {}{}", name, rest.trim(), is_current_marker);
+        }
+    }
+
+    // Conflicts
+    if !conflicts.trim().is_empty() {
+        println!();
+        println!("conflicts:");
+        for line in conflicts.lines() {
+            println!("  {line}");
+        }
+        println!("  Fix: edit files, then: maw ws jj <name> describe -m \"resolve: ...\"");
+    }
+
+    // Divergent commits
+    if !divergent.trim().is_empty() {
+        println!();
+        println!("divergent:");
+        for line in divergent.lines() {
+            if !line.trim().is_empty() {
+                println!("  {line}");
+            }
+        }
+        println!("  Fix: jj abandon <change-id>/0");
+    }
+
+    // Next command
+    println!();
+    println!("Next: maw ws jj {current_ws} describe -m \"feat: ...\"");
+}
+
+/// Print status in pretty format (colored, human-friendly)
+fn print_status_pretty(
+    current_ws: &str,
+    is_stale: bool,
+    status_stdout: &str,
+    ws_list: &str,
+    conflicts: &str,
+    divergent: &str,
+    use_color: bool,
+) {
+    let (bold, green, yellow, red, gray, reset) = if use_color {
+        ("\x1b[1m", "\x1b[32m", "\x1b[33m", "\x1b[31m", "\x1b[90m", "\x1b[0m")
+    } else {
+        ("", "", "", "", "", "")
+    };
+
+    // Header
+    println!("{bold}Workspace Status{reset}");
+    println!();
+
+    // Stale warning
     if is_stale {
-        println!("WARNING: Working copy is stale!");
-        println!("  (Another workspace changed shared history — your files are outdated.)");
-        println!("  Fix: maw ws sync {current_ws}");
+        println!("{yellow}▲ WARNING:{reset} Working copy is stale");
+        println!("  Another workspace changed shared history — your files are outdated");
+        println!("  {gray}Fix: maw ws sync {current_ws}{reset}");
         println!();
     }
 
-    println!("Current: {current_ws}");
+    // Current workspace
+    println!("{bold}Current:{reset} {current_ws}");
     if status_stdout.trim().is_empty() {
-        println!("  (no changes)");
+        println!("  {gray}(no changes){reset}");
     } else {
         for line in status_stdout.lines() {
             println!("  {line}");
@@ -1100,51 +1173,49 @@ fn print_status_text(
     }
     println!();
 
-    println!("=== All Agent Work ===");
-    println!();
-
+    // All workspaces
+    println!("{bold}All Workspaces{reset}");
     for line in ws_list.lines() {
         if let Some((name, rest)) = line.split_once(':') {
-            let name = name.trim();
-            let is_current = name == current_ws;
-            let marker = if is_current { ">" } else { " " };
-            println!("{marker} {name}: {}", rest.trim());
+            let name = name.trim().trim_end_matches('@');
+            if name == current_ws {
+                println!("  {}● {}{} {}", green, name, reset, rest.trim());
+            } else {
+                println!("  {}◌ {}{} {}", gray, name, reset, rest.trim());
+            }
         }
     }
-    println!();
 
+    // Conflicts
     if !conflicts.trim().is_empty() {
-        println!("=== Conflicts ===");
-        println!("  (jj records conflicts in commits instead of blocking — you can keep working)");
         println!();
+        println!("{bold}Conflicts{reset}");
+        println!("  {gray}jj records conflicts in commits — you can keep working{reset}");
         for line in conflicts.lines() {
-            println!("  ! {line}");
+            println!("  {red}!{reset} {line}");
         }
         println!();
-        println!("  To resolve: edit conflicted files (look for <<<<<<< markers),");
-        println!("  then set the commit message:");
-        println!("    maw ws jj <name> describe -m \"resolve: ...\"");
-        println!("    ('describe' = set commit message, like git commit --amend -m)");
-        println!();
+        println!("  To resolve: edit conflicted files (look for <<<<<<< markers)");
+        println!("  then: {gray}maw ws jj <name> describe -m \"resolve: ...\"{reset}");
     }
 
+    // Divergent commits
     if !divergent.trim().is_empty() {
-        println!("=== Divergent Commits (needs cleanup) ===");
         println!();
-        println!("  WARNING: These commits have divergent versions (same change ID, multiple");
-        println!("  commit versions). This happens when two operations modified the same commit");
-        println!("  concurrently — rare with maw since each agent owns their own commit.");
-        println!();
+        println!("{bold}Divergent Commits{reset}");
+        println!("  {yellow}WARNING: Multiple versions of the same commit{reset}");
         for line in divergent.lines() {
             if !line.trim().is_empty() {
-                println!("  ~ {line}");
+                println!("  {yellow}~{reset} {line}");
             }
         }
         println!();
-        println!("  To fix: keep one version and abandon (delete) the others:");
-        println!("    jj abandon <change-id>/0   # remove the unwanted version");
-        println!();
+        println!("  Fix: {gray}jj abandon <change-id>/0{reset}");
     }
+
+    // Next command
+    println!();
+    println!("{gray}Next: maw ws jj {current_ws} describe -m \"feat: ...\"{reset}");
 }
 
 /// Build structured status data (resilient to parsing failures)
@@ -1305,7 +1376,7 @@ fn sync(all: bool) -> Result<()> {
 
 /// After sync, detect and auto-resolve divergent commits on the workspace's
 /// working copy. When `jj workspace update-stale` runs, it can fork the
-/// workspace commit into multiple versions (e.g. change_id/0 and change_id/1).
+/// workspace commit into multiple versions (e.g. `change_id/0` and `change_id/1`).
 ///
 /// Resolution strategy (never abandons @, which would orphan the workspace pointer):
 /// 1. Empty non-@ copies → abandon
@@ -1335,7 +1406,7 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
 
     // Check if this change ID has divergent copies.
     // Must use change_id() revset function — bare change_id errors on divergent changes.
-    let revset = format!("change_id({})", change_id);
+    let revset = format!("change_id({change_id})");
     let divergent_output = Command::new("jj")
         .args([
             "log",
@@ -1353,7 +1424,7 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
     let divergent_commits: Vec<String> = divergent_text
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     if divergent_commits.len() <= 1 {
@@ -1513,7 +1584,9 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
     }
 
     // Report unresolved copies with actionable instructions
-    if !unresolved.is_empty() {
+    if unresolved.is_empty() {
+        println!("  Divergence fully resolved.");
+    } else {
         println!();
         println!("  WARNING: {} divergent copy/copies could not be auto-resolved.", unresolved.len());
         println!("  @ and non-@ have overlapping but different changes.");
@@ -1528,8 +1601,6 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
             println!("    jj squash --from {id} --into @");
         }
         println!("  IMPORTANT: Do NOT abandon @ — this orphans the workspace pointer.");
-    } else {
-        println!("  Divergence fully resolved.");
     }
 
     Ok(())
@@ -1704,7 +1775,7 @@ fn sync_all() -> Result<()> {
 /// Auto-sync a stale workspace before running a command.
 /// If the workspace is stale, runs update-stale + divergent resolution.
 /// Returns Ok(()) whether or not it was stale (idempotent).
-pub(crate) fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
+pub fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
     let output = Command::new("jj")
         .args(["status"])
         .current_dir(path)
@@ -1802,8 +1873,7 @@ fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result
 
     if synced_count > 0 {
         println!(
-            "Synced {} stale workspace(s). Proceeding with merge.",
-            synced_count
+            "Synced {synced_count} stale workspace(s). Proceeding with merge."
         );
         println!();
     }
@@ -1831,8 +1901,7 @@ fn history(name: &str, limit: usize) -> Result<()> {
         .any(|line| {
             line.split(':')
                 .next()
-                .map(|n| n.trim().trim_end_matches('@') == name)
-                .unwrap_or(false)
+                .is_some_and(|n| n.trim().trim_end_matches('@') == name)
         });
 
     if !workspace_exists {
@@ -1914,7 +1983,7 @@ fn history(name: &str, limit: usize) -> Result<()> {
 
     let line_count = history.lines().filter(|l| !l.trim().is_empty()).count();
     println!();
-    println!("Showing {} commit(s)", line_count);
+    println!("Showing {line_count} commit(s)");
 
     if line_count >= limit {
         println!("  (Use --limit/-n to show more)");
@@ -2088,9 +2157,8 @@ fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: b
                     "{hook_type} hook failed (exit code {exit_code}): {cmd}\n  \
                      Merge aborted. Fix the issue and try again."
                 );
-            } else {
-                eprintln!("  WARNING: {hook_type} hook failed (exit code {exit_code}): {cmd}");
             }
+            eprintln!("  WARNING: {hook_type} hook failed (exit code {exit_code}): {cmd}");
         }
     }
 
@@ -2116,7 +2184,7 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
     println!();
 
     for ws in workspaces {
-        println!("--- {} ---", ws);
+        println!("--- {ws} ---");
 
         // Get diff stats for the workspace using workspace@ syntax
         let diff_output = Command::new("jj")
@@ -2164,7 +2232,7 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
                     .lines()
                     .filter_map(|line| {
                         // Format: "M path/to/file" or "A path/to/file"
-                        line.split_whitespace().nth(1).map(|s| s.to_string())
+                        line.split_whitespace().nth(1).map(std::string::ToString::to_string)
                     })
                     .collect();
                 workspace_files.push((ws.clone(), files));
@@ -2343,14 +2411,13 @@ fn merge(
         .current_dir(&cwd)
         .output();
 
-    if let Ok(output) = abandon_output {
-        if output.status.success() {
+    if let Ok(output) = abandon_output
+        && output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.contains("Abandoned") {
                 println!("Cleaned up scaffolding commits.");
             }
         }
-    }
 
     // Step 5: Rebase default workspace onto new branch so on-disk files reflect the merge.
     // The default workspace's working copy is empty (no changes), so this is safe.
@@ -2522,7 +2589,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
     let dir_workspaces: std::collections::HashSet<String> = if ws_dir.exists() {
         std::fs::read_dir(&ws_dir)
             .context("Failed to read ws directory")?
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|entry| {
                 let path = entry.path();
                 // Skip symlinks - they could point anywhere
@@ -2575,14 +2642,13 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
                 .current_dir(&cwd)
                 .output();
 
-            if let Ok(diff) = diff_output {
-                if diff.status.success() {
+            if let Ok(diff) = diff_output
+                && diff.status.success() {
                     let diff_text = String::from_utf8_lossy(&diff.stdout);
                     if diff_text.trim().is_empty() {
                         analysis.empty.push(jj_ws.clone());
                     }
                 }
-            }
         }
     }
 
@@ -2712,8 +2778,7 @@ fn prune(force: bool, include_empty: bool) -> Result<()> {
         let deleted = analysis.orphaned.len() + analysis.empty.len();
         let forgotten = analysis.missing.len();
         println!(
-            "Pruned: {} deleted, {} forgotten from jj",
-            deleted, forgotten
+            "Pruned: {deleted} deleted, {forgotten} forgotten from jj"
         );
     } else {
         println!("=== Summary ===");
@@ -2755,8 +2820,8 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
 
     if list.trim().is_empty() {
         match format {
-            OutputFormat::Text => println!("No workspaces found."),
-            OutputFormat::Json | OutputFormat::Toon => {
+            OutputFormat::Text | OutputFormat::Pretty => println!("No workspaces found."),
+            OutputFormat::Json => {
                 let envelope = WorkspaceListEnvelope {
                     workspaces: vec![],
                     advice: vec![],
@@ -2767,79 +2832,139 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         return Ok(());
     }
 
-    // For text format, just print the raw jj output (traditional behavior)
-    if format == OutputFormat::Text {
-        println!("Workspaces:");
-        println!();
-
-        for line in list.lines() {
-            if let Some((name, rest)) = line.split_once(':') {
-                let name = name.trim();
-                let rest = rest.trim();
-
-                let is_default = name == DEFAULT_WORKSPACE;
-                let marker = if is_default { "*" } else { " " };
-
-                if verbose {
-                    println!("{marker} {name}");
-                    println!("    {rest}");
-
-                    let path = workspace_path(name)?;
-                    if path.exists() {
-                        println!("    path: {}/", path.display());
-                    } else {
-                        println!("    path: (missing!)");
-                    }
-                    println!();
-                } else {
-                    println!("{marker} {name}: {rest}");
-                }
-            }
-        }
-        // Check for stale workspaces after listing
-        warn_stale_workspaces();
-        return Ok(());
-    }
-
-    // For structured formats (json/toon), parse into data structures
-    // Be resilient: if parsing fails, fall back to raw text
+    // Parse workspace list into structured data
     let workspaces: Vec<WorkspaceInfo> = match parse_workspace_list(&list, verbose) {
         Ok(ws) => ws,
         Err(e) => {
-            eprintln!("Warning: Failed to parse workspace list: {}", e);
+            eprintln!("Warning: Failed to parse workspace list: {e}");
             eprintln!("Falling back to raw text output:");
             println!("{list}");
             return Ok(());
         }
     };
 
-    // Collect stale workspace warnings into the advice array
-    let advice = match check_stale_workspaces() {
-        Ok(stale) if !stale.is_empty() => {
-            vec![Advice {
-                level: "warn",
-                message: format!("{} workspace(s) stale: {}", stale.len(), stale.join(", ")),
-                details: Some(AdviceDetails {
-                    workspaces: stale,
-                    fix: "maw ws sync --all".to_string(),
-                }),
-            }]
+    // Collect stale workspace warnings
+    let stale_workspaces = check_stale_workspaces().unwrap_or_default();
+
+    // Handle different output formats
+    match format {
+        OutputFormat::Text => {
+            // Compact, ID-first, agent-friendly format
+            for ws in &workspaces {
+                let default_marker = if ws.is_default { "  [default]" } else { "" };
+                println!(
+                    "{}  {}  {}  {}{}",
+                    ws.name, ws.change_id, ws.commit_id, ws.description, default_marker
+                );
+                if verbose
+                    && let Some(path) = &ws.path {
+                        println!("  path: {path}");
+                    }
+            }
+
+            // Stale workspace warnings
+            if !stale_workspaces.is_empty() {
+                println!();
+                println!("WARNING: {} stale workspace(s): {}",
+                    stale_workspaces.len(),
+                    stale_workspaces.join(", ")
+                );
+                println!("  Fix: maw ws sync --all");
+            }
+
+            // Suggested next command
+            println!();
+            println!("Next: maw ws jj <name> describe -m \"feat: ...\"");
         }
-        _ => vec![],
-    };
 
-    let envelope = WorkspaceListEnvelope {
-        workspaces,
-        advice,
-    };
+        OutputFormat::Pretty => {
+            // Colored, human-friendly format with unicode glyphs
+            let use_color = format.should_use_color();
 
-    // Serialize to requested format
-    match format.serialize(&envelope) {
-        Ok(output) => println!("{output}"),
-        Err(e) => {
-            eprintln!("Warning: Failed to serialize to {format:?}: {}", e);
-            eprintln!("Falling back to raw text output:");
-            println!("{list}");
+            for ws in &workspaces {
+                let (glyph, name_style, reset) = if use_color {
+                    if ws.is_current {
+                        ("●", "\x1b[1;32m", "\x1b[0m")  // Green bold for current
+                    } else {
+                        ("◌", "\x1b[90m", "\x1b[0m")    // Gray for others
+                    }
+                } else if ws.is_current {
+                    ("●", "", "")
+                } else {
+                    ("◌", "", "")
+                };
+
+                println!(
+                    "{} {}{}{} {} {}",
+                    glyph, name_style, ws.name, reset, ws.change_id, ws.description
+                );
+
+                if verbose {
+                    if let Some(path) = &ws.path {
+                        println!("    path: {path}");
+                    }
+                    println!("    commit: {}", ws.commit_id);
+                    if ws.is_default {
+                        println!("    default workspace");
+                    }
+                }
+            }
+
+            // Stale workspace warnings
+            if !stale_workspaces.is_empty() {
+                println!();
+                if use_color {
+                    println!("\x1b[1;33m▲ WARNING:\x1b[0m {} stale workspace(s): {}",
+                        stale_workspaces.len(),
+                        stale_workspaces.join(", ")
+                    );
+                } else {
+                    println!("▲ WARNING: {} stale workspace(s): {}",
+                        stale_workspaces.len(),
+                        stale_workspaces.join(", ")
+                    );
+                }
+                println!("  Fix: maw ws sync --all");
+            }
+
+            // Suggested next command
+            if !workspaces.is_empty() {
+                println!();
+                if use_color {
+                    println!("\x1b[90mNext: maw ws jj <name> describe -m \"feat: ...\"\x1b[0m");
+                } else {
+                    println!("Next: maw ws jj <name> describe -m \"feat: ...\"");
+                }
+            }
+        }
+
+        OutputFormat::Json => {
+            let advice = if stale_workspaces.is_empty() {
+                vec![]
+            } else {
+                vec![Advice {
+                    level: "warn",
+                    message: format!("{} workspace(s) stale: {}", stale_workspaces.len(), stale_workspaces.join(", ")),
+                    details: Some(AdviceDetails {
+                        workspaces: stale_workspaces,
+                        fix: "maw ws sync --all".to_string(),
+                    }),
+                }]
+            };
+
+            let envelope = WorkspaceListEnvelope {
+                workspaces,
+                advice,
+            };
+
+            match format.serialize(&envelope) {
+                Ok(output) => println!("{output}"),
+                Err(e) => {
+                    eprintln!("Warning: Failed to serialize to JSON: {e}");
+                    eprintln!("Falling back to raw text output:");
+                    println!("{list}");
+                }
+            }
         }
     }
 
@@ -2864,10 +2989,10 @@ fn parse_workspace_list(list: &str, include_path: bool) -> Result<Vec<WorkspaceI
         let name = name_part.trim_end_matches('@').trim();
 
         // Parse rest: "change_id commit_id description..."
-        let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+        let parts: Vec<&str> = rest.split_whitespace().collect();
         if parts.len() < 2 {
             // Need at least change_id and commit_id
-            bail!("Unexpected workspace line format: {}", line);
+            bail!("Unexpected workspace line format: {line}");
         }
 
         let change_id = parts[0].to_string();

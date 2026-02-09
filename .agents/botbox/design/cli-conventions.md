@@ -27,9 +27,9 @@ Support three output formats via `--format` flag:
 
 | Format | Audience | Description |
 |--------|----------|-------------|
-| `text` | Humans + Agents | Concise, readable plain text. Default format. Should be token-efficient by design. |
-| `json` | Machines | Structured, parseable, stable schema |
-| `toon` | Agents (optional) | Ultra-compact token-optimized format. Available but `text` is usually sufficient. |
+| `text` | Agents + Machines | Compact, parseable plain text. ID-first layout, two-space delimiters, self-labeling fields. |
+| `json` | Machines | Structured JSON, stable schema for programmatic use. |
+| `pretty` | Humans | Colored output with unicode glyphs, optimized for terminal display. |
 
 ```bash
 # Flag takes precedence
@@ -38,14 +38,14 @@ tool items list --format json
 # Environment variable sets default
 FORMAT=json tool items list
 
-# Default to text for interactive terminals
+# Auto-detect: pretty for TTY, text for pipes
 tool items list
 ```
 
 **Implementation notes:**
-- Rust projects: use the `toon-format` crate
-- Detect TTY to choose sensible defaults (text for TTY, json for pipes)
-- `toon` format should be ~90% smaller than json while preserving key information
+- Auto-detect TTY: `pretty` if stdout is a terminal, `text` if piped
+- `pretty` format: use ANSI escape codes directly (no dependencies), respect `NO_COLOR` env var
+- `text` format: designed for agents and machines, compact and parseable
 
 ## Help and Documentation
 
@@ -352,4 +352,4 @@ Omit:
 - Redundant confirmations
 - Lengthy explanations (put those in --help)
 
-The `toon` format is an ultra-compact alternative when even text is too verbose, but text should be the design target for agent usability.
+The `pretty` format is for human readability with colors and glyphs, while `text` is the design target for agent and machine usability.

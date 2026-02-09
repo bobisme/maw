@@ -272,19 +272,16 @@ fn set_git_bare_mode() -> Result<()> {
     Ok(())
 }
 
-/// Clean root directory so only KEEP_ROOT items remain.
+/// Clean root directory so only `KEEP_ROOT` items remain.
 ///
 /// Scans the root directory and removes any files/dirs not in the keep list.
 /// This catches both git-tracked files and untracked files (like .gitignore
 /// created during init but not yet committed).
 #[allow(clippy::unnecessary_wraps)]
 pub fn clean_root_source_files() -> Result<()> {
-    let entries = match fs::read_dir(".") {
-        Ok(e) => e,
-        Err(_) => {
-            println!("[OK] Could not read root directory");
-            return Ok(());
-        }
+    let entries = if let Ok(e) = fs::read_dir(".") { e } else {
+        println!("[OK] Could not read root directory");
+        return Ok(());
     };
 
     let mut cleaned = 0;
@@ -319,7 +316,7 @@ pub fn clean_root_source_files() -> Result<()> {
 
 /// Ensure .gitignore with ws/ exists in the default workspace.
 ///
-/// After clean_root_source_files removes .gitignore from root, it needs
+/// After `clean_root_source_files` removes .gitignore from root, it needs
 /// to exist in ws/default/ so jj ignores workspace directories.
 fn ensure_gitignore_in_workspace() -> Result<()> {
     let ws_gitignore = Path::new("ws").join("default").join(".gitignore");

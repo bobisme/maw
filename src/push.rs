@@ -48,13 +48,7 @@ pub fn run(args: &PushArgs) -> Result<()> {
     }
 
     // Check ahead/behind status — bail if behind, skip bookmark push if up-to-date
-    if !should_push(&cwd, branch)? {
-        println!("{branch} is up to date with origin.");
-        // Check if there's unpushed work at @- that could be pushed with --advance
-        if !args.advance {
-            suggest_advance(&cwd, branch);
-        }
-    } else {
+    if should_push(&cwd, branch)? {
         // Re-resolve after potential advance to get updated commit info
         let commit_info = resolve_branch(&cwd, branch)?;
 
@@ -80,6 +74,12 @@ pub fn run(args: &PushArgs) -> Result<()> {
             println!("{branch} is up to date with origin.");
         } else {
             println!("  Pushed: {commit_info}");
+        }
+    } else {
+        println!("{branch} is up to date with origin.");
+        // Check if there's unpushed work at @- that could be pushed with --advance
+        if !args.advance {
+            suggest_advance(&cwd, branch);
         }
     }
 

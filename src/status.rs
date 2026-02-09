@@ -76,8 +76,8 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
             if remaining.is_zero() {
                 break;
             }
-            if event::poll(remaining.min(Duration::from_millis(100)))? {
-                if let Event::Key(key) = event::read()? {
+            if event::poll(remaining.min(Duration::from_millis(100)))?
+                && let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -86,7 +86,6 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
                         _ => {}
                     }
                 }
-            }
         }
     }
 }
@@ -310,35 +309,35 @@ fn status_line(label: &str, value: &str, ok: bool) -> String {
 }
 
 impl MainSyncStatus {
-    fn is_warning(&self) -> bool {
-        !matches!(self, MainSyncStatus::UpToDate)
+    const fn is_warning(&self) -> bool {
+        !matches!(self, Self::UpToDate)
     }
 
     fn oneline(&self) -> String {
         match self {
-            MainSyncStatus::UpToDate => "sync".to_string(),
-            MainSyncStatus::Ahead(ahead) => format!("ahead({ahead})"),
-            MainSyncStatus::Behind(behind) => format!("behind({behind})"),
-            MainSyncStatus::Diverged { ahead, behind } => {
+            Self::UpToDate => "sync".to_string(),
+            Self::Ahead(ahead) => format!("ahead({ahead})"),
+            Self::Behind(behind) => format!("behind({behind})"),
+            Self::Diverged { ahead, behind } => {
                 format!("diverged({ahead}/{behind})")
             }
-            MainSyncStatus::NoMain => "no-main".to_string(),
-            MainSyncStatus::NoRemote => "no-remote".to_string(),
-            MainSyncStatus::Unknown(_) => "unknown".to_string(),
+            Self::NoMain => "no-main".to_string(),
+            Self::NoRemote => "no-remote".to_string(),
+            Self::Unknown(_) => "unknown".to_string(),
         }
     }
 
     fn describe(&self) -> String {
         match self {
-            MainSyncStatus::UpToDate => "up to date".to_string(),
-            MainSyncStatus::Ahead(ahead) => format!("ahead by {ahead} (not pushed)"),
-            MainSyncStatus::Behind(behind) => format!("behind by {behind}"),
-            MainSyncStatus::Diverged { ahead, behind } => {
+            Self::UpToDate => "up to date".to_string(),
+            Self::Ahead(ahead) => format!("ahead by {ahead} (not pushed)"),
+            Self::Behind(behind) => format!("behind by {behind}"),
+            Self::Diverged { ahead, behind } => {
                 format!("diverged (ahead {ahead}, behind {behind})")
             }
-            MainSyncStatus::NoMain => "missing main bookmark".to_string(),
-            MainSyncStatus::NoRemote => "no main@origin bookmark".to_string(),
-            MainSyncStatus::Unknown(reason) => format!("unknown ({reason})"),
+            Self::NoMain => "missing main bookmark".to_string(),
+            Self::NoRemote => "no main@origin bookmark".to_string(),
+            Self::Unknown(reason) => format!("unknown ({reason})"),
         }
     }
 }
@@ -495,11 +494,10 @@ fn git_status_files(root: &Path) -> Result<GitStatusFiles> {
             continue;
         }
         // Porcelain format: "?? path/to/file" for untracked
-        if line.starts_with("??") {
-            if let Some(path) = line.get(3..) {
+        if line.starts_with("??")
+            && let Some(path) = line.get(3..) {
                 files.untracked.push(path.trim().to_string());
             }
-        }
     }
 
     Ok(files)

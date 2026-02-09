@@ -65,7 +65,7 @@ fn check_tool(name: &str, args: &[&str], install_url: &str) -> bool {
     }
 }
 
-/// Check if we're in a jj repo. Uses jj_cwd() to avoid stale errors at bare root.
+/// Check if we're in a jj repo. Uses `jj_cwd()` to avoid stale errors at bare root.
 fn check_jj_repo(cwd: Option<&Path>) -> bool {
     let cwd = cwd.unwrap_or(Path::new("."));
 
@@ -110,8 +110,8 @@ fn check_default_workspace(root: Option<&Path>) -> bool {
 
     // Check that it has a .gitignore with ws/ entry
     let gitignore = default_ws.join(".gitignore");
-    if gitignore.exists() {
-        if let Ok(content) = std::fs::read_to_string(&gitignore) {
+    if gitignore.exists()
+        && let Ok(content) = std::fs::read_to_string(&gitignore) {
             let has_ws = content
                 .lines()
                 .any(|l| matches!(l.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
@@ -120,7 +120,6 @@ fn check_default_workspace(root: Option<&Path>) -> bool {
                 println!("       Run: maw init");
             }
         }
-    }
 
     // Check that source files exist (not an empty workspace)
     let has_files = std::fs::read_dir(&default_ws)
