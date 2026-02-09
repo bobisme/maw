@@ -39,7 +39,13 @@ pub fn run() -> Result<()> {
 }
 
 fn ensure_jj_repo() -> Result<()> {
-    let check = Command::new("jj").args(["status"]).output().context(
+    // Run from ws/default/ if it exists (root may lack .jj/working_copy/)
+    let jj_cwd = if Path::new("ws/default").exists() {
+        Path::new("ws/default")
+    } else {
+        Path::new(".")
+    };
+    let check = Command::new("jj").args(["status"]).current_dir(jj_cwd).output().context(
         "jj not found — install from https://martinvonz.github.io/jj/latest/install-and-setup/",
     )?;
 
@@ -157,9 +163,16 @@ fn setup_bare_default_workspace() -> Result<()> {
     let ws_dir = Path::new("ws");
     let default_path = ws_dir.join("default");
 
-    // Check current workspace state
+    // Check current workspace state. Run from ws/default/ if it exists
+    // (root may lack .jj/working_copy/ after ghost cleanup).
+    let jj_cwd = if default_path.exists() {
+        default_path.as_path()
+    } else {
+        Path::new(".")
+    };
     let output = Command::new("jj")
         .args(["workspace", "list"])
+        .current_dir(jj_cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -185,6 +198,7 @@ fn setup_bare_default_workspace() -> Result<()> {
     if has_default {
         let forget = Command::new("jj")
             .args(["workspace", "forget", "default"])
+            .current_dir(jj_cwd)
             .output()
             .context("Failed to forget default workspace")?;
 
