@@ -13,6 +13,7 @@ use crate::workspace::{self, MawConfig};
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const ANSI_ORANGE: &str = "\x1b[38;5;208m";
+const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_LIGHT_RED: &str = "\x1b[91m";
 const ANSI_GREEN: &str = "\x1b[32m";
@@ -91,11 +92,8 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
 
 #[derive(Debug)]
 struct StatusSummary {
-    total_workspaces: usize,
     workspaces: usize,
     change_count: usize,
-    jj_change_count: usize,
-    git_change_count: usize,
     git_untracked_count: usize,
     is_stale: bool,
     main_sync: MainSyncStatus,
@@ -132,18 +130,14 @@ impl StatusSummary {
 
     fn render_oneline(&self) -> String {
         let check = green_check();
-        let mut parts = vec![
-            format!("ws={}{}", self.workspaces, if self.workspaces == 0 { &check } else { "" }),
-            format!("changes={}{}", self.change_count, if self.change_count == 0 { &check } else { "" }),
-            format!("untracked={}{}", self.git_untracked_count, if self.git_untracked_count == 0 { &check } else { "" }),
-            format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { "" }),
+        let warn = yellow_warn();
+        let parts = vec![
+            format!("ws={}{}", self.workspaces, if self.workspaces == 0 { &check } else { &warn }),
+            format!("changes={}{}", self.change_count, if self.change_count == 0 { &check } else { &warn }),
+            format!("untracked={}{}", self.git_untracked_count, if self.git_untracked_count == 0 { &check } else { &warn }),
+            format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { &warn }),
+            format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }),
         ];
-
-        if self.is_stale {
-            parts.push("stale=1".to_string());
-        } else {
-            parts.push(format!("stale=0{check}"));
-        }
 
         format!("{}\n", parts.join(" "))
     }
@@ -198,45 +192,42 @@ impl StatusSummary {
     }
 
     fn render_multiline(&self) -> String {
-        let check = green_check();
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
 
-        if self.workspaces == 0 {
-            out.push_str(&format!("Agent workspaces: {} ({} total) {check}\n", self.workspaces, self.total_workspaces));
-        } else {
-            out.push_str(&format!("Agent workspaces: {} ({} total)\n", self.workspaces, self.total_workspaces));
-        }
+        out.push_str(&status_line(
+            "Non-default workspaces",
+            &if self.workspaces == 0 { "none".to_string() } else { self.workspaces.to_string() },
+            self.workspaces == 0,
+        ));
 
-        if self.change_count == 0 {
-            out.push_str(&format!("Working copy changes: none {check}\n"));
-        } else {
-            out.push_str(&format!(
-                "Working copy changes: {} (jj={}, git={})\n",
-                self.change_count, self.jj_change_count, self.git_change_count
-            ));
-        }
+        out.push_str(&status_line(
+            "Working copy",
+            &if self.change_count == 0 {
+                "clean".to_string()
+            } else {
+                format!("{} changed files", self.change_count)
+            },
+            self.change_count == 0,
+        ));
 
-        if self.git_untracked_count == 0 {
-            out.push_str(&format!("Untracked files (git): none {check}\n"));
-        } else {
-            out.push_str(&format!(
-                "Untracked files (git): {}\n",
-                self.git_untracked_count
-            ));
-        }
+        out.push_str(&status_line(
+            "Untracked files",
+            &if self.git_untracked_count == 0 { "none".to_string() } else { self.git_untracked_count.to_string() },
+            self.git_untracked_count == 0,
+        ));
 
-        if matches!(self.main_sync, MainSyncStatus::UpToDate) {
-            out.push_str(&format!("Main vs origin: {} {check}\n", self.main_sync.describe()));
-        } else {
-            out.push_str(&format!("Main vs origin: {}\n", self.main_sync.describe()));
-        }
+        out.push_str(&status_line(
+            "Main vs origin",
+            &self.main_sync.describe(),
+            matches!(self.main_sync, MainSyncStatus::UpToDate),
+        ));
 
-        if self.is_stale {
-            out.push_str("Stale workspace: yes (run `maw ws sync`)\n");
-        } else {
-            out.push_str(&format!("Stale workspace: no {check}\n"));
-        }
+        out.push_str(&status_line(
+            "Default workspace",
+            &if self.is_stale { "stale (run: maw ws sync)".to_string() } else { "fresh".to_string() },
+            !self.is_stale,
+        ));
 
         out
     }
@@ -256,6 +247,24 @@ fn colorize_light_red(value: &str) -> String {
 
 fn green_check() -> String {
     format!("{ANSI_GREEN}✓{ANSI_RESET}")
+}
+
+fn yellow_warn() -> String {
+    format!("{ANSI_YELLOW}⚠{ANSI_RESET}")
+}
+
+fn colorize_yellow(value: &str) -> String {
+    format!("{ANSI_YELLOW}{value}{ANSI_RESET}")
+}
+
+/// Format a status line with glyph on the left.
+/// `ok`: true → green ✓, false → yellow ⚠ with yellow value.
+fn status_line(label: &str, value: &str, ok: bool) -> String {
+    if ok {
+        format!("  {} {label}: {value}\n", green_check())
+    } else {
+        format!("  {} {label}: {}\n", yellow_warn(), colorize_yellow(value))
+    }
 }
 
 impl MainSyncStatus {
@@ -340,7 +349,7 @@ fn collect_status() -> Result<StatusSummary> {
     }
 
     let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let (total_workspaces, workspaces) = count_workspaces(&ws_list);
+    let (_total_workspaces, workspaces) = count_workspaces(&ws_list);
 
     let status_output = Command::new("jj")
         .args(["status", "--color=never", "--no-pager"])
@@ -366,11 +375,8 @@ fn collect_status() -> Result<StatusSummary> {
     let main_sync = main_sync_status(&cwd, config.branch())?;
 
     Ok(StatusSummary {
-        total_workspaces,
         workspaces,
         change_count,
-        jj_change_count,
-        git_change_count: git_counts.changes,
         git_untracked_count: git_counts.untracked,
         is_stale,
         main_sync,
