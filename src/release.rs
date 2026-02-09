@@ -58,9 +58,16 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         );
     }
 
-    // Get the commit info for reporting
+    // Get the commit hash and info for reporting + git tagging.
+    // IMPORTANT: We resolve from jj, not git, because the local git ref
+    // for the branch may be stale (jj git push updates the remote but
+    // doesn't always export to the local git ref in bare repos).
+    let commit_hash = get_commit_hash(&cwd, branch)?;
     let commit_info = get_commit_info(&cwd, branch)?;
     println!("  {branch} -> {commit_info}");
+
+    // Warn if working copy has uncommitted changes
+    check_working_copy_clean(&cwd);
 
     // Step 2: Push branch to origin
     println!("Pushing {branch} to origin...");
@@ -99,9 +106,10 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         bail!("Failed to create jj tag: {}", stderr.trim());
     }
 
-    // Step 4: Create git tag (jj tags don't reliably export to git)
+    // Step 4: Create git tag using the jj-resolved commit hash.
+    // We can't use the branch name because the local git ref may be stale.
     let git_tag = Command::new("git")
-        .args(["tag", tag, branch])
+        .args(["tag", tag, &commit_hash])
         .current_dir(&root)
         .output()
         .context("Failed to create git tag")?;
@@ -138,6 +146,52 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     println!("  Tag:    {tag} pushed to origin");
 
     Ok(())
+}
+
+/// Resolve the full commit hash for a revset from jj.
+fn get_commit_hash(cwd: &std::path::Path, revset: &str) -> Result<String> {
+    let output = Command::new("jj")
+        .args([
+            "log",
+            "-r",
+            revset,
+            "--no-graph",
+            "--color=never",
+            "--no-pager",
+            "-T",
+            "commit_id",
+        ])
+        .current_dir(cwd)
+        .output()
+        .context("Failed to resolve commit hash")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to resolve {revset}: {}", stderr.trim());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_string())
+}
+
+/// Warn if the working copy (@) has uncommitted changes that won't be included.
+fn check_working_copy_clean(cwd: &std::path::Path) {
+    let Ok(output) = Command::new("jj")
+        .args(["diff", "--stat", "-r", "@"])
+        .current_dir(cwd)
+        .output()
+    else {
+        return;
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        println!();
+        println!("WARNING: Working copy (@) has uncommitted changes that are NOT in this release.");
+        println!("  If these should be included, abort and run: jj squash");
+        println!();
+    }
 }
 
 fn get_commit_info(cwd: &std::path::Path, branch: &str) -> Result<String> {
