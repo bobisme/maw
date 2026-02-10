@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.30.4
+
+- Fix: `maw init` compatibility with jj 0.37.0 — ghost `.jj/working_copy/` cleanup moved to after `jj workspace add` succeeds, preventing "No such file or directory" errors during init.
+- Refactor: split 3100-line `workspace.rs` into `workspace/` module (9 files: mod.rs, merge.rs, sync.rs, status.rs, create.rs, list.rs, prune.rs, history.rs, names.rs).
+- Test: add 13 integration tests covering merge (5), sync (3), push (2), and config/status (3) using real jj repos in temp directories. Fix test helpers for jj 0.37.0 (commit `.gitignore` after init, use `--all` for initial push to new remotes).
+
 ## v0.30.3
 
 - `maw init` now previews root cleanup before deleting files. Untracked files (not in any jj/git commit) are skipped with a warning instead of silently deleted. Only jj-tracked files — which are recoverable — are removed.
