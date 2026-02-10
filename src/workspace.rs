@@ -2398,6 +2398,28 @@ fn merge(
     // Build revision references using workspace@ syntax
     let revisions: Vec<String> = ws_to_merge.iter().map(|ws| format!("{ws}@")).collect();
 
+    // Record parent commit IDs before rebase, so we can abandon only these
+    // specific scaffolding commits afterward (not commits from other workspaces).
+    let parents_revset = revisions
+        .iter()
+        .map(|r| format!("parents({r})"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let parents_output = Command::new("jj")
+        .args(["log", "-r", &parents_revset, "--no-graph", "-T", "commit_id ++ \"\\n\""])
+        .current_dir(&cwd)
+        .output();
+    let pre_rebase_parent_ids: Vec<String> = parents_output
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Build merge commit message
     let msg = message.map_or_else(
         || {
@@ -2483,21 +2505,32 @@ fn merge(
         eprintln!("  Run manually: jj bookmark set {branch} -r {final_rev}");
     }
 
-    // Step 4: Abandon orphaned scaffolding commits (empty, undescribed, not on branch)
-    // These are the workspace setup commits that got orphaned by rebase
-    let abandon_revset = format!("empty() & description(exact:'') & ~ancestors({branch}) & ~root()");
-    let abandon_output = Command::new("jj")
-        .args(["abandon", &abandon_revset])
-        .current_dir(&cwd)
-        .output();
+    // Step 4: Abandon orphaned scaffolding commits from the merged workspaces only.
+    // Only target the specific parent commits recorded before rebase — not all empty
+    // commits in the repo, which could belong to other active workspaces.
+    if !pre_rebase_parent_ids.is_empty() {
+        let id_terms: Vec<String> = pre_rebase_parent_ids
+            .iter()
+            .map(|id| format!("id(\"{id}\")"))
+            .collect();
+        let abandon_revset = format!(
+            "({}) & empty() & description(exact:'') & ~ancestors({branch}) & ~root()",
+            id_terms.join(" | ")
+        );
+        let abandon_output = Command::new("jj")
+            .args(["abandon", &abandon_revset])
+            .current_dir(&cwd)
+            .output();
 
-    if let Ok(output) = abandon_output
-        && output.status.success() {
+        if let Ok(output) = abandon_output
+            && output.status.success()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.contains("Abandoned") {
                 println!("Cleaned up scaffolding commits.");
             }
         }
+    }
 
     // Step 5: Rebase default workspace onto new branch so on-disk files reflect the merge.
     // The default workspace's working copy is empty (no changes), so this is safe.
