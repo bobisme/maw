@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## v0.30.3
+
+- `maw init` now previews root cleanup before deleting files. Untracked files (not in any jj/git commit) are skipped with a warning instead of silently deleted. Only jj-tracked files — which are recoverable — are removed.
+- Extract shared `count_revset()` and `revset_exists()` jj helpers into new `jj.rs` module, replacing duplicate implementations in push.rs and status.rs.
+
 ## v0.30.2
 
 - Fix: use `&Path` instead of `&str` for workspace paths in divergent resolution, removing unsafe `.to_str().unwrap_or(".")` fallbacks.
