@@ -74,6 +74,10 @@ pub fn setup_bare_repo() -> TempDir {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // Commit the .gitignore that maw init creates, so default workspace is clean
+    let ws_default = dir.path().join("ws").join("default");
+    run_jj(&ws_default, &["commit", "-m", "chore: maw init"]);
+
     dir
 }
 
@@ -123,7 +127,7 @@ pub fn setup_with_remote() -> (TempDir, TempDir) {
     std::fs::write(repo.path().join("README.md"), "# test repo\n").unwrap();
     run_jj(repo.path(), &["commit", "-m", "initial commit"]);
     run_jj(repo.path(), &["bookmark", "create", "main", "-r", "@-"]);
-    run_jj(repo.path(), &["git", "push", "--bookmark", "main"]);
+    run_jj(repo.path(), &["git", "push", "--all"]);
 
     // Now run maw init for bare model
     let out = maw_in(repo.path(), &["init"]);
@@ -132,6 +136,14 @@ pub fn setup_with_remote() -> (TempDir, TempDir) {
         "maw init failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    // Commit the .gitignore that maw init creates, so default workspace is clean
+    let ws_default = repo.path().join("ws").join("default");
+    run_jj(&ws_default, &["commit", "-m", "chore: maw init"]);
+
+    // Re-import remote bookmarks and track (maw init's bare conversion can lose tracking)
+    run_jj(&ws_default, &["git", "fetch"]);
+    run_jj(&ws_default, &["bookmark", "track", "main@origin"]);
 
     (repo, remote_dir)
 }
