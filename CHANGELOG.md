@@ -2,6 +2,73 @@
 
 All notable changes to maw.
 
+## v0.30.2
+
+- Fix: use `&Path` instead of `&str` for workspace paths in divergent resolution, removing unsafe `.to_str().unwrap_or(".")` fallbacks.
+- Fix: check `git push --tags` exit status and report failures/rejected tags.
+- Fix: `maw exec` returns `ExitCodeError` instead of calling `process::exit` directly, preserving exit code passthrough.
+- Fix: rename misleading `root` parameters to `cwd` in merge helper functions.
+- Fix: upgrade change detection uses jj's "no changes" pattern instead of git's "nothing to".
+- Internal: pass `jj_cwd` to `push_tags` instead of re-resolving it.
+
+## v0.30.1
+
+- Fix: post-merge abandon now scoped to only orphaned commits from the workspaces being merged. Previously, the broad revset could abandon empty commits from unrelated active workspaces.
+- Fix: `get_current_workspace` no longer returns name with `@` suffix.
+- Fix: all deprecated `maw ws jj` suggestions replaced with `maw exec`.
+- Fix: `--message` now applies to single-workspace merges via `jj describe`.
+- Fix: always use `--colocate` for `jj git init` even without existing `.git/`.
+
+## v0.30.0
+
+- New `maw release <tag>` command — tags and pushes in one step. Creates a jj tag, exports to git, pushes the branch, then pushes the tag. Replaces manual `jj tag set` + `git push origin` workflow.
+- Fix: `maw release` uses jj-resolved commit hash for the git tag, preventing stale ref issues.
+- Fix: `maw init`, `maw upgrade`, and `maw doctor` now set git HEAD to `refs/heads/main` after enabling bare mode. Prevents "HEAD detached" warnings from git tooling.
+
+## v0.29.3
+
+- Fix: text format uses structured output with `[OK]`/`[WARN]` markers for machine-parseable status.
+
+## v0.29.2
+
+- Fix: remove ghost `.jj/working_copy/` directory that causes root pollution in bare repos.
+- Fix: `maw init` runs jj from `ws/default/` when root lacks a working copy.
+
+## v0.29.1
+
+- Add `--format` flag to `maw status`, `maw doctor`, and `maw ws history`. Supports `text`, `json`, and `pretty` formats.
+
+## v0.29.0
+
+- Drop `toon` output format, add `pretty` format with automatic TTY detection. `pretty` is now the default for interactive terminals; `text` for pipes.
+- Fix: reject `maw ws merge default` with clear error pointing to `maw push --advance`. Prevents silent edit loss from `jj restore` running on the merge target.
+- Fix: `maw status` and `maw doctor` warn if unexpected files exist at the bare repo root.
+- Fix: allow dotfiles and agent stubs (`.claude/`, `AGENTS.md`, `CLAUDE.md`) at bare repo root without triggering stray-file warnings.
+
+## v0.28.4
+
+- Internal: botbox upgrades only, no user-facing changes.
+
+## v0.28.3
+
+- Deprecate `maw ws jj` — now errors with suggestion to use `maw exec` instead.
+- Fix: tests use temp dirs instead of creating workspaces in the live repo.
+
+## v0.28.2
+
+- Redesign `maw status` output with left-aligned glyphs and clearer labels.
+
+## v0.28.1
+
+- `maw push` now pushes git tags by default (no separate `git push origin --tags` needed).
+
+## v0.28.0
+
+- `maw ws list` wraps JSON/text output in a structured envelope with an `advice` array for actionable suggestions.
+- Green checkmarks on ideal-state items in `maw status` — helps spot problems at a glance.
+- Hide cursor during `maw status --watch`, restore on exit (q/Esc/Ctrl-C).
+- Fix: use `\r\n` in watch mode for correct raw-terminal rendering.
+
 ## v0.27.2
 
 - Fix: auto-resolve divergent copies when both are non-empty. After `maw ws sync`, if jj forks a workspace commit into divergent copies that both have file changes, maw now resolves them automatically: identical diffs → abandon non-@, file subset → abandon, superset → squash into @. Previously required ~6 manual jj commands that agents frequently got wrong.
