@@ -529,15 +529,21 @@ fn collect_status() -> Result<StatusSummary> {
         .output()
         .context("Failed to run jj workspace list")?;
 
-    if !ws_output.status.success() {
-        bail!(
-            "jj workspace list failed: {}",
-            String::from_utf8_lossy(&ws_output.stderr)
-        );
-    }
-
-    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let workspace_names = non_default_workspace_names(&ws_list);
+    // If jj workspace list fails due to stale working copy, degrade gracefully
+    // instead of bailing — especially important for --watch mode.
+    let mut is_stale = false;
+    let workspace_names = if !ws_output.status.success() {
+        let stderr = String::from_utf8_lossy(&ws_output.stderr);
+        if stderr.contains("working copy is stale") {
+            is_stale = true;
+            Vec::new()
+        } else {
+            bail!("jj workspace list failed: {}", stderr);
+        }
+    } else {
+        let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+        non_default_workspace_names(&ws_list)
+    };
 
     let status_output = Command::new("jj")
         .args(["status", "--color=never", "--no-pager"])
@@ -545,18 +551,23 @@ fn collect_status() -> Result<StatusSummary> {
         .output()
         .context("Failed to run jj status")?;
 
-    if !status_output.status.success() {
-        bail!(
-            "jj status failed: {}",
-            String::from_utf8_lossy(&status_output.stderr)
-        );
-    }
+    // jj status may also fail when stale — degrade gracefully
+    let (changed_files, status_is_stale) = if !status_output.status.success() {
+        let stderr = String::from_utf8_lossy(&status_output.stderr);
+        if stderr.contains("working copy is stale") {
+            (Vec::new(), true)
+        } else {
+            bail!("jj status failed: {}", stderr);
+        }
+    } else {
+        let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+        let status_stderr = String::from_utf8_lossy(&status_output.stderr);
+        let stale = status_stderr.contains("working copy is stale");
+        (parse_jj_changed_files(&status_stdout), stale)
+    };
+    is_stale = is_stale || status_is_stale;
 
-    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-    let status_stderr = String::from_utf8_lossy(&status_output.stderr);
-    let changed_files = parse_jj_changed_files(&status_stdout);
     let git_files = git_status_files(&root).unwrap_or_default();
-    let is_stale = status_stderr.contains("working copy is stale");
 
     let config = MawConfig::load(&root).unwrap_or_default();
     let main_sync = main_sync_status(&cwd, config.branch())?;
