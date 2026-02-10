@@ -8,6 +8,20 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+/// Disable git commit/tag signing in a repo. Call after git/jj init.
+fn disable_signing(dir: &Path) {
+    for (key, val) in [
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+    ] {
+        Command::new("git")
+            .args(["config", key, val])
+            .current_dir(dir)
+            .output()
+            .ok();
+    }
+}
+
 /// Create a fresh jj repo in a temp directory (non-bare, simple mode).
 pub fn setup_test_repo() -> TempDir {
     let dir = TempDir::new().expect("failed to create temp dir");
@@ -23,6 +37,7 @@ pub fn setup_test_repo() -> TempDir {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    disable_signing(dir.path());
     dir
 }
 
@@ -43,6 +58,8 @@ pub fn setup_bare_repo() -> TempDir {
         "jj git init failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    disable_signing(dir.path());
 
     // Create an initial commit so main bookmark exists
     std::fs::write(dir.path().join("README.md"), "# test repo\n").unwrap();
@@ -87,6 +104,8 @@ pub fn setup_with_remote() -> (TempDir, TempDir) {
         "git clone failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    disable_signing(repo.path());
 
     // Initialize jj on top of the git clone
     let out = Command::new("jj")
