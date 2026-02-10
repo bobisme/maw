@@ -3,107 +3,57 @@
 //! Each test creates an isolated jj repo in a temp directory,
 //! so no workspaces are created in the real repo.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
-use tempfile::TempDir;
-
-/// Create a fresh jj repo in a temp directory.
-fn setup_test_repo() -> TempDir {
-    let dir = TempDir::new().expect("failed to create temp dir");
-
-    let out = Command::new("jj")
-        .args(["git", "init"])
-        .current_dir(dir.path())
-        .output()
-        .expect("failed to run jj git init");
-    assert!(
-        out.status.success(),
-        "jj git init failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    dir
-}
-
-fn maw_in(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_maw"))
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("failed to execute maw")
-}
-
-fn maw_fails_with(dir: &Path, args: &[&str], expected_error: &str) {
-    let output = maw_in(dir, args);
-    assert!(
-        !output.status.success(),
-        "Expected command to fail: maw {}",
-        args.join(" ")
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(expected_error),
-        "Expected error containing '{expected_error}', got: {stderr}",
-    );
-}
+use common::{maw_fails, maw_in, setup_test_repo};
 
 #[test]
 fn rejects_empty_workspace_name() {
     let repo = setup_test_repo();
-    maw_fails_with(repo.path(), &["ws", "create", ""], "cannot be empty");
+    let stderr = maw_fails(repo.path(), &["ws", "create", ""]);
+    assert!(stderr.contains("cannot be empty"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_path_traversal_dotdot() {
     let repo = setup_test_repo();
-    maw_fails_with(repo.path(), &["ws", "create", ".."], "cannot be '.' or '..'");
+    let stderr = maw_fails(repo.path(), &["ws", "create", ".."]);
+    assert!(stderr.contains("cannot be '.' or '..'"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_path_traversal_slash() {
     let repo = setup_test_repo();
-    maw_fails_with(repo.path(), &["ws", "create", "../etc"], "path separators");
+    let stderr = maw_fails(repo.path(), &["ws", "create", "../etc"]);
+    assert!(stderr.contains("path separators"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_path_traversal_backslash() {
     let repo = setup_test_repo();
-    maw_fails_with(
-        repo.path(),
-        &["ws", "create", "..\\etc"],
-        "path separators",
-    );
+    let stderr = maw_fails(repo.path(), &["ws", "create", "..\\etc"]);
+    assert!(stderr.contains("path separators"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_leading_dash() {
     let repo = setup_test_repo();
-    maw_fails_with(
-        repo.path(),
-        &["ws", "create", "--", "-rf"],
-        "cannot start with '-'",
-    );
+    let stderr = maw_fails(repo.path(), &["ws", "create", "--", "-rf"]);
+    assert!(stderr.contains("cannot start with '-'"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_spaces_in_name() {
     let repo = setup_test_repo();
-    maw_fails_with(
-        repo.path(),
-        &["ws", "create", "my workspace"],
-        "must contain only",
-    );
+    let stderr = maw_fails(repo.path(), &["ws", "create", "my workspace"]);
+    assert!(stderr.contains("must contain only"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_special_characters() {
     let repo = setup_test_repo();
-    maw_fails_with(
-        repo.path(),
-        &["ws", "create", "test@workspace"],
-        "must contain only",
-    );
+    let stderr = maw_fails(repo.path(), &["ws", "create", "test@workspace"]);
+    assert!(stderr.contains("must contain only"), "Got: {stderr}");
 }
 
 #[test]
@@ -115,7 +65,6 @@ fn allows_valid_names() {
         let output = maw_in(repo.path(), &["ws", "create", name]);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // Should NOT contain validation error messages
         assert!(
             !stderr.contains("cannot be empty")
                 && !stderr.contains("path separators")
@@ -124,7 +73,6 @@ fn allows_valid_names() {
             "Valid name '{name}' was incorrectly rejected: {stderr}",
         );
 
-        // Should succeed — workspace actually created in temp dir
         assert!(
             output.status.success(),
             "Failed to create workspace '{name}': {stderr}",
