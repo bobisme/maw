@@ -5,6 +5,7 @@ mod doctor;
 mod exec;
 mod format;
 mod init;
+mod jj;
 mod jj_intro;
 mod push;
 mod release;

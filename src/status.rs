@@ -11,6 +11,7 @@ use crossterm::terminal;
 
 use crate::doctor;
 use crate::format::OutputFormat;
+use crate::jj::{count_revset, revset_exists};
 use crate::workspace::{self, MawConfig};
 use serde::Serialize;
 
@@ -691,61 +692,3 @@ fn main_sync_status(root: &Path, branch: &str) -> Result<MainSyncStatus> {
     })
 }
 
-fn revset_exists(root: &Path, revset: &str) -> Result<bool> {
-    let output = Command::new("jj")
-        .args([
-            "log",
-            "-r",
-            revset,
-            "--no-graph",
-            "--color=never",
-            "--no-pager",
-            "-T",
-            "change_id.short()",
-        ])
-        .current_dir(root)
-        .output()
-        .context("Failed to run jj log")?;
-
-    if output.status.success() {
-        return Ok(true);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let message = format!("{stderr}{stdout}");
-    if message.contains("doesn't exist") || message.contains("not found") {
-        return Ok(false);
-    }
-
-    bail!("jj log failed: {}", message.trim())
-}
-
-fn count_revset(root: &Path, revset: &str) -> Result<usize> {
-    let output = Command::new("jj")
-        .args([
-            "log",
-            "-r",
-            revset,
-            "--no-graph",
-            "--color=never",
-            "--no-pager",
-            "-T",
-            "change_id.short()",
-        ])
-        .current_dir(root)
-        .output()
-        .context("Failed to run jj log")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let message = format!("{stderr}{stdout}");
-        bail!("jj log failed for {revset}: {}", message.trim());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count())
-}

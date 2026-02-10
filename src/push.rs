@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
+use crate::jj::count_revset;
 use crate::workspace::{jj_cwd, repo_root, MawConfig};
 
 #[derive(Args)]
@@ -204,33 +205,6 @@ fn should_push(cwd: &Path, branch: &str) -> Result<bool> {
     }
 
     Ok(true)
-}
-
-fn count_revset(cwd: &Path, revset: &str) -> Result<usize> {
-    let output = Command::new("jj")
-        .args([
-            "log",
-            "-r",
-            revset,
-            "--no-graph",
-            "--color=never",
-            "--no-pager",
-            "-T",
-            "commit_id.short()",
-        ])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj log")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("jj log failed for {revset}: {}", stderr.trim());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count())
 }
 
 /// Export jj tags to git, then push all tags to origin.

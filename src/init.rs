@@ -340,8 +340,8 @@ pub fn fix_git_head() -> Result<()> {
 /// Clean root directory so only `KEEP_ROOT` items remain.
 ///
 /// Scans the root directory and removes any files/dirs not in the keep list.
-/// This catches both git-tracked files and untracked files (like .gitignore
-/// created during init but not yet committed).
+/// Previews what will be deleted before removing anything. Files tracked by
+/// jj/git are recoverable and removed silently; untracked files get a warning.
 #[allow(clippy::unnecessary_wraps)]
 pub fn clean_root_source_files() -> Result<()> {
     let entries = if let Ok(e) = fs::read_dir(".") { e } else {
@@ -349,44 +349,96 @@ pub fn clean_root_source_files() -> Result<()> {
         return Ok(());
     };
 
-    let mut cleaned = 0;
-
+    // Collect files/dirs that would be removed.
+    let mut to_remove: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        // Skip dotfiles/dotdirs (VCS, agent config) and explicit keep list
         if name_str.starts_with('.') || KEEP_ROOT.contains(&name_str.as_ref()) {
             continue;
         }
+        to_remove.push(name_str.into_owned());
+    }
 
-        let path = entry.path();
-        if path.is_dir() {
-            if fs::remove_dir_all(&path).is_ok() {
+    // Nothing to clean (besides ghost working_copy, handled below).
+    if to_remove.is_empty() {
+        clean_ghost_working_copy();
+        println!("[OK] Root already clean");
+        return Ok(());
+    }
+
+    // Check which files are untracked (not recoverable from jj/git).
+    let untracked: Vec<&str> = to_remove
+        .iter()
+        .filter(|name| !is_jj_tracked(name))
+        .map(String::as_str)
+        .collect();
+
+    if !untracked.is_empty() {
+        eprintln!("[WARN] Root cleanup would delete files NOT tracked by jj/git (unrecoverable):");
+        for name in &untracked {
+            eprintln!("  - {name}");
+        }
+        eprintln!("  These files are not in any jj/git commit and cannot be restored.");
+        eprintln!("  To keep them, move them into ws/default/ before running init.");
+        eprintln!("  To force cleanup, delete them manually and re-run maw init.");
+        // Still remove the tracked files — those are recoverable.
+        // Skip the untracked ones.
+    }
+
+    let mut cleaned = 0;
+    for name in &to_remove {
+        if !untracked.contains(&name.as_str()) {
+            let path = Path::new(name);
+            if path.is_dir() {
+                if fs::remove_dir_all(path).is_ok() {
+                    cleaned += 1;
+                }
+            } else if fs::remove_file(path).is_ok() {
                 cleaned += 1;
             }
-        } else if fs::remove_file(&path).is_ok() {
-            cleaned += 1;
         }
     }
 
-    // Also remove ghost .jj/working_copy/ if present — this is left behind
-    // by `jj workspace forget` and causes jj to materialize files at root.
-    let ghost_wc = Path::new(".jj").join("working_copy");
-    if ghost_wc.exists() {
-        if fs::remove_dir_all(&ghost_wc).is_ok() {
-            cleaned += 1;
-            println!("[OK] Removed ghost .jj/working_copy/ (prevents root pollution)");
-        }
-    }
+    clean_ghost_working_copy();
 
     if cleaned > 0 {
-        println!("[OK] Cleaned {cleaned} root file(s)/dir(s)");
-    } else {
-        println!("[OK] Root already clean");
+        println!("[OK] Cleaned {cleaned} tracked root file(s)/dir(s)");
+    }
+    if !untracked.is_empty() {
+        println!("[WARN] Skipped {} untracked file(s) — see warnings above", untracked.len());
     }
 
     Ok(())
+}
+
+/// Remove ghost .jj/working_copy/ if present — left behind by `jj workspace forget`.
+fn clean_ghost_working_copy() {
+    let ghost_wc = Path::new(".jj").join("working_copy");
+    if ghost_wc.exists() {
+        if fs::remove_dir_all(&ghost_wc).is_ok() {
+            println!("[OK] Removed ghost .jj/working_copy/ (prevents root pollution)");
+        }
+    }
+}
+
+/// Check whether a file at root is tracked by jj (present in the main branch).
+///
+/// Must run jj from ws/default/ because the bare root has no working copy.
+fn is_jj_tracked(name: &str) -> bool {
+    let ws_default = Path::new("ws").join("default");
+    if !ws_default.exists() {
+        return false;
+    }
+    Command::new("jj")
+        .args(["file", "show", "-r", "main", name])
+        .current_dir(&ws_default)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Ensure .gitignore with ws/ exists in the default workspace.
