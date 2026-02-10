@@ -7,7 +7,7 @@ use crate::workspace;
 
 /// Run a command inside a workspace directory
 ///
-/// Like `maw ws jj` but for any command — useful for running tools
+/// Run any command inside a workspace — useful for running tools
 /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
 /// needing persistent `cd`.
 ///

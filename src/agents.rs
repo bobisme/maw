@@ -52,7 +52,7 @@ Each agent gets an isolated working copy (like a git worktree but lightweight) a
 maw ws create <your-name>      # Creates workspace + your own commit
 # Edit files using the absolute workspace path shown by create
 # Set your commit message (like git commit --amend -m):
-maw ws jj <your-name> describe -m "feat: what you did"
+maw exec <your-name> -- jj describe -m "feat: what you did"
 maw ws status                  # See all agent work
 ```
 
@@ -63,7 +63,7 @@ maw ws status                  # See all agent work
 | Create workspace | `maw ws create <name>` |
 | Check status | `maw ws status` |
 | Sync stale workspace | `maw ws sync` |
-| Run jj in workspace | `maw ws jj <name> <args>` |
+| Run command in workspace | `maw exec <name> -- <command>` |
 | Merge work | `maw ws merge <a> <b>` |
 | Destroy workspace | `maw ws destroy <name> --force` |
 
@@ -81,14 +81,14 @@ maw ws status                  # See all agent work
 ### During Work
 
 ```bash
-maw ws jj <name> diff                        # See changes (like git diff)
-maw ws jj <name> log                         # See commit history (like git log)
-maw ws jj <name> log -r 'working_copies()'   # See all workspace commits (revset query)
-maw ws jj <name> describe -m "feat: ..."     # Set commit message (like git commit --amend -m)
-maw ws jj <name> commit -m "feat: ..."       # Save current work + start new empty commit
+maw exec <name> -- jj diff                        # See changes (like git diff)
+maw exec <name> -- jj log                         # See commit history (like git log)
+maw exec <name> -- jj log -r 'working_copies()'   # See all workspace commits (revset query)
+maw exec <name> -- jj describe -m "feat: ..."     # Set commit message (like git commit --amend -m)
+maw exec <name> -- jj commit -m "feat: ..."       # Save current work + start new empty commit
 ```
 
-`maw ws jj` runs jj in the workspace directory. Use this instead of `cd ws/<name> && jj ...` — it works reliably in sandboxed environments where cd doesn't persist.
+`maw exec` runs any command in the workspace directory. Use this instead of `cd ws/<name> && ...` — it works reliably in sandboxed environments where cd doesn't persist.
 
 ### Stale Workspace
 
@@ -103,9 +103,9 @@ maw ws sync
 jj records conflicts in commits instead of blocking your work. If you see conflicts:
 
 ```bash
-maw ws jj <name> status                      # Shows conflicted files
+maw exec <name> -- jj status                      # Shows conflicted files
 # Edit files to remove <<<<<<< conflict markers (similar to git)
-maw ws jj <name> describe -m "resolve: ..."  # Update commit message
+maw exec <name> -- jj describe -m "resolve: ..."  # Update commit message
 ```
 
 ### Pushing to Remote (Coordinator)

@@ -1,0 +1,3 @@
+{"ts":"2026-02-10T02:33:18.737543177Z","author":"maw-dev","event":"ReviewCreated","data":{"review_id":"cr-2zug","jj_change_id":"ovtoukpwqxrpuolmmszxtloprnunyovr","initial_commit":"03505bfdd81539381703e22000767aaf9c5c00ee","title":"fix: four bug fixes (bd-17a, bd-2ea, bd-1re, bd-1ex)","description":"Fix get_current_workspace @ suffix (bd-17a), replace deprecated maw ws jj suggestions (bd-2ea), apply --message to single-workspace merges (bd-1re), always --colocate on jj git init (bd-1ex)"}}
+{"ts":"2026-02-10T02:34:42.947013402Z","author":"maw-dev","event":"ReviewersRequested","data":{"review_id":"cr-2zug","reviewers":["maw-security"]}}
+{"ts":"2026-02-10T02:35:56.004728834Z","author":"maw-dev","event":"ReviewApproved","data":{"review_id":"cr-2zug"}}

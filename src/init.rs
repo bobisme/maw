@@ -59,13 +59,9 @@ fn ensure_jj_repo() -> Result<()> {
     if stderr.contains("no jj repo") || stderr.contains("There is no jj repo") {
         println!("[..] Initializing jj repository...");
 
-        // Check if this is a git repo — if so, colocate
-        let is_git = Path::new(".git").exists();
-        let args = if is_git {
-            vec!["git", "init", "--colocate"]
-        } else {
-            vec!["git", "init"]
-        };
+        // Always colocate — maw requires both .jj/ and .git/
+        let had_git = Path::new(".git").exists();
+        let args = vec!["git", "init", "--colocate"];
 
         let init_output = Command::new("jj")
             .args(&args)
@@ -73,10 +69,10 @@ fn ensure_jj_repo() -> Result<()> {
             .context("Failed to run jj git init")?;
 
         if init_output.status.success() {
-            if is_git {
+            if had_git {
                 println!("[OK] jj initialized (colocated with existing git repo)");
             } else {
-                println!("[OK] jj initialized (new git-backed repo)");
+                println!("[OK] jj initialized (new colocated repo)");
             }
         } else {
             let init_stderr = String::from_utf8_lossy(&init_output.stderr);

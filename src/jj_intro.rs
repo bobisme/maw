@@ -106,11 +106,11 @@ jj git push                # Push to GitHub
 
 ## maw-Specific Notes
 
-**Use `maw ws jj` for jj commands in workspaces:**
+**Use `maw exec` for commands in workspaces:**
 
 ```bash
 # Instead of: cd ws/alice && jj describe -m "feat: ..."
-# Use:        maw ws jj alice describe -m "feat: ..."
+# Use:        maw exec alice -- jj describe -m "feat: ..."
 ```
 
 This works reliably in sandboxed environments where `cd` doesn't persist.

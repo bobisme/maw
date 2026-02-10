@@ -32,9 +32,9 @@ mod workspace;
 ///
 ///   # All file operations use the workspace path shown by create.
 ///   # Run jj commands via maw (works in sandboxed environments):
-///   maw ws jj <your-name> describe -m "feat: what you did"
+///   maw exec <your-name> -- jj describe -m "feat: what you did"
 ///   #   ('describe' sets the commit message — like git commit --amend -m)
-///   maw ws jj <your-name> diff
+///   maw exec <your-name> -- jj diff
 ///
 ///   # Run other tools in your workspace:
 ///   maw exec <your-name> -- cargo test
@@ -47,7 +47,7 @@ mod workspace;
 ///
 ///   1. Create workspace: maw ws create <name>
 ///   2. Edit files under ws/<name>/ (use absolute paths)
-///   3. Save work: maw ws jj <name> describe -m "feat: ..."
+///   3. Save work: maw exec <name> -- jj describe -m "feat: ..."
 ///   4. Check status: maw ws status
 ///   5. Merge work: maw ws merge <name1> <name2>
 ///   6. Conflicts are recorded in commits, resolve and continue
@@ -117,7 +117,7 @@ enum Commands {
 
     /// Run a command inside a workspace directory
     ///
-    /// Like `maw ws jj` but for any command — useful for running tools
+    /// Run any command inside a workspace — useful for running tools
     /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
     /// needing persistent `cd`.
     ///

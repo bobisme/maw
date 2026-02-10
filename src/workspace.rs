@@ -229,7 +229,7 @@ pub enum WorkspaceCommands {
     ///
     /// After creation:
     ///   1. Edit files under ws/<name>/ (use absolute paths)
-    ///   2. Save work: maw ws jj <name> describe -m "feat: ..."
+    ///   2. Save work: maw exec <name> -- jj describe -m "feat: ..."
     ///      ('describe' sets the commit message — like git commit --amend -m)
     ///   3. Run other commands: cd /abs/path/ws/<name> && cmd
     Create {
@@ -722,14 +722,14 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!("To start working:");
     println!();
     println!("  # Set your commit message (like git commit --amend -m):");
-    println!("  maw ws jj {name} describe -m \"feat: what you're implementing\"");
+    println!("  maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
     println!();
     println!("  # View changes (like git diff / git log):");
-    println!("  maw ws jj {name} diff");
-    println!("  maw ws jj {name} log");
+    println!("  maw exec {name} -- jj diff");
+    println!("  maw exec {name} -- jj log");
     println!();
-    println!("  # Other commands (use absolute workspace path):");
-    println!("  cd {}/ && cargo test", path.display());
+    println!("  # Other commands (run inside workspace):");
+    println!("  maw exec {name} -- cargo test");
     println!();
     println!("Note: jj has no staging area — all edits are tracked automatically.");
     println!("Your changes are always in your commit. Use 'describe' to set the message.");
@@ -942,7 +942,7 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     println!("  Path: {}/", path.display());
     println!();
     println!("  NOTE: Your local files were preserved. They may differ from the");
-    println!("  revision's files. Run 'maw ws jj {name} status' to see differences.");
+    println!("  revision's files. Run 'maw exec {name} -- jj status' to see differences.");
     println!();
 
     // Check if workspace is stale after attaching
@@ -961,8 +961,8 @@ fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     }
 
     println!("To continue working:");
-    println!("  maw ws jj {name} status");
-    println!("  maw ws jj {name} log");
+    println!("  maw exec {name} -- jj status");
+    println!("  maw exec {name} -- jj log");
 
     Ok(())
 }
@@ -1133,7 +1133,7 @@ fn print_status_text(
         for line in conflicts.lines() {
             println!("  {line}");
         }
-        println!("  Fix: edit files, then: maw ws jj <name> describe -m \"resolve: ...\"");
+        println!("  Fix: edit files, then: maw exec <name> -- jj describe -m \"resolve: ...\"");
     }
 
     // Divergent commits
@@ -1150,7 +1150,7 @@ fn print_status_text(
 
     // Next command
     println!();
-    println!("Next: maw ws jj {current_ws} describe -m \"feat: ...\"");
+    println!("Next: maw exec {current_ws} -- jj describe -m \"feat: ...\"");
 }
 
 /// Print status in pretty format (colored, human-friendly)
@@ -1215,7 +1215,7 @@ fn print_status_pretty(
         }
         println!();
         println!("  To resolve: edit conflicted files (look for <<<<<<< markers)");
-        println!("  then: {gray}maw ws jj <name> describe -m \"resolve: ...\"{reset}");
+        println!("  then: {gray}maw exec <name> -- jj describe -m \"resolve: ...\"{reset}");
     }
 
     // Divergent commits
@@ -1234,7 +1234,7 @@ fn print_status_pretty(
 
     // Next command
     println!();
-    println!("{gray}Next: maw ws jj {current_ws} describe -m \"feat: ...\"{reset}");
+    println!("{gray}Next: maw exec {current_ws} -- jj describe -m \"feat: ...\"{reset}");
 }
 
 /// Build structured status data (resilient to parsing failures)
@@ -1321,7 +1321,7 @@ fn get_current_workspace(cwd: &Path) -> Result<String> {
     for line in list.lines() {
         if line.contains('@')
             && let Some((name, _)) = line.split_once(':') {
-                return Ok(name.trim().to_string());
+                return Ok(name.trim().trim_end_matches('@').to_string());
             }
     }
 
@@ -2000,7 +2000,7 @@ fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()>
             OutputFormat::Text => {
                 println!("Workspace '{name}' has no commits yet.");
                 println!();
-                println!("Next: maw ws jj {name} describe -m \"feat: what you're implementing\"");
+                println!("Next: maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
             }
             OutputFormat::Pretty => {
                 println!("Workspace '{name}' has no commits yet.");
@@ -2009,7 +2009,7 @@ fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()>
                 println!("   Edit files and describe your changes to create history.)");
                 println!();
                 println!("  Start working:");
-                println!("    maw ws jj {name} describe -m \"feat: what you're implementing\"");
+                println!("    maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
             }
         }
         return Ok(());
@@ -2032,7 +2032,7 @@ fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()>
                 );
             }
             println!();
-            println!("Next: maw ws jj {name} diff -r <change_id>");
+            println!("Next: maw exec {name} -- jj diff -r <change_id>");
         }
         OutputFormat::Pretty => {
             println!("=== Commit History: {name} ===");
@@ -2056,7 +2056,7 @@ fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()>
 
             println!();
             println!("Tip: View full commit details:");
-            println!("  maw ws jj {name} show <change-id>");
+            println!("  maw exec {name} -- jj show <change-id>");
         }
     }
 
@@ -2429,7 +2429,7 @@ fn merge(
         );
     }
 
-    // Step 2: If multiple workspaces, squash them into one commit
+    // Step 2: Apply message and squash if needed
     if ws_to_merge.len() > 1 {
         // Squash all but first into the first workspace's commit
         let first_ws = format!("{}@", ws_to_merge[0]);
@@ -2453,6 +2453,19 @@ fn merge(
         if !squash_output.status.success() {
             let stderr = String::from_utf8_lossy(&squash_output.stderr);
             bail!("Failed to squash workspace commits: {}", stderr.trim());
+        }
+    } else if message.is_some() {
+        // Single workspace: apply --message via jj describe
+        let ws_rev = format!("{}@", ws_to_merge[0]);
+        let describe_output = Command::new("jj")
+            .args(["describe", "-r", &ws_rev, "-m", &msg])
+            .current_dir(&cwd)
+            .output()
+            .context("Failed to describe workspace commit")?;
+
+        if !describe_output.status.success() {
+            let stderr = String::from_utf8_lossy(&describe_output.stderr);
+            eprintln!("Warning: Failed to apply --message: {}", stderr.trim());
         }
     }
 
@@ -2941,7 +2954,7 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
 
             // Suggested next command
             println!();
-            println!("Next: maw ws jj <name> describe -m \"feat: ...\"");
+            println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
         }
 
         OutputFormat::Pretty => {
@@ -2998,9 +3011,9 @@ fn list(verbose: bool, format: OutputFormat) -> Result<()> {
             if !workspaces.is_empty() {
                 println!();
                 if use_color {
-                    println!("\x1b[90mNext: maw ws jj <name> describe -m \"feat: ...\"\x1b[0m");
+                    println!("\x1b[90mNext: maw exec <name> -- jj describe -m \"feat: ...\"\x1b[0m");
                 } else {
-                    println!("Next: maw ws jj <name> describe -m \"feat: ...\"");
+                    println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
                 }
             }
         }
