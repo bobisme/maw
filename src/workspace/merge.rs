@@ -479,6 +479,42 @@ pub(crate) fn merge(
             .current_dir(&default_ws_path)
             .output();
 
+        // Auto-snapshot: if default workspace has local edits, commit them
+        // before the rebase+restore sequence which would overwrite on-disk files.
+        let status_output = Command::new("jj")
+            .args(["status", "--color=never", "--no-pager"])
+            .current_dir(&default_ws_path)
+            .output();
+
+        let has_local_edits = status_output
+            .as_ref()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.contains("Working copy changes:")
+            })
+            .unwrap_or(false);
+
+        if has_local_edits {
+            println!("Auto-snapshotting uncommitted changes in default workspace...");
+            let snap = Command::new("jj")
+                .args(["commit", "-m", "wip: auto-snapshot before merge"])
+                .current_dir(&default_ws_path)
+                .output();
+            if snap.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+                println!("  Saved as 'wip: auto-snapshot before merge' commit.");
+            } else {
+                let stderr = snap
+                    .as_ref()
+                    .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+                    .unwrap_or_default();
+                eprintln!("WARNING: Failed to auto-save default workspace changes: {}", stderr.trim());
+                eprintln!("  To preserve your changes manually, run:");
+                eprintln!("    maw exec default -- jj commit -m \"wip: save before merge\"");
+                eprintln!("  Then re-run the merge.");
+                bail!("Could not auto-snapshot default workspace before merge.");
+            }
+        }
+
         // Check for intermediate commits between main and default@.
         // The revset `{branch}+..{default_ws}@` gives all commits strictly after
         // main up to and including default@. If there are commits beyond just
@@ -537,29 +573,6 @@ pub(crate) fn merge(
 
         // The rebase may have created a divergent commit -- auto-resolve it.
         let _ = resolve_divergent_working_copy(&default_ws_path);
-
-        // Check if default workspace has local edits that would be lost by restore.
-        let status_output = Command::new("jj")
-            .args(["status", "--color=never", "--no-pager"])
-            .current_dir(&default_ws_path)
-            .output();
-
-        let has_local_edits = status_output
-            .as_ref()
-            .map(|o| {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                // jj status shows "Working copy changes:" when there are edits
-                stdout.contains("Working copy changes:")
-            })
-            .unwrap_or(false);
-
-        if has_local_edits {
-            eprintln!("WARNING: Default workspace has uncommitted changes that would be overwritten by merge.");
-            eprintln!("  To preserve your changes, commit them first:");
-            eprintln!("    maw exec default -- jj commit -m \"wip: save before merge\"");
-            eprintln!("  Then re-run the merge.");
-            bail!("Default workspace has dirty state. Commit or discard changes before merging.");
-        }
 
         // Restore on-disk files from the parent commit. After rebasing the
         // working copy onto the new main, the commit tree is correct but

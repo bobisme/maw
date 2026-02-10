@@ -138,7 +138,7 @@ fn merge_with_conflict() {
 }
 
 #[test]
-fn dirty_default_blocks_merge() {
+fn dirty_default_auto_snapshots_before_merge() {
     let repo = setup_bare_repo();
 
     // Write a file directly in default workspace (uncommitted work)
@@ -150,13 +150,24 @@ fn dirty_default_blocks_merge() {
     let ws_path = repo.path().join("ws").join("agent-1");
     run_jj(&ws_path, &["describe", "-m", "feat: agent work"]);
 
-    // Try to merge - should fail due to dirty default
-    let stderr = maw_fails(repo.path(), &["ws", "merge", "agent-1"]);
-
-    // Verify error mentions dirty state or uncommitted changes
+    // Merge should succeed — auto-snapshot saves uncommitted changes
+    let stdout = maw_ok(repo.path(), &["ws", "merge", "agent-1", "--destroy"]);
     assert!(
-        stderr.contains("dirty") || stderr.contains("uncommitted") || stderr.contains("changes"),
-        "Error should mention dirty state or uncommitted changes, got: {stderr}"
+        stdout.contains("Auto-snapshotting") || stdout.contains("Merged"),
+        "Merge should succeed with auto-snapshot, got: {stdout}"
+    );
+
+    // Verify the agent work is visible in default workspace
+    let content = read_from_ws(repo.path(), "default", "agent.txt")
+        .expect("agent.txt should exist in default workspace after merge");
+    assert_eq!(content.trim(), "agent work");
+
+    // Verify the uncommitted file was preserved in a snapshot commit
+    let dws = default_ws(repo.path());
+    let log = run_jj(&dws, &["log", "--no-graph", "-T", r#"description.first_line() ++ "\n""#]);
+    assert!(
+        log.contains("wip: auto-snapshot before merge"),
+        "Snapshot commit should exist in log, got: {log}"
     );
 }
 
