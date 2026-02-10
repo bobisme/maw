@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## v0.30.5
+
+- Fix: `maw ws merge` now preserves committed work in the default workspace. Previously, intermediate commits between main and default@ were lost during merge rebase — the whole chain is now rebased, not just the tip. (bd-342s)
+- Fix: `maw status` (including `--watch` mode) no longer crashes when the default workspace working copy is stale. `collect_status()` now catches stale errors from `jj workspace list` and `jj status`, sets `is_stale=true`, and continues with degraded data. (bd-ubxq)
+
 ## v0.30.4
 
 - Fix: `maw init` compatibility with jj 0.37.0 — ghost `.jj/working_copy/` cleanup moved to after `jj workspace add` succeeds, preventing "No such file or directory" errors during init.
