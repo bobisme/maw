@@ -467,7 +467,8 @@ pub(crate) fn merge(
     }
 
     // Step 4: Rebase default workspace onto new merge commit so on-disk files reflect the merge.
-    // The default workspace's working copy is empty (no changes), so this is safe.
+    // If default has intermediate committed work between main and default@, rebase the
+    // entire chain (not just the tip) to avoid orphaning those commits.
     let default_ws_path = root.join("ws").join(default_ws);
     if default_ws_path.exists() {
         // The merge operations above (squash) ran from root and
@@ -478,17 +479,60 @@ pub(crate) fn merge(
             .current_dir(&default_ws_path)
             .output();
 
-        let rebase_default = Command::new("jj")
-            .args(["rebase", "-r", &format!("{default_ws}@"), "-d", &final_rev])
+        // Check for intermediate commits between main and default@.
+        // The revset `{branch}+..{default_ws}@` gives all commits strictly after
+        // main up to and including default@. If there are commits beyond just
+        // default@ itself, those are committed work that must move with the rebase.
+        let chain_revset = format!("{branch}+..{default_ws}@");
+        let chain_output = Command::new("jj")
+            .args([
+                "log",
+                "-r",
+                &chain_revset,
+                "--no-graph",
+                "--reversed",
+                "-T",
+                r#"change_id ++ "\n""#,
+            ])
             .current_dir(&default_ws_path)
             .output();
+
+        let chain_ids: Vec<String> = chain_output
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let rebase_default = if chain_ids.len() > 1 {
+            // There are intermediate commits. Rebase from the first commit after
+            // main (the root of the chain) using -s to carry all descendants along.
+            println!(
+                "Preserving {} committed change(s) in default workspace ancestry.",
+                chain_ids.len() - 1
+            );
+            Command::new("jj")
+                .args(["rebase", "-s", &chain_ids[0], "-d", &final_rev])
+                .current_dir(&default_ws_path)
+                .output()
+        } else {
+            // No intermediate commits — just rebase the working copy tip.
+            Command::new("jj")
+                .args(["rebase", "-r", &format!("{default_ws}@"), "-d", &final_rev])
+                .current_dir(&default_ws_path)
+                .output()
+        };
 
         if let Ok(output) = rebase_default
             && !output.status.success()
         {
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("Warning: Failed to rebase default workspace onto {}: {}", final_rev, stderr.trim());
-            eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -r {default_ws}@ -d {final_rev}");
+            eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -s {default_ws}@ -d {final_rev}");
         }
 
         // The rebase may have created a divergent commit -- auto-resolve it.

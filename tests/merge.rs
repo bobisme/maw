@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{maw_fails, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
+use common::{default_ws, maw_fails, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
 
 #[test]
 fn basic_merge() {
@@ -171,5 +171,52 @@ fn reject_merge_default() {
     assert!(
         stderr.contains("default") || stderr.contains("reserved"),
         "Error should mention default workspace cannot be merged, got: {stderr}"
+    );
+}
+
+#[test]
+fn merge_preserves_committed_work_in_default() {
+    let repo = setup_bare_repo();
+    let ws_default = default_ws(repo.path());
+
+    // Simulate committed work in the default workspace:
+    // User runs `jj commit -m "wip"` to save work before merging agent output.
+    // This creates a commit between main and default@ that must survive the merge.
+    write_in_ws(repo.path(), "default", "saved.txt", "important work");
+    run_jj(&ws_default, &["commit", "-m", "wip: save before merge"]);
+
+    // Create an agent workspace with its own changes
+    maw_ok(repo.path(), &["ws", "create", "agent-1"]);
+    write_in_ws(repo.path(), "agent-1", "feature.txt", "agent feature");
+    let agent_ws = repo.path().join("ws").join("agent-1");
+    run_jj(&agent_ws, &["describe", "-m", "feat: agent work"]);
+
+    // Merge agent workspace
+    maw_ok(
+        repo.path(),
+        &["ws", "merge", "agent-1", "--destroy"],
+    );
+
+    // The committed work (saved.txt) must still be reachable in default workspace
+    let saved = read_from_ws(repo.path(), "default", "saved.txt");
+    assert_eq!(
+        saved.as_deref(),
+        Some("important work"),
+        "committed work in default must survive merge (saved.txt)"
+    );
+
+    // Agent's work must also be present
+    let feature = read_from_ws(repo.path(), "default", "feature.txt");
+    assert_eq!(
+        feature.as_deref(),
+        Some("agent feature"),
+        "agent feature.txt should be present after merge"
+    );
+
+    // Verify the committed work is in the log (not orphaned)
+    let log = run_jj(&ws_default, &["log", "--no-graph", "-r", "main..@"]);
+    assert!(
+        log.contains("wip: save before merge"),
+        "committed wip work should appear in default's ancestry, got:\n{log}"
     );
 }
