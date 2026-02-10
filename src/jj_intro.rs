@@ -42,66 +42,42 @@ can push/pull from GitHub, and git commands still work on the same repo.
 | Create new commit       | git commit -m            | jj commit -m "message"             |
 | Rebase onto main        | git rebase main          | jj rebase -d main                  |
 | Fetch from remote       | git fetch                | jj git fetch                       |
-| Push to remote          | git push                 | jj git push                        |
+| Push to remote          | git push                 | maw push                           |
 | Undo last operation     | git reset --hard HEAD~   | jj undo                            |
 | Abandon commit          | git reset --hard HEAD~   | jj abandon <change-id>             |
 
-## How to Push to GitHub (The Common Question)
+## How to Push to GitHub
 
-After you've merged agent work with `maw ws merge`, you have a merge commit in
-your working copy but it's not on main yet. Here's how to push:
-
-### Step 1: Check for push blockers
+After merging agent work with `maw ws merge`, push to remote:
 
 ```bash
-maw ws status   # Shows undescribed commits, conflicts, etc
+maw push                       # Push branch to origin (handles bookmarks automatically)
 ```
 
-If you see warnings about undescribed commits (commits with no message), fix them:
+If you committed directly (not via merge), advance the branch first:
 
 ```bash
-# Option A: Rebase onto main (skips scaffolding commits)
-jj rebase -r @- -d main
-#         @- = parent of working copy (your merge commit)
-
-# Option B: Give them descriptions
-jj describe <change-id> -m "workspace setup"
+maw push --advance             # Move branch to your commit, then push
 ```
 
-### Step 2: Move the 'main' bookmark to your merge commit
+### For tagged releases
 
 ```bash
-jj bookmark set main -r @-
-#   bookmark = jj's name for branches
-#   @- = parent of working copy (your merge commit)
+maw release v1.2.3             # Tag + push branch + push tag in one step
 ```
 
-### Step 3: Push to GitHub
-
-```bash
-jj git push
-```
-
-**IMPORTANT**: When jj says `Changes to push to origin:`, the push is ALREADY DONE.
-This is different from git — jj reports what it pushed, not what it will push.
+**IMPORTANT**: When maw/jj says `Changes to push to origin:`, the push is ALREADY DONE.
+This is different from git — it reports what it pushed, not what it will push.
 Do NOT run `git push` afterwards (it would fail or be a no-op).
 
-### Step 4: Verify push succeeded (optional)
+### Under the Hood
+
+`maw push` wraps `jj git push` with bookmark management and sync checks.
+If you need manual control:
 
 ```bash
-# Compare local and remote commit hashes — they should match
-jj log -r main --no-graph -T 'commit_id.short()'
-git ls-remote origin refs/heads/main | cut -c1-12
-```
-
-### Full example
-
-```bash
-# After maw ws merge alice bob
-maw ws status              # Check for issues
-jj rebase -r @- -d main    # Skip empty commits
-jj bookmark set main -r @- # Point main at merge
-jj git push                # Push to GitHub
+jj bookmark set main -r @-     # Point 'main' at parent of working copy
+jj git push                    # Push to remote
 ```
 
 ## maw-Specific Notes

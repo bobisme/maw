@@ -231,7 +231,7 @@ pub enum WorkspaceCommands {
     ///   1. Edit files under ws/<name>/ (use absolute paths)
     ///   2. Save work: maw exec <name> -- jj describe -m "feat: ..."
     ///      ('describe' sets the commit message — like git commit --amend -m)
-    ///   3. Run other commands: cd /abs/path/ws/<name> && cmd
+    ///   3. Run other commands: maw exec <name> -- cmd
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -519,9 +519,8 @@ fn ensure_repo_root() -> Result<PathBuf> {
         bail!(
             "This command must be run from the repo root.\n\
              \n  You are in: {}\n  Repo root:  {}\n\
-             \n  Run: cd {} && maw ...",
+             \n  Run from repo root, or use: maw exec <workspace> -- <command>",
             cwd.display(),
-            root.display(),
             root.display()
         );
     }
@@ -696,9 +695,8 @@ fn create(name: &str, revision: Option<&str>) -> Result<()> {
     if !new_output.status.success() {
         let stderr = String::from_utf8_lossy(&new_output.stderr);
         bail!(
-            "Failed to create dedicated commit for workspace: {}\n  The workspace was created but has no dedicated commit.\n  Try: cd {} && jj new -m \"wip: {name}\"",
-            stderr.trim(),
-            path.display()
+            "Failed to create dedicated commit for workspace: {}\n  The workspace was created but has no dedicated commit.\n  Try: maw exec {name} -- jj new -m \"wip: {name}\"",
+            stderr.trim()
         );
     }
 
@@ -1145,7 +1143,7 @@ fn print_status_text(
                 println!("  {line}");
             }
         }
-        println!("  Fix: jj abandon <change-id>/0");
+        println!("  Fix: maw exec <name> -- jj abandon <change-id>/0");
     }
 
     // Next command
@@ -1229,7 +1227,7 @@ fn print_status_pretty(
             }
         }
         println!();
-        println!("  Fix: {gray}jj abandon <change-id>/0{reset}");
+        println!("  Fix: {gray}maw exec <name> -- jj abandon <change-id>/0{reset}");
     }
 
     // Next command
@@ -1606,18 +1604,22 @@ fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()> {
     if unresolved.is_empty() {
         println!("  Divergence fully resolved.");
     } else {
+        let ws_name = workspace_dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<ws>");
+
         println!();
         println!("  WARNING: {} divergent copy/copies could not be auto-resolved.", unresolved.len());
         println!("  @ and non-@ have overlapping but different changes.");
         println!("  To fix manually:");
-        println!("    jj diff -r @                          # see @ changes");
+        println!("    maw exec {ws_name} -- jj diff -r @             # see @ changes");
         for id in &unresolved {
-            println!("    jj diff -r {id:<12}                  # see this copy's changes");
+            println!("    maw exec {ws_name} -- jj diff -r {id:<12}   # see this copy's changes");
         }
         println!();
         println!("  To merge a copy's extra changes into @:");
         for id in &unresolved {
-            println!("    jj squash --from {id} --into @");
+            println!("    maw exec {ws_name} -- jj squash --from {id} --into @");
         }
         println!("  IMPORTANT: Do NOT abandon @ — this orphans the workspace pointer.");
     }
@@ -2491,21 +2493,10 @@ fn merge(
         }
     }
 
-    // Step 3: Move main bookmark to the final commit
+    // Compute the final merge revision for bookmark/rebase (before cleanup steps)
     let final_rev = format!("{}@", ws_to_merge[0]);
-    let bookmark_output = Command::new("jj")
-        .args(["bookmark", "set", branch, "-r", &final_rev])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to move main bookmark")?;
 
-    if !bookmark_output.status.success() {
-        let stderr = String::from_utf8_lossy(&bookmark_output.stderr);
-        eprintln!("Warning: Failed to move {branch} bookmark: {}", stderr.trim());
-        eprintln!("  Run manually: jj bookmark set {branch} -r {final_rev}");
-    }
-
-    // Step 4: Abandon orphaned scaffolding commits from the merged workspaces only.
+    // Step 3: Abandon orphaned scaffolding commits from the merged workspaces only.
     // Only target the specific parent commits recorded before rebase — not all empty
     // commits in the repo, which could belong to other active workspaces.
     if !pre_rebase_parent_ids.is_empty() {
@@ -2532,11 +2523,11 @@ fn merge(
         }
     }
 
-    // Step 5: Rebase default workspace onto new branch so on-disk files reflect the merge.
+    // Step 4: Rebase default workspace onto new merge commit so on-disk files reflect the merge.
     // The default workspace's working copy is empty (no changes), so this is safe.
     let default_ws_path = root.join("ws").join(default_ws);
     if default_ws_path.exists() {
-        // The merge operations above (squash, bookmark set) ran from root and
+        // The merge operations above (squash) ran from root and
         // modified the commit graph. The default workspace may now be stale.
         // Update it BEFORE rebasing to avoid stale errors.
         let _ = Command::new("jj")
@@ -2545,7 +2536,7 @@ fn merge(
             .output();
 
         let rebase_default = Command::new("jj")
-            .args(["rebase", "-r", &format!("{default_ws}@"), "-d", branch])
+            .args(["rebase", "-r", &format!("{default_ws}@"), "-d", &final_rev])
             .current_dir(&default_ws_path)
             .output();
 
@@ -2553,12 +2544,35 @@ fn merge(
             && !output.status.success()
         {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: Failed to rebase default workspace onto {branch}: {}", stderr.trim());
-            eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -r {default_ws}@ -d {branch}");
+            eprintln!("Warning: Failed to rebase default workspace onto {}: {}", final_rev, stderr.trim());
+            eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -r {default_ws}@ -d {final_rev}");
         }
 
         // The rebase may have created a divergent commit — auto-resolve it.
         let _ = resolve_divergent_working_copy(&default_ws_path);
+
+        // Check if default workspace has local edits that would be lost by restore.
+        let status_output = Command::new("jj")
+            .args(["status", "--color=never", "--no-pager"])
+            .current_dir(&default_ws_path)
+            .output();
+
+        let has_local_edits = status_output
+            .as_ref()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // jj status shows "Working copy changes:" when there are edits
+                stdout.contains("Working copy changes:")
+            })
+            .unwrap_or(false);
+
+        if has_local_edits {
+            eprintln!("WARNING: Default workspace has uncommitted changes that would be overwritten by merge.");
+            eprintln!("  To preserve your changes, commit them first:");
+            eprintln!("    maw exec default -- jj commit -m \"wip: save before merge\"");
+            eprintln!("  Then re-run the merge.");
+            bail!("Default workspace has dirty state. Commit or discard changes before merging.");
+        }
 
         // Restore on-disk files from the parent commit. After rebasing the
         // working copy onto the new main, the commit tree is correct but
@@ -2579,6 +2593,23 @@ fn merge(
 
     println!("Merged to {branch}: {msg}");
     let has_conflicts = auto_resolve_conflicts(&cwd, &config, branch)?;
+
+    // Step 5: Move branch bookmark to the final commit (only if no conflicts).
+    // We defer this until after conflict detection so the branch never points
+    // at a conflicted commit.
+    if !has_conflicts {
+        let bookmark_output = Command::new("jj")
+            .args(["bookmark", "set", branch, "-r", &final_rev])
+            .current_dir(&cwd)
+            .output()
+            .context("Failed to move main bookmark")?;
+
+        if !bookmark_output.status.success() {
+            let stderr = String::from_utf8_lossy(&bookmark_output.stderr);
+            eprintln!("Warning: Failed to move {branch} bookmark: {}", stderr.trim());
+            eprintln!("  Run manually: jj bookmark set {branch} -r {final_rev}");
+        }
+    }
 
     // Optionally destroy workspaces (but not if there are conflicts!)
     // Never destroy the default workspace during merge --destroy.

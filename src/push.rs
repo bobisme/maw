@@ -249,6 +249,26 @@ fn push_tags(cwd: &Path, root: &Path) -> Result<()> {
         // Non-fatal — tags may already be exported
     }
 
+    // Verify at least some tag refs exist in git before pushing.
+    // If jj git export didn't create any tag refs, git push --tags
+    // would succeed but push nothing — which can be confusing.
+    let tag_check = Command::new("git")
+        .args(["tag", "--list"])
+        .current_dir(root)
+        .output();
+
+    let has_git_tags = tag_check
+        .as_ref()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+
+    if !has_git_tags {
+        eprintln!("Warning: No git tags found after jj git export.");
+        eprintln!("  Tags created with `jj tag set` may not have exported to git.");
+        eprintln!("  For reliable tag+push, use: maw release <tag>");
+        return Ok(());
+    }
+
     let output = Command::new("git")
         .args(["push", "origin", "--tags", "--porcelain"])
         .current_dir(root)

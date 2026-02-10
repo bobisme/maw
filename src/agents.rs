@@ -110,32 +110,27 @@ maw exec <name> -- jj describe -m "resolve: ..."  # Update commit message
 
 ### Pushing to Remote (Coordinator)
 
-After merging workspaces, `maw ws merge` checks for push blockers and warns you.
-If it reports undescribed commits, fix them before pushing:
+After merging workspaces:
 
 ```bash
-# Option A: rebase merge onto clean base (skips scaffolding commits)
-# 'rebase' moves a commit to a new parent; @- = parent of working copy (the merge commit)
-jj rebase -r @- -d main
-
-# Option B: give the empty commits descriptions
-# <change-id> is jj's stable identifier shown in jj log output
-jj describe <change-id> -m "workspace setup"
+maw push                       # Push branch to origin (handles bookmarks automatically)
 ```
 
-Then move the bookmark (jj's equivalent of a git branch) and push:
+If you committed directly (not via merge), advance the branch first:
 
 ```bash
-jj bookmark set main -r @-     # Point 'main' at the merge commit (@- = parent of working copy)
-jj git push                    # Push to remote (like git push)
-
-# IMPORTANT: When jj says "Changes to push to origin:", the push is ALREADY DONE.
-# jj reports what it pushed, not what it will push. Do NOT run git push afterwards.
-
-# To verify push succeeded (local and remote should match):
-jj log -r main --no-graph -T 'commit_id.short()'
-git ls-remote origin refs/heads/main | cut -c1-12
+maw push --advance             # Move branch to parent of working copy, then push
 ```
+
+For tagged releases:
+
+```bash
+maw release v1.2.3             # Tag + push branch + push tag in one step
+```
+
+**IMPORTANT**: When jj/maw says "Changes to push to origin:", the push is ALREADY DONE.
+This is different from git — it reports what it pushed, not what it will push.
+Do NOT run `git push` afterwards.
 
 {MAW_SECTION_END}
 "#

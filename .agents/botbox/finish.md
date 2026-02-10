@@ -41,7 +41,7 @@ When you've completed multiple beads in a session (or a significant single bead)
   1. Run `jj new` to create a release commit, **then** bump version (Cargo.toml, package.json, etc.) using **semantic versioning**. Order matters: jj snapshots the working copy before `jj new`, so edits made before `jj new` go into the previous commit.
   2. Update changelog/release notes if the project has one
   3. Push to main
-  4. Tag and push (`jj tag set vX.Y.Z -r main && maw push`)
+  4. Tag and push: `maw release vX.Y.Z`
   5. Announce on botbus: `bus send --no-hooks --agent $AGENT $BOTBOX_PROJECT "<project> vX.Y.Z released - <summary>" -L release`
 
 Use **conventional commits** (`feat:`, `fix:`, `docs:`, `chore:`, etc.) for clear history.

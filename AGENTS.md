@@ -15,17 +15,15 @@ This project uses **maw** for workspace management, **jj** (Jujutsu) for version
 ```bash
 # Create your workspace (automatically creates a commit you own)
 maw ws create <your-name>
-cd ws/<your-name>
 
-# Work - jj tracks changes automatically
-# ... edit files ...
-jj describe -m "feat: what you're implementing"
+# Work - jj tracks changes automatically (use the absolute path shown by create)
+# ... edit files in ws/<your-name>/ ...
+maw exec <your-name> -- jj describe -m "feat: what you're implementing"
 
 # Check status (see all agent work, conflicts, stale warnings)
 maw ws status
 
-# When done, merge all work from the repo root (or default workspace)
-cd /path/to/repo/root
+# When done, merge all work from the repo root
 maw ws merge alice bob --destroy
 ```
 
@@ -59,7 +57,6 @@ Common patterns:
 | Quick status overview | `maw status` |
 | Check status | `maw ws status` |
 | Handle stale workspace | `maw ws sync` |
-| Run jj in workspace | `maw ws jj <name> <args>` |
 | Run any command in workspace | `maw exec <name> -- <cmd> <args>` |
 | Merge agent work | `maw ws merge <a> <b>` |
 | Merge and cleanup | `maw ws merge <a> <b> --destroy` |
@@ -76,8 +73,6 @@ maw exec alice -- cargo test
 maw exec alice -- br list
 maw exec alice -- ls -la src/
 ```
-
-For jj specifically, `maw ws jj <name> <args>` also works and includes jj-specific safety warnings.
 
 ---
 
@@ -206,9 +201,8 @@ maw push --advance
 ### 5. Tag the Release
 
 ```bash
-# Tag the release
-jj tag set vX.Y.Z -r main
-git push origin vX.Y.Z
+# Tag and push the release
+maw release vX.Y.Z
 
 # Install locally and verify
 cargo install --path .
@@ -239,7 +233,7 @@ jj bookmark track main@origin  # Track remote main
 | Bump version | Edit `Cargo.toml` + `README.md`, then `jj describe` |
 | Push (after merge) | `maw push` |
 | Push (after direct commit) | `maw push --advance` |
-| Tag release | `jj tag set vX.Y.Z -r main` then `git push origin vX.Y.Z` |
+| Tag release | `maw release vX.Y.Z` |
 
 ---
 
@@ -330,7 +324,7 @@ br create --title="..." --type=task --priority=2
 - **Agent identity**: When announcing releases or responding on botbus, use `--agent maw-dev` and post to `#maw` channel.
 - **Issue tracking**: Use `br` (beads) for issue tracking. File beads for bugs and feature requests. Triage community feedback from botbus.
 - **Release announcements**: Always use `bus send --no-hooks --agent maw-dev maw "..."` for release announcements. The `--no-hooks` flag prevents auto-spawn hooks from triggering on announcement messages.
-- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `maw push --advance` → `jj tag set vX.Y.Z -r main` → `git push origin vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
+- **Release process**: commit via jj → bump version in Cargo.toml + README.md → `maw push --advance` → `maw release vX.Y.Z` → `just install` → announce on botbus #maw as maw-dev.
 
 ---
 
@@ -346,7 +340,7 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 **Success output** must include:
 - What happened
 - What to do next (exact commands)
-- Example: `"Workspace 'agent-a' ready!\n  Path: /abs/path\n  maw ws jj agent-a describe -m \"feat: ...\""`
+- Example: `"Workspace 'agent-a' ready!\n  Path: /abs/path\n  maw exec agent-a -- jj describe -m \"feat: ...\""`
 
 **Principles**:
 - Agents can't remember prior output — every message must stand alone
@@ -354,7 +348,7 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 - Keep it brief — agents are token-conscious
 - Use structured prefixes where appropriate: `WARNING:`, `IMPORTANT:`, `To fix:`, `Next:`
 - Assume agents have **zero jj knowledge** — maw is their first contact with jj. Every jj concept (describe, working copy, stale, bookmarks, @- syntax) needs a one-line explanation the first time it appears in a given output context
-- All --help text and runtime output must work in **sandboxed environments** where `cd` doesn't persist between tool calls. Never instruct agents to `cd` into a workspace — use `maw ws jj <name>` for jj commands and `maw exec <name> -- <cmd>` for other tools
+- All --help text and runtime output must work in **sandboxed environments** where `cd` doesn't persist between tool calls. Never instruct agents to `cd` into a workspace — use `maw exec <name> -- <cmd>` for all commands in workspaces
 - All file operation instructions must reference **absolute workspace paths**, not relative ones. Agents use Read/Write/Edit tools with absolute paths, not just bash
 
 ---
