@@ -85,7 +85,7 @@ pub fn run(args: &PushArgs) -> Result<()> {
 
     // Push git tags regardless of branch status (unless --no-tags)
     if !args.no_tags {
-        push_tags(&root)?;
+        push_tags(&cwd, &root)?;
     }
 
     Ok(())
@@ -234,14 +234,12 @@ fn count_revset(cwd: &Path, revset: &str) -> Result<usize> {
 }
 
 /// Export jj tags to git, then push all tags to origin.
-/// Reports which tags were pushed; stays silent if none.
-fn push_tags(root: &Path) -> Result<()> {
+/// Reports which tags were pushed; warns on failures but does not fail the overall push.
+fn push_tags(cwd: &Path, root: &Path) -> Result<()> {
     // Export jj state (including tags) to the colocated git repo.
-    // Run from ws/default/ (not bare root) to avoid stale-workspace errors.
-    let cwd = jj_cwd()?;
     let export = Command::new("jj")
         .args(["git", "export"])
-        .current_dir(&cwd)
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj git export")?;
 
@@ -251,7 +249,6 @@ fn push_tags(root: &Path) -> Result<()> {
         // Non-fatal — tags may already be exported
     }
 
-    // Collect local tags before push so we can report what's new
     let output = Command::new("git")
         .args(["push", "origin", "--tags", "--porcelain"])
         .current_dir(root)
@@ -260,23 +257,47 @@ fn push_tags(root: &Path) -> Result<()> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Parse porcelain output for newly pushed tags.
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "Warning: git push --tags failed (tags not pushed): {}",
+            stderr.trim()
+        );
+        return Ok(());
+    }
+
+    // Parse porcelain output for newly pushed and rejected tags.
     // Format: "<flag>\t<from>:<to>\t<summary>"
     //   * = new ref pushed, = = up to date, ! = rejected
-    // We only report lines starting with '*' (newly pushed).
-    let pushed: Vec<&str> = stdout
-        .lines()
-        .filter(|line| line.starts_with('*'))
-        .filter_map(|line| {
-            // Extract tag name from "*\trefs/tags/vX.Y.Z:refs/tags/vX.Y.Z\t..."
-            line.split("refs/tags/")
-                .nth(1)
-                .and_then(|s| s.split(['\t', ' ', ':']).next())
-        })
-        .collect();
+    let mut pushed = Vec::new();
+    let mut rejected = Vec::new();
+
+    for line in stdout.lines() {
+        let tag_name = line
+            .split("refs/tags/")
+            .nth(1)
+            .and_then(|s| s.split(['\t', ' ', ':']).next());
+
+        if line.starts_with('*') {
+            if let Some(name) = tag_name {
+                pushed.push(name.to_string());
+            }
+        } else if line.starts_with('!') {
+            if let Some(name) = tag_name {
+                rejected.push(name.to_string());
+            }
+        }
+    }
 
     if !pushed.is_empty() {
         println!("  Tags pushed: {}", pushed.join(", "));
+    }
+    if !rejected.is_empty() {
+        eprintln!(
+            "Warning: {} tag(s) rejected by remote: {}",
+            rejected.len(),
+            rejected.join(", ")
+        );
     }
 
     Ok(())

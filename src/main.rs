@@ -1,4 +1,3 @@
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod agents;
@@ -163,10 +162,10 @@ enum Commands {
     Release(release::ReleaseArgs),
 }
 
-fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Init => init::run(),
@@ -178,5 +177,15 @@ fn main() -> Result<()> {
         Commands::Push(args) => push::run(&args),
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
+    };
+
+    if let Err(e) = result {
+        // If the error is an ExitCodeError from exec, propagate the exit code
+        // without printing an error message (the child command already printed its own).
+        if let Some(exit_err) = e.downcast_ref::<exec::ExitCodeError>() {
+            std::process::exit(exit_err.0);
+        }
+        eprintln!("Error: {e:?}");
+        std::process::exit(1);
     }
 }

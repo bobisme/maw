@@ -84,8 +84,9 @@ fn auto_commit_wip() -> Result<()> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // If there are working-copy changes (not just "The working copy has no changes")
-    let has_changes = !stdout.contains("nothing to") && !stdout.contains("no changes");
+    // jj says "The working copy has no changes" when clean.
+    // The diff --stat check below is the real test; this is just an early hint.
+    let has_changes = !stdout.contains("no changes");
 
     // Check if the current working copy has modifications
     let diff_output = Command::new("jj")

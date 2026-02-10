@@ -1385,7 +1385,7 @@ fn sync(all: bool) -> Result<()> {
 
     // After sync, check for and auto-resolve divergent commits on our working copy.
     // This happens when update-stale creates a fork of the workspace commit.
-    resolve_divergent_working_copy(".")?;
+    resolve_divergent_working_copy(&cwd)?;
 
     println!();
     println!("Workspace synced successfully.");
@@ -1403,7 +1403,7 @@ fn sync(all: bool) -> Result<()> {
 /// 3. Non-@'s files ⊆ @'s files → abandon non-@ (@ is superset)
 /// 4. @'s files ⊆ non-@'s files → squash non-@ into @ (recover extra files)
 /// 5. Overlapping but different → warn with actionable instructions
-fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
+fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()> {
     // Get the working copy's change ID and commit ID
     let change_output = Command::new("jj")
         .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
@@ -1626,7 +1626,7 @@ fn resolve_divergent_working_copy(workspace_dir: &str) -> Result<()> {
 }
 
 /// Abandon a non-@ divergent copy, logging the reason.
-fn abandon_copy(workspace_dir: &str, commit_id: &str, reason: &str) {
+fn abandon_copy(workspace_dir: &Path, commit_id: &str, reason: &str) {
     let result = Command::new("jj")
         .args(["abandon", commit_id])
         .current_dir(workspace_dir)
@@ -1716,7 +1716,7 @@ fn sync_all() -> Result<()> {
         match sync_result {
             Ok(out) if out.status.success() => {
                 // Check for and resolve divergent commits after sync
-                if let Err(e) = resolve_divergent_working_copy(path.to_str().unwrap_or(".")) {
+                if let Err(e) = resolve_divergent_working_copy(&path) {
                     eprintln!("  ✓ {ws} - synced (divergent resolution failed: {e})");
                 } else {
                     println!("  ✓ {ws} - synced");
@@ -1824,7 +1824,7 @@ pub fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
     }
 
     // Resolve any divergent commits created by sync
-    resolve_divergent_working_copy(path.to_str().unwrap_or("."))?;
+    resolve_divergent_working_copy(&path)?;
 
     eprintln!("Workspace '{name}' synced. Proceeding with command.");
     eprintln!();
@@ -1885,7 +1885,7 @@ fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result
         }
 
         // Resolve any divergent commits created by the sync
-        resolve_divergent_working_copy(ws_path.to_str().unwrap_or("."))?;
+        resolve_divergent_working_copy(&ws_path)?;
 
         synced_count += 1;
     }
@@ -2065,11 +2065,11 @@ fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()>
 
 /// Check for conflicts after merge and auto-resolve paths matching config patterns.
 /// Returns true if there are remaining (unresolved) conflicts.
-fn auto_resolve_conflicts(root: &Path, config: &MawConfig, branch: &str) -> Result<bool> {
+fn auto_resolve_conflicts(cwd: &Path, config: &MawConfig, branch: &str) -> Result<bool> {
     // Check for conflicts
     let status_output = Command::new("jj")
         .args(["status"])
-        .current_dir(root)
+        .current_dir(cwd)
         .output()
         .context("Failed to check status")?;
 
@@ -2079,7 +2079,7 @@ fn auto_resolve_conflicts(root: &Path, config: &MawConfig, branch: &str) -> Resu
     }
 
     // Get list of conflicted files
-    let conflicted_files = get_conflicted_files(root)?;
+    let conflicted_files = get_conflicted_files(cwd)?;
     if conflicted_files.is_empty() {
         return Ok(false);
     }
@@ -2123,7 +2123,7 @@ fn auto_resolve_conflicts(root: &Path, config: &MawConfig, branch: &str) -> Resu
             // Restore file from branch to resolve conflict
             let restore_output = Command::new("jj")
                 .args(["restore", "--from", branch, file])
-                .current_dir(root)
+                .current_dir(cwd)
                 .output()
                 .context("Failed to restore file from main")?;
 
@@ -2158,12 +2158,12 @@ fn auto_resolve_conflicts(root: &Path, config: &MawConfig, branch: &str) -> Resu
 }
 
 /// Get list of files with conflicts from jj status output.
-fn get_conflicted_files(root: &Path) -> Result<Vec<String>> {
+fn get_conflicted_files(cwd: &Path) -> Result<Vec<String>> {
     // Use jj status to get conflicted files
     // Format: "C filename" for conflicted files
     let output = Command::new("jj")
         .args(["status"])
-        .current_dir(root)
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj status")?;
 
@@ -2235,7 +2235,7 @@ fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: b
 
 /// Preview what a merge would do without creating any commits.
 /// Shows changes in each workspace and potential conflicts.
-fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
+fn preview_merge(workspaces: &[String], cwd: &Path) -> Result<()> {
     println!("=== Merge Preview (dry run) ===");
     println!();
 
@@ -2256,7 +2256,7 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
         // Get diff stats for the workspace using workspace@ syntax
         let diff_output = Command::new("jj")
             .args(["diff", "--stat", "-r", &format!("{ws}@")])
-            .current_dir(root)
+            .current_dir(cwd)
             .output()
             .with_context(|| format!("Failed to get diff for workspace {ws}"))?;
 
@@ -2289,7 +2289,7 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
         for ws in workspaces {
             let diff_output = Command::new("jj")
                 .args(["diff", "--summary", "-r", &format!("{ws}@")])
-                .current_dir(root)
+                .current_dir(cwd)
                 .output()
                 .with_context(|| format!("Failed to get diff summary for {ws}"))?;
 
@@ -2558,8 +2558,7 @@ fn merge(
         }
 
         // The rebase may have created a divergent commit — auto-resolve it.
-        let default_ws_str = default_ws_path.to_string_lossy();
-        let _ = resolve_divergent_working_copy(&default_ws_str);
+        let _ = resolve_divergent_working_copy(&default_ws_path);
 
         // Restore on-disk files from the parent commit. After rebasing the
         // working copy onto the new main, the commit tree is correct but
