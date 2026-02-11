@@ -89,6 +89,10 @@ enum Commands {
         /// Output format: text, json, pretty (auto-detected from TTY)
         #[arg(long)]
         format: Option<format::OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 
     /// Launch the terminal UI
@@ -171,7 +175,7 @@ fn main() {
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Init => init::run(),
         Commands::Upgrade => upgrade::run(),
-        Commands::Doctor { format } => doctor::run(format),
+        Commands::Doctor { format, json } => doctor::run(format::OutputFormat::with_json_flag(format, json)),
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),
         Commands::Status(cmd) => status::run(cmd),

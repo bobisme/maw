@@ -45,6 +45,10 @@ pub struct StatusArgs {
     /// Output format: text, json, pretty (auto-detected from TTY)
     #[arg(long)]
     pub format: Option<OutputFormat>,
+
+    /// Shorthand for --format json
+    #[arg(long, hide = true, conflicts_with = "format")]
+    pub json: bool,
 }
 
 pub fn run(args: StatusArgs) -> Result<()> {
@@ -55,7 +59,7 @@ pub fn run(args: StatusArgs) -> Result<()> {
         return Ok(());
     }
 
-    let format = OutputFormat::resolve(args.format);
+    let format = OutputFormat::resolve(OutputFormat::with_json_flag(args.format, args.json));
 
     // JSON mode: serialize and exit (no watch)
     if format == OutputFormat::Json {
@@ -98,7 +102,7 @@ fn watch_loop(args: &StatusArgs) -> Result<()> {
 }
 
 fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
-    let format = OutputFormat::resolve(args.format);
+    let format = OutputFormat::resolve(OutputFormat::with_json_flag(args.format, args.json));
 
     loop {
         let summary = collect_status()?;

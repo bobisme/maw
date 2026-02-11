@@ -199,6 +199,10 @@ pub enum WorkspaceCommands {
         /// Can also be set via FORMAT env var.
         #[arg(long)]
         format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 
     /// Show status of current workspace and all agent work
@@ -215,6 +219,10 @@ pub enum WorkspaceCommands {
         /// Can also be set via FORMAT env var.
         #[arg(long)]
         format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 
     /// Sync workspace with repository (handle stale working copy)
@@ -261,6 +269,10 @@ pub enum WorkspaceCommands {
         /// Output format: text, json, pretty (auto-detected from TTY)
         #[arg(long)]
         format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 
     /// Clean up orphaned, stale, or empty workspaces
@@ -361,8 +373,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         }
         WorkspaceCommands::Destroy { name, confirm } => create::destroy(&name, confirm),
         WorkspaceCommands::Restore { name } => restore::restore(&name),
-        WorkspaceCommands::List { verbose, format } => list::list(verbose, OutputFormat::resolve(format)),
-        WorkspaceCommands::Status { format } => status::status(OutputFormat::resolve(format)),
+        WorkspaceCommands::List { verbose, format, json } => list::list(verbose, OutputFormat::resolve(OutputFormat::with_json_flag(format, json))),
+        WorkspaceCommands::Status { format, json } => status::status(OutputFormat::resolve(OutputFormat::with_json_flag(format, json))),
         WorkspaceCommands::Sync { all } => sync::sync(all),
         WorkspaceCommands::Jj { name, args } => {
             let args_str = args.join(" ");
@@ -371,7 +383,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                  Use: maw exec {name} -- jj {args_str}"
             );
         }
-        WorkspaceCommands::History { name, limit, format } => history::history(&name, limit, format),
+        WorkspaceCommands::History { name, limit, format, json } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
         WorkspaceCommands::Merge {

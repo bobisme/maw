@@ -32,6 +32,12 @@ impl FromStr for OutputFormat {
 }
 
 impl OutputFormat {
+    /// Merge a hidden `--json` flag with an explicit `--format` option.
+    /// `--json` acts as a shorthand for `--format json`.
+    pub fn with_json_flag(explicit: Option<Self>, json: bool) -> Option<Self> {
+        if json { Some(Self::Json) } else { explicit }
+    }
+
     /// Resolve the output format based on explicit value, env var, or TTY detection
     pub fn resolve(explicit: Option<Self>) -> Self {
         // Priority: explicit flag > FORMAT env var > TTY detection
