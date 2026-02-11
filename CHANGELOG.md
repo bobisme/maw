@@ -2,6 +2,13 @@
 
 All notable changes to maw.
 
+## v0.31.0
+
+- Feat: `maw init` and `maw upgrade` now set `ui.conflict-marker-style = "snapshot"` in jj repo config. The default jj "diff" style uses `%%%%%%%` and `\\\\\\\` markers that break JSON-based editing tools agents use. Snapshot style fully materializes both conflict sides with JSON-safe markers. Requires jj >= 0.38.0. (bd-2m7c)
+- Feat: `maw doctor` checks jj version >= 0.38.0 and warns if conflict-marker-style isn't "snapshot".
+- Feat: `maw ws merge` now shows conflict file locations with line ranges and actionable resolution guidance when merge results in conflicts. (bd-2vrn)
+- Fix: auto-snapshot default workspace before merge rebase to prevent data loss when default has uncommitted changes. (bd-97m6)
+
 ## v0.30.5
 
 - Fix: `maw ws merge` now preserves committed work in the default workspace. Previously, intermediate commits between main and default@ were lost during merge rebase — the whole chain is now rebased, not just the tip. (bd-342s)
