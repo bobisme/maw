@@ -92,17 +92,26 @@ pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     // Handle different output formats
     match format {
         OutputFormat::Text => {
-            // Compact, ID-first, agent-friendly format
+            // Tab-separated with header, agent-friendly format
+            if verbose {
+                println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT\tPATH");
+            } else {
+                println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT");
+            }
             for ws in &workspaces {
-                let default_marker = if ws.is_default { "  [default]" } else { "" };
-                println!(
-                    "{}  {}  {}  {}{}",
-                    ws.name, ws.change_id, ws.commit_id, ws.description, default_marker
-                );
-                if verbose
-                    && let Some(path) = &ws.path {
-                        println!("  path: {path}");
-                    }
+                let default_marker = if ws.is_default { "true" } else { "false" };
+                if verbose {
+                    let path = ws.path.as_deref().unwrap_or("");
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        ws.name, ws.change_id, ws.commit_id, ws.description, default_marker, path
+                    );
+                } else {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        ws.name, ws.change_id, ws.commit_id, ws.description, default_marker
+                    );
+                }
             }
 
             // Stale workspace warnings
