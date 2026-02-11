@@ -2,6 +2,10 @@
 
 All notable changes to maw.
 
+## v0.31.2
+
+- Feat: `--json` is now accepted as a hidden alias for `--format json` on all commands that support `--format` (doctor, status, ws list, ws status, ws history). Hidden from `--help`; conflicts with `--format` if both specified. (bd-3i8u)
+
 ## v0.31.1
 
 - Feat: `maw ws restore <name>` recovers a workspace after accidental `maw ws destroy`. Uses jj operation log to revert the forget, rematerialize the directory, and restore file content. Multi-strategy fallback ensures recovery even when op revert alone doesn't recreate the directory. (bd-2nyy)
