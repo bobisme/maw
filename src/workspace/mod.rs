@@ -13,6 +13,7 @@ mod list;
 mod merge;
 mod names;
 mod prune;
+mod restore;
 mod status;
 pub(crate) mod sync;
 
@@ -154,6 +155,8 @@ pub enum WorkspaceCommands {
     ///
     /// Non-interactive by default (agents can't respond to prompts).
     /// Use --confirm for interactive confirmation.
+    ///
+    /// To undo: maw ws restore <name>
     Destroy {
         /// Name of the workspace to destroy
         name: String,
@@ -161,6 +164,22 @@ pub enum WorkspaceCommands {
         /// Prompt for confirmation before destroying
         #[arg(short, long)]
         confirm: bool,
+    },
+
+    /// Restore a previously destroyed workspace
+    ///
+    /// Recovers a workspace that was removed with 'maw ws destroy' by
+    /// reverting the forget operation from jj's operation log. The
+    /// workspace's commit history and file contents are recovered.
+    ///
+    /// Only works if the workspace was destroyed via 'maw ws destroy'
+    /// (which uses 'jj workspace forget' internally).
+    ///
+    /// Examples:
+    ///   maw ws restore alice    # recover alice's destroyed workspace
+    Restore {
+        /// Name of the workspace to restore
+        name: String,
     },
 
     /// List all workspaces
@@ -341,6 +360,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             create::create(&name, revision.as_deref())
         }
         WorkspaceCommands::Destroy { name, confirm } => create::destroy(&name, confirm),
+        WorkspaceCommands::Restore { name } => restore::restore(&name),
         WorkspaceCommands::List { verbose, format } => list::list(verbose, OutputFormat::resolve(format)),
         WorkspaceCommands::Status { format } => status::status(OutputFormat::resolve(format)),
         WorkspaceCommands::Sync { all } => sync::sync(all),

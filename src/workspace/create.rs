@@ -164,7 +164,8 @@ pub(crate) fn destroy(name: &str, confirm: bool) -> Result<()> {
     std::fs::remove_dir_all(&path)
         .with_context(|| format!("Failed to remove {}", path.display()))?;
 
-    println!("Workspace destroyed.");
+    println!("Workspace '{name}' destroyed.");
+    println!("  To undo: maw ws restore {name}");
     Ok(())
 }
 
