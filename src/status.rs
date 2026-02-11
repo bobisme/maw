@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -25,6 +26,7 @@ const ANSI_RESET: &str = "\x1b[0m";
 
 /// Brief repo/workspace status
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StatusArgs {
     /// Terse, statusbar-friendly output
     #[arg(long)]
@@ -51,16 +53,16 @@ pub struct StatusArgs {
     pub json: bool,
 }
 
-pub fn run(args: StatusArgs) -> Result<()> {
+pub fn run(args: &StatusArgs) -> Result<()> {
     // Special modes take precedence over format
     if args.status_bar || args.oneline {
         let summary = collect_status()?;
-        render(&summary, RenderOptions {
+        render(&summary, &RenderOptions {
             oneline: args.oneline,
             status_bar: args.status_bar,
             mouth: args.mouth,
             watching: false,
-        })?;
+        });
         return Ok(());
     }
 
@@ -75,7 +77,7 @@ pub fn run(args: StatusArgs) -> Result<()> {
             untracked_files: summary.untracked_files.clone(),
             is_stale: summary.is_stale,
             main_sync: summary.main_sync.oneline(),
-            stray_root_files: summary.stray_root_files.clone(),
+            stray_root_files: summary.stray_root_files,
             advice: vec![],
         };
         println!("{}", format.serialize(&envelope)?);
@@ -84,7 +86,7 @@ pub fn run(args: StatusArgs) -> Result<()> {
 
     // Watch mode (text/pretty only)
     if args.watch {
-        watch_loop(&args)?;
+        watch_loop(args)?;
     } else {
         let summary = collect_status()?;
         render_with_format(&summary, format, false)?;
@@ -169,7 +171,7 @@ enum MainSyncStatus {
 }
 
 impl StatusSummary {
-    fn issue_count(&self) -> usize {
+    const fn issue_count(&self) -> usize {
         let mut count = 0;
         if self.op_fork {
             count += 1;
@@ -222,16 +224,17 @@ impl StatusSummary {
 
         if self.op_fork {
             let fix = self.op_fork_fix.as_deref().unwrap_or("wait for concurrent agents to finish, then: jj op integrate <id>");
-            out.push_str(&format!("[WARN] OP FORK: concurrent operations forked the jj operation graph\n  Fix: {fix}\n"));
+            let _ = writeln!(out, "[WARN] OP FORK: concurrent operations forked the jj operation graph\n  Fix: {fix}");
         }
 
         if !self.stray_root_files.is_empty() {
             let n = self.stray_root_files.len();
-            out.push_str(&format!(
-                "[WARN] ROOT NOT BARE: {n} unexpected file(s) at repo root: run maw init to fix\n"
-            ));
+            let _ = writeln!(
+                out,
+                "[WARN] ROOT NOT BARE: {n} unexpected file(s) at repo root: run maw init to fix"
+            );
             for name in &self.stray_root_files {
-                out.push_str(&format!("  - {name}\n"));
+                let _ = writeln!(out, "  - {name}");
             }
         }
 
@@ -242,7 +245,7 @@ impl StatusSummary {
             ws_count == 0,
         ));
         for name in &self.workspace_names {
-            out.push_str(&format!("  - {name}\n"));
+            let _ = writeln!(out, "  - {name}");
         }
 
         let change_count = self.changed_files.len();
@@ -256,7 +259,7 @@ impl StatusSummary {
             change_count == 0,
         ));
         for file in &self.changed_files {
-            out.push_str(&format!("  - {file}\n"));
+            let _ = writeln!(out, "  - {file}");
         }
 
         let untracked_count = self.untracked_files.len();
@@ -266,7 +269,7 @@ impl StatusSummary {
             untracked_count == 0,
         ));
         for file in &self.untracked_files {
-            out.push_str(&format!("  - {file}\n"));
+            let _ = writeln!(out, "  - {file}");
         }
 
         out.push_str(&text_status_line(
@@ -349,24 +352,26 @@ impl StatusSummary {
 
         if self.op_fork {
             let fix = self.op_fork_fix.as_deref().unwrap_or("wait for concurrent agents to finish, then: jj op integrate <id>");
-            out.push_str(&format!(
-                "{} {}: {}\n",
+            let _ = writeln!(
+                out,
+                "{} {}: {}",
                 colorize_light_red("\u{26a0} OP FORK"),
                 colorize_light_red("concurrent operations forked the jj operation graph"),
                 colorize_light_red(fix),
-            ));
+            );
         }
 
         if !self.stray_root_files.is_empty() {
             let n = self.stray_root_files.len();
-            out.push_str(&format!(
-                "{} {}: {}\n",
+            let _ = writeln!(
+                out,
+                "{} {}: {}",
                 colorize_light_red("⚠ ROOT NOT BARE"),
                 colorize_light_red(&format!("{n} unexpected file(s) at repo root")),
                 colorize_light_red("run maw init to fix"),
-            ));
+            );
             for name in &self.stray_root_files {
-                out.push_str(&format!("  - {name}\n"));
+                let _ = writeln!(out, "  - {name}");
             }
         }
 
@@ -377,7 +382,7 @@ impl StatusSummary {
             ws_count == 0,
         ));
         for name in &self.workspace_names {
-            out.push_str(&format!("  - {name}\n"));
+            let _ = writeln!(out, "  - {name}");
         }
 
         let change_count = self.changed_files.len();
@@ -391,7 +396,7 @@ impl StatusSummary {
             change_count == 0,
         ));
         for file in &self.changed_files {
-            out.push_str(&format!("  - {file}\n"));
+            let _ = writeln!(out, "  - {file}");
         }
 
         let untracked_count = self.untracked_files.len();
@@ -401,7 +406,7 @@ impl StatusSummary {
             untracked_count == 0,
         ));
         for file in &self.untracked_files {
-            out.push_str(&format!("  - {file}\n"));
+            let _ = writeln!(out, "  - {file}");
         }
 
         out.push_str(&status_line(
@@ -526,6 +531,7 @@ fn render_with_format(
 }
 
 /// Options controlling status rendering.
+#[allow(clippy::struct_excessive_bools)]
 struct RenderOptions {
     /// Show a single-line summary.
     oneline: bool,
@@ -537,7 +543,7 @@ struct RenderOptions {
     watching: bool,
 }
 
-fn render(summary: &StatusSummary, opts: RenderOptions) -> Result<()> {
+fn render(summary: &StatusSummary, opts: &RenderOptions) {
     if opts.watching {
         print!("\u{1b}[2J\u{1b}[H");
     }
@@ -558,7 +564,6 @@ fn render(summary: &StatusSummary, opts: RenderOptions) -> Result<()> {
         print!("{output}");
     }
     io::stdout().flush().ok();
-    Ok(())
 }
 
 fn collect_status() -> Result<StatusSummary> {
@@ -576,7 +581,10 @@ fn collect_status() -> Result<StatusSummary> {
     // If jj workspace list fails due to stale working copy or op fork,
     // degrade gracefully instead of bailing — especially important for --watch mode.
     let mut is_stale = false;
-    let workspace_names = if !ws_output.status.success() {
+    let workspace_names = if ws_output.status.success() {
+        let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+        non_default_workspace_names(&ws_list)
+    } else {
         let stderr = String::from_utf8_lossy(&ws_output.stderr);
         if is_sibling_op_error(&stderr) {
             op_fork = true;
@@ -586,11 +594,8 @@ fn collect_status() -> Result<StatusSummary> {
             is_stale = true;
             Vec::new()
         } else {
-            bail!("jj workspace list failed: {}", stderr);
+            bail!("jj workspace list failed: {stderr}");
         }
-    } else {
-        let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-        non_default_workspace_names(&ws_list)
     };
 
     // If op is forked, skip further jj commands — they'll all fail the same way
@@ -603,7 +608,12 @@ fn collect_status() -> Result<StatusSummary> {
         )?;
 
         // jj status may also fail when stale or op-forked — degrade gracefully
-        let (changed_files, status_is_stale) = if !status_output.status.success() {
+        let (changed_files, status_is_stale) = if status_output.status.success() {
+            let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+            let status_stderr = String::from_utf8_lossy(&status_output.stderr);
+            let stale = status_stderr.contains("working copy is stale");
+            (parse_jj_changed_files(&status_stdout), stale)
+        } else {
             let stderr = String::from_utf8_lossy(&status_output.stderr);
             if is_sibling_op_error(&stderr) {
                 op_fork = true;
@@ -612,19 +622,14 @@ fn collect_status() -> Result<StatusSummary> {
             } else if stderr.contains("working copy is stale") {
                 (Vec::new(), true)
             } else {
-                bail!("jj status failed: {}", stderr);
+                bail!("jj status failed: {stderr}");
             }
-        } else {
-            let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-            let status_stderr = String::from_utf8_lossy(&status_output.stderr);
-            let stale = status_stderr.contains("working copy is stale");
-            (parse_jj_changed_files(&status_stdout), stale)
         };
         is_stale = is_stale || status_is_stale;
 
         let git_files = git_status_files(&root).unwrap_or_default();
         let config = MawConfig::load(&root).unwrap_or_default();
-        let sync = main_sync_status(&cwd, config.branch())?;
+        let sync = main_sync_status(&cwd, config.branch());
 
         (changed_files, git_files.untracked, sync)
     };
@@ -720,38 +725,38 @@ fn git_status_files(root: &Path) -> Result<GitStatusFiles> {
     Ok(files)
 }
 
-fn main_sync_status(root: &Path, branch: &str) -> Result<MainSyncStatus> {
+fn main_sync_status(root: &Path, branch: &str) -> MainSyncStatus {
     let main_exists = match revset_exists(root, branch) {
         Ok(exists) => exists,
-        Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
+        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
     };
 
     if !main_exists {
-        return Ok(MainSyncStatus::NoMain);
+        return MainSyncStatus::NoMain;
     }
 
     let origin_ref = format!("{branch}@origin");
     let origin_exists = match revset_exists(root, &origin_ref) {
         Ok(exists) => exists,
-        Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
+        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
     };
 
     if !origin_exists {
-        return Ok(MainSyncStatus::NoRemote);
+        return MainSyncStatus::NoRemote;
     }
 
     let ahead_revset = format!("{origin_ref}..{branch}");
     let behind_revset = format!("{branch}..{origin_ref}");
     let ahead = match count_revset(root, &ahead_revset) {
         Ok(count) => count,
-        Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
+        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
     };
     let behind = match count_revset(root, &behind_revset) {
         Ok(count) => count,
-        Err(err) => return Ok(MainSyncStatus::Unknown(err.to_string())),
+        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
     };
 
-    Ok(match (ahead, behind) {
+    match (ahead, behind) {
         (0, 0) => MainSyncStatus::UpToDate,
         (a, 0) => MainSyncStatus::Ahead(a),
         (0, b) => MainSyncStatus::Behind(b),
@@ -759,6 +764,6 @@ fn main_sync_status(root: &Path, branch: &str) -> Result<MainSyncStatus> {
             ahead: a,
             behind: b,
         },
-    })
+    }
 }
 

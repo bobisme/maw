@@ -15,7 +15,8 @@ struct PruneAnalysis {
     empty: Vec<String>,
 }
 
-pub(crate) fn prune(force: bool, include_empty: bool) -> Result<()> {
+#[allow(clippy::too_many_lines)] // TODO: refactor (bd-3nzk)
+pub fn prune(force: bool, include_empty: bool) -> Result<()> {
     let cwd = jj_cwd()?;
     let ws_dir = workspaces_dir()?;
 

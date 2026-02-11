@@ -8,7 +8,7 @@ use super::{
     MawConfig, DEFAULT_WORKSPACE,
 };
 
-pub(crate) fn create(name: &str, revision: Option<&str>) -> Result<()> {
+pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
     let root = ensure_repo_root()?;
     let cwd = jj_cwd()?;
     let path = workspace_path(name)?;
@@ -28,21 +28,22 @@ pub(crate) fn create(name: &str, revision: Option<&str>) -> Result<()> {
     // In v2 bare model, the default workspace is at ws/default/, not root.
     // @ can't resolve from root (no workspace there), so fall back to the
     // configured branch name (e.g. "main").
-    let base = if let Some(rev) = revision {
-        rev.to_string()
-    } else {
-        let check = Command::new("jj")
-            .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()", "--no-pager"])
-            .current_dir(&cwd)
-            .output();
-        match check {
-            Ok(o) if o.status.success() => "@".to_string(),
-            _ => {
-                let config = MawConfig::load(&root).unwrap_or_default();
-                config.branch().to_string()
+    let base = revision.map_or_else(
+        || {
+            let check = Command::new("jj")
+                .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()", "--no-pager"])
+                .current_dir(&cwd)
+                .output();
+            match check {
+                Ok(o) if o.status.success() => "@".to_string(),
+                _ => {
+                    let config = MawConfig::load(&root).unwrap_or_default();
+                    config.branch().to_string()
+                }
             }
-        }
-    };
+        },
+        std::string::ToString::to_string,
+    );
 
     // Create the workspace
     let output = Command::new("jj")
@@ -118,7 +119,7 @@ pub(crate) fn create(name: &str, revision: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn destroy(name: &str, confirm: bool) -> Result<()> {
+pub fn destroy(name: &str, confirm: bool) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot destroy the default workspace");
     }
@@ -172,7 +173,8 @@ pub(crate) fn destroy(name: &str, confirm: bool) -> Result<()> {
 /// Attach (reconnect) an orphaned workspace directory to jj's tracking.
 /// An orphaned workspace is one where 'jj workspace forget' was run but
 /// the directory still exists in ws/.
-pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
+#[allow(clippy::too_many_lines)] // TODO: refactor (bd-3nzk)
+pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot attach the default workspace (it's always tracked)");
     }

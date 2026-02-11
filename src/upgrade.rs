@@ -16,7 +16,7 @@ pub fn run() -> Result<()> {
     println!();
 
     // Step 1: Check if already v2
-    if is_already_v2()? {
+    if is_already_v2() {
         // Still apply config upgrades for existing v2 repos
         set_conflict_marker_style()?;
         println!();
@@ -77,8 +77,8 @@ pub fn run() -> Result<()> {
 
 /// Check if the repo is already in v2 layout.
 /// v2 = ws/default/ directory exists.
-fn is_already_v2() -> Result<bool> {
-    Ok(Path::new("ws").join("default").exists())
+fn is_already_v2() -> bool {
+    Path::new("ws").join("default").exists()
 }
 
 /// Check for uncommitted changes and auto-commit them as WIP.

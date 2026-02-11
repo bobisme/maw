@@ -178,7 +178,7 @@ fn main() {
         Commands::Doctor { format, json } => doctor::run(format::OutputFormat::with_json_flag(format, json)),
         Commands::Ui => tui::run(),
         Commands::JjIntro => jj_intro::run(),
-        Commands::Status(cmd) => status::run(cmd),
+        Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),

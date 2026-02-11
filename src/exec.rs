@@ -68,19 +68,15 @@ pub fn run(args: &ExecArgs) -> Result<()> {
     // Block `jj bookmark set <branch>` from non-default workspaces.
     // Setting the shared branch bookmark from an agent workspace causes
     // divergent bookmarks and breaks push for everyone.
-    if args.cmd.first().is_some_and(|c| c == "jj") && args.workspace != "default" {
-        if let Ok(root) = workspace::repo_root() {
-            if let Ok(config) = workspace::MawConfig::load(&root) {
+    if args.cmd.first().is_some_and(|c| c == "jj") && args.workspace != "default"
+        && let Ok(root) = workspace::repo_root()
+            && let Ok(config) = workspace::MawConfig::load(&root) {
                 let branch = config.branch();
-                let rest: Vec<&str> = args.cmd[1..].iter().map(|s| s.as_str()).collect();
+                let rest: Vec<&str> = args.cmd[1..].iter().map(std::string::String::as_str).collect();
                 // Look for "bookmark" followed by "set" followed by the branch name
-                if let Some(bm_pos) = rest.iter().position(|&a| a == "bookmark") {
-                    if rest[bm_pos + 1..]
-                        .iter()
-                        .position(|&a| a == "set")
-                        .is_some()
-                    {
-                        if rest.iter().any(|&a| a == branch) {
+                if let Some(bm_pos) = rest.iter().position(|&a| a == "bookmark")
+                    && rest[bm_pos + 1..].contains(&"set")
+                        && rest.contains(&branch) {
                             bail!(
                                 "Blocked: `jj bookmark set {branch}` from non-default workspace '{ws}'.\n\n\
                                  Setting the '{branch}' bookmark from an agent workspace causes divergent\n\
@@ -91,11 +87,7 @@ pub fn run(args: &ExecArgs) -> Result<()> {
                                 ws = args.workspace,
                             );
                         }
-                    }
-                }
             }
-        }
-    }
 
     let status = Command::new(&args.cmd[0])
         .args(&args.cmd[1..])

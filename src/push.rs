@@ -310,11 +310,10 @@ fn push_tags(cwd: &Path, root: &Path) -> Result<()> {
             if let Some(name) = tag_name {
                 pushed.push(name.to_string());
             }
-        } else if line.starts_with('!') {
-            if let Some(name) = tag_name {
+        } else if line.starts_with('!')
+            && let Some(name) = tag_name {
                 rejected.push(name.to_string());
             }
-        }
     }
 
     if !pushed.is_empty() {

@@ -12,7 +12,7 @@ use super::{jj_cwd, repo_root, workspace_path, DEFAULT_WORKSPACE};
 /// 2. Run `jj op revert <op-id>` to undo the forget
 /// 3. If the directory doesn't exist after revert, run `jj workspace update-stale`
 /// 4. If that still doesn't work, fall back to re-creating and restoring content
-pub(crate) fn restore(name: &str) -> Result<()> {
+pub fn restore(name: &str) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot restore the default workspace");
     }

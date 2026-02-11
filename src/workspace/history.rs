@@ -8,14 +8,14 @@ use crate::format::OutputFormat;
 use super::{jj_cwd, validate_workspace_name};
 
 #[derive(Serialize)]
-pub(crate) struct HistoryEnvelope {
+pub struct HistoryEnvelope {
     pub(crate) workspace: String,
     pub(crate) commits: Vec<HistoryCommit>,
     pub(crate) advice: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Serialize)]
-pub(crate) struct HistoryCommit {
+pub struct HistoryCommit {
     pub(crate) change_id: String,
     pub(crate) commit_id: String,
     pub(crate) timestamp: String,
@@ -23,7 +23,7 @@ pub(crate) struct HistoryCommit {
 }
 
 /// Show commit history for a workspace
-pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()> {
+pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()> {
     let cwd = jj_cwd()?;
     validate_workspace_name(name)?;
     let format = OutputFormat::resolve(format);
@@ -33,9 +33,9 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
     let commits = fetch_workspace_commits(name, limit, &cwd)?;
 
     if commits.is_empty() {
-        print_empty_history(name, &format)?;
+        print_empty_history(name, format)?;
     } else {
-        print_history(name, &commits, limit, &format)?;
+        print_history(name, &commits, limit, format)?;
     }
 
     Ok(())
@@ -132,7 +132,7 @@ fn parse_history_lines(raw: &str) -> Vec<HistoryCommit> {
 }
 
 /// Print output when a workspace has no commits yet.
-fn print_empty_history(name: &str, format: &OutputFormat) -> Result<()> {
+fn print_empty_history(name: &str, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => {
             let envelope = HistoryEnvelope {
@@ -165,7 +165,7 @@ fn print_history(
     name: &str,
     commits: &[HistoryCommit],
     limit: usize,
-    format: &OutputFormat,
+    format: OutputFormat,
 ) -> Result<()> {
     match format {
         OutputFormat::Json => {

@@ -37,10 +37,7 @@ fn scan_conflict_markers(file_path: &Path) -> Option<ConflictFileDetail> {
 
     for (idx, line) in reader.lines().enumerate() {
         let line_num = idx + 1; // 1-indexed
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue, // skip unreadable lines (binary?)
-        };
+        let Ok(line) = line else { continue }; // skip unreadable lines (binary?)
 
         if line.starts_with("<<<<<<<") {
             current_start = Some(line_num);
@@ -49,8 +46,8 @@ fn scan_conflict_markers(file_path: &Path) -> Option<ConflictFileDetail> {
             && (line.starts_with("%%%%%%%") || line.starts_with("+++++++"))
         {
             side_count += 1;
-        } else if line.starts_with(">>>>>>>") {
-            if let Some(start) = current_start.take() {
+        } else if line.starts_with(">>>>>>>")
+            && let Some(start) = current_start.take() {
                 regions.push(ConflictRegion {
                     start_line: start,
                     end_line: line_num,
@@ -60,7 +57,6 @@ fn scan_conflict_markers(file_path: &Path) -> Option<ConflictFileDetail> {
                 }
                 side_count = 0;
             }
-        }
     }
 
     if regions.is_empty() {
@@ -85,7 +81,7 @@ fn print_conflict_guidance(
     for file in conflicted_files {
         let abs_path = default_ws_path.join(file);
         if let Some(mut detail) = scan_conflict_markers(&abs_path) {
-            detail.path = file.clone();
+            detail.path.clone_from(file);
             details.push(detail);
         } else {
             // File exists in conflict state but we couldn't find markers
@@ -426,7 +422,7 @@ fn preview_merge(workspaces: &[String], cwd: &Path) -> Result<()> {
 }
 
 /// Options controlling merge behavior.
-pub(crate) struct MergeOptions<'a> {
+pub struct MergeOptions<'a> {
     /// Destroy workspaces after a successful merge.
     pub destroy_after: bool,
     /// Ask for interactive confirmation before destroying workspaces.
@@ -437,16 +433,16 @@ pub(crate) struct MergeOptions<'a> {
     pub dry_run: bool,
 }
 
-pub(crate) fn merge(
+pub fn merge(
     workspaces: &[String],
-    opts: MergeOptions<'_>,
+    opts: &MergeOptions<'_>,
 ) -> Result<()> {
     let MergeOptions {
         destroy_after,
         confirm,
         message,
         dry_run,
-    } = opts;
+    } = *opts;
     let ws_to_merge = workspaces.to_vec();
 
     if ws_to_merge.is_empty() {
@@ -830,15 +826,15 @@ fn handle_post_merge_destroy(
             return Ok(());
         }
 
-        destroy_workspaces(&ws_to_destroy, root)?;
+        destroy_workspaces(&ws_to_destroy, root);
     } else {
         println!();
-        destroy_workspaces(&ws_to_destroy, root)?;
+        destroy_workspaces(&ws_to_destroy, root);
     }
     Ok(())
 }
 
-fn destroy_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
+fn destroy_workspaces(workspaces: &[String], root: &Path) {
     println!("Cleaning up workspaces...");
     let ws_dir = root.join("ws");
     // Run jj commands from inside the default workspace to avoid stale
@@ -860,5 +856,4 @@ fn destroy_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
         }
         println!("  Destroyed: {ws}");
     }
-    Ok(())
 }

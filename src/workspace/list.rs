@@ -7,7 +7,7 @@ use crate::jj::{is_sibling_op_error, run_jj, sibling_op_fix_command};
 use super::{check_stale_workspaces, jj_cwd, workspace_path, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
-pub(crate) struct WorkspaceInfo {
+pub struct WorkspaceInfo {
     pub(crate) name: String,
     pub(crate) is_current: bool,
     pub(crate) is_default: bool,
@@ -22,14 +22,14 @@ pub(crate) struct WorkspaceInfo {
 /// Wraps the workspace array with an advice array so warnings
 /// (stale workspaces, etc.) are machine-readable.
 #[derive(Serialize)]
-pub(crate) struct WorkspaceListEnvelope {
+pub struct WorkspaceListEnvelope {
     pub(crate) workspaces: Vec<WorkspaceInfo>,
     pub(crate) advice: Vec<Advice>,
 }
 
 /// A single advisory message (warning, info) embedded in structured output.
 #[derive(Serialize)]
-pub(crate) struct Advice {
+pub struct Advice {
     pub(crate) level: &'static str,
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,12 +38,13 @@ pub(crate) struct Advice {
 
 /// Extra details for an advice entry.
 #[derive(Serialize)]
-pub(crate) struct AdviceDetails {
+pub struct AdviceDetails {
     pub(crate) workspaces: Vec<String>,
     pub(crate) fix: String,
 }
 
-pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
+#[allow(clippy::too_many_lines)] // TODO: refactor (bd-3nzk)
+pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let cwd = jj_cwd()?;
     let output = run_jj(&["workspace", "list"], &cwd)?;
 
@@ -57,7 +58,7 @@ pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                  Wait for other agents to finish, then fix with: {fix}"
             );
         }
-        bail!("jj workspace list failed: {}", stderr);
+        bail!("jj workspace list failed: {stderr}");
     }
 
     let list = String::from_utf8_lossy(&output.stdout);
@@ -93,8 +94,8 @@ pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     // Handle different output formats
     match format {
         OutputFormat::Text => print_list_text(&workspaces, &stale_workspaces, verbose),
-        OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, &format, verbose),
-        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, &format, &list),
+        OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, format, verbose),
+        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, format, &list),
     }
 
     Ok(())
@@ -133,7 +134,7 @@ fn print_list_text(workspaces: &[WorkspaceInfo], stale: &[String], verbose: bool
 fn print_list_pretty(
     workspaces: &[WorkspaceInfo],
     stale: &[String],
-    format: &OutputFormat,
+    format: OutputFormat,
     verbose: bool,
 ) {
     let use_color = format.should_use_color();
@@ -197,7 +198,7 @@ fn print_list_pretty(
 fn print_list_json(
     workspaces: Vec<WorkspaceInfo>,
     stale_workspaces: Vec<String>,
-    format: &OutputFormat,
+    format: OutputFormat,
     raw_list: &str,
 ) {
     let advice = if stale_workspaces.is_empty() {
@@ -242,7 +243,7 @@ fn print_stale_warning_text(stale: &[String]) {
 
 /// Parse jj workspace list output into structured data
 /// Resilient to format changes - returns error if parsing fails
-pub(crate) fn parse_workspace_list(list: &str, include_path: bool) -> Result<Vec<WorkspaceInfo>> {
+pub fn parse_workspace_list(list: &str, include_path: bool) -> Result<Vec<WorkspaceInfo>> {
     let mut workspaces = Vec::new();
 
     for line in list.lines() {

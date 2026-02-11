@@ -9,7 +9,7 @@ use crate::jj::run_jj;
 use super::{jj_cwd, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
-pub(crate) struct WorkspaceStatus {
+pub struct WorkspaceStatus {
     pub(crate) current_workspace: String,
     pub(crate) is_stale: bool,
     pub(crate) has_changes: bool,
@@ -23,26 +23,26 @@ pub(crate) struct WorkspaceStatus {
 }
 
 #[derive(Serialize)]
-pub(crate) struct WorkspaceEntry {
+pub struct WorkspaceEntry {
     pub(crate) name: String,
     pub(crate) is_current: bool,
     pub(crate) info: String,
 }
 
 #[derive(Serialize)]
-pub(crate) struct ConflictInfo {
+pub struct ConflictInfo {
     pub(crate) change_id: String,
     pub(crate) description: String,
 }
 
 #[derive(Serialize)]
-pub(crate) struct DivergentCommitInfo {
+pub struct DivergentCommitInfo {
     pub(crate) change_id: String,
     pub(crate) commit_id: String,
     pub(crate) description: String,
 }
 
-pub(crate) fn status(format: OutputFormat) -> Result<()> {
+pub fn status(format: OutputFormat) -> Result<()> {
     let cwd = jj_cwd()?;
 
     // Get current workspace name
@@ -112,31 +112,18 @@ pub(crate) fn status(format: OutputFormat) -> Result<()> {
             );
         }
         OutputFormat::Json => {
-            match build_status_struct(
+            let status_data = build_status_struct(
                 &current_ws,
                 is_stale,
                 &status_stdout,
                 &ws_list,
                 &conflicts_text,
                 &divergent_text,
-            ) {
-                Ok(status_data) => match format.serialize(&status_data) {
-                    Ok(output) => println!("{output}"),
-                    Err(e) => {
-                        eprintln!("Warning: Failed to serialize status to JSON: {e}");
-                        eprintln!("Falling back to text output:");
-                        print_status_text(
-                            &current_ws,
-                            is_stale,
-                            &status_stdout,
-                            &ws_list,
-                            &conflicts_text,
-                            &divergent_text,
-                        );
-                    }
-                },
+            );
+            match format.serialize(&status_data) {
+                Ok(output) => println!("{output}"),
                 Err(e) => {
-                    eprintln!("Warning: Failed to parse status data: {e}");
+                    eprintln!("Warning: Failed to serialize status to JSON: {e}");
                     eprintln!("Falling back to text output:");
                     print_status_text(
                         &current_ws,
@@ -310,7 +297,7 @@ fn build_status_struct(
     ws_list: &str,
     conflicts_text: &str,
     divergent_text: &str,
-) -> Result<WorkspaceStatus> {
+) -> WorkspaceStatus {
     let has_changes = !status_stdout.trim().is_empty();
     let changes = if has_changes {
         Some(status_stdout.to_string())
@@ -363,7 +350,7 @@ fn build_status_struct(
         }
     }
 
-    Ok(WorkspaceStatus {
+    WorkspaceStatus {
         current_workspace: current_ws.to_string(),
         is_stale,
         has_changes,
@@ -371,10 +358,10 @@ fn build_status_struct(
         workspaces,
         conflicts,
         divergent_commits,
-    })
+    }
 }
 
-pub(crate) fn get_current_workspace(cwd: &Path) -> Result<String> {
+pub fn get_current_workspace(cwd: &Path) -> Result<String> {
     // jj workspace list marks current with @
     let output = run_jj(&["workspace", "list"], cwd)?;
 

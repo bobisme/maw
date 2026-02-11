@@ -26,7 +26,7 @@ pub fn run() -> Result<()> {
     set_conflict_marker_style()?;
     clean_root_source_files()?;
     ensure_gitignore_in_workspace()?;
-    refresh_workspace_state()?;
+    refresh_workspace_state();
 
     let cwd = std::env::current_dir()
         .context("Could not determine current directory")?;
@@ -305,9 +305,7 @@ fn set_git_bare_mode() -> Result<()> {
 pub fn fix_git_head() -> Result<()> {
     // Read branch from .maw.toml if available, fall back to "main"
     let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
-    let branch = crate::workspace::MawConfig::load(&root)
-        .map(|c| c.branch().to_string())
-        .unwrap_or_else(|_| "main".to_string());
+    let branch = crate::workspace::MawConfig::load(&root).map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
 
     let ref_name = format!("refs/heads/{branch}");
 
@@ -362,15 +360,14 @@ pub fn set_conflict_marker_style() -> Result<()> {
         .current_dir(jj_cwd)
         .output();
 
-    if let Ok(out) = &check {
-        if out.status.success() {
+    if let Ok(out) = &check
+        && out.status.success() {
             let val = String::from_utf8_lossy(&out.stdout);
             if val.trim() == "snapshot" {
                 println!("[OK] jj conflict-marker-style already set to snapshot");
                 return Ok(());
             }
         }
-    }
 
     // Set it
     let output = Command::new("jj")
@@ -398,7 +395,7 @@ pub fn set_conflict_marker_style() -> Result<()> {
 /// jj/git are recoverable and removed silently; untracked files get a warning.
 #[allow(clippy::unnecessary_wraps)]
 pub fn clean_root_source_files() -> Result<()> {
-    let entries = if let Ok(e) = fs::read_dir(".") { e } else {
+    let Ok(entries) = fs::read_dir(".") else {
         println!("[OK] Could not read root directory");
         return Ok(());
     };
@@ -467,14 +464,13 @@ pub fn clean_root_source_files() -> Result<()> {
     Ok(())
 }
 
-/// Remove ghost .jj/working_copy/ if present — left behind by `jj workspace forget`.
+/// Remove ghost .`jj/working_copy`/ if present — left behind by `jj workspace forget`.
 fn clean_ghost_working_copy() {
     let ghost_wc = Path::new(".jj").join("working_copy");
-    if ghost_wc.exists() {
-        if fs::remove_dir_all(&ghost_wc).is_ok() {
+    if ghost_wc.exists()
+        && fs::remove_dir_all(&ghost_wc).is_ok() {
             println!("[OK] Removed ghost .jj/working_copy/ (prevents root pollution)");
         }
-    }
 }
 
 /// Check whether a file at root is tracked by jj (present in the main branch).
@@ -528,16 +524,14 @@ fn ensure_gitignore_in_workspace() -> Result<()> {
 /// After moving the default workspace from root to ws/default/, jj may
 /// have stale working copy state. Running update-stale from inside the
 /// workspace fixes this.
-fn refresh_workspace_state() -> Result<()> {
+fn refresh_workspace_state() {
     let ws_path = Path::new("ws").join("default");
     if !ws_path.exists() {
-        return Ok(());
+        return;
     }
 
     let _ = Command::new("jj")
         .args(["workspace", "update-stale"])
         .current_dir(&ws_path)
         .output();
-
-    Ok(())
 }

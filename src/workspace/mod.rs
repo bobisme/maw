@@ -16,7 +16,7 @@ mod names;
 mod prune;
 mod restore;
 mod status;
-pub(crate) mod sync;
+pub mod sync;
 
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;
@@ -68,7 +68,7 @@ impl RepoConfig {
 
 /// Hook configuration for running commands before/after operations
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct HooksConfig {
+pub struct HooksConfig {
     /// Commands to run before merge. Merge aborts if any command fails (non-zero exit).
     #[serde(default)]
     pub(crate) pre_merge: Vec<String>,
@@ -79,7 +79,7 @@ pub(crate) struct HooksConfig {
 
 /// Merge-specific configuration
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct MergeConfig {
+pub struct MergeConfig {
     /// Paths to auto-resolve from main during merge conflicts.
     /// Supports glob patterns like ".beads/**".
     #[serde(default)]
@@ -394,7 +394,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             message,
             dry_run,
             auto_describe: _,
-        } => merge::merge(&workspaces, merge::MergeOptions {
+        } => merge::merge(&workspaces, &merge::MergeOptions {
             destroy_after: destroy,
             confirm,
             message: message.as_deref(),

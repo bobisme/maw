@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 
 use super::{jj_cwd, repo_root, validate_workspace_name};
 
-pub(crate) fn sync(all: bool) -> Result<()> {
+pub fn sync(all: bool) -> Result<()> {
     if all {
         return sync_all();
     }
@@ -84,7 +84,7 @@ pub(crate) fn sync(all: bool) -> Result<()> {
 /// 3. Non-@'s files <= @'s files -> abandon non-@ (@ is superset)
 /// 4. @'s files <= non-@'s files -> squash non-@ into @ (recover extra files)
 /// 5. Overlapping but different -> warn with actionable instructions
-pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()> {
+pub fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()> {
     let (change_id, current_commit_id) = get_working_copy_ids(workspace_dir)?;
     if change_id.is_empty() {
         return Ok(());
@@ -357,7 +357,7 @@ fn print_unresolved_guidance(workspace_dir: &Path, unresolved: &[String]) {
 /// - Otherwise, warn and let the user resolve manually.
 ///
 /// This function never fails the sync — errors are printed as warnings.
-pub(crate) fn auto_abandon_empty_divergent(workspace_dir: &Path) {
+pub fn auto_abandon_empty_divergent(workspace_dir: &Path) {
     if let Err(e) = auto_abandon_empty_divergent_inner(workspace_dir) {
         eprintln!("  WARNING: divergent commit check failed: {e}");
     }
@@ -474,7 +474,7 @@ fn auto_abandon_empty_divergent_inner(workspace_dir: &Path) -> Result<()> {
 }
 
 /// Abandon a non-@ divergent copy, logging the reason.
-pub(crate) fn abandon_copy(workspace_dir: &Path, commit_id: &str, reason: &str) {
+pub fn abandon_copy(workspace_dir: &Path, commit_id: &str, reason: &str) {
     let result = Command::new("jj")
         .args(["abandon", commit_id])
         .current_dir(workspace_dir)
@@ -552,7 +552,7 @@ fn list_workspace_names(cwd: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Sync each workspace, returning (synced_count, already_current_count, errors).
+/// Sync each workspace, returning (`synced_count`, `already_current_count`, errors).
 fn sync_each_workspace(
     workspace_names: &[String],
     root: &Path,
@@ -704,7 +704,7 @@ pub fn auto_sync_if_stale(name: &str, path: &Path) -> Result<()> {
 ///
 /// This function checks each workspace being merged and syncs any that are stale,
 /// ensuring all workspace commits are based on current main before the merge.
-pub(crate) fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result<()> {
+pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result<()> {
     let ws_dir = root.join("ws");
     let mut synced_count = 0;
 

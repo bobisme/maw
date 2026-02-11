@@ -32,7 +32,7 @@ fn print_check(check: &DoctorCheck) {
     };
     println!("{} {}", prefix, check.message);
     if let Some(fix) = &check.fix {
-        println!("       {}", fix);
+        println!("       {fix}");
     }
 }
 
@@ -135,7 +135,7 @@ fn check_tool(name: &str, args: &[&str], install_url: &str) -> DoctorCheck {
 
 /// Check if we're in a jj repo. Uses `jj_cwd()` to avoid stale errors at bare root.
 fn check_jj_repo(cwd: Option<&Path>) -> DoctorCheck {
-    let cwd = cwd.unwrap_or(Path::new("."));
+    let cwd = cwd.unwrap_or_else(|| Path::new("."));
 
     let Ok(output) = Command::new("jj").args(["status"]).current_dir(cwd).output() else {
         // jj not installed — already reported by check_tool
@@ -283,7 +283,7 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
 /// AGENTS.md and CLAUDE.md are redirect stubs pointing into ws/default/.
 const BARE_ROOT_ALLOWED: &[&str] = &["ws", "AGENTS.md", "CLAUDE.md"];
 
-/// Check for ghost .jj/working_copy/ at root that causes file materialization.
+/// Check for ghost .`jj/working_copy`/ at root that causes file materialization.
 /// After `jj workspace forget`, jj leaves behind working copy metadata on disk.
 /// If any jj command runs from root, jj sees the stale metadata and materializes
 /// files into root — polluting the bare repo.
@@ -358,9 +358,7 @@ fn check_git_head() -> DoctorCheck {
         _ => {
             // HEAD is detached or git failed
             let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
-            let branch = crate::workspace::MawConfig::load(&root)
-                .map(|c| c.branch().to_string())
-                .unwrap_or_else(|_| "main".to_string());
+            let branch = crate::workspace::MawConfig::load(&root).map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
             DoctorCheck {
                 name: "git HEAD".to_string(),
                 status: "fail".to_string(),
@@ -455,7 +453,7 @@ fn parse_jj_version(version_line: &str) -> Option<(u32, u32, u32)> {
 /// which break JSON-based editing tools that agents use. The "snapshot" style
 /// uses `+++++++` and `-------` which are JSON-safe.
 fn check_conflict_marker_style(cwd: Option<&Path>) -> DoctorCheck {
-    let cwd = cwd.unwrap_or(Path::new("."));
+    let cwd = cwd.unwrap_or_else(|| Path::new("."));
 
     let Ok(output) = Command::new("jj")
         .args(["config", "get", "ui.conflict-marker-style"])
