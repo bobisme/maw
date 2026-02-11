@@ -23,6 +23,7 @@ pub fn run() -> Result<()> {
     setup_bare_default_workspace()?;
     set_git_bare_mode()?;
     fix_git_head()?;
+    set_conflict_marker_style()?;
     clean_root_source_files()?;
     ensure_gitignore_in_workspace()?;
     refresh_workspace_state()?;
@@ -334,6 +335,57 @@ pub fn fix_git_head() -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Non-fatal — HEAD being wrong is annoying but not blocking
         println!("[WARN] Could not set git HEAD: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+/// Set jj conflict marker style to "snapshot" (repo-level config).
+///
+/// The default jj conflict style ("diff") uses `%%%%%%%` and `\\\\\\\` markers
+/// which break JSON-based editing tools that agents use. The "snapshot" style
+/// uses `+++++++` and `-------` which are JSON-safe.
+///
+/// Uses `jj config set --repo` which writes to the correct location regardless
+/// of jj version (old: `.jj/repo/config.toml`, new: `~/.config/jj/repos/`).
+pub fn set_conflict_marker_style() -> Result<()> {
+    // Run from ws/default/ if it exists (root may lack .jj/working_copy/)
+    let jj_cwd = if Path::new("ws/default").exists() {
+        Path::new("ws/default")
+    } else {
+        Path::new(".")
+    };
+
+    // Check current value first
+    let check = Command::new("jj")
+        .args(["config", "get", "ui.conflict-marker-style"])
+        .current_dir(jj_cwd)
+        .output();
+
+    if let Ok(out) = &check {
+        if out.status.success() {
+            let val = String::from_utf8_lossy(&out.stdout);
+            if val.trim() == "snapshot" {
+                println!("[OK] jj conflict-marker-style already set to snapshot");
+                return Ok(());
+            }
+        }
+    }
+
+    // Set it
+    let output = Command::new("jj")
+        .args(["config", "set", "--repo", "ui.conflict-marker-style", "snapshot"])
+        .current_dir(jj_cwd)
+        .output()
+        .context("Failed to run jj config set")?;
+
+    if output.status.success() {
+        println!("[OK] Set jj conflict-marker-style = snapshot");
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Non-fatal — old jj versions may not support this config key
+        println!("[WARN] Could not set conflict-marker-style: {}", stderr.trim());
+        println!("       Requires jj >= 0.38.0. Upgrade: https://jj-vcs.github.io/jj/latest/install-and-setup/");
     }
 
     Ok(())

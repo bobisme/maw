@@ -68,6 +68,12 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     // Check git HEAD is not detached (should point to branch ref)
     checks.push(check_git_head());
 
+    // Check jj version >= 0.38.0 (required for snapshot conflict markers)
+    checks.push(check_jj_version());
+
+    // Check conflict-marker-style is "snapshot" (agent-safe markers)
+    checks.push(check_conflict_marker_style(cwd.as_deref()));
+
     let all_ok = checks.iter().all(|c| c.status == "ok");
 
     match format {
@@ -361,6 +367,136 @@ fn check_git_head() -> DoctorCheck {
                 message: "git HEAD: detached (git log shows stale history)".to_string(),
                 fix: Some(format!("Fix: git symbolic-ref HEAD refs/heads/{branch}  (or run: maw init)")),
             }
+        }
+    }
+}
+
+/// Minimum required jj version for snapshot conflict markers.
+const MIN_JJ_VERSION: (u32, u32, u32) = (0, 38, 0);
+
+/// Check that jj version is >= 0.38.0 (required for snapshot conflict markers).
+fn check_jj_version() -> DoctorCheck {
+    let Ok(output) = Command::new("jj").args(["--version"]).output() else {
+        // jj not installed — already reported by check_tool
+        return DoctorCheck {
+            name: "jj version".to_string(),
+            status: "ok".to_string(),
+            message: "jj version: skipped (jj not available)".to_string(),
+            fix: None,
+        };
+    };
+
+    if !output.status.success() {
+        return DoctorCheck {
+            name: "jj version".to_string(),
+            status: "warn".to_string(),
+            message: "jj version: could not determine".to_string(),
+            fix: None,
+        };
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    let version_str = version_str.trim();
+
+    match parse_jj_version(version_str) {
+        Some((major, minor, patch)) => {
+            let (req_major, req_minor, req_patch) = MIN_JJ_VERSION;
+            let meets_minimum = (major, minor, patch) >= (req_major, req_minor, req_patch);
+
+            if meets_minimum {
+                DoctorCheck {
+                    name: "jj version".to_string(),
+                    status: "ok".to_string(),
+                    message: format!("jj version: {major}.{minor}.{patch} (>= {req_major}.{req_minor}.{req_patch})"),
+                    fix: None,
+                }
+            } else {
+                DoctorCheck {
+                    name: "jj version".to_string(),
+                    status: "warn".to_string(),
+                    message: format!(
+                        "jj version: {major}.{minor}.{patch} (< {req_major}.{req_minor}.{req_patch} — snapshot conflict markers unavailable)"
+                    ),
+                    fix: Some(format!(
+                        "Upgrade jj to >= {req_major}.{req_minor}.{req_patch}: https://jj-vcs.github.io/jj/latest/install-and-setup/"
+                    )),
+                }
+            }
+        }
+        None => DoctorCheck {
+            name: "jj version".to_string(),
+            status: "warn".to_string(),
+            message: format!("jj version: could not parse '{version_str}'"),
+            fix: None,
+        },
+    }
+}
+
+/// Parse a jj version string like "jj 0.38.0" or "jj 0.38.0-dev" into (major, minor, patch).
+fn parse_jj_version(version_line: &str) -> Option<(u32, u32, u32)> {
+    // "jj 0.38.0" -> "0.38.0"
+    let version_part = version_line
+        .strip_prefix("jj ")
+        .unwrap_or(version_line);
+
+    // Strip any pre-release suffix: "0.38.0-dev" -> "0.38.0"
+    let version_part = version_part.split('-').next()?;
+
+    let mut parts = version_part.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Check that jj conflict-marker-style is set to "snapshot".
+///
+/// The default jj conflict style ("diff") uses `%%%%%%%` and `\\\\\\\` markers
+/// which break JSON-based editing tools that agents use. The "snapshot" style
+/// uses `+++++++` and `-------` which are JSON-safe.
+fn check_conflict_marker_style(cwd: Option<&Path>) -> DoctorCheck {
+    let cwd = cwd.unwrap_or(Path::new("."));
+
+    let Ok(output) = Command::new("jj")
+        .args(["config", "get", "ui.conflict-marker-style"])
+        .current_dir(cwd)
+        .output()
+    else {
+        return DoctorCheck {
+            name: "conflict-marker-style".to_string(),
+            status: "ok".to_string(),
+            message: "conflict-marker-style: skipped (jj not available)".to_string(),
+            fix: None,
+        };
+    };
+
+    if output.status.success() {
+        let val = String::from_utf8_lossy(&output.stdout);
+        let val = val.trim();
+        if val == "snapshot" {
+            DoctorCheck {
+                name: "conflict-marker-style".to_string(),
+                status: "ok".to_string(),
+                message: "conflict-marker-style: snapshot (agent-safe)".to_string(),
+                fix: None,
+            }
+        } else {
+            DoctorCheck {
+                name: "conflict-marker-style".to_string(),
+                status: "warn".to_string(),
+                message: format!(
+                    "conflict-marker-style: \"{val}\" (agents need \"snapshot\" for JSON-safe markers)"
+                ),
+                fix: Some("Fix: jj config set --repo ui.conflict-marker-style snapshot  (or run: maw init)".to_string()),
+            }
+        }
+    } else {
+        // Config key not set — using default ("diff"), which is not agent-safe
+        DoctorCheck {
+            name: "conflict-marker-style".to_string(),
+            status: "warn".to_string(),
+            message: "conflict-marker-style: not set (defaults to \"diff\" which breaks agent JSON tools)".to_string(),
+            fix: Some("Fix: jj config set --repo ui.conflict-marker-style snapshot  (or run: maw init)".to_string()),
         }
     }
 }

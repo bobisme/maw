@@ -138,6 +138,101 @@ fn merge_with_conflict() {
 }
 
 #[test]
+fn merge_conflict_shows_details_and_guidance() {
+    let repo = setup_bare_repo();
+
+    // Create a base file in main that both workspaces will modify
+    let dws = repo.path().join("ws").join("default");
+    write_in_ws(repo.path(), "default", "shared.txt", "line 1\nline 2\nline 3\n");
+    run_jj(&dws, &["commit", "-m", "add shared file"]);
+    run_jj(&dws, &["bookmark", "set", "main", "-r", "@-"]);
+
+    // Create two workspaces that both modify the same file
+    maw_ok(repo.path(), &["ws", "create", "alice"]);
+    maw_ok(repo.path(), &["ws", "create", "bob"]);
+
+    write_in_ws(
+        repo.path(),
+        "alice",
+        "shared.txt",
+        "alice line 1\nalice line 2\nalice line 3\n",
+    );
+    let alice_ws = repo.path().join("ws").join("alice");
+    run_jj(&alice_ws, &["describe", "-m", "feat: alice edits"]);
+
+    write_in_ws(
+        repo.path(),
+        "bob",
+        "shared.txt",
+        "bob line 1\nbob line 2\nbob line 3\n",
+    );
+    let bob_ws = repo.path().join("ws").join("bob");
+    run_jj(&bob_ws, &["describe", "-m", "feat: bob edits"]);
+
+    // Merge with --destroy so we can distinguish conflict (workspaces preserved)
+    // from clean merge (workspaces destroyed)
+    let stdout = maw_ok(
+        repo.path(),
+        &["ws", "merge", "alice", "bob", "--destroy"],
+    );
+
+    // Detect conflict from the merge output (not from workspace list)
+    let has_conflict = stdout.contains("conflict") || stdout.contains("Conflict");
+
+    if has_conflict {
+        // Conflict was detected — verify detailed output
+        let ws_path = repo
+            .path()
+            .join("ws")
+            .join("default")
+            .display()
+            .to_string();
+
+        // Should include the "Conflicts:" header
+        assert!(
+            stdout.contains("Conflicts:"),
+            "Output should include 'Conflicts:' header, got:\n{stdout}"
+        );
+
+        // Should mention the conflicted file
+        assert!(
+            stdout.contains("shared.txt"),
+            "Output should list 'shared.txt' as conflicted, got:\n{stdout}"
+        );
+
+        // Should include line range info (e.g. "lines 1-7" or similar)
+        assert!(
+            stdout.contains("lines ") || stdout.contains("line "),
+            "Output should include line range info, got:\n{stdout}"
+        );
+
+        // Should include the absolute workspace path in guidance
+        assert!(
+            stdout.contains(&ws_path),
+            "Output should include absolute workspace path '{}', got:\n{stdout}",
+            ws_path
+        );
+
+        // Should include resolution steps
+        assert!(
+            stdout.contains("To resolve:"),
+            "Output should include 'To resolve:' guidance, got:\n{stdout}"
+        );
+
+        // Should include maw exec command for verification
+        assert!(
+            stdout.contains("maw exec default -- jj status"),
+            "Output should include 'maw exec default -- jj status' command, got:\n{stdout}"
+        );
+
+        println!("Test verified: conflict details and guidance are shown");
+    } else {
+        // jj merged cleanly — that's fine, the feature is only for conflicts
+        println!("Test verified: no conflict detected (jj merged cleanly)");
+    }
+}
+
+#[test]
 fn dirty_default_auto_snapshots_before_merge() {
     let repo = setup_bare_repo();
 

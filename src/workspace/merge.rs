@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -8,9 +8,153 @@ use glob::Pattern;
 use super::sync::resolve_divergent_working_copy;
 use super::{jj_cwd, repo_root, MawConfig, DEFAULT_WORKSPACE};
 
+/// Details about a single conflict region within a file.
+struct ConflictRegion {
+    start_line: usize,
+    end_line: usize,
+}
+
+/// Details about conflicts in a single file.
+struct ConflictFileDetail {
+    path: String,
+    regions: Vec<ConflictRegion>,
+    sides: usize, // e.g. 2 for a 2-sided conflict
+}
+
+/// Scan a file on disk for jj conflict markers and return details.
+///
+/// jj uses `<<<<<<<` to open a conflict region and `>>>>>>>` to close it.
+/// The number of sides is determined by counting `%%%%%%%` (diff-style)
+/// and `+++++++` (snapshot-style) sections within each region.
+fn scan_conflict_markers(file_path: &Path) -> Option<ConflictFileDetail> {
+    let file = std::fs::File::open(file_path).ok()?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut regions = Vec::new();
+    let mut current_start: Option<usize> = None;
+    let mut side_count: usize = 0;
+    let mut max_sides: usize = 0;
+
+    for (idx, line) in reader.lines().enumerate() {
+        let line_num = idx + 1; // 1-indexed
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue, // skip unreadable lines (binary?)
+        };
+
+        if line.starts_with("<<<<<<<") {
+            current_start = Some(line_num);
+            side_count = 1; // the opening marker starts the first side
+        } else if current_start.is_some()
+            && (line.starts_with("%%%%%%%") || line.starts_with("+++++++"))
+        {
+            side_count += 1;
+        } else if line.starts_with(">>>>>>>") {
+            if let Some(start) = current_start.take() {
+                regions.push(ConflictRegion {
+                    start_line: start,
+                    end_line: line_num,
+                });
+                if side_count > max_sides {
+                    max_sides = side_count;
+                }
+                side_count = 0;
+            }
+        }
+    }
+
+    if regions.is_empty() {
+        return None;
+    }
+
+    Some(ConflictFileDetail {
+        path: String::new(), // caller fills this in
+        regions,
+        sides: max_sides,
+    })
+}
+
+/// Print detailed conflict information with absolute workspace paths and resolution guidance.
+fn print_conflict_guidance(
+    conflicted_files: &[String],
+    default_ws_path: &Path,
+    default_ws_name: &str,
+) {
+    // Scan each conflicted file for marker details
+    let mut details: Vec<ConflictFileDetail> = Vec::new();
+    for file in conflicted_files {
+        let abs_path = default_ws_path.join(file);
+        if let Some(mut detail) = scan_conflict_markers(&abs_path) {
+            detail.path = file.clone();
+            details.push(detail);
+        } else {
+            // File exists in conflict state but we couldn't find markers
+            // (could be binary or jj materialized differently)
+            details.push(ConflictFileDetail {
+                path: file.clone(),
+                regions: Vec::new(),
+                sides: 0,
+            });
+        }
+    }
+
+    // Print conflict summary
+    println!();
+    println!("Conflicts:");
+    for detail in &details {
+        if detail.regions.is_empty() {
+            println!("  {:<40} conflict (could not locate markers)", detail.path);
+        } else {
+            let sides_label = if detail.sides > 0 {
+                format!("{}-sided conflict", detail.sides)
+            } else {
+                "conflict".to_string()
+            };
+            let ranges: Vec<String> = detail
+                .regions
+                .iter()
+                .map(|r| {
+                    if r.start_line == r.end_line {
+                        format!("line {}", r.start_line)
+                    } else {
+                        format!("lines {}-{}", r.start_line, r.end_line)
+                    }
+                })
+                .collect();
+            println!("  {:<40} {} ({})", detail.path, sides_label, ranges.join(", "));
+        }
+    }
+
+    // Print resolution guidance with absolute paths
+    let ws_display = default_ws_path.display();
+    println!();
+    println!("To resolve:");
+    println!(
+        "  1. Edit the conflicted files in {ws_display}/"
+    );
+    println!("     Remove conflict markers (<<<<<<< ... >>>>>>>), keeping the correct code");
+    println!(
+        "  2. Verify: maw exec {default_ws_name} -- jj status"
+    );
+    println!(
+        "     (should show no more 'C' entries for resolved files)"
+    );
+    println!(
+        "  3. Describe: maw exec {default_ws_name} -- jj describe -m \"resolve: merge conflicts\""
+    );
+}
+
 /// Check for conflicts after merge and auto-resolve paths matching config patterns.
 /// Returns true if there are remaining (unresolved) conflicts.
-fn auto_resolve_conflicts(cwd: &Path, config: &MawConfig, branch: &str) -> Result<bool> {
+fn auto_resolve_conflicts(
+    cwd: &Path,
+    config: &MawConfig,
+    branch: &str,
+    root: &Path,
+) -> Result<bool> {
+    let default_ws = config.default_workspace();
+    let default_ws_path = root.join("ws").join(default_ws);
+
     // Check for conflicts
     let status_output = Command::new("jj")
         .args(["status"])
@@ -34,7 +178,7 @@ fn auto_resolve_conflicts(cwd: &Path, config: &MawConfig, branch: &str) -> Resul
     if patterns.is_empty() {
         println!();
         println!("WARNING: Merge has conflicts that need resolution.");
-        println!("Run `jj status` to see conflicted files.");
+        print_conflict_guidance(&conflicted_files, &default_ws_path, default_ws);
         return Ok(true);
     }
 
@@ -82,18 +226,14 @@ fn auto_resolve_conflicts(cwd: &Path, config: &MawConfig, branch: &str) -> Resul
         }
     }
 
-    // Report remaining conflicts
+    // Report remaining conflicts with detailed guidance
     if !remaining_conflicts.is_empty() {
         println!();
         println!(
-            "WARNING: {} conflict(s) remaining that need manual resolution:",
+            "WARNING: {} conflict(s) remaining that need manual resolution.",
             remaining_conflicts.len()
         );
-        for file in &remaining_conflicts {
-            println!("  - {file}");
-        }
-        println!();
-        println!("Run `jj status` to see details.");
+        print_conflict_guidance(&remaining_conflicts, &default_ws_path, default_ws);
         return Ok(true);
     }
 
@@ -592,7 +732,7 @@ pub(crate) fn merge(
     }
 
     println!("Merged to {branch}: {msg}");
-    let has_conflicts = auto_resolve_conflicts(&cwd, &config, branch)?;
+    let has_conflicts = auto_resolve_conflicts(&cwd, &config, branch, &root)?;
 
     // Step 5: Move branch bookmark to the final commit (only if no conflicts).
     // We defer this until after conflict detection so the branch never points

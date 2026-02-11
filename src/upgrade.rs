@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::init::{clean_root_source_files, ensure_workspaces_gitignored, fix_git_head};
+use crate::init::{clean_root_source_files, ensure_workspaces_gitignored, fix_git_head, set_conflict_marker_style};
 
 /// Upgrade a v1 repo (.workspaces/) to v2 bare model (ws/).
 ///
@@ -17,7 +17,10 @@ pub fn run() -> Result<()> {
 
     // Step 1: Check if already v2
     if is_already_v2()? {
-        println!("Already v2 (bare repo model). Nothing to do.");
+        // Still apply config upgrades for existing v2 repos
+        set_conflict_marker_style()?;
+        println!();
+        println!("Already v2 (bare repo model). Applied config updates.");
         return Ok(());
     }
 
@@ -39,6 +42,9 @@ pub fn run() -> Result<()> {
 
     // Step 6b: Fix git HEAD (points to branch ref, not detached)
     fix_git_head()?;
+
+    // Step 6c: Set conflict-marker-style = snapshot (agent-safe markers)
+    set_conflict_marker_style()?;
 
     // Step 7: Clean root source files
     clean_root_source_files()?;
