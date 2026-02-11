@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## v0.31.1
+
+- Feat: `maw ws restore <name>` recovers a workspace after accidental `maw ws destroy`. Uses jj operation log to revert the forget, rematerialize the directory, and restore file content. Multi-strategy fallback ensures recovery even when op revert alone doesn't recreate the directory. (bd-2nyy)
+- `maw ws destroy` now shows `To undo: maw ws restore <name>` in its output.
+
 ## v0.31.0
 
 - Feat: `maw init` and `maw upgrade` now set `ui.conflict-marker-style = "snapshot"` in jj repo config. The default jj "diff" style uses `%%%%%%%` and `\\\\\\\` markers that break JSON-based editing tools agents use. Snapshot style fully materializes both conflict sides with JSON-safe markers. Requires jj >= 0.38.0. (bd-2m7c)
