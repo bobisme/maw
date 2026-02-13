@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.32.0
+
+- Fix: `maw push` now runs `jj git export` before the bookmark push, preventing false "Nothing changed" when the op graph has diverged from concurrent workspace operations. (bd-bjr0)
+- Fix: `maw exec` blocks `jj bookmark set <branch>` from non-default workspaces. This prevents agents from accidentally forking the jj operation graph by modifying shared bookmarks. Shows a clear error suggesting `maw ws merge` instead. (bd-fs7c)
+- Fix: `maw ws sync` detects divergent commits after sync and auto-abandons empty copies. Prevents data loss when `jj workspace update-stale` picks the wrong copy. (bd-3pxf)
+- Fix: `maw status` (including `--watch` and `--status-bar`) degrades gracefully on jj sibling operation errors instead of crashing. Shows `OPFORK!` indicator with fix command, resumes normal display when resolved. (bd-etjx)
+- Fix: `maw ws list --format text` uses tab-separated columns with a header row for agent parseability. (bd-3757)
+
 ## v0.31.2
 
 - Feat: `--json` is now accepted as a hidden alias for `--format json` on all commands that support `--format` (doctor, status, ws list, ws status, ws history). Hidden from `--help`; conflicts with `--format` if both specified. (bd-3i8u)
