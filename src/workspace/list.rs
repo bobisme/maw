@@ -1,9 +1,8 @@
-use std::process::Command;
-
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::jj::run_jj_with_op_recovery;
 
 use super::{check_stale_workspaces, jj_cwd, workspace_path, DEFAULT_WORKSPACE};
 
@@ -46,11 +45,7 @@ pub(crate) struct AdviceDetails {
 
 pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let cwd = jj_cwd()?;
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
+    let output = run_jj_with_op_recovery(&["workspace", "list"], &cwd)?;
 
     if !output.status.success() {
         bail!(

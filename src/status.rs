@@ -11,7 +11,7 @@ use crossterm::terminal;
 
 use crate::doctor;
 use crate::format::OutputFormat;
-use crate::jj::{count_revset, revset_exists};
+use crate::jj::{count_revset, revset_exists, run_jj_with_op_recovery};
 use crate::workspace::{self, MawConfig};
 use serde::Serialize;
 
@@ -527,11 +527,10 @@ fn collect_status() -> Result<StatusSummary> {
     let root = workspace::repo_root()?;
     let cwd = workspace::jj_cwd()?;
 
-    let ws_output = Command::new("jj")
-        .args(["workspace", "list", "--color=never", "--no-pager"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
+    let ws_output = run_jj_with_op_recovery(
+        &["workspace", "list", "--color=never", "--no-pager"],
+        &cwd,
+    )?;
 
     // If jj workspace list fails due to stale working copy, degrade gracefully
     // instead of bailing — especially important for --watch mode.
@@ -549,11 +548,10 @@ fn collect_status() -> Result<StatusSummary> {
         non_default_workspace_names(&ws_list)
     };
 
-    let status_output = Command::new("jj")
-        .args(["status", "--color=never", "--no-pager"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj status")?;
+    let status_output = run_jj_with_op_recovery(
+        &["status", "--color=never", "--no-pager"],
+        &cwd,
+    )?;
 
     // jj status may also fail when stale — degrade gracefully
     let (changed_files, status_is_stale) = if !status_output.status.success() {

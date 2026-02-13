@@ -53,6 +53,19 @@ pub fn run(args: &PushArgs) -> Result<()> {
         // Re-resolve after potential advance to get updated commit info
         let commit_info = resolve_branch(&cwd, branch)?;
 
+        // Export jj refs to git before pushing — prevents false "Nothing changed"
+        // when the operation graph has diverged and git refs are stale.
+        let export = Command::new("jj")
+            .args(["git", "export"])
+            .current_dir(&cwd)
+            .output()
+            .context("Failed to run jj git export")?;
+
+        if !export.status.success() {
+            let stderr = String::from_utf8_lossy(&export.stderr);
+            eprintln!("Warning: jj git export failed: {}", stderr.trim());
+        }
+
         // Push bookmark
         println!("Pushing {branch} to origin...");
         let push_output = Command::new("jj")

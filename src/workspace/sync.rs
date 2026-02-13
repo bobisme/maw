@@ -61,8 +61,11 @@ pub(crate) fn sync(all: bool) -> Result<()> {
         );
     }
 
-    // After sync, check for and auto-resolve divergent commits on our working copy.
-    // This happens when update-stale creates a fork of the workspace commit.
+    // After sync, detect and auto-abandon empty divergent copies (common case).
+    // This is a lightweight check that never fails the sync.
+    auto_abandon_empty_divergent(&cwd);
+
+    // Then run the full divergent resolution for any remaining complex cases.
     resolve_divergent_working_copy(&cwd)?;
 
     println!();
@@ -302,6 +305,132 @@ pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()>
             println!("    maw exec {ws_name} -- jj squash --from {id} --into @");
         }
         println!("  IMPORTANT: Do NOT abandon @ — this orphans the workspace pointer.");
+    }
+
+    Ok(())
+}
+
+/// Lightweight post-sync check: detect divergent commits on the workspace's
+/// working copy and auto-abandon empty copies. This is a simpler, faster check
+/// than the full `resolve_divergent_working_copy` — it only handles the common
+/// case where sync creates an empty fork of the workspace commit.
+///
+/// Resolution:
+/// - If exactly one copy is empty and others have content, abandon the empty one.
+/// - Otherwise, warn and let the user resolve manually.
+///
+/// This function never fails the sync — errors are printed as warnings.
+pub(crate) fn auto_abandon_empty_divergent(workspace_dir: &Path) {
+    if let Err(e) = auto_abandon_empty_divergent_inner(workspace_dir) {
+        eprintln!("  WARNING: divergent commit check failed: {e}");
+    }
+}
+
+fn auto_abandon_empty_divergent_inner(workspace_dir: &Path) -> Result<()> {
+    // Step 1: Get the current workspace's change-id (short 8-char form)
+    let change_output = Command::new("jj")
+        .args([
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "change_id.short(8)",
+        ])
+        .current_dir(workspace_dir)
+        .output()
+        .context("Failed to get working copy change ID")?;
+
+    let change_id = String::from_utf8_lossy(&change_output.stdout)
+        .trim()
+        .to_string();
+    if change_id.is_empty() {
+        return Ok(());
+    }
+
+    // Step 2: Check for divergent copies using change_id() revset function
+    let revset = format!("change_id({change_id})");
+    let copies_output = Command::new("jj")
+        .args([
+            "log",
+            "-r",
+            &revset,
+            "--no-graph",
+            "-T",
+            r#"commit_id.short(8) ++ "\n""#,
+        ])
+        .current_dir(workspace_dir)
+        .output()
+        .context("Failed to check for divergent commits")?;
+
+    let copies_text = String::from_utf8_lossy(&copies_output.stdout);
+    let commit_ids: Vec<String> = copies_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect();
+
+    // Not divergent if only one (or zero) copies
+    if commit_ids.len() <= 1 {
+        return Ok(());
+    }
+
+    // Step 3: For each copy, check if it's empty using jj diff --stat
+    let mut empty_ids: Vec<String> = Vec::new();
+    let mut nonempty_ids: Vec<String> = Vec::new();
+
+    for commit_id in &commit_ids {
+        let diff_output = Command::new("jj")
+            .args(["diff", "--stat", "-r", commit_id])
+            .current_dir(workspace_dir)
+            .output()
+            .with_context(|| format!("Failed to check diff for commit {commit_id}"))?;
+
+        let stat_text = String::from_utf8_lossy(&diff_output.stdout);
+        if stat_text.trim().is_empty() {
+            empty_ids.push(commit_id.clone());
+        } else {
+            nonempty_ids.push(commit_id.clone());
+        }
+    }
+
+    // Step 4: If exactly one copy is empty and the rest have content, auto-abandon
+    if empty_ids.len() == 1 && !nonempty_ids.is_empty() {
+        let empty_id = &empty_ids[0];
+        let result = Command::new("jj")
+            .args(["abandon", empty_id])
+            .current_dir(workspace_dir)
+            .output();
+
+        match result {
+            Ok(out) if out.status.success() => {
+                println!(
+                    "Resolved divergent commit: abandoned empty copy {empty_id}"
+                );
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!(
+                    "  WARNING: Failed to abandon empty copy {empty_id}: {}",
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "  WARNING: Failed to abandon empty copy {empty_id}: {e}"
+                );
+            }
+        }
+    } else {
+        // Both have content, both are empty, or multiple empties — warn
+        let ws_name = workspace_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<ws>");
+        println!(
+            "WARNING: Divergent commits detected for {change_id}. \
+             Manual resolution needed: maw exec {ws_name} -- jj log -r 'change_id({change_id})'"
+        );
     }
 
     Ok(())

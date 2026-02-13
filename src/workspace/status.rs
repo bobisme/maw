@@ -1,10 +1,10 @@
 use std::path::Path;
-use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::jj::run_jj_with_op_recovery;
 
 use super::{jj_cwd, DEFAULT_WORKSPACE};
 
@@ -49,52 +49,42 @@ pub(crate) fn status(format: OutputFormat) -> Result<()> {
     let current_ws = get_current_workspace(&cwd)?;
 
     // Check if stale
-    let stale_check = Command::new("jj")
-        .args(["status"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj status")?;
+    let stale_check = run_jj_with_op_recovery(&["status"], &cwd)?;
 
     let status_stderr = String::from_utf8_lossy(&stale_check.stderr);
     let is_stale = status_stderr.contains("working copy is stale");
     let status_stdout = String::from_utf8_lossy(&stale_check.stdout);
 
     // Get all workspaces and their commits
-    let ws_output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
+    let ws_output = run_jj_with_op_recovery(&["workspace", "list"], &cwd)?;
 
     let ws_list = String::from_utf8_lossy(&ws_output.stdout);
 
     // Check for conflicts
-    let log_output = Command::new("jj")
-        .args([
+    let log_output = run_jj_with_op_recovery(
+        &[
             "log",
             "--no-graph",
             "-r",
             "conflicts()",
             "-T",
             r#"change_id.short() ++ " " ++ description.first_line() ++ "\n""#,
-        ])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to check for conflicts")?;
+        ],
+        &cwd,
+    )?;
 
     let conflicts_text = String::from_utf8_lossy(&log_output.stdout);
 
     // Check for divergent commits
-    let divergent_output = Command::new("jj")
-        .args([
+    let divergent_output = run_jj_with_op_recovery(
+        &[
             "log",
             "--no-graph",
             "-T",
             r#"if(divergent, change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n", "")"#,
-        ])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to check for divergent commits")?;
+        ],
+        &cwd,
+    )?;
 
     let divergent_text = String::from_utf8_lossy(&divergent_output.stdout);
 
@@ -386,11 +376,7 @@ fn build_status_struct(
 
 pub(crate) fn get_current_workspace(cwd: &Path) -> Result<String> {
     // jj workspace list marks current with @
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
+    let output = run_jj_with_op_recovery(&["workspace", "list"], cwd)?;
 
     let list = String::from_utf8_lossy(&output.stdout);
     for line in list.lines() {
