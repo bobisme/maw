@@ -107,6 +107,27 @@ pub fn run(args: &PushArgs) -> Result<()> {
 
 /// Move the branch bookmark to @- (parent of working copy).
 fn advance_bookmark(cwd: &Path, branch: &str) -> Result<()> {
+    // Check @- for conflicts before advancing — if @- has unresolved conflicts,
+    // jj will refuse the push after the bookmark has already moved, leaving
+    // the branch pointing at a broken commit.
+    let conflict_check = Command::new("jj")
+        .args([
+            "log", "-r", "@-", "--no-graph", "--color=never", "-T", "conflict",
+        ])
+        .current_dir(cwd)
+        .output()
+        .context("Failed to check @- for conflicts")?;
+
+    if conflict_check.status.success()
+        && String::from_utf8_lossy(&conflict_check.stdout).trim() == "true"
+    {
+        bail!(
+            "@- has unresolved conflicts — cannot push.\n  \
+             To fix: jj squash (folds working copy into parent, resolving conflicts)\n  \
+             Then:   maw push --advance"
+        );
+    }
+
     let output = Command::new("jj")
         .args(["bookmark", "set", branch, "-r", "@-"])
         .current_dir(cwd)
