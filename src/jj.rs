@@ -69,81 +69,29 @@ pub fn revset_exists(cwd: &Path, revset: &str) -> Result<bool> {
     bail!("jj log failed: {}", message.trim())
 }
 
-/// Run a jj command with automatic recovery from "sibling operation" errors.
+/// Run a jj command, returning the Output for the caller to inspect.
 ///
-/// When concurrent workspaces run jj commands simultaneously, they can create
-/// forked operation graphs. jj reports this as "sibling of the working copy's
-/// operation" and suggests `jj op integrate <id>`. This helper:
-///   1. Runs the command
-///   2. If it fails with a sibling-op error, extracts the op ID from the hint
-///   3. Runs `jj op integrate <id>` to heal the fork
-///   4. Retries the original command once
-///   5. Returns a clear error if recovery fails
-pub fn run_jj_with_op_recovery(args: &[&str], cwd: &Path) -> Result<Output> {
-    let output = Command::new("jj")
+/// Thin wrapper around `Command::new("jj")` with consistent error context.
+/// Does NOT auto-recover from errors — callers should check
+/// `is_sibling_op_error()` on stderr and degrade gracefully.
+pub fn run_jj(args: &[&str], cwd: &Path) -> Result<Output> {
+    Command::new("jj")
         .args(args)
         .current_dir(cwd)
         .output()
-        .with_context(|| format!("Failed to run jj {}", args.join(" ")))?;
+        .with_context(|| format!("Failed to run jj {}", args.join(" ")))
+}
 
-    if output.status.success() {
-        return Ok(output);
-    }
+/// Check if jj stderr indicates a "sibling operation" error caused by
+/// concurrent workspace operations forking the operation graph.
+pub fn is_sibling_op_error(stderr: &str) -> bool {
+    stderr.contains("sibling of the working copy")
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.contains("sibling of the working copy") {
-        // Not a sibling-op error — return as-is for caller to handle
-        return Ok(output);
-    }
-
-    // Extract operation ID from hint line: "Run `jj op integrate <id>` ..."
-    let op_id = extract_op_integrate_id(&stderr);
-
-    let Some(op_id) = op_id else {
-        bail!(
-            "Concurrent workspace operations caused an operation graph fork.\n\
-             jj could not determine the operation ID to integrate.\n\
-             stderr: {stderr}"
-        );
-    };
-
-    // Attempt auto-fix
-    eprintln!(
-        "maw: concurrent operation fork detected, running: jj op integrate {op_id}"
-    );
-
-    let integrate = Command::new("jj")
-        .args(["op", "integrate", &op_id])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj op integrate")?;
-
-    if !integrate.status.success() {
-        let integrate_err = String::from_utf8_lossy(&integrate.stderr);
-        bail!(
-            "Concurrent workspace operations caused an operation graph fork.\n\
-             Auto-recovery failed: {integrate_err}\n\
-             Try again shortly, or run manually: jj op integrate {op_id}"
-        );
-    }
-
-    // Retry the original command
-    let retry = Command::new("jj")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("Failed to run jj {} (retry)", args.join(" ")))?;
-
-    if !retry.status.success() {
-        let retry_err = String::from_utf8_lossy(&retry.stderr);
-        bail!(
-            "Concurrent workspace operations caused an operation graph fork.\n\
-             jj op integrate succeeded but the retry failed: {retry_err}\n\
-             Try again shortly, or run manually: jj op integrate {op_id}"
-        );
-    }
-
-    Ok(retry)
+/// Build a human-readable fix command for a sibling-op error.
+/// Returns `None` if the op ID can't be extracted from stderr.
+pub fn sibling_op_fix_command(stderr: &str) -> Option<String> {
+    extract_op_integrate_id(stderr).map(|id| format!("jj op integrate {id}"))
 }
 
 /// Extract operation ID from jj's hint about `jj op integrate <id>`.

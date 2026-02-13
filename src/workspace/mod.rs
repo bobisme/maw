@@ -6,7 +6,7 @@ use clap::Subcommand;
 use serde::Deserialize;
 
 use crate::format::OutputFormat;
-use crate::jj::run_jj_with_op_recovery;
+use crate::jj::run_jj;
 
 mod create;
 mod history;
@@ -510,8 +510,8 @@ fn check_stale_workspaces() -> Result<Vec<String>> {
     let cwd = jj_cwd()?;
     let ws_dir = workspaces_dir()?;
 
-    // Get all workspaces (with op-recovery in case of concurrent operations)
-    let output = run_jj_with_op_recovery(&["workspace", "list"], &cwd)?;
+    // Get all workspaces
+    let output = run_jj(&["workspace", "list"], &cwd)?;
 
     let ws_list = String::from_utf8_lossy(&output.stdout);
 

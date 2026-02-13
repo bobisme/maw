@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
-use crate::jj::run_jj_with_op_recovery;
+use crate::jj::run_jj;
 
 use super::{jj_cwd, DEFAULT_WORKSPACE};
 
@@ -49,19 +49,19 @@ pub(crate) fn status(format: OutputFormat) -> Result<()> {
     let current_ws = get_current_workspace(&cwd)?;
 
     // Check if stale
-    let stale_check = run_jj_with_op_recovery(&["status"], &cwd)?;
+    let stale_check = run_jj(&["status"], &cwd)?;
 
     let status_stderr = String::from_utf8_lossy(&stale_check.stderr);
     let is_stale = status_stderr.contains("working copy is stale");
     let status_stdout = String::from_utf8_lossy(&stale_check.stdout);
 
     // Get all workspaces and their commits
-    let ws_output = run_jj_with_op_recovery(&["workspace", "list"], &cwd)?;
+    let ws_output = run_jj(&["workspace", "list"], &cwd)?;
 
     let ws_list = String::from_utf8_lossy(&ws_output.stdout);
 
     // Check for conflicts
-    let log_output = run_jj_with_op_recovery(
+    let log_output = run_jj(
         &[
             "log",
             "--no-graph",
@@ -76,7 +76,7 @@ pub(crate) fn status(format: OutputFormat) -> Result<()> {
     let conflicts_text = String::from_utf8_lossy(&log_output.stdout);
 
     // Check for divergent commits
-    let divergent_output = run_jj_with_op_recovery(
+    let divergent_output = run_jj(
         &[
             "log",
             "--no-graph",
@@ -376,7 +376,7 @@ fn build_status_struct(
 
 pub(crate) fn get_current_workspace(cwd: &Path) -> Result<String> {
     // jj workspace list marks current with @
-    let output = run_jj_with_op_recovery(&["workspace", "list"], cwd)?;
+    let output = run_jj(&["workspace", "list"], cwd)?;
 
     let list = String::from_utf8_lossy(&output.stdout);
     for line in list.lines() {

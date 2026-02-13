@@ -11,7 +11,7 @@ use crossterm::terminal;
 
 use crate::doctor;
 use crate::format::OutputFormat;
-use crate::jj::{count_revset, revset_exists, run_jj_with_op_recovery};
+use crate::jj::{count_revset, is_sibling_op_error, revset_exists, run_jj, sibling_op_fix_command};
 use crate::workspace::{self, MawConfig};
 use serde::Serialize;
 
@@ -146,6 +146,8 @@ struct StatusSummary {
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
     is_stale: bool,
+    op_fork: bool,
+    op_fork_fix: Option<String>,
     main_sync: MainSyncStatus,
     stray_root_files: Vec<String>,
 }
@@ -164,6 +166,9 @@ enum MainSyncStatus {
 impl StatusSummary {
     fn issue_count(&self) -> usize {
         let mut count = 0;
+        if self.op_fork {
+            count += 1;
+        }
         if !self.stray_root_files.is_empty() {
             count += 1;
         }
@@ -190,6 +195,9 @@ impl StatusSummary {
         let changes = self.changed_files.len();
         let untracked = self.untracked_files.len();
         let mut parts = Vec::new();
+        if self.op_fork {
+            parts.push(format!("OPFORK{warn}"));
+        }
         if stray > 0 {
             parts.push(format!("ROOT-NOT-BARE={stray}{warn}"));
         }
@@ -206,6 +214,11 @@ impl StatusSummary {
     fn render_text(&self) -> String {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
+
+        if self.op_fork {
+            let fix = self.op_fork_fix.as_deref().unwrap_or("wait for concurrent agents to finish, then: jj op integrate <id>");
+            out.push_str(&format!("[WARN] OP FORK: concurrent operations forked the jj operation graph\n  Fix: {fix}\n"));
+        }
 
         if !self.stray_root_files.is_empty() {
             let n = self.stray_root_files.len();
@@ -289,6 +302,10 @@ impl StatusSummary {
             out.push_str(segment);
         };
 
+        if self.op_fork {
+            append_segment(&colorize_light_red("OPFORK!"));
+        }
+
         if !self.stray_root_files.is_empty() {
             append_segment(&colorize_light_red("ROOT!"));
         }
@@ -324,6 +341,16 @@ impl StatusSummary {
     fn render_multiline(&self) -> String {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
+
+        if self.op_fork {
+            let fix = self.op_fork_fix.as_deref().unwrap_or("wait for concurrent agents to finish, then: jj op integrate <id>");
+            out.push_str(&format!(
+                "{} {}: {}\n",
+                colorize_light_red("\u{26a0} OP FORK"),
+                colorize_light_red("concurrent operations forked the jj operation graph"),
+                colorize_light_red(fix),
+            ));
+        }
 
         if !self.stray_root_files.is_empty() {
             let n = self.stray_root_files.len();
@@ -527,17 +554,24 @@ fn collect_status() -> Result<StatusSummary> {
     let root = workspace::repo_root()?;
     let cwd = workspace::jj_cwd()?;
 
-    let ws_output = run_jj_with_op_recovery(
+    let mut op_fork = false;
+    let mut op_fork_fix: Option<String> = None;
+
+    let ws_output = run_jj(
         &["workspace", "list", "--color=never", "--no-pager"],
         &cwd,
     )?;
 
-    // If jj workspace list fails due to stale working copy, degrade gracefully
-    // instead of bailing — especially important for --watch mode.
+    // If jj workspace list fails due to stale working copy or op fork,
+    // degrade gracefully instead of bailing — especially important for --watch mode.
     let mut is_stale = false;
     let workspace_names = if !ws_output.status.success() {
         let stderr = String::from_utf8_lossy(&ws_output.stderr);
-        if stderr.contains("working copy is stale") {
+        if is_sibling_op_error(&stderr) {
+            op_fork = true;
+            op_fork_fix = sibling_op_fix_command(&stderr);
+            Vec::new()
+        } else if stderr.contains("working copy is stale") {
             is_stale = true;
             Vec::new()
         } else {
@@ -548,39 +582,51 @@ fn collect_status() -> Result<StatusSummary> {
         non_default_workspace_names(&ws_list)
     };
 
-    let status_output = run_jj_with_op_recovery(
-        &["status", "--color=never", "--no-pager"],
-        &cwd,
-    )?;
-
-    // jj status may also fail when stale — degrade gracefully
-    let (changed_files, status_is_stale) = if !status_output.status.success() {
-        let stderr = String::from_utf8_lossy(&status_output.stderr);
-        if stderr.contains("working copy is stale") {
-            (Vec::new(), true)
-        } else {
-            bail!("jj status failed: {}", stderr);
-        }
+    // If op is forked, skip further jj commands — they'll all fail the same way
+    let (changed_files, untracked_files, main_sync) = if op_fork {
+        (Vec::new(), Vec::new(), MainSyncStatus::Unknown("op fork".to_string()))
     } else {
-        let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-        let status_stderr = String::from_utf8_lossy(&status_output.stderr);
-        let stale = status_stderr.contains("working copy is stale");
-        (parse_jj_changed_files(&status_stdout), stale)
+        let status_output = run_jj(
+            &["status", "--color=never", "--no-pager"],
+            &cwd,
+        )?;
+
+        // jj status may also fail when stale or op-forked — degrade gracefully
+        let (changed_files, status_is_stale) = if !status_output.status.success() {
+            let stderr = String::from_utf8_lossy(&status_output.stderr);
+            if is_sibling_op_error(&stderr) {
+                op_fork = true;
+                op_fork_fix = op_fork_fix.or_else(|| sibling_op_fix_command(&stderr));
+                (Vec::new(), false)
+            } else if stderr.contains("working copy is stale") {
+                (Vec::new(), true)
+            } else {
+                bail!("jj status failed: {}", stderr);
+            }
+        } else {
+            let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+            let status_stderr = String::from_utf8_lossy(&status_output.stderr);
+            let stale = status_stderr.contains("working copy is stale");
+            (parse_jj_changed_files(&status_stdout), stale)
+        };
+        is_stale = is_stale || status_is_stale;
+
+        let git_files = git_status_files(&root).unwrap_or_default();
+        let config = MawConfig::load(&root).unwrap_or_default();
+        let sync = main_sync_status(&cwd, config.branch())?;
+
+        (changed_files, git_files.untracked, sync)
     };
-    is_stale = is_stale || status_is_stale;
-
-    let git_files = git_status_files(&root).unwrap_or_default();
-
-    let config = MawConfig::load(&root).unwrap_or_default();
-    let main_sync = main_sync_status(&cwd, config.branch())?;
 
     let stray_root_files = doctor::stray_root_entries(&root);
 
     Ok(StatusSummary {
         workspace_names,
         changed_files,
-        untracked_files: git_files.untracked,
+        untracked_files,
         is_stale,
+        op_fork,
+        op_fork_fix,
         main_sync,
         stray_root_files,
     })

@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
-use crate::jj::run_jj_with_op_recovery;
+use crate::jj::{is_sibling_op_error, run_jj, sibling_op_fix_command};
 
 use super::{check_stale_workspaces, jj_cwd, workspace_path, DEFAULT_WORKSPACE};
 
@@ -45,13 +45,19 @@ pub(crate) struct AdviceDetails {
 
 pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let cwd = jj_cwd()?;
-    let output = run_jj_with_op_recovery(&["workspace", "list"], &cwd)?;
+    let output = run_jj(&["workspace", "list"], &cwd)?;
 
     if !output.status.success() {
-        bail!(
-            "jj workspace list failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_sibling_op_error(&stderr) {
+            let fix = sibling_op_fix_command(&stderr)
+                .unwrap_or_else(|| "jj op integrate <id>".to_string());
+            bail!(
+                "Concurrent operations forked the jj operation graph.\n  \
+                 Wait for other agents to finish, then fix with: {fix}"
+            );
+        }
+        bail!("jj workspace list failed: {}", stderr);
     }
 
     let list = String::from_utf8_lossy(&output.stdout);
