@@ -25,27 +25,85 @@ Use plural nouns (`issues` not `issue`) for consistency. Make exceptions where s
 
 Support three output formats via `--format` flag:
 
-| Format | Audience | Description |
-|--------|----------|-------------|
-| `text` | Agents + Machines | Compact, parseable plain text. ID-first layout, two-space delimiters, self-labeling fields. |
-| `json` | Machines | Structured JSON, stable schema for programmatic use. |
-| `pretty` | Humans | Colored output with unicode glyphs, optimized for terminal display. |
+| Format | Default when | Audience | Description |
+|--------|-------------|----------|-------------|
+| `text` | Non-TTY (pipes, agents) | Agents + scripts | Concise, token-efficient plain text. ID-first records, two-space delimiters, no prose. |
+| `pretty` | TTY (interactive terminal) | Humans | Tables, color, box-drawing. Never fed to LLMs or parsed programmatically. |
+| `json` | Explicit `--format json` | Machines | Structured, parseable, stable schema. Always an object envelope. |
+
+### `--json` shorthand
+
+Provide `--json` as a **hidden** alias for `--format json`. This is the most common format agents request, and they frequently guess `--json` before discovering `--format json`.
 
 ```bash
-# Flag takes precedence
+# Both must work identically
 tool items list --format json
+tool items list --json
 
-# Environment variable sets default
-FORMAT=json tool items list
-
-# Auto-detect: pretty for TTY, text for pipes
-tool items list
+# --json is hidden: not shown in --help, not in completions
+# --format json is the canonical form shown in docs and help
 ```
 
-**Implementation notes:**
-- Auto-detect TTY: `pretty` if stdout is a terminal, `text` if piped
-- `pretty` format: use ANSI escape codes directly (no dependencies), respect `NO_COLOR` env var
-- `text` format: designed for agents and machines, compact and parseable
+Hidden means: don't document it, don't show it in `--help` output, but accept it silently. The goal is to reduce agent friction without cluttering the documented interface.
+
+### Format auto-detection
+
+Resolution order: `--format` flag / `--json` > `FORMAT` env var > TTY auto-detect.
+
+```bash
+# Explicit flag always wins
+tool items list --format json
+
+# Environment variable overrides auto-detect
+FORMAT=json tool items list
+
+# Auto-detect: TTY → pretty, pipe → text
+tool items list              # human at terminal → pretty
+tool items list | head       # piped → text
+```
+
+### Text format guidelines
+
+Text is the default for agents and pipes. Design it to be simultaneously human-scannable and LLM-comprehensible while staying token-efficient.
+
+Rules:
+- **ID-first**: Every record starts with its identifier
+- **Two-space delimiters**: Separate fields with two spaces (not tabs, not single space)
+- **No prose**: No "Successfully created!" or "Here are your results:"
+- **Suggested next commands**: When there's an obvious workflow, include the command to run next
+
+```bash
+# Good text output
+cr-kex3  bd-2qa  fix inbox orphan detection  PENDING  botcrit-dev
+cr-v486  bd-1nf  fix stale workspace check   MERGED   botcrit-dev
+
+# Bad text output
+Review cr-kex3 was created by botcrit-dev for bead bd-2qa.
+Title: "fix inbox orphan detection". Status: PENDING.
+```
+
+### Pretty format guidelines
+
+Pretty is for humans at terminals. Use tables, color, box-drawing, but never feed this to LLMs.
+
+### JSON envelope convention
+
+All JSON output must follow the envelope pattern:
+
+```json
+{
+  "items": [...],
+  "advice": [
+    { "level": "warn", "type": "stale-workspace", "message": "Workspace 'gold-tiger' is stale" }
+  ]
+}
+```
+
+Rules:
+- **Always an object** — never a bare array at top level
+- **Always include `advice` array** — empty `[]` when no warnings
+- **Named collection key** — `items`, `workspaces`, `reviews`, etc. (not generic `data`)
+- **Advice `type`** — short kebab-case identifier for programmatic matching (e.g., `stale-workspace`, `deprecated-flag`). Not a URI.
 
 ## Help and Documentation
 
@@ -66,7 +124,7 @@ Options:
   -t, --title <TITLE>    Item title (required)
   -d, --desc <DESC>      Description
   -p, --priority <1-4>   Priority level [default: 2]
-  --format <FORMAT>      Output format: text|json|toon [default: text]
+  --format <FORMAT>      Output format: text|pretty|json [default: auto]
   -h, --help             Print help
 
 Examples:
@@ -352,4 +410,4 @@ Omit:
 - Redundant confirmations
 - Lengthy explanations (put those in --help)
 
-The `pretty` format is for human readability with colors and glyphs, while `text` is the design target for agent and machine usability.
+Text should be the primary design target for agent usability. Pretty is for humans only.
