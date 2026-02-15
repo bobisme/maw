@@ -14,7 +14,7 @@ pub(crate) struct HistoryEnvelope {
     pub(crate) advice: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct HistoryCommit {
     pub(crate) change_id: String,
     pub(crate) commit_id: String,
@@ -28,10 +28,24 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
     validate_workspace_name(name)?;
     let format = OutputFormat::resolve(format);
 
-    // Check if workspace exists
+    ensure_workspace_exists(name, &cwd)?;
+
+    let commits = fetch_workspace_commits(name, limit, &cwd)?;
+
+    if commits.is_empty() {
+        print_empty_history(name, &format)?;
+    } else {
+        print_history(name, &commits, limit, &format)?;
+    }
+
+    Ok(())
+}
+
+/// Verify that a workspace exists in jj's tracked workspace list.
+fn ensure_workspace_exists(name: &str, cwd: &std::path::Path) -> Result<()> {
     let ws_output = Command::new("jj")
         .args(["workspace", "list"])
-        .current_dir(&cwd)
+        .current_dir(cwd)
         .output()
         .context("Failed to run jj workspace list")?;
 
@@ -50,11 +64,18 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
              List workspaces: maw ws list"
         );
     }
+    Ok(())
+}
 
+/// Fetch and parse workspace commits from jj log.
+fn fetch_workspace_commits(
+    name: &str,
+    limit: usize,
+    cwd: &std::path::Path,
+) -> Result<Vec<HistoryCommit>> {
     // Use revset to get commits specific to this workspace:
     // {name}@:: gets all commits reachable from the workspace's working copy
     // ~::main excludes commits already in main (ancestors of main)
-    // This shows commits the workspace has made since diverging from main
     let revset = format!("{name}@:: & ~::main");
 
     let output = Command::new("jj")
@@ -68,7 +89,7 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
             "-n",
             &limit.to_string(),
         ])
-        .current_dir(&cwd)
+        .current_dir(cwd)
         .output()
         .context("Failed to get workspace history")?;
 
@@ -78,10 +99,13 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
     }
 
     let history = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_history_lines(&history))
+}
 
-    // Parse commits into structs
+/// Parse jj log output lines into `HistoryCommit` structs.
+fn parse_history_lines(raw: &str) -> Vec<HistoryCommit> {
     let mut commits = Vec::new();
-    for line in history.lines() {
+    for line in raw.lines() {
         if line.trim().is_empty() {
             continue;
         }
@@ -90,9 +114,7 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
         if parts.len() >= 4 {
             let change_id = parts[0].to_string();
             let commit_id = parts[1].to_string();
-            let date = parts[2];
-            let time = parts[3];
-            let timestamp = format!("{date} {time}");
+            let timestamp = format!("{} {}", parts[2], parts[3]);
             let description = if parts.len() >= 5 {
                 parts[4].to_string()
             } else {
@@ -106,46 +128,56 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
             });
         }
     }
+    commits
+}
 
-    if commits.is_empty() {
-        match format {
-            OutputFormat::Json => {
-                let envelope = HistoryEnvelope {
-                    workspace: name.to_string(),
-                    commits: vec![],
-                    advice: vec![],
-                };
-                println!("{}", format.serialize(&envelope)?);
-            }
-            OutputFormat::Text => {
-                println!("Workspace '{name}' has no commits yet.");
-                println!();
-                println!("Next: maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
-            }
-            OutputFormat::Pretty => {
-                println!("Workspace '{name}' has no commits yet.");
-                println!();
-                println!("  (Workspace starts with an empty commit for ownership.");
-                println!("   Edit files and describe your changes to create history.)");
-                println!();
-                println!("  Start working:");
-                println!("    maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
-            }
-        }
-        return Ok(());
-    }
-
+/// Print output when a workspace has no commits yet.
+fn print_empty_history(name: &str, format: &OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => {
             let envelope = HistoryEnvelope {
                 workspace: name.to_string(),
-                commits,
+                commits: vec![],
                 advice: vec![],
             };
             println!("{}", format.serialize(&envelope)?);
         }
         OutputFormat::Text => {
-            for commit in &commits {
+            println!("Workspace '{name}' has no commits yet.");
+            println!();
+            println!("Next: maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
+        }
+        OutputFormat::Pretty => {
+            println!("Workspace '{name}' has no commits yet.");
+            println!();
+            println!("  (Workspace starts with an empty commit for ownership.");
+            println!("   Edit files and describe your changes to create history.)");
+            println!();
+            println!("  Start working:");
+            println!("    maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
+        }
+    }
+    Ok(())
+}
+
+/// Print formatted commit history.
+fn print_history(
+    name: &str,
+    commits: &[HistoryCommit],
+    limit: usize,
+    format: &OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            let envelope = HistoryEnvelope {
+                workspace: name.to_string(),
+                commits: commits.to_vec(),
+                advice: vec![],
+            };
+            println!("{}", format.serialize(&envelope)?);
+        }
+        OutputFormat::Text => {
+            for commit in commits {
                 println!(
                     "{}  {}  {}  {}",
                     commit.change_id, commit.commit_id, commit.timestamp, commit.description
@@ -160,7 +192,7 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
             println!("  change_id      commit        timestamp         description");
             println!("  ────────────   ──────────    ────────────────  ────────────────────────");
 
-            for commit in &commits {
+            for commit in commits {
                 println!(
                     "  {}   {}    {}  {}",
                     commit.change_id, commit.commit_id, commit.timestamp, commit.description
@@ -179,6 +211,5 @@ pub(crate) fn history(name: &str, limit: usize, format: Option<OutputFormat>) ->
             println!("  maw exec {name} -- jj show <change-id>");
         }
     }
-
     Ok(())
 }

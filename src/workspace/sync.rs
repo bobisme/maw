@@ -85,7 +85,43 @@ pub(crate) fn sync(all: bool) -> Result<()> {
 /// 4. @'s files <= non-@'s files -> squash non-@ into @ (recover extra files)
 /// 5. Overlapping but different -> warn with actionable instructions
 pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()> {
-    // Get the working copy's change ID and commit ID
+    let (change_id, current_commit_id) = get_working_copy_ids(workspace_dir)?;
+    if change_id.is_empty() {
+        return Ok(());
+    }
+
+    let divergent_commits = get_divergent_commits(workspace_dir, &change_id)?;
+    if divergent_commits.len() <= 1 {
+        return Ok(());
+    }
+
+    println!();
+    println!(
+        "Detected {} divergent copies of workspace commit {change_id}.",
+        divergent_commits.len()
+    );
+    println!("  (This happens when sync forks your commit. Auto-resolving...)");
+
+    let copies = collect_copy_info(workspace_dir, &divergent_commits, &current_commit_id);
+
+    let Some(current_idx) = copies.iter().position(|c| c.is_current) else {
+        println!("  WARNING: Could not identify @ among divergent copies. Skipping auto-resolve.");
+        return Ok(());
+    };
+
+    let unresolved = resolve_divergent_copies(workspace_dir, &copies, current_idx);
+
+    if unresolved.is_empty() {
+        println!("  Divergence fully resolved.");
+    } else {
+        print_unresolved_guidance(workspace_dir, &unresolved);
+    }
+
+    Ok(())
+}
+
+/// Get the working copy's change ID and commit ID.
+fn get_working_copy_ids(workspace_dir: &Path) -> Result<(String, String)> {
     let change_output = Command::new("jj")
         .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
         .current_dir(workspace_dir)
@@ -93,9 +129,6 @@ pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()>
         .context("Failed to get working copy change ID")?;
 
     let change_id = String::from_utf8_lossy(&change_output.stdout).trim().to_string();
-    if change_id.is_empty() {
-        return Ok(());
-    }
 
     let current_output = Command::new("jj")
         .args(["log", "-r", "@", "--no-graph", "-T", "commit_id.short()"])
@@ -104,8 +137,11 @@ pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()>
         .context("Failed to get current commit ID")?;
     let current_commit_id = String::from_utf8_lossy(&current_output.stdout).trim().to_string();
 
-    // Check if this change ID has divergent copies.
-    // Must use change_id() revset function -- bare change_id errors on divergent changes.
+    Ok((change_id, current_commit_id))
+}
+
+/// Query jj for divergent copies of the given change ID.
+fn get_divergent_commits(workspace_dir: &Path, change_id: &str) -> Result<Vec<String>> {
     let revset = format!("change_id({change_id})");
     let divergent_output = Command::new("jj")
         .args([
@@ -121,39 +157,32 @@ pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()>
         .context("Failed to check for divergent commits")?;
 
     let divergent_text = String::from_utf8_lossy(&divergent_output.stdout);
-    let divergent_commits: Vec<String> = divergent_text
+    Ok(divergent_text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(std::string::ToString::to_string)
-        .collect();
+        .collect())
+}
 
-    if divergent_commits.len() <= 1 {
-        return Ok(());
-    }
+/// Info about a single divergent copy (diff text and changed file paths).
+struct CopyInfo {
+    commit_id: String,
+    is_current: bool,
+    diff: Option<String>,
+    changed_files: Option<HashSet<String>>,
+}
 
-    println!();
-    println!(
-        "Detected {} divergent copies of workspace commit {change_id}.",
-        divergent_commits.len()
-    );
-    println!("  (This happens when sync forks your commit. Auto-resolving...)");
+/// Collect diff and changed-file info for each divergent copy.
+fn collect_copy_info(
+    workspace_dir: &Path,
+    divergent_commits: &[String],
+    current_commit_id: &str,
+) -> Vec<CopyInfo> {
+    let mut copies = Vec::new();
 
-    // Collect diff and changed-file info for each copy.
-    // diff/changed_files are None when the jj command fails (e.g., commit
-    // already abandoned). We only auto-resolve when we have reliable data.
-    struct CopyInfo {
-        commit_id: String,
-        is_current: bool,
-        diff: Option<String>,
-        changed_files: Option<HashSet<String>>,
-    }
-
-    let mut copies: Vec<CopyInfo> = Vec::new();
-
-    for commit_id in &divergent_commits {
+    for commit_id in divergent_commits {
         let is_current = *commit_id == current_commit_id;
 
-        // Full diff text (for identity comparison)
         let diff_output = Command::new("jj")
             .args(["diff", "-r", commit_id])
             .current_dir(workspace_dir)
@@ -166,8 +195,6 @@ pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()>
             _ => None,
         };
 
-        // Changed file paths (for subset comparison).
-        // --summary format: "M path/to/file" -- extract just the path.
         let summary_output = Command::new("jj")
             .args(["diff", "-r", commit_id, "--summary"])
             .current_dir(workspace_dir)
@@ -192,122 +219,132 @@ pub(crate) fn resolve_divergent_working_copy(workspace_dir: &Path) -> Result<()>
         });
     }
 
-    // Find the @ copy index
-    let Some(current_idx) = copies.iter().position(|c| c.is_current) else {
-        println!("  WARNING: Could not identify @ among divergent copies. Skipping auto-resolve.");
-        return Ok(());
-    };
+    copies
+}
 
-    // Process each non-@ copy against @
+/// Try to resolve each non-@ divergent copy against @.
+/// Returns the list of commit IDs that could not be auto-resolved.
+fn resolve_divergent_copies(
+    workspace_dir: &Path,
+    copies: &[CopyInfo],
+    current_idx: usize,
+) -> Vec<String> {
     let mut unresolved = Vec::new();
 
-    for i in 0..copies.len() {
+    for (i, copy) in copies.iter().enumerate() {
         if i == current_idx {
             continue;
         }
 
-        let other_id = copies[i].commit_id.clone();
+        let other_id = &copy.commit_id;
 
-        // If we couldn't read this copy's diff, skip auto-resolve (safe default).
-        let Some(other_diff) = &copies[i].diff else {
-            unresolved.push(other_id);
+        let Some(other_diff) = &copy.diff else {
+            unresolved.push(other_id.clone());
             continue;
         };
 
         // Case 1: non-@ is empty -> abandon
         if other_diff.is_empty() {
-            abandon_copy(workspace_dir, &other_id, "empty");
+            abandon_copy(workspace_dir, other_id, "empty");
             continue;
         }
 
-        // Cases 2-4 require @'s diff data. If unavailable, skip.
+        // Cases 2-4 require @'s diff data
         let (Some(current_diff), Some(current_files)) =
             (&copies[current_idx].diff, &copies[current_idx].changed_files)
         else {
-            unresolved.push(other_id);
+            unresolved.push(other_id.clone());
             continue;
         };
 
-        // Case 2: identical diffs -> abandon non-@ (same changes, different parent)
+        // Case 2: identical diffs -> abandon non-@
         if other_diff == current_diff {
-            abandon_copy(workspace_dir, &other_id, "identical to @");
+            abandon_copy(workspace_dir, other_id, "identical to @");
             continue;
         }
 
-        // Cases 3-4 require non-@'s file list. If unavailable, skip.
-        let Some(other_files) = &copies[i].changed_files else {
-            unresolved.push(other_id);
+        let Some(other_files) = &copy.changed_files else {
+            unresolved.push(other_id.clone());
             continue;
         };
 
-        // Case 3: non-@'s files <= @'s files -> abandon non-@ (@ has everything)
+        // Case 3: non-@'s files subset of @ -> abandon non-@
         if other_files.is_subset(current_files) {
-            abandon_copy(workspace_dir, &other_id, "subset of @");
+            abandon_copy(workspace_dir, other_id, "subset of @");
             continue;
         }
 
-        // Case 4: @'s files <= non-@'s files -> squash non-@ into @ (recover extra files)
+        // Case 4: @'s files subset of non-@ -> squash non-@ into @
         if current_files.is_subset(other_files) {
-            let extra: Vec<&String> = other_files
-                .difference(current_files)
-                .collect();
-
-            // JJ_EDITOR=true prevents jj from opening an editor to merge
-            // the differing descriptions of the two divergent copies.
-            let squash_result = Command::new("jj")
-                .args(["squash", "--from", &other_id, "--into", "@"])
-                .env("JJ_EDITOR", "true")
-                .current_dir(workspace_dir)
-                .output();
-
-            match squash_result {
-                Ok(out) if out.status.success() => {
-                    println!("  Squashed {other_id} into @ (recovered {} extra file(s): {}).",
-                        extra.len(),
-                        extra.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", "));
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    eprintln!("  WARNING: Could not squash {other_id} into @: {}", stderr.trim());
-                    unresolved.push(other_id);
-                }
-                Err(e) => {
-                    eprintln!("  WARNING: Could not squash {other_id} into @: {e}");
-                    unresolved.push(other_id);
-                }
+            if try_squash_into_current(workspace_dir, other_id, other_files, current_files) {
+                continue;
             }
+            unresolved.push(other_id.clone());
             continue;
         }
 
-        // Case 5: overlapping but different -- cannot auto-resolve
-        unresolved.push(other_id);
+        // Case 5: overlapping but different
+        unresolved.push(other_id.clone());
     }
 
-    // Report unresolved copies with actionable instructions
-    if unresolved.is_empty() {
-        println!("  Divergence fully resolved.");
-    } else {
-        let ws_name = workspace_dir.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("<ws>");
+    unresolved
+}
 
-        println!();
-        println!("  WARNING: {} divergent copy/copies could not be auto-resolved.", unresolved.len());
-        println!("  @ and non-@ have overlapping but different changes.");
-        println!("  To fix manually:");
-        println!("    maw exec {ws_name} -- jj diff -r @             # see @ changes");
-        for id in &unresolved {
-            println!("    maw exec {ws_name} -- jj diff -r {id:<12}   # see this copy's changes");
+/// Attempt to squash a non-@ copy into @ to recover extra files.
+/// Returns true on success.
+fn try_squash_into_current(
+    workspace_dir: &Path,
+    other_id: &str,
+    other_files: &HashSet<String>,
+    current_files: &HashSet<String>,
+) -> bool {
+    let extra: Vec<&String> = other_files.difference(current_files).collect();
+
+    let squash_result = Command::new("jj")
+        .args(["squash", "--from", other_id, "--into", "@"])
+        .env("JJ_EDITOR", "true")
+        .current_dir(workspace_dir)
+        .output();
+
+    match squash_result {
+        Ok(out) if out.status.success() => {
+            println!("  Squashed {other_id} into @ (recovered {} extra file(s): {}).",
+                extra.len(),
+                extra.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", "));
+            true
         }
-        println!();
-        println!("  To merge a copy's extra changes into @:");
-        for id in &unresolved {
-            println!("    maw exec {ws_name} -- jj squash --from {id} --into @");
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!("  WARNING: Could not squash {other_id} into @: {}", stderr.trim());
+            false
         }
-        println!("  IMPORTANT: Do NOT abandon @ — this orphans the workspace pointer.");
+        Err(e) => {
+            eprintln!("  WARNING: Could not squash {other_id} into @: {e}");
+            false
+        }
     }
+}
 
-    Ok(())
+/// Print actionable guidance for unresolved divergent copies.
+fn print_unresolved_guidance(workspace_dir: &Path, unresolved: &[String]) {
+    let ws_name = workspace_dir.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<ws>");
+
+    println!();
+    println!("  WARNING: {} divergent copy/copies could not be auto-resolved.", unresolved.len());
+    println!("  @ and non-@ have overlapping but different changes.");
+    println!("  To fix manually:");
+    println!("    maw exec {ws_name} -- jj diff -r @             # see @ changes");
+    for id in unresolved {
+        println!("    maw exec {ws_name} -- jj diff -r {id:<12}   # see this copy's changes");
+    }
+    println!();
+    println!("  To merge a copy's extra changes into @:");
+    for id in unresolved {
+        println!("    maw exec {ws_name} -- jj squash --from {id} --into @");
+    }
+    println!("  IMPORTANT: Do NOT abandon @ — this orphans the workspace pointer.");
 }
 
 /// Lightweight post-sync check: detect divergent commits on the workspace's
@@ -462,22 +499,7 @@ fn sync_all() -> Result<()> {
     let root = repo_root()?;
     let cwd = jj_cwd()?;
 
-    // Get all workspaces
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&output.stdout);
-
-    // Parse workspace names (format: "name@: change_id ..." or "name: change_id ...")
-    let workspace_names: Vec<String> = ws_list
-        .lines()
-        .filter_map(|l| l.split(':').next())
-        .map(|s| s.trim().trim_end_matches('@').to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let workspace_names = list_workspace_names(&cwd)?;
 
     if workspace_names.is_empty() {
         println!("No workspaces found.");
@@ -487,12 +509,59 @@ fn sync_all() -> Result<()> {
     println!("Syncing {} workspace(s)...", workspace_names.len());
     println!();
 
+    let (synced, already_current, errors) = sync_each_workspace(&workspace_names, &root)?;
+
+    println!();
+    println!(
+        "Results: {} synced, {} already current, {} errors",
+        synced,
+        already_current,
+        errors.len()
+    );
+
+    if !errors.is_empty() {
+        println!();
+        println!("Errors:");
+        for err in &errors {
+            println!("  - {err}");
+        }
+    }
+
+    // Re-check for cascade staleness: syncing one workspace can make others stale again
+    if synced > 0 {
+        check_cascade_staleness(&workspace_names, &root);
+    }
+
+    Ok(())
+}
+
+/// Parse workspace names from jj workspace list output.
+fn list_workspace_names(cwd: &Path) -> Result<Vec<String>> {
+    let output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(cwd)
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&output.stdout);
+    Ok(ws_list
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .map(|s| s.trim().trim_end_matches('@').to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// Sync each workspace, returning (synced_count, already_current_count, errors).
+fn sync_each_workspace(
+    workspace_names: &[String],
+    root: &Path,
+) -> Result<(usize, usize, Vec<String>)> {
     let mut synced = 0;
     let mut already_current = 0;
     let mut errors: Vec<String> = Vec::new();
 
-    for ws in &workspace_names {
-        // Validate workspace name to prevent path traversal (defense-in-depth)
+    for ws in workspace_names {
         if validate_workspace_name(ws).is_err() {
             errors.push(format!("{ws}: invalid workspace name (skipped)"));
             continue;
@@ -526,7 +595,6 @@ fn sync_all() -> Result<()> {
 
         match sync_result {
             Ok(out) if out.status.success() => {
-                // Check for and resolve divergent commits after sync
                 if let Err(e) = resolve_divergent_working_copy(&path) {
                     eprintln!("  \u{2713} {ws} - synced (divergent resolution failed: {e})");
                 } else {
@@ -544,62 +612,46 @@ fn sync_all() -> Result<()> {
         }
     }
 
-    println!();
-    println!(
-        "Results: {} synced, {} already current, {} errors",
-        synced,
-        already_current,
-        errors.len()
-    );
+    Ok((synced, already_current, errors))
+}
 
-    if !errors.is_empty() {
+/// After syncing, re-check all workspaces for cascade staleness and warn if found.
+fn check_cascade_staleness(workspace_names: &[String], root: &Path) {
+    let mut cascade_stale = Vec::new();
+    for ws in workspace_names {
+        if validate_workspace_name(ws).is_err() {
+            continue;
+        }
+        let path = root.join("ws").join(ws);
+        if !path.exists() {
+            continue;
+        }
+        let status = Command::new("jj")
+            .args(["status"])
+            .current_dir(&path)
+            .output();
+        if let Ok(out) = status {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("working copy is stale") {
+                cascade_stale.push(ws.clone());
+            }
+        }
+    }
+    if !cascade_stale.is_empty() {
         println!();
-        println!("Errors:");
-        for err in &errors {
-            println!("  - {err}");
+        println!(
+            "WARNING: {} workspace(s) became stale again (cascade effect): {}",
+            cascade_stale.len(),
+            cascade_stale.join(", ")
+        );
+        println!("  This happens when syncing one workspace modifies shared history.");
+        println!("  Re-run: maw ws sync --all");
+        println!();
+        println!("  Tip: To avoid cascading, sync only your workspace:");
+        for ws in &cascade_stale {
+            println!("    maw ws sync {ws}");
         }
     }
-
-    // Re-check for cascade staleness: syncing one workspace can make others stale again
-    if synced > 0 {
-        let mut cascade_stale = Vec::new();
-        for ws in &workspace_names {
-            if validate_workspace_name(ws).is_err() {
-                continue;
-            }
-            let path = root.join("ws").join(ws);
-            if !path.exists() {
-                continue;
-            }
-            let status = Command::new("jj")
-                .args(["status"])
-                .current_dir(&path)
-                .output();
-            if let Ok(out) = status {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if stderr.contains("working copy is stale") {
-                    cascade_stale.push(ws.clone());
-                }
-            }
-        }
-        if !cascade_stale.is_empty() {
-            println!();
-            println!(
-                "WARNING: {} workspace(s) became stale again (cascade effect): {}",
-                cascade_stale.len(),
-                cascade_stale.join(", ")
-            );
-            println!("  This happens when syncing one workspace modifies shared history.");
-            println!("  Re-run: maw ws sync --all");
-            println!();
-            println!("  Tip: To avoid cascading, sync only your workspace:");
-            for ws in &cascade_stale {
-                println!("    maw ws sync {ws}");
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Auto-sync a stale workspace before running a command.

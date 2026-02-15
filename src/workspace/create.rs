@@ -193,26 +193,7 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     }
 
     // Check if workspace is already tracked by jj
-    let ws_output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let is_tracked = ws_list.lines().any(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|n| n.trim().trim_end_matches('@') == name)
-    });
-
-    if is_tracked {
-        bail!(
-            "Workspace '{name}' is already tracked by jj.\n  \
-             Use 'maw ws sync' if the workspace is stale.\n  \
-             Use 'maw ws list' to see all workspaces."
-        );
-    }
+    ensure_workspace_not_tracked(name, &cwd)?;
 
     // Determine the revision to attach to (user-specified or default to configured branch)
     let config = MawConfig::load(&root)?;
@@ -226,33 +207,7 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     // 3. Move contents back (excluding newly-created .jj)
     let temp_backup = root.join("ws").join(format!(".{name}-attach-backup"));
 
-    // Create backup directory
-    std::fs::create_dir_all(&temp_backup)
-        .with_context(|| format!("Failed to create backup directory: {}", temp_backup.display()))?;
-
-    // Move all contents (except .jj) to backup
-    let entries: Vec<_> = std::fs::read_dir(&path)
-        .with_context(|| format!("Failed to read directory: {}", path.display()))?
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_name() != ".jj")
-        .collect();
-
-    for entry in &entries {
-        let src = entry.path();
-        let dst = temp_backup.join(entry.file_name());
-        std::fs::rename(&src, &dst).with_context(|| {
-            format!(
-                "Failed to move {} to backup",
-                entry.file_name().to_string_lossy()
-            )
-        })?;
-    }
-
-    // Remove the .jj directory (stale workspace metadata)
-    let jj_dir = path.join(".jj");
-    if jj_dir.exists() {
-        std::fs::remove_dir_all(&jj_dir).with_context(|| "Failed to remove stale .jj directory")?;
-    }
+    backup_workspace_contents(&path, &temp_backup)?;
 
     // Now the directory should be empty, run jj workspace add
     let output = Command::new("jj")
@@ -271,16 +226,7 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 
     if !output.status.success() {
         // Restore backup on failure
-        for entry in std::fs::read_dir(&temp_backup)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(std::result::Result::ok)
-        {
-            let src = entry.path();
-            let dst = path.join(entry.file_name());
-            let _ = std::fs::rename(&src, &dst);
-        }
+        restore_backup_best_effort(&temp_backup, &path);
         let _ = std::fs::remove_dir_all(&temp_backup);
 
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -292,13 +238,102 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
         );
     }
 
-    // Move contents back from backup
-    for entry in std::fs::read_dir(&temp_backup)
+    // Move contents back from backup, overwriting jj-populated files
+    restore_backup_overwrite(&temp_backup, &path)?;
+
+    // Clean up backup directory
+    std::fs::remove_dir_all(&temp_backup).ok();
+
+    print_attach_success(name, &path);
+
+    Ok(())
+}
+
+/// Verify that a workspace name is not already tracked by jj.
+fn ensure_workspace_not_tracked(name: &str, cwd: &std::path::Path) -> Result<()> {
+    let ws_output = Command::new("jj")
+        .args(["workspace", "list"])
+        .current_dir(cwd)
+        .output()
+        .context("Failed to run jj workspace list")?;
+
+    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
+    let is_tracked = ws_list.lines().any(|line| {
+        line.split(':')
+            .next()
+            .is_some_and(|n| n.trim().trim_end_matches('@') == name)
+    });
+
+    if is_tracked {
+        bail!(
+            "Workspace '{name}' is already tracked by jj.\n  \
+             Use 'maw ws sync' if the workspace is stale.\n  \
+             Use 'maw ws list' to see all workspaces."
+        );
+    }
+    Ok(())
+}
+
+/// Move all workspace contents (except `.jj`) into a backup directory,
+/// then remove any stale `.jj` directory so the workspace dir is empty.
+fn backup_workspace_contents(
+    workspace: &std::path::Path,
+    backup: &std::path::Path,
+) -> Result<()> {
+    std::fs::create_dir_all(backup)
+        .with_context(|| format!("Failed to create backup directory: {}", backup.display()))?;
+
+    let entries: Vec<_> = std::fs::read_dir(workspace)
+        .with_context(|| format!("Failed to read directory: {}", workspace.display()))?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name() != ".jj")
+        .collect();
+
+    for entry in &entries {
+        let src = entry.path();
+        let dst = backup.join(entry.file_name());
+        std::fs::rename(&src, &dst).with_context(|| {
+            format!(
+                "Failed to move {} to backup",
+                entry.file_name().to_string_lossy()
+            )
+        })?;
+    }
+
+    // Remove the .jj directory (stale workspace metadata)
+    let jj_dir = workspace.join(".jj");
+    if jj_dir.exists() {
+        std::fs::remove_dir_all(&jj_dir).with_context(|| "Failed to remove stale .jj directory")?;
+    }
+
+    Ok(())
+}
+
+/// Best-effort restore of backup contents (used on failure paths).
+fn restore_backup_best_effort(backup: &std::path::Path, workspace: &std::path::Path) {
+    for entry in std::fs::read_dir(backup)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+    {
+        let src = entry.path();
+        let dst = workspace.join(entry.file_name());
+        let _ = std::fs::rename(&src, &dst);
+    }
+}
+
+/// Restore backup contents into workspace, overwriting jj-populated files.
+fn restore_backup_overwrite(
+    backup: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<()> {
+    for entry in std::fs::read_dir(backup)
         .with_context(|| "Failed to read backup directory")?
         .filter_map(std::result::Result::ok)
     {
         let src = entry.path();
-        let dst = path.join(entry.file_name());
+        let dst = workspace.join(entry.file_name());
         // If jj created the file, remove it first (jj workspace add populates working copy)
         if dst.exists() {
             if dst.is_dir() {
@@ -314,10 +349,11 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
             )
         })?;
     }
+    Ok(())
+}
 
-    // Clean up backup directory
-    std::fs::remove_dir_all(&temp_backup).ok();
-
+/// Print success message and stale-workspace check after attach.
+fn print_attach_success(name: &str, path: &std::path::Path) {
     println!();
     println!("Workspace '{name}' attached!");
     println!();
@@ -330,7 +366,7 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     // Check if workspace is stale after attaching
     let status_check = Command::new("jj")
         .args(["status"])
-        .current_dir(&path)
+        .current_dir(path)
         .output();
 
     if let Ok(status) = status_check {
@@ -345,6 +381,4 @@ pub(crate) fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     println!("To continue working:");
     println!("  maw exec {name} -- jj status");
     println!("  maw exec {name} -- jj log");
-
-    Ok(())
 }

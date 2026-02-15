@@ -55,7 +55,12 @@ pub fn run(args: StatusArgs) -> Result<()> {
     // Special modes take precedence over format
     if args.status_bar || args.oneline {
         let summary = collect_status()?;
-        render(&summary, args.oneline, args.status_bar, args.mouth, false)?;
+        render(&summary, RenderOptions {
+            oneline: args.oneline,
+            status_bar: args.status_bar,
+            mouth: args.mouth,
+            watching: false,
+        })?;
         return Ok(());
     }
 
@@ -520,20 +525,26 @@ fn render_with_format(
     Ok(())
 }
 
-fn render(
-    summary: &StatusSummary,
+/// Options controlling status rendering.
+struct RenderOptions {
+    /// Show a single-line summary.
     oneline: bool,
+    /// Show a compact status bar.
     status_bar: bool,
+    /// Include mouth indicator in status bar.
     mouth: bool,
+    /// Clear screen before output (for watch mode).
     watching: bool,
-) -> Result<()> {
-    if watching {
+}
+
+fn render(summary: &StatusSummary, opts: RenderOptions) -> Result<()> {
+    if opts.watching {
         print!("\u{1b}[2J\u{1b}[H");
     }
 
-    let output = if status_bar {
-        summary.render_status_bar(mouth)
-    } else if oneline {
+    let output = if opts.status_bar {
+        summary.render_status_bar(opts.mouth)
+    } else if opts.oneline {
         summary.render_oneline()
     } else {
         summary.render_multiline()
@@ -541,7 +552,7 @@ fn render(
 
     // In raw mode (watch), \n only moves cursor down without returning to
     // column 0.  Replace with \r\n so each line starts at the left edge.
-    if watching {
+    if opts.watching {
         print!("{}", output.replace('\n', "\r\n"));
     } else {
         print!("{output}");

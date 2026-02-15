@@ -393,8 +393,13 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             confirm,
             message,
             dry_run,
-            auto_describe,
-        } => merge::merge(&workspaces, destroy, confirm, message.as_deref(), dry_run, auto_describe),
+            auto_describe: _,
+        } => merge::merge(&workspaces, merge::MergeOptions {
+            destroy_after: destroy,
+            confirm,
+            message: message.as_deref(),
+            dry_run,
+        }),
     }
 }
 

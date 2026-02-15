@@ -92,136 +92,152 @@ pub(crate) fn list(verbose: bool, format: OutputFormat) -> Result<()> {
 
     // Handle different output formats
     match format {
-        OutputFormat::Text => {
-            // Tab-separated with header, agent-friendly format
-            if verbose {
-                println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT\tPATH");
-            } else {
-                println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT");
-            }
-            for ws in &workspaces {
-                let default_marker = if ws.is_default { "true" } else { "false" };
-                if verbose {
-                    let path = ws.path.as_deref().unwrap_or("");
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}",
-                        ws.name, ws.change_id, ws.commit_id, ws.description, default_marker, path
-                    );
-                } else {
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}",
-                        ws.name, ws.change_id, ws.commit_id, ws.description, default_marker
-                    );
-                }
-            }
+        OutputFormat::Text => print_list_text(&workspaces, &stale_workspaces, verbose),
+        OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, &format, verbose),
+        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, &format, &list),
+    }
 
-            // Stale workspace warnings
-            if !stale_workspaces.is_empty() {
-                println!();
-                println!("WARNING: {} stale workspace(s): {}",
-                    stale_workspaces.len(),
-                    stale_workspaces.join(", ")
-                );
-                println!("  Fix: maw ws sync --all");
-            }
+    Ok(())
+}
 
-            // Suggested next command
-            println!();
-            println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
+/// Print workspace list in tab-separated text format (agent-friendly).
+fn print_list_text(workspaces: &[WorkspaceInfo], stale: &[String], verbose: bool) {
+    if verbose {
+        println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT\tPATH");
+    } else {
+        println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT");
+    }
+    for ws in workspaces {
+        let default_marker = if ws.is_default { "true" } else { "false" };
+        if verbose {
+            let path = ws.path.as_deref().unwrap_or("");
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                ws.name, ws.change_id, ws.commit_id, ws.description, default_marker, path
+            );
+        } else {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                ws.name, ws.change_id, ws.commit_id, ws.description, default_marker
+            );
         }
+    }
 
-        OutputFormat::Pretty => {
-            // Colored, human-friendly format with unicode glyphs
-            let use_color = format.should_use_color();
+    print_stale_warning_text(stale);
 
-            for ws in &workspaces {
-                let (glyph, name_style, reset) = if use_color {
-                    if ws.is_current {
-                        ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for current
-                    } else {
-                        ("\u{25cc}", "\x1b[90m", "\x1b[0m")    // Gray for others
-                    }
-                } else if ws.is_current {
-                    ("\u{25cf}", "", "")
-                } else {
-                    ("\u{25cc}", "", "")
-                };
+    println!();
+    println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
+}
 
-                println!(
-                    "{} {}{}{} {} {}",
-                    glyph, name_style, ws.name, reset, ws.change_id, ws.description
-                );
+/// Print workspace list in colored, human-friendly format.
+fn print_list_pretty(
+    workspaces: &[WorkspaceInfo],
+    stale: &[String],
+    format: &OutputFormat,
+    verbose: bool,
+) {
+    let use_color = format.should_use_color();
 
-                if verbose {
-                    if let Some(path) = &ws.path {
-                        println!("    path: {path}");
-                    }
-                    println!("    commit: {}", ws.commit_id);
-                    if ws.is_default {
-                        println!("    default workspace");
-                    }
-                }
-            }
-
-            // Stale workspace warnings
-            if !stale_workspaces.is_empty() {
-                println!();
-                if use_color {
-                    println!("\x1b[1;33m\u{25b2} WARNING:\x1b[0m {} stale workspace(s): {}",
-                        stale_workspaces.len(),
-                        stale_workspaces.join(", ")
-                    );
-                } else {
-                    println!("\u{25b2} WARNING: {} stale workspace(s): {}",
-                        stale_workspaces.len(),
-                        stale_workspaces.join(", ")
-                    );
-                }
-                println!("  Fix: maw ws sync --all");
-            }
-
-            // Suggested next command
-            if !workspaces.is_empty() {
-                println!();
-                if use_color {
-                    println!("\x1b[90mNext: maw exec <name> -- jj describe -m \"feat: ...\"\x1b[0m");
-                } else {
-                    println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
-                }
-            }
-        }
-
-        OutputFormat::Json => {
-            let advice = if stale_workspaces.is_empty() {
-                vec![]
+    for ws in workspaces {
+        let (glyph, name_style, reset) = if use_color {
+            if ws.is_current {
+                ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for current
             } else {
-                vec![Advice {
-                    level: "warn",
-                    message: format!("{} workspace(s) stale: {}", stale_workspaces.len(), stale_workspaces.join(", ")),
-                    details: Some(AdviceDetails {
-                        workspaces: stale_workspaces,
-                        fix: "maw ws sync --all".to_string(),
-                    }),
-                }]
-            };
+                ("\u{25cc}", "\x1b[90m", "\x1b[0m")    // Gray for others
+            }
+        } else if ws.is_current {
+            ("\u{25cf}", "", "")
+        } else {
+            ("\u{25cc}", "", "")
+        };
 
-            let envelope = WorkspaceListEnvelope {
-                workspaces,
-                advice,
-            };
+        println!(
+            "{} {}{}{} {} {}",
+            glyph, name_style, ws.name, reset, ws.change_id, ws.description
+        );
 
-            match format.serialize(&envelope) {
-                Ok(output) => println!("{output}"),
-                Err(e) => {
-                    eprintln!("Warning: Failed to serialize to JSON: {e}");
-                    eprintln!("Falling back to raw text output:");
-                    println!("{list}");
-                }
+        if verbose {
+            if let Some(path) = &ws.path {
+                println!("    path: {path}");
+            }
+            println!("    commit: {}", ws.commit_id);
+            if ws.is_default {
+                println!("    default workspace");
             }
         }
     }
 
-    Ok(())
+    if !stale.is_empty() {
+        println!();
+        if use_color {
+            println!("\x1b[1;33m\u{25b2} WARNING:\x1b[0m {} stale workspace(s): {}",
+                stale.len(),
+                stale.join(", ")
+            );
+        } else {
+            println!("\u{25b2} WARNING: {} stale workspace(s): {}",
+                stale.len(),
+                stale.join(", ")
+            );
+        }
+        println!("  Fix: maw ws sync --all");
+    }
+
+    if !workspaces.is_empty() {
+        println!();
+        if use_color {
+            println!("\x1b[90mNext: maw exec <name> -- jj describe -m \"feat: ...\"\x1b[0m");
+        } else {
+            println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
+        }
+    }
+}
+
+/// Print workspace list as JSON with stale-workspace advice.
+fn print_list_json(
+    workspaces: Vec<WorkspaceInfo>,
+    stale_workspaces: Vec<String>,
+    format: &OutputFormat,
+    raw_list: &str,
+) {
+    let advice = if stale_workspaces.is_empty() {
+        vec![]
+    } else {
+        vec![Advice {
+            level: "warn",
+            message: format!("{} workspace(s) stale: {}", stale_workspaces.len(), stale_workspaces.join(", ")),
+            details: Some(AdviceDetails {
+                workspaces: stale_workspaces,
+                fix: "maw ws sync --all".to_string(),
+            }),
+        }]
+    };
+
+    let envelope = WorkspaceListEnvelope {
+        workspaces,
+        advice,
+    };
+
+    match format.serialize(&envelope) {
+        Ok(output) => println!("{output}"),
+        Err(e) => {
+            eprintln!("Warning: Failed to serialize to JSON: {e}");
+            eprintln!("Falling back to raw text output:");
+            println!("{raw_list}");
+        }
+    }
+}
+
+/// Print stale workspace warnings for text output mode.
+fn print_stale_warning_text(stale: &[String]) {
+    if !stale.is_empty() {
+        println!();
+        println!("WARNING: {} stale workspace(s): {}",
+            stale.len(),
+            stale.join(", ")
+        );
+        println!("  Fix: maw ws sync --all");
+    }
 }
 
 /// Parse jj workspace list output into structured data

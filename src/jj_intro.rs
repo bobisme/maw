@@ -7,6 +7,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 const fn jj_intro_text() -> &'static str {
     r#"# jj Quick Reference for Git Users
 
