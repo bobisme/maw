@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{default_ws, maw_fails, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
+use common::{default_ws, maw_fails, maw_in, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
 
 #[test]
 fn basic_merge() {
@@ -112,27 +112,36 @@ fn merge_with_conflict() {
     let bob_ws = repo.path().join("ws").join("bob");
     run_jj(&bob_ws, &["describe", "-m", "feat: bob's data"]);
 
-    // Merge with --destroy flag
-    let stdout = maw_ok(repo.path(), &["ws", "merge", "alice", "bob", "--destroy"]);
+    // Merge with --destroy flag — may succeed or fail depending on jj's merge
+    let out = maw_in(repo.path(), &["ws", "merge", "alice", "bob", "--destroy"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     // Check if workspaces still exist (they should if there was a conflict)
     let list_output = maw_ok(repo.path(), &["ws", "list"]);
 
     // The test passes regardless of whether jj detected a conflict or not.
-    // What matters is that IF there's a conflict, workspaces are preserved.
-    // If jj merged it cleanly, workspaces are destroyed.
-    // Both behaviors are correct depending on jj's merge algorithm.
+    // What matters is that IF there's a conflict, workspaces are preserved
+    // and exit code is non-zero.
+    // If jj merged it cleanly, workspaces are destroyed and exit code is 0.
     if list_output.contains("alice") || list_output.contains("bob") {
         // Workspaces were preserved - must have been a conflict
+        assert!(
+            !out.status.success(),
+            "Merge with conflicts should exit non-zero"
+        );
         assert!(
             stdout.contains("conflict")
                 || stdout.contains("Conflict")
                 || stdout.contains("NOT destroying"),
             "If workspaces were preserved, output should mention conflict or not destroying"
         );
-        println!("Test verified: conflict was detected and workspaces preserved");
+        println!("Test verified: conflict was detected, workspaces preserved, exit non-zero");
     } else {
         // Workspaces were destroyed - jj merged cleanly
+        assert!(
+            out.status.success(),
+            "Clean merge should exit zero"
+        );
         println!("Test verified: no conflict detected, workspaces were destroyed");
     }
 }
@@ -171,10 +180,11 @@ fn merge_conflict_shows_details_and_guidance() {
 
     // Merge with --destroy so we can distinguish conflict (workspaces preserved)
     // from clean merge (workspaces destroyed)
-    let stdout = maw_ok(
+    let out = maw_in(
         repo.path(),
         &["ws", "merge", "alice", "bob", "--destroy"],
     );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     // Detect conflict from the merge output (not from workspace list)
     let has_conflict = stdout.contains("conflict") || stdout.contains("Conflict");

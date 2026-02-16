@@ -4,6 +4,9 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use glob::Pattern;
+use serde::Serialize;
+
+use crate::format::OutputFormat;
 
 use super::sync::resolve_divergent_working_copy;
 use super::{jj_cwd, repo_root, MawConfig, DEFAULT_WORKSPACE};
@@ -421,6 +424,203 @@ fn preview_merge(workspaces: &[String], cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Result of a merge check — structured for JSON output.
+#[derive(Debug, Serialize)]
+pub struct CheckResult {
+    pub ready: bool,
+    pub conflicts: Vec<String>,
+    pub stale: bool,
+    pub workspace: CheckWorkspaceInfo,
+    pub description: String,
+}
+
+/// Workspace info included in check result.
+#[derive(Debug, Serialize)]
+pub struct CheckWorkspaceInfo {
+    pub name: String,
+    pub change_id: String,
+}
+
+/// Pre-flight merge check: rebase onto branch, detect conflicts, then undo.
+///
+/// Returns a `CheckResult` with structured info. Exit code 0 = ready,
+/// non-zero = blocked (conflicts or errors).
+pub fn check_merge(
+    workspaces: &[String],
+    format: OutputFormat,
+) -> Result<()> {
+    if workspaces.is_empty() {
+        bail!("No workspaces specified for --check");
+    }
+
+    let root = repo_root()?;
+    let cwd = jj_cwd()?;
+    let config = MawConfig::load(&root)?;
+    let default_ws = config.default_workspace();
+    let branch = config.branch();
+
+    // Reject merging the default workspace
+    if workspaces.iter().any(|ws| ws == default_ws) {
+        bail!(
+            "Cannot merge the default workspace — it is the merge target, not a source."
+        );
+    }
+
+    // Check staleness
+    let stale_workspaces = super::check_stale_workspaces()?;
+    let is_stale = workspaces.iter().any(|ws| stale_workspaces.contains(ws));
+
+    // Gather workspace info (use first workspace as primary)
+    let ws_infos: Vec<CheckWorkspaceInfo> = workspaces
+        .iter()
+        .map(|ws| {
+            let change_id = get_change_id(&format!("{ws}@"), &cwd).unwrap_or_default();
+            CheckWorkspaceInfo {
+                name: ws.clone(),
+                change_id,
+            }
+        })
+        .collect();
+
+    // Get description from first workspace
+    let description = get_commit_description(&format!("{}@", workspaces[0]), &cwd)
+        .unwrap_or_default();
+
+    // If stale, report without attempting rebase
+    if is_stale {
+        let result = CheckResult {
+            ready: false,
+            conflicts: Vec::new(),
+            stale: true,
+            workspace: ws_infos.into_iter().next().unwrap(),
+            description,
+        };
+        return output_check_result(&result, format);
+    }
+
+    // Do the trial rebase to detect conflicts
+    let revisions: Vec<String> = workspaces.iter().map(|ws| format!("{ws}@")).collect();
+    let revset = revisions.join(" | ");
+
+    let rebase_output = Command::new("jj")
+        .args(["rebase", "-r", &revset, "-d", branch])
+        .current_dir(&cwd)
+        .output()
+        .context("Failed to run trial rebase")?;
+
+    if !rebase_output.status.success() {
+        // Rebase itself failed — undo and report
+        let _ = Command::new("jj")
+            .args(["op", "undo"])
+            .current_dir(&cwd)
+            .output();
+
+        let stderr = String::from_utf8_lossy(&rebase_output.stderr);
+        let result = CheckResult {
+            ready: false,
+            conflicts: vec![format!("rebase failed: {}", stderr.trim())],
+            stale: false,
+            workspace: ws_infos.into_iter().next().unwrap(),
+            description,
+        };
+        return output_check_result(&result, format);
+    }
+
+    // Check for conflicts after rebase
+    let conflicts = get_conflicted_files(&cwd)?;
+
+    // Undo the trial rebase
+    let undo_output = Command::new("jj")
+        .args(["op", "undo"])
+        .current_dir(&cwd)
+        .output()
+        .context("Failed to undo trial rebase")?;
+
+    if !undo_output.status.success() {
+        let stderr = String::from_utf8_lossy(&undo_output.stderr);
+        bail!(
+            "Failed to undo trial rebase — repo may be in unexpected state: {}\n  \
+             Run: maw exec default -- jj op log",
+            stderr.trim()
+        );
+    }
+
+    let ready = conflicts.is_empty();
+    let result = CheckResult {
+        ready,
+        conflicts,
+        stale: false,
+        workspace: ws_infos.into_iter().next().unwrap(),
+        description,
+    };
+    output_check_result(&result, format)
+}
+
+/// Get the change ID for a revision.
+fn get_change_id(rev: &str, cwd: &Path) -> Option<String> {
+    let output = Command::new("jj")
+        .args(["log", "-r", rev, "--no-graph", "-T", "change_id.short()", "--color=never", "--no-pager"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if id.is_empty() { None } else { Some(id) }
+    } else {
+        None
+    }
+}
+
+/// Get the commit description for a revision.
+fn get_commit_description(rev: &str, cwd: &Path) -> Option<String> {
+    let output = Command::new("jj")
+        .args(["log", "-r", rev, "--no-graph", "-T", "description", "--color=never", "--no-pager"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let desc = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Some(desc)
+    } else {
+        None
+    }
+}
+
+/// Output the check result in the requested format.
+/// Returns `Ok(())` if ready, `Err` if not (to get non-zero exit code).
+fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", format.serialize(result)?);
+        }
+        _ => {
+            if result.ready {
+                println!("[OK] Ready to merge");
+                println!("  Workspace: {} ({})", result.workspace.name, result.workspace.change_id);
+                if !result.description.is_empty() {
+                    println!("  Description: {}", result.description);
+                }
+            } else if result.stale {
+                println!("[BLOCKED] Workspace is stale — sync before merging");
+                println!("  To fix: maw ws sync");
+            } else if result.conflicts.is_empty() {
+                println!("[BLOCKED] Merge check failed");
+            } else {
+                println!("[BLOCKED] Merge would produce {} conflict(s):", result.conflicts.len());
+                for file in &result.conflicts {
+                    println!("  C {file}");
+                }
+            }
+        }
+    }
+
+    if result.ready {
+        Ok(())
+    } else {
+        bail!("merge check: not ready")
+    }
+}
+
 /// Options controlling merge behavior.
 pub struct MergeOptions<'a> {
     /// Destroy workspaces after a successful merge.
@@ -528,11 +728,17 @@ pub fn merge(
 
     run_hooks(&config.hooks.post_merge, "post-merge", &root, false)?;
 
-    if !has_conflicts {
-        println!();
-        println!("Next: push to remote:");
-        println!("  maw push");
+    if has_conflicts {
+        // Print guidance but return error for non-zero exit code
+        bail!(
+            "Merge completed with conflicts. Resolve them, then:\n  \
+             maw push"
+        );
     }
+
+    println!();
+    println!("Next: push to remote:");
+    println!("  maw push");
 
     Ok(())
 }

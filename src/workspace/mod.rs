@@ -325,12 +325,17 @@ pub enum WorkspaceCommands {
     /// synced before merge to avoid spurious conflicts. After merge, check
     /// output for undescribed commits (commits with no message) that may block push.
     ///
+    /// Use --check for a dry-run conflict detection that undoes itself:
+    ///   exit 0 = safe to merge, non-zero = blocked (conflicts/stale).
+    ///   Combine with --format json for structured output.
+    ///
     /// Examples:
     ///   maw ws merge alice                 # adopt alice's work
     ///   maw ws merge alice bob             # merge alice and bob's work
     ///   maw ws merge alice bob --destroy   # merge and clean up (non-interactive)
     ///   maw ws merge alice bob --dry-run   # preview merge without committing
-    ///   maw ws merge alice bob --auto-describe  # auto-describe empty scaffolding commits
+    ///   maw ws merge alice --check         # pre-flight: can we merge cleanly?
+    ///   maw ws merge alice --check --format json  # structured check result
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -355,6 +360,19 @@ pub enum WorkspaceCommands {
         /// Automatically describe empty commits as 'workspace setup'
         #[arg(long)]
         auto_describe: bool,
+
+        /// Pre-flight check: trial rebase to detect conflicts, then undo.
+        /// Exit 0 = safe to merge, non-zero = blocked.
+        #[arg(long)]
+        check: bool,
+
+        /// Output format for --check: text, json, or pretty
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json (use with --check)
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 }
 
@@ -394,12 +412,21 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             message,
             dry_run,
             auto_describe: _,
-        } => merge::merge(&workspaces, &merge::MergeOptions {
-            destroy_after: destroy,
-            confirm,
-            message: message.as_deref(),
-            dry_run,
-        }),
+            check,
+            format,
+            json,
+        } => {
+            if check {
+                let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+                return merge::check_merge(&workspaces, fmt);
+            }
+            merge::merge(&workspaces, &merge::MergeOptions {
+                destroy_after: destroy,
+                confirm,
+                message: message.as_deref(),
+                dry_run,
+            })
+        }
     }
 }
 

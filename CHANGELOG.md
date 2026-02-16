@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## v0.33.0
+
+- Feat: `maw ws merge --check` pre-flight conflict detection. Trial-rebases onto main, detects conflicts, then undoes. Exit 0 = safe to merge, non-zero = blocked. Combine with `--format json` for structured output (`ready`, `conflicts`, `stale`, `workspace`, `description`). (bd-pp6o)
+- Fix: `maw ws merge` now returns non-zero exit code when conflicts remain. Previously returned 0 with only a WARNING printed. (bd-pp6o)
+
 ## v0.32.0
 
 - Fix: `maw push` now runs `jj git export` before the bookmark push, preventing false "Nothing changed" when the op graph has diverged from concurrent workspace operations. (bd-bjr0)
