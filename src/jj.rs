@@ -94,6 +94,51 @@ pub fn sibling_op_fix_command(stderr: &str) -> Option<String> {
     extract_op_integrate_id(stderr).map(|id| format!("jj op integrate {id}"))
 }
 
+/// Check jj stderr for an opfork error and return a rich, actionable error.
+///
+/// Call this after any jj command that fails. If the stderr contains an opfork
+/// error, returns `Err` with a clear message and fix command. Otherwise returns
+/// `Ok(())` so the caller can proceed with its own error handling.
+pub fn check_opfork(stderr: &str, cmd_description: &str) -> Result<()> {
+    if !is_sibling_op_error(stderr) {
+        return Ok(());
+    }
+    let fix = sibling_op_fix_command(stderr)
+        .unwrap_or_else(|| "jj op integrate <id>".to_string());
+    bail!(
+        "jj operation fork detected (concurrent agents forked the op graph).\n  \
+         Command: {cmd_description}\n  \
+         This happens when multiple workspaces run jj commands simultaneously.\n  \
+         Wait for other agents to finish, then run: {fix}"
+    );
+}
+
+/// Attempt to auto-integrate a forked jj operation log.
+///
+/// Extracts the operation ID from the stderr hint and runs `jj op integrate`.
+/// Returns `Ok(true)` if integration succeeded, `Ok(false)` if the ID couldn't
+/// be extracted, or `Err` if the integrate command itself failed.
+pub fn auto_integrate(stderr: &str, cwd: &Path) -> Result<bool> {
+    let Some(op_id) = extract_op_integrate_id(stderr) else {
+        return Ok(false);
+    };
+    eprintln!("Auto-integrating forked jj operation: {op_id}");
+    let output = Command::new("jj")
+        .args(["op", "integrate", &op_id])
+        .current_dir(cwd)
+        .output()
+        .context("Failed to run jj op integrate")?;
+    if !output.status.success() {
+        let integrate_stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "jj op integrate {op_id} failed: {}\n  \
+             Manual fix may be needed: run `jj op integrate {op_id}` from inside ws/default/",
+            integrate_stderr.trim()
+        );
+    }
+    Ok(true)
+}
+
 /// Extract operation ID from jj's hint about `jj op integrate <id>`.
 ///
 /// jj emits a hint like:
@@ -167,5 +212,29 @@ Hint: Run `jj op integrate 4a8f3bc2e1d0abcdef1234567890abcdef1234567890abcdef123
         // Should not match without the "jj op integrate" hint
         let stderr = "Error: something about sibling of the working copy\nHint: do something else";
         assert_eq!(extract_op_integrate_id(stderr), None);
+    }
+
+    #[test]
+    fn check_opfork_returns_err_on_sibling_error() {
+        let stderr = "\
+Error: The repo was loaded at operation fb69192ef2a4, which seems to be a sibling of the working copy's operation 2fbc12cf0f39
+Hint: Run `jj op integrate 2fbc12cf0f39` to add the working copy's operation to the operation log.";
+        let result = check_opfork(stderr, "jj workspace list");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("operation fork detected"));
+        assert!(msg.contains("jj op integrate 2fbc12cf0f39"));
+        assert!(msg.contains("jj workspace list"));
+    }
+
+    #[test]
+    fn check_opfork_returns_ok_on_other_errors() {
+        let stderr = "Error: something else went wrong";
+        assert!(check_opfork(stderr, "jj status").is_ok());
+    }
+
+    #[test]
+    fn check_opfork_returns_ok_on_empty_stderr() {
+        assert!(check_opfork("", "jj status").is_ok());
     }
 }

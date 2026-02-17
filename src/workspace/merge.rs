@@ -7,6 +7,7 @@ use glob::Pattern;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::jj::{auto_integrate, is_sibling_op_error, run_jj};
 
 use super::sync::resolve_divergent_working_copy;
 use super::{jj_cwd, repo_root, MawConfig, DEFAULT_WORKSPACE};
@@ -315,6 +316,39 @@ fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: b
 
     println!("{hook_type} hooks complete.");
     Ok(())
+}
+
+/// Detect and auto-resolve jj operation forks before merge.
+///
+/// Concurrent agents may have forked the operation log. We detect this by
+/// running a lightweight jj command and checking stderr. If an opfork is
+/// found, we auto-integrate up to 5 times (multiple forks from many agents
+/// may need multiple passes).
+fn preflight_opfork_check(cwd: &Path) -> Result<()> {
+    for attempt in 0..5 {
+        let output = run_jj(&["workspace", "list", "--no-pager"], cwd)?;
+        if output.status.success() {
+            if attempt > 0 {
+                eprintln!("Opfork resolved after {attempt} integration(s).");
+            }
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !is_sibling_op_error(&stderr) {
+            // Not an opfork — let the caller deal with it
+            return Ok(());
+        }
+        if !auto_integrate(&stderr, cwd)? {
+            bail!(
+                "jj operation fork detected but could not extract op ID to auto-integrate.\n  \
+                 Manual fix: run `jj op integrate <id>` from inside ws/default/"
+            );
+        }
+    }
+    bail!(
+        "jj operation fork could not be resolved after 5 integration attempts.\n  \
+         Manual fix: run `jj op log` and `jj op integrate <id>` from inside ws/default/"
+    )
 }
 
 /// Preview what a merge would do without creating any commits.
@@ -671,6 +705,10 @@ pub fn merge(
     if dry_run {
         return preview_merge(&ws_to_merge, &cwd);
     }
+
+    // Pre-flight: detect and auto-integrate opforks before merge.
+    // Concurrent agents may have forked the jj operation graph.
+    preflight_opfork_check(&cwd)?;
 
     run_hooks(&config.hooks.pre_merge, "pre-merge", &root, true)?;
     super::sync::sync_stale_workspaces_for_merge(&ws_to_merge, &root)?;

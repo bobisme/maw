@@ -25,7 +25,9 @@ impl std::error::Error for ExitCodeError {}
 /// needing persistent `cd`.
 ///
 /// The workspace name is validated (no path traversal). Stale
-/// workspaces are auto-synced before running the command.
+/// workspaces are auto-synced only when running jj commands —
+/// non-jj commands skip the sync to avoid creating jj operations
+/// that cause opforks with concurrent agent workspaces.
 ///
 /// Examples:
 ///   maw exec alice -- cargo test
@@ -62,8 +64,13 @@ pub fn run(args: &ExecArgs) -> Result<()> {
         );
     }
 
-    // Auto-sync stale workspace before running
-    workspace::auto_sync_if_stale(&args.workspace, &path)?;
+    // Only auto-sync when running jj commands. Non-jj commands (cargo, br,
+    // ls, etc.) don't need jj state and calling jj to check staleness creates
+    // operations that cause opforks with concurrent agent workspaces.
+    let is_jj_command = args.cmd.first().is_some_and(|c| c == "jj");
+    if is_jj_command {
+        workspace::auto_sync_if_stale(&args.workspace, &path)?;
+    }
 
     // Block `jj bookmark set <branch>` from non-default workspaces.
     // Setting the shared branch bookmark from an agent workspace causes
