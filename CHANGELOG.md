@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.34.0
+
+- Feat: `maw exec` no longer runs `jj status` for non-jj commands. Running `maw exec alice -- cargo test` creates zero jj operations, eliminating opforks from concurrent agent workspaces. Auto-sync only triggers when the command starts with `jj`. (bd-1h8c)
+- Feat: `maw ws merge` auto-detects and auto-integrates jj operation forks before merging. Up to 5 integration passes for multi-agent opforks. (bd-1h8c)
+- Feat: new `check_opfork()` and `auto_integrate()` helpers in jj.rs for programmatic opfork detection and recovery. (bd-2akx)
+
 ## v0.33.0
 
 - Feat: `maw ws merge --check` pre-flight conflict detection. Trial-rebases onto main, detects conflicts, then undoes. Exit 0 = safe to merge, non-zero = blocked. Combine with `--format json` for structured output (`ready`, `conflicts`, `stale`, `workspace`, `description`). (bd-pp6o)
