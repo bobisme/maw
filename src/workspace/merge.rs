@@ -351,6 +351,36 @@ fn preflight_opfork_check(cwd: &Path) -> Result<()> {
     )
 }
 
+/// Trigger a jj working-copy snapshot in each source workspace.
+///
+/// When workers run non-jj commands via `maw exec` (e.g. `cargo build`,
+/// `br list`), their file edits exist on disk but haven't been snapshotted
+/// into jj's tree. Running `jj status` from within each workspace directory
+/// forces jj to snapshot the working copy, capturing those edits before we
+/// rebase and squash.
+fn snapshot_source_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
+    for ws in workspaces {
+        let ws_path = root.join("ws").join(ws);
+        if !ws_path.exists() {
+            continue;
+        }
+        let output = Command::new("jj")
+            .args(["status", "--no-pager"])
+            .current_dir(&ws_path)
+            .output()
+            .with_context(|| format!("Failed to snapshot workspace {ws}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "WARNING: Failed to snapshot workspace {ws}: {}",
+                stderr.trim()
+            );
+            eprintln!("  On-disk edits in ws/{ws}/ may not be included in the merge.");
+        }
+    }
+    Ok(())
+}
+
 /// Preview what a merge would do without creating any commits.
 /// Shows changes in each workspace and potential conflicts.
 fn preview_merge(workspaces: &[String], cwd: &Path) -> Result<()> {
@@ -719,6 +749,11 @@ pub fn merge(
         println!("Merging workspaces: {}", ws_to_merge.join(", "));
     }
     println!();
+
+    // Snapshot source workspaces so on-disk edits are captured into jj's tree.
+    // Workers using maw exec with non-jj commands won't have triggered a
+    // snapshot, so their on-disk changes would be silently lost during squash.
+    snapshot_source_workspaces(&ws_to_merge, &root)?;
 
     let revisions: Vec<String> = ws_to_merge.iter().map(|ws| format!("{ws}@")).collect();
     let pre_rebase_parent_ids = record_parent_commit_ids(&revisions, &cwd);

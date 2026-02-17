@@ -2,6 +2,10 @@
 
 All notable changes to maw.
 
+## v0.34.1
+
+- Fix: `maw ws merge` now snapshots source workspaces before rebasing/squashing. Workers that only used `maw exec` with non-jj commands (e.g. `cargo test`, `br list`) had on-disk edits that weren't in jj's tree — these were silently lost during merge. Now `jj status` is run in each source workspace to trigger a snapshot first. (bd-1lkg)
+
 ## v0.34.0
 
 - Feat: `maw exec` no longer runs `jj status` for non-jj commands. Running `maw exec alice -- cargo test` creates zero jj operations, eliminating opforks from concurrent agent workspaces. Auto-sync only triggers when the command starts with `jj`. (bd-1h8c)

@@ -277,6 +277,33 @@ fn dirty_default_auto_snapshots_before_merge() {
 }
 
 #[test]
+fn merge_snapshots_source_workspace_without_jj() {
+    let repo = setup_bare_repo();
+
+    // Create a workspace but only write files — never run jj describe or jj status.
+    // This simulates a worker that used maw exec with non-jj commands only
+    // (e.g. cargo build, br list). Without the snapshot fix, these edits
+    // would be silently lost during merge.
+    maw_ok(repo.path(), &["ws", "create", "worker"]);
+    write_in_ws(repo.path(), "worker", "result.txt", "worker output");
+    // Intentionally no jj describe/status — on-disk only
+
+    // Merge should capture the on-disk edits via pre-merge snapshot
+    maw_ok(
+        repo.path(),
+        &["ws", "merge", "worker", "--destroy"],
+    );
+
+    // Verify the file made it into default workspace
+    let content = read_from_ws(repo.path(), "default", "result.txt");
+    assert_eq!(
+        content.as_deref(),
+        Some("worker output"),
+        "On-disk edits from jj-free worker must be captured by merge snapshot"
+    );
+}
+
+#[test]
 fn reject_merge_default() {
     let repo = setup_bare_repo();
 

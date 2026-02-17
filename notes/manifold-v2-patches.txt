@@ -1,0 +1,312 @@
+
+Patch (unified diff):
+
+````diff
+--- a/manifold-v2.md
++++ b/manifold-v2.md
+@@ -61,6 +61,13 @@
+   and JSON structured output.
+ - Conflicts are structured and localizable — per file, per region, per edit
+   atom — not "giant marker soup."
++- Merges are previewable: the system can produce a deterministic merge plan
++  (touched paths, predicted conflicts, configured validation commands) without
++  advancing the epoch.
++- Mainline stays green by default: epoch advancement can be gated on
++  post-merge validation, and validation failure yields a materialized
++  "quarantine" workspace representing the candidate merge result for
++  fix-forward workflows.
+ 
+ **Git Compatibility**
+ 
+@@ -788,14 +795,25 @@
+   - Collect patch-sets from all source workspaces
+   - Compute merged patch-set (resolve conflicts per §5.7)
+   - Write all needed git objects (blobs, trees, commit)
+-  - Write merge-result record with resulting commit OID (fsync)
++  - Write merge-result record with resulting candidate commit OID (fsync)
+ 
+-Phase 3: COMMIT (point of no return)
++Phase 3: VALIDATE (gate)
++  - Materialize a temporary checkout of the candidate commit
++  - Run configured validation command(s) (see §6.3)
++  - Write validation record + diagnostics to .manifold/merge-state (fsync)
++  - If validation passes: proceed
++  - If validation fails:
++      * on_failure = "warn": proceed to COMMIT, but record diagnostics
++      * on_failure = "block": stop; do not advance epoch
++      * on_failure includes "quarantine": create a quarantined merge workspace
++        seeded with the candidate result (see §5.12) and stop
++
++Phase 4: COMMIT (point of no return)
+   - Atomically update refs/manifold/epoch/current → new epoch commit
+   - Atomically update refs/heads/main → new commit
+   - Write merge-committed record (fsync)
+ 
+-Phase 4: CLEANUP
++Phase 5: CLEANUP
+   - Destroy source workspaces (if --destroy policy)
+   - GC stale epoch snapshot directories
+   - Remove .manifold/merge-state
+@@ -807,6 +825,8 @@
+ - Crashed in PREPARE: Abort. No state was changed. Workspaces intact.
+ - Crashed in BUILD: Abort. Git objects were written but no refs moved.
+   Unreferenced objects collected by `git gc`. Workspaces intact.
++- Crashed in VALIDATE: Re-run validation. Deterministic because inputs are
++  frozen in PREPARE.
+ - Crashed in COMMIT: Check if `refs/manifold/epoch/current` was updated.
+   If yes: merge succeeded, proceed to CLEANUP. If no: abort, workspaces intact.
+ - Crashed in CLEANUP: Re-run cleanup. Idempotent.
+@@ -814,6 +834,10 @@
+ **The commit pointer is the only point of no return.** Everything before it is
+ safely abortable. Everything after it is idempotent cleanup.
+ 
++If VALIDATE fails and the configured policy blocks epoch advancement, the
++merge-state record is retained as a durable "merge attempt". The merge can
++then be resolved via promotion (after fixes) or abandoned (§5.12).
++
+ ### 5.11 Undo as Compensation Operations
+ 
+ The workspace lattice is monotonic — merges only move forward. But users and
+@@ -841,6 +865,142 @@
+ mutation. Source workspace logs remain intact (they were never deleted, only
+ marked as merged).
+ 
++### 5.12 Merge Preview, Quarantine, and Machine-Readable Artifacts
++
++Agent workflows need a way to *reason about* a merge before it moves refs, and
++they need a concrete, fixable artifact when a merge is textually clean but the
++result is broken.
++
++Manifold therefore supports three related capabilities:
++
++1. **Merge preview (dry-run) producing a deterministic merge plan**
++2. **Validation-gated epoch advancement**
++3. **Quarantined merge results for fix-forward workflows**
++
++#### 5.12.1 Merge Preview (Deterministic Merge Plan)
++
++`maw ws merge` has a preview mode that runs PREPARE+BUILD+VALIDATE but performs
++no COMMIT.
++
++```
++maw ws merge alice bob --plan --json
++```
++
++**Properties:**
++
++- No refs are updated.
++- No epoch advancement occurs.
++- Outputs are deterministic for deterministic inputs (frozen epoch + frozen
++  workspace heads).
++
++**Output artifact (example schema):**
++
++```json
++{
++  "merge_id": "m-<opaque>",
++  "epoch_before": "<git-oid>",
++  "sources": ["alice", "bob"],
++  "touched_paths": ["src/x.rs", "Cargo.lock"],
++  "overlaps": ["src/x.rs"],
++  "predicted_conflicts": [
++    {
++      "path": "src/x.rs",
++      "kind": "Content",
++      "sides": ["alice", "bob"]
++    }
++  ],
++  "drivers": [
++    {"path": "Cargo.lock", "driver": "regenerate", "command": "cargo generate-lockfile"}
++  ],
++  "validation": {
++    "commands": ["cargo check"],
++    "timeout_seconds": 60,
++    "policy": "block+quarantine"
++  }
++}
++```
++
++The `merge_id` is stable for the frozen inputs and is used to locate derived
++artifacts and (optionally) a quarantine workspace.
++
++Recommended definition (implementation detail, but makes caching and debugging
++unambiguous):
++
++```
++merge_id = sha256(
++  epoch_before ||
++  sorted(sources) ||
++  [refs/manifold/head/<ws> for ws in sources] ||
++  normalized_merge_config
++)
++```
++
++Where `normalized_merge_config` includes the effective merge driver and
++validation settings.
++
++#### 5.12.2 Quarantined Merge Results (Fix-Forward)
++
++If validation fails and the configured policy includes quarantine, Manifold
++creates a workspace representing the candidate merge result:
++
++```
++ws/merge-quarantine/<merge_id>/
++```
++
++This workspace is materialized from the same frozen inputs as the merge plan
++and contains:
++
++- The candidate merged file tree (exactly what would have been committed)
++- Validation diagnostics captured during VALIDATE
++- A pointer to the merge intent (sources, epoch_before, candidate commit OID)
++
++**Important invariants:**
++
++- The epoch is not advanced.
++- Source workspaces remain intact unless explicitly destroyed by policy.
++- The quarantine workspace is a normal workspace: it can be edited, snapshotted,
++  and merged like any other. It exists to let an agent fix-forward the
++  candidate result without redoing the merge.
++
++**Promotion path (lead-only):**
++
++```
++maw merge promote <merge_id>
++```
++
++Promotion re-runs VALIDATE on the quarantined workspace's current state and, if
++green, performs COMMIT (advancing epoch + main). Promotion is idempotent and
++uses the same persisted merge-state mechanism as normal epoch advancement.
++
++**Abandon path (lead-only):**
++
++```
++maw merge abandon <merge_id>
++```
++
++Abandon removes the quarantined workspace (if any) and deletes the persisted
++merge-state record. Abandon is idempotent.
++
++#### 5.12.3 Derived Artifacts Directory
++
++For agent UX and debugging, Manifold writes derived, disposable artifacts under
++`.manifold/artifacts/`. These are *not* sources of truth and can be deleted at
++any time.
++
++Recommended layout:
++
++```
++.manifold/artifacts/
++  ws/<workspace_id>/report.json
++  merge/<merge_id>/plan.json
++  merge/<merge_id>/validation.json
++  merge/<merge_id>/diagnostics.txt
++```
++
++Artifacts are written via atomic rename and may be regenerated from git objects
++and logs.
++
++
+ ---
+ 
+ ## 6. Merge Engine
+@@ -887,8 +1047,10 @@
+   Apply all resolved patches
+   Produce result git tree + git commit
+ 
+-Step 5: Commit (via §5.10 state machine)
+-  Atomically advance epoch
++Step 5: Validate + Commit (via §5.10 state machine)
++  Run post-merge validation (if configured)
++  If validation passes (or is configured to warn): atomically advance epoch
++  If validation blocks: do not advance epoch; optionally materialize quarantine
+````
+
+@@ -924,12 +1086,45 @@
+[merge.validation]
+command = "cargo check"
+timeout_seconds = 60
+-on_failure = "warn"  # or "block" to prevent epoch advancement
++on_failure = "block+quarantine"  # warn | block | quarantine | block+quarantine
+
+````
+
+Semantic conflicts (textually clean merge that breaks the build) are reported as
+diagnostics attached to the Merge operation, not as VCS conflicts.
+
++When `on_failure` includes `quarantine`, a failed validation produces a
++quarantined workspace seeded with the candidate merge result (§5.12).
++
++### 6.4 Deterministic Merge Drivers for Lockfiles and Generated Artifacts
++
++Certain files are not meaningfully "merged" by hand (lockfiles, generated code,
++snapshots). For these, Manifold supports deterministic drivers.
++
++**Driver kinds:**
++
++- `regenerate`: ignore conflicting edits and re-generate deterministically from
++  the merged sources (preferred)
++- `ours` / `theirs`: deterministic selection (only for explicitly configured
++  paths)
++
++Minimal config shape:
++
++```toml
++[[merge.drivers]]
++match = "Cargo.lock"
++kind = "regenerate"
++command = "cargo generate-lockfile"
++
++[[merge.drivers]]
++match = "src/gen/**"
++kind = "regenerate"
++command = "./scripts/gen.sh"
++```
++
++Drivers run during BUILD (to produce the candidate tree) and are therefore part
++of the deterministic merge result. Any regeneration failures surface as
++validation failures and follow the same on-failure policy.
++
+---
+
+## 7. Workspace Isolation Strategies
+@@ -1161,8 +1356,16 @@
+- Implement `WorkspaceBackend` trait in maw
+- Implement `GitWorktreeBackend`: create (detached), destroy (atomic/idempotent),
+  list, status, merge using `git worktree` commands
+-- Implement crash-safe merge state machine (§5.10) — this is Phase 1, not
+-  Phase 3. Crash safety is a day-one requirement.
++- Implement crash-safe merge state machine (§5.10), including VALIDATE gating
++  and quarantine materialization (§5.12) — this is Phase 1, not Phase 3.
++  Crash safety and "keep mainline green" are day-one requirements.
++- Implement merge preview (`--plan --json`) producing a deterministic merge plan
++  artifact (§5.12)
++- Implement minimal derived artifacts for agent UX:
++  - per-workspace change report (`.manifold/artifacts/ws/<id>/report.json`)
++  - per-merge plan + validation artifacts (`.manifold/artifacts/merge/<id>/*`)
++- Implement deterministic merge drivers (minimal allowlist: lockfiles + known
++  generated dirs) (§6.4)
+- New repos use git worktrees by default
+- Old repos keep jj (backward compatibility)
+- Delete sync.rs, simplify merge.rs, remove opfork detection
+@@ -1171,6 +1374,9 @@
+1. Detached worktrees by default (no branch spam)
+2. Atomic + idempotent create/destroy
+3. Crash-safe merge with persisted state machine
++4. Merge preview is side-effect free (no ref updates)
++5. Default validation policy blocks epoch advancement and produces quarantine
++   (configurable)
+
+**Effort:** 3–5 beads. The maw CLI API doesn't change.
+
+@@ -1207,7 +1413,7 @@
+  pairwise diff
+- Implement merge pipeline layering (§6.2): hash equality → diff3 →
+  shifted-code alignment → AST merge → agent resolution
+-- Implement post-merge validation hooks (§6.3)
++- Expand post-merge validation hooks (§6.3): multi-command pipelines, per-language presets, richer diagnostics
+- AST-aware merge for Rust, Python, TypeScript via tree-sitter
+- Agent-friendly conflict presentation (JSON structured output)
+
+``` :contentReference[oaicite:0]{index=0}
+````
