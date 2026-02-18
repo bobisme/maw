@@ -481,9 +481,12 @@ fn ensure_repo_root() -> Result<PathBuf> {
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
 
-    if cwd_canon != root_canon {
+    // Allow running from repo root or any subdirectory (e.g. ws/default/).
+    // This lets agents use `maw exec default -- maw ws create <name>` or
+    // run maw commands from inside a workspace directory.
+    if !cwd_canon.starts_with(&root_canon) {
         bail!(
-            "This command must be run from the repo root.\n\
+            "This command must be run from within the repo.\n\
              \n  You are in: {}\n  Repo root:  {}\n\
              \n  Run from repo root, or use: maw exec <workspace> -- <command>",
             cwd.display(),

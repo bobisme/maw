@@ -2,6 +2,10 @@
 
 All notable changes to maw.
 
+## v0.34.2
+
+- Fix: `maw ws create`, `maw ws destroy`, and `maw ws attach` now work from any directory within the repo, not just the repo root. Previously failed with "must be run from the repo root" when invoked via `maw exec default -- maw ws create <name>`. (bd-363g)
+
 ## v0.34.1
 
 - Fix: `maw ws merge` now snapshots source workspaces before rebasing/squashing. Workers that only used `maw exec` with non-jj commands (e.g. `cargo test`, `br list`) had on-disk edits that weren't in jj's tree — these were silently lost during merge. Now `jj status` is run in each source workspace to trigger a snapshot first. (bd-1lkg)
