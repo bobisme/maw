@@ -40,6 +40,15 @@ impl FileId {
         Self(id)
     }
 
+    /// Generate a cryptographically-random `FileId`.
+    ///
+    /// Uses the thread-local PRNG (rand 0.9). Each call produces a unique
+    /// 128-bit random identifier suitable for stable file identity.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(rand::random::<u128>())
+    }
+
     /// Return the inner `u128` value.
     #[must_use]
     pub fn as_u128(self) -> u128 {
