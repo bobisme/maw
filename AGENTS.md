@@ -12,8 +12,9 @@ This repo is a clone of maw on the **`manifold`** branch. It is where we build t
 - All work here targets the **`manifold`** branch, NOT `main`.
 - The `.maw.toml` is configured with `branch = "manifold"`. Use `maw push` and `maw ws merge` normally — they target `manifold` automatically.
 - **NEVER push to `main`** from this repo. `main` is maintained in `~/src/maw` for bugfixes to current maw (v0.34.x).
-- **NEVER use raw `jj bookmark set main`** or `jj git push --bookmark main`. Only use `maw push` / `maw push --advance` which respect the `.maw.toml` branch config.
-- **NEVER run `maw release`, `cargo install`, or `just install`** from this repo. Manifold is in active development and not ready for release. Releases happen from `~/src/maw` on the `main` branch only.
+- **NEVER use raw `jj git push`** — it pushes ALL changed bookmarks including `main`. Only use `maw push` / `maw push --advance` which respect the `.maw.toml` branch config.
+- **NEVER use `jj bookmark set main`** or `jj git push --bookmark main`.
+- **NEVER run `maw release`, `cargo install`, `just install`, or `cargo install --path .`** from this repo. Manifold is in active development and installing it replaces the stable maw binary that other projects depend on. Releases and installs happen from `~/src/maw` on the `main` branch only.
 
 **Repo layout:**
 - `~/src/maw` — current maw, ships bugfixes on `main`
