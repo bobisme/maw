@@ -2,6 +2,13 @@
 
 All notable changes to maw.
 
+## v0.37.0
+
+- Feat: Op log read — walk the causal chain from head backwards via BFS. Supports max depth limits, stop-at predicates, and diamond DAG deduplication. 21 tests. (bd-1v2t.3)
+- Feat: PatchSet computation from working directory diff — `compute_patchset()` builds a PatchSet by parsing `git diff --find-renames --name-status`, collecting untracked files, and verifying blob OIDs. 21 tests. (bd-2xxh.3)
+- Feat: Post-merge validation language presets — `LanguagePreset` enum (Rust/Python/TypeScript/Auto) with auto-detection from filesystem markers (Cargo.toml, pyproject.toml, tsconfig.json). Resolution pipeline: explicit → preset → auto-detect. 35+ tests. (bd-1cg0)
+- Milestone: Closed bd-2xxh (PatchSet types) and bd-1v2t (operation log) — all children complete. Unblocks downstream: FileId system, Conflict model, OrderingKey, workspace history, view materialization.
+
 ## v0.36.0
 
 - Feat: PatchSet join operation — CRDT merge of two patch-sets with commutative, associative, and idempotent properties. Conflict classification with 6 distinct reasons (DivergentAdd, DivergentModify, ModifyDelete, RenameConflict, DivergentRename, Incompatible). 26 tests including property tests. (bd-2xxh.2)
