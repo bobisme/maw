@@ -10,7 +10,9 @@
 //! - [`types`] — [`Operation`] struct and [`OpPayload`] enum with canonical JSON
 //! - [`write`] — write operations as git blobs and advance head refs
 //! - [`read`] — walk the causal chain from head backwards
+//! - [`view`] — per-workspace view materialization from op log replay
 
 pub mod read;
 pub mod types;
+pub mod view;
 pub mod write;
