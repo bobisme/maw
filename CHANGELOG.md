@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## v0.36.0
+
+- Feat: PatchSet join operation — CRDT merge of two patch-sets with commutative, associative, and idempotent properties. Conflict classification with 6 distinct reasons (DivergentAdd, DivergentModify, ModifyDelete, RenameConflict, DivergentRename, Incompatible). 26 tests including property tests. (bd-2xxh.2)
+- Feat: Op log write — store operations as git blobs via `git hash-object -w --stdin` with atomic CAS ref updates at `refs/manifold/head/<workspace>`. Single-writer invariant enforced. 16 tests. (bd-1v2t.2)
+
 ## v0.35.0
 
 - **Major**: Git-native backend — replaced jj dependency with direct git worktree operations for workspaces, merge, push, status, and release. No more jj workspace commands needed. (bd-1xfd)
