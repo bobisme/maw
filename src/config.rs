@@ -78,14 +78,26 @@ pub struct WorkspaceConfig {
     /// Which backend to use for workspace isolation.
     #[serde(default)]
     pub backend: BackendKind,
+
+    /// Enable Level 1 git compatibility refs (`refs/manifold/ws/<name>`).
+    ///
+    /// When enabled, workspace state can be inspected with standard git tools,
+    /// e.g. `git diff refs/manifold/ws/alice..main`.
+    #[serde(default = "default_git_compat_refs")]
+    pub git_compat_refs: bool,
 }
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             backend: BackendKind::default(),
+            git_compat_refs: default_git_compat_refs(),
         }
     }
+}
+
+fn default_git_compat_refs() -> bool {
+    true
 }
 
 /// The workspace isolation backend.
@@ -491,6 +503,7 @@ mod tests {
         let cfg = ManifoldConfig::default();
         assert_eq!(cfg.repo.branch, "main");
         assert_eq!(cfg.workspace.backend, BackendKind::Auto);
+        assert!(cfg.workspace.git_compat_refs);
         assert_eq!(cfg.merge.validation.command, None);
         assert!(cfg.merge.validation.commands.is_empty());
         assert_eq!(cfg.merge.validation.timeout_seconds, 60);
@@ -544,6 +557,7 @@ kind = "theirs"
         let cfg = ManifoldConfig::parse(toml).unwrap();
         assert_eq!(cfg.repo.branch, "develop");
         assert_eq!(cfg.workspace.backend, BackendKind::GitWorktree);
+        assert!(cfg.workspace.git_compat_refs);
         assert_eq!(cfg.merge.validation.command.as_deref(), Some("cargo test"));
         assert_eq!(cfg.merge.validation.timeout_seconds, 120);
         assert_eq!(cfg.merge.validation.on_failure, OnFailure::Block);
@@ -557,6 +571,18 @@ kind = "theirs"
         assert_eq!(cfg.merge.drivers[1].match_glob, "generated/**");
         assert_eq!(cfg.merge.drivers[1].kind, MergeDriverKind::Theirs);
         assert!(cfg.merge.drivers[1].command.is_none());
+    }
+
+    #[test]
+    fn parse_workspace_git_compat_refs_false() {
+        let toml = r#"
+[workspace]
+backend = "git-worktree"
+git_compat_refs = false
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(cfg.workspace.backend, BackendKind::GitWorktree);
+        assert!(!cfg.workspace.git_compat_refs);
     }
 
     #[test]
@@ -605,6 +631,7 @@ branch = "trunk"
         assert_eq!(cfg.repo.branch, "trunk");
         // Everything else is default.
         assert_eq!(cfg.workspace.backend, BackendKind::Auto);
+        assert!(cfg.workspace.git_compat_refs);
         assert_eq!(cfg.merge.validation.timeout_seconds, 60);
         assert!(cfg.merge.validation.commands.is_empty());
     }

@@ -10,8 +10,10 @@
 //! refs/manifold/
 //! ├── epoch/
 //! │   └── current       ← OID of the current epoch commit
-//! └── head/
-//!     └── <workspace>   ← latest operation OID for each workspace (Phase 2+)
+//! ├── head/
+//! │   └── <workspace>   ← latest operation OID for each workspace (Phase 2+)
+//! └── ws/
+//!     └── <workspace>   ← materialized workspace state commit (Level 1 compat)
 //! ```
 //!
 //! # Concurrency
@@ -41,6 +43,9 @@ pub const EPOCH_CURRENT: &str = "refs/manifold/epoch/current";
 /// Prefix for per-workspace head refs (used in Phase 2+).
 pub const HEAD_PREFIX: &str = "refs/manifold/head/";
 
+/// Prefix for per-workspace materialized state refs (Level 1 compatibility).
+pub const WORKSPACE_STATE_PREFIX: &str = "refs/manifold/ws/";
+
 /// Build the per-workspace head ref name.
 ///
 /// # Example
@@ -51,6 +56,18 @@ pub const HEAD_PREFIX: &str = "refs/manifold/head/";
 #[must_use]
 pub fn workspace_head_ref(workspace_name: &str) -> String {
     format!("{HEAD_PREFIX}{workspace_name}")
+}
+
+/// Build the per-workspace Level 1 state ref name.
+///
+/// # Example
+/// ```
+/// assert_eq!(maw::refs::workspace_state_ref("default"),
+///            "refs/manifold/ws/default");
+/// ```
+#[must_use]
+pub fn workspace_state_ref(workspace_name: &str) -> String {
+    format!("{WORKSPACE_STATE_PREFIX}{workspace_name}")
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +452,18 @@ mod tests {
         assert_eq!(
             workspace_head_ref("agent-1"),
             "refs/manifold/head/agent-1"
+        );
+    }
+
+    #[test]
+    fn workspace_state_ref_format() {
+        assert_eq!(
+            workspace_state_ref("default"),
+            "refs/manifold/ws/default"
+        );
+        assert_eq!(
+            workspace_state_ref("agent-1"),
+            "refs/manifold/ws/agent-1"
         );
     }
 

@@ -4,10 +4,11 @@
 //! isolation. Each workspace is a detached worktree under `ws/<name>/`.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::model::types::{EpochId, WorkspaceId, WorkspaceInfo, WorkspaceState};
+use crate::config::ManifoldConfig;
+use crate::model::types::{EpochId, GitOid, WorkspaceId, WorkspaceInfo, WorkspaceState};
 use crate::refs as manifold_refs;
 use super::{SnapshotResult, WorkspaceBackend, WorkspaceStatus};
 
@@ -170,6 +171,56 @@ impl GitWorktreeBackend {
             None
         }
     }
+
+    /// Whether Level 1 workspace refs are enabled in `.manifold/config.toml`.
+    ///
+    /// Missing config or parse/load failures fall back to enabled.
+    fn git_compat_refs_enabled(&self) -> bool {
+        let config_path = self.root.join(".manifold").join("config.toml");
+        ManifoldConfig::load(&config_path)
+            .map(|cfg| cfg.workspace.git_compat_refs)
+            .unwrap_or(true)
+    }
+
+    /// Refresh `refs/manifold/ws/<name>` to point at a commit representing the
+    /// current workspace state.
+    ///
+    /// Uses `git stash create` to lazily materialize a commit without mutating
+    /// the workspace's index or working tree. If there are no local changes,
+    /// falls back to `HEAD`.
+    fn refresh_workspace_state_ref(
+        &self,
+        name: &WorkspaceId,
+        ws_path: &Path,
+    ) -> Result<(), GitBackendError> {
+        if !self.git_compat_refs_enabled() {
+            return Ok(());
+        }
+
+        let ref_name = manifold_refs::workspace_state_ref(name.as_str());
+
+        let stash_oid = self.git_stdout_in(ws_path, &["stash", "create"])?;
+        let oid_str = stash_oid.trim();
+
+        let materialized = if oid_str.is_empty() {
+            self.git_stdout_in(ws_path, &["rev-parse", "HEAD"])?
+        } else {
+            stash_oid
+        };
+        let materialized = materialized.trim();
+
+        let oid = GitOid::new(materialized).map_err(|e| GitBackendError::GitCommand {
+            command: "git stash create / git rev-parse HEAD".to_owned(),
+            stderr: format!("invalid OID while materializing workspace ref: {e}"),
+            exit_code: None,
+        })?;
+
+        manifold_refs::write_ref(&self.root, &ref_name, &oid).map_err(|e| GitBackendError::GitCommand {
+            command: format!("git update-ref {ref_name} {}", oid.as_str()),
+            stderr: e.to_string(),
+            exit_code: None,
+        })
+    }
 }
 
 impl WorkspaceBackend for GitWorktreeBackend {
@@ -283,6 +334,10 @@ impl WorkspaceBackend for GitWorktreeBackend {
             .args(["worktree", "prune"])
             .current_dir(&self.root)
             .output();
+
+        // Prune Level 1 materialized workspace ref if present.
+        let ws_ref = manifold_refs::workspace_state_ref(name.as_str());
+        let _ = manifold_refs::delete_ref(&self.root, &ws_ref);
 
         Ok(())
     }
@@ -418,6 +473,9 @@ impl WorkspaceBackend for GitWorktreeBackend {
             .map(|current| base_epoch != current)
             .unwrap_or(false);
 
+        // Lazily materialize Level 1 workspace state ref for git inspection.
+        self.refresh_workspace_state_ref(name, &ws_path)?;
+
         Ok(WorkspaceStatus::new(base_epoch, dirty_files, is_stale))
     }
 
@@ -491,6 +549,9 @@ impl WorkspaceBackend for GitWorktreeBackend {
 
         // Remove from modified/deleted if also in added (file was added then modified)
         modified.retain(|p| !added.contains(p));
+
+        // Lazily materialize Level 1 workspace state ref for git inspection.
+        self.refresh_workspace_state_ref(name, &ws_path)?;
 
         Ok(SnapshotResult::new(added, modified, deleted))
     }
@@ -721,6 +782,19 @@ mod tests {
         (temp_dir, epoch)
     }
 
+    fn read_ws_ref(root: &std::path::Path, ws: &str) -> Option<String> {
+        let ref_name = manifold_refs::workspace_state_ref(ws);
+        let out = Command::new("git")
+            .args(["rev-parse", &ref_name])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8(out.stdout).unwrap().trim().to_owned())
+    }
+
     // -- create tests --
 
     #[test]
@@ -903,21 +977,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_snapshot_materializes_workspace_state_ref() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("snap-ref").unwrap();
+        let info = backend.create(&ws_name, &epoch).unwrap();
+
+        fs::write(info.path.join("README.md"), "# changed from workspace").unwrap();
+        let _snap = backend.snapshot(&ws_name).unwrap();
+
+        let ref_oid = read_ws_ref(&root, ws_name.as_str()).expect("workspace ref should exist");
+        let head_oid = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let head_oid = String::from_utf8(head_oid.stdout).unwrap().trim().to_owned();
+        assert_ne!(ref_oid, head_oid, "dirty workspace should materialize non-HEAD commit");
+
+        let ref_name = manifold_refs::workspace_state_ref(ws_name.as_str());
+        let diff_out = Command::new("git")
+            .args(["diff", "--name-only", &format!("HEAD..{ref_name}")])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let diff = String::from_utf8(diff_out.stdout).unwrap();
+        assert!(diff.lines().any(|l| l.trim() == "README.md"), "diff should include README.md: {diff}");
+    }
+
+    #[test]
+    fn test_snapshot_skips_workspace_state_ref_when_disabled_in_config() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".manifold")).unwrap();
+        std::fs::write(
+            root.join(".manifold").join("config.toml"),
+            "[workspace]\ngit_compat_refs = false\n",
+        )
+        .unwrap();
+
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("snap-no-ref").unwrap();
+        let info = backend.create(&ws_name, &epoch).unwrap();
+
+        fs::write(info.path.join("README.md"), "# changed with compat disabled").unwrap();
+        let _snap = backend.snapshot(&ws_name).unwrap();
+
+        assert!(
+            read_ws_ref(&root, ws_name.as_str()).is_none(),
+            "workspace ref should not be created when disabled"
+        );
+    }
+
     // -- destroy tests --
 
     #[test]
     fn test_destroy_workspace() {
         let (temp_dir, epoch) = setup_git_repo();
-        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
         let ws_name = WorkspaceId::new("destroy-ws").unwrap();
 
         // Create then destroy
         let info = backend.create(&ws_name, &epoch).unwrap();
         assert!(info.path.exists());
 
+        // Materialize Level 1 ref, then ensure destroy prunes it.
+        fs::write(info.path.join("README.md"), "# dirty before destroy").unwrap();
+        let _ = backend.snapshot(&ws_name).unwrap();
+        assert!(read_ws_ref(&root, ws_name.as_str()).is_some());
+
         backend.destroy(&ws_name).unwrap();
         assert!(!info.path.exists(), "directory should be gone");
         assert!(!backend.exists(&ws_name), "should not exist in git");
+        assert!(
+            read_ws_ref(&root, ws_name.as_str()).is_none(),
+            "workspace ref should be pruned on destroy"
+        );
     }
 
     #[test]
