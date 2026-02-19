@@ -218,3 +218,62 @@ pub fn read_from_ws(repo: &Path, ws_name: &str, rel_path: &str) -> Option<String
     let ws_path = repo.join("ws").join(ws_name).join(rel_path);
     std::fs::read_to_string(&ws_path).ok()
 }
+
+/// Create a git-native test repo (no jj) for workspace validation tests.
+///
+/// Creates a git repo with an initial commit and sets up the Manifold
+/// epoch ref so that `maw ws create` can resolve the epoch.
+pub fn setup_git_test_repo() -> TempDir {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let root = dir.path();
+
+    // git init
+    let out = Command::new("git")
+        .args(["init"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run git init");
+    assert!(out.status.success(), "git init failed");
+
+    disable_signing(root);
+
+    // Set identity
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    // Create an initial commit
+    std::fs::write(root.join("README.md"), "# test\n").unwrap();
+    Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    // Read HEAD and set epoch ref
+    let head_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let head_oid = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+    Command::new("git")
+        .args(["update-ref", "refs/manifold/epoch/current", &head_oid])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    dir
+}

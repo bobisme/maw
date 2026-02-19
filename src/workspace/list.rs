@@ -1,26 +1,25 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::Serialize;
 
+use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
-use crate::jj::{is_sibling_op_error, run_jj, sibling_op_fix_command};
+use crate::model::types::WorkspaceState;
 
-use super::{check_stale_workspaces, jj_cwd, workspace_path, DEFAULT_WORKSPACE};
+use super::{get_backend, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
 pub struct WorkspaceInfo {
     pub(crate) name: String,
-    pub(crate) is_current: bool,
     pub(crate) is_default: bool,
-    pub(crate) change_id: String,
-    pub(crate) commit_id: String,
-    pub(crate) description: String,
+    pub(crate) epoch: String,
+    pub(crate) state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) behind_epochs: Option<u32>,
 }
 
-/// Envelope for `maw ws list --format json/toon` output.
-/// Wraps the workspace array with an advice array so warnings
-/// (stale workspaces, etc.) are machine-readable.
+/// Envelope for `maw ws list --format json` output.
 #[derive(Serialize)]
 pub struct WorkspaceListEnvelope {
     pub(crate) workspaces: Vec<WorkspaceInfo>,
@@ -43,27 +42,11 @@ pub struct AdviceDetails {
     pub(crate) fix: String,
 }
 
-#[allow(clippy::too_many_lines)] // TODO: refactor (bd-3nzk)
 pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
-    let cwd = jj_cwd()?;
-    let output = run_jj(&["workspace", "list"], &cwd)?;
+    let backend = get_backend()?;
+    let backend_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_sibling_op_error(&stderr) {
-            let fix = sibling_op_fix_command(&stderr)
-                .unwrap_or_else(|| "jj op integrate <id>".to_string());
-            bail!(
-                "Concurrent operations forked the jj operation graph.\n  \
-                 Wait for other agents to finish, then fix with: {fix}"
-            );
-        }
-        bail!("jj workspace list failed: {stderr}");
-    }
-
-    let list = String::from_utf8_lossy(&output.stdout);
-
-    if list.trim().is_empty() {
+    if backend_workspaces.is_empty() {
         match format {
             OutputFormat::Text | OutputFormat::Pretty => println!("No workspaces found."),
             OutputFormat::Json => {
@@ -77,25 +60,40 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         return Ok(());
     }
 
-    // Parse workspace list into structured data
-    let workspaces: Vec<WorkspaceInfo> = match parse_workspace_list(&list, verbose) {
-        Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("Warning: Failed to parse workspace list: {e}");
-            eprintln!("Falling back to raw text output:");
-            println!("{list}");
-            return Ok(());
-        }
-    };
+    // Convert backend workspace info to display structs
+    let workspaces: Vec<WorkspaceInfo> = backend_workspaces
+        .iter()
+        .map(|ws| {
+            let behind = match &ws.state {
+                WorkspaceState::Stale { behind_epochs } => Some(*behind_epochs),
+                _ => None,
+            };
+            WorkspaceInfo {
+                name: ws.id.as_str().to_string(),
+                is_default: ws.id.as_str() == DEFAULT_WORKSPACE,
+                epoch: ws.epoch.as_str()[..12].to_string(),
+                state: format!("{}", ws.state),
+                path: if verbose {
+                    Some(ws.path.display().to_string())
+                } else {
+                    None
+                },
+                behind_epochs: behind,
+            }
+        })
+        .collect();
 
     // Collect stale workspace warnings
-    let stale_workspaces = check_stale_workspaces().unwrap_or_default();
+    let stale_workspaces: Vec<String> = backend_workspaces
+        .iter()
+        .filter(|ws| ws.state.is_stale())
+        .map(|ws| ws.id.as_str().to_string())
+        .collect();
 
-    // Handle different output formats
     match format {
         OutputFormat::Text => print_list_text(&workspaces, &stale_workspaces, verbose),
         OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, format, verbose),
-        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, format, &list),
+        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, format),
     }
 
     Ok(())
@@ -104,22 +102,22 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
 /// Print workspace list in tab-separated text format (agent-friendly).
 fn print_list_text(workspaces: &[WorkspaceInfo], stale: &[String], verbose: bool) {
     if verbose {
-        println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT\tPATH");
+        println!("NAME\tEPOCH\tSTATE\tDEFAULT\tPATH");
     } else {
-        println!("NAME\tCHANGE_ID\tCOMMIT_ID\tDESCRIPTION\tDEFAULT");
+        println!("NAME\tEPOCH\tSTATE\tDEFAULT");
     }
     for ws in workspaces {
         let default_marker = if ws.is_default { "true" } else { "false" };
         if verbose {
             let path = ws.path.as_deref().unwrap_or("");
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                ws.name, ws.change_id, ws.commit_id, ws.description, default_marker, path
+                "{}\t{}\t{}\t{}\t{}",
+                ws.name, ws.epoch, ws.state, default_marker, path
             );
         } else {
             println!(
-                "{}\t{}\t{}\t{}\t{}",
-                ws.name, ws.change_id, ws.commit_id, ws.description, default_marker
+                "{}\t{}\t{}\t{}",
+                ws.name, ws.epoch, ws.state, default_marker
             );
         }
     }
@@ -127,7 +125,7 @@ fn print_list_text(workspaces: &[WorkspaceInfo], stale: &[String], verbose: bool
     print_stale_warning_text(stale);
 
     println!();
-    println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
+    println!("Next: maw exec <name> -- <command>");
 }
 
 /// Print workspace list in colored, human-friendly format.
@@ -141,12 +139,14 @@ fn print_list_pretty(
 
     for ws in workspaces {
         let (glyph, name_style, reset) = if use_color {
-            if ws.is_current {
-                ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for current
+            if ws.is_default {
+                ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for default
+            } else if ws.state.contains("stale") {
+                ("\u{25b2}", "\x1b[1;33m", "\x1b[0m")  // Yellow for stale
             } else {
                 ("\u{25cc}", "\x1b[90m", "\x1b[0m")    // Gray for others
             }
-        } else if ws.is_current {
+        } else if ws.is_default {
             ("\u{25cf}", "", "")
         } else {
             ("\u{25cc}", "", "")
@@ -154,14 +154,13 @@ fn print_list_pretty(
 
         println!(
             "{} {}{}{} {} {}",
-            glyph, name_style, ws.name, reset, ws.change_id, ws.description
+            glyph, name_style, ws.name, reset, ws.epoch, ws.state
         );
 
         if verbose {
             if let Some(path) = &ws.path {
                 println!("    path: {path}");
             }
-            println!("    commit: {}", ws.commit_id);
             if ws.is_default {
                 println!("    default workspace");
             }
@@ -187,9 +186,9 @@ fn print_list_pretty(
     if !workspaces.is_empty() {
         println!();
         if use_color {
-            println!("\x1b[90mNext: maw exec <name> -- jj describe -m \"feat: ...\"\x1b[0m");
+            println!("\x1b[90mNext: maw exec <name> -- <command>\x1b[0m");
         } else {
-            println!("Next: maw exec <name> -- jj describe -m \"feat: ...\"");
+            println!("Next: maw exec <name> -- <command>");
         }
     }
 }
@@ -199,7 +198,6 @@ fn print_list_json(
     workspaces: Vec<WorkspaceInfo>,
     stale_workspaces: Vec<String>,
     format: OutputFormat,
-    raw_list: &str,
 ) {
     let advice = if stale_workspaces.is_empty() {
         vec![]
@@ -223,8 +221,6 @@ fn print_list_json(
         Ok(output) => println!("{output}"),
         Err(e) => {
             eprintln!("Warning: Failed to serialize to JSON: {e}");
-            eprintln!("Falling back to raw text output:");
-            println!("{raw_list}");
         }
     }
 }
@@ -241,56 +237,4 @@ fn print_stale_warning_text(stale: &[String]) {
     }
 }
 
-/// Parse jj workspace list output into structured data
-/// Resilient to format changes - returns error if parsing fails
-pub fn parse_workspace_list(list: &str, include_path: bool) -> Result<Vec<WorkspaceInfo>> {
-    let mut workspaces = Vec::new();
 
-    for line in list.lines() {
-        // Expected format: "name@: change_id commit_id description"
-        // Current workspace has @ marker
-        let Some((name_part, rest)) = line.split_once(':') else {
-            // Skip lines that don't match expected format
-            continue;
-        };
-
-        let name_part = name_part.trim();
-        let is_current = name_part.contains('@');
-        let name = name_part.trim_end_matches('@').trim();
-
-        // Parse rest: "change_id commit_id description..."
-        let parts: Vec<&str> = rest.split_whitespace().collect();
-        if parts.len() < 2 {
-            // Need at least change_id and commit_id
-            bail!("Unexpected workspace line format: {line}");
-        }
-
-        let change_id = parts[0].to_string();
-        let commit_id = parts[1].to_string();
-        let description = parts[2..].join(" ");
-
-        let path = if include_path {
-            workspace_path(name).ok().and_then(|p| {
-                if p.exists() {
-                    Some(p.display().to_string())
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-
-        workspaces.push(WorkspaceInfo {
-            name: name.to_string(),
-            is_current,
-            is_default: name == DEFAULT_WORKSPACE,
-            change_id,
-            commit_id,
-            description,
-            path,
-        });
-    }
-
-    Ok(workspaces)
-}

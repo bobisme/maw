@@ -5,8 +5,9 @@ use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde::Deserialize;
 
+use crate::backend::git::GitWorktreeBackend;
+use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
-use crate::jj::run_jj;
 
 mod create;
 mod history;
@@ -125,16 +126,15 @@ impl MawConfig {
 pub enum WorkspaceCommands {
     /// Create a new workspace for an agent
     ///
-    /// Creates an isolated jj workspace in ws/<name>/ with its
-    /// own working copy (a separate view of the codebase, like a git
-    /// worktree but lightweight). All file reads, writes, and edits must
-    /// use the absolute workspace path shown after creation.
+    /// Creates an isolated workspace in ws/<name>/ using git worktrees.
+    /// Each workspace has its own working copy (a separate view of the
+    /// codebase). All file reads, writes, and edits must use the absolute
+    /// workspace path shown after creation.
     ///
     /// After creation:
     ///   1. Edit files under ws/<name>/ (use absolute paths)
-    ///   2. Save work: maw exec <name> -- jj describe -m "feat: ..."
-    ///      ('describe' sets the commit message -- like git commit --amend -m)
-    ///   3. Run other commands: maw exec <name> -- cmd
+    ///   2. Run commands: maw exec <name> -- <command>
+    ///   3. Changes are captured automatically during merge
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -151,7 +151,7 @@ pub enum WorkspaceCommands {
 
     /// Remove a workspace
     ///
-    /// Removes the workspace: unregisters it from jj and deletes the
+    /// Removes the workspace: removes the git worktree and deletes the
     /// directory. Merge any important changes first (maw ws merge).
     ///
     /// Non-interactive by default (agents can't respond to prompts).
@@ -169,15 +169,12 @@ pub enum WorkspaceCommands {
 
     /// Restore a previously destroyed workspace
     ///
-    /// Recovers a workspace that was removed with 'maw ws destroy' by
-    /// reverting the forget operation from jj's operation log. The
-    /// workspace's commit history and file contents are recovered.
-    ///
-    /// Only works if the workspace was destroyed via 'maw ws destroy'
-    /// (which uses 'jj workspace forget' internally).
+    /// Recreates a workspace that was removed with 'maw ws destroy'.
+    /// Creates a fresh workspace at the current epoch. Previous working
+    /// copy changes are not automatically restored.
     ///
     /// Examples:
-    ///   maw ws restore alice    # recover alice's destroyed workspace
+    ///   maw ws restore alice    # recreate alice's workspace
     Restore {
         /// Name of the workspace to restore
         name: String,
@@ -185,9 +182,9 @@ pub enum WorkspaceCommands {
 
     /// List all workspaces
     ///
-    /// Shows all jj workspaces with their current status including:
-    /// - Current commit description
-    /// - Whether the workspace is stale (out of date with repo)
+    /// Shows all workspaces with their current status including:
+    /// - Epoch (base commit) and staleness state
+    /// - Whether the workspace is stale (behind current epoch)
     /// - Path to the workspace directory
     List {
         /// Show detailed information
@@ -229,24 +226,24 @@ pub enum WorkspaceCommands {
     /// Sync workspace with repository (handle stale working copy)
     ///
     /// Run this at the start of every session. If the working copy is stale
-    /// (another workspace modified shared commits, so your files are outdated),
-    /// this updates your workspace to match. Safe to run even if not stale.
+    /// (behind the current epoch), this updates your workspace to match.
+    /// Safe to run even if not stale.
     ///
-    /// Use --all to sync all workspaces at once, useful after `jj git fetch`
-    /// or when multiple workspaces may be stale.
+    /// Use --all to sync all workspaces at once, useful after epoch
+    /// advancement or when multiple workspaces may be stale.
     Sync {
         /// Sync all workspaces instead of just the current one
         #[arg(long)]
         all: bool,
     },
 
-    /// Deprecated: use `maw exec <workspace> -- jj <args>` instead.
+    /// Deprecated: use `maw exec <workspace> -- <command>` instead.
     #[command(hide = true)]
     Jj {
         /// Workspace name
         name: String,
 
-        /// Arguments to pass to jj
+        /// Arguments to pass to the command
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -279,8 +276,8 @@ pub enum WorkspaceCommands {
     /// Clean up orphaned, stale, or empty workspaces
     ///
     /// Detects problematic workspaces:
-    /// - Orphaned: directory exists in ws/ but jj forgot the workspace
-    /// - Missing: jj tracks the workspace but the directory is gone
+    /// - Orphaned: directory exists in ws/ but not tracked as worktree
+    /// - Missing: git tracks the worktree but the directory is gone
     /// - Empty (with --empty): workspace has no changes
     ///
     /// By default, shows what would be pruned (preview mode).
@@ -301,10 +298,10 @@ pub enum WorkspaceCommands {
         empty: bool,
     },
 
-    /// Reconnect an orphaned workspace directory to jj's tracking
+    /// Reconnect an orphaned workspace directory as a git worktree
     ///
-    /// Use this to recover a workspace where 'jj workspace forget' was run
-    /// but the directory still exists. Re-adds the workspace to jj's tracking.
+    /// Use this to recover a workspace where the worktree tracking was lost
+    /// but the directory still exists. Re-creates the worktree entry.
     ///
     /// Examples:
     ///   maw ws attach orphaned               # reconnect orphaned directory
@@ -399,7 +396,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let args_str = args.join(" ");
             bail!(
                 "`maw ws jj` is deprecated.\n  \
-                 Use: maw exec {name} -- jj {args_str}"
+                 Use: maw exec {name} -- {args_str}"
             );
         }
         WorkspaceCommands::History { name, limit, format, json } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
@@ -431,36 +428,63 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 }
 
 pub fn repo_root() -> Result<PathBuf> {
-    let output = Command::new("jj")
-        .args(["root"])
+    // Use git to find the repo root. In Manifold's bare repo model,
+    // GIT_DIR is at the repo root. We may be running from ws/<name>/
+    // or from the root itself.
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
         .output()
-        .context("Failed to run jj root")?;
+        .context("Failed to run git rev-parse --git-dir")?;
     if !output.status.success() {
         bail!(
-            "jj root failed: {}",
+            "Not in a git repository: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
 
-    // jj root returns the workspace root, not the repo root.
-    // If we're inside a workspace (ws/<name>/), walk up
-    // to the directory containing ws/.
-    for ancestor in root.ancestors() {
-        if ancestor.file_name().is_some_and(|n| n == "ws")
-            && let Some(parent) = ancestor.parent() {
-                return Ok(parent.to_path_buf());
-            }
-    }
+    // Resolve to absolute path
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        std::env::current_dir()
+            .context("Could not determine current directory")?
+            .join(&git_dir)
+    };
+
+    // In a bare repo, .git dir IS the repo root's .git/.
+    // In a worktree, .git is a file pointing to the main repo.
+    // The repo root is the parent of .git/ (or the directory containing .git/).
+    let root = if git_dir.is_dir() {
+        // Standard .git/ directory — parent is repo root
+        git_dir.parent()
+            .context("Cannot determine repo root from .git dir")?
+            .to_path_buf()
+    } else {
+        // Worktree: .git is a file. Use git to find the common dir.
+        let common_output = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .context("Failed to run git rev-parse --git-common-dir")?;
+        if !common_output.status.success() {
+            bail!(
+                "Failed to find git common dir: {}",
+                String::from_utf8_lossy(&common_output.stderr)
+            );
+        }
+        let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim());
+        common_dir.parent()
+            .context("Cannot determine repo root from git common dir")?
+            .to_path_buf()
+    };
 
     Ok(root)
 }
 
-/// Return the best directory for running jj commands.
+/// Return the best directory for running git commands.
 ///
-/// In v2 bare repo model, the repo root has no jj workspace -- running jj
-/// there produces "working copy is stale" errors. This returns `ws/default/`
-/// when it exists, falling back to the repo root for v1 repos or pre-init.
+/// In v2 bare repo model, the repo root has no workspace. This returns
+/// `ws/default/` when it exists, falling back to the repo root.
 pub fn jj_cwd() -> Result<PathBuf> {
     let root = repo_root()?;
     let default_ws = root.join("ws").join("default");
@@ -469,6 +493,12 @@ pub fn jj_cwd() -> Result<PathBuf> {
     } else {
         Ok(root)
     }
+}
+
+/// Get a `GitWorktreeBackend` instance for the current repository.
+pub fn get_backend() -> Result<GitWorktreeBackend> {
+    let root = repo_root()?;
+    Ok(GitWorktreeBackend::new(root))
 }
 
 /// Ensure CWD is the repo root. Mutation commands must run from root
@@ -539,52 +569,16 @@ fn validate_workspace_name(name: &str) -> Result<()> {
 }
 
 /// Check all workspaces for staleness and return list of stale workspace names.
-/// A workspace is stale when another workspace modified shared history,
-/// making the working copy files outdated.
+/// A workspace is stale when its base epoch differs from the current epoch.
 fn check_stale_workspaces() -> Result<Vec<String>> {
-    let cwd = jj_cwd()?;
-    let ws_dir = workspaces_dir()?;
+    let backend = get_backend()?;
+    let workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Get all workspaces
-    let output = run_jj(&["workspace", "list"], &cwd)?;
-
-    let ws_list = String::from_utf8_lossy(&output.stdout);
-
-    // Parse workspace names
-    let workspace_names: Vec<String> = ws_list
-        .lines()
-        .filter_map(|l| l.split(':').next())
-        .map(|s| s.trim().trim_end_matches('@').to_string())
-        .filter(|s| !s.is_empty())
+    let stale: Vec<String> = workspaces
+        .iter()
+        .filter(|ws| ws.state.is_stale())
+        .map(|ws| ws.id.as_str().to_string())
         .collect();
-
-    let mut stale = Vec::new();
-
-    for ws in &workspace_names {
-        // Validate workspace name (defense-in-depth)
-        if validate_workspace_name(ws).is_err() {
-            continue;
-        }
-
-        let path = ws_dir.join(ws);
-
-        if !path.exists() {
-            continue;
-        }
-
-        // Check if stale by looking at jj status stderr
-        let status = Command::new("jj")
-            .args(["status"])
-            .current_dir(&path)
-            .output();
-
-        if let Ok(out) = status {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if stderr.contains("working copy is stale") {
-                stale.push(ws.clone());
-            }
-        }
-    }
 
     Ok(stale)
 }

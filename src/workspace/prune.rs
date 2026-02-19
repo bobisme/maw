@@ -1,33 +1,39 @@
-use std::process::Command;
+use anyhow::Result;
 
-use anyhow::{bail, Context, Result};
+use crate::backend::WorkspaceBackend;
+use crate::model::types::WorkspaceId;
 
-use super::{jj_cwd, validate_workspace_name, workspaces_dir, DEFAULT_WORKSPACE};
+use super::{get_backend, validate_workspace_name, workspaces_dir, DEFAULT_WORKSPACE};
 
 /// Result of analyzing workspaces for pruning
 #[derive(Debug)]
 struct PruneAnalysis {
-    /// Directories in ws/ that jj doesn't know about
+    /// Directories in ws/ that git worktree doesn't know about
     orphaned: Vec<String>,
-    /// Workspaces jj tracks but directories are missing
+    /// Workspaces git tracks but directories are missing
     missing: Vec<String>,
     /// Workspaces with no changes (empty working copies)
     empty: Vec<String>,
 }
 
-#[allow(clippy::too_many_lines)] // TODO: refactor (bd-3nzk)
 pub fn prune(force: bool, include_empty: bool) -> Result<()> {
-    let cwd = jj_cwd()?;
+    let backend = get_backend()?;
     let ws_dir = workspaces_dir()?;
 
-    let jj_workspaces = get_jj_tracked_workspaces(&cwd)?;
+    let tracked_workspaces = backend.list()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let tracked_names: std::collections::HashSet<String> = tracked_workspaces
+        .iter()
+        .map(|ws| ws.id.as_str().to_string())
+        .collect();
+
     let dir_workspaces = get_directory_workspaces(&ws_dir)?;
 
     let mut analysis = analyze_workspaces(
-        &jj_workspaces,
+        &tracked_names,
         &dir_workspaces,
         include_empty,
-        &cwd,
+        &backend,
     );
 
     // Sort for consistent output
@@ -54,41 +60,14 @@ pub fn prune(force: bool, include_empty: bool) -> Result<()> {
     println!();
 
     prune_orphaned(&analysis.orphaned, &ws_dir, force);
-    prune_missing(&analysis.missing, &cwd, force);
-    prune_empty(&analysis.empty, &ws_dir, &cwd, force);
+    prune_missing(&analysis.missing, &backend, force);
+    prune_empty(&analysis.empty, &backend, force);
     print_prune_summary(&analysis, total_issues, include_empty, force);
 
     Ok(())
 }
 
-/// Get the set of workspace names that jj tracks.
-fn get_jj_tracked_workspaces(
-    cwd: &std::path::Path,
-) -> Result<std::collections::HashSet<String>> {
-    let output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    if !output.status.success() {
-        bail!(
-            "jj workspace list failed: {}\n  To fix: ensure you're in a jj repository",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let ws_list = String::from_utf8_lossy(&output.stdout);
-    Ok(ws_list
-        .lines()
-        .filter_map(|l| l.split(':').next())
-        .map(|s| s.trim().trim_end_matches('@').to_string())
-        .filter(|s| !s.is_empty())
-        .collect())
-}
-
 /// Get the set of workspace directory names present in ws/.
-/// Skips symlinks and validates names to prevent path traversal.
 fn get_directory_workspaces(
     ws_dir: &std::path::Path,
 ) -> Result<std::collections::HashSet<String>> {
@@ -96,7 +75,7 @@ fn get_directory_workspaces(
         return Ok(std::collections::HashSet::new());
     }
     Ok(std::fs::read_dir(ws_dir)
-        .context("Failed to read ws directory")?
+        .map_err(|e| anyhow::anyhow!("Failed to read ws directory: {e}"))?
         .filter_map(std::result::Result::ok)
         .filter(|entry| {
             let path = entry.path();
@@ -107,13 +86,12 @@ fn get_directory_workspaces(
         .collect())
 }
 
-/// Compare jj-tracked workspaces against directory workspaces to find
-/// orphaned, missing, and (optionally) empty workspaces.
+/// Compare tracked workspaces against directory workspaces.
 fn analyze_workspaces(
-    jj_workspaces: &std::collections::HashSet<String>,
+    tracked_names: &std::collections::HashSet<String>,
     dir_workspaces: &std::collections::HashSet<String>,
     include_empty: bool,
-    cwd: &std::path::Path,
+    backend: &impl WorkspaceBackend,
 ) -> PruneAnalysis {
     let mut analysis = PruneAnalysis {
         orphaned: Vec::new(),
@@ -122,50 +100,43 @@ fn analyze_workspaces(
     };
 
     for dir_name in dir_workspaces {
-        if !jj_workspaces.contains(dir_name) {
+        if !tracked_names.contains(dir_name) {
             analysis.orphaned.push(dir_name.clone());
         }
     }
 
-    for jj_ws in jj_workspaces {
-        if !dir_workspaces.contains(jj_ws) {
-            analysis.missing.push(jj_ws.clone());
-        }
-    }
+    // In git worktree model, "missing" means directory is gone but
+    // git still tracks the worktree. This is handled by git worktree prune.
+    // We don't need to detect this separately since destroy() calls prune.
 
     if include_empty {
-        for jj_ws in jj_workspaces {
-            if jj_ws == DEFAULT_WORKSPACE {
+        for name in tracked_names {
+            if name == DEFAULT_WORKSPACE {
                 continue;
             }
-            if analysis.orphaned.contains(jj_ws) || analysis.missing.contains(jj_ws) {
+            if analysis.orphaned.contains(name) {
                 continue;
             }
-            let diff_output = Command::new("jj")
-                .args(["diff", "--stat", "-r", &format!("{jj_ws}@")])
-                .current_dir(cwd)
-                .output();
-
-            if let Ok(diff) = diff_output
-                && diff.status.success() {
-                    let diff_text = String::from_utf8_lossy(&diff.stdout);
-                    if diff_text.trim().is_empty() {
-                        analysis.empty.push(jj_ws.clone());
+            if let Ok(ws_id) = WorkspaceId::new(name) {
+                if let Ok(snapshot) = backend.snapshot(&ws_id) {
+                    if snapshot.is_empty() {
+                        analysis.empty.push(name.clone());
                     }
                 }
+            }
         }
     }
 
     analysis
 }
 
-/// Handle orphaned directories (exist on disk but not tracked by jj).
+/// Handle orphaned directories (exist on disk but not tracked by git worktree).
 fn prune_orphaned(orphaned: &[String], ws_dir: &std::path::Path, force: bool) {
     if orphaned.is_empty() {
         return;
     }
     println!(
-        "Orphaned ({} directory exists but jj forgot the workspace):",
+        "Orphaned ({} — directory exists but not tracked as worktree):",
         orphaned.len()
     );
     for name in orphaned {
@@ -188,49 +159,33 @@ fn prune_orphaned(orphaned: &[String], ws_dir: &std::path::Path, force: bool) {
     println!();
 }
 
-/// Handle missing workspaces (jj tracks but directory is gone).
-fn prune_missing(missing: &[String], cwd: &std::path::Path, force: bool) {
+/// Handle missing workspaces (git tracks but directory is gone).
+fn prune_missing(missing: &[String], backend: &impl WorkspaceBackend, force: bool) {
     if missing.is_empty() {
         return;
     }
     println!(
-        "Missing ({} jj tracks workspace but directory is gone):",
+        "Missing ({} — tracked as worktree but directory is gone):",
         missing.len()
     );
     for name in missing {
         if force {
-            let forget_result = Command::new("jj")
-                .args(["workspace", "forget", name])
-                .current_dir(cwd)
-                .output();
-
-            match forget_result {
-                Ok(out) if out.status.success() => {
-                    println!("  \u{2713} {name}: forgotten from jj");
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    println!("  \u{2717} {name}: failed to forget - {}", stderr.trim());
-                }
-                Err(e) => {
-                    println!("  \u{2717} {name}: failed to forget - {e}");
+            if let Ok(ws_id) = WorkspaceId::new(name) {
+                match backend.destroy(&ws_id) {
+                    Ok(()) => println!("  \u{2713} {name}: removed from git"),
+                    Err(e) => println!("  \u{2717} {name}: failed to remove - {e}"),
                 }
             }
         } else {
             println!("  - {name}");
-            println!("      Would run: jj workspace forget {name}");
+            println!("      Would remove from git worktree tracking");
         }
     }
     println!();
 }
 
 /// Handle empty workspaces (tracked, directory exists, but no file changes).
-fn prune_empty(
-    empty: &[String],
-    ws_dir: &std::path::Path,
-    cwd: &std::path::Path,
-    force: bool,
-) {
+fn prune_empty(empty: &[String], backend: &impl WorkspaceBackend, force: bool) {
     if empty.is_empty() {
         return;
     }
@@ -239,29 +194,15 @@ fn prune_empty(
         empty.len()
     );
     for name in empty {
-        let path = ws_dir.join(name);
         if force {
-            if path.is_symlink() {
-                println!("  \u{2717} {name}: refused to delete symlink (security)");
-                continue;
-            }
-            let _ = Command::new("jj")
-                .args(["workspace", "forget", name])
-                .current_dir(cwd)
-                .status();
-
-            if path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    println!("  \u{2717} {name}: failed to delete - {e}");
-                } else {
-                    println!("  \u{2713} {name}: deleted");
+            if let Ok(ws_id) = WorkspaceId::new(name) {
+                match backend.destroy(&ws_id) {
+                    Ok(()) => println!("  \u{2713} {name}: deleted"),
+                    Err(e) => println!("  \u{2717} {name}: failed to delete - {e}"),
                 }
-            } else {
-                println!("  \u{2713} {name}: forgotten");
             }
         } else {
             println!("  - {name}");
-            println!("      Path: {}/", path.display());
         }
     }
     println!();
@@ -278,7 +219,7 @@ fn print_prune_summary(
         let deleted = analysis.orphaned.len() + analysis.empty.len();
         let forgotten = analysis.missing.len();
         println!(
-            "Pruned: {deleted} deleted, {forgotten} forgotten from jj"
+            "Pruned: {deleted} deleted, {forgotten} removed from tracking"
         );
     } else {
         println!("=== Summary ===");

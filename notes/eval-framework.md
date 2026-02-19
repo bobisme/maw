@@ -21,7 +21,7 @@ Each eval scenario produces these metrics:
 | Metric | What it measures | How |
 |--------|-----------------|-----|
 | **tool_calls** | Total tool invocations (Bash, Read, Grep, etc.) | Count from agent transcript |
-| **maw_commands** | maw/jj commands run | Count Bash calls containing `maw` or `jj` |
+| **maw_commands** | maw commands run | Count Bash calls containing `maw` |
 | **errors** | Non-zero exit codes from commands | Count failed Bash calls |
 | **confusion_markers** | Agent expressing confusion, re-reading, retrying | Count re-reads of same file, repeated failed commands, "I'm confused" / "let me try again" / backtracking |
 | **goal_achieved** | Did the agent complete the task? | Boolean (manual or heuristic check) |
@@ -46,17 +46,16 @@ Create a test environment in /tmp:
 
 ```bash
 # Create a project repo
-REPO=/tmp/maw-eval-$$
-mkdir -p $REPO && cd $REPO
-git init && jj git init --colocate
+REPO=/tmp/manifold-eval-$$
+mkdir -p "$REPO"
+git -C "$REPO" init -b main
 # ... seed with code files ...
 maw init
 
-# For push scenarios: create a bare remote
-REMOTE=/tmp/maw-eval-remote-$$
-git init --bare $REMOTE
-git remote add origin $REMOTE
-# ... push initial commit ...
+# Optional: push scenario setup with a throwaway bare remote
+REMOTE=/tmp/manifold-eval-remote-$$
+git init --bare "$REMOTE"
+git -C "$REPO" remote add origin "$REMOTE"
 ```
 
 ### 2. Scenario Phase
@@ -69,7 +68,7 @@ Define the task in plain English (non-leading):
 The agent does NOT get told:
 - Which maw commands to run
 - That files might not be visible after merge
-- How jj bookmarks work
+- Any git/jj internals
 
 ### 3. Measurement Phase
 
@@ -96,7 +95,7 @@ Compare metrics side-by-side.
 ### S2: Push workflow
 - Setup: Create repo with remote, make and merge changes
 - Task: "Push the latest changes to origin"
-- Measures: Does agent figure out push without jj bookmark knowledge?
+- Measures: Does agent figure out push without git/jj internals?
 
 ### S3: Custom branch name
 - Setup: Create repo with `branch = "dev"` in .maw.toml
@@ -111,16 +110,16 @@ Compare metrics side-by-side.
 ## Running Evals
 
 ```bash
-# From maw repo root
-# Run a specific scenario
-./notes/eval-harness.sh S1-before
-./notes/eval-harness.sh S1-after
+# From repo root
+# Dry run (setup + prompt generation only)
+notes/eval-harness.sh --dry-run --keep-tmp
 
-# Or run all
-./notes/eval-harness.sh all
+# Real run (requires a Claude/agent command)
+notes/eval-harness.sh \
+  --agent-cmd 'claude --print --input-file {PROMPT_FILE}'
 ```
 
-Results go to `/tmp/maw-eval-results/`.
+Results go to `/tmp/manifold-eval-results/` by default.
 
 ## Adding New Scenarios
 

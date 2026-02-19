@@ -3,6 +3,7 @@ use common::*;
 
 /// Test that config loading works with custom branch name
 #[test]
+#[ignore = "requires jj - being replaced by git-native status (bd-1xfd.3)"]
 fn config_fallback_to_default_workspace() {
     let repo = setup_test_repo();
 

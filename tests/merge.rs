@@ -8,6 +8,7 @@ mod common;
 use common::{default_ws, maw_fails, maw_in, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn basic_merge() {
     let repo = setup_bare_repo();
 
@@ -62,6 +63,7 @@ fn basic_merge() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn single_workspace_merge() {
     let repo = setup_bare_repo();
 
@@ -89,6 +91,7 @@ fn single_workspace_merge() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn merge_with_conflict() {
     let repo = setup_bare_repo();
 
@@ -147,6 +150,7 @@ fn merge_with_conflict() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn merge_conflict_shows_details_and_guidance() {
     let repo = setup_bare_repo();
 
@@ -243,6 +247,7 @@ fn merge_conflict_shows_details_and_guidance() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn dirty_default_auto_snapshots_before_merge() {
     let repo = setup_bare_repo();
 
@@ -277,6 +282,7 @@ fn dirty_default_auto_snapshots_before_merge() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn merge_snapshots_source_workspace_without_jj() {
     let repo = setup_bare_repo();
 
@@ -318,6 +324,7 @@ fn reject_merge_default() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn merge_preserves_committed_work_in_default() {
     let repo = setup_bare_repo();
     let ws_default = default_ws(repo.path());

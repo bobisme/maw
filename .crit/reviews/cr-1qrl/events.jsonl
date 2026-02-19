@@ -1,2 +1,14 @@
 {"ts":"2026-02-08T23:25:33.497824011Z","author":"maw-dev","event":"ReviewCreated","data":{"review_id":"cr-1qrl","jj_change_id":"popwuuzqmmvyrqrrkyzztrnxwmlunprr","initial_commit":"58106928f8164c3548364eb1bd8ee0e6ff6a66f3","title":"bd-2lj: fix maw status --watch broken rendering","description":"Fix raw terminal rendering in watch mode. In raw mode, \\n only moves cursor down without carriage return. Replace \\n with \\r\\n when watching=true so output renders correctly."}}
 {"ts":"2026-02-08T23:26:13.545896692Z","author":"maw-dev","event":"ReviewersRequested","data":{"review_id":"cr-1qrl","reviewers":["maw-security"]}}
+{"ts":"2026-02-19T06:21:16.858752486Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm","reason":"No security concerns. Minimal change: applies existing \\\\n→\\\\r\\\\n pattern to render_with_format() for raw terminal mode consistency. No user input, no new command execution, no path handling changes."}}
+{"ts":"2026-02-19T06:21:58.853831410Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm","reason":"No security concerns. Change is a terminal rendering fix: replaces \\n with \\r\\n when in raw terminal mode (watch). All data is internally generated — no user input flows through this code path. No injection, disclosure, or resource risks."}}
+{"ts":"2026-02-19T06:22:44.029423277Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:23:28.966251294Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:24:18.529449389Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:24:38.012089534Z","author":"maw-dev/0","event":"ReviewApproved","data":{"review_id":"cr-1qrl"}}
+{"ts":"2026-02-19T06:25:12.031017195Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm","reason":"Security review: No concerns. The change is a safe string transformation (\\n → \\r\\n) on internally-generated status output. No user-controlled input reaches this code path, no new attack surface introduced."}}
+{"ts":"2026-02-19T06:25:57.309540151Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:26:42.795003110Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:27:31.185438066Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:28:21.805926462Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}
+{"ts":"2026-02-19T06:44:55.083041076Z","author":"maw-security","event":"ReviewerVoted","data":{"review_id":"cr-1qrl","vote":"lgtm"}}

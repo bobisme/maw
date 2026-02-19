@@ -1,17 +1,25 @@
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
 
 mod agents;
+mod backend;
+mod config;
 mod doctor;
+mod error;
 mod exec;
 mod format;
 mod init;
-mod jj;
-mod jj_intro;
+mod merge;
+mod merge_state;
+mod model;
 mod push;
+mod refs;
 mod release;
 mod status;
 mod tui;
 mod upgrade;
+mod v2_init;
 mod workspace;
 
 /// Multi-Agent Workspaces coordinator
@@ -77,14 +85,14 @@ enum Commands {
 
     /// Initialize maw in the current repository
     ///
-    /// Ensures jj is initialized and ws/ is gitignored.
+    /// Ensures .manifold/ is initialized and ws/ is gitignored.
     /// Safe to run multiple times.
     Init,
 
     /// Check system requirements and configuration
     ///
-    /// Verifies that required tools (jj) are installed and optional tools
-    /// (botbus, beads) are available. Also checks if you're in a jj repository.
+    /// Verifies that required tools (git) are installed and optional tools
+    /// (botbus, beads) are available.
     Doctor {
         /// Output format: text, json, pretty (auto-detected from TTY)
         #[arg(long)]
@@ -102,14 +110,7 @@ enum Commands {
     #[command(name = "ui")]
     Ui,
 
-    /// Quick jj reference for git users
-    ///
-    /// Shows jj mental model, git command equivalents, and how to push
-    /// to GitHub. Designed for agents encountering jj for the first time.
-    #[command(name = "jj-intro")]
-    JjIntro,
-
-    /// Brief repo and workspace status
+    /// Quick repo and workspace status
     Status(status::StatusArgs),
 
     /// Upgrade v1 repo (.workspaces/) to v2 bare model (ws/)
@@ -167,8 +168,29 @@ enum Commands {
     Release(release::ReleaseArgs),
 }
 
+fn should_emit_migration_notice(repo_root: &Path) -> bool {
+    repo_root.join(".jj").is_dir() && !repo_root.join(".manifold").exists()
+}
+
+fn emit_migration_notice_if_needed() {
+    let Ok(repo_root) = workspace::repo_root() else {
+        return;
+    };
+
+    if !should_emit_migration_notice(&repo_root) {
+        return;
+    }
+
+    eprintln!("WARNING: Detected legacy jj repo (.jj/ present, .manifold/ missing).");
+    eprintln!("IMPORTANT: maw now uses git worktrees instead of jj workspaces.");
+    eprintln!("Next: run `maw init` to bootstrap .manifold/ metadata in this repo.");
+    eprintln!("If migrating from v1 (.workspaces/), run `maw upgrade` first.");
+    eprintln!("Your repository history is preserved.");
+}
+
 fn main() {
     let cli = Cli::parse();
+    emit_migration_notice_if_needed();
 
     let result = match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
@@ -177,7 +199,6 @@ fn main() {
         Commands::Upgrade => upgrade::run(),
         Commands::Doctor { format, json } => doctor::run(format::OutputFormat::with_json_flag(format, json)),
         Commands::Ui => tui::run(),
-        Commands::JjIntro => jj_intro::run(),
         Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
         Commands::Release(args) => release::run(&args),
@@ -190,7 +211,48 @@ fn main() {
         if let Some(exit_err) = e.downcast_ref::<exec::ExitCodeError>() {
             std::process::exit(exit_err.0);
         }
-        eprintln!("Error: {e:?}");
+        eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::should_emit_migration_notice;
+
+    #[test]
+    fn emits_notice_for_jj_only_repo() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".jj")).unwrap();
+
+        assert!(should_emit_migration_notice(dir.path()));
+    }
+
+    #[test]
+    fn does_not_emit_notice_for_manifold_only_repo() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".manifold")).unwrap();
+
+        assert!(!should_emit_migration_notice(dir.path()));
+    }
+
+    #[test]
+    fn does_not_emit_notice_when_both_exist() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".jj")).unwrap();
+        fs::create_dir_all(dir.path().join(".manifold")).unwrap();
+
+        assert!(!should_emit_migration_notice(dir.path()));
+    }
+
+    #[test]
+    fn does_not_emit_notice_when_neither_exists() {
+        let dir = tempdir().unwrap();
+
+        assert!(!should_emit_migration_notice(dir.path()));
     }
 }

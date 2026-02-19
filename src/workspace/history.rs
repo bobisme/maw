@@ -3,9 +3,11 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
+use crate::model::types::WorkspaceId;
 
-use super::{jj_cwd, validate_workspace_name};
+use super::{get_backend, validate_workspace_name};
 
 #[derive(Serialize)]
 pub struct HistoryEnvelope {
@@ -16,21 +18,34 @@ pub struct HistoryEnvelope {
 
 #[derive(Clone, Serialize)]
 pub struct HistoryCommit {
-    pub(crate) change_id: String,
     pub(crate) commit_id: String,
     pub(crate) timestamp: String,
     pub(crate) description: String,
 }
 
-/// Show commit history for a workspace
+/// Show commit history for a workspace.
+///
+/// In the git worktree model, workspace "history" is the git log
+/// from the worktree's HEAD back to the epoch it was created from.
+/// Since workspaces are detached at an epoch and agents don't commit,
+/// this mainly shows the epoch commit and any parent history.
 pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()> {
-    let cwd = jj_cwd()?;
     validate_workspace_name(name)?;
     let format = OutputFormat::resolve(format);
 
-    ensure_workspace_exists(name, &cwd)?;
+    let backend = get_backend()?;
+    let ws_id = WorkspaceId::new(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
-    let commits = fetch_workspace_commits(name, limit, &cwd)?;
+    if !backend.exists(&ws_id) {
+        bail!(
+            "Workspace '{name}' not found.\n  \
+             List workspaces: maw ws list"
+        );
+    }
+
+    let ws_path = backend.workspace_path(&ws_id);
+    let commits = fetch_workspace_commits(&ws_path, limit)?;
 
     if commits.is_empty() {
         print_empty_history(name, format)?;
@@ -41,55 +56,19 @@ pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result
     Ok(())
 }
 
-/// Verify that a workspace exists in jj's tracked workspace list.
-fn ensure_workspace_exists(name: &str, cwd: &std::path::Path) -> Result<()> {
-    let ws_output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let workspace_exists = ws_list
-        .lines()
-        .any(|line| {
-            line.split(':')
-                .next()
-                .is_some_and(|n| n.trim().trim_end_matches('@') == name)
-        });
-
-    if !workspace_exists {
-        bail!(
-            "Workspace '{name}' not found.\n  \
-             List workspaces: maw ws list"
-        );
-    }
-    Ok(())
-}
-
-/// Fetch and parse workspace commits from jj log.
+/// Fetch commits from git log in the workspace directory.
 fn fetch_workspace_commits(
-    name: &str,
+    ws_path: &std::path::Path,
     limit: usize,
-    cwd: &std::path::Path,
 ) -> Result<Vec<HistoryCommit>> {
-    // Use revset to get commits specific to this workspace:
-    // {name}@:: gets all commits reachable from the workspace's working copy
-    // ~::main excludes commits already in main (ancestors of main)
-    let revset = format!("{name}@:: & ~::main");
-
-    let output = Command::new("jj")
+    let output = Command::new("git")
         .args([
             "log",
-            "--no-graph",
-            "-r",
-            &revset,
-            "-T",
-            r#"change_id.short() ++ " " ++ commit_id.short() ++ " " ++ committer.timestamp().format("%Y-%m-%d %H:%M") ++ " " ++ if(description.first_line(), description.first_line(), "(no description)") ++ "\n""#,
+            "--format=%H %ai %s",
             "-n",
             &limit.to_string(),
         ])
-        .current_dir(cwd)
+        .current_dir(ws_path)
         .output()
         .context("Failed to get workspace history")?;
 
@@ -102,26 +81,31 @@ fn fetch_workspace_commits(
     Ok(parse_history_lines(&history))
 }
 
-/// Parse jj log output lines into `HistoryCommit` structs.
+/// Parse git log output lines into `HistoryCommit` structs.
 fn parse_history_lines(raw: &str) -> Vec<HistoryCommit> {
     let mut commits = Vec::new();
     for line in raw.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        // Format: change_id commit_id date time description
-        let parts: Vec<&str> = line.splitn(5, ' ').collect();
-        if parts.len() >= 4 {
-            let change_id = parts[0].to_string();
-            let commit_id = parts[1].to_string();
-            let timestamp = format!("{} {}", parts[2], parts[3]);
-            let description = if parts.len() >= 5 {
-                parts[4].to_string()
+        // Format: <full-oid> <date> <time> <tz> <subject>
+        let parts: Vec<&str> = line.splitn(4, ' ').collect();
+        if parts.len() >= 3 {
+            let commit_id = parts[0][..12].to_string();
+            let timestamp = parts[1].to_string();
+            let description = if parts.len() >= 4 {
+                // Skip timezone, get subject
+                let rest = parts[3..].join(" ");
+                // The timezone is embedded in the date format, subject follows
+                if let Some((_tz, subject)) = rest.split_once(' ') {
+                    subject.to_string()
+                } else {
+                    rest
+                }
             } else {
                 "(no description)".to_string()
             };
             commits.push(HistoryCommit {
-                change_id,
                 commit_id,
                 timestamp,
                 description,
@@ -143,18 +127,15 @@ fn print_empty_history(name: &str, format: OutputFormat) -> Result<()> {
             println!("{}", format.serialize(&envelope)?);
         }
         OutputFormat::Text => {
-            println!("Workspace '{name}' has no commits yet.");
+            println!("Workspace '{name}' has no commits.");
             println!();
-            println!("Next: maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
+            println!("Next: edit files in the workspace, then merge with maw ws merge {name}");
         }
         OutputFormat::Pretty => {
-            println!("Workspace '{name}' has no commits yet.");
+            println!("Workspace '{name}' has no commits.");
             println!();
-            println!("  (Workspace starts with an empty commit for ownership.");
-            println!("   Edit files and describe your changes to create history.)");
-            println!();
-            println!("  Start working:");
-            println!("    maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
+            println!("  Edit files in the workspace directory.");
+            println!("  Changes are captured during merge.");
         }
     }
     Ok(())
@@ -179,23 +160,23 @@ fn print_history(
         OutputFormat::Text => {
             for commit in commits {
                 println!(
-                    "{}  {}  {}  {}",
-                    commit.change_id, commit.commit_id, commit.timestamp, commit.description
+                    "{}  {}  {}",
+                    commit.commit_id, commit.timestamp, commit.description
                 );
             }
             println!();
-            println!("Next: maw exec {name} -- jj diff -r <change_id>");
+            println!("Next: maw exec {name} -- git show <commit-id>");
         }
         OutputFormat::Pretty => {
             println!("=== Commit History: {name} ===");
             println!();
-            println!("  change_id      commit        timestamp         description");
-            println!("  ────────────   ──────────    ────────────────  ────────────────────────");
+            println!("  commit        timestamp         description");
+            println!("  ──────────    ────────────────  ────────────────────────");
 
             for commit in commits {
                 println!(
-                    "  {}   {}    {}  {}",
-                    commit.change_id, commit.commit_id, commit.timestamp, commit.description
+                    "  {}    {}  {}",
+                    commit.commit_id, commit.timestamp, commit.description
                 );
             }
 
@@ -205,10 +186,6 @@ fn print_history(
             if commits.len() >= limit {
                 println!("  (Use --limit/-n to show more)");
             }
-
-            println!();
-            println!("Tip: View full commit details:");
-            println!("  maw exec {name} -- jj show <change-id>");
         }
     }
     Ok(())

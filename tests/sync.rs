@@ -7,6 +7,7 @@ mod common;
 use common::*;
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn stale_workspace_detected() {
     // Create a bare maw repo
     let repo = setup_bare_repo();
@@ -41,6 +42,7 @@ fn stale_workspace_detected() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn auto_sync_on_exec() {
     // Create a bare maw repo
     let repo = setup_bare_repo();
@@ -68,6 +70,7 @@ fn auto_sync_on_exec() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn sync_resolves_divergent_identical() {
     // Create a bare maw repo
     let repo = setup_bare_repo();

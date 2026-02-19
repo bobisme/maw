@@ -12,7 +12,6 @@ use crossterm::terminal;
 
 use crate::doctor;
 use crate::format::OutputFormat;
-use crate::jj::{count_revset, is_sibling_op_error, revset_exists, run_jj, sibling_op_fix_command};
 use crate::workspace::{self, MawConfig};
 use serde::Serialize;
 
@@ -222,11 +221,6 @@ impl StatusSummary {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
 
-        if self.op_fork {
-            let fix = self.op_fork_fix.as_deref().unwrap_or("wait for concurrent agents to finish, then: jj op integrate <id>");
-            let _ = writeln!(out, "[WARN] OP FORK: concurrent operations forked the jj operation graph\n  Fix: {fix}");
-        }
-
         if !self.stray_root_files.is_empty() {
             let n = self.stray_root_files.len();
             let _ = writeln!(
@@ -349,17 +343,6 @@ impl StatusSummary {
     fn render_multiline(&self) -> String {
         let mut out = String::new();
         out.push_str("=== maw status ===\n");
-
-        if self.op_fork {
-            let fix = self.op_fork_fix.as_deref().unwrap_or("wait for concurrent agents to finish, then: jj op integrate <id>");
-            let _ = writeln!(
-                out,
-                "{} {}: {}",
-                colorize_light_red("\u{26a0} OP FORK"),
-                colorize_light_red("concurrent operations forked the jj operation graph"),
-                colorize_light_red(fix),
-            );
-        }
 
         if !self.stray_root_files.is_empty() {
             let n = self.stray_root_files.len();
@@ -568,74 +551,39 @@ fn render(summary: &StatusSummary, opts: &RenderOptions) {
 
 fn collect_status() -> Result<StatusSummary> {
     let root = workspace::repo_root()?;
-    let cwd = workspace::jj_cwd()?;
+    // let cwd = workspace::jj_cwd()?;
 
-    let mut op_fork = false;
-    let mut op_fork_fix: Option<String> = None;
+    let op_fork = false;
+    let op_fork_fix: Option<String> = None;
 
-    let ws_output = run_jj(
-        &["workspace", "list", "--color=never", "--no-pager"],
-        &cwd,
-    )?;
+    let is_stale = false;
+    let workspace_names = Vec::new();
 
-    // If jj workspace list fails due to stale working copy or op fork,
-    // degrade gracefully instead of bailing — especially important for --watch mode.
-    let mut is_stale = false;
-    let workspace_names = if ws_output.status.success() {
-        let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-        non_default_workspace_names(&ws_list)
-    } else {
-        let stderr = String::from_utf8_lossy(&ws_output.stderr);
-        if is_sibling_op_error(&stderr) {
-            op_fork = true;
-            op_fork_fix = sibling_op_fix_command(&stderr);
-            Vec::new()
-        } else if stderr.contains("working copy is stale") {
-            is_stale = true;
-            Vec::new()
-        } else {
-            bail!("jj workspace list failed: {stderr}");
-        }
-    };
-
-    // If op is forked, skip further jj commands — they'll all fail the same way
-    let (changed_files, untracked_files, main_sync) = if op_fork {
-        (Vec::new(), Vec::new(), MainSyncStatus::Unknown("op fork".to_string()))
-    } else {
-        let status_output = run_jj(
-            &["status", "--color=never", "--no-pager"],
-            &cwd,
-        )?;
-
-        // jj status may also fail when stale or op-forked — degrade gracefully
-        let (changed_files, status_is_stale) = if status_output.status.success() {
-            let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-            let status_stderr = String::from_utf8_lossy(&status_output.stderr);
-            let stale = status_stderr.contains("working copy is stale");
-            (parse_jj_changed_files(&status_stdout), stale)
-        } else {
-            let stderr = String::from_utf8_lossy(&status_output.stderr);
-            if is_sibling_op_error(&stderr) {
-                op_fork = true;
-                op_fork_fix = op_fork_fix.or_else(|| sibling_op_fix_command(&stderr));
-                (Vec::new(), false)
-            } else if stderr.contains("working copy is stale") {
-                (Vec::new(), true)
-            } else {
-                bail!("jj status failed: {stderr}");
-            }
-        };
-        is_stale = is_stale || status_is_stale;
-
-        let git_files = git_status_files(&root).unwrap_or_default();
-        let config = MawConfig::load(&root).unwrap_or_default();
-        let sync = main_sync_status(&cwd, config.branch());
-
-        (changed_files, git_files.untracked, sync)
-    };
+    let (changed_files, untracked_files, main_sync) = (Vec::new(), Vec::new(), MainSyncStatus::Unknown("not implemented".to_string()));
 
     let stray_root_files = doctor::stray_root_entries(&root);
 
+    Ok(StatusSummary {
+        workspace_names,
+        changed_files,
+        untracked_files,
+        is_stale,
+        op_fork,
+        op_fork_fix,
+        main_sync,
+        stray_root_files,
+    })
+}
+
+fn _collect_status_legacy() -> Result<StatusSummary> {
+    let root = workspace::repo_root()?;
+    let _cwd = Path::new("."); // dummy
+    let mut op_fork = false;
+    let mut op_fork_fix: Option<String> = None;
+    let mut is_stale = false;
+    let workspace_names = Vec::new();
+    let (changed_files, untracked_files, main_sync) = (Vec::new(), Vec::new(), MainSyncStatus::Unknown("not implemented".to_string()));
+    let stray_root_files = doctor::stray_root_entries(&root);
     Ok(StatusSummary {
         workspace_names,
         changed_files,
@@ -725,45 +673,7 @@ fn git_status_files(root: &Path) -> Result<GitStatusFiles> {
     Ok(files)
 }
 
-fn main_sync_status(root: &Path, branch: &str) -> MainSyncStatus {
-    let main_exists = match revset_exists(root, branch) {
-        Ok(exists) => exists,
-        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
-    };
-
-    if !main_exists {
-        return MainSyncStatus::NoMain;
-    }
-
-    let origin_ref = format!("{branch}@origin");
-    let origin_exists = match revset_exists(root, &origin_ref) {
-        Ok(exists) => exists,
-        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
-    };
-
-    if !origin_exists {
-        return MainSyncStatus::NoRemote;
-    }
-
-    let ahead_revset = format!("{origin_ref}..{branch}");
-    let behind_revset = format!("{branch}..{origin_ref}");
-    let ahead = match count_revset(root, &ahead_revset) {
-        Ok(count) => count,
-        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
-    };
-    let behind = match count_revset(root, &behind_revset) {
-        Ok(count) => count,
-        Err(err) => return MainSyncStatus::Unknown(err.to_string()),
-    };
-
-    match (ahead, behind) {
-        (0, 0) => MainSyncStatus::UpToDate,
-        (a, 0) => MainSyncStatus::Ahead(a),
-        (0, b) => MainSyncStatus::Behind(b),
-        (a, b) => MainSyncStatus::Diverged {
-            ahead: a,
-            behind: b,
-        },
-    }
+fn main_sync_status(_root: &Path, _branch: &str) -> MainSyncStatus {
+    MainSyncStatus::Unknown("not implemented".to_string())
 }
 

@@ -9,6 +9,7 @@ use common::{default_ws, maw_ok, run_jj, setup_with_remote, write_in_ws};
 use tempfile::TempDir;
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn push_after_merge() {
     let (repo, remote) = setup_with_remote();
 
@@ -54,6 +55,7 @@ fn push_after_merge() {
 }
 
 #[test]
+#[ignore = "requires jj push - being replaced by git-native push (bd-1xfd.3)"]
 fn push_advance() {
     let (repo, remote) = setup_with_remote();
 

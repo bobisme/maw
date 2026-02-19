@@ -3,14 +3,18 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+use crate::backend::WorkspaceBackend;
+use crate::model::types::{EpochId, WorkspaceId};
+use crate::refs as manifold_refs;
+
 use super::{
-    ensure_repo_root, jj_cwd, repo_root, workspace_path, workspaces_dir,
+    ensure_repo_root, get_backend, repo_root, workspace_path, workspaces_dir,
     MawConfig, DEFAULT_WORKSPACE,
 };
 
 pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
     let root = ensure_repo_root()?;
-    let cwd = jj_cwd()?;
+    let backend = get_backend()?;
     let path = workspace_path(name)?;
 
     if path.exists() {
@@ -24,99 +28,103 @@ pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
 
     println!("Creating workspace '{name}' at ws/{name} ...");
 
-    // Determine base revision.
-    // In v2 bare model, the default workspace is at ws/default/, not root.
-    // @ can't resolve from root (no workspace there), so fall back to the
-    // configured branch name (e.g. "main").
-    let base = revision.map_or_else(
-        || {
-            let check = Command::new("jj")
-                .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()", "--no-pager"])
-                .current_dir(&cwd)
-                .output();
-            match check {
-                Ok(o) if o.status.success() => "@".to_string(),
-                _ => {
-                    let config = MawConfig::load(&root).unwrap_or_default();
-                    config.branch().to_string()
-                }
-            }
-        },
-        std::string::ToString::to_string,
-    );
+    // Determine base epoch.
+    // Use the provided revision, or fall back to refs/manifold/epoch/current,
+    // or HEAD of the configured branch.
+    let epoch = resolve_epoch(&root, revision)?;
 
-    // Create the workspace
-    let output = Command::new("jj")
-        .args([
-            "workspace",
-            "add",
-            path.to_str().unwrap(),
-            "--name",
-            name,
-            "-r",
-            &base,
-        ])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace add")?;
+    // Create workspace ID
+    let ws_id = WorkspaceId::new(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "jj workspace add failed: {}\n  Check: maw doctor\n  Verify name is not already used: maw ws list",
-            stderr.trim()
-        );
-    }
+    // Create the workspace via backend
+    let info = backend.create(&ws_id, &epoch)
+        .map_err(|e| anyhow::anyhow!(
+            "Failed to create workspace: {e}\n  Check: maw doctor\n  Verify name is not already used: maw ws list"
+        ))?;
 
-    // Create a dedicated commit for this agent to own
-    // This prevents divergent commits when multiple agents work concurrently
-    let new_output = Command::new("jj")
-        .args(["new", "-m", &format!("wip: {name} workspace")])
-        .current_dir(&path)
-        .output()
-        .context("Failed to create agent commit")?;
-
-    if !new_output.status.success() {
-        let stderr = String::from_utf8_lossy(&new_output.stderr);
-        bail!(
-            "Failed to create dedicated commit for workspace: {}\n  The workspace was created but has no dedicated commit.\n  Try: maw exec {name} -- jj new -m \"wip: {name}\"",
-            stderr.trim()
-        );
-    }
-
-    // Get the new commit's change ID for display
-    let change_id = Command::new("jj")
-        .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
-        .current_dir(&path)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    // Get short commit ID for display
+    let short_oid = &epoch.as_str()[..12];
 
     println!();
     println!("Workspace '{name}' ready!");
     println!();
-    println!("  Commit: {change_id} (your dedicated change — jj's stable ID for this commit)");
-    println!("  Path:   {}/", path.display());
+    println!("  Epoch:  {short_oid} (base commit for this workspace)");
+    println!("  Path:   {}/", info.path.display());
     println!();
     println!("  IMPORTANT: All file reads, writes, and edits must use this path.");
     println!("  This is your working directory for ALL operations, not just bash.");
     println!();
     println!("To start working:");
     println!();
-    println!("  # Set your commit message (like git commit --amend -m):");
-    println!("  maw exec {name} -- jj describe -m \"feat: what you're implementing\"");
+    println!("  # Edit files under {}/", info.path.display());
+    println!("  # Changes are detected automatically by the merge engine");
     println!();
-    println!("  # View changes (like git diff / git log):");
-    println!("  maw exec {name} -- jj diff");
-    println!("  maw exec {name} -- jj log");
-    println!();
-    println!("  # Other commands (run inside workspace):");
+    println!("  # Run commands in the workspace:");
     println!("  maw exec {name} -- cargo test");
     println!();
-    println!("Note: jj has no staging area — all edits are tracked automatically.");
-    println!("Your changes are always in your commit. Use 'describe' to set the message.");
+    println!("Note: All edits in the workspace are tracked automatically.");
+    println!("The merge engine captures changes when merging.");
 
     Ok(())
+}
+
+/// Resolve the epoch (base commit) for a new workspace.
+///
+/// Priority:
+/// 1. Explicit revision (from --revision flag)
+/// 2. refs/manifold/epoch/current (if set by `maw init`)
+/// 3. HEAD of the configured branch
+fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<EpochId> {
+    if let Some(rev) = revision {
+        // Resolve the user-specified revision to a full OID
+        let output = Command::new("git")
+            .args(["rev-parse", rev])
+            .current_dir(root)
+            .output()
+            .context("Failed to resolve revision")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Cannot resolve revision '{rev}': {}", stderr.trim());
+        }
+        let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return EpochId::new(&oid)
+            .map_err(|e| anyhow::anyhow!("Invalid commit OID: {e}"));
+    }
+
+    // Try refs/manifold/epoch/current first
+    if let Ok(Some(oid)) = manifold_refs::read_epoch_current(root) {
+        return EpochId::new(oid.as_str())
+            .map_err(|e| anyhow::anyhow!("Invalid epoch OID: {e}"));
+    }
+
+    // Fall back to configured branch HEAD
+    let config = MawConfig::load(root).unwrap_or_default();
+    let branch = config.branch();
+    let output = Command::new("git")
+        .args(["rev-parse", branch])
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("Failed to resolve branch '{branch}'"))?;
+
+    if !output.status.success() {
+        // Last resort: try HEAD
+        let head_output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .context("Failed to resolve HEAD")?;
+        if !head_output.status.success() {
+            bail!("No commits found. Run `maw init` first, or specify --revision.");
+        }
+        let oid = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+        return EpochId::new(&oid)
+            .map_err(|e| anyhow::anyhow!("Invalid HEAD OID: {e}"));
+    }
+
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    EpochId::new(&oid)
+        .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
 }
 
 pub fn destroy(name: &str, confirm: bool) -> Result<()> {
@@ -139,7 +147,7 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
 
     if confirm {
         println!("About to destroy workspace '{name}' at {}", path.display());
-        println!("This will forget the workspace and delete the directory.");
+        println!("This will remove the workspace and delete the directory.");
         println!();
         print!("Continue? [y/N] ");
         io::stdout().flush()?;
@@ -154,26 +162,21 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
 
     println!("Destroying workspace '{name}'...");
 
-    // Forget from jj (ignore errors if already forgotten)
-    let cwd = jj_cwd()?;
-    let _ = Command::new("jj")
-        .args(["workspace", "forget", name])
-        .current_dir(&cwd)
-        .status();
+    let backend = get_backend()?;
+    let ws_id = WorkspaceId::new(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
-    // Remove directory
-    std::fs::remove_dir_all(&path)
-        .with_context(|| format!("Failed to remove {}", path.display()))?;
+    backend.destroy(&ws_id)
+        .map_err(|e| anyhow::anyhow!("Failed to destroy workspace: {e}"))?;
 
     println!("Workspace '{name}' destroyed.");
-    println!("  To undo: maw ws restore {name}");
     Ok(())
 }
 
-/// Attach (reconnect) an orphaned workspace directory to jj's tracking.
-/// An orphaned workspace is one where 'jj workspace forget' was run but
-/// the directory still exists in ws/.
-#[allow(clippy::too_many_lines)] // TODO: refactor (bd-3nzk)
+/// Attach (reconnect) an orphaned workspace directory.
+/// In the git worktree model, this means creating a worktree entry
+/// for an existing directory.
+#[allow(clippy::too_many_lines)]
 pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot attach the default workspace (it's always tracked)");
@@ -181,7 +184,6 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 
     ensure_repo_root()?;
     let root = repo_root()?;
-    let cwd = jj_cwd()?;
     let path = workspace_path(name)?;
 
     // Check if directory exists
@@ -194,90 +196,62 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
         );
     }
 
-    // Check if workspace is already tracked by jj
-    ensure_workspace_not_tracked(name, &cwd)?;
+    // Check if workspace is already tracked by git worktree
+    let backend = get_backend()?;
+    let ws_id = WorkspaceId::new(name)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
-    // Determine the revision to attach to (user-specified or default to configured branch)
-    let config = MawConfig::load(&root)?;
-    let attach_rev = revision.map_or_else(|| config.branch().to_string(), ToString::to_string);
-
-    println!("Attaching workspace '{name}' at revision {attach_rev}...");
-
-    // jj workspace add requires an empty directory, so we need to:
-    // 1. Move existing contents to a temp location
-    // 2. Run jj workspace add
-    // 3. Move contents back (excluding newly-created .jj)
-    let temp_backup = root.join("ws").join(format!(".{name}-attach-backup"));
-
-    backup_workspace_contents(&path, &temp_backup)?;
-
-    // Now the directory should be empty, run jj workspace add
-    let output = Command::new("jj")
-        .args([
-            "workspace",
-            "add",
-            path.to_str().unwrap(),
-            "--name",
-            name,
-            "-r",
-            &attach_rev,
-        ])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run jj workspace add")?;
-
-    if !output.status.success() {
-        // Restore backup on failure
-        restore_backup_best_effort(&temp_backup, &path);
-        let _ = std::fs::remove_dir_all(&temp_backup);
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if backend.exists(&ws_id) {
         bail!(
-            "Failed to attach workspace: {}\n  \
-             Your files have been restored.\n  \
-             Try: maw ws destroy {name} && maw ws create {name}",
-            stderr.trim()
-        );
-    }
-
-    // Move contents back from backup, overwriting jj-populated files
-    restore_backup_overwrite(&temp_backup, &path)?;
-
-    // Clean up backup directory
-    std::fs::remove_dir_all(&temp_backup).ok();
-
-    print_attach_success(name, &path);
-
-    Ok(())
-}
-
-/// Verify that a workspace name is not already tracked by jj.
-fn ensure_workspace_not_tracked(name: &str, cwd: &std::path::Path) -> Result<()> {
-    let ws_output = Command::new("jj")
-        .args(["workspace", "list"])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj workspace list")?;
-
-    let ws_list = String::from_utf8_lossy(&ws_output.stdout);
-    let is_tracked = ws_list.lines().any(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|n| n.trim().trim_end_matches('@') == name)
-    });
-
-    if is_tracked {
-        bail!(
-            "Workspace '{name}' is already tracked by jj.\n  \
-             Use 'maw ws sync' if the workspace is stale.\n  \
+            "Workspace '{name}' is already tracked.\n  \
              Use 'maw ws list' to see all workspaces."
         );
     }
+
+    // Resolve epoch
+    let epoch = resolve_epoch(&root, revision)?;
+
+    println!("Attaching workspace '{name}' at epoch {}...", &epoch.as_str()[..12]);
+
+    // Move existing contents to a temp location
+    let temp_backup = root.join("ws").join(format!(".{name}-attach-backup"));
+    backup_workspace_contents(&path, &temp_backup)?;
+
+    // Create the worktree via backend
+    match backend.create(&ws_id, &epoch) {
+        Ok(_) => {
+            // Move contents back from backup, overwriting git-populated files
+            restore_backup_overwrite(&temp_backup, &path)?;
+            std::fs::remove_dir_all(&temp_backup).ok();
+        }
+        Err(e) => {
+            // Restore backup on failure
+            restore_backup_best_effort(&temp_backup, &path);
+            let _ = std::fs::remove_dir_all(&temp_backup);
+            bail!(
+                "Failed to attach workspace: {e}\n  \
+                 Your files have been restored.\n  \
+                 Try: maw ws destroy {name} && maw ws create {name}"
+            );
+        }
+    }
+
+    println!();
+    println!("Workspace '{name}' attached!");
+    println!();
+    println!("  Path: {}/", path.display());
+    println!();
+    println!("  NOTE: Your local files were preserved. They may differ from the");
+    println!("  epoch's files. Run 'maw exec {name} -- git status' to see differences.");
+    println!();
+    println!("To continue working:");
+    println!("  maw exec {name} -- git status");
+
     Ok(())
 }
 
-/// Move all workspace contents (except `.jj`) into a backup directory,
-/// then remove any stale `.jj` directory so the workspace dir is empty.
+/// Move all workspace contents (except `.git`) into a backup directory,
+/// then remove any stale `.git` file/directory so the workspace dir is empty.
 fn backup_workspace_contents(
     workspace: &std::path::Path,
     backup: &std::path::Path,
@@ -288,7 +262,7 @@ fn backup_workspace_contents(
     let entries: Vec<_> = std::fs::read_dir(workspace)
         .with_context(|| format!("Failed to read directory: {}", workspace.display()))?
         .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_name() != ".jj")
+        .filter(|e| e.file_name() != ".git" && e.file_name() != ".jj")
         .collect();
 
     for entry in &entries {
@@ -302,10 +276,20 @@ fn backup_workspace_contents(
         })?;
     }
 
-    // Remove the .jj directory (stale workspace metadata)
+    // Remove the .git file/directory (stale workspace metadata)
+    let git_entry = workspace.join(".git");
+    if git_entry.exists() {
+        if git_entry.is_dir() {
+            std::fs::remove_dir_all(&git_entry).with_context(|| "Failed to remove stale .git directory")?;
+        } else {
+            std::fs::remove_file(&git_entry).with_context(|| "Failed to remove stale .git file")?;
+        }
+    }
+
+    // Also clean up .jj if present (legacy)
     let jj_dir = workspace.join(".jj");
     if jj_dir.exists() {
-        std::fs::remove_dir_all(&jj_dir).with_context(|| "Failed to remove stale .jj directory")?;
+        std::fs::remove_dir_all(&jj_dir).ok();
     }
 
     Ok(())
@@ -325,7 +309,7 @@ fn restore_backup_best_effort(backup: &std::path::Path, workspace: &std::path::P
     }
 }
 
-/// Restore backup contents into workspace, overwriting jj-populated files.
+/// Restore backup contents into workspace, overwriting git-populated files.
 fn restore_backup_overwrite(
     backup: &std::path::Path,
     workspace: &std::path::Path,
@@ -336,7 +320,7 @@ fn restore_backup_overwrite(
     {
         let src = entry.path();
         let dst = workspace.join(entry.file_name());
-        // If jj created the file, remove it first (jj workspace add populates working copy)
+        // If git created the file, remove it first
         if dst.exists() {
             if dst.is_dir() {
                 std::fs::remove_dir_all(&dst).ok();
@@ -352,35 +336,4 @@ fn restore_backup_overwrite(
         })?;
     }
     Ok(())
-}
-
-/// Print success message and stale-workspace check after attach.
-fn print_attach_success(name: &str, path: &std::path::Path) {
-    println!();
-    println!("Workspace '{name}' attached!");
-    println!();
-    println!("  Path: {}/", path.display());
-    println!();
-    println!("  NOTE: Your local files were preserved. They may differ from the");
-    println!("  revision's files. Run 'maw exec {name} -- jj status' to see differences.");
-    println!();
-
-    // Check if workspace is stale after attaching
-    let status_check = Command::new("jj")
-        .args(["status"])
-        .current_dir(path)
-        .output();
-
-    if let Ok(status) = status_check {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        if stderr.contains("working copy is stale") {
-            println!("NOTE: Workspace is stale (files may be outdated).");
-            println!("  Fix: maw ws sync {name}");
-            println!();
-        }
-    }
-
-    println!("To continue working:");
-    println!("  maw exec {name} -- jj status");
-    println!("  maw exec {name} -- jj log");
 }

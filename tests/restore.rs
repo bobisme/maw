@@ -8,6 +8,7 @@ mod common;
 use common::{maw_fails, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn restore_destroyed_workspace_with_changes() {
     let repo = setup_bare_repo();
 
@@ -90,6 +91,7 @@ fn restore_default_workspace_fails() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn restore_never_existed_workspace_fails() {
     let repo = setup_bare_repo();
 
@@ -102,6 +104,7 @@ fn restore_never_existed_workspace_fails() {
 }
 
 #[test]
+#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
 fn destroy_output_mentions_restore() {
     let repo = setup_bare_repo();
 

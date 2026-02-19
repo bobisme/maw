@@ -1,10 +1,28 @@
-# maw
+# Manifold (next-gen maw)
 
 Project type: cli
 Tools: `beads`, `maw`, `crit`, `botbus`, `botty`
 Reviewer roles: security
 
-<!-- Add project-specific context below: architecture, conventions, key files, etc. -->
+## IMPORTANT: This is the Manifold development repo
+
+This repo is a clone of maw on the **`manifold`** branch. It is where we build the next generation of maw — replacing jj with git worktrees and implementing the Manifold architecture described in `notes/manifold-v2.md`.
+
+**Branch rules:**
+- All work here targets the **`manifold`** branch, NOT `main`.
+- The `.maw.toml` is configured with `branch = "manifold"`. Use `maw push` and `maw ws merge` normally — they target `manifold` automatically.
+- **NEVER push to `main`** from this repo. `main` is maintained in `~/src/maw` for bugfixes to current maw (v0.34.x).
+- **NEVER use raw `jj bookmark set main`** or `jj git push --bookmark main`. Only use `maw push` / `maw push --advance` which respect the `.maw.toml` branch config.
+- **NEVER run `maw release`, `cargo install`, or `just install`** from this repo. Manifold is in active development and not ready for release. Releases happen from `~/src/maw` on the `main` branch only.
+
+**Repo layout:**
+- `~/src/maw` — current maw, ships bugfixes on `main`
+- `~/src/manifold` (this repo) — Manifold development on `manifold` branch
+- Both repos share the same GitHub remote (`bobisme/maw`)
+
+**Design doc:** `notes/manifold-v2.md` — full architecture, data model, implementation phases.
+
+---
 
 This project uses **maw** for workspace management, **jj** (Jujutsu) for version control, and **beads** for issue tracking.
 
@@ -412,7 +430,7 @@ All commands support JSON output with `--format json` for parsing. If a command 
 - Post progress comments during work for crash recovery.
 - **Run checks before requesting review**: `just check` (or your project's build/test command). Fix any failures before proceeding.
 - After finishing a bead, follow [finish.md](.agents/botbox/finish.md). **Workers: do NOT push** — the lead handles merges and pushes.
-- **Install locally** after releasing: `just install`
+- **Install locally** after releasing: `maw exec default -- just install`
 
 ### Identity
 

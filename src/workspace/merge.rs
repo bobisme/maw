@@ -1,273 +1,66 @@
-use std::io::{self, BufRead, Write};
-use std::path::Path;
-use std::process::Command;
+use std::collections::BTreeMap;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use glob::Pattern;
 use serde::Serialize;
 
+use crate::backend::WorkspaceBackend;
+use crate::config::ManifoldConfig;
 use crate::format::OutputFormat;
-use crate::jj::{auto_integrate, is_sibling_op_error, run_jj};
+use crate::merge::build_phase::{BuildPhaseOutput, run_build_phase};
+use crate::merge::commit::{CommitRecovery, CommitResult, run_commit_phase, recover_partial_commit};
+use crate::merge::prepare::run_prepare_phase;
+use crate::merge::resolve::ConflictRecord;
+use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
+use crate::merge_state::{
+    MergePhase, MergeStateFile, run_cleanup_phase,
+};
+use crate::model::types::WorkspaceId;
 
-use super::sync::resolve_divergent_working_copy;
-use super::{jj_cwd, repo_root, MawConfig, DEFAULT_WORKSPACE};
+use super::{get_backend, repo_root, MawConfig, DEFAULT_WORKSPACE};
 
-/// Details about a single conflict region within a file.
-struct ConflictRegion {
-    start_line: usize,
-    end_line: usize,
-}
+// ---------------------------------------------------------------------------
+// Conflict reporting
+// ---------------------------------------------------------------------------
 
-/// Details about conflicts in a single file.
-struct ConflictFileDetail {
-    path: String,
-    regions: Vec<ConflictRegion>,
-    sides: usize, // e.g. 2 for a 2-sided conflict
-}
-
-/// Scan a file on disk for jj conflict markers and return details.
-///
-/// jj uses `<<<<<<<` to open a conflict region and `>>>>>>>` to close it.
-/// The number of sides is determined by counting `%%%%%%%` (diff-style)
-/// and `+++++++` (snapshot-style) sections within each region.
-fn scan_conflict_markers(file_path: &Path) -> Option<ConflictFileDetail> {
-    let file = std::fs::File::open(file_path).ok()?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut regions = Vec::new();
-    let mut current_start: Option<usize> = None;
-    let mut side_count: usize = 0;
-    let mut max_sides: usize = 0;
-
-    for (idx, line) in reader.lines().enumerate() {
-        let line_num = idx + 1; // 1-indexed
-        let Ok(line) = line else { continue }; // skip unreadable lines (binary?)
-
-        if line.starts_with("<<<<<<<") {
-            current_start = Some(line_num);
-            side_count = 1; // the opening marker starts the first side
-        } else if current_start.is_some()
-            && (line.starts_with("%%%%%%%") || line.starts_with("+++++++"))
-        {
-            side_count += 1;
-        } else if line.starts_with(">>>>>>>")
-            && let Some(start) = current_start.take() {
-                regions.push(ConflictRegion {
-                    start_line: start,
-                    end_line: line_num,
-                });
-                if side_count > max_sides {
-                    max_sides = side_count;
-                }
-                side_count = 0;
-            }
-    }
-
-    if regions.is_empty() {
-        return None;
-    }
-
-    Some(ConflictFileDetail {
-        path: String::new(), // caller fills this in
-        regions,
-        sides: max_sides,
-    })
-}
-
-/// Print detailed conflict information with absolute workspace paths and resolution guidance.
-fn print_conflict_guidance(
-    conflicted_files: &[String],
+/// Print detailed conflict information from the merge engine's conflict records.
+fn print_conflict_report(
+    conflicts: &[ConflictRecord],
     default_ws_path: &Path,
     default_ws_name: &str,
 ) {
-    // Scan each conflicted file for marker details
-    let mut details: Vec<ConflictFileDetail> = Vec::new();
-    for file in conflicted_files {
-        let abs_path = default_ws_path.join(file);
-        if let Some(mut detail) = scan_conflict_markers(&abs_path) {
-            detail.path.clone_from(file);
-            details.push(detail);
-        } else {
-            // File exists in conflict state but we couldn't find markers
-            // (could be binary or jj materialized differently)
-            details.push(ConflictFileDetail {
-                path: file.clone(),
-                regions: Vec::new(),
-                sides: 0,
-            });
-        }
-    }
-
-    // Print conflict summary
     println!();
     println!("Conflicts:");
-    for detail in &details {
-        if detail.regions.is_empty() {
-            println!("  {:<40} conflict (could not locate markers)", detail.path);
-        } else {
-            let sides_label = if detail.sides > 0 {
-                format!("{}-sided conflict", detail.sides)
-            } else {
-                "conflict".to_string()
-            };
-            let ranges: Vec<String> = detail
-                .regions
-                .iter()
-                .map(|r| {
-                    if r.start_line == r.end_line {
-                        format!("line {}", r.start_line)
-                    } else {
-                        format!("lines {}-{}", r.start_line, r.end_line)
-                    }
-                })
-                .collect();
-            println!("  {:<40} {} ({})", detail.path, sides_label, ranges.join(", "));
-        }
+    for conflict in conflicts {
+        let reason = format!("{}", conflict.reason);
+        println!("  {:<40} {reason}", conflict.path.display());
     }
 
-    // Print resolution guidance with absolute paths
     let ws_display = default_ws_path.display();
     println!();
     println!("To resolve:");
     println!(
-        "  1. Edit the conflicted files in {ws_display}/"
-    );
-    println!("     Remove conflict markers (<<<<<<< ... >>>>>>>), keeping the correct code");
-    println!(
-        "  2. Verify: maw exec {default_ws_name} -- jj status"
+        "  1. Examine the conflict details above and determine the correct content"
     );
     println!(
-        "     (should show no more 'C' entries for resolved files)"
+        "  2. Edit the conflicted files in {ws_display}/"
     );
     println!(
-        "  3. Describe: maw exec {default_ws_name} -- jj describe -m \"resolve: merge conflicts\""
+        "  3. Re-run the merge: maw ws merge <workspace names>"
     );
-}
-
-/// Check for conflicts after merge and auto-resolve paths matching config patterns.
-/// Returns true if there are remaining (unresolved) conflicts.
-fn auto_resolve_conflicts(
-    cwd: &Path,
-    config: &MawConfig,
-    branch: &str,
-    root: &Path,
-) -> Result<bool> {
-    let default_ws = config.default_workspace();
-    let default_ws_path = root.join("ws").join(default_ws);
-
-    // Check for conflicts
-    let status_output = Command::new("jj")
-        .args(["status"])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to check status")?;
-
-    let status_text = String::from_utf8_lossy(&status_output.stdout);
-    if !status_text.contains("conflict") {
-        return Ok(false);
-    }
-
-    // Get list of conflicted files
-    let conflicted_files = get_conflicted_files(cwd)?;
-    if conflicted_files.is_empty() {
-        return Ok(false);
-    }
-
-    // Check if we have patterns to auto-resolve
-    let patterns = &config.merge.auto_resolve_from_main;
-    if patterns.is_empty() {
-        println!();
-        println!("WARNING: Merge has conflicts that need resolution.");
-        print_conflict_guidance(&conflicted_files, &default_ws_path, default_ws);
-        return Ok(true);
-    }
-
-    // Compile glob patterns
-    let compiled_patterns: Vec<Pattern> = patterns
-        .iter()
-        .filter_map(|p| Pattern::new(p).ok())
-        .collect();
-
-    // Find files to auto-resolve
-    let mut auto_resolved = Vec::new();
-    let mut remaining_conflicts = Vec::new();
-
-    for file in &conflicted_files {
-        let matches_pattern = compiled_patterns.iter().any(|pat| pat.matches(file));
-        if matches_pattern {
-            auto_resolved.push(file.clone());
-        } else {
-            remaining_conflicts.push(file.clone());
-        }
-    }
-
-    // Auto-resolve matching files by restoring from main
-    if !auto_resolved.is_empty() {
-        println!();
-        println!(
-            "Auto-resolving {} file(s) from {branch} (via .maw.toml config):",
-            auto_resolved.len()
-        );
-        for file in &auto_resolved {
-            // Restore file from branch to resolve conflict
-            let restore_output = Command::new("jj")
-                .args(["restore", "--from", branch, file])
-                .current_dir(cwd)
-                .output()
-                .context("Failed to restore file from main")?;
-
-            if restore_output.status.success() {
-                println!("  \u{2713} {file}");
-            } else {
-                let stderr = String::from_utf8_lossy(&restore_output.stderr);
-                println!("  \u{2717} {file}: {}", stderr.trim());
-                remaining_conflicts.push(file.clone());
-            }
-        }
-    }
-
-    // Report remaining conflicts with detailed guidance
-    if !remaining_conflicts.is_empty() {
-        println!();
-        println!(
-            "WARNING: {} conflict(s) remaining that need manual resolution.",
-            remaining_conflicts.len()
-        );
-        print_conflict_guidance(&remaining_conflicts, &default_ws_path, default_ws);
-        return Ok(true);
-    }
-
     println!();
-    println!("All conflicts auto-resolved from main.");
-    Ok(false)
+    println!(
+        "  Conflicts are reported by the merge engine, not as markers in files."
+    );
+    println!(
+        "  Each conflict has a reason (divergent edits, add/add, etc.) to guide resolution."
+    );
+    let _ = default_ws_name; // used in the path above
 }
 
-/// Get list of files with conflicts from jj status output.
-fn get_conflicted_files(cwd: &Path) -> Result<Vec<String>> {
-    // Use jj status to get conflicted files
-    // Format: "C filename" for conflicted files
-    let output = Command::new("jj")
-        .args(["status"])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to run jj status")?;
-
-    let status_text = String::from_utf8_lossy(&output.stdout);
-    let mut files = Vec::new();
-
-    for line in status_text.lines() {
-        // jj status shows conflicts as "C path/to/file"
-        if let Some(stripped) = line.strip_prefix("C ") {
-            files.push(stripped.trim().to_string());
-        }
-    }
-
-    Ok(files)
-}
-
-/// Run a list of hook commands. Returns Ok(()) if all succeed or hooks are empty.
-/// For pre-merge hooks: aborts on first failure.
-/// For post-merge hooks: warns but continues on failure.
+/// Run pre-merge or post-merge hook commands from .maw.toml.
 fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: bool) -> Result<()> {
     if hooks.is_empty() {
         return Ok(());
@@ -278,17 +71,12 @@ fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: b
     for (i, cmd) in hooks.iter().enumerate() {
         println!("  [{}/{}] {cmd}", i + 1, hooks.len());
 
-        // Use shell to execute the command (allows pipes, redirects, etc.)
-        // Security note: These commands come from .maw.toml which is checked into
-        // the repo and controlled by the project owner. This is intentional and
-        // similar to how git hooks, npm scripts, and Makefiles work.
-        let output = Command::new("sh")
+        let output = std::process::Command::new("sh")
             .args(["-c", cmd])
             .current_dir(root)
             .output()
             .with_context(|| format!("Failed to execute hook command: {cmd}"))?;
 
-        // Show output if any
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stdout.trim().is_empty() {
@@ -318,175 +106,9 @@ fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: b
     Ok(())
 }
 
-/// Detect and auto-resolve jj operation forks before merge.
-///
-/// Concurrent agents may have forked the operation log. We detect this by
-/// running a lightweight jj command and checking stderr. If an opfork is
-/// found, we auto-integrate up to 5 times (multiple forks from many agents
-/// may need multiple passes).
-fn preflight_opfork_check(cwd: &Path) -> Result<()> {
-    for attempt in 0..5 {
-        let output = run_jj(&["workspace", "list", "--no-pager"], cwd)?;
-        if output.status.success() {
-            if attempt > 0 {
-                eprintln!("Opfork resolved after {attempt} integration(s).");
-            }
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !is_sibling_op_error(&stderr) {
-            // Not an opfork — let the caller deal with it
-            return Ok(());
-        }
-        if !auto_integrate(&stderr, cwd)? {
-            bail!(
-                "jj operation fork detected but could not extract op ID to auto-integrate.\n  \
-                 Manual fix: run `jj op integrate <id>` from inside ws/default/"
-            );
-        }
-    }
-    bail!(
-        "jj operation fork could not be resolved after 5 integration attempts.\n  \
-         Manual fix: run `jj op log` and `jj op integrate <id>` from inside ws/default/"
-    )
-}
-
-/// Trigger a jj working-copy snapshot in each source workspace.
-///
-/// When workers run non-jj commands via `maw exec` (e.g. `cargo build`,
-/// `br list`), their file edits exist on disk but haven't been snapshotted
-/// into jj's tree. Running `jj status` from within each workspace directory
-/// forces jj to snapshot the working copy, capturing those edits before we
-/// rebase and squash.
-fn snapshot_source_workspaces(workspaces: &[String], root: &Path) -> Result<()> {
-    for ws in workspaces {
-        let ws_path = root.join("ws").join(ws);
-        if !ws_path.exists() {
-            continue;
-        }
-        let output = Command::new("jj")
-            .args(["status", "--no-pager"])
-            .current_dir(&ws_path)
-            .output()
-            .with_context(|| format!("Failed to snapshot workspace {ws}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "WARNING: Failed to snapshot workspace {ws}: {}",
-                stderr.trim()
-            );
-            eprintln!("  On-disk edits in ws/{ws}/ may not be included in the merge.");
-        }
-    }
-    Ok(())
-}
-
-/// Preview what a merge would do without creating any commits.
-/// Shows changes in each workspace and potential conflicts.
-fn preview_merge(workspaces: &[String], cwd: &Path) -> Result<()> {
-    println!("=== Merge Preview (dry run) ===");
-    println!();
-
-    if workspaces.len() == 1 {
-        println!("Would adopt workspace: {}", workspaces[0]);
-    } else {
-        println!("Would merge workspaces: {}", workspaces.join(", "));
-    }
-    println!();
-
-    // Show changes in each workspace using jj diff --stat
-    println!("=== Changes by Workspace ===");
-    println!();
-
-    for ws in workspaces {
-        println!("--- {ws} ---");
-
-        // Get diff stats for the workspace using workspace@ syntax
-        let diff_output = Command::new("jj")
-            .args(["diff", "--stat", "-r", &format!("{ws}@")])
-            .current_dir(cwd)
-            .output()
-            .with_context(|| format!("Failed to get diff for workspace {ws}"))?;
-
-        if !diff_output.status.success() {
-            let stderr = String::from_utf8_lossy(&diff_output.stderr);
-            println!("  Could not get changes: {}", stderr.trim());
-            println!();
-            continue;
-        }
-
-        let diff_text = String::from_utf8_lossy(&diff_output.stdout);
-        if diff_text.trim().is_empty() {
-            println!("  (no changes)");
-        } else {
-            for line in diff_text.lines() {
-                println!("  {line}");
-            }
-        }
-        println!();
-    }
-
-    // Check for potential conflicts using files modified in multiple workspaces
-    if workspaces.len() > 1 {
-        println!("=== Potential Conflicts ===");
-        println!();
-
-        // Get files modified in each workspace
-        let mut workspace_files: Vec<(String, Vec<String>)> = Vec::new();
-
-        for ws in workspaces {
-            let diff_output = Command::new("jj")
-                .args(["diff", "--summary", "-r", &format!("{ws}@")])
-                .current_dir(cwd)
-                .output()
-                .with_context(|| format!("Failed to get diff summary for {ws}"))?;
-
-            if diff_output.status.success() {
-                let diff_text = String::from_utf8_lossy(&diff_output.stdout);
-                let files: Vec<String> = diff_text
-                    .lines()
-                    .filter_map(|line| {
-                        // Format: "M path/to/file" or "A path/to/file"
-                        line.split_whitespace().nth(1).map(std::string::ToString::to_string)
-                    })
-                    .collect();
-                workspace_files.push((ws.clone(), files));
-            }
-        }
-
-        // Find files modified in multiple workspaces
-        let mut conflict_files: Vec<String> = Vec::new();
-        for i in 0..workspace_files.len() {
-            for j in (i + 1)..workspace_files.len() {
-                let (ws1, files1) = &workspace_files[i];
-                let (ws2, files2) = &workspace_files[j];
-                for file in files1 {
-                    if files2.contains(file) && !conflict_files.contains(file) {
-                        conflict_files.push(file.clone());
-                        println!("  ! {file} - modified in both '{ws1}' and '{ws2}'");
-                    }
-                }
-            }
-        }
-
-        if conflict_files.is_empty() {
-            println!("  (no overlapping changes detected)");
-        } else {
-            println!();
-            println!("  Note: jj records conflicts in commits instead of blocking.");
-            println!("  You can proceed and resolve conflicts after merge if needed.");
-        }
-        println!();
-    }
-
-    println!("=== Summary ===");
-    println!();
-    println!("To perform this merge, run without --dry-run:");
-    println!("  maw ws merge {}", workspaces.join(" "));
-    println!();
-
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Merge check (pre-flight)
+// ---------------------------------------------------------------------------
 
 /// Result of a merge check — structured for JSON output.
 #[derive(Debug, Serialize)]
@@ -505,10 +127,10 @@ pub struct CheckWorkspaceInfo {
     pub change_id: String,
 }
 
-/// Pre-flight merge check: rebase onto branch, detect conflicts, then undo.
+/// Pre-flight merge check using the new merge engine.
 ///
-/// Returns a `CheckResult` with structured info. Exit code 0 = ready,
-/// non-zero = blocked (conflicts or errors).
+/// Runs PREPARE + BUILD without COMMIT to detect conflicts.
+/// Returns a `CheckResult` with structured info.
 pub fn check_merge(
     workspaces: &[String],
     format: OutputFormat,
@@ -518,10 +140,9 @@ pub fn check_merge(
     }
 
     let root = repo_root()?;
-    let cwd = jj_cwd()?;
-    let config = MawConfig::load(&root)?;
-    let default_ws = config.default_workspace();
-    let branch = config.branch();
+    let maw_config = MawConfig::load(&root)?;
+    let default_ws = maw_config.default_workspace();
+    let backend = get_backend()?;
 
     // Reject merging the default workspace
     if workspaces.iter().any(|ws| ws == default_ws) {
@@ -534,124 +155,99 @@ pub fn check_merge(
     let stale_workspaces = super::check_stale_workspaces()?;
     let is_stale = workspaces.iter().any(|ws| stale_workspaces.contains(ws));
 
-    // Gather workspace info (use first workspace as primary)
-    let ws_infos: Vec<CheckWorkspaceInfo> = workspaces
-        .iter()
-        .map(|ws| {
-            let change_id = get_change_id(&format!("{ws}@"), &cwd).unwrap_or_default();
-            CheckWorkspaceInfo {
-                name: ws.clone(),
-                change_id,
-            }
-        })
-        .collect();
+    let primary_ws = &workspaces[0];
+    let ws_info = CheckWorkspaceInfo {
+        name: primary_ws.clone(),
+        change_id: String::new(), // Not available without jj
+    };
 
-    // Get description from first workspace
-    let description = get_commit_description(&format!("{}@", workspaces[0]), &cwd)
-        .unwrap_or_default();
-
-    // If stale, report without attempting rebase
     if is_stale {
         let result = CheckResult {
             ready: false,
             conflicts: Vec::new(),
             stale: true,
-            workspace: ws_infos.into_iter().next().unwrap(),
-            description,
+            workspace: ws_info,
+            description: String::new(),
         };
         return output_check_result(&result, format);
     }
 
-    // Do the trial rebase to detect conflicts
-    let revisions: Vec<String> = workspaces.iter().map(|ws| format!("{ws}@")).collect();
-    let revset = revisions.join(" | ");
+    // Try a BUILD phase to detect conflicts (don't COMMIT)
+    let manifold_dir = root.join(".manifold");
+    let check_dir = manifold_dir.join("check-tmp");
+    let _ = std::fs::remove_dir_all(&check_dir);
+    std::fs::create_dir_all(&check_dir)
+        .context("Failed to create temp dir for merge check")?;
 
-    let rebase_output = Command::new("jj")
-        .args(["rebase", "-r", &revset, "-d", branch])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to run trial rebase")?;
+    let sources: Vec<WorkspaceId> = workspaces
+        .iter()
+        .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("{e}")))
+        .collect::<Result<Vec<_>>>()?;
 
-    if !rebase_output.status.success() {
-        // Rebase itself failed — undo and report
-        let _ = Command::new("jj")
-            .args(["op", "undo"])
-            .current_dir(&cwd)
-            .output();
-
-        let stderr = String::from_utf8_lossy(&rebase_output.stderr);
-        let result = CheckResult {
-            ready: false,
-            conflicts: vec![format!("rebase failed: {}", stderr.trim())],
-            stale: false,
-            workspace: ws_infos.into_iter().next().unwrap(),
-            description,
-        };
-        return output_check_result(&result, format);
+    let mut workspace_dirs = BTreeMap::new();
+    for ws_id in &sources {
+        workspace_dirs.insert(ws_id.clone(), backend.workspace_path(ws_id));
     }
 
-    // Check for conflicts after rebase
-    let conflicts = get_conflicted_files(&cwd)?;
+    // Run PREPARE in the temp dir
+    let prepare_result = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
 
-    // Undo the trial rebase
-    let undo_output = Command::new("jj")
-        .args(["op", "undo"])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to undo trial rebase")?;
+    // Clean up temp dir
+    let _ = std::fs::remove_dir_all(&check_dir);
 
-    if !undo_output.status.success() {
-        let stderr = String::from_utf8_lossy(&undo_output.stderr);
-        bail!(
-            "Failed to undo trial rebase — repo may be in unexpected state: {}\n  \
-             Run: maw exec default -- jj op log",
-            stderr.trim()
-        );
-    }
+    match prepare_result {
+        Ok(_frozen) => {
+            // PREPARE succeeded, now try BUILD
+            // Re-create dir for build
+            std::fs::create_dir_all(&check_dir)
+                .context("Failed to create temp dir for build check")?;
+            let _ = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
+            let build_result = run_build_phase(&root, &check_dir, &backend);
+            let _ = std::fs::remove_dir_all(&check_dir);
 
-    let ready = conflicts.is_empty();
-    let result = CheckResult {
-        ready,
-        conflicts,
-        stale: false,
-        workspace: ws_infos.into_iter().next().unwrap(),
-        description,
-    };
-    output_check_result(&result, format)
-}
-
-/// Get the change ID for a revision.
-fn get_change_id(rev: &str, cwd: &Path) -> Option<String> {
-    let output = Command::new("jj")
-        .args(["log", "-r", rev, "--no-graph", "-T", "change_id.short()", "--color=never", "--no-pager"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if id.is_empty() { None } else { Some(id) }
-    } else {
-        None
-    }
-}
-
-/// Get the commit description for a revision.
-fn get_commit_description(rev: &str, cwd: &Path) -> Option<String> {
-    let output = Command::new("jj")
-        .args(["log", "-r", rev, "--no-graph", "-T", "description", "--color=never", "--no-pager"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let desc = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Some(desc)
-    } else {
-        None
+            match build_result {
+                Ok(output) => {
+                    let conflicts: Vec<String> = output
+                        .conflicts
+                        .iter()
+                        .map(|c| format!("{}: {}", c.path.display(), c.reason))
+                        .collect();
+                    let ready = conflicts.is_empty();
+                    let result = CheckResult {
+                        ready,
+                        conflicts,
+                        stale: false,
+                        workspace: ws_info,
+                        description: String::new(),
+                    };
+                    output_check_result(&result, format)
+                }
+                Err(e) => {
+                    let result = CheckResult {
+                        ready: false,
+                        conflicts: vec![format!("build failed: {e}")],
+                        stale: false,
+                        workspace: ws_info,
+                        description: String::new(),
+                    };
+                    output_check_result(&result, format)
+                }
+            }
+        }
+        Err(e) => {
+            let result = CheckResult {
+                ready: false,
+                conflicts: vec![format!("prepare failed: {e}")],
+                stale: false,
+                workspace: ws_info,
+                description: String::new(),
+            };
+            output_check_result(&result, format)
+        }
     }
 }
 
 /// Output the check result in the requested format.
-/// Returns `Ok(())` if ready, `Err` if not (to get non-zero exit code).
 fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => {
@@ -660,7 +256,7 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
         _ => {
             if result.ready {
                 println!("[OK] Ready to merge");
-                println!("  Workspace: {} ({})", result.workspace.name, result.workspace.change_id);
+                println!("  Workspace: {}", result.workspace.name);
                 if !result.description.is_empty() {
                     println!("  Description: {}", result.description);
                 }
@@ -685,6 +281,124 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
     }
 }
 
+// ---------------------------------------------------------------------------
+// Preview merge
+// ---------------------------------------------------------------------------
+
+/// Preview what a merge would do without creating any commits.
+fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
+    let backend = get_backend()?;
+
+    println!("=== Merge Preview (dry run) ===");
+    println!();
+
+    if workspaces.len() == 1 {
+        println!("Would adopt workspace: {}", workspaces[0]);
+    } else {
+        println!("Would merge workspaces: {}", workspaces.join(", "));
+    }
+    println!();
+
+    // Show changes in each workspace using the backend snapshot
+    println!("=== Changes by Workspace ===");
+    println!();
+
+    for ws_name in workspaces {
+        println!("--- {ws_name} ---");
+
+        let ws_id = match WorkspaceId::new(ws_name) {
+            Ok(id) => id,
+            Err(e) => {
+                println!("  Invalid workspace name: {e}");
+                println!();
+                continue;
+            }
+        };
+
+        match backend.snapshot(&ws_id) {
+            Ok(snapshot) => {
+                if snapshot.is_empty() {
+                    println!("  (no changes)");
+                } else {
+                    for path in &snapshot.added {
+                        println!("  A {}", path.display());
+                    }
+                    for path in &snapshot.modified {
+                        println!("  M {}", path.display());
+                    }
+                    for path in &snapshot.deleted {
+                        println!("  D {}", path.display());
+                    }
+                    println!("  {} file(s) changed", snapshot.change_count());
+                }
+            }
+            Err(e) => {
+                println!("  Could not get changes: {e}");
+            }
+        }
+        println!();
+    }
+
+    // Check for potential conflicts (files modified in multiple workspaces)
+    if workspaces.len() > 1 {
+        println!("=== Potential Conflicts ===");
+        println!();
+
+        let mut workspace_files: Vec<(String, Vec<PathBuf>)> = Vec::new();
+
+        for ws_name in workspaces {
+            if let Ok(ws_id) = WorkspaceId::new(ws_name) {
+                if let Ok(snapshot) = backend.snapshot(&ws_id) {
+                    let files: Vec<PathBuf> = snapshot
+                        .all_changed()
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    workspace_files.push((ws_name.clone(), files));
+                }
+            }
+        }
+
+        let mut conflict_files: Vec<PathBuf> = Vec::new();
+        for i in 0..workspace_files.len() {
+            for j in (i + 1)..workspace_files.len() {
+                let (ws1, files1) = &workspace_files[i];
+                let (ws2, files2) = &workspace_files[j];
+                for file in files1 {
+                    if files2.contains(file) && !conflict_files.contains(file) {
+                        conflict_files.push(file.clone());
+                        println!(
+                            "  ! {} - modified in both '{ws1}' and '{ws2}'",
+                            file.display()
+                        );
+                    }
+                }
+            }
+        }
+
+        if conflict_files.is_empty() {
+            println!("  (no overlapping changes detected)");
+        } else {
+            println!();
+            println!("  Note: Overlapping files will be resolved via diff3 where possible.");
+        }
+        println!();
+    }
+
+    println!("=== Summary ===");
+    println!();
+    println!("To perform this merge, run without --dry-run:");
+    println!("  maw ws merge {}", workspaces.join(" "));
+    println!();
+
+    let _ = root; // used implicitly via get_backend()
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Merge options
+// ---------------------------------------------------------------------------
+
 /// Options controlling merge behavior.
 pub struct MergeOptions<'a> {
     /// Destroy workspaces after a successful merge.
@@ -697,6 +411,13 @@ pub struct MergeOptions<'a> {
     pub dry_run: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Main merge function
+// ---------------------------------------------------------------------------
+
+/// Run the merge state machine: PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP.
+///
+/// This replaces the old jj-based merge with the Manifold merge engine.
 pub fn merge(
     workspaces: &[String],
     opts: &MergeOptions<'_>,
@@ -715,14 +436,11 @@ pub fn merge(
     }
 
     let root = repo_root()?;
-    let cwd = jj_cwd()?;
+    let maw_config = MawConfig::load(&root)?;
+    let default_ws = maw_config.default_workspace();
+    let branch = maw_config.branch();
 
-    // Load config early for hooks, auto-resolve settings, and branch name
-    let config = MawConfig::load(&root)?;
-    let default_ws = config.default_workspace();
-    let branch = config.branch();
-
-    // Reject merging the default workspace -- it's the merge target, not a source.
+    // Reject merging the default workspace
     if ws_to_merge.iter().any(|ws| ws == default_ws) {
         bail!(
             "Cannot merge the default workspace \u{2014} it is the merge target, not a source.\n\
@@ -733,15 +451,10 @@ pub fn merge(
     }
 
     if dry_run {
-        return preview_merge(&ws_to_merge, &cwd);
+        return preview_merge(&ws_to_merge, &root);
     }
 
-    // Pre-flight: detect and auto-integrate opforks before merge.
-    // Concurrent agents may have forked the jj operation graph.
-    preflight_opfork_check(&cwd)?;
-
-    run_hooks(&config.hooks.pre_merge, "pre-merge", &root, true)?;
-    super::sync::sync_stale_workspaces_for_merge(&ws_to_merge, &root)?;
+    run_hooks(&maw_config.hooks.pre_merge, "pre-merge", &root, true)?;
 
     if ws_to_merge.len() == 1 {
         println!("Adopting workspace: {}", ws_to_merge[0]);
@@ -750,65 +463,301 @@ pub fn merge(
     }
     println!();
 
-    // Snapshot source workspaces so on-disk edits are captured into jj's tree.
-    // Workers using maw exec with non-jj commands won't have triggered a
-    // snapshot, so their on-disk changes would be silently lost during squash.
-    snapshot_source_workspaces(&ws_to_merge, &root)?;
-
-    let revisions: Vec<String> = ws_to_merge.iter().map(|ws| format!("{ws}@")).collect();
-    let pre_rebase_parent_ids = record_parent_commit_ids(&revisions, &cwd);
-
-    let msg = message.map_or_else(
-        || {
-            if ws_to_merge.len() == 1 {
-                format!("merge: adopt work from {}", ws_to_merge[0])
-            } else {
-                format!("merge: combine work from {}", ws_to_merge.join(", "))
-            }
-        },
-        ToString::to_string,
-    );
-
-    // Step 1: Rebase all workspace commits onto main
-    rebase_workspaces_onto_branch(&revisions, branch, &cwd)?;
-
-    // Step 2: Apply message and squash if needed
-    squash_or_describe(&ws_to_merge, message, &msg, &cwd)?;
-
-    let final_rev = format!("{}@", ws_to_merge[0]);
-
-    // Step 3: Abandon orphaned scaffolding commits
-    abandon_scaffolding_commits(&pre_rebase_parent_ids, branch, &cwd);
-
-    // Step 4: Rebase default workspace onto merge result
+    // Set up paths
+    let manifold_dir = root.join(".manifold");
     let default_ws_path = root.join("ws").join(default_ws);
-    if default_ws_path.exists() {
-        rebase_default_workspace(&default_ws_path, branch, default_ws, &final_rev)?;
+    let backend = get_backend()?;
+
+    // Convert workspace names to WorkspaceIds
+    let sources: Vec<WorkspaceId> = ws_to_merge
+        .iter()
+        .map(|ws| {
+            WorkspaceId::new(ws)
+                .map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Build workspace_dirs map for PREPARE
+    let mut workspace_dirs = BTreeMap::new();
+    for ws_id in &sources {
+        let ws_path = backend.workspace_path(ws_id);
+        if !ws_path.exists() {
+            bail!(
+                "Workspace '{}' does not exist at {}\n  \
+                 Check available workspaces: maw ws list",
+                ws_id,
+                ws_path.display()
+            );
+        }
+        workspace_dirs.insert(ws_id.clone(), ws_path);
     }
 
-    println!("Merged to {branch}: {msg}");
-    let has_conflicts = auto_resolve_conflicts(&cwd, &config, branch, &root)?;
-
-    // Step 5: Move branch bookmark (only if no conflicts)
-    if !has_conflicts {
-        advance_branch_bookmark(branch, &final_rev, &cwd);
-    }
-
-    // Optionally destroy workspaces
-    if destroy_after {
-        handle_post_merge_destroy(&ws_to_merge, default_ws, has_conflicts, confirm, &root)?;
-    }
-
-    run_hooks(&config.hooks.post_merge, "post-merge", &root, false)?;
-
-    if has_conflicts {
-        // Print guidance but return error for non-zero exit code
-        bail!(
-            "Merge completed with conflicts. Resolve them, then:\n  \
-             maw push"
+    // -----------------------------------------------------------------------
+    // Phase 1: PREPARE — freeze inputs
+    // -----------------------------------------------------------------------
+    println!("PREPARE: Freezing merge inputs...");
+    let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "  Epoch: {}",
+        &frozen.epoch.as_str()[..12]
+    );
+    for (ws_id, head) in &frozen.heads {
+        println!(
+            "  {}: {}",
+            ws_id,
+            &head.as_str()[..12]
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 2: BUILD — collect, partition, resolve, build candidate
+    // -----------------------------------------------------------------------
+    println!();
+    println!("BUILD: Running merge engine...");
+    let build_output = match run_build_phase(&root, &manifold_dir, &backend) {
+        Ok(output) => output,
+        Err(e) => {
+            // Abort: clean up merge-state
+            abort_merge(&manifold_dir, &format!("BUILD failed: {e}"))?;
+            bail!("Merge BUILD phase failed: {e}");
+        }
+    };
+
+    println!(
+        "  {} unique path(s), {} shared path(s), {} resolved",
+        build_output.unique_count, build_output.shared_count, build_output.resolved_count
+    );
+    println!(
+        "  Candidate: {}",
+        &build_output.candidate.as_str()[..12]
+    );
+
+    // Check for unresolved conflicts
+    if !build_output.conflicts.is_empty() {
+        println!(
+            "  {} unresolved conflict(s)",
+            build_output.conflicts.len()
+        );
+        print_conflict_report(&build_output.conflicts, &default_ws_path, default_ws);
+
+        // Abort the merge — conflicts must be resolved first
+        abort_merge(&manifold_dir, "unresolved conflicts")?;
+
+        if destroy_after {
+            println!();
+            println!("NOT destroying workspaces due to conflicts.");
+            println!("Resolve conflicts in the source workspaces, then retry:");
+            println!("  maw ws merge {}", ws_to_merge.join(" "));
+        }
+
+        bail!(
+            "Merge has {} unresolved conflict(s). Resolve them and retry.",
+            build_output.conflicts.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: VALIDATE — run post-merge validation commands
+    // -----------------------------------------------------------------------
+    let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let validation_config = &manifold_config.merge.validation;
+
+    if validation_config.has_commands() {
+        println!();
+        println!("VALIDATE: Running post-merge validation...");
+
+        // Advance merge-state to Validate phase
+        advance_merge_state(&manifold_dir, MergePhase::Validate)?;
+
+        let validate_outcome = match run_validate_phase(
+            &root,
+            &build_output.candidate,
+            validation_config,
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                abort_merge(&manifold_dir, &format!("VALIDATE error: {e}"))?;
+                bail!("Merge VALIDATE phase failed: {e}");
+            }
+        };
+
+        // Write validation artifact for diagnostics
+        if let Some(result) = validate_outcome.result() {
+            let merge_id = &build_output.candidate.as_str()[..12];
+            let _ = write_validation_artifact(&manifold_dir, merge_id, result);
+        }
+
+        // Record validation result in merge-state
+        if let Some(result) = validate_outcome.result() {
+            record_validation_result(&manifold_dir, result)?;
+        }
+
+        match &validate_outcome {
+            ValidateOutcome::Skipped => {
+                println!("  Validation skipped (no commands configured).");
+            }
+            ValidateOutcome::Passed(r) => {
+                println!(
+                    "  Validation passed ({}ms).",
+                    r.duration_ms
+                );
+            }
+            ValidateOutcome::PassedWithWarnings(r) => {
+                println!(
+                    "  WARNING: Validation failed ({}ms) but policy is 'warn' — proceeding.",
+                    r.duration_ms
+                );
+                if !r.stderr.is_empty() {
+                    for line in r.stderr.lines().take(5) {
+                        eprintln!("    {line}");
+                    }
+                }
+            }
+            ValidateOutcome::Blocked(r) => {
+                println!(
+                    "  Validation FAILED ({}ms) — merge blocked by policy.",
+                    r.duration_ms
+                );
+                if !r.stderr.is_empty() {
+                    for line in r.stderr.lines().take(10) {
+                        eprintln!("    {line}");
+                    }
+                }
+                abort_merge(&manifold_dir, "validation failed (policy: block)")?;
+                bail!(
+                    "Merge validation failed. Fix issues and retry.\n  \
+                     Diagnostics: .manifold/artifacts/merge/{}/validation.json",
+                    &build_output.candidate.as_str()[..12]
+                );
+            }
+            ValidateOutcome::Quarantine(r) => {
+                println!(
+                    "  WARNING: Validation failed ({}ms) — quarantine created, proceeding.",
+                    r.duration_ms
+                );
+            }
+            ValidateOutcome::BlockedAndQuarantine(r) => {
+                println!(
+                    "  Validation FAILED ({}ms) — merge blocked, quarantine created.",
+                    r.duration_ms
+                );
+                abort_merge(&manifold_dir, "validation failed (policy: block+quarantine)")?;
+                bail!(
+                    "Merge validation failed. Fix issues and retry.\n  \
+                     Diagnostics: .manifold/artifacts/merge/{}/validation.json",
+                    &build_output.candidate.as_str()[..12]
+                );
+            }
+        }
+
+        if !validate_outcome.may_proceed() {
+            // Already bailed above, but just in case
+            bail!("Merge validation blocked the merge.");
+        }
+    } else {
+        println!();
+        println!("VALIDATE: No validation commands configured — skipping.");
+        advance_merge_state(&manifold_dir, MergePhase::Validate)?;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: COMMIT — atomically update refs (point of no return)
+    // -----------------------------------------------------------------------
+    println!();
+    println!("COMMIT: Advancing epoch...");
+
+    // Advance merge-state to Commit phase
+    advance_merge_state(&manifold_dir, MergePhase::Commit)?;
+
+    let epoch_before_oid = frozen.epoch.oid().clone();
+    match run_commit_phase(&root, branch, &epoch_before_oid, &build_output.candidate) {
+        Ok(CommitResult::Committed) => {
+            println!(
+                "  Epoch advanced: {} → {}",
+                &epoch_before_oid.as_str()[..12],
+                &build_output.candidate.as_str()[..12]
+            );
+            println!("  Branch '{branch}' updated.");
+        }
+        Err(crate::merge::commit::CommitError::PartialCommit) => {
+            // Epoch ref moved but branch ref didn't — attempt recovery
+            println!("  WARNING: Partial commit — attempting recovery...");
+            match recover_partial_commit(&root, branch, &epoch_before_oid, &build_output.candidate) {
+                Ok(CommitRecovery::FinalizedMainRef) => {
+                    println!("  Recovery succeeded: branch ref finalized.");
+                }
+                Ok(CommitRecovery::AlreadyCommitted) => {
+                    println!("  Recovery: both refs already updated.");
+                }
+                Ok(CommitRecovery::NotCommitted) => {
+                    abort_merge(&manifold_dir, "commit phase failed: neither ref updated")?;
+                    bail!("Merge COMMIT phase failed: could not update refs.");
+                }
+                Err(e) => {
+                    bail!(
+                        "Merge COMMIT phase partially applied and recovery failed: {e}\n  \
+                         Manual recovery: check refs/manifold/epoch/current and refs/heads/{branch}"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            abort_merge(&manifold_dir, &format!("COMMIT failed: {e}"))?;
+            bail!("Merge COMMIT phase failed: {e}");
+        }
+    }
+
+    // Record epoch_after in merge-state
+    record_epoch_after(&manifold_dir, &build_output.candidate)?;
+
+    // -----------------------------------------------------------------------
+    // Phase 5: CLEANUP — destroy workspaces (if requested), remove merge-state
+    // -----------------------------------------------------------------------
+    println!();
+    println!("CLEANUP...");
+
+    // Advance merge-state to Cleanup phase
+    advance_merge_state(&manifold_dir, MergePhase::Cleanup)?;
+
+    // Update the default workspace to point to the new epoch
+    if default_ws_path.exists() {
+        update_default_workspace(&default_ws_path, &build_output.candidate)?;
+    }
+
+    // Destroy source workspaces if requested
+    if destroy_after {
+        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend)?;
+    }
+
+    // Remove merge-state file
+    let merge_state_path = MergeStateFile::default_path(&manifold_dir);
+    let state = MergeStateFile::read(&merge_state_path).unwrap_or_else(|_| {
+        MergeStateFile::new(sources, frozen.epoch, now_secs())
+    });
+    run_cleanup_phase(&state, &merge_state_path, false, |_ws| Ok(()))
+        .map_err(|e| anyhow::anyhow!("cleanup failed: {e}"))?;
+
+    // Also clean up the commit-phase state file if present
+    let commit_state_path = root.join(".manifold").join("merge-state");
+    if commit_state_path.exists() {
+        let _ = std::fs::remove_file(&commit_state_path);
+    }
+
+    run_hooks(&maw_config.hooks.post_merge, "post-merge", &root, false)?;
+
+    // Generate the merge message for display
+    let msg = message.unwrap_or_else(|| {
+        if ws_to_merge.len() == 1 {
+            "adopt work"
+        } else {
+            "combine work"
+        }
+    });
+
+    println!();
+    println!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
     println!();
     println!("Next: push to remote:");
     println!("  maw push");
@@ -816,265 +765,121 @@ pub fn merge(
     Ok(())
 }
 
-/// Record parent commit IDs before rebase so we can abandon only these
-/// specific scaffolding commits afterward.
-fn record_parent_commit_ids(revisions: &[String], cwd: &Path) -> Vec<String> {
-    let parents_revset = revisions
-        .iter()
-        .map(|r| format!("parents({r})"))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let parents_output = Command::new("jj")
-        .args(["log", "-r", &parents_revset, "--no-graph", "-T", "commit_id ++ \"\\n\""])
-        .current_dir(cwd)
-        .output();
-    parents_output
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
+// ---------------------------------------------------------------------------
+// Helpers: merge-state management
+// ---------------------------------------------------------------------------
+
+/// Advance the merge-state file to the next phase.
+fn advance_merge_state(manifold_dir: &Path, next_phase: MergePhase) -> Result<()> {
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    let mut state = MergeStateFile::read(&state_path)
+        .map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    state
+        .advance(next_phase, now_secs())
+        .map_err(|e| anyhow::anyhow!("advance merge-state: {e}"))?;
+    state
+        .write_atomic(&state_path)
+        .map_err(|e| anyhow::anyhow!("write merge-state: {e}"))?;
+    Ok(())
 }
 
-/// Rebase workspace commits onto the target branch for linear history.
-fn rebase_workspaces_onto_branch(
-    revisions: &[String],
-    branch: &str,
-    cwd: &Path,
+/// Record the validation result in the merge-state file.
+fn record_validation_result(
+    manifold_dir: &Path,
+    result: &crate::merge_state::ValidationResult,
 ) -> Result<()> {
-    let revset = revisions.join(" | ");
-    let rebase_output = Command::new("jj")
-        .args(["rebase", "-r", &revset, "-d", branch])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to rebase workspace commits")?;
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    let mut state = MergeStateFile::read(&state_path)
+        .map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    state.validation_result = Some(result.clone());
+    state.updated_at = now_secs();
+    state
+        .write_atomic(&state_path)
+        .map_err(|e| anyhow::anyhow!("write merge-state: {e}"))?;
+    Ok(())
+}
 
-    if !rebase_output.status.success() {
-        let stderr = String::from_utf8_lossy(&rebase_output.stderr);
-        bail!(
-            "Failed to rebase workspace commits onto {branch}: {}\n  Verify workspaces exist: maw ws list",
+/// Record the epoch_after in the merge-state file.
+fn record_epoch_after(manifold_dir: &Path, candidate: &crate::model::types::GitOid) -> Result<()> {
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    let mut state = MergeStateFile::read(&state_path)
+        .map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    state.epoch_after = Some(
+        crate::model::types::EpochId::new(candidate.as_str())
+            .map_err(|e| anyhow::anyhow!("invalid candidate OID: {e}"))?
+    );
+    state.updated_at = now_secs();
+    state
+        .write_atomic(&state_path)
+        .map_err(|e| anyhow::anyhow!("write merge-state: {e}"))?;
+    Ok(())
+}
+
+/// Abort the merge by writing abort reason and removing merge-state.
+fn abort_merge(manifold_dir: &Path, reason: &str) -> Result<()> {
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    if state_path.exists() {
+        if let Ok(mut state) = MergeStateFile::read(&state_path) {
+            let _ = state.abort(reason, now_secs());
+            let _ = state.write_atomic(&state_path);
+        }
+        // Clean up the merge-state file
+        let _ = std::fs::remove_file(&state_path);
+    }
+    Ok(())
+}
+
+/// Get current Unix timestamp in seconds.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: workspace management
+// ---------------------------------------------------------------------------
+
+/// Update the default workspace to check out the new epoch commit.
+///
+/// Uses `git checkout` to update the default workspace's working copy
+/// to the new epoch commit.
+fn update_default_workspace(
+    default_ws_path: &Path,
+    new_epoch: &crate::model::types::GitOid,
+) -> Result<()> {
+    // Reset the worktree to the new epoch
+    let output = std::process::Command::new("git")
+        .args(["checkout", "--force", new_epoch.as_str()])
+        .current_dir(default_ws_path)
+        .output()
+        .context("Failed to update default workspace")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "WARNING: Failed to update default workspace to new epoch: {}",
             stderr.trim()
         );
-    }
-    Ok(())
-}
-
-/// Squash multiple workspaces into one commit, or describe a single workspace.
-fn squash_or_describe(
-    ws_to_merge: &[String],
-    user_message: Option<&str>,
-    msg: &str,
-    cwd: &Path,
-) -> Result<()> {
-    if ws_to_merge.len() > 1 {
-        let first_ws = format!("{}@", ws_to_merge[0]);
-        let others: Vec<String> = ws_to_merge[1..].iter().map(|ws| format!("{ws}@")).collect();
-        let from_revset = others.join(" | ");
-
-        let squash_output = Command::new("jj")
-            .args(["squash", "--from", &from_revset, "--into", &first_ws, "-m", msg])
-            .current_dir(cwd)
-            .output()
-            .context("Failed to squash workspace commits")?;
-
-        if !squash_output.status.success() {
-            let stderr = String::from_utf8_lossy(&squash_output.stderr);
-            bail!("Failed to squash workspace commits: {}", stderr.trim());
-        }
-    } else if user_message.is_some() {
-        let ws_rev = format!("{}@", ws_to_merge[0]);
-        let describe_output = Command::new("jj")
-            .args(["describe", "-r", &ws_rev, "-m", msg])
-            .current_dir(cwd)
-            .output()
-            .context("Failed to describe workspace commit")?;
-
-        if !describe_output.status.success() {
-            let stderr = String::from_utf8_lossy(&describe_output.stderr);
-            eprintln!("Warning: Failed to apply --message: {}", stderr.trim());
-        }
-    }
-    Ok(())
-}
-
-/// Abandon orphaned scaffolding commits from the merged workspaces.
-fn abandon_scaffolding_commits(parent_ids: &[String], branch: &str, cwd: &Path) {
-    if parent_ids.is_empty() {
-        return;
-    }
-    let id_terms: Vec<String> = parent_ids
-        .iter()
-        .map(|id| format!("id(\"{id}\")"))
-        .collect();
-    let abandon_revset = format!(
-        "({}) & empty() & description(exact:'') & ~ancestors({branch}) & ~root()",
-        id_terms.join(" | ")
-    );
-    let abandon_output = Command::new("jj")
-        .args(["abandon", &abandon_revset])
-        .current_dir(cwd)
-        .output();
-
-    if let Ok(output) = abandon_output
-        && output.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("Abandoned") {
-            println!("Cleaned up scaffolding commits.");
-        }
-    }
-}
-
-/// Rebase the default workspace onto the merge result, preserving any
-/// intermediate committed work between main and default@.
-fn rebase_default_workspace(
-    default_ws_path: &Path,
-    branch: &str,
-    default_ws: &str,
-    final_rev: &str,
-) -> Result<()> {
-    // Update stale state before rebasing
-    let _ = Command::new("jj")
-        .args(["workspace", "update-stale"])
-        .current_dir(default_ws_path)
-        .output();
-
-    // Auto-snapshot uncommitted changes
-    auto_snapshot_default_workspace(default_ws_path)?;
-
-    // Check for intermediate commits and rebase appropriately
-    let chain_revset = format!("{branch}+..{default_ws}@");
-    let chain_output = Command::new("jj")
-        .args([
-            "log", "-r", &chain_revset, "--no-graph", "--reversed",
-            "-T", r#"change_id ++ "\n""#,
-        ])
-        .current_dir(default_ws_path)
-        .output();
-
-    let chain_ids: Vec<String> = chain_output
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let rebase_default = if chain_ids.len() > 1 {
-        println!(
-            "Preserving {} committed change(s) in default workspace ancestry.",
-            chain_ids.len() - 1
+        eprintln!(
+            "  Manual fix: cd {} && git checkout {}",
+            default_ws_path.display(),
+            &new_epoch.as_str()[..12]
         );
-        Command::new("jj")
-            .args(["rebase", "-s", &chain_ids[0], "-d", final_rev])
-            .current_dir(default_ws_path)
-            .output()
     } else {
-        Command::new("jj")
-            .args(["rebase", "-r", &format!("{default_ws}@"), "-d", final_rev])
-            .current_dir(default_ws_path)
-            .output()
-    };
-
-    if let Ok(output) = rebase_default
-        && !output.status.success()
-    {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("Warning: Failed to rebase default workspace onto {final_rev}: {}", stderr.trim());
-        eprintln!("  On-disk files may not reflect the merge. Run: jj rebase -s {default_ws}@ -d {final_rev}");
+        println!("  Default workspace updated to new epoch.");
     }
-
-    let _ = resolve_divergent_working_copy(default_ws_path);
-
-    // Restore on-disk files and clear stale state
-    let _ = Command::new("jj")
-        .args(["restore"])
-        .current_dir(default_ws_path)
-        .output();
-    let _ = Command::new("jj")
-        .args(["workspace", "update-stale"])
-        .current_dir(default_ws_path)
-        .output();
 
     Ok(())
 }
 
-/// If the default workspace has uncommitted changes, commit them before
-/// the merge's rebase+restore would overwrite on-disk files.
-fn auto_snapshot_default_workspace(default_ws_path: &Path) -> Result<()> {
-    let status_output = Command::new("jj")
-        .args(["status", "--color=never", "--no-pager"])
-        .current_dir(default_ws_path)
-        .output();
-
-    let has_local_edits = status_output
-        .as_ref()
-        .map(|o| {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.contains("Working copy changes:")
-        })
-        .unwrap_or(false);
-
-    if !has_local_edits {
-        return Ok(());
-    }
-
-    println!("Auto-snapshotting uncommitted changes in default workspace...");
-    let snap = Command::new("jj")
-        .args(["commit", "-m", "wip: auto-snapshot before merge"])
-        .current_dir(default_ws_path)
-        .output();
-    if snap.as_ref().map(|o| o.status.success()).unwrap_or(false) {
-        println!("  Saved as 'wip: auto-snapshot before merge' commit.");
-    } else {
-        let stderr = snap
-            .as_ref()
-            .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-            .unwrap_or_default();
-        eprintln!("WARNING: Failed to auto-save default workspace changes: {}", stderr.trim());
-        eprintln!("  To preserve your changes manually, run:");
-        eprintln!("    maw exec default -- jj commit -m \"wip: save before merge\"");
-        eprintln!("  Then re-run the merge.");
-        bail!("Could not auto-snapshot default workspace before merge.");
-    }
-    Ok(())
-}
-
-/// Move the branch bookmark to the final merge revision.
-fn advance_branch_bookmark(branch: &str, final_rev: &str, cwd: &Path) {
-    let bookmark_output = Command::new("jj")
-        .args(["bookmark", "set", branch, "-r", final_rev])
-        .current_dir(cwd)
-        .output();
-
-    match bookmark_output {
-        Ok(output) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: Failed to move {branch} bookmark: {}", stderr.trim());
-            eprintln!("  Run manually: jj bookmark set {branch} -r {final_rev}");
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to move {branch} bookmark: {e}");
-            eprintln!("  Run manually: jj bookmark set {branch} -r {final_rev}");
-        }
-        _ => {}
-    }
-}
-
-/// Handle post-merge workspace destruction with conflict and confirmation checks.
+/// Handle post-merge workspace destruction with confirmation check.
 fn handle_post_merge_destroy(
     ws_to_merge: &[String],
     default_ws: &str,
-    has_conflicts: bool,
     confirm: bool,
-    root: &Path,
+    backend: &impl WorkspaceBackend<Error: std::fmt::Display>,
 ) -> Result<()> {
     let ws_to_destroy: Vec<String> = ws_to_merge
         .iter()
@@ -1082,15 +887,9 @@ fn handle_post_merge_destroy(
         .cloned()
         .collect();
 
-    if has_conflicts {
-        println!("NOT destroying workspaces due to conflicts.");
-        println!("Resolve conflicts first, then run:");
-        for ws in &ws_to_destroy {
-            println!("  maw ws destroy {ws}");
-        }
-    } else if confirm {
+    if confirm {
         println!();
-        println!("Will destroy {} workspaces:", ws_to_destroy.len());
+        println!("Will destroy {} workspace(s):", ws_to_destroy.len());
         for ws in &ws_to_destroy {
             println!("  - {ws}");
         }
@@ -1104,35 +903,21 @@ fn handle_post_merge_destroy(
             println!("Aborted. Workspaces kept. Merge commit still exists.");
             return Ok(());
         }
-
-        destroy_workspaces(&ws_to_destroy, root);
-    } else {
-        println!();
-        destroy_workspaces(&ws_to_destroy, root);
     }
-    Ok(())
-}
 
-fn destroy_workspaces(workspaces: &[String], root: &Path) {
-    println!("Cleaning up workspaces...");
-    let ws_dir = root.join("ws");
-    // Run jj commands from inside the default workspace to avoid stale
-    // root working copy errors in the bare repo model.
-    let jj_cwd = ws_dir.join(DEFAULT_WORKSPACE);
-    let jj_cwd = if jj_cwd.exists() { &jj_cwd } else { root };
-    for ws in workspaces {
-        if ws == DEFAULT_WORKSPACE {
-            println!("  Skipping default workspace");
+    println!("  Cleaning up workspaces...");
+    for ws_name in &ws_to_destroy {
+        if ws_name == DEFAULT_WORKSPACE {
+            println!("    Skipping default workspace");
             continue;
         }
-        let path = ws_dir.join(ws);
-        let _ = Command::new("jj")
-            .args(["workspace", "forget", ws])
-            .current_dir(jj_cwd)
-            .status();
-        if path.exists() {
-            std::fs::remove_dir_all(&path).ok();
+        if let Ok(ws_id) = WorkspaceId::new(ws_name) {
+            match backend.destroy(&ws_id) {
+                Ok(()) => println!("    Destroyed: {ws_name}"),
+                Err(e) => eprintln!("    WARNING: Failed to destroy {ws_name}: {e}"),
+            }
         }
-        println!("  Destroyed: {ws}");
     }
+
+    Ok(())
 }
