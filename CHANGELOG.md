@@ -2,6 +2,13 @@
 
 All notable changes to maw.
 
+## v0.35.0
+
+- **Major**: Git-native backend — replaced jj dependency with direct git worktree operations for workspaces, merge, push, status, and release. No more jj workspace commands needed. (bd-1xfd)
+- Feat: `maw gc` command — garbage-collect unreferenced epoch snapshots from `.manifold/epochs/`. Supports `--dry-run` preview. (bd-1xu7)
+- Feat: New core data model types: `PatchSet`/`PatchValue` (patch-set model §5.4), `FileId` (stable rename-tracking §5.8), `Operation`/`OpPayload` (operation log §5.3). Foundation for Phase 2 merge and op-log systems. (bd-2xxh.1, bd-1v2t.1)
+- Internal: Phase 1 integration tests for workspace lifecycle, merge scenarios, and crash recovery.
+
 ## v0.34.2
 
 - Fix: `maw ws create`, `maw ws destroy`, and `maw ws attach` now work from any directory within the repo, not just the repo root. Previously failed with "must be run from the repo root" when invoked via `maw exec default -- maw ws create <name>`. (bd-363g)
