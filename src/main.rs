@@ -12,6 +12,7 @@ mod format;
 mod init;
 mod merge;
 mod merge_state;
+mod epoch_gc;
 mod model;
 mod push;
 mod refs;
@@ -166,6 +167,16 @@ enum Commands {
     /// Assumes your version bump is already committed. Run this after:
     ///   jj new && <edit version> && jj describe -m "chore: bump to vX.Y.Z"
     Release(release::ReleaseArgs),
+
+    /// Garbage-collect unreferenced epoch snapshots
+    ///
+    /// Removes `.manifold/epochs/e-<oid>` directories that are no longer
+    /// referenced by any active workspace and are not the current epoch.
+    Gc {
+        /// Preview removals without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn should_emit_migration_notice(repo_root: &Path) -> bool {
@@ -203,6 +214,7 @@ fn main() {
         Commands::Push(args) => push::run(&args),
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
+        Commands::Gc { dry_run } => epoch_gc::run_cli(dry_run),
     };
 
     if let Err(e) = result {

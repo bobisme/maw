@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod epoch_gc;
 pub mod merge;
 pub mod merge_state;
 pub mod model;
