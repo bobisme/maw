@@ -2,6 +2,13 @@
 
 All notable changes to maw.
 
+## v0.38.0
+
+- Feat: Stable FileId system — 128-bit random FileId for deterministic rename tracking. FileIdMap with bidirectional path↔id mapping, atomic persistence to `.manifold/fileids`, concurrent rename+edit resolution. 27 tests. (bd-b2y4)
+- Feat: OrderingKey with wall-clock clamp guard — composite ordering key `(epoch_id, workspace_id, seq)` for causal ordering. Wall clock clamped monotonically, excluded from Ord. SequenceGenerator for per-workspace sequence+clock management. 23 tests. (bd-1182)
+- Feat: Enhanced `maw ws history` — op log first (walks `refs/manifold/head/<name>` blob chain), git commit fallback, JSON/Text/Pretty output formats, payload summarization for all 7 op types. 13 tests. (bd-23w1)
+- Feat: Eval scenarios — 5 agent task scenarios with scoring rubric (basic lifecycle, multi-file edit, multi-agent, conflict resolution, read-only inspection). FrictionScore 1-5 scale, RunMetrics collection, EvalReport with target threshold ≤1.5. 19 tests. (bd-29e3.2)
+
 ## v0.37.0
 
 - Feat: Op log read — walk the causal chain from head backwards via BFS. Supports max depth limits, stop-at predicates, and diamond DAG deduplication. 21 tests. (bd-1v2t.3)
