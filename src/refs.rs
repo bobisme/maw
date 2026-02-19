@@ -45,7 +45,7 @@ pub const HEAD_PREFIX: &str = "refs/manifold/head/";
 ///
 /// # Example
 /// ```
-/// assert_eq!(manifold_refs::workspace_head_ref("default"),
+/// assert_eq!(maw::refs::workspace_head_ref("default"),
 ///            "refs/manifold/head/default");
 /// ```
 #[must_use]
