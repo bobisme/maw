@@ -10,21 +10,19 @@ pub struct ReleaseArgs {
     /// Version tag to create (e.g., v0.30.1)
     ///
     /// Must start with 'v' followed by a semver-like version.
-    /// Creates both jj and git tags, then pushes to origin.
+    /// Creates a git tag and pushes to origin.
     pub tag: String,
 }
 
 /// Tag and push a release in one step.
 ///
 /// Does everything after the version bump commit:
-///   1. Advance branch bookmark to @- (parent of working copy)
+///   1. Advance branch to current epoch (if needed)
 ///   2. Push branch to origin
-///   3. Create jj tag + git tag pointing at the branch
+///   3. Create git tag at the branch tip
 ///   4. Push git tag to origin
 ///
-/// Assumes the version bump is already committed (via `jj commit` or
-/// `jj describe`). The working copy (@) should be empty or contain
-/// only post-release work.
+/// Assumes the version bump is already merged (via `maw ws merge`).
 pub fn run(args: &ReleaseArgs) -> Result<()> {
     let tag = &args.tag;
 
@@ -37,43 +35,66 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     }
 
     let root = repo_root()?;
-    let cwd = jj_cwd()?;
+    let _cwd = jj_cwd()?;
     let config = MawConfig::load(&root)?;
     let branch = config.branch();
 
-    // Step 1: Advance bookmark to @-
-    println!("Advancing {branch} bookmark to @-...");
-    let advance = Command::new("jj")
-        .args(["bookmark", "set", branch, "-r", "@-"])
-        .current_dir(&cwd)
+    // Step 1: Ensure branch is at current epoch
+    println!("Ensuring {branch} is at current epoch...");
+    let epoch_output = Command::new("git")
+        .args(["rev-parse", "refs/manifold/epoch/current"])
+        .current_dir(&root)
         .output()
-        .context("Failed to advance bookmark")?;
+        .context("Failed to read current epoch")?;
 
-    if !advance.status.success() {
-        let stderr = String::from_utf8_lossy(&advance.stderr);
+    if !epoch_output.status.success() {
         bail!(
-            "Failed to advance {branch} to @-: {}\n  \
-             Check: jj log --limit 5",
-            stderr.trim()
+            "No current epoch found.\n  \
+             Run `maw init` and `maw ws merge` first."
         );
     }
 
-    // Get the commit hash and info for reporting + git tagging.
-    // IMPORTANT: We resolve from jj, not git, because the local git ref
-    // for the branch may be stale (jj git push updates the remote but
-    // doesn't always export to the local git ref in bare repos).
-    let commit_hash = get_commit_hash(&cwd, branch)?;
-    let commit_info = get_commit_info(&cwd, branch)?;
-    println!("  {branch} -> {commit_info}");
+    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout).trim().to_string();
 
-    // Warn if working copy has uncommitted changes
-    check_working_copy_clean(&cwd);
+    // Read current branch position
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_output = Command::new("git")
+        .args(["rev-parse", &branch_ref])
+        .current_dir(&root)
+        .output();
+
+    let branch_oid = branch_output
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    // Advance branch if it's behind the epoch
+    if branch_oid != epoch_oid {
+        println!("  Advancing {branch} to epoch ({})...", &epoch_oid[..12]);
+        let update = Command::new("git")
+            .args(["update-ref", &branch_ref, &epoch_oid])
+            .current_dir(&root)
+            .output()
+            .context("Failed to update branch ref")?;
+
+        if !update.status.success() {
+            let stderr = String::from_utf8_lossy(&update.stderr);
+            bail!("Failed to advance {branch}: {}", stderr.trim());
+        }
+    } else {
+        println!("  {branch} already at current epoch.");
+    }
+
+    // Get commit info for reporting
+    let commit_info = get_commit_info(&root, &epoch_oid)?;
+    println!("  {branch} -> {commit_info}");
 
     // Step 2: Push branch to origin
     println!("Pushing {branch} to origin...");
-    let push = Command::new("jj")
-        .args(["git", "push", "--bookmark", branch])
-        .current_dir(&cwd)
+    let push = Command::new("git")
+        .args(["push", "origin", branch])
+        .current_dir(&root)
         .output()
         .context("Failed to push branch")?;
 
@@ -81,35 +102,23 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         let stderr = String::from_utf8_lossy(&push.stderr);
         bail!(
             "Push failed: {}\n  \
-             Check: jj log -r '{branch}' and jj git fetch",
-            stderr.trim()
+             Check: git -C {} log --oneline -5",
+            stderr.trim(),
+            root.display()
         );
     }
 
-    let push_stdout = String::from_utf8_lossy(&push.stdout);
-    if push_stdout.contains("Nothing changed") {
+    let push_stderr = String::from_utf8_lossy(&push.stderr);
+    if push_stderr.contains("Everything up-to-date") {
         println!("  {branch} was already up to date.");
     } else {
         println!("  Pushed.");
     }
 
-    // Step 3: Create jj tag
+    // Step 3: Create git tag at the branch tip
     println!("Creating tag {tag}...");
-    let jj_tag = Command::new("jj")
-        .args(["tag", "set", tag, "-r", branch])
-        .current_dir(&cwd)
-        .output()
-        .context("Failed to create jj tag")?;
-
-    if !jj_tag.status.success() {
-        let stderr = String::from_utf8_lossy(&jj_tag.stderr);
-        bail!("Failed to create jj tag: {}", stderr.trim());
-    }
-
-    // Step 4: Create git tag using the jj-resolved commit hash.
-    // We can't use the branch name because the local git ref may be stale.
     let git_tag = Command::new("git")
-        .args(["tag", tag, &commit_hash])
+        .args(["tag", tag, &epoch_oid])
         .current_dir(&root)
         .output()
         .context("Failed to create git tag")?;
@@ -123,7 +132,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         }
     }
 
-    // Step 5: Push git tag to origin
+    // Step 4: Push git tag to origin
     println!("Pushing tag {tag} to origin...");
     let push_tag = Command::new("git")
         .args(["push", "origin", tag])
@@ -148,69 +157,22 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the full commit hash for a revset from jj.
-fn get_commit_hash(cwd: &std::path::Path, revset: &str) -> Result<String> {
-    let output = Command::new("jj")
+/// Get a short commit info line for a commit hash.
+fn get_commit_info(root: &std::path::Path, oid: &str) -> Result<String> {
+    let output = Command::new("git")
         .args([
             "log",
-            "-r",
-            revset,
-            "--no-graph",
-            "--color=never",
-            "--no-pager",
-            "-T",
-            "commit_id",
+            "--format=%h %s",
+            "-1",
+            oid,
         ])
-        .current_dir(cwd)
-        .output()
-        .context("Failed to resolve commit hash")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to resolve {revset}: {}", stderr.trim());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string())
-}
-
-/// Warn if the working copy (@) has uncommitted changes that won't be included.
-fn check_working_copy_clean(cwd: &std::path::Path) {
-    let Ok(output) = Command::new("jj")
-        .args(["diff", "--stat", "-r", "@"])
-        .current_dir(cwd)
-        .output()
-    else {
-        return;
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.trim().is_empty() {
-        println!();
-        println!("WARNING: Working copy (@) has uncommitted changes that are NOT in this release.");
-        println!("  If these should be included, abort and run: jj squash");
-        println!();
-    }
-}
-
-fn get_commit_info(cwd: &std::path::Path, branch: &str) -> Result<String> {
-    let output = Command::new("jj")
-        .args([
-            "log",
-            "-r",
-            branch,
-            "--no-graph",
-            "--color=never",
-            "--no-pager",
-            "-T",
-            r#"commit_id.short() ++ " " ++ description.first_line()"#,
-        ])
-        .current_dir(cwd)
+        .current_dir(root)
         .output()
         .context("Failed to get commit info")?;
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string())
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Ok(format!("{}", &oid[..12.min(oid.len())]))
+    }
 }

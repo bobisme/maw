@@ -10,9 +10,11 @@ use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
+use crate::backend::WorkspaceBackend;
 use crate::doctor;
 use crate::format::OutputFormat;
-use crate::workspace::{self, MawConfig};
+use crate::push::{SyncStatus, main_sync_status_inner};
+use crate::workspace::{self, get_backend, MawConfig};
 use serde::Serialize;
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -152,29 +154,13 @@ struct StatusSummary {
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
     is_stale: bool,
-    op_fork: bool,
-    op_fork_fix: Option<String>,
-    main_sync: MainSyncStatus,
+    main_sync: SyncStatus,
     stray_root_files: Vec<String>,
-}
-
-#[derive(Debug)]
-enum MainSyncStatus {
-    UpToDate,
-    Ahead(usize),
-    Behind(usize),
-    Diverged { ahead: usize, behind: usize },
-    NoMain,
-    NoRemote,
-    Unknown(String),
 }
 
 impl StatusSummary {
     const fn issue_count(&self) -> usize {
         let mut count = 0;
-        if self.op_fork {
-            count += 1;
-        }
         if !self.stray_root_files.is_empty() {
             count += 1;
         }
@@ -201,16 +187,13 @@ impl StatusSummary {
         let changes = self.changed_files.len();
         let untracked = self.untracked_files.len();
         let mut parts = Vec::new();
-        if self.op_fork {
-            parts.push(format!("OPFORK{warn}"));
-        }
         if stray > 0 {
             parts.push(format!("ROOT-NOT-BARE={stray}{warn}"));
         }
         parts.push(format!("ws={ws}{}", if ws == 0 { &check } else { &warn }));
         parts.push(format!("changes={changes}{}", if changes == 0 { &check } else { &warn }));
         parts.push(format!("untracked={untracked}{}", if untracked == 0 { &check } else { &warn }));
-        parts.push(format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, MainSyncStatus::UpToDate) { &check } else { &warn }));
+        parts.push(format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, SyncStatus::UpToDate) { &check } else { &warn }));
         parts.push(format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }));
 
         format!("{}\n", parts.join(" "))
@@ -269,7 +252,7 @@ impl StatusSummary {
         out.push_str(&text_status_line(
             "Main vs origin",
             &self.main_sync.describe(),
-            matches!(self.main_sync, MainSyncStatus::UpToDate),
+            matches!(self.main_sync, SyncStatus::UpToDate),
         ));
 
         out.push_str(&text_status_line(
@@ -295,46 +278,34 @@ impl StatusSummary {
 
         let mut out = String::new();
         out.push_str(face);
-        let mut has_segment = false;
-
-        let mut append_segment = |segment: &str| {
-            if !has_segment {
-                has_segment = true;
-            }
-            out.push_str(segment);
-        };
-
-        if self.op_fork {
-            append_segment(&colorize_light_red("OPFORK!"));
-        }
 
         if !self.stray_root_files.is_empty() {
-            append_segment(&colorize_light_red("ROOT!"));
+            out.push_str(&colorize_light_red("ROOT!"));
         }
 
         let ws = self.workspace_names.len();
         if ws > 0 {
             let workspace = format!("\u{f0645} {ws}");
             let colored = colorize_orange(&workspace);
-            append_segment(&colored);
+            out.push_str(&colored);
         }
 
         let changes = self.changed_files.len();
         if changes > 0 {
             let changes = format!("\u{eb43} {changes}");
             let colored = colorize_blue(&changes);
-            append_segment(&colored);
+            out.push_str(&colored);
         }
 
         let untracked = self.untracked_files.len();
         if untracked > 0 {
             let untracked = format!("?{untracked}");
-            append_segment(&untracked);
+            out.push_str(&untracked);
         }
 
         if self.main_sync.is_warning() {
             let warning = colorize_light_red("\u{e726}");
-            append_segment(&warning);
+            out.push_str(&warning);
         }
 
         format!("{out}\n")
@@ -395,7 +366,7 @@ impl StatusSummary {
         out.push_str(&status_line(
             "Main vs origin",
             &self.main_sync.describe(),
-            matches!(self.main_sync, MainSyncStatus::UpToDate),
+            matches!(self.main_sync, SyncStatus::UpToDate),
         ));
 
         out.push_str(&status_line(
@@ -448,40 +419,6 @@ fn status_line(label: &str, value: &str, ok: bool) -> String {
         format!("{} {label}: {value}\n", green_check())
     } else {
         format!("{} {label}: {}\n", yellow_warn(), colorize_yellow(value))
-    }
-}
-
-impl MainSyncStatus {
-    const fn is_warning(&self) -> bool {
-        !matches!(self, Self::UpToDate)
-    }
-
-    fn oneline(&self) -> String {
-        match self {
-            Self::UpToDate => "sync".to_string(),
-            Self::Ahead(ahead) => format!("ahead({ahead})"),
-            Self::Behind(behind) => format!("behind({behind})"),
-            Self::Diverged { ahead, behind } => {
-                format!("diverged({ahead}/{behind})")
-            }
-            Self::NoMain => "no-main".to_string(),
-            Self::NoRemote => "no-remote".to_string(),
-            Self::Unknown(_) => "unknown".to_string(),
-        }
-    }
-
-    fn describe(&self) -> String {
-        match self {
-            Self::UpToDate => "up to date".to_string(),
-            Self::Ahead(ahead) => format!("ahead by {ahead} (not pushed)"),
-            Self::Behind(behind) => format!("behind by {behind}"),
-            Self::Diverged { ahead, behind } => {
-                format!("diverged (ahead {ahead}, behind {behind})")
-            }
-            Self::NoMain => "missing main bookmark".to_string(),
-            Self::NoRemote => "no main@origin bookmark".to_string(),
-            Self::Unknown(reason) => format!("unknown ({reason})"),
-        }
     }
 }
 
@@ -549,18 +486,50 @@ fn render(summary: &StatusSummary, opts: &RenderOptions) {
     io::stdout().flush().ok();
 }
 
+/// Collect repository status using git-native operations.
+///
+/// Gathers:
+/// - Non-default workspace names (via git worktree backend)
+/// - Changed/untracked files in the default workspace (via git status)
+/// - Whether the default workspace is stale (behind current epoch)
+/// - Branch sync status vs origin (via git rev-list)
+/// - Stray files at repo root
 fn collect_status() -> Result<StatusSummary> {
     let root = workspace::repo_root()?;
-    // let cwd = workspace::jj_cwd()?;
+    let config = MawConfig::load(&root)?;
+    let branch = config.branch();
+    let default_ws_name = config.default_workspace();
 
-    let op_fork = false;
-    let op_fork_fix: Option<String> = None;
+    // Get non-default workspace names from backend
+    let workspace_names = match get_backend() {
+        Ok(backend) => {
+            match backend.list() {
+                Ok(infos) => infos
+                    .into_iter()
+                    .filter(|ws| ws.id.as_str() != default_ws_name)
+                    .map(|ws| ws.id.as_str().to_string())
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
+    };
 
-    let is_stale = false;
-    let workspace_names = Vec::new();
+    // Get changed/untracked files in the default workspace
+    let default_ws_path = root.join("ws").join(default_ws_name);
+    let (changed_files, untracked_files) = if default_ws_path.exists() {
+        collect_git_status(&default_ws_path)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
-    let (changed_files, untracked_files, main_sync) = (Vec::new(), Vec::new(), MainSyncStatus::Unknown("not implemented".to_string()));
+    // Check if default workspace is stale (behind current epoch)
+    let is_stale = check_default_stale(&root, &default_ws_path);
 
+    // Check main branch sync status vs origin
+    let main_sync = main_sync_status_inner(&root, branch);
+
+    // Check for stray files at repo root
     let stray_root_files = doctor::stray_root_entries(&root);
 
     Ok(StatusSummary {
@@ -568,112 +537,79 @@ fn collect_status() -> Result<StatusSummary> {
         changed_files,
         untracked_files,
         is_stale,
-        op_fork,
-        op_fork_fix,
         main_sync,
         stray_root_files,
     })
 }
 
-fn _collect_status_legacy() -> Result<StatusSummary> {
-    let root = workspace::repo_root()?;
-    let _cwd = Path::new("."); // dummy
-    let mut op_fork = false;
-    let mut op_fork_fix: Option<String> = None;
-    let mut is_stale = false;
-    let workspace_names = Vec::new();
-    let (changed_files, untracked_files, main_sync) = (Vec::new(), Vec::new(), MainSyncStatus::Unknown("not implemented".to_string()));
-    let stray_root_files = doctor::stray_root_entries(&root);
-    Ok(StatusSummary {
-        workspace_names,
-        changed_files,
-        untracked_files,
-        is_stale,
-        op_fork,
-        op_fork_fix,
-        main_sync,
-        stray_root_files,
-    })
-}
-
-fn non_default_workspace_names(list: &str) -> Vec<String> {
-    let mut names = Vec::new();
-
-    for line in list.lines() {
-        let Some((name_part, _)) = line.split_once(':') else {
-            continue;
-        };
-        let name = name_part.trim().trim_end_matches('@').trim();
-        if name.is_empty() || name == "default" {
-            continue;
-        }
-        names.push(name.to_string());
-    }
-
-    names
-}
-
-fn parse_jj_changed_files(status_stdout: &str) -> Vec<String> {
-    let mut files = Vec::new();
-    let mut in_changes = false;
-
-    for line in status_stdout.lines() {
-        if line.starts_with("Working copy changes:") {
-            in_changes = true;
-            continue;
-        }
-
-        if in_changes {
-            if line.trim().is_empty()
-                || line.starts_with("Working copy ")
-                || line.starts_with("Parent commit")
-            {
-                break;
-            }
-
-            // Lines look like "M src/status.rs" or "A new_file.rs"
-            let trimmed = line.trim();
-            if let Some(path) = trimmed.split_whitespace().last() {
-                files.push(path.to_string());
-            }
-        }
-    }
-
-    files
-}
-
-#[derive(Default, Debug)]
-struct GitStatusFiles {
-    untracked: Vec<String>,
-}
-
-fn git_status_files(root: &Path) -> Result<GitStatusFiles> {
+/// Collect changed and untracked files from `git status --porcelain` in a directory.
+fn collect_git_status(ws_path: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let output = Command::new("git")
-        .args(["status", "--porcelain=1", "--untracked-files=all"])
-        .current_dir(root)
+        .args(["status", "--porcelain"])
+        .current_dir(ws_path)
         .output()
         .context("Failed to run git status")?;
 
     if !output.status.success() {
-        return Ok(GitStatusFiles::default());
+        return Ok((Vec::new(), Vec::new()));
     }
 
-    let mut files = GitStatusFiles::default();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.trim().is_empty() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut changed = Vec::new();
+    let mut untracked = Vec::new();
+
+    for line in stdout.lines() {
+        if line.len() < 4 {
             continue;
         }
-        // Porcelain format: "?? path/to/file" for untracked
-        if line.starts_with("??")
-            && let Some(path) = line.get(3..) {
-                files.untracked.push(path.trim().to_string());
-            }
+        let status_xy = &line[..2];
+        let path = &line[3..];
+        let path = path
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(path);
+
+        if status_xy == "??" {
+            untracked.push(path.to_string());
+        } else {
+            changed.push(path.to_string());
+        }
     }
 
-    Ok(files)
+    Ok((changed, untracked))
 }
 
-fn main_sync_status(_root: &Path, _branch: &str) -> MainSyncStatus {
-    MainSyncStatus::Unknown("not implemented".to_string())
-}
+/// Check if the default workspace is stale (its HEAD differs from the current epoch).
+fn check_default_stale(root: &Path, default_ws_path: &Path) -> bool {
+    if !default_ws_path.exists() {
+        return false;
+    }
 
+    // Read current epoch
+    let epoch_output = Command::new("git")
+        .args(["rev-parse", "refs/manifold/epoch/current"])
+        .current_dir(root)
+        .output();
+
+    let epoch_oid = match epoch_output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => return false, // No epoch ref = can't be stale
+    };
+
+    // Read default workspace HEAD
+    let ws_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(default_ws_path)
+        .output();
+
+    let ws_oid = match ws_head {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => return false,
+    };
+
+    epoch_oid != ws_oid
+}
