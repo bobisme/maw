@@ -4,5 +4,6 @@ pub mod diff;
 pub mod file_id;
 pub mod join;
 pub mod layout;
+pub mod ordering;
 pub mod patch;
 pub mod types;
