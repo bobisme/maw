@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::config::{OnFailure, ValidationConfig};
+use crate::config::{LanguagePreset, OnFailure, ValidationConfig};
 use crate::merge_state::{CommandResult, MergeStateError, ValidationResult};
 use crate::model::types::GitOid;
 
@@ -193,6 +193,65 @@ fn remove_temp_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Va
 }
 
 // ---------------------------------------------------------------------------
+// Per-language preset auto-detection
+// ---------------------------------------------------------------------------
+
+/// Detect the language preset for a project directory by inspecting
+/// well-known marker files.
+///
+/// Detection order (first match wins):
+/// 1. `Cargo.toml` → [`LanguagePreset::Rust`]
+/// 2. `pyproject.toml` / `setup.py` / `setup.cfg` → [`LanguagePreset::Python`]
+/// 3. `tsconfig.json` → [`LanguagePreset::TypeScript`]
+///
+/// Returns `None` if no known marker is found.
+#[must_use]
+pub fn detect_language_preset(dir: &Path) -> Option<LanguagePreset> {
+    if dir.join("Cargo.toml").exists() {
+        return Some(LanguagePreset::Rust);
+    }
+    if dir.join("pyproject.toml").exists()
+        || dir.join("setup.py").exists()
+        || dir.join("setup.cfg").exists()
+    {
+        return Some(LanguagePreset::Python);
+    }
+    if dir.join("tsconfig.json").exists() {
+        return Some(LanguagePreset::TypeScript);
+    }
+    None
+}
+
+/// Resolve the effective command list for a validation config in a given
+/// directory, incorporating preset auto-detection.
+///
+/// Resolution order:
+/// 1. Explicit `command`/`commands` (always wins).
+/// 2. Named preset (`rust`, `python`, `typescript`).
+/// 3. `auto` preset — detect from directory markers.
+/// 4. No commands (empty — validation is skipped).
+#[must_use]
+pub fn resolve_commands(config: &ValidationConfig, worktree_dir: &Path) -> Vec<String> {
+    // Explicit commands always take precedence.
+    let explicit = config.effective_commands();
+    if !explicit.is_empty() {
+        return explicit.into_iter().map(str::to_owned).collect();
+    }
+
+    // Fall back to preset.
+    let preset = match &config.preset {
+        None => return Vec::new(),
+        Some(LanguagePreset::Auto) => detect_language_preset(worktree_dir),
+        Some(p) => Some(p.clone()),
+    };
+
+    match preset {
+        Some(p) => p.commands().iter().map(|s| (*s).to_owned()).collect(),
+        None => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // run_validate_phase
 // ---------------------------------------------------------------------------
 
@@ -223,13 +282,7 @@ pub fn run_validate_phase(
     candidate_oid: &GitOid,
     config: &ValidationConfig,
 ) -> Result<ValidateOutcome, ValidateError> {
-    // 1. Check if validation is configured
-    let commands = config.effective_commands();
-    if commands.is_empty() {
-        return Ok(ValidateOutcome::Skipped);
-    }
-
-    // 2. Create temp worktree
+    // 2. Create temp worktree first (needed for preset auto-detection)
     let worktree_dir = repo_root.join(".manifold").join("validate-tmp");
     // Clean up any stale worktree from a previous crash
     if worktree_dir.exists() {
@@ -237,10 +290,31 @@ pub fn run_validate_phase(
         // Also try just removing the directory if git worktree remove failed
         let _ = fs::remove_dir_all(&worktree_dir);
     }
+
+    // 1. Resolve commands — includes preset auto-detection against the
+    //    worktree dir if `preset = "auto"`.  We need the worktree to exist
+    //    for auto-detection, but we only create it when there might be
+    //    commands to run. If explicit commands are configured we skip
+    //    auto-detection entirely.
+    let explicit = config.effective_commands();
+    if explicit.is_empty() && config.preset.is_none() {
+        return Ok(ValidateOutcome::Skipped);
+    }
+
     create_temp_worktree(repo_root, candidate_oid, &worktree_dir)?;
 
+    // Resolve the full command list (explicit wins; preset is fallback).
+    let commands = resolve_commands(config, &worktree_dir);
+    if commands.is_empty() {
+        // Preset was configured but auto-detection found nothing.
+        let _ = remove_temp_worktree(repo_root, &worktree_dir);
+        let _ = fs::remove_dir_all(&worktree_dir);
+        return Ok(ValidateOutcome::Skipped);
+    }
+
     // 3. Run validation commands in sequence
-    let result = run_commands_pipeline(&commands, &worktree_dir, config.timeout_seconds);
+    let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    let result = run_commands_pipeline(&cmd_refs, &worktree_dir, config.timeout_seconds);
 
     // 4. Clean up worktree (best-effort)
     let _ = remove_temp_worktree(repo_root, &worktree_dir);
@@ -276,6 +350,25 @@ pub fn run_validate_pipeline_in_dir(
 ) -> Result<ValidateOutcome, ValidateError> {
     let result = run_commands_pipeline(commands, working_dir, timeout_seconds)?;
     Ok(apply_policy(&result, on_failure))
+}
+
+/// Run the full validation config (including preset resolution) in a
+/// directory without creating a git worktree.
+///
+/// This is the testing counterpart of [`run_validate_phase`]: it exercises
+/// the complete command-resolution path (explicit → preset → auto-detect)
+/// in an isolated temp directory.
+pub fn run_validate_config_in_dir(
+    config: &ValidationConfig,
+    working_dir: &Path,
+) -> Result<ValidateOutcome, ValidateError> {
+    let commands = resolve_commands(config, working_dir);
+    if commands.is_empty() {
+        return Ok(ValidateOutcome::Skipped);
+    }
+    let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    let result = run_commands_pipeline(&cmd_refs, working_dir, config.timeout_seconds)?;
+    Ok(apply_policy(&result, &config.on_failure))
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +764,7 @@ mod tests {
             command: None,
             commands: Vec::new(),
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         let oid = GitOid::new(&"a".repeat(40)).unwrap();
@@ -685,6 +779,7 @@ mod tests {
             command: Some(String::new()),
             commands: Vec::new(),
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         let oid = GitOid::new(&"a".repeat(40)).unwrap();
@@ -699,6 +794,7 @@ mod tests {
             command: None,
             commands: vec![String::new()],
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         let oid = GitOid::new(&"a".repeat(40)).unwrap();
@@ -983,6 +1079,7 @@ mod tests {
             command: Some("cargo check".into()),
             commands: Vec::new(),
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         assert_eq!(config.effective_commands(), vec!["cargo check"]);
@@ -994,6 +1091,7 @@ mod tests {
             command: None,
             commands: vec!["cargo check".into(), "cargo test".into()],
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         assert_eq!(
@@ -1008,6 +1106,7 @@ mod tests {
             command: Some("cargo fmt --check".into()),
             commands: vec!["cargo check".into(), "cargo test".into()],
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         assert_eq!(
@@ -1022,6 +1121,7 @@ mod tests {
             command: Some(String::new()),
             commands: vec![String::new(), "cargo test".into(), String::new()],
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         assert_eq!(config.effective_commands(), vec!["cargo test"]);
@@ -1036,6 +1136,7 @@ mod tests {
             command: Some("test".into()),
             commands: Vec::new(),
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         assert!(with_cmd.has_commands());
@@ -1044,8 +1145,290 @@ mod tests {
             command: None,
             commands: vec!["test".into()],
             timeout_seconds: 60,
+            preset: None,
             on_failure: OnFailure::Block,
         };
         assert!(with_cmds.has_commands());
+    }
+
+    // -- detect_language_preset --
+
+    #[test]
+    fn detect_preset_rust_from_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        assert_eq!(
+            detect_language_preset(dir.path()),
+            Some(LanguagePreset::Rust)
+        );
+    }
+
+    #[test]
+    fn detect_preset_python_from_pyproject_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+        assert_eq!(
+            detect_language_preset(dir.path()),
+            Some(LanguagePreset::Python)
+        );
+    }
+
+    #[test]
+    fn detect_preset_python_from_setup_py() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("setup.py"), "from setuptools import setup\n").unwrap();
+        assert_eq!(
+            detect_language_preset(dir.path()),
+            Some(LanguagePreset::Python)
+        );
+    }
+
+    #[test]
+    fn detect_preset_python_from_setup_cfg() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("setup.cfg"), "[metadata]\nname=x\n").unwrap();
+        assert_eq!(
+            detect_language_preset(dir.path()),
+            Some(LanguagePreset::Python)
+        );
+    }
+
+    #[test]
+    fn detect_preset_typescript_from_tsconfig() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}\n").unwrap();
+        assert_eq!(
+            detect_language_preset(dir.path()),
+            Some(LanguagePreset::TypeScript)
+        );
+    }
+
+    #[test]
+    fn detect_preset_returns_none_for_unknown_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# hello\n").unwrap();
+        assert_eq!(detect_language_preset(dir.path()), None);
+    }
+
+    #[test]
+    fn detect_preset_rust_wins_over_python_when_both_present() {
+        // Cargo.toml takes precedence (first in detection order)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+        assert_eq!(
+            detect_language_preset(dir.path()),
+            Some(LanguagePreset::Rust)
+        );
+    }
+
+    // -- resolve_commands --
+
+    #[test]
+    fn resolve_explicit_commands_take_precedence_over_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        // Cargo.toml present — would trigger Rust preset — but explicit command wins.
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let config = ValidationConfig {
+            command: Some("make test".into()),
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Rust),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["make test"]);
+    }
+
+    #[test]
+    fn resolve_named_preset_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Rust),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["cargo check", "cargo test --no-run"]);
+    }
+
+    #[test]
+    fn resolve_named_preset_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Python),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["python -m py_compile", "pytest -q --co"]);
+    }
+
+    #[test]
+    fn resolve_named_preset_typescript() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::TypeScript),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["tsc --noEmit"]);
+    }
+
+    #[test]
+    fn resolve_auto_preset_detects_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Auto),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["cargo check", "cargo test --no-run"]);
+    }
+
+    #[test]
+    fn resolve_auto_preset_detects_python() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Auto),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["python -m py_compile", "pytest -q --co"]);
+    }
+
+    #[test]
+    fn resolve_auto_preset_detects_typescript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Auto),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert_eq!(cmds, vec!["tsc --noEmit"]);
+    }
+
+    #[test]
+    fn resolve_auto_preset_unknown_project_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        // No marker files
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Auto),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let cmds = resolve_commands(&config, dir.path());
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn resolve_no_preset_no_commands_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ValidationConfig::default();
+        let cmds = resolve_commands(&config, dir.path());
+        assert!(cmds.is_empty());
+    }
+
+    // -- run_validate_config_in_dir (preset integration) --
+
+    #[test]
+    fn config_in_dir_skipped_with_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ValidationConfig::default();
+        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::Skipped));
+    }
+
+    #[test]
+    fn config_in_dir_skipped_when_auto_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No marker files — auto-detect returns None → skipped
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Auto),
+            timeout_seconds: 60,
+            on_failure: OnFailure::Block,
+        };
+        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::Skipped));
+    }
+
+    #[test]
+    fn config_in_dir_explicit_commands_ignore_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        // Rust preset present but explicit commands win
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let config = ValidationConfig {
+            command: Some("echo explicit".into()),
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Rust),
+            timeout_seconds: 10,
+            on_failure: OnFailure::Block,
+        };
+        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::Passed(_)));
+        let result = outcome.result().unwrap();
+        assert!(result.stdout.contains("explicit"));
+        // Single-command run: command_results empty for backward compat
+        assert!(result.command_results.is_empty());
+    }
+
+    #[test]
+    fn config_in_dir_multi_command_explicit_with_preset_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: vec!["echo step1".into(), "echo step2".into()],
+            preset: Some(LanguagePreset::TypeScript), // ignored — explicit commands present
+            timeout_seconds: 10,
+            on_failure: OnFailure::Block,
+        };
+        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::Passed(_)));
+        let result = outcome.result().unwrap();
+        assert_eq!(result.command_results.len(), 2);
+        assert!(result.command_results[0].stdout.contains("step1"));
+        assert!(result.command_results[1].stdout.contains("step2"));
+    }
+
+    #[test]
+    fn config_in_dir_auto_preset_not_skipped_when_marker_found() {
+        // Create a dir with Cargo.toml so auto-detection fires.
+        // The Rust preset commands will likely fail (not a real project),
+        // but with Warn policy the outcome is PassedWithWarnings (not Skipped).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let config = ValidationConfig {
+            command: None,
+            commands: Vec::new(),
+            preset: Some(LanguagePreset::Auto),
+            timeout_seconds: 5,
+            on_failure: OnFailure::Warn,
+        };
+        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        // Must NOT be skipped — preset was resolved
+        assert!(!matches!(outcome, ValidateOutcome::Skipped));
     }
 }

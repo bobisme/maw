@@ -178,22 +178,92 @@ fn default_merge_drivers() -> Vec<MergeDriver> {
 // ValidationConfig
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// LanguagePreset
+// ---------------------------------------------------------------------------
+
+/// Built-in per-language validation preset.
+///
+/// Each preset provides a curated sequence of validation commands for a
+/// specific language/ecosystem. Presets activate when no explicit
+/// `command` or `commands` are configured.
+///
+/// Use `"auto"` to let Manifold detect the project type from filesystem
+/// markers (e.g. `Cargo.toml` → Rust, `pyproject.toml` → Python,
+/// `tsconfig.json` → TypeScript).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LanguagePreset {
+    /// Auto-detect project type from filesystem markers.
+    ///
+    /// Detection order:
+    /// 1. `Cargo.toml` → Rust
+    /// 2. `pyproject.toml` / `setup.py` / `setup.cfg` → Python
+    /// 3. `tsconfig.json` → TypeScript
+    Auto,
+    /// Rust preset: `["cargo check", "cargo test --no-run"]`.
+    Rust,
+    /// Python preset: `["python -m py_compile", "pytest -q --co"]`.
+    Python,
+    /// TypeScript preset: `["tsc --noEmit"]`.
+    TypeScript,
+}
+
+impl LanguagePreset {
+    /// Returns the validation commands for this preset.
+    ///
+    /// Returns an empty slice for `Auto` — auto-detection must be performed
+    /// externally against the actual project directory.
+    #[must_use]
+    pub fn commands(&self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["cargo check", "cargo test --no-run"],
+            Self::Python => &["python -m py_compile", "pytest -q --co"],
+            Self::TypeScript => &["tsc --noEmit"],
+            Self::Auto => &[],
+        }
+    }
+}
+
+impl fmt::Display for LanguagePreset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Rust => write!(f, "rust"),
+            Self::Python => write!(f, "python"),
+            Self::TypeScript => write!(f, "typescript"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ValidationConfig
+// ---------------------------------------------------------------------------
+
 /// Post-merge validation command settings.
 ///
 /// Supports both a single `command` string and a `commands` array. When both
 /// are specified, `command` runs first, then all entries from `commands`.
-/// When neither is set, validation is skipped.
+/// When neither is set, validation is skipped — unless a `preset` is
+/// configured, in which case the preset's commands are used.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationConfig {
     /// Shell command to run for post-merge validation (e.g. `"cargo test"`).
-    /// `None` means no validation (unless `commands` is set).
+    /// `None` means no validation (unless `commands` or `preset` is set).
     pub command: Option<String>,
 
     /// Multiple shell commands to run in sequence. Each runs via `sh -c`.
     /// Execution stops on first failure.
     #[serde(default)]
     pub commands: Vec<String>,
+
+    /// Per-language preset. When set and no explicit `command`/`commands`
+    /// are configured, the preset's commands are used instead.
+    ///
+    /// Use `"auto"` to detect the project type from filesystem markers.
+    #[serde(default)]
+    pub preset: Option<LanguagePreset>,
 
     /// Timeout in seconds for each validation command.
     #[serde(default = "default_validation_timeout")]
@@ -209,6 +279,7 @@ impl Default for ValidationConfig {
         Self {
             command: None,
             commands: Vec::new(),
+            preset: None,
             timeout_seconds: default_validation_timeout(),
             on_failure: OnFailure::default(),
         }
@@ -216,11 +287,14 @@ impl Default for ValidationConfig {
 }
 
 impl ValidationConfig {
-    /// Returns the effective list of commands to run, merging `command` and
-    /// `commands` fields. Empty commands are filtered out.
+    /// Returns the explicit commands from `command` and `commands` fields.
     ///
-    /// If `command` is set, it becomes the first entry. All entries from
-    /// `commands` follow.
+    /// Empty commands are filtered out. If `command` is set, it becomes the
+    /// first entry. All entries from `commands` follow.
+    ///
+    /// **Note:** This does **not** include preset commands. Use
+    /// [`effective_commands`] or the validate phase's preset resolution for
+    /// the full command list (explicit + preset fallback).
     #[must_use]
     pub fn effective_commands(&self) -> Vec<&str> {
         let mut result = Vec::new();
@@ -237,10 +311,18 @@ impl ValidationConfig {
         result
     }
 
-    /// Returns `true` if at least one validation command is configured.
+    /// Returns `true` if at least one explicit validation command is
+    /// configured (ignoring presets).
     #[must_use]
     pub fn has_commands(&self) -> bool {
         !self.effective_commands().is_empty()
+    }
+
+    /// Returns `true` if validation is configured — either through explicit
+    /// commands or a preset.
+    #[must_use]
+    pub fn has_any_validation(&self) -> bool {
+        self.has_commands() || self.preset.is_some()
     }
 }
 
@@ -717,5 +799,120 @@ branch = "release"
         let msg = format!("{err}");
         assert!(msg.contains("config error"));
         assert!(msg.contains("parse error"));
+    }
+
+    // -- LanguagePreset --
+
+    #[test]
+    fn language_preset_display() {
+        assert_eq!(format!("{}", LanguagePreset::Auto), "auto");
+        assert_eq!(format!("{}", LanguagePreset::Rust), "rust");
+        assert_eq!(format!("{}", LanguagePreset::Python), "python");
+        assert_eq!(format!("{}", LanguagePreset::TypeScript), "typescript");
+    }
+
+    #[test]
+    fn language_preset_commands_rust() {
+        let cmds = LanguagePreset::Rust.commands();
+        assert_eq!(cmds, &["cargo check", "cargo test --no-run"]);
+    }
+
+    #[test]
+    fn language_preset_commands_python() {
+        let cmds = LanguagePreset::Python.commands();
+        assert_eq!(cmds, &["python -m py_compile", "pytest -q --co"]);
+    }
+
+    #[test]
+    fn language_preset_commands_typescript() {
+        let cmds = LanguagePreset::TypeScript.commands();
+        assert_eq!(cmds, &["tsc --noEmit"]);
+    }
+
+    #[test]
+    fn language_preset_auto_has_no_commands() {
+        // Auto is resolved externally via detect_language_preset.
+        assert!(LanguagePreset::Auto.commands().is_empty());
+    }
+
+    #[test]
+    fn all_language_presets_parse() {
+        for (input, expected) in [
+            ("auto", LanguagePreset::Auto),
+            ("rust", LanguagePreset::Rust),
+            ("python", LanguagePreset::Python),
+            ("typescript", LanguagePreset::TypeScript),
+        ] {
+            let toml = format!("[merge.validation]\npreset = \"{input}\"");
+            let cfg = ManifoldConfig::parse(&toml).unwrap();
+            assert_eq!(
+                cfg.merge.validation.preset.as_ref().unwrap(),
+                &expected,
+                "variant: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_config_preset_defaults_to_none() {
+        let cfg = ManifoldConfig::default();
+        assert!(cfg.merge.validation.preset.is_none());
+    }
+
+    #[test]
+    fn validation_config_has_any_validation_with_preset() {
+        let cfg = ManifoldConfig::parse("[merge.validation]\npreset = \"rust\"").unwrap();
+        assert!(cfg.merge.validation.has_any_validation());
+        // No explicit commands set
+        assert!(!cfg.merge.validation.has_commands());
+    }
+
+    #[test]
+    fn validation_config_has_any_validation_with_command() {
+        let cfg =
+            ManifoldConfig::parse("[merge.validation]\ncommand = \"cargo test\"").unwrap();
+        assert!(cfg.merge.validation.has_any_validation());
+        assert!(cfg.merge.validation.has_commands());
+    }
+
+    #[test]
+    fn validation_config_has_no_validation_by_default() {
+        let cfg = ManifoldConfig::default();
+        assert!(!cfg.merge.validation.has_any_validation());
+    }
+
+    #[test]
+    fn parse_preset_with_explicit_commands_coexist() {
+        // Explicit commands take precedence over preset in resolve_commands,
+        // but both can be specified in TOML.
+        let toml = r#"
+[merge.validation]
+command = "cargo fmt --check"
+preset = "rust"
+on_failure = "block"
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(
+            cfg.merge.validation.command.as_deref(),
+            Some("cargo fmt --check")
+        );
+        assert_eq!(cfg.merge.validation.preset, Some(LanguagePreset::Rust));
+        // effective_commands only returns explicit (not preset)
+        assert_eq!(
+            cfg.merge.validation.effective_commands(),
+            vec!["cargo fmt --check"]
+        );
+        assert!(cfg.merge.validation.has_any_validation());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_language_preset() {
+        let toml = "[merge.validation]\npreset = \"cobol\"";
+        let err = ManifoldConfig::parse(toml).unwrap_err();
+        assert!(
+            err.message.contains("unknown variant"),
+            "expected 'unknown variant' but got: {}",
+            err.message
+        );
     }
 }
