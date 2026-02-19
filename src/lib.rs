@@ -10,6 +10,7 @@ pub mod epoch_gc;
 pub mod merge;
 pub mod merge_state;
 pub mod model;
+pub mod oplog;
 pub mod refs;
 
 // Private modules only used by the binary — not re-exported.
