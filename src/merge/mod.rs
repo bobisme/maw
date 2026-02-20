@@ -65,3 +65,6 @@ pub use validate::{
 
 #[cfg(test)]
 mod determinism_tests;
+
+#[cfg(test)]
+mod pushout_tests;
