@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 use crate::model::types::{WorkspaceMode, WorkspaceState};
+use crate::workspace::templates::TemplateDefaults;
 
 use crate::merge::quarantine::QUARANTINE_NAME_PREFIX;
 
@@ -20,6 +21,10 @@ pub struct WorkspaceInfo {
     pub(crate) path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) behind_epochs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) template_defaults: Option<TemplateDefaults>,
 }
 
 /// Envelope for `maw ws list --format json` output.
@@ -77,9 +82,8 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                 _ => None,
             };
             // Read metadata for this workspace (defaults to ephemeral on error/missing).
-            let ws_mode = metadata::read(&root, ws.id.as_str())
-                .map(|m| m.mode)
-                .unwrap_or(WorkspaceMode::Ephemeral);
+            let ws_meta = metadata::read(&root, ws.id.as_str()).unwrap_or_default();
+            let ws_mode = ws_meta.mode;
             WorkspaceInfo {
                 is_default: name == DEFAULT_WORKSPACE,
                 epoch: ws.epoch.as_str()[..12].to_string(),
@@ -97,6 +101,8 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                     None
                 },
                 behind_epochs: behind,
+                template: ws_meta.template.map(|t| t.to_string()),
+                template_defaults: ws_meta.template_defaults,
                 name,
             }
         })

@@ -2,6 +2,7 @@ use std::io::{self, Write};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::{EpochId, WorkspaceId, WorkspaceMode};
@@ -9,10 +10,15 @@ use crate::refs as manifold_refs;
 
 use super::{
     DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata, repo_root,
-    workspace_path, workspaces_dir,
+    templates::WorkspaceTemplate, workspace_path, workspaces_dir,
 };
 
-pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()> {
+pub fn create(
+    name: &str,
+    revision: Option<&str>,
+    persistent: bool,
+    template: Option<WorkspaceTemplate>,
+) -> Result<()> {
     let root = ensure_repo_root()?;
     let backend = get_backend()?;
     let path = workspace_path(name)?;
@@ -31,6 +37,7 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
     } else {
         WorkspaceMode::Ephemeral
     };
+    let template_profile = template.map(WorkspaceTemplate::profile);
 
     println!("Creating workspace '{name}' at ws/{name} ...");
     if persistent {
@@ -54,13 +61,22 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
             "Failed to create workspace: {e}\n  Check: maw doctor\n  Verify name is not already used: maw ws list"
         ))?;
 
-    // Write workspace metadata (mode: ephemeral | persistent).
-    // Only write metadata for non-default values (persistent) to keep the
-    // common case (ephemeral) lean — missing metadata => ephemeral.
-    if persistent {
-        let meta = metadata::WorkspaceMetadata { mode };
+    // Write workspace metadata (mode + optional template defaults).
+    // Keep the common case lean: if mode is ephemeral and no template is set,
+    // metadata is omitted and defaults are inferred.
+    if persistent || template_profile.is_some() {
+        let meta = metadata::WorkspaceMetadata {
+            mode,
+            template,
+            template_defaults: template_profile.as_ref().map(|p| p.defaults.clone()),
+        };
         metadata::write(&root, name, &meta)
             .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;
+    }
+
+    if let Some(profile) = &template_profile {
+        write_template_artifact(&info.path, profile)
+            .with_context(|| format!("Failed to write template artifact for workspace '{name}'"))?;
     }
 
     // Get short commit ID for display
@@ -77,6 +93,10 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
             "ephemeral"
         }
     );
+    if let Some(profile) = &template_profile {
+        println!("  Template: {}", profile.template);
+        println!("  Merge policy: {}", profile.defaults.merge_policy);
+    }
     println!("  Epoch:  {short_oid} (base commit for this workspace)");
     println!("  Path:   {}/", info.path.display());
     println!();
@@ -100,6 +120,40 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
         println!("The merge engine captures changes when merging.");
     }
 
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct WorkspaceTemplateArtifact {
+    template: String,
+    description: String,
+    merge_policy: String,
+    default_checks: Vec<String>,
+    recommended_validation: Vec<String>,
+}
+
+fn write_template_artifact(
+    workspace_path: &std::path::Path,
+    profile: &super::templates::TemplateProfile,
+) -> Result<()> {
+    let artifact_path = workspace_path.join(".manifold").join("workspace-template.json");
+    if let Some(parent) = artifact_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+
+    let artifact = WorkspaceTemplateArtifact {
+        template: profile.template.to_string(),
+        description: profile.description.clone(),
+        merge_policy: profile.defaults.merge_policy.clone(),
+        default_checks: profile.defaults.default_checks.clone(),
+        recommended_validation: profile.defaults.recommended_validation.clone(),
+    };
+
+    let content = serde_json::to_string_pretty(&artifact)
+        .context("Failed to serialize workspace template artifact")?;
+    std::fs::write(&artifact_path, content)
+        .with_context(|| format!("Failed to write {}", artifact_path.display()))?;
     Ok(())
 }
 

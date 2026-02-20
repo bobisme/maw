@@ -22,6 +22,7 @@ mod status;
 pub mod sync;
 mod overlap;
 mod touched;
+mod templates;
 
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;
@@ -167,6 +168,13 @@ pub enum WorkspaceCommands {
         /// Staleness is shown in `maw ws list` and `maw ws status`.
         #[arg(long)]
         persistent: bool,
+
+        /// Apply a workspace archetype template (feature, bugfix, refactor, eval, release).
+        ///
+        /// Templates emit machine-readable defaults in workspace metadata and
+        /// `.manifold/workspace-template.json` inside the workspace.
+        #[arg(long, value_enum)]
+        template: Option<templates::WorkspaceTemplate>,
     },
 
     /// Remove a workspace
@@ -532,13 +540,14 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             random,
             revision,
             persistent,
+            template,
         } => {
             let name = if random {
                 names::generate_workspace_name()
             } else {
                 name.expect("name is required unless --random is set")
             };
-            create::create(&name, revision.as_deref(), persistent)
+            create::create(&name, revision.as_deref(), persistent, template)
         }
         WorkspaceCommands::Destroy { name, confirm } => create::destroy(&name, confirm),
         WorkspaceCommands::Restore { name } => restore::restore(&name),

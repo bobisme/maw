@@ -118,3 +118,43 @@ fn status_reports_clean_dirty_and_stale_states() {
         "agent-a state should be stale after epoch advance, got: {state}"
     );
 }
+
+#[test]
+fn workspace_create_template_emits_metadata_and_artifact() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "agent-template", "--template", "bugfix"]);
+
+    let listed = repo.maw_ok(&["ws", "list", "--format", "json"]);
+    let listed_json: serde_json::Value =
+        serde_json::from_str(&listed).expect("ws list --format json should be valid JSON");
+
+    let workspaces = listed_json["workspaces"]
+        .as_array()
+        .expect("workspaces should be an array");
+    let templated = workspaces
+        .iter()
+        .find(|w| w["name"].as_str() == Some("agent-template"))
+        .expect("templated workspace should exist");
+
+    assert_eq!(templated["template"].as_str(), Some("bugfix"));
+    assert_eq!(
+        templated["template_defaults"]["merge_policy"].as_str(),
+        Some("fast-track-if-clean")
+    );
+
+    let artifact_path = repo
+        .workspace_path("agent-template")
+        .join(".manifold")
+        .join("workspace-template.json");
+    let artifact_raw = std::fs::read_to_string(&artifact_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", artifact_path.display()));
+    let artifact_json: serde_json::Value =
+        serde_json::from_str(&artifact_raw).expect("workspace-template artifact should be JSON");
+
+    assert_eq!(artifact_json["template"].as_str(), Some("bugfix"));
+    assert_eq!(
+        artifact_json["merge_policy"].as_str(),
+        Some("fast-track-if-clean")
+    );
+}

@@ -33,6 +33,7 @@ That's it. Agents reading AGENTS.md will know how to create workspaces and coord
 | Command | Description |
 |---------|-------------|
 | `maw ws create <name>` | Create isolated workspace for an agent |
+| `maw ws create <name> --template <archetype>` | Create workspace with archetype defaults (`feature`, `bugfix`, `refactor`, `eval`, `release`) |
 | `maw ws list` | List all workspaces |
 | `maw status` | Brief repo/workspace status summary |
 | `maw ws status` | Show all agent work, conflicts, stale warnings |

@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::model::types::WorkspaceMode;
+use crate::workspace::templates::{TemplateDefaults, WorkspaceTemplate};
 
 // ---------------------------------------------------------------------------
 // WorkspaceMetadata
@@ -27,6 +28,12 @@ pub struct WorkspaceMetadata {
     /// Workspace lifetime mode.
     #[serde(default)]
     pub mode: WorkspaceMode,
+    /// Optional selected archetype template for this workspace.
+    #[serde(default)]
+    pub template: Option<WorkspaceTemplate>,
+    /// Effective defaults materialized from the selected template.
+    #[serde(default)]
+    pub template_defaults: Option<TemplateDefaults>,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +129,7 @@ mod tests {
     fn roundtrip_ephemeral() {
         let meta = WorkspaceMetadata {
             mode: WorkspaceMode::Ephemeral,
+            ..WorkspaceMetadata::default()
         };
         let decoded = write_and_read(&meta);
         assert_eq!(decoded.mode, WorkspaceMode::Ephemeral);
@@ -131,6 +139,7 @@ mod tests {
     fn roundtrip_persistent() {
         let meta = WorkspaceMetadata {
             mode: WorkspaceMode::Persistent,
+            ..WorkspaceMetadata::default()
         };
         let decoded = write_and_read(&meta);
         assert_eq!(decoded.mode, WorkspaceMode::Persistent);
@@ -141,6 +150,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let meta = WorkspaceMetadata {
             mode: WorkspaceMode::Persistent,
+            ..WorkspaceMetadata::default()
         };
         write(dir.path(), "my-ws", &meta).unwrap();
         let expected_path = dir
@@ -156,6 +166,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let meta = WorkspaceMetadata {
             mode: WorkspaceMode::Persistent,
+            ..WorkspaceMetadata::default()
         };
         write(dir.path(), "ws", &meta).unwrap();
         delete(dir.path(), "ws").unwrap();
