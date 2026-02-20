@@ -19,6 +19,8 @@
 //! - File content (blob identity) drives resolution, not timestamps.
 //! - diff3 is itself deterministic given the same inputs.
 
+#[cfg(feature = "ast-merge")]
+pub mod ast_merge;
 pub mod build;
 pub mod build_phase;
 pub mod collect;
@@ -28,12 +30,12 @@ pub mod plan;
 pub mod prepare;
 pub mod quarantine;
 pub mod rename;
-#[cfg(feature = "ast-merge")]
-pub mod ast_merge;
 pub mod resolve;
 pub mod types;
 pub mod validate;
 
+#[cfg(feature = "ast-merge")]
+pub use ast_merge::{AstLanguage, AstMergeConfig, AstMergeResult, try_ast_merge};
 pub use build::{BuildError, ResolvedChange, build_merge_commit};
 pub use build_phase::{
     BuildPhaseError, BuildPhaseOutput, run_build_phase, run_build_phase_with_inputs,
@@ -50,8 +52,6 @@ pub use quarantine::{
     create_quarantine_workspace, list_quarantines, merge_id_from_name, promote_quarantine,
     quarantine_workspace_name, quarantine_workspace_path,
 };
-#[cfg(feature = "ast-merge")]
-pub use ast_merge::{AstLanguage, AstMergeConfig, AstMergeResult, try_ast_merge};
 pub use rename::{RenameAwareResult, RenameConflict, apply_rename_awareness};
 pub use resolve::{
     ConflictReason, ConflictRecord, ConflictSide, ResolveError, ResolveResult, parse_diff3_atoms,

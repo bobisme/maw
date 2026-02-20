@@ -37,7 +37,7 @@ use crate::model::conflict::{
 use crate::model::types::WorkspaceId;
 
 #[cfg(feature = "ast-merge")]
-use super::ast_merge::{AstLanguage, AstMergeConfig, AstMergeResult, try_ast_merge};
+use super::ast_merge::{AstMergeConfig, AstMergeResult, try_ast_merge_with_config};
 
 use super::build::ResolvedChange;
 use super::partition::{PartitionResult, PathEntry};
@@ -477,7 +477,11 @@ fn resolve_shared_path_with_ast(
             ConflictReason::MissingBase
         };
         return Ok(SharedOutcome::Conflict(conflict_record(
-            path, entries, None, reason, vec![],
+            path,
+            entries,
+            None,
+            reason,
+            vec![],
         )));
     };
 
@@ -523,7 +527,7 @@ fn resolve_shared_path_with_ast(
             .map(|(entry, content)| (entry.workspace_id.clone(), content.clone()))
             .collect();
 
-        match try_ast_merge(base_bytes, &ast_variants, lang) {
+        match try_ast_merge_with_config(base_bytes, &ast_variants, lang, ast_config) {
             AstMergeResult::Clean(ast_merged) => {
                 return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
                     path: path.to_path_buf(),
@@ -1197,7 +1201,9 @@ mod tests {
         // Bare diff3 conflicts on this shifted-code fixture.
         match diff3_merge_bytes(base_text, moved, edited).unwrap() {
             Diff3Outcome::Conflict { .. } => {}
-            Diff3Outcome::Clean(_) => panic!("fixture should conflict before shifted alignment retry"),
+            Diff3Outcome::Clean(_) => {
+                panic!("fixture should conflict before shifted alignment retry")
+            }
         }
 
         let partition = shared_only(
@@ -1211,7 +1217,10 @@ mod tests {
         base.insert(PathBuf::from("src/lib.rs"), base_text.to_vec());
 
         let result = resolve_partition(&partition, &base).unwrap();
-        assert!(result.is_clean(), "alignment retry should auto-resolve moved block");
+        assert!(
+            result.is_clean(),
+            "alignment retry should auto-resolve moved block"
+        );
 
         let merged = String::from_utf8(upsert_content(&result).to_vec()).unwrap();
         assert!(merged.contains("println!(\"2\")"));
@@ -1229,7 +1238,10 @@ mod tests {
         // Anchored functions should be restored to base-relative order.
         let one_pos = normalized_text.find("fn one()").unwrap();
         let two_pos = normalized_text.find("fn two()").unwrap();
-        assert!(one_pos < two_pos, "fn one should appear before fn two after normalization");
+        assert!(
+            one_pos < two_pos,
+            "fn one should appear before fn two after normalization"
+        );
         // Inserted helper block should be preserved.
         assert!(normalized_text.contains("fn helper()"));
     }
@@ -1260,13 +1272,19 @@ mod tests {
         let mut aligned_clean = 0usize;
 
         for (ours, theirs) in fixtures {
-            if matches!(diff3_merge_bytes(base, ours, theirs).unwrap(), Diff3Outcome::Clean(_)) {
+            if matches!(
+                diff3_merge_bytes(base, ours, theirs).unwrap(),
+                Diff3Outcome::Clean(_)
+            ) {
                 bare_clean += 1;
             }
             if retry_with_shifted_alignment(base, ours, theirs)
                 .unwrap()
                 .is_some()
-                || matches!(diff3_merge_bytes(base, ours, theirs).unwrap(), Diff3Outcome::Clean(_))
+                || matches!(
+                    diff3_merge_bytes(base, ours, theirs).unwrap(),
+                    Diff3Outcome::Clean(_)
+                )
             {
                 aligned_clean += 1;
             }
@@ -1907,8 +1925,7 @@ mod tests {
             base_map.insert(PathBuf::from("src/processor.rs"), base.to_vec());
 
             let ast_config = AstMergeConfig::all_languages();
-            let result =
-                resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+            let result = resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
 
             // Both ws-a and ws-b modify the same function — should conflict.
             assert_eq!(result.conflicts.len(), 1);
@@ -1946,8 +1963,7 @@ mod tests {
 
             // With no languages enabled, AST merge should not be tried.
             let no_ast_config = AstMergeConfig::default();
-            let result =
-                resolve_partition_with_ast(&partition, &base_map, &no_ast_config).unwrap();
+            let result = resolve_partition_with_ast(&partition, &base_map, &no_ast_config).unwrap();
 
             // Should get the same result as plain resolve_partition.
             let plain_result = resolve_partition(&partition, &base_map).unwrap();
@@ -1972,8 +1988,7 @@ mod tests {
             base_map.insert(PathBuf::from("data.json"), base.to_vec());
 
             let ast_config = AstMergeConfig::all_languages();
-            let result =
-                resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+            let result = resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
             let plain_result = resolve_partition(&partition, &base_map).unwrap();
             assert_eq!(result.is_clean(), plain_result.is_clean());
         }

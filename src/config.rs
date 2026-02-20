@@ -172,29 +172,60 @@ impl Default for MergeConfig {
 ///
 /// ```toml
 /// [merge.ast]
-/// languages = ["rust", "python", "typescript"]
+/// languages = ["rust", "python", "typescript", "javascript", "go"]
+/// packs = ["core"]
+/// semantic_false_positive_budget_pct = 5
+/// semantic_min_confidence = 70
 /// ```
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AstConfig {
     /// Languages for which AST merge is enabled.
     ///
-    /// Supported values: `"rust"`, `"python"`, `"typescript"`.
+    /// Supported values: `"rust"`, `"python"`, `"typescript"`, `"javascript"`, `"go"`.
     /// Empty (default) means AST merge is disabled for all languages.
     #[serde(default)]
     pub languages: Vec<AstConfigLanguage>,
+
+    /// Optional language packs that expand to multiple languages.
+    ///
+    /// Packs are additive with `languages` and deduplicated by the merge layer.
+    #[serde(default)]
+    pub packs: Vec<AstLanguagePack>,
+
+    /// Maximum allowed semantic false-positive rate percentage (0-100).
+    ///
+    /// Semantic rules with confidence below `min_confidence` are downgraded to
+    /// generic AST-node conflict reasons to keep diagnostics conservative.
+    #[serde(default = "default_semantic_false_positive_budget_pct")]
+    pub semantic_false_positive_budget_pct: u8,
+
+    /// Minimum confidence required for semantic rule-specific diagnostics.
+    #[serde(default = "default_semantic_min_confidence")]
+    pub semantic_min_confidence: u8,
 }
 
 impl Default for AstConfig {
     fn default() -> Self {
         Self {
             languages: Vec::new(),
+            packs: Vec::new(),
+            semantic_false_positive_budget_pct: default_semantic_false_positive_budget_pct(),
+            semantic_min_confidence: default_semantic_min_confidence(),
         }
     }
 }
 
+const fn default_semantic_false_positive_budget_pct() -> u8 {
+    5
+}
+
+const fn default_semantic_min_confidence() -> u8 {
+    70
+}
+
 /// A language supported by the AST merge layer.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AstConfigLanguage {
     /// Rust (.rs files).
@@ -204,6 +235,22 @@ pub enum AstConfigLanguage {
     /// TypeScript (.ts, .tsx files).
     #[serde(alias = "ts")]
     TypeScript,
+    /// JavaScript (.js, .jsx, .mjs, .cjs files).
+    JavaScript,
+    /// Go (.go files).
+    Go,
+}
+
+/// A predefined pack of AST grammars that can be enabled together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AstLanguagePack {
+    /// Existing stable languages (Rust/Python/TypeScript).
+    Core,
+    /// Front-end language family (TypeScript/JavaScript).
+    Web,
+    /// Backend language family (Rust/Go/Python).
+    Backend,
 }
 
 impl MergeConfig {
@@ -999,7 +1046,16 @@ on_failure = "block"
     #[test]
     fn ast_config_defaults_to_disabled() {
         let cfg = ManifoldConfig::default();
-        assert!(cfg.merge.ast.languages.is_empty(), "AST merge should be disabled by default");
+        assert!(
+            cfg.merge.ast.languages.is_empty(),
+            "AST merge should be disabled by default"
+        );
+        assert!(
+            cfg.merge.ast.packs.is_empty(),
+            "AST packs should be disabled by default"
+        );
+        assert_eq!(cfg.merge.ast.semantic_false_positive_budget_pct, 5);
+        assert_eq!(cfg.merge.ast.semantic_min_confidence, 70);
     }
 
     #[test]
@@ -1012,7 +1068,12 @@ languages = ["rust", "python", "typescript"]
         assert_eq!(cfg.merge.ast.languages.len(), 3);
         assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Rust));
         assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Python));
-        assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::TypeScript));
+        assert!(
+            cfg.merge
+                .ast
+                .languages
+                .contains(&AstConfigLanguage::TypeScript)
+        );
     }
 
     #[test]
@@ -1035,6 +1096,39 @@ languages = ["ts"]
         let cfg = ManifoldConfig::parse(toml).unwrap();
         assert_eq!(cfg.merge.ast.languages.len(), 1);
         assert_eq!(cfg.merge.ast.languages[0], AstConfigLanguage::TypeScript);
+    }
+
+    #[test]
+    fn parse_ast_config_javascript_and_go() {
+        let toml = r#"
+[merge.ast]
+languages = ["javascript", "go"]
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(cfg.merge.ast.languages.len(), 2);
+        assert!(
+            cfg.merge
+                .ast
+                .languages
+                .contains(&AstConfigLanguage::JavaScript)
+        );
+        assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Go));
+    }
+
+    #[test]
+    fn parse_ast_config_packs_and_semantic_thresholds() {
+        let toml = r#"
+[merge.ast]
+packs = ["core", "web"]
+semantic_false_positive_budget_pct = 3
+semantic_min_confidence = 80
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(cfg.merge.ast.packs.len(), 2);
+        assert!(cfg.merge.ast.packs.contains(&AstLanguagePack::Core));
+        assert!(cfg.merge.ast.packs.contains(&AstLanguagePack::Web));
+        assert_eq!(cfg.merge.ast.semantic_false_positive_budget_pct, 3);
+        assert_eq!(cfg.merge.ast.semantic_min_confidence, 80);
     }
 
     #[test]

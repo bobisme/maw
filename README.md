@@ -104,6 +104,22 @@ Matching files with conflicts are restored from `main`, while other conflicts st
 
 **Note on `.crit/`**: Crit v2 uses per-review event logs (`.crit/reviews/<id>/events.jsonl`) instead of a single file. This structure rarely conflicts across workspaces, so auto_resolve is typically not needed.
 
+### AST-aware semantic conflict detection (tree-sitter)
+
+You can opt-in per language (or by pack) for AST-aware conflict diagnostics:
+
+```toml
+[merge.ast]
+languages = ["rust", "python", "typescript", "javascript", "go"]
+packs = ["core"] # core = rust/python/typescript; also: web, backend
+semantic_false_positive_budget_pct = 5
+semantic_min_confidence = 70
+```
+
+- `languages` and `packs` are additive and deduplicated.
+- If semantic confidence falls below the configured threshold/budget gate, Manifold falls back to generic `same_ast_node_modified` reasons to reduce false positives.
+- Conflict artifacts include optional machine-readable semantic metadata (`rule`, `confidence`, `rationale`, `evidence`) for downstream automation.
+
 ## Optional Integrations
 
 - **[botbus](https://github.com/anthropics/botbus)**: Agent coordination and claims

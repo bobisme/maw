@@ -12,6 +12,8 @@ ast-merge = [
     "dep:tree-sitter-rust",
     "dep:tree-sitter-python",
     "dep:tree-sitter-typescript",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-go",
 ]
 
 [dependencies]
@@ -32,6 +34,8 @@ tree-sitter = { version = "0.25", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.23", optional = true }
 
 [dev-dependencies]
 proptest = "1"

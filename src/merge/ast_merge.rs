@@ -30,7 +30,9 @@ use std::path::Path;
 
 use tree_sitter::{Language, Parser, Tree};
 
-use crate::model::conflict::{AtomEdit, ConflictAtom, ConflictReason, Region};
+use crate::model::conflict::{
+    AtomEdit, ConflictAtom, ConflictReason, Region, SemanticConflictExplanation,
+};
 use crate::model::types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -38,11 +40,13 @@ use crate::model::types::WorkspaceId;
 // ---------------------------------------------------------------------------
 
 /// Languages supported by the AST merge layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AstLanguage {
     Rust,
     Python,
     TypeScript,
+    JavaScript,
+    Go,
 }
 
 impl AstLanguage {
@@ -55,6 +59,8 @@ impl AstLanguage {
             "rs" => Some(Self::Rust),
             "py" => Some(Self::Python),
             "ts" | "tsx" => Some(Self::TypeScript),
+            "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
+            "go" => Some(Self::Go),
             _ => None,
         }
     }
@@ -65,6 +71,8 @@ impl AstLanguage {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
         }
     }
 
@@ -88,12 +96,18 @@ impl AstLanguage {
                 "class_definition",
                 "decorated_definition",
             ],
-            Self::TypeScript => &[
+            Self::TypeScript | Self::JavaScript => &[
                 "function_declaration",
                 "class_declaration",
                 "interface_declaration",
                 "type_alias_declaration",
                 "enum_declaration",
+                "method_definition",
+            ],
+            Self::Go => &[
+                "function_declaration",
+                "method_declaration",
+                "type_declaration",
             ],
         }
     }
@@ -108,6 +122,28 @@ impl AstLanguage {
             _ => "name",
         }
     }
+
+    #[must_use]
+    fn from_config_language(lang: crate::config::AstConfigLanguage) -> Self {
+        use crate::config::AstConfigLanguage;
+        match lang {
+            AstConfigLanguage::Rust => Self::Rust,
+            AstConfigLanguage::Python => Self::Python,
+            AstConfigLanguage::TypeScript => Self::TypeScript,
+            AstConfigLanguage::JavaScript => Self::JavaScript,
+            AstConfigLanguage::Go => Self::Go,
+        }
+    }
+
+    #[must_use]
+    fn pack_languages(pack: crate::config::AstLanguagePack) -> &'static [Self] {
+        use crate::config::AstLanguagePack;
+        match pack {
+            AstLanguagePack::Core => &[Self::Rust, Self::Python, Self::TypeScript],
+            AstLanguagePack::Web => &[Self::TypeScript, Self::JavaScript],
+            AstLanguagePack::Backend => &[Self::Rust, Self::Go, Self::Python],
+        }
+    }
 }
 
 impl std::fmt::Display for AstLanguage {
@@ -116,6 +152,8 @@ impl std::fmt::Display for AstLanguage {
             Self::Rust => write!(f, "rust"),
             Self::Python => write!(f, "python"),
             Self::TypeScript => write!(f, "typescript"),
+            Self::JavaScript => write!(f, "javascript"),
+            Self::Go => write!(f, "go"),
         }
     }
 }
@@ -125,11 +163,25 @@ impl std::fmt::Display for AstLanguage {
 // ---------------------------------------------------------------------------
 
 /// Configuration for AST-aware merge.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AstMergeConfig {
     /// Languages for which AST merge is enabled.
     /// Empty = disabled for all languages.
     pub enabled_languages: Vec<AstLanguage>,
+    /// Maximum semantic false-positive budget in percent.
+    pub semantic_false_positive_budget_pct: u8,
+    /// Minimum confidence required for semantic-specific conflict reasons.
+    pub semantic_min_confidence: u8,
+}
+
+impl Default for AstMergeConfig {
+    fn default() -> Self {
+        Self {
+            enabled_languages: Vec::new(),
+            semantic_false_positive_budget_pct: 5,
+            semantic_min_confidence: 70,
+        }
+    }
 }
 
 impl AstMergeConfig {
@@ -152,24 +204,35 @@ impl AstMergeConfig {
                 AstLanguage::Rust,
                 AstLanguage::Python,
                 AstLanguage::TypeScript,
+                AstLanguage::JavaScript,
+                AstLanguage::Go,
             ],
+            semantic_false_positive_budget_pct: 5,
+            semantic_min_confidence: 70,
         }
     }
 
     /// Create from the TOML config representation.
     #[must_use]
     pub fn from_config(config: &crate::config::AstConfig) -> Self {
-        use crate::config::AstConfigLanguage;
+        let mut enabled_languages: Vec<AstLanguage> = config
+            .languages
+            .iter()
+            .copied()
+            .map(AstLanguage::from_config_language)
+            .collect();
+
+        for pack in config.packs.iter().copied() {
+            enabled_languages.extend_from_slice(AstLanguage::pack_languages(pack));
+        }
+
+        enabled_languages.sort();
+        enabled_languages.dedup();
+
         Self {
-            enabled_languages: config
-                .languages
-                .iter()
-                .filter_map(|l| match l {
-                    AstConfigLanguage::Rust => Some(AstLanguage::Rust),
-                    AstConfigLanguage::Python => Some(AstLanguage::Python),
-                    AstConfigLanguage::TypeScript => Some(AstLanguage::TypeScript),
-                })
-                .collect(),
+            enabled_languages,
+            semantic_false_positive_budget_pct: config.semantic_false_positive_budget_pct,
+            semantic_min_confidence: config.semantic_min_confidence,
         }
     }
 }
@@ -259,13 +322,11 @@ fn parse_and_extract(
 
         // Extract the item name from the appropriate field.
         let name_field = lang.name_field(kind);
-        let name = child
-            .child_by_field_name(name_field)
-            .map(|n| {
-                std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                    .unwrap_or("")
-                    .to_owned()
-            });
+        let name = child.child_by_field_name(name_field).map(|n| {
+            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                .unwrap_or("")
+                .to_owned()
+        });
 
         let start = child.start_byte();
         let end = child.end_byte();
@@ -371,9 +432,7 @@ pub enum AstMergeResult {
     /// All changes were in independent AST nodes — merged cleanly.
     Clean(Vec<u8>),
     /// Conflicts were found at the AST level.
-    Conflict {
-        atoms: Vec<ConflictAtom>,
-    },
+    Conflict { atoms: Vec<ConflictAtom> },
     /// The file could not be parsed or AST merge is not applicable.
     Unsupported,
 }
@@ -420,6 +479,16 @@ pub fn try_ast_merge(
     variants: &[(WorkspaceId, Vec<u8>)],
     lang: AstLanguage,
 ) -> AstMergeResult {
+    try_ast_merge_with_config(base, variants, lang, &AstMergeConfig::default())
+}
+
+/// Attempt AST-aware merge with semantic conflict tuning from config.
+pub fn try_ast_merge_with_config(
+    base: &[u8],
+    variants: &[(WorkspaceId, Vec<u8>)],
+    lang: AstLanguage,
+    config: &AstMergeConfig,
+) -> AstMergeResult {
     // Parse base.
     let (_base_tree, base_items) = match parse_and_extract(base, lang) {
         Ok(result) => result,
@@ -464,10 +533,7 @@ pub fn try_ast_merge(
             | ItemChange::Added { key, .. }
             | ItemChange::Deleted { key, .. } => key.clone(),
         };
-        constraints_by_item
-            .entry(key)
-            .or_default()
-            .push(constraint);
+        constraints_by_item.entry(key).or_default().push(constraint);
     }
 
     // Check for conflicts: same item modified by multiple workspaces differently.
@@ -498,13 +564,13 @@ pub fn try_ast_merge(
 
         if has_delete && has_modify {
             // Modify/delete at AST level — conflict.
-            let atom = build_modify_delete_atom(key, constraints);
+            let atom = build_modify_delete_atom(key, constraints, lang, config);
             conflict_atoms.push(atom);
             continue;
         }
 
         // Multiple different modifications to the same item — conflict.
-        let atom = build_conflict_atom(key, constraints);
+        let atom = build_conflict_atom(key, constraints, lang, config);
         conflict_atoms.push(atom);
     }
 
@@ -553,9 +619,33 @@ fn change_content(change: &ItemChange) -> Option<&[u8]> {
 // Conflict atom construction
 // ---------------------------------------------------------------------------
 
-fn build_conflict_atom(key: &ItemKey, constraints: &[&ItemConstraint]) -> ConflictAtom {
-    // Determine the base region from the first constraint's base item.
-    let base_region = constraints
+fn build_conflict_atom(
+    key: &ItemKey,
+    constraints: &[&ItemConstraint],
+    lang: AstLanguage,
+    config: &AstMergeConfig,
+) -> ConflictAtom {
+    let base_region = conflict_base_region(constraints);
+    let edits = conflict_edits(constraints);
+
+    let (reason, semantic) = classify_semantic_conflict(key, constraints, lang, config, false);
+    ConflictAtom::new(base_region, edits, reason).with_semantic(semantic)
+}
+
+fn build_modify_delete_atom(
+    key: &ItemKey,
+    constraints: &[&ItemConstraint],
+    lang: AstLanguage,
+    config: &AstMergeConfig,
+) -> ConflictAtom {
+    let base_region = conflict_base_region(constraints);
+    let edits = conflict_edits(constraints);
+    let (reason, semantic) = classify_semantic_conflict(key, constraints, lang, config, true);
+    ConflictAtom::new(base_region, edits, reason).with_semantic(semantic)
+}
+
+fn conflict_base_region(constraints: &[&ItemConstraint]) -> Region {
+    constraints
         .iter()
         .find_map(|c| match &c.change {
             ItemChange::Modified { base_item, .. } | ItemChange::Deleted { base_item, .. } => {
@@ -573,22 +663,16 @@ fn build_conflict_atom(key: &ItemKey, constraints: &[&ItemConstraint]) -> Confli
                 variant_item.end_byte as u32,
             )),
         })
-        .unwrap_or(Region::whole_file());
+        .unwrap_or(Region::whole_file())
+}
 
-    let edits: Vec<AtomEdit> = constraints
+fn conflict_edits(constraints: &[&ItemConstraint]) -> Vec<AtomEdit> {
+    constraints
         .iter()
         .map(|c| {
             let (region, content) = match &c.change {
-                ItemChange::Modified { variant_item, .. } => (
-                    Region::ast_node(
-                        &variant_item.kind,
-                        variant_item.name.clone(),
-                        variant_item.start_byte as u32,
-                        variant_item.end_byte as u32,
-                    ),
-                    String::from_utf8_lossy(&variant_item.content).to_string(),
-                ),
-                ItemChange::Added { variant_item, .. } => (
+                ItemChange::Modified { variant_item, .. }
+                | ItemChange::Added { variant_item, .. } => (
                     Region::ast_node(
                         &variant_item.kind,
                         variant_item.name.clone(),
@@ -609,100 +693,141 @@ fn build_conflict_atom(key: &ItemKey, constraints: &[&ItemConstraint]) -> Confli
             };
             AtomEdit::new(c.workspace_id.to_string(), region, content)
         })
-        .collect();
+        .collect()
+}
 
-    let description = format!(
-        "{key} modified by {} workspaces: [{}]",
-        constraints.len(),
-        constraints
-            .iter()
-            .map(|c| c.workspace_id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+fn classify_semantic_conflict(
+    key: &ItemKey,
+    constraints: &[&ItemConstraint],
+    lang: AstLanguage,
+    config: &AstMergeConfig,
+    force_symbol_lifecycle: bool,
+) -> (ConflictReason, SemanticConflictExplanation) {
+    let workspaces = constraints
+        .iter()
+        .map(|c| c.workspace_id.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    ConflictAtom::new(
-        base_region,
-        edits,
-        ConflictReason::SameAstNodeModified { description },
+    let has_delete = constraints
+        .iter()
+        .any(|c| matches!(c.change, ItemChange::Deleted { .. }));
+    let has_add = constraints
+        .iter()
+        .any(|c| matches!(c.change, ItemChange::Added { .. }));
+
+    let has_modified = constraints
+        .iter()
+        .any(|c| matches!(c.change, ItemChange::Modified { .. }));
+
+    let signatures = constraints
+        .iter()
+        .filter_map(|c| match &c.change {
+            ItemChange::Modified { variant_item, .. } | ItemChange::Added { variant_item, .. } => {
+                extract_signature(variant_item, lang)
+            }
+            ItemChange::Deleted { .. } => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let (rule, confidence, raw_reason) = if force_symbol_lifecycle || (has_delete && has_modified) {
+        (
+            "symbol_lifecycle",
+            92,
+            ConflictReason::symbol_lifecycle(format!(
+                "{key}: symbol lifecycle diverged across [{workspaces}] (modify/delete mismatch)"
+            )),
+        )
+    } else if signatures.len() > 1 {
+        (
+            "signature_drift",
+            86,
+            ConflictReason::signature_drift(format!(
+                "{key}: signature drift detected across [{workspaces}]"
+            )),
+        )
+    } else if has_add || has_modified {
+        (
+            "incompatible_api_edits",
+            74,
+            ConflictReason::incompatible_api_edits(format!(
+                "{key}: incompatible API-level edits across [{workspaces}]"
+            )),
+        )
+    } else {
+        (
+            "same_ast_node_modified",
+            65,
+            ConflictReason::same_ast_node(format!(
+                "{key} modified by {} workspaces: [{workspaces}]",
+                constraints.len(),
+            )),
+        )
+    };
+
+    let max_false_positive_budget = config.semantic_false_positive_budget_pct.clamp(0, 40);
+    let budget_gate = 100_u8.saturating_sub(max_false_positive_budget * 2);
+    let effective_min_confidence = config.semantic_min_confidence.max(budget_gate);
+
+    let (reason, rationale) = if confidence >= effective_min_confidence {
+        (
+            raw_reason,
+            format!("semantic rule `{rule}` passed confidence gate"),
+        )
+    } else {
+        (
+            ConflictReason::same_ast_node(format!(
+                "{key}: semantic classifier below threshold ({confidence} < {effective_min_confidence})"
+            )),
+            format!("downgraded `{rule}` due to confidence gate"),
+        )
+    };
+
+    (
+        reason,
+        SemanticConflictExplanation::new(
+            rule,
+            confidence,
+            rationale,
+            vec![
+                format!("workspaces={workspaces}"),
+                format!("signature_variants={}", signatures.len()),
+                format!("effective_min_confidence={effective_min_confidence}"),
+            ],
+        ),
     )
 }
 
-fn build_modify_delete_atom(key: &ItemKey, constraints: &[&ItemConstraint]) -> ConflictAtom {
-    // Same structure as build_conflict_atom but with a more specific reason.
-    let base_region = constraints
-        .iter()
-        .find_map(|c| match &c.change {
-            ItemChange::Modified { base_item, .. } | ItemChange::Deleted { base_item, .. } => {
-                Some(Region::ast_node(
-                    &base_item.kind,
-                    base_item.name.clone(),
-                    base_item.start_byte as u32,
-                    base_item.end_byte as u32,
-                ))
-            }
-            _ => None,
-        })
-        .unwrap_or(Region::whole_file());
+fn extract_signature(item: &TopLevelItem, lang: AstLanguage) -> Option<String> {
+    let text = String::from_utf8_lossy(&item.content);
+    let first_line = text.lines().next()?.trim();
+    let signature = match lang {
+        AstLanguage::Rust => first_line
+            .strip_prefix("pub ")
+            .or(Some(first_line))
+            .unwrap_or(first_line)
+            .split('{')
+            .next()
+            .unwrap_or(first_line)
+            .trim()
+            .to_string(),
+        AstLanguage::Python => first_line
+            .strip_suffix(':')
+            .unwrap_or(first_line)
+            .to_string(),
+        AstLanguage::TypeScript | AstLanguage::JavaScript | AstLanguage::Go => first_line
+            .split('{')
+            .next()
+            .unwrap_or(first_line)
+            .trim()
+            .to_string(),
+    };
 
-    let edits: Vec<AtomEdit> = constraints
-        .iter()
-        .map(|c| {
-            let (region, content) = match &c.change {
-                ItemChange::Modified { variant_item, .. } => (
-                    Region::ast_node(
-                        &variant_item.kind,
-                        variant_item.name.clone(),
-                        variant_item.start_byte as u32,
-                        variant_item.end_byte as u32,
-                    ),
-                    String::from_utf8_lossy(&variant_item.content).to_string(),
-                ),
-                ItemChange::Deleted { base_item, .. } => (
-                    Region::ast_node(
-                        &base_item.kind,
-                        base_item.name.clone(),
-                        base_item.start_byte as u32,
-                        base_item.end_byte as u32,
-                    ),
-                    String::new(),
-                ),
-                ItemChange::Added { variant_item, .. } => (
-                    Region::ast_node(
-                        &variant_item.kind,
-                        variant_item.name.clone(),
-                        variant_item.start_byte as u32,
-                        variant_item.end_byte as u32,
-                    ),
-                    String::from_utf8_lossy(&variant_item.content).to_string(),
-                ),
-            };
-            AtomEdit::new(c.workspace_id.to_string(), region, content)
-        })
-        .collect();
-
-    let modifiers: Vec<_> = constraints
-        .iter()
-        .filter(|c| matches!(&c.change, ItemChange::Modified { .. }))
-        .map(|c| c.workspace_id.to_string())
-        .collect();
-    let deleters: Vec<_> = constraints
-        .iter()
-        .filter(|c| matches!(&c.change, ItemChange::Deleted { .. }))
-        .map(|c| c.workspace_id.to_string())
-        .collect();
-
-    let description = format!(
-        "{key}: modified by [{}], deleted by [{}]",
-        modifiers.join(", "),
-        deleters.join(", ")
-    );
-
-    ConflictAtom::new(
-        base_region,
-        edits,
-        ConflictReason::SameAstNodeModified { description },
-    )
+    if signature.is_empty() {
+        None
+    } else {
+        Some(signature)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -860,6 +985,18 @@ mod tests {
     }
 
     #[test]
+    fn detect_javascript_and_go_from_extension() {
+        assert_eq!(
+            AstLanguage::from_path(Path::new("web/app.js")),
+            Some(AstLanguage::JavaScript)
+        );
+        assert_eq!(
+            AstLanguage::from_path(Path::new("cmd/main.go")),
+            Some(AstLanguage::Go)
+        );
+    }
+
+    #[test]
     fn unsupported_extension_returns_none() {
         assert_eq!(AstLanguage::from_path(Path::new("data.json")), None);
         assert_eq!(AstLanguage::from_path(Path::new("README.md")), None);
@@ -943,6 +1080,42 @@ function goodbye(): void {
         assert_eq!(items[1].name.as_deref(), Some("Point"));
         assert_eq!(items[2].kind, "function_declaration");
         assert_eq!(items[2].name.as_deref(), Some("goodbye"));
+    }
+
+    #[test]
+    fn parse_javascript_file_extracts_items() {
+        let source = br#"
+function hello() {
+    return 1;
+}
+
+class Point {
+    value() { return 1; }
+}
+"#;
+        let (_tree, items) = parse_and_extract(source, AstLanguage::JavaScript).unwrap();
+        assert!(!items.is_empty());
+        assert_eq!(items[0].kind, "function_declaration");
+        assert_eq!(items[0].name.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn parse_go_file_extracts_items() {
+        let source = br#"
+package main
+
+func hello() int {
+    return 1
+}
+
+type Point struct {
+    x int
+}
+"#;
+        let (_tree, items) = parse_and_extract(source, AstLanguage::Go).unwrap();
+        assert!(!items.is_empty());
+        assert_eq!(items[0].kind, "function_declaration");
+        assert_eq!(items[0].name.as_deref(), Some("hello"));
     }
 
     // -----------------------------------------------------------------------
@@ -1103,8 +1276,7 @@ function goodbye(): void {
 
                 // Should have edits from both workspaces.
                 assert_eq!(atom.edits.len(), 2);
-                let ws_names: Vec<&str> =
-                    atom.edits.iter().map(|e| e.workspace.as_str()).collect();
+                let ws_names: Vec<&str> = atom.edits.iter().map(|e| e.workspace.as_str()).collect();
                 assert!(ws_names.contains(&"ws-a"));
                 assert!(ws_names.contains(&"ws-b"));
 
@@ -1131,6 +1303,62 @@ function goodbye(): void {
             matches!(result, AstMergeResult::Conflict { ref atoms } if atoms.len() == 1),
             "expected 1 conflict atom, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn signature_drift_is_reported_with_semantic_metadata() {
+        let base = b"fn process(input: i32) -> i32 {\n    input\n}\n";
+        let variant_a = b"fn process(input: i32, flag: bool) -> i32 {\n    if flag { input + 1 } else { input }\n}\n";
+        let variant_b = b"fn process(input: i32) -> String {\n    input.to_string()\n}\n";
+
+        let variants = vec![
+            (ws("ws-a"), variant_a.to_vec()),
+            (ws("ws-b"), variant_b.to_vec()),
+        ];
+        let config = AstMergeConfig {
+            enabled_languages: vec![AstLanguage::Rust],
+            semantic_false_positive_budget_pct: 15,
+            semantic_min_confidence: 70,
+        };
+
+        let result = try_ast_merge_with_config(base, &variants, AstLanguage::Rust, &config);
+        match result {
+            AstMergeResult::Conflict { atoms } => {
+                assert_eq!(atoms.len(), 1);
+                assert_eq!(atoms[0].reason.variant_name(), "signature_drift");
+                let semantic = atoms[0].semantic.as_ref().expect("semantic metadata");
+                assert_eq!(semantic.rule, "signature_drift");
+                assert!(semantic.confidence >= 80);
+            }
+            other => panic!("expected conflict, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strict_budget_downgrades_low_confidence_semantic_rule() {
+        let base = b"fn process() {\n    old();\n}\n";
+        let variant_a = b"fn process() {\n    new_a();\n}\n";
+        let variant_b = b"fn process() {\n    new_b();\n}\n";
+
+        let variants = vec![
+            (ws("ws-a"), variant_a.to_vec()),
+            (ws("ws-b"), variant_b.to_vec()),
+        ];
+        let config = AstMergeConfig {
+            enabled_languages: vec![AstLanguage::Rust],
+            semantic_false_positive_budget_pct: 2,
+            semantic_min_confidence: 90,
+        };
+
+        let result = try_ast_merge_with_config(base, &variants, AstLanguage::Rust, &config);
+        match result {
+            AstMergeResult::Conflict { atoms } => {
+                assert_eq!(atoms.len(), 1);
+                assert_eq!(atoms[0].reason.variant_name(), "same_ast_node_modified");
+                assert!(atoms[0].semantic.is_some());
+            }
+            other => panic!("expected conflict, got: {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1254,6 +1482,8 @@ function goodbye(): void {
     fn config_partial_languages() {
         let config = AstMergeConfig {
             enabled_languages: vec![AstLanguage::Rust],
+            semantic_false_positive_budget_pct: 5,
+            semantic_min_confidence: 70,
         };
         assert_eq!(
             config.is_enabled_for(Path::new("src/main.rs")),
@@ -1278,16 +1508,12 @@ function goodbye(): void {
         for i in 0..50 {
             base.push_str(&format!("fn func_{i}() {{\n    // body {i}\n}}\n\n"));
             if i == 10 {
-                variant_a.push_str(&format!(
-                    "fn func_{i}() {{\n    // modified by a\n}}\n\n"
-                ));
+                variant_a.push_str(&format!("fn func_{i}() {{\n    // modified by a\n}}\n\n"));
             } else {
                 variant_a.push_str(&format!("fn func_{i}() {{\n    // body {i}\n}}\n\n"));
             }
             if i == 40 {
-                variant_b.push_str(&format!(
-                    "fn func_{i}() {{\n    // modified by b\n}}\n\n"
-                ));
+                variant_b.push_str(&format!("fn func_{i}() {{\n    // modified by b\n}}\n\n"));
             } else {
                 variant_b.push_str(&format!("fn func_{i}() {{\n    // body {i}\n}}\n\n"));
             }

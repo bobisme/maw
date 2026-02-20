@@ -16,11 +16,11 @@ mod list;
 mod merge;
 mod metadata;
 mod names;
+mod overlap;
 mod prune;
 mod restore;
 mod status;
 pub mod sync;
-mod overlap;
 mod touched;
 mod templates;
 

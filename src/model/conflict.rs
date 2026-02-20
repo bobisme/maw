@@ -239,6 +239,24 @@ pub enum ConflictReason {
         description: String,
     },
 
+    /// A symbol lifecycle mismatch (add/delete/rename intent divergence).
+    SymbolLifecycleDivergence {
+        /// Human-readable description.
+        description: String,
+    },
+
+    /// Function/method signature drift across variants.
+    SignatureDrift {
+        /// Human-readable description.
+        description: String,
+    },
+
+    /// Incompatible API-level edits (same symbol, incompatible behavior/contract edits).
+    IncompatibleApiEdits {
+        /// Human-readable description.
+        description: String,
+    },
+
     /// The edits are non-commutative — applying them in different orders
     /// produces different results.
     ///
@@ -275,6 +293,30 @@ impl ConflictReason {
         }
     }
 
+    /// Create a symbol lifecycle divergence reason.
+    #[must_use]
+    pub fn symbol_lifecycle(description: impl Into<String>) -> Self {
+        Self::SymbolLifecycleDivergence {
+            description: description.into(),
+        }
+    }
+
+    /// Create a signature drift reason.
+    #[must_use]
+    pub fn signature_drift(description: impl Into<String>) -> Self {
+        Self::SignatureDrift {
+            description: description.into(),
+        }
+    }
+
+    /// Create an incompatible API edits reason.
+    #[must_use]
+    pub fn incompatible_api_edits(description: impl Into<String>) -> Self {
+        Self::IncompatibleApiEdits {
+            description: description.into(),
+        }
+    }
+
     /// Create a non-commutative edits reason.
     #[must_use]
     pub fn non_commutative(description: impl Into<String>) -> Self {
@@ -297,6 +339,9 @@ impl ConflictReason {
         match self {
             Self::OverlappingLineEdits { description }
             | Self::SameAstNodeModified { description }
+            | Self::SymbolLifecycleDivergence { description }
+            | Self::SignatureDrift { description }
+            | Self::IncompatibleApiEdits { description }
             | Self::NonCommutativeEdits { description }
             | Self::Custom { description } => description,
         }
@@ -308,6 +353,9 @@ impl ConflictReason {
         match self {
             Self::OverlappingLineEdits { .. } => "overlapping_line_edits",
             Self::SameAstNodeModified { .. } => "same_ast_node_modified",
+            Self::SymbolLifecycleDivergence { .. } => "symbol_lifecycle_divergence",
+            Self::SignatureDrift { .. } => "signature_drift",
+            Self::IncompatibleApiEdits { .. } => "incompatible_api_edits",
             Self::NonCommutativeEdits { .. } => "non_commutative_edits",
             Self::Custom { .. } => "custom",
         }
@@ -376,6 +424,37 @@ impl fmt::Display for AtomEdit {
     }
 }
 
+/// Machine-readable semantic diagnostics attached to a conflict atom.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticConflictExplanation {
+    /// Stable semantic rule identifier.
+    pub rule: String,
+    /// Confidence score in the range 0-100.
+    pub confidence: u8,
+    /// Compact rationale for agents.
+    pub rationale: String,
+    /// Optional evidence fragments used by the classifier.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+impl SemanticConflictExplanation {
+    #[must_use]
+    pub fn new(
+        rule: impl Into<String>,
+        confidence: u8,
+        rationale: impl Into<String>,
+        evidence: Vec<String>,
+    ) -> Self {
+        Self {
+            rule: rule.into(),
+            confidence,
+            rationale: rationale.into(),
+            evidence,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ConflictAtom — localized conflict region with edits and reason
 // ---------------------------------------------------------------------------
@@ -417,6 +496,10 @@ pub struct ConflictAtom {
 
     /// Why this region could not be auto-merged.
     pub reason: ConflictReason,
+
+    /// Optional semantic explanation used by downstream automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<SemanticConflictExplanation>,
 }
 
 impl ConflictAtom {
@@ -427,7 +510,15 @@ impl ConflictAtom {
             base_region,
             edits,
             reason,
+            semantic: None,
         }
+    }
+
+    /// Attach semantic explanation metadata.
+    #[must_use]
+    pub fn with_semantic(mut self, semantic: SemanticConflictExplanation) -> Self {
+        self.semantic = Some(semantic);
+        self
     }
 
     /// Create a simple line-overlap conflict atom (convenience constructor).
@@ -442,6 +533,7 @@ impl ConflictAtom {
             base_region: Region::lines(start, end),
             edits,
             reason: ConflictReason::overlapping(description),
+            semantic: None,
         }
     }
 
