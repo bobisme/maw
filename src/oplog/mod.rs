@@ -12,6 +12,7 @@
 //! - [`read`] — walk the causal chain from head backwards
 //! - [`view`] — per-workspace view materialization from op log replay
 
+pub mod global_view;
 pub mod read;
 pub mod types;
 pub mod view;
