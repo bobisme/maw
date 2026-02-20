@@ -24,6 +24,7 @@ pub mod build_phase;
 pub mod collect;
 pub mod commit;
 pub mod partition;
+pub mod plan;
 pub mod prepare;
 pub mod resolve;
 pub mod types;
@@ -32,6 +33,10 @@ pub mod validate;
 pub use build::{BuildError, ResolvedChange, build_merge_commit};
 pub use build_phase::{
     BuildPhaseError, BuildPhaseOutput, run_build_phase, run_build_phase_with_inputs,
+};
+pub use plan::{
+    DriverInfo, MergePlan, PlanArtifactError, PredictedConflict, ValidationInfo, WorkspaceChange,
+    WorkspaceReport, compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
 pub use collect::{CollectError, collect_snapshots};
 pub use partition::{PartitionResult, PathEntry, partition_by_path};

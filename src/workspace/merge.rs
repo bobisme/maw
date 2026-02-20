@@ -7,11 +7,17 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
-use crate::config::ManifoldConfig;
+use crate::config::{ManifoldConfig, MergeDriverKind};
 use crate::format::OutputFormat;
-use crate::merge::build_phase::run_build_phase;
+use crate::merge::build_phase::{BuildPhaseOutput, run_build_phase};
+use crate::merge::collect::collect_snapshots;
 use crate::merge::commit::{CommitRecovery, CommitResult, run_commit_phase, recover_partial_commit};
 use crate::merge::prepare::run_prepare_phase;
+use crate::merge::partition::partition_by_path;
+use crate::merge::plan::{
+    DriverInfo, MergePlan, PredictedConflict, ValidationInfo, WorkspaceChange, WorkspaceReport,
+    compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
+};
 use crate::merge::resolve::{ConflictReason, ConflictRecord};
 use crate::model::conflict::Region;
 use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
@@ -653,6 +659,375 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
     } else {
         bail!("merge check: not ready")
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Plan merge (--plan [--json])
+// ---------------------------------------------------------------------------
+
+/// Run the merge pipeline (PREPARE → BUILD → VALIDATE) without committing.
+///
+/// Produces a deterministic `MergePlan` JSON describing what the merge *would*
+/// do. No refs are updated, no epoch is advanced. Artifacts are written to
+/// `.manifold/artifacts/`.
+pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
+    if workspaces.is_empty() {
+        bail!("No workspaces specified for --plan");
+    }
+
+    let root = repo_root()?;
+    let maw_config = MawConfig::load(&root)?;
+    let default_ws = maw_config.default_workspace();
+    let backend = get_backend()?;
+
+    if workspaces.iter().any(|ws| ws == default_ws) {
+        bail!(
+            "Cannot plan a merge of the default workspace — it is the merge target, not a source."
+        );
+    }
+
+    let manifold_dir = root.join(".manifold");
+    let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let sources = parse_workspace_ids(workspaces)?;
+    validate_workspace_dirs(&sources, &backend)?;
+
+    // PREPARE → COLLECT → PARTITION → BUILD
+    let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs_map(&sources, &backend))
+        .map_err(|e| anyhow::anyhow!("PREPARE failed: {e}"))?;
+    let patch_sets = collect_snapshots(&root, &backend, &sources)
+        .map_err(|e| anyhow::anyhow!("COLLECT failed: {e}"))?;
+    let partition = partition_by_path(&patch_sets);
+    let (touched_paths, overlaps) = paths_from_partition(&partition);
+
+    let build_output = match run_build_phase(&root, &manifold_dir, &backend) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = cleanup_plan_merge_state(&manifold_dir);
+            bail!("BUILD phase failed: {e}");
+        }
+    };
+
+    let merge_id = compute_merge_id(&frozen.epoch, &sources, &frozen.heads);
+    let driver_infos = build_driver_infos(&touched_paths, &manifold_config);
+    let predicted_conflicts = build_predicted_conflicts(&build_output, &partition);
+    let validation_info = build_validation_info(&manifold_config);
+
+    // VALIDATE (optional): run and write artifact, but don't block
+    plan_run_validation(&root, &manifold_dir, &merge_id, &build_output, &manifold_config);
+
+    // Clean up merge-state (plan-only: no COMMIT)
+    cleanup_plan_merge_state(&manifold_dir)?;
+
+    let plan = MergePlan {
+        merge_id,
+        epoch_before: frozen.epoch.as_str().to_owned(),
+        sources: {
+            let mut sorted: Vec<String> = sources.iter().map(|ws| ws.as_str().to_owned()).collect();
+            sorted.sort();
+            sorted
+        },
+        touched_paths,
+        overlaps,
+        predicted_conflicts,
+        drivers: driver_infos,
+        validation: validation_info,
+    };
+
+    // Write artifacts (non-fatal on failure)
+    plan_write_artifacts(&manifold_dir, &plan, &patch_sets, &frozen, format);
+
+    // Output
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan)
+                    .map_err(|e| anyhow::anyhow!("serialize plan: {e}"))?
+            );
+        }
+        _ => print_plan_text(&plan),
+    }
+
+    Ok(())
+}
+
+/// Parse workspace name strings into `WorkspaceId` values.
+fn parse_workspace_ids(workspaces: &[String]) -> Result<Vec<WorkspaceId>> {
+    workspaces
+        .iter()
+        .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}")))
+        .collect()
+}
+
+/// Verify all source workspaces exist on disk.
+fn validate_workspace_dirs<B: WorkspaceBackend>(sources: &[WorkspaceId], backend: &B) -> Result<()>
+where
+    B::Error: std::fmt::Display,
+{
+    for ws_id in sources {
+        let ws_path = backend.workspace_path(ws_id);
+        if !ws_path.exists() {
+            bail!(
+                "Workspace '{}' does not exist at {}\n  \
+                 Check available workspaces: maw ws list",
+                ws_id,
+                ws_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Build a `BTreeMap<WorkspaceId, PathBuf>` of workspace directories.
+fn workspace_dirs_map<B: WorkspaceBackend>(
+    sources: &[WorkspaceId],
+    backend: &B,
+) -> BTreeMap<WorkspaceId, PathBuf> {
+    sources
+        .iter()
+        .map(|ws_id| (ws_id.clone(), backend.workspace_path(ws_id)))
+        .collect()
+}
+
+/// Extract sorted touched paths and overlaps from a partition.
+fn paths_from_partition(partition: &crate::merge::partition::PartitionResult) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut touched: Vec<PathBuf> = partition
+        .unique
+        .iter()
+        .map(|(p, _)| p.clone())
+        .chain(partition.shared.iter().map(|(p, _)| p.clone()))
+        .collect();
+    touched.sort();
+    touched.dedup();
+
+    let overlaps: Vec<PathBuf> = partition.shared.iter().map(|(p, _)| p.clone()).collect();
+    (touched, overlaps)
+}
+
+/// Build `DriverInfo` entries for each touched path that has a matching driver.
+fn build_driver_infos(touched_paths: &[PathBuf], config: &ManifoldConfig) -> Vec<DriverInfo> {
+    let effective_drivers = config.merge.effective_drivers();
+    let mut infos = Vec::new();
+    for path in touched_paths {
+        for driver in &effective_drivers {
+            let matches = glob::Pattern::new(&driver.match_glob)
+                .ok()
+                .is_some_and(|p| p.matches_path(path));
+            if matches {
+                let command = matches!(driver.kind, MergeDriverKind::Regenerate)
+                    .then(|| driver.command.clone())
+                    .flatten();
+                infos.push(DriverInfo {
+                    path: path.clone(),
+                    kind: driver.kind.to_string(),
+                    command,
+                });
+                break; // First matching driver wins
+            }
+        }
+    }
+    infos
+}
+
+/// Build `PredictedConflict` entries from the BUILD output.
+fn build_predicted_conflicts(
+    build_output: &BuildPhaseOutput,
+    partition: &crate::merge::partition::PartitionResult,
+) -> Vec<PredictedConflict> {
+    build_output
+        .conflicts
+        .iter()
+        .map(|conflict| {
+            let sides: Vec<String> = partition
+                .shared
+                .iter()
+                .find(|(p, _)| p == &conflict.path)
+                .map(|(_, entries)| {
+                    entries
+                        .iter()
+                        .map(|e| e.workspace_id.as_str().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            PredictedConflict {
+                path: conflict.path.clone(),
+                kind: conflict.reason.to_string(),
+                sides,
+            }
+        })
+        .collect()
+}
+
+/// Build `ValidationInfo` from config (returns `None` if no commands configured).
+fn build_validation_info(config: &ManifoldConfig) -> Option<ValidationInfo> {
+    let vc = &config.merge.validation;
+    if !vc.has_commands() {
+        return None;
+    }
+    Some(ValidationInfo {
+        commands: vc.effective_commands().iter().map(|s| (*s).to_owned()).collect(),
+        timeout_seconds: vc.timeout_seconds,
+        policy: vc.on_failure.to_string(),
+    })
+}
+
+/// Run validation in plan mode: write artifact but never block.
+fn plan_run_validation(
+    root: &Path,
+    manifold_dir: &Path,
+    merge_id: &str,
+    build_output: &BuildPhaseOutput,
+    config: &ManifoldConfig,
+) {
+    let vc = &config.merge.validation;
+    if !vc.has_commands() {
+        return;
+    }
+    match run_validate_phase(root, &build_output.candidate, vc) {
+        Ok(outcome) => {
+            if let Some(result) = outcome.result() {
+                let _ = write_validation_artifact(manifold_dir, merge_id, result);
+            }
+            if !outcome.may_proceed() {
+                eprintln!(
+                    "  WARNING: Validation would fail — merge would be blocked by policy '{}'",
+                    vc.on_failure
+                );
+            }
+        }
+        Err(e) => eprintln!("  WARNING: Validation failed to run: {e}"),
+    }
+}
+
+/// Write plan.json and per-workspace report.json artifacts (non-fatal on failure).
+fn plan_write_artifacts(
+    manifold_dir: &Path,
+    plan: &MergePlan,
+    patch_sets: &[crate::merge::types::PatchSet],
+    frozen: &crate::merge::prepare::FrozenInputs,
+    format: OutputFormat,
+) {
+    match write_plan_artifact(manifold_dir, plan) {
+        Ok(path) => {
+            if !matches!(format, OutputFormat::Json) {
+                println!("Plan artifact: {}", path.display());
+            }
+        }
+        Err(e) => eprintln!("WARNING: Failed to write plan artifact: {e}"),
+    }
+
+    for patch_set in patch_sets {
+        let changes: Vec<WorkspaceChange> = patch_set
+            .changes
+            .iter()
+            .map(|c| WorkspaceChange {
+                path: c.path.clone(),
+                kind: c.kind.to_string(),
+            })
+            .collect();
+        let head = frozen
+            .heads
+            .get(&patch_set.workspace_id)
+            .map(|oid| oid.as_str().to_owned())
+            .unwrap_or_default();
+        let report = WorkspaceReport {
+            workspace_id: patch_set.workspace_id.as_str().to_owned(),
+            head,
+            changes,
+        };
+        if let Err(e) = write_workspace_report_artifact(manifold_dir, &report) {
+            eprintln!(
+                "WARNING: Failed to write workspace report for {}: {e}",
+                patch_set.workspace_id
+            );
+        }
+    }
+}
+
+/// Print a human-readable plan summary.
+fn print_plan_text(plan: &MergePlan) {
+    println!("=== Merge Plan (dry run — no commits) ===");
+    println!();
+    println!("Merge ID:    {}", &plan.merge_id[..16]);
+    println!("Epoch:       {}", &plan.epoch_before[..12]);
+    println!("Sources:     {}", plan.sources.join(", "));
+    println!(
+        "Touched:     {} path(s), {} overlap(s)",
+        plan.touched_paths.len(),
+        plan.overlaps.len()
+    );
+
+    if !plan.overlaps.is_empty() {
+        println!();
+        println!("Overlapping paths (modified in multiple workspaces):");
+        for path in &plan.overlaps {
+            println!("  ~ {}", path.display());
+        }
+    }
+
+    if !plan.predicted_conflicts.is_empty() {
+        println!();
+        println!("Predicted conflicts ({}):", plan.predicted_conflicts.len());
+        for conflict in &plan.predicted_conflicts {
+            let sides = conflict.sides.join(", ");
+            println!(
+                "  C {} — {} (sides: {})",
+                conflict.path.display(),
+                conflict.kind,
+                sides
+            );
+        }
+    } else if !plan.overlaps.is_empty() {
+        println!();
+        println!("  (all overlapping paths resolved cleanly via diff3 or drivers)");
+    }
+
+    if !plan.drivers.is_empty() {
+        println!();
+        println!("Merge drivers:");
+        for driver in &plan.drivers {
+            if let Some(cmd) = &driver.command {
+                println!("  {} — {} (command: {})", driver.path.display(), driver.kind, cmd);
+            } else {
+                println!("  {} — {}", driver.path.display(), driver.kind);
+            }
+        }
+    }
+
+    if let Some(val) = &plan.validation {
+        println!();
+        println!("Validation:");
+        for cmd in &val.commands {
+            println!("  $ {cmd}");
+        }
+        println!("  Timeout: {}s, Policy: {}", val.timeout_seconds, val.policy);
+    }
+
+    println!();
+    if plan.predicted_conflicts.is_empty() {
+        println!("[OK] Merge would succeed with no conflicts.");
+    } else {
+        println!(
+            "[BLOCKED] Merge would have {} unresolved conflict(s). Resolve before merging.",
+            plan.predicted_conflicts.len()
+        );
+    }
+}
+
+/// Remove the merge-state file created during a plan run.
+///
+/// In plan mode, we create a merge-state file during PREPARE/BUILD but never
+/// advance to COMMIT — so we clean it up manually at the end.
+fn cleanup_plan_merge_state(manifold_dir: &Path) -> Result<()> {
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    if state_path.exists() {
+        std::fs::remove_file(&state_path).map_err(|e| {
+            anyhow::anyhow!("failed to remove plan merge-state: {e}")
+        })?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

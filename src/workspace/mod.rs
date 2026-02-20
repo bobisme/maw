@@ -335,6 +335,8 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice bob                   # merge alice and bob's work
     ///   maw ws merge alice bob --destroy         # merge and clean up (non-interactive)
     ///   maw ws merge alice bob --dry-run         # preview merge without committing
+    ///   maw ws merge alice bob --plan      # deterministic merge plan (no commit)
+    ///   maw ws merge alice bob --plan --json  # machine-parseable plan JSON
     ///   maw ws merge alice --check               # pre-flight: can we merge cleanly?
     ///   maw ws merge alice --check --format json # structured check result
     ///   maw ws merge alice --format json         # structured merge result (success or conflict)
@@ -362,6 +364,12 @@ pub enum WorkspaceCommands {
         /// Automatically describe empty commits as 'workspace setup'
         #[arg(long)]
         auto_describe: bool,
+
+        /// Run PREPARE+BUILD+VALIDATE but stop before COMMIT.
+        /// Writes deterministic plan to .manifold/artifacts/ and prints a summary.
+        /// Combine with --json for machine-parseable output.
+        #[arg(long, conflicts_with = "dry_run", conflicts_with = "check")]
+        plan: bool,
 
         /// Pre-flight check: trial rebase to detect conflicts, then undo.
         /// Exit 0 = safe to merge, non-zero = blocked.
@@ -450,6 +458,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             message,
             dry_run,
             auto_describe: _,
+            plan,
             check,
             format,
             json,
@@ -457,6 +466,9 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             if check {
                 return merge::check_merge(&workspaces, fmt);
+            }
+            if plan {
+                return merge::plan_merge(&workspaces, fmt);
             }
             merge::merge(&workspaces, &merge::MergeOptions {
                 destroy_after: destroy,
