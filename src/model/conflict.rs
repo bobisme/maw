@@ -1,4 +1,4 @@
-//! Structured conflict model — variant types and serialization (§6.4).
+//! Structured conflict model — variant types, localization, and serialization (§5.7, §6.4).
 //!
 //! Conflicts in Manifold are structured and localizable — per file, per region,
 //! per edit atom — not giant marker soup. Each variant captures the minimal data
@@ -13,9 +13,18 @@
 //! | [`Conflict::ModifyDelete`] | One workspace modified, another deleted the file |
 //! | [`Conflict::DivergentRename`] | Same file renamed to different destinations |
 //!
+//! # Localization Types
+//!
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Region`] | Where in a file: line ranges, AST nodes, or whole file |
+//! | [`ConflictReason`] | Why the conflict occurred: overlapping edits, same AST node, etc. |
+//! | [`AtomEdit`] | One workspace's contribution to a conflict region |
+//! | [`ConflictAtom`] | A localized conflict with base region, edits, and reason |
+//!
 //! # Serialization
 //!
-//! All types use `#[serde(tag = "type")]` for clean, tagged JSON:
+//! All types use tagged JSON for clean, agent-parseable output:
 //!
 //! ```json
 //! {
@@ -24,7 +33,14 @@
 //!   "file_id": "00000000000000000000000000000001",
 //!   "base": "aaaa...",
 //!   "sides": [...],
-//!   "atoms": [...]
+//!   "atoms": [{
+//!     "base_region": { "kind": "lines", "start": 42, "end": 67 },
+//!     "edits": [
+//!       { "workspace": "alice", "region": { "kind": "lines", "start": 42, "end": 55 }, "content": "..." },
+//!       { "workspace": "bob", "region": { "kind": "lines", "start": 50, "end": 67 }, "content": "..." }
+//!     ],
+//!     "reason": { "reason": "overlapping_line_edits", "description": "Both sides edited lines 42-67" }
+//!   }]
 //! }
 //! ```
 
@@ -77,27 +93,374 @@ impl ConflictSide {
 }
 
 // ---------------------------------------------------------------------------
-// ConflictAtom (forward declaration — full definition in bd-15yn.2)
+// Region — localization of a conflict within a file
 // ---------------------------------------------------------------------------
 
-/// A minimal conflict region within a file (placeholder for bd-15yn.2).
+/// A region within a file that participates in a conflict.
 ///
-/// The full `ConflictAtom` type (with `Region`, line ranges, AST spans) will
-/// be defined in subtask bd-15yn.2. For now, this placeholder carries a
-/// human-readable description of the conflicting region.
+/// Regions localize conflicts to specific parts of a file — either line ranges
+/// or AST node spans. This is the difference between "file has conflict" and
+/// "lines 42-67 of function process_order have a conflict."
+///
+/// # Serialization
+///
+/// Uses `#[serde(tag = "kind")]` with snake_case variant names:
+///
+/// ```json
+/// { "kind": "lines", "start": 42, "end": 67 }
+/// { "kind": "ast_node", "node_kind": "function", "name": "process_order", "start_byte": 1024, "end_byte": 2048 }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Region {
+    /// A contiguous range of lines (1-indexed, inclusive start, exclusive end).
+    ///
+    /// # Example
+    ///
+    /// `Region::Lines { start: 10, end: 15 }` means lines 10..15.
+    Lines {
+        /// First line of the region (1-indexed, inclusive).
+        start: u32,
+        /// One past the last line of the region (exclusive).
+        end: u32,
+    },
+
+    /// An AST node identified by tree-sitter node kind and optional name.
+    ///
+    /// Used when the merge engine has parsed the file and can identify
+    /// conflicts at the syntax-tree level rather than raw line ranges.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// AstNode { node_kind: "function_item", name: Some("process_order"), start_byte: 1024, end_byte: 2048 }
+    /// ```
+    AstNode {
+        /// The tree-sitter node kind (e.g., "function_item", "struct_item").
+        node_kind: String,
+        /// The name of the node if available (e.g., function name, struct name).
+        name: Option<String>,
+        /// Start byte offset in the file (0-indexed).
+        start_byte: u32,
+        /// End byte offset in the file (exclusive).
+        end_byte: u32,
+    },
+
+    /// The entire file (used when region-level granularity is not available).
+    WholeFile,
+}
+
+impl Region {
+    /// Create a line-based region.
+    #[must_use]
+    pub fn lines(start: u32, end: u32) -> Self {
+        Self::Lines { start, end }
+    }
+
+    /// Create an AST-node region.
+    #[must_use]
+    pub fn ast_node(
+        node_kind: impl Into<String>,
+        name: Option<String>,
+        start_byte: u32,
+        end_byte: u32,
+    ) -> Self {
+        Self::AstNode {
+            node_kind: node_kind.into(),
+            name,
+            start_byte,
+            end_byte,
+        }
+    }
+
+    /// Create a whole-file region.
+    #[must_use]
+    pub fn whole_file() -> Self {
+        Self::WholeFile
+    }
+
+    /// Return a human-readable summary of this region.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Lines { start, end } => format!("lines {start}..{end}"),
+            Self::AstNode {
+                node_kind, name, ..
+            } => match name {
+                Some(n) => format!("{node_kind} `{n}`"),
+                None => format!("{node_kind}"),
+            },
+            Self::WholeFile => "whole file".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for Region {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.summary())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConflictReason — why a conflict occurred
+// ---------------------------------------------------------------------------
+
+/// Explains why a specific conflict region could not be auto-merged.
+///
+/// Agents use this to decide resolution strategy. For example,
+/// `OverlappingLineEdits` suggests a line-level diff3 resolution might work,
+/// while `SameAstNodeModified` suggests looking at the AST structure.
+///
+/// # Serialization
+///
+/// Uses `#[serde(tag = "reason")]` with snake_case variant names:
+///
+/// ```json
+/// { "reason": "overlapping_line_edits", "description": "Both sides edited lines 42-67" }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ConflictReason {
+    /// Two or more workspaces edited overlapping line ranges.
+    ///
+    /// This is the most common conflict reason. The line ranges from each
+    /// side overlap, making a clean merge impossible without human/agent input.
+    OverlappingLineEdits {
+        /// Human-readable description of the overlap.
+        description: String,
+    },
+
+    /// Two or more workspaces modified the same AST node.
+    ///
+    /// Even if the exact line ranges don't overlap, modifying the same
+    /// function or struct from multiple workspaces requires review.
+    SameAstNodeModified {
+        /// Human-readable description of which AST node is affected.
+        description: String,
+    },
+
+    /// The edits are non-commutative — applying them in different orders
+    /// produces different results.
+    ///
+    /// This is the formal CRDT-theory reason for a conflict. It subsumes
+    /// the other reasons but is used when no more specific reason applies.
+    NonCommutativeEdits {
+        /// Human-readable description.
+        description: String,
+    },
+
+    /// A custom reason not covered by the predefined variants.
+    ///
+    /// Used by custom merge drivers or specialized analysis tools.
+    Custom {
+        /// The custom reason string.
+        description: String,
+    },
+}
+
+impl ConflictReason {
+    /// Create an overlapping line edits reason.
+    #[must_use]
+    pub fn overlapping(description: impl Into<String>) -> Self {
+        Self::OverlappingLineEdits {
+            description: description.into(),
+        }
+    }
+
+    /// Create a same-AST-node-modified reason.
+    #[must_use]
+    pub fn same_ast_node(description: impl Into<String>) -> Self {
+        Self::SameAstNodeModified {
+            description: description.into(),
+        }
+    }
+
+    /// Create a non-commutative edits reason.
+    #[must_use]
+    pub fn non_commutative(description: impl Into<String>) -> Self {
+        Self::NonCommutativeEdits {
+            description: description.into(),
+        }
+    }
+
+    /// Create a custom reason.
+    #[must_use]
+    pub fn custom(description: impl Into<String>) -> Self {
+        Self::Custom {
+            description: description.into(),
+        }
+    }
+
+    /// Return the human-readable description.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        match self {
+            Self::OverlappingLineEdits { description }
+            | Self::SameAstNodeModified { description }
+            | Self::NonCommutativeEdits { description }
+            | Self::Custom { description } => description,
+        }
+    }
+
+    /// Return the reason variant name as a static string.
+    #[must_use]
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::OverlappingLineEdits { .. } => "overlapping_line_edits",
+            Self::SameAstNodeModified { .. } => "same_ast_node_modified",
+            Self::NonCommutativeEdits { .. } => "non_commutative_edits",
+            Self::Custom { .. } => "custom",
+        }
+    }
+}
+
+impl fmt::Display for ConflictReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AtomEdit — one workspace's contribution to a conflict atom
+// ---------------------------------------------------------------------------
+
+/// A single workspace's edit within a conflict atom.
+///
+/// Each `AtomEdit` represents what one workspace did to a conflicted region.
+/// The collection of `AtomEdit`s within a `ConflictAtom` shows all the
+/// divergent changes that produced the conflict.
+///
+/// # Example
+///
+/// Workspace `alice` replaced lines 10-15 with new code. Workspace `bob`
+/// replaced lines 12-18 with different code. Both edits would appear as
+/// `AtomEdit` entries within the same `ConflictAtom`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomEdit {
+    /// The workspace that made this edit.
+    pub workspace: String,
+
+    /// The region in the workspace's version of the file where the edit lands.
+    pub region: Region,
+
+    /// The text content of the edit (the new content from this workspace).
+    ///
+    /// May be empty for deletions.
+    pub content: String,
+}
+
+impl AtomEdit {
+    /// Create a new atom edit.
+    #[must_use]
+    pub fn new(workspace: impl Into<String>, region: Region, content: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            region,
+            content: content.into(),
+        }
+    }
+}
+
+impl fmt::Display for AtomEdit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let content_preview = if self.content.len() > 40 {
+            format!("{}...", &self.content[..40])
+        } else {
+            self.content.clone()
+        };
+        write!(
+            f,
+            "{} @ {}: {:?}",
+            self.workspace, self.region, content_preview
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConflictAtom — localized conflict region with edits and reason
+// ---------------------------------------------------------------------------
+
+/// A localized conflict region within a file.
+///
+/// A `ConflictAtom` pinpoints exactly WHERE a conflict occurs and WHY it
+/// cannot be auto-merged. It carries the base region (in the common ancestor),
+/// each workspace's edit to that region, and the reason for the conflict.
+///
+/// # Design philosophy
+///
+/// From §5.7: "An agent receiving 'two edits are non-commutative because both
+/// modify AST node process_order at lines 42-67' can resolve the conflict
+/// surgically. An agent receiving 'file has conflict' with marker soup cannot."
+///
+/// # Example JSON
+///
+/// ```json
+/// {
+///   "base_region": { "kind": "lines", "start": 42, "end": 67 },
+///   "edits": [
+///     { "workspace": "alice", "region": { "kind": "lines", "start": 42, "end": 55 }, "content": "fn process_order(..." },
+///     { "workspace": "bob", "region": { "kind": "lines", "start": 50, "end": 67 }, "content": "fn process_order(..." }
+///   ],
+///   "reason": { "reason": "overlapping_line_edits", "description": "Both sides edited lines 42-67" }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictAtom {
-    /// Human-readable description of the conflicting region.
-    pub description: String,
+    /// The region in the base (common ancestor) version where the conflict occurs.
+    pub base_region: Region,
+
+    /// Each workspace's edit to the conflicted region.
+    ///
+    /// Always has ≥ 2 entries (otherwise it wouldn't be a conflict).
+    /// Sorted by workspace name for deterministic output.
+    pub edits: Vec<AtomEdit>,
+
+    /// Why this region could not be auto-merged.
+    pub reason: ConflictReason,
 }
 
 impl ConflictAtom {
-    /// Create a new conflict atom with a description.
+    /// Create a new conflict atom.
     #[must_use]
-    pub fn new(description: impl Into<String>) -> Self {
+    pub fn new(base_region: Region, edits: Vec<AtomEdit>, reason: ConflictReason) -> Self {
         Self {
-            description: description.into(),
+            base_region,
+            edits,
+            reason,
         }
+    }
+
+    /// Create a simple line-overlap conflict atom (convenience constructor).
+    #[must_use]
+    pub fn line_overlap(
+        start: u32,
+        end: u32,
+        edits: Vec<AtomEdit>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_region: Region::lines(start, end),
+            edits,
+            reason: ConflictReason::overlapping(description),
+        }
+    }
+
+    /// Return a human-readable summary of this atom.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let ws: Vec<_> = self.edits.iter().map(|e| e.workspace.as_str()).collect();
+        format!(
+            "{} — {} [{}]",
+            self.base_region.summary(),
+            self.reason,
+            ws.join(", ")
+        )
+    }
+}
+
+impl fmt::Display for ConflictAtom {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.summary())
     }
 }
 
@@ -400,6 +763,18 @@ mod tests {
         ConflictSide::new(ws.into(), test_oid(oid_char), test_ordering_key(ws, seq))
     }
 
+    // Helper to create a simple test ConflictAtom with a description
+    fn test_atom(desc: &str) -> ConflictAtom {
+        ConflictAtom::line_overlap(
+            1, 10,
+            vec![
+                AtomEdit::new("ws-1", Region::lines(1, 5), "side-1"),
+                AtomEdit::new("ws-2", Region::lines(5, 10), "side-2"),
+            ],
+            desc,
+        )
+    }
+
     // -----------------------------------------------------------------------
     // ConflictSide
     // -----------------------------------------------------------------------
@@ -423,21 +798,245 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Region
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn region_lines_construction() {
+        let r = Region::lines(10, 15);
+        assert_eq!(r.summary(), "lines 10..15");
+        assert_eq!(format!("{r}"), "lines 10..15");
+    }
+
+    #[test]
+    fn region_ast_node_with_name() {
+        let r = Region::ast_node("function_item", Some("process_order".into()), 1024, 2048);
+        assert_eq!(r.summary(), "function_item `process_order`");
+    }
+
+    #[test]
+    fn region_ast_node_without_name() {
+        let r = Region::ast_node("struct_item", None, 0, 100);
+        assert_eq!(r.summary(), "struct_item");
+    }
+
+    #[test]
+    fn region_whole_file() {
+        let r = Region::whole_file();
+        assert_eq!(r.summary(), "whole file");
+    }
+
+    #[test]
+    fn region_lines_serde_roundtrip() {
+        let r = Region::lines(42, 67);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"kind\":\"lines\""));
+        assert!(json.contains("\"start\":42"));
+        assert!(json.contains("\"end\":67"));
+        let decoded: Region = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, r);
+    }
+
+    #[test]
+    fn region_ast_node_serde_roundtrip() {
+        let r = Region::ast_node("function_item", Some("foo".into()), 100, 200);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"kind\":\"ast_node\""));
+        assert!(json.contains("\"node_kind\":\"function_item\""));
+        let decoded: Region = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, r);
+    }
+
+    #[test]
+    fn region_whole_file_serde_roundtrip() {
+        let r = Region::whole_file();
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"kind\":\"whole_file\""));
+        let decoded: Region = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, r);
+    }
+
+    // -----------------------------------------------------------------------
+    // ConflictReason
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conflict_reason_overlapping() {
+        let r = ConflictReason::overlapping("lines 10-15 overlap in both sides");
+        assert_eq!(r.variant_name(), "overlapping_line_edits");
+        assert_eq!(r.description(), "lines 10-15 overlap in both sides");
+    }
+
+    #[test]
+    fn conflict_reason_same_ast_node() {
+        let r = ConflictReason::same_ast_node("function `foo` modified by both");
+        assert_eq!(r.variant_name(), "same_ast_node_modified");
+    }
+
+    #[test]
+    fn conflict_reason_non_commutative() {
+        let r = ConflictReason::non_commutative("edits produce different results in different order");
+        assert_eq!(r.variant_name(), "non_commutative_edits");
+    }
+
+    #[test]
+    fn conflict_reason_custom() {
+        let r = ConflictReason::custom("custom driver reported conflict");
+        assert_eq!(r.variant_name(), "custom");
+        assert_eq!(r.description(), "custom driver reported conflict");
+    }
+
+    #[test]
+    fn conflict_reason_serde_roundtrip() {
+        let reasons = vec![
+            ConflictReason::overlapping("overlap"),
+            ConflictReason::same_ast_node("ast"),
+            ConflictReason::non_commutative("non-comm"),
+            ConflictReason::custom("custom"),
+        ];
+        for reason in &reasons {
+            let json = serde_json::to_string(reason).unwrap();
+            let decoded: ConflictReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.variant_name(), reason.variant_name());
+            assert_eq!(decoded.description(), reason.description());
+        }
+    }
+
+    #[test]
+    fn conflict_reason_display() {
+        let r = ConflictReason::overlapping("test display");
+        assert_eq!(format!("{r}"), "test display");
+    }
+
+    // -----------------------------------------------------------------------
+    // AtomEdit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn atom_edit_construction() {
+        let edit = AtomEdit::new("alice", Region::lines(10, 15), "fn foo() {}");
+        assert_eq!(edit.workspace, "alice");
+        assert_eq!(edit.region, Region::lines(10, 15));
+        assert_eq!(edit.content, "fn foo() {}");
+    }
+
+    #[test]
+    fn atom_edit_serde_roundtrip() {
+        let edit = AtomEdit::new("bob", Region::lines(20, 30), "new code here");
+        let json = serde_json::to_string(&edit).unwrap();
+        let decoded: AtomEdit = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, edit);
+    }
+
+    #[test]
+    fn atom_edit_display_short_content() {
+        let edit = AtomEdit::new("ws-1", Region::lines(1, 5), "short");
+        let display = format!("{edit}");
+        assert!(display.contains("ws-1"));
+        assert!(display.contains("lines 1..5"));
+    }
+
+    #[test]
+    fn atom_edit_display_long_content_truncated() {
+        let long = "a".repeat(100);
+        let edit = AtomEdit::new("ws-1", Region::lines(1, 5), long);
+        let display = format!("{edit}");
+        assert!(display.contains("..."));
+    }
+
+    // -----------------------------------------------------------------------
     // ConflictAtom
     // -----------------------------------------------------------------------
 
     #[test]
     fn conflict_atom_construction() {
-        let atom = ConflictAtom::new("lines 10-15 overlap");
-        assert_eq!(atom.description, "lines 10-15 overlap");
+        let atom = ConflictAtom::new(
+            Region::lines(10, 15),
+            vec![
+                AtomEdit::new("alice", Region::lines(10, 13), "alice's code"),
+                AtomEdit::new("bob", Region::lines(12, 15), "bob's code"),
+            ],
+            ConflictReason::overlapping("lines 10-15 overlap"),
+        );
+        assert_eq!(atom.base_region, Region::lines(10, 15));
+        assert_eq!(atom.edits.len(), 2);
+        assert_eq!(atom.reason.variant_name(), "overlapping_line_edits");
+    }
+
+    #[test]
+    fn conflict_atom_line_overlap_convenience() {
+        let atom = ConflictAtom::line_overlap(
+            42,
+            67,
+            vec![
+                AtomEdit::new("ws-1", Region::lines(42, 55), "code-1"),
+                AtomEdit::new("ws-2", Region::lines(50, 67), "code-2"),
+            ],
+            "Both sides edited lines 42-67",
+        );
+        assert_eq!(atom.base_region, Region::lines(42, 67));
+        assert_eq!(atom.reason.variant_name(), "overlapping_line_edits");
     }
 
     #[test]
     fn conflict_atom_serde_roundtrip() {
-        let atom = ConflictAtom::new("function signature diverged");
-        let json = serde_json::to_string(&atom).unwrap();
+        let atom = ConflictAtom::new(
+            Region::lines(1, 10),
+            vec![
+                AtomEdit::new("ws-a", Region::lines(1, 5), "alpha"),
+                AtomEdit::new("ws-b", Region::lines(3, 10), "beta"),
+            ],
+            ConflictReason::overlapping("overlap at lines 3-5"),
+        );
+        let json = serde_json::to_string_pretty(&atom).unwrap();
+        assert!(json.contains("\"base_region\""));
+        assert!(json.contains("\"edits\""));
+        assert!(json.contains("\"reason\""));
+
         let decoded: ConflictAtom = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, atom);
+    }
+
+    #[test]
+    fn conflict_atom_with_ast_region() {
+        let atom = ConflictAtom::new(
+            Region::ast_node("function_item", Some("process_order".into()), 1024, 2048),
+            vec![
+                AtomEdit::new("alice", Region::ast_node("function_item", Some("process_order".into()), 1024, 1800), "alice version"),
+                AtomEdit::new("bob", Region::ast_node("function_item", Some("process_order".into()), 1024, 1900), "bob version"),
+            ],
+            ConflictReason::same_ast_node("function `process_order` modified by both"),
+        );
+        assert_eq!(atom.summary(), "function_item `process_order` — function `process_order` modified by both [alice, bob]");
+    }
+
+    #[test]
+    fn conflict_atom_summary() {
+        let atom = ConflictAtom::line_overlap(
+            10,
+            20,
+            vec![
+                AtomEdit::new("ws-1", Region::lines(10, 15), ""),
+                AtomEdit::new("ws-2", Region::lines(12, 20), ""),
+            ],
+            "overlap",
+        );
+        let summary = atom.summary();
+        assert!(summary.contains("lines 10..20"));
+        assert!(summary.contains("overlap"));
+        assert!(summary.contains("ws-1"));
+        assert!(summary.contains("ws-2"));
+    }
+
+    #[test]
+    fn conflict_atom_display() {
+        let atom = ConflictAtom::line_overlap(
+            1, 5,
+            vec![AtomEdit::new("a", Region::lines(1, 3), "x"), AtomEdit::new("b", Region::lines(2, 5), "y")],
+            "test",
+        );
+        let display = format!("{atom}");
+        assert!(display.contains("lines 1..5"));
     }
 
     // -----------------------------------------------------------------------
@@ -451,7 +1050,7 @@ mod tests {
             file_id: test_file_id(1),
             base: Some(test_oid('0')),
             sides: vec![test_side("alice", 'a', 1), test_side("bob", 'b', 2)],
-            atoms: vec![ConflictAtom::new("lines 10-15")],
+            atoms: vec![test_atom("lines 10-15")],
         };
 
         assert_eq!(conflict.path(), &PathBuf::from("src/lib.rs"));
@@ -490,8 +1089,8 @@ mod tests {
                 test_side("carol", 'c', 3),
             ],
             atoms: vec![
-                ConflictAtom::new("header section"),
-                ConflictAtom::new("footer section"),
+                test_atom("header section"),
+                test_atom("footer section"),
             ],
         };
 
@@ -506,7 +1105,7 @@ mod tests {
             file_id: test_file_id(10),
             base: Some(test_oid('0')),
             sides: vec![test_side("alice", 'a', 1), test_side("bob", 'b', 2)],
-            atoms: vec![ConflictAtom::new("imports block")],
+            atoms: vec![test_atom("imports block")],
         };
 
         let json = serde_json::to_string_pretty(&conflict).unwrap();
@@ -672,7 +1271,7 @@ mod tests {
             file_id: test_file_id(1),
             base: Some(test_oid('0')),
             sides: vec![test_side("alice", 'a', 1), test_side("bob", 'b', 2)],
-            atoms: vec![ConflictAtom::new("line 10")],
+            atoms: vec![test_atom("line 10")],
         };
         let display = format!("{conflict}");
         assert!(display.contains("content conflict in src/lib.rs"));
