@@ -28,6 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::model::conflict::{AtomEdit, ConflictAtom, ConflictReason as ModelConflictReason, Region};
 use crate::model::types::WorkspaceId;
 
 use super::build::ResolvedChange;
@@ -84,6 +85,12 @@ pub struct ConflictRecord {
     pub sides: Vec<ConflictSide>,
     /// Conflict classification.
     pub reason: ConflictReason,
+    /// Localized conflict atoms extracted from diff3 conflict markers.
+    ///
+    /// Non-empty for `Diff3Conflict` records where region-level localization
+    /// was successfully extracted. Empty for other conflict reasons (add/add,
+    /// modify/delete) or when the diff3 output could not be parsed.
+    pub atoms: Vec<ConflictAtom>,
 }
 
 /// Output of the RESOLVE phase.
@@ -194,6 +201,7 @@ pub fn resolve_partition(
                     content: None,
                 }],
                 reason: ConflictReason::MissingContent,
+                atoms: vec![],
             }),
         }
     }
@@ -242,6 +250,7 @@ fn resolve_shared_path(
             entries,
             base,
             ConflictReason::ModifyDelete,
+            vec![],
         )));
     }
 
@@ -254,6 +263,7 @@ fn resolve_shared_path(
                 entries,
                 base,
                 ConflictReason::MissingContent,
+                vec![],
             )));
         };
         variants.push(content.clone());
@@ -276,25 +286,38 @@ fn resolve_shared_path(
             ConflictReason::MissingBase
         };
         return Ok(SharedOutcome::Conflict(conflict_record(
-            path, entries, None, reason,
+            path, entries, None, reason, vec![],
         )));
     };
 
     // K-way deterministic merge by folding pairwise diff3 against the same base.
+    // Track the workspace names that contributed to the accumulated "ours" side
+    // so that ConflictAtom edits can carry meaningful workspace labels.
     let mut merged = variants[0].clone();
-    for next in &variants[1..] {
+    let mut ours_ws_label: String = entries[0].workspace_id.to_string();
+
+    for (i, next) in variants[1..].iter().enumerate() {
         if merged == *next {
+            let theirs_ws = &entries[i + 1].workspace_id;
+            ours_ws_label = format!("{ours_ws_label}+{theirs_ws}");
             continue;
         }
 
+        let theirs_ws_label = entries[i + 1].workspace_id.to_string();
+
         match diff3_merge_bytes(base_bytes, &merged, next)? {
-            Some(out) => merged = out,
-            None => {
+            Diff3Outcome::Clean(out) => {
+                merged = out;
+                ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
+            }
+            Diff3Outcome::Conflict { marker_output } => {
+                let atoms = parse_diff3_atoms(&marker_output, &ours_ws_label, &theirs_ws_label);
                 return Ok(SharedOutcome::Conflict(conflict_record(
                     path,
                     entries,
                     Some(base_bytes),
                     ConflictReason::Diff3Conflict,
+                    atoms,
                 )));
             }
         }
@@ -317,6 +340,7 @@ fn conflict_record(
     entries: &[PathEntry],
     base: Option<&[u8]>,
     reason: ConflictReason,
+    atoms: Vec<ConflictAtom>,
 ) -> ConflictRecord {
     ConflictRecord {
         path: path.to_path_buf(),
@@ -330,20 +354,29 @@ fn conflict_record(
             })
             .collect(),
         reason,
+        atoms,
     }
+}
+
+/// Outcome of a single diff3 merge attempt.
+enum Diff3Outcome {
+    /// Clean merge — result bytes.
+    Clean(Vec<u8>),
+    /// Conflicting merge — the raw diff3 marker output (stdout from git merge-file exit 1).
+    Conflict { marker_output: Vec<u8> },
 }
 
 /// Run `git merge-file -p --diff3` for one 3-way merge.
 ///
 /// Returns:
-/// - `Ok(Some(bytes))` for clean merge
-/// - `Ok(None)` for merge conflicts (exit code 1)
+/// - `Ok(Diff3Outcome::Clean(bytes))` for clean merge (exit 0)
+/// - `Ok(Diff3Outcome::Conflict { marker_output })` for conflicts (exit 1)
 /// - `Err` for command/runtime failures
 fn diff3_merge_bytes(
     base: &[u8],
     ours: &[u8],
     theirs: &[u8],
-) -> Result<Option<Vec<u8>>, ResolveError> {
+) -> Result<Diff3Outcome, ResolveError> {
     // We intentionally use temp files + git merge-file instead of adding a new
     // diff3 crate dependency. BUILD/COMMIT already shell out to git, and this
     // keeps behavior aligned with git's merge semantics.
@@ -372,14 +405,141 @@ fn diff3_merge_bytes(
     let _ = fs::remove_dir_all(&tmp_dir);
 
     match output.status.code() {
-        Some(0) => Ok(Some(output.stdout)),
-        Some(1) => Ok(None),
+        Some(0) => Ok(Diff3Outcome::Clean(output.stdout)),
+        // git merge-file exits with the number of conflict hunks (≥1) when
+        // there are conflicts. Any positive exit code means "conflict output in
+        // stdout with diff3 markers". Negative codes or None indicate an error.
+        Some(n) if n > 0 => Ok(Diff3Outcome::Conflict {
+            marker_output: output.stdout,
+        }),
         code => Err(ResolveError::GitCommand {
             command: "git merge-file -p --diff3 <ours> <base> <theirs>".to_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             exit_code: code,
         }),
     }
+}
+
+/// Parse diff3 conflict marker output and extract [`ConflictAtom`]s.
+///
+/// Each conflict block in the diff3 output (delimited by `<<<<<<<`, `|||||||`,
+/// `=======`, `>>>>>>>`) is converted into one [`ConflictAtom`] with:
+/// - `base_region`: the line range in the base file covered by this block
+/// - `edits`: two [`AtomEdit`]s — one per workspace side
+/// - `reason`: [`ModelConflictReason::OverlappingLineEdits`]
+///
+/// Base line positions are computed by counting context lines and completed
+/// base sections as they appear in the output.
+///
+/// # Marker format (`git merge-file --diff3`)
+///
+/// ```text
+/// <context lines>
+/// <<<<<<< ours
+/// <ours content>
+/// ||||||| base
+/// <base content>
+/// =======
+/// <theirs content>
+/// >>>>>>> theirs
+/// <context lines>
+/// ```
+///
+/// `ws_ours` and `ws_theirs` are the workspace ID strings used to label each
+/// side's [`AtomEdit`].
+pub fn parse_diff3_atoms(
+    marker_output: &[u8],
+    ws_ours: &str,
+    ws_theirs: &str,
+) -> Vec<ConflictAtom> {
+    let text = String::from_utf8_lossy(marker_output);
+    let lines: Vec<&str> = text.lines().collect();
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Context,
+        Ours,
+        Base,
+        Theirs,
+    }
+
+    let mut state = State::Context;
+    // 1-indexed position in the base file, advancing as we consume context
+    // and completed base sections.
+    let mut base_line: u32 = 1;
+
+    // Per-block accumulators.
+    let mut block_base_start: u32 = 1;
+    let mut ours_lines: Vec<&str> = Vec::new();
+    let mut base_lines: Vec<&str> = Vec::new();
+    let mut theirs_lines: Vec<&str> = Vec::new();
+
+    let mut atoms: Vec<ConflictAtom> = Vec::new();
+
+    for line in &lines {
+        if line.starts_with("<<<<<<<") {
+            // Start of a new conflict block.
+            state = State::Ours;
+            block_base_start = base_line;
+            ours_lines.clear();
+            base_lines.clear();
+            theirs_lines.clear();
+        } else if line.starts_with("|||||||") && state == State::Ours {
+            // Transition: ours → base section.
+            state = State::Base;
+        } else if *line == "=======" && state == State::Base {
+            // Transition: base → theirs section.
+            state = State::Theirs;
+        } else if line.starts_with(">>>>>>>") && state == State::Theirs {
+            // End of conflict block — build the atom.
+            let base_len = base_lines.len() as u32;
+            // The base section covers [block_base_start, block_base_start + base_len).
+            // If the base section is empty (pure insertion conflict), the region
+            // is a zero-length marker at the insertion point.
+            let base_region = Region::lines(block_base_start, block_base_start + base_len);
+
+            let description = if base_len == 0 {
+                format!("Both sides inserted content at line {block_base_start}")
+            } else {
+                format!(
+                    "Both sides edited lines {}..{}",
+                    block_base_start,
+                    block_base_start + base_len
+                )
+            };
+
+            // For the AtomEdit regions we use the base region as an approximation.
+            // Exact workspace-version line numbers would require tracking per-file
+            // offsets across multiple conflict blocks, which is Phase 2 work.
+            let ours_region = Region::lines(block_base_start, block_base_start + ours_lines.len() as u32);
+            let theirs_region = Region::lines(block_base_start, block_base_start + theirs_lines.len() as u32);
+
+            let edits = vec![
+                AtomEdit::new(ws_ours, ours_region, ours_lines.join("\n")),
+                AtomEdit::new(ws_theirs, theirs_region, theirs_lines.join("\n")),
+            ];
+
+            atoms.push(ConflictAtom::new(
+                base_region,
+                edits,
+                ModelConflictReason::OverlappingLineEdits { description },
+            ));
+
+            // Advance base_line past the base section just consumed.
+            base_line += base_len;
+            state = State::Context;
+        } else {
+            // Accumulate or count lines based on current state.
+            match state {
+                State::Context => base_line += 1,
+                State::Ours => ours_lines.push(line),
+                State::Base => base_lines.push(line),
+                State::Theirs => theirs_lines.push(line),
+            }
+        }
+    }
+
+    atoms
 }
 
 #[cfg(test)]
@@ -642,5 +802,277 @@ mod tests {
             .collect();
 
         assert_eq!(paths, vec![PathBuf::from("a.txt"), PathBuf::from("z.txt")]);
+    }
+
+    // -----------------------------------------------------------------------
+    // ConflictAtom extraction tests (bd-15yn.3 acceptance criteria)
+    // -----------------------------------------------------------------------
+
+    /// Overlapping edits on the same line produce a ConflictRecord with ≥1 atoms.
+    #[test]
+    fn overlapping_edits_produce_conflict_with_atoms() {
+        // Base: "a\nb\nc\n" (3 lines). ws-a changes line 2 to B1, ws-b to B2.
+        let partition = shared_only(
+            "doc.txt",
+            vec![
+                entry("ws-a", ChangeKind::Modified, Some(b"a\nB1\nc\n")),
+                entry("ws-b", ChangeKind::Modified, Some(b"a\nB2\nc\n")),
+            ],
+        );
+
+        let mut base = BTreeMap::new();
+        base.insert(PathBuf::from("doc.txt"), b"a\nb\nc\n".to_vec());
+
+        let result = resolve_partition(&partition, &base).unwrap();
+        assert_eq!(result.conflicts.len(), 1);
+        let record = &result.conflicts[0];
+        assert_eq!(record.reason, ConflictReason::Diff3Conflict);
+
+        // Must have exactly one ConflictAtom for the single conflicting hunk.
+        assert_eq!(record.atoms.len(), 1, "expected 1 atom, got {:?}", record.atoms);
+
+        let atom = &record.atoms[0];
+        // The base line that conflicted is line 2 ("b").
+        // Region::lines uses exclusive end, so lines(2, 3) = line 2 only.
+        assert_eq!(
+            atom.base_region,
+            crate::model::conflict::Region::lines(2, 3),
+            "atom base_region should cover the conflicted base line"
+        );
+
+        // Atom must have two edits (one per workspace).
+        assert_eq!(atom.edits.len(), 2);
+
+        // Edits carry the correct workspace labels.
+        let ws_labels: Vec<&str> = atom.edits.iter().map(|e| e.workspace.as_str()).collect();
+        assert!(ws_labels.contains(&"ws-a"), "expected ws-a in edits: {ws_labels:?}");
+        assert!(ws_labels.contains(&"ws-b"), "expected ws-b in edits: {ws_labels:?}");
+
+        // Edits carry the correct content.
+        let content_a = atom.edits.iter().find(|e| e.workspace == "ws-a").unwrap();
+        let content_b = atom.edits.iter().find(|e| e.workspace == "ws-b").unwrap();
+        assert_eq!(content_a.content, "B1");
+        assert_eq!(content_b.content, "B2");
+    }
+
+    /// ConflictAtoms match the actual conflicting line region in the base file.
+    #[test]
+    fn diff3_atoms_have_correct_line_ranges() {
+        // Base: 5 lines. Lines 3-4 are the conflict zone.
+        // ws-a and ws-b both edit lines 3-4 differently.
+        let base = b"line1\nline2\nold3\nold4\nline5\n";
+        let ours = b"line1\nline2\nnew3a\nnew4a\nline5\n";
+        let theirs = b"line1\nline2\nnew3b\nnew4b\nline5\n";
+
+        let partition = shared_only(
+            "src.txt",
+            vec![
+                entry("ws-a", ChangeKind::Modified, Some(ours)),
+                entry("ws-b", ChangeKind::Modified, Some(theirs)),
+            ],
+        );
+
+        let mut base_map = BTreeMap::new();
+        base_map.insert(PathBuf::from("src.txt"), base.to_vec());
+
+        let result = resolve_partition(&partition, &base_map).unwrap();
+        assert_eq!(result.conflicts.len(), 1);
+        let record = &result.conflicts[0];
+        assert_eq!(record.atoms.len(), 1);
+
+        let atom = &record.atoms[0];
+        // The conflicting region in base spans lines 3 and 4 (1-indexed).
+        // Region::lines uses exclusive end: lines(3, 5) = lines 3..5 = lines 3 and 4.
+        assert_eq!(
+            atom.base_region,
+            crate::model::conflict::Region::lines(3, 5),
+            "atom should cover base lines 3-4; got {:?}", atom.base_region
+        );
+
+        // The reason must be OverlappingLineEdits.
+        assert_eq!(
+            atom.reason.variant_name(),
+            "overlapping_line_edits",
+            "reason should be overlapping_line_edits"
+        );
+    }
+
+    /// Multiple conflict blocks in the same file produce one atom per block.
+    #[test]
+    fn multiple_conflicts_in_same_file_produce_multiple_atoms() {
+        // Base: 5 lines. Lines 2 and 4 are each independently conflicted.
+        // Need enough context (≥3 lines) between hunks for git merge-file to
+        // treat them as separate hunks.
+        let base = b"ctx\na\nctx\nctx\nctx\nb\nctx\n";
+        // ws-a edits lines 2 and 6 (1-indexed); ws-b edits same lines differently.
+        let ours   = b"ctx\nA1\nctx\nctx\nctx\nB1\nctx\n";
+        let theirs = b"ctx\nA2\nctx\nctx\nctx\nB2\nctx\n";
+
+        let partition = shared_only(
+            "multi.txt",
+            vec![
+                entry("ws-a", ChangeKind::Modified, Some(ours)),
+                entry("ws-b", ChangeKind::Modified, Some(theirs)),
+            ],
+        );
+
+        let mut base_map = BTreeMap::new();
+        base_map.insert(PathBuf::from("multi.txt"), base.to_vec());
+
+        let result = resolve_partition(&partition, &base_map).unwrap();
+        assert_eq!(result.conflicts.len(), 1);
+        let record = &result.conflicts[0];
+
+        // Two separate conflict hunks → two atoms.
+        assert_eq!(
+            record.atoms.len(),
+            2,
+            "expected 2 atoms (one per conflict hunk), got {:?}", record.atoms
+        );
+
+        // Atoms should be for distinct base line ranges.
+        let regions: Vec<_> = record.atoms.iter().map(|a| &a.base_region).collect();
+        assert_ne!(
+            regions[0], regions[1],
+            "atoms should cover different base regions"
+        );
+    }
+
+    /// Non-diff3 conflicts (add/add, modify/delete) have empty atoms.
+    #[test]
+    fn non_diff3_conflicts_have_empty_atoms() {
+        // add/add
+        let partition = shared_only(
+            "new.txt",
+            vec![
+                entry("ws-a", ChangeKind::Added, Some(b"hello\n")),
+                entry("ws-b", ChangeKind::Added, Some(b"world\n")),
+            ],
+        );
+        let result = resolve_partition(&partition, &BTreeMap::new()).unwrap();
+        assert_eq!(result.conflicts[0].atoms.len(), 0, "add/add should have no atoms");
+
+        // modify/delete
+        let partition2 = shared_only(
+            "gone.txt",
+            vec![
+                entry("ws-a", ChangeKind::Modified, Some(b"new\n")),
+                entry("ws-b", ChangeKind::Deleted, None),
+            ],
+        );
+        let mut base = BTreeMap::new();
+        base.insert(PathBuf::from("gone.txt"), b"old\n".to_vec());
+        let result2 = resolve_partition(&partition2, &base).unwrap();
+        assert_eq!(result2.conflicts[0].atoms.len(), 0, "modify/delete should have no atoms");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_diff3_atoms unit tests
+    // -----------------------------------------------------------------------
+
+    /// Parser handles a single conflict block with correct workspace labels.
+    #[test]
+    fn parse_diff3_atoms_single_block() {
+        // Simulated diff3 output for base="b\n", ours="B1\n", theirs="B2\n"
+        // with context "a\n" before and "c\n" after.
+        let marker_output = b"a\n<<<<<<< ours.tmp\nB1\n||||||| base.tmp\nb\n=======\nB2\n>>>>>>> theirs.tmp\nc\n";
+
+        let atoms = parse_diff3_atoms(marker_output, "alice", "bob");
+        assert_eq!(atoms.len(), 1, "expected 1 atom");
+
+        let atom = &atoms[0];
+        // "a\n" is context (line 1 in base). The base section "b\n" is line 2.
+        // Region: lines(2, 3) = just line 2.
+        assert_eq!(atom.base_region, crate::model::conflict::Region::lines(2, 3));
+        assert_eq!(atom.edits.len(), 2);
+
+        let alice = atom.edits.iter().find(|e| e.workspace == "alice").unwrap();
+        let bob   = atom.edits.iter().find(|e| e.workspace == "bob").unwrap();
+        assert_eq!(alice.content, "B1");
+        assert_eq!(bob.content, "B2");
+
+        assert_eq!(atom.reason.variant_name(), "overlapping_line_edits");
+    }
+
+    /// Parser extracts one atom per conflict block when multiple blocks appear.
+    #[test]
+    fn parse_diff3_atoms_multiple_blocks() {
+        // Two conflict blocks separated by 3+ context lines.
+        // Base: ctx(1), a(2), ctx(3), ctx(4), ctx(5), b(6), ctx(7)
+        let marker_output = concat!(
+            "ctx\n",
+            "<<<<<<< ours\n",
+            "A1\n",
+            "||||||| base\n",
+            "a\n",
+            "=======\n",
+            "A2\n",
+            ">>>>>>> theirs\n",
+            "ctx\n",
+            "ctx\n",
+            "ctx\n",
+            "<<<<<<< ours\n",
+            "B1\n",
+            "||||||| base\n",
+            "b\n",
+            "=======\n",
+            "B2\n",
+            ">>>>>>> theirs\n",
+            "ctx\n",
+        ).as_bytes();
+
+        let atoms = parse_diff3_atoms(marker_output, "ws-a", "ws-b");
+        assert_eq!(atoms.len(), 2, "expected 2 atoms");
+
+        // First block: base section = "a" at line 2 (after 1 context line).
+        assert_eq!(atoms[0].base_region, crate::model::conflict::Region::lines(2, 3));
+        assert_eq!(atoms[0].edits.iter().find(|e| e.workspace == "ws-a").unwrap().content, "A1");
+        assert_eq!(atoms[0].edits.iter().find(|e| e.workspace == "ws-b").unwrap().content, "A2");
+
+        // Second block: base section = "b" at line 6
+        // After block 1: base_line = 2 + 1(base-len) = 3
+        // ctx(3) → 4, ctx(4) → 5, ctx(5) → 6: block_base_start = 6
+        assert_eq!(atoms[1].base_region, crate::model::conflict::Region::lines(6, 7));
+        assert_eq!(atoms[1].edits.iter().find(|e| e.workspace == "ws-a").unwrap().content, "B1");
+        assert_eq!(atoms[1].edits.iter().find(|e| e.workspace == "ws-b").unwrap().content, "B2");
+    }
+
+    /// Parser returns empty vec for marker output with no conflict blocks.
+    #[test]
+    fn parse_diff3_atoms_no_conflicts_returns_empty() {
+        let clean_output = b"line one\nline two\nline three\n";
+        let atoms = parse_diff3_atoms(clean_output, "ws-a", "ws-b");
+        assert!(atoms.is_empty(), "clean output should produce no atoms");
+    }
+
+    /// K=2 workspace labels appear correctly in atom edits.
+    #[test]
+    fn diff3_atoms_carry_workspace_labels_k2() {
+        let partition = shared_only(
+            "doc.txt",
+            vec![
+                entry("alice", ChangeKind::Modified, Some(b"a\nALICE\nc\n")),
+                entry("bob",   ChangeKind::Modified, Some(b"a\nBOB\nc\n")),
+            ],
+        );
+
+        let mut base = BTreeMap::new();
+        base.insert(PathBuf::from("doc.txt"), b"a\norig\nc\n".to_vec());
+
+        let result = resolve_partition(&partition, &base).unwrap();
+        assert_eq!(result.conflicts.len(), 1);
+        let atoms = &result.conflicts[0].atoms;
+        assert_eq!(atoms.len(), 1);
+
+        let edit_ws: Vec<&str> = atoms[0].edits.iter().map(|e| e.workspace.as_str()).collect();
+        // "alice" is first in lexicographic order (ours), "bob" is theirs.
+        assert!(
+            edit_ws.contains(&"alice"),
+            "alice should appear as an edit workspace; got {edit_ws:?}"
+        );
+        assert!(
+            edit_ws.contains(&"bob"),
+            "bob should appear as an edit workspace; got {edit_ws:?}"
+        );
     }
 }

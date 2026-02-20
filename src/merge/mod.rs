@@ -37,7 +37,8 @@ pub use collect::{CollectError, collect_snapshots};
 pub use partition::{PartitionResult, PathEntry, partition_by_path};
 pub use prepare::{FrozenInputs, PrepareError, run_prepare_phase, run_prepare_phase_with_epoch};
 pub use resolve::{
-    ConflictReason, ConflictRecord, ConflictSide, ResolveError, ResolveResult, resolve_partition,
+    ConflictReason, ConflictRecord, ConflictSide, ResolveError, ResolveResult, parse_diff3_atoms,
+    resolve_partition,
 };
 pub use types::{ChangeKind, FileChange, PatchSet};
 pub use validate::{
