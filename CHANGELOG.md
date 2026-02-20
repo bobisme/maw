@@ -2,6 +2,20 @@
 
 All notable changes to maw.
 
+## v0.46.0
+
+### Added
+- **Workspace backend auto-selection and benchmarking** (bd-3ca3). `CopyBackend`, `AnyBackend` enum, config-driven `get_backend()`, `auto_select_backend()` per §7.5, criterion benchmark suite.
+- **Performance benchmarks eval** (bd-30pm). Snapshot scaling benchmarks (2 repo sizes × 3 change counts), merge partition benchmarks (fixed-total and scaling variants). All §1.1 targets confirmed: create <100ms @30k files, snapshot proportional to changes, merge proportional to touched files.
+
+### Closed (housekeeping)
+- bd-3t67 (P1 Epic: Evals — Agent Testing in /tmp) — all 7 eval beads completed
+- bd-3iqh (P2 Epic: Phase 4 — CoW Workspace Layer) — all 5 blockers completed
+- bd-21zn (P2 Epic: Phase 5 — The Full Manifold) — all 9 blockers completed
+- bd-jsw0 (Track 5: Phase 4 CoW backend strategy) — complete
+- bd-17nb (Track 6: Phase 5 long-horizon transport) — complete
+- **All 502 beads closed** — project roadmap complete through Phase 5
+
 ## v0.45.0
 
 ### Added
