@@ -218,7 +218,7 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
     }
 }
 
-const BARE_ROOT_ALLOWED: &[&str] = &["ws", "AGENTS.md", "CLAUDE.md"];
+const BARE_ROOT_ALLOWED: &[&str] = &["ws", "repo.git", "AGENTS.md", "CLAUDE.md"];
 
 fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
     let Some(root) = root else {

@@ -429,20 +429,20 @@ each workspace's log is a **Git ref** at `refs/manifold/head/<workspace>`.
 struct Operation {
     parent_ids: Vec<GitOid>,        // causal predecessors (blob OIDs)
     workspace_id: WorkspaceId,
-    timestamp: OrderingKey,         // see §5.9
+    timestamp: String,              // ISO-8601 UTC (canonical JSON)
     payload: OpPayload,
 }
 
 enum OpPayload {
     // Workspace lifecycle
     Create {
-        epoch_id: GitOid,           // the epoch commit this workspace is based on
+        epoch: GitOid,              // the epoch commit this workspace is based on
     },
     Destroy,
 
     // Workspace state (patch-set model — see §5.4)
     Snapshot {
-        patches: PatchSet,          // changed paths relative to epoch
+        patch_set_oid: GitOid,      // git blob OID for serialized PatchSet
     },
 
     // Epoch advancement (lead-only)
@@ -450,19 +450,17 @@ enum OpPayload {
         sources: Vec<WorkspaceId>,
         epoch_before: GitOid,
         epoch_after: GitOid,
-        conflicts: Vec<Conflict>,
-        strategy: MergeStrategy,
     },
 
     // Undo (see §5.11)
     Compensate {
         target_op: GitOid,          // the operation being undone
-        inverse_patches: PatchSet,  // the inverse diff
+        reason: String,
     },
 
     // Metadata
     Describe { message: String },
-    Annotate { key: String, value: String },
+    Annotate { key: String, data: JsonObject },
 }
 ```
 
@@ -776,6 +774,12 @@ never used for correctness decisions.
 **Backward clock guard (mandatory):** If `wall_clock` would go backward (NTP
 step, VM resume), clamp to `max(current_wall_clock, last_seen_wall_clock)`.
 This is standard HLC practice and is non-negotiable.
+
+**Current implementation note:** Operation log entries currently store
+`timestamp` as an ISO-8601 UTC string for canonical JSON stability. The
+`OrderingKey` model exists and is used for deterministic ordering semantics in
+model code, with planned expansion into operation-log schema in a compatible
+migration path.
 
 ### 5.10 Crash-Safe Epoch Advancement
 

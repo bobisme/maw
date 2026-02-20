@@ -313,7 +313,8 @@ where
     let mut cache_key = Vec::new();
 
     for ws_id in workspace_ids {
-        let view = super::view::materialize(root, ws_id, &read_patch_set)?;
+        let view = super::checkpoint::materialize_from_checkpoint(root, ws_id, &read_patch_set)
+            .or_else(|_| super::view::materialize(root, ws_id, &read_patch_set))?;
 
         // For cache key, use the patch_set_oid if available, otherwise "empty"
         let head_oid = view

@@ -1,14 +1,16 @@
 //! Manifold v2 greenfield initialization — git-native.
 //!
-//! Creates a new Manifold-managed repository from scratch when no `.git/`
-//! exists. Sets up a bare-mode git repo, `.manifold/` metadata, epoch₀,
+//! Creates a new Manifold-managed repository from scratch when no `.git`
+//! exists. Sets up a bare common-dir git repo (`repo.git`), `.manifold/`
+//! metadata, epoch₀,
 //! and the `ws/default/` workspace via `git worktree`.
 //!
 //! # Architecture
 //!
 //! ```text
 //! repo-root/
-//! ├── .git/              ← git data (core.bare=true after setup)
+//! ├── .git               ← gitfile: gitdir: repo.git
+//! ├── repo.git/          ← git common-dir (bare)
 //! ├── .manifold/         ← manifold metadata
 //! │   ├── config.toml
 //! │   ├── epochs/
@@ -26,6 +28,8 @@ use std::process::Command;
 use crate::model::layout;
 use crate::model::types::EpochId;
 use crate::refs as manifold_refs;
+
+const REPO_GIT_DIR: &str = "repo.git";
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -166,27 +170,28 @@ impl Default for InitOptions {
 /// This is the entry point for `maw init` when no `.git/` exists.
 ///
 /// # Steps
-/// 1. Verify no `.git/` exists
+/// 1. Verify no `.git` exists
 /// 2. `git init` — creates a standard git repo
 /// 3. Create an initial empty commit on the configured branch
-/// 4. Set `core.bare = true` — root becomes metadata-only
-/// 5. Remove root working tree files (git index, etc.)
-/// 6. Create `.manifold/` directory structure
-/// 7. Set `refs/manifold/epoch/current` → initial commit
-/// 8. `git worktree add --detach ws/default <commit>` — default workspace
-/// 9. Configure `.gitignore` in the default workspace
+/// 4. Move common-dir to `repo.git` and make root `.git` a gitfile
+/// 5. Set `core.bare = true` — root becomes metadata-only
+/// 6. Remove common-dir index file
+/// 7. Create `.manifold/` directory structure
+/// 8. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
+/// 9. `git worktree add --detach ws/default <commit>` — default workspace
+/// 10. Configure `.gitignore` in the default workspace
 ///
 /// # Errors
 /// Returns [`InitError`] if any step fails. Partial state may remain
 /// on disk — callers should clean up on error if desired.
 ///
 /// # Idempotency
-/// This function is NOT idempotent — it errors if `.git/` already exists.
+/// This function is NOT idempotent — it errors if `.git` already exists.
 /// Use brownfield init for existing repos.
 pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, InitError> {
     let root = std::fs::canonicalize(root).map_err(InitError::Io)?;
 
-    // 1. Verify no .git/ exists
+    // 1. Verify no .git exists
     let git_dir = root.join(".git");
     if git_dir.exists() {
         return Err(InitError::AlreadyExists { path: git_dir });
@@ -201,22 +206,26 @@ pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, In
     // 3. Create initial empty commit
     let epoch0_oid = create_initial_commit(&root, &opts.branch)?;
 
-    // 4. Set core.bare = true
+    // 4. Normalize to repo.git common-dir topology
+    normalize_common_dir_to_repo_git(&root)?;
+
+    // 5. Set core.bare = true
     set_bare_mode(&root)?;
 
-    // 5. Clean up root working tree artifacts
+    // 6. Clean up common-dir working tree artifacts
     clean_root_worktree(&root)?;
 
-    // 6. Create .manifold/ directory structure
+    // 7. Create .manifold/ directory structure
     layout::init_manifold_dir(&root).map_err(InitError::Layout)?;
 
-    // 7. Set refs/manifold/epoch/current → epoch₀
+    // 8. Set refs/manifold/epoch/current → epoch₀
     set_epoch_ref(&root, &epoch0_oid)?;
+    set_default_workspace_ref(&root, &epoch0_oid)?;
 
-    // 8. Create ws/default/ workspace
+    // 9. Create ws/default/ workspace
     let ws_default = create_default_workspace(&root, &epoch0_oid)?;
 
-    // 9. Configure .gitignore in the workspace
+    // 10. Configure .gitignore in the workspace
     setup_workspace_gitignore(&ws_default)?;
 
     Ok(InitResult {
@@ -310,6 +319,18 @@ fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
+fn normalize_common_dir_to_repo_git(root: &Path) -> Result<(), InitError> {
+    let dot_git = root.join(".git");
+    let repo_git = root.join(REPO_GIT_DIR);
+
+    if dot_git.is_dir() && !repo_git.exists() {
+        std::fs::rename(&dot_git, &repo_git)?;
+        std::fs::write(&dot_git, format!("gitdir: {REPO_GIT_DIR}\n"))?;
+    }
+
+    Ok(())
+}
+
 /// Set `core.bare = true` so git treats the root as a bare repo.
 fn set_bare_mode(root: &Path) -> Result<(), InitError> {
     run_git(root, &["config", "core.bare", "true"])?;
@@ -321,12 +342,18 @@ fn set_bare_mode(root: &Path) -> Result<(), InitError> {
 /// After `core.bare = true`, the index file and any checkout artifacts
 /// at root are no longer needed. The working tree lives in `ws/default/`.
 fn clean_root_worktree(root: &Path) -> Result<(), InitError> {
+    let common_dir = git_common_dir(root)?;
     // Remove index file (not needed in bare mode)
-    let index = root.join(".git").join("index");
+    let index = common_dir.join("index");
     if index.exists() {
         std::fs::remove_file(&index)?;
     }
     Ok(())
+}
+
+fn git_common_dir(root: &Path) -> Result<PathBuf, InitError> {
+    let path = run_git_stdout(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    Ok(PathBuf::from(path.trim()))
 }
 
 /// Set `refs/manifold/epoch/current` to the given epoch commit.
@@ -336,6 +363,14 @@ fn set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), InitError> {
     let ref_name = manifold_refs::EPOCH_CURRENT;
     manifold_refs::write_ref(root, ref_name, epoch.oid()).map_err(|e| InitError::RefSet {
         ref_name: ref_name.to_owned(),
+        message: e.to_string(),
+    })
+}
+
+fn set_default_workspace_ref(root: &Path, epoch: &EpochId) -> Result<(), InitError> {
+    let ref_name = manifold_refs::workspace_state_ref("default");
+    manifold_refs::write_ref(root, &ref_name, epoch.oid()).map_err(|e| InitError::RefSet {
+        ref_name,
         message: e.to_string(),
     })
 }
@@ -464,6 +499,16 @@ mod tests {
         stdout.contains(&ws_path.to_string_lossy().to_string())
     }
 
+    fn git_common_dir(root: &Path) -> PathBuf {
+        let output = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(root)
+            .output()
+            .expect("git rev-parse --git-common-dir should succeed");
+        assert!(output.status.success());
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    }
+
     #[test]
     fn greenfield_creates_valid_repo() {
         let dir = tempdir().unwrap();
@@ -581,6 +626,19 @@ mod tests {
     }
 
     #[test]
+    fn greenfield_uses_repo_git_common_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("myrepo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+
+        assert!(result.repo_root.join(".git").is_file());
+        assert!(result.repo_root.join(REPO_GIT_DIR).is_dir());
+        assert_eq!(git_common_dir(&result.repo_root), result.repo_root.join(REPO_GIT_DIR));
+    }
+
+    #[test]
     fn greenfield_custom_branch() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("myrepo");
@@ -623,9 +681,10 @@ mod tests {
 
         let result = greenfield_init(&root, &InitOptions::default()).unwrap();
 
-        // Index file should be removed (bare mode)
+        // Index file should be removed from common-dir (bare mode)
+        let common_dir = git_common_dir(&result.repo_root);
         assert!(
-            !result.repo_root.join(".git/index").exists(),
+            !common_dir.join("index").exists(),
             "index should be removed in bare mode"
         );
     }
@@ -893,22 +952,23 @@ pub fn run() -> anyhow::Result<()> {
 
 /// Initialize Manifold in an existing git repository (brownfield).
 ///
-/// Unlike [`greenfield_init`], this function expects a `.git/` to already
+/// Unlike [`greenfield_init`], this function expects a `.git` to already
 /// exist. It preserves all existing history and sets `epoch₀ = HEAD`.
 ///
 /// # Steps
-/// 1. Verify `.git/` exists and is a valid repository
+/// 1. Verify `.git` exists and is a valid repository
 /// 2. Idempotency check — if already initialized, return early
 /// 3. Detect dirty working tree — warn but continue
 /// 4. Read current HEAD as epoch₀
 /// 5. Detect detached HEAD — warn but continue
-/// 6. Set `core.bare = true`
-/// 7. Remove root `.git/index` (bare mode cleanup)
-/// 8. Create `.manifold/` directory structure
-/// 9. Set `refs/manifold/epoch/current` → HEAD
-/// 10. Create `ws/default/` via `git worktree add --detach`
-/// 11. Remove tracked source files from root (dirty files are kept with warning)
-/// 12. Update root `.gitignore`
+/// 6. Normalize to `repo.git` common-dir topology
+/// 7. Set `core.bare = true`
+/// 8. Remove common-dir index file (bare mode cleanup)
+/// 9. Create `.manifold/` directory structure
+/// 10. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
+/// 11. Create `ws/default/` via `git worktree add --detach`
+/// 12. Remove tracked source files from root (dirty files are kept with warning)
+/// 13. Update root `.gitignore`
 ///
 /// # Errors
 /// Returns [`BrownfieldInitError`] if any step fails. Partial state may remain
@@ -923,7 +983,7 @@ pub fn brownfield_init(
 ) -> Result<BrownfieldInitResult, BrownfieldInitError> {
     let root = std::fs::canonicalize(root)?;
 
-    // 1. Verify .git/ exists
+    // 1. Verify .git exists
     let git_dir = root.join(".git");
     if !git_dir.exists() {
         return Err(BrownfieldInitError::NotAGitRepo { path: git_dir });
@@ -932,10 +992,44 @@ pub fn brownfield_init(
     // 2. Verify it is a valid git repo
     bf_verify_git_repo(&root)?;
 
-    // 3. Idempotency check: ws/default/ already exists → already initialized
+    // 2b. Migrate legacy v2 common-dir layout (.git directory) to
+    // canonical repo.git topology before further checks.
+    let _migrated_common_dir = bf_maybe_migrate_legacy_common_dir(&root)?;
+
+    // 3. Idempotency/repair: ws/default/ already exists.
     let ws_default = root.join("ws").join("default");
     if ws_default.exists() {
-        let epoch0 = bf_read_epoch_ref(&root)?;
+        layout::init_manifold_dir(&root).map_err(BrownfieldInitError::Layout)?;
+
+        let epoch0 = match manifold_refs::read_epoch_current(&root) {
+            Ok(Some(oid)) => {
+                EpochId::new(oid.as_str()).map_err(|e| BrownfieldInitError::GitCommand {
+                    command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
+                    stderr: format!("invalid OID: {e}"),
+                    exit_code: None,
+                })?
+            }
+            Ok(None) => {
+                let head = bf_get_head_oid(&root)?;
+                bf_set_epoch_ref(&root, &head)?;
+                head
+            }
+            Err(e) => {
+                return Err(BrownfieldInitError::GitCommand {
+                    command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
+                    stderr: e.to_string(),
+                    exit_code: None,
+                });
+            }
+        };
+
+        if matches!(
+            manifold_refs::read_ref(&root, &manifold_refs::workspace_state_ref("default")),
+            Ok(None)
+        ) {
+            bf_set_default_workspace_ref(&root, &bf_get_workspace_head_oid(&ws_default)?)?;
+        }
+
         let head_branch = bf_detect_head_branch(&root);
         return Ok(BrownfieldInitResult {
             repo_root: root,
@@ -976,17 +1070,21 @@ pub fn brownfield_init(
         eprintln!("    git checkout -b <branch-name>");
     }
 
+    // 6. Normalize to repo.git topology
+    bf_normalize_common_dir_to_repo_git(&root)?;
+
     // 7. Set core.bare = true
     bf_set_bare_mode(&root)?;
 
-    // 8. Remove root index file (bare mode cleanup)
+    // 8. Remove common-dir index file (bare mode cleanup)
     bf_clean_root_index(&root)?;
 
     // 9. Create .manifold/ directory structure
     layout::init_manifold_dir(&root).map_err(BrownfieldInitError::Layout)?;
 
-    // 10. Set refs/manifold/epoch/current → HEAD
+    // 10. Set refs/manifold/epoch/current and refs/manifold/ws/default → HEAD
     bf_set_epoch_ref(&root, &epoch0)?;
+    bf_set_default_workspace_ref(&root, &epoch0)?;
 
     // 11. Create ws/default/ worktree at HEAD
     let ws_dir = root.join("ws");
@@ -1036,29 +1134,6 @@ fn bf_verify_git_repo(root: &Path) -> Result<(), BrownfieldInitError> {
         });
     }
     Ok(())
-}
-
-/// Read `refs/manifold/epoch/current` — used for idempotency check.
-///
-/// Delegates to the shared [`crate::refs`] module. Falls back to HEAD if
-/// the ref has not been set yet.
-fn bf_read_epoch_ref(root: &Path) -> Result<EpochId, BrownfieldInitError> {
-    match manifold_refs::read_epoch_current(root) {
-        Ok(Some(oid)) => EpochId::new(oid.as_str()).map_err(|e| BrownfieldInitError::GitCommand {
-            command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
-            stderr: format!("invalid OID: {e}"),
-            exit_code: None,
-        }),
-        Ok(None) => {
-            // Ref doesn't exist yet — fall back to HEAD
-            bf_get_head_oid(root)
-        }
-        Err(e) => Err(BrownfieldInitError::GitCommand {
-            command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
-            stderr: e.to_string(),
-            exit_code: None,
-        }),
-    }
 }
 
 /// Detect the current branch name. Returns `None` if HEAD is detached.
@@ -1173,13 +1248,117 @@ fn bf_set_bare_mode(root: &Path) -> Result<(), BrownfieldInitError> {
     bf_run_git(root, &["config", "core.bare", "true"])
 }
 
-/// Remove `.git/index` (bare mode cleanup — no working tree at root).
+fn bf_normalize_common_dir_to_repo_git(root: &Path) -> Result<(), BrownfieldInitError> {
+    let dot_git = root.join(".git");
+    let repo_git = root.join(REPO_GIT_DIR);
+
+    if dot_git.is_dir() && !repo_git.exists() {
+        std::fs::rename(&dot_git, &repo_git)?;
+        std::fs::write(&dot_git, format!("gitdir: {REPO_GIT_DIR}\n"))?;
+    }
+
+    Ok(())
+}
+
+fn bf_maybe_migrate_legacy_common_dir(root: &Path) -> Result<bool, BrownfieldInitError> {
+    let dot_git = root.join(".git");
+    let repo_git = root.join(REPO_GIT_DIR);
+
+    if !dot_git.is_dir() || repo_git.exists() {
+        return Ok(false);
+    }
+
+    let workspace_admin_paths = bf_collect_workspace_admin_paths(root, &dot_git)?;
+
+    bf_normalize_common_dir_to_repo_git(root)?;
+
+    for (ws_path, old_admin_path) in workspace_admin_paths {
+        let new_admin_path = old_admin_path
+            .strip_prefix(&dot_git)
+            .map_or_else(|_| old_admin_path.clone(), |suffix| repo_git.join(suffix));
+
+        std::fs::write(ws_path.join(".git"), format!("gitdir: {}\n", new_admin_path.display()))?;
+    }
+
+    Ok(true)
+}
+
+fn bf_collect_workspace_admin_paths(
+    root: &Path,
+    dot_git: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>, BrownfieldInitError> {
+    let ws_root = root.join("ws");
+    if !ws_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut mappings = Vec::new();
+    for entry in std::fs::read_dir(&ws_root)? {
+        let entry = entry?;
+        let ws_path = entry.path();
+        if !ws_path.is_dir() {
+            continue;
+        }
+
+        let ws_git = ws_path.join(".git");
+        if !ws_git.is_file() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&ws_git)?;
+        let Some(raw_gitdir) = content.trim().strip_prefix("gitdir:") else {
+            continue;
+        };
+        let raw_gitdir = raw_gitdir.trim();
+
+        let candidate = PathBuf::from(raw_gitdir);
+        let admin_path = if candidate.is_absolute() {
+            candidate
+        } else {
+            ws_path.join(candidate)
+        };
+
+        // Only rewrite admin paths that still point at the legacy .git dir.
+        if admin_path.starts_with(dot_git) {
+            mappings.push((ws_path, admin_path));
+        }
+    }
+
+    Ok(mappings)
+}
+
+/// Remove common-dir `index` (bare mode cleanup — no working tree at root).
 fn bf_clean_root_index(root: &Path) -> Result<(), BrownfieldInitError> {
-    let index = root.join(".git").join("index");
+    let common_dir = bf_git_common_dir(root)?;
+    let index = common_dir.join("index");
     if index.exists() {
         std::fs::remove_file(&index)?;
     }
     Ok(())
+}
+
+fn bf_git_common_dir(root: &Path) -> Result<PathBuf, BrownfieldInitError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: "git rev-parse --path-format=absolute --git-common-dir".to_owned(),
+            stderr: format!("failed to spawn: {e}"),
+            exit_code: None,
+        })?;
+
+    if !output.status.success() {
+        return Err(BrownfieldInitError::GitCommand {
+            command: "git rev-parse --path-format=absolute --git-common-dir".to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            exit_code: output.status.code(),
+        });
+    }
+
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 /// Set `refs/manifold/epoch/current` to the given epoch commit.
@@ -1190,6 +1369,41 @@ fn bf_set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), BrownfieldInitEr
     manifold_refs::write_ref(root, ref_name, epoch.oid()).map_err(|e| BrownfieldInitError::RefSet {
         ref_name: ref_name.to_owned(),
         message: e.to_string(),
+    })
+}
+
+fn bf_set_default_workspace_ref(root: &Path, epoch: &EpochId) -> Result<(), BrownfieldInitError> {
+    let ref_name = manifold_refs::workspace_state_ref("default");
+    manifold_refs::write_ref(root, &ref_name, epoch.oid()).map_err(|e| BrownfieldInitError::RefSet {
+        ref_name,
+        message: e.to_string(),
+    })
+}
+
+fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(ws_path)
+        .output()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: "git rev-parse HEAD".to_owned(),
+            stderr: format!("failed to spawn: {e}"),
+            exit_code: None,
+        })?;
+
+    if !output.status.success() {
+        return Err(BrownfieldInitError::GitCommand {
+            command: "git rev-parse HEAD".to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            exit_code: output.status.code(),
+        });
+    }
+
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    EpochId::new(&oid).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git rev-parse HEAD".to_owned(),
+        stderr: format!("invalid OID from git: {e}"),
+        exit_code: None,
     })
 }
 
@@ -1373,6 +1587,30 @@ mod brownfield_tests {
         EpochId::new(&oid).unwrap()
     }
 
+    fn setup_legacy_initialized_repo(dir: &Path) -> EpochId {
+        let head = setup_existing_repo(dir);
+
+        Command::new("git")
+            .args(["config", "core.bare", "true"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        layout::init_manifold_dir(dir).unwrap();
+        manifold_refs::write_ref(dir, manifold_refs::EPOCH_CURRENT, head.oid()).unwrap();
+        manifold_refs::write_ref(dir, &manifold_refs::workspace_state_ref("default"), head.oid())
+            .unwrap();
+
+        fs::create_dir_all(dir.join("ws")).unwrap();
+        Command::new("git")
+            .args(["worktree", "add", "--detach", "ws/default", head.as_str()])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        head
+    }
+
     /// Read a git ref from a directory.
     fn read_ref(root: &Path, ref_name: &str) -> Option<String> {
         let out = Command::new("git")
@@ -1385,6 +1623,16 @@ mod brownfield_tests {
         } else {
             None
         }
+    }
+
+    fn git_common_dir(root: &Path) -> PathBuf {
+        let output = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(root)
+            .output()
+            .expect("git rev-parse --git-common-dir should succeed");
+        assert!(output.status.success());
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
     }
 
     #[test]
@@ -1490,6 +1738,8 @@ mod brownfield_tests {
             .unwrap();
         let val = String::from_utf8_lossy(&out.stdout);
         assert_eq!(val.trim(), "true", "core.bare should be true");
+        assert!(root.join(".git").is_file(), ".git should be gitfile after init");
+        assert!(root.join(REPO_GIT_DIR).is_dir(), "repo.git should exist after init");
     }
 
     #[test]
@@ -1624,6 +1874,32 @@ mod brownfield_tests {
     }
 
     #[test]
+    fn brownfield_migrates_legacy_initialized_repo_to_repo_git() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let head = setup_legacy_initialized_repo(root);
+
+        assert!(root.join(".git").is_dir(), "legacy repo should start with .git dir");
+        assert!(!root.join(REPO_GIT_DIR).exists());
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        assert!(result.already_initialized);
+
+        assert!(root.join(".git").is_file(), ".git should be a gitfile after migration");
+        assert!(root.join(REPO_GIT_DIR).is_dir(), "repo.git should exist after migration");
+        assert_eq!(git_common_dir(root), root.join(REPO_GIT_DIR));
+
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root.join("ws/default"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "default worktree should remain usable after migration");
+        let ws_head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        assert_eq!(ws_head, head.as_str());
+    }
+
+    #[test]
     fn brownfield_preserves_git_history() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -1712,10 +1988,39 @@ mod brownfield_tests {
 
         brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
 
+        let common_dir = git_common_dir(root);
         assert!(
-            !root.join(".git/index").exists(),
+            !common_dir.join("index").exists(),
             "index should be removed in bare mode"
         );
+    }
+
+    #[test]
+    fn brownfield_bootstraps_refs_when_ws_default_already_exists() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        setup_existing_repo(root);
+
+        // Simulate external bare common-dir topology with default worktree already created.
+        fs::rename(root.join(".git"), root.join(REPO_GIT_DIR)).unwrap();
+        fs::write(root.join(".git"), format!("gitdir: {REPO_GIT_DIR}\n")).unwrap();
+        Command::new("git")
+            .args(["config", "core.bare", "true"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        fs::create_dir_all(root.join("ws")).unwrap();
+        Command::new("git")
+            .args(["worktree", "add", "--detach", "ws/default", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        assert!(result.already_initialized);
+
+        assert!(read_ref(root, manifold_refs::EPOCH_CURRENT).is_some());
+        assert!(read_ref(root, &manifold_refs::workspace_state_ref("default")).is_some());
     }
 
     #[test]

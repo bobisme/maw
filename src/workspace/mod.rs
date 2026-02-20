@@ -18,6 +18,7 @@ mod merge;
 mod metadata;
 mod names;
 mod overlap;
+mod oplog_runtime;
 mod prune;
 mod restore;
 mod status;
@@ -653,9 +654,16 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 }
 
 pub fn repo_root() -> Result<PathBuf> {
-    // Always resolve via git-common-dir so this works from both:
-    // - repo root (bare/manifold metadata root)
-    // - workspace directories (ws/<name>/)
+    // First preference: find an ancestor with Manifold markers.
+    // This is robust for both legacy and repo.git common-dir layouts.
+    let cwd = std::env::current_dir().context("Could not determine current directory")?;
+    if let Some(root) = cwd.ancestors().find(|dir| {
+        dir.join(".manifold").is_dir() && (dir.join("ws").is_dir() || dir.join(".git").exists())
+    }) {
+        return Ok(root.to_path_buf());
+    }
+
+    // Fallback: derive from git common-dir.
     let output = Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
@@ -668,10 +676,20 @@ pub fn repo_root() -> Result<PathBuf> {
     }
 
     let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    common_dir
+    let mut root = common_dir
         .parent()
-        .context("Cannot determine repo root from git common dir")
-        .map(std::path::Path::to_path_buf)
+        .context("Cannot determine repo root from git common dir")?
+        .to_path_buf();
+
+    // Support nested common-dir layouts like <root>/.manifold/git.
+    if root.file_name().is_some_and(|name| name == ".manifold") {
+        root = root
+            .parent()
+            .context("Cannot determine repo root from nested common dir")?
+            .to_path_buf();
+    }
+
+    Ok(root)
 }
 
 /// Return the best directory for running git commands.

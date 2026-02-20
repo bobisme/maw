@@ -95,6 +95,36 @@ fn merge_captures_source_workspace_edits_without_extra_vcs_commands() {
 }
 
 #[test]
+fn merge_records_snapshot_and_merge_ops_in_workspace_history() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "worker"]);
+    repo.add_file("worker", "result.txt", "worker output\n");
+
+    repo.maw_ok(&["ws", "merge", "worker"]);
+
+    let history = repo.maw_ok(&["ws", "history", "worker", "--format", "json"]);
+    let payload: serde_json::Value =
+        serde_json::from_str(&history).expect("history output should be valid JSON");
+    let operations = payload["operations"]
+        .as_array()
+        .expect("history operations should be an array");
+
+    assert!(
+        operations
+            .iter()
+            .any(|op| op["op_type"].as_str() == Some("snapshot")),
+        "expected at least one snapshot operation in history: {payload}"
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|op| op["op_type"].as_str() == Some("merge")),
+        "expected at least one merge operation in history: {payload}"
+    );
+}
+
+#[test]
 fn reject_merge_default_workspace() {
     let repo = TestRepo::new();
 

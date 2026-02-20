@@ -1,9 +1,14 @@
+use std::path::Path;
+
 use anyhow::Result;
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceMode;
+use crate::oplog::global_view::compute_global_view;
+use crate::oplog::read::read_head;
+use crate::oplog::view::read_patch_set_blob;
 
 use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
 
@@ -14,6 +19,8 @@ pub struct WorkspaceStatus {
     pub(crate) has_changes: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) changes: Option<StatusChanges>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) global_view: Option<GlobalViewSummary>,
     pub(crate) workspaces: Vec<WorkspaceEntry>,
 }
 
@@ -30,6 +37,16 @@ pub struct WorkspaceEntry {
     pub(crate) epoch: String,
     pub(crate) state: String,
     pub(crate) mode: String,
+}
+
+#[derive(Serialize)]
+pub struct GlobalViewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) epoch: Option<String>,
+    pub(crate) workspace_count: usize,
+    pub(crate) total_patches: usize,
+    pub(crate) conflict_count: usize,
+    pub(crate) total_ops: usize,
 }
 
 pub fn status(format: OutputFormat) -> Result<()> {
@@ -71,6 +88,10 @@ pub fn status(format: OutputFormat) -> Result<()> {
 
     // Read metadata for mode information.
     let root = repo_root().unwrap_or_default();
+    let current_workspace =
+        detect_current_workspace(&root).unwrap_or_else(|| default_ws_name.to_string());
+
+    let global_view = compute_global_view_summary(&root, &all_workspaces);
 
     // Build workspace entries
     let workspace_entries: Vec<WorkspaceEntry> = all_workspaces
@@ -95,6 +116,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 default_ws_name,
                 is_stale,
                 changes.as_ref(),
+                global_view.as_ref(),
                 &workspace_entries,
             );
         }
@@ -103,23 +125,25 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 default_ws_name,
                 is_stale,
                 changes.as_ref(),
+                global_view.as_ref(),
                 &workspace_entries,
                 format.should_use_color(),
             );
         }
         OutputFormat::Json => {
             let status_data = WorkspaceStatus {
-                current_workspace: default_ws_name.to_string(),
+                current_workspace,
                 is_stale,
                 has_changes,
                 changes,
+                global_view,
                 workspaces: workspace_entries,
             };
             match format.serialize(&status_data) {
                 Ok(output) => println!("{output}"),
                 Err(e) => {
                     eprintln!("Warning: Failed to serialize status to JSON: {e}");
-                    print_status_text(default_ws_name, is_stale, None, &[]);
+                    print_status_text(default_ws_name, is_stale, None, None, &[]);
                 }
             }
         }
@@ -128,11 +152,25 @@ pub fn status(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+fn detect_current_workspace(root: &Path) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let ws_root = root.join("ws");
+    let rel = cwd.strip_prefix(&ws_root).ok()?;
+    let first = rel.components().next()?;
+    let name = first.as_os_str().to_str()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 /// Print status in compact text format (agent-friendly)
 fn print_status_text(
     current_ws: &str,
     is_stale: bool,
     changes: Option<&StatusChanges>,
+    global_view: Option<&GlobalViewSummary>,
     workspaces: &[WorkspaceEntry],
 ) {
     // Current workspace and stale warning
@@ -153,6 +191,15 @@ fn print_status_text(
         }
     }
     println!();
+
+    if let Some(view) = global_view {
+        let epoch = view.epoch.as_deref().unwrap_or("none");
+        println!(
+            "global-view: epoch={} ws={} patches={} conflicts={} ops={}",
+            epoch, view.workspace_count, view.total_patches, view.conflict_count, view.total_ops
+        );
+        println!();
+    }
 
     // All workspaces
     println!("workspaces:");
@@ -216,6 +263,7 @@ fn print_status_pretty(
     current_ws: &str,
     is_stale: bool,
     changes: Option<&StatusChanges>,
+    global_view: Option<&GlobalViewSummary>,
     workspaces: &[WorkspaceEntry],
     use_color: bool,
 ) {
@@ -248,6 +296,16 @@ fn print_status_pretty(
         }
     }
     println!();
+
+    if let Some(view) = global_view {
+        let epoch = view.epoch.as_deref().unwrap_or("none");
+        println!("{bold}Global View{reset}");
+        println!(
+            "  epoch:{epoch} ws:{} patches:{} conflicts:{} ops:{}",
+            view.workspace_count, view.total_patches, view.conflict_count, view.total_ops
+        );
+        println!();
+    }
 
     // All workspaces
     println!("{bold}All Workspaces{reset}");
@@ -310,4 +368,32 @@ fn print_status_pretty(
     // Next command
     println!();
     println!("{gray}Next: maw exec <name> -- <command>{reset}");
+}
+
+fn compute_global_view_summary(
+    root: &Path,
+    workspaces: &[crate::model::types::WorkspaceInfo],
+) -> Option<GlobalViewSummary> {
+    let workspace_ids: Vec<_> = workspaces
+        .iter()
+        .filter_map(|ws| match read_head(root, &ws.id) {
+            Ok(Some(_)) => Some(ws.id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    if workspace_ids.is_empty() {
+        return None;
+    }
+
+    let view =
+        compute_global_view(root, &workspace_ids, |oid| read_patch_set_blob(root, oid)).ok()?;
+
+    Some(GlobalViewSummary {
+        epoch: view.epoch.as_ref().map(|e| e.as_str()[..12].to_string()),
+        workspace_count: view.workspace_count(),
+        total_patches: view.total_patches(),
+        conflict_count: view.conflicts.len(),
+        total_ops: view.total_ops,
+    })
 }

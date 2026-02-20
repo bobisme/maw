@@ -151,12 +151,12 @@ pub struct MergeConfig {
 /// Configuration for AST-aware merge via tree-sitter (§6.2).
 ///
 /// Controls which languages use AST-level merge as a fallback when diff3 fails.
-/// Disabled by default — must be explicitly enabled per language.
+/// Enabled by default for all built-in language packs.
 ///
 /// ```toml
 /// [merge.ast]
 /// languages = ["rust", "python", "typescript", "javascript", "go"]
-/// packs = ["core"]
+/// packs = ["core", "web", "backend"]
 /// semantic_false_positive_budget_pct = 5
 /// semantic_min_confidence = 70
 /// ```
@@ -166,14 +166,14 @@ pub struct AstConfig {
     /// Languages for which AST merge is enabled.
     ///
     /// Supported values: `"rust"`, `"python"`, `"typescript"`, `"javascript"`, `"go"`.
-    /// Empty (default) means AST merge is disabled for all languages.
+    /// Empty by default; language packs control baseline enablement.
     #[serde(default)]
     pub languages: Vec<AstConfigLanguage>,
 
     /// Optional language packs that expand to multiple languages.
     ///
     /// Packs are additive with `languages` and deduplicated by the merge layer.
-    #[serde(default)]
+    #[serde(default = "default_ast_packs")]
     pub packs: Vec<AstLanguagePack>,
 
     /// Maximum allowed semantic false-positive rate percentage (0-100).
@@ -192,11 +192,19 @@ impl Default for AstConfig {
     fn default() -> Self {
         Self {
             languages: Vec::new(),
-            packs: Vec::new(),
+            packs: default_ast_packs(),
             semantic_false_positive_budget_pct: default_semantic_false_positive_budget_pct(),
             semantic_min_confidence: default_semantic_min_confidence(),
         }
     }
+}
+
+fn default_ast_packs() -> Vec<AstLanguagePack> {
+    vec![
+        AstLanguagePack::Core,
+        AstLanguagePack::Web,
+        AstLanguagePack::Backend,
+    ]
 }
 
 const fn default_semantic_false_positive_budget_pct() -> u8 {
@@ -1027,15 +1035,23 @@ on_failure = "block"
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ast_config_defaults_to_disabled() {
+    fn ast_config_defaults_to_all_packs() {
         let cfg = ManifoldConfig::default();
         assert!(
             cfg.merge.ast.languages.is_empty(),
-            "AST merge should be disabled by default"
+            "explicit language list should default to empty"
         );
         assert!(
-            cfg.merge.ast.packs.is_empty(),
-            "AST packs should be disabled by default"
+            cfg.merge.ast.packs.contains(&AstLanguagePack::Core),
+            "AST core pack should be enabled by default"
+        );
+        assert!(
+            cfg.merge.ast.packs.contains(&AstLanguagePack::Web),
+            "AST web pack should be enabled by default"
+        );
+        assert!(
+            cfg.merge.ast.packs.contains(&AstLanguagePack::Backend),
+            "AST backend pack should be enabled by default"
         );
         assert_eq!(cfg.merge.ast.semantic_false_positive_budget_pct, 5);
         assert_eq!(cfg.merge.ast.semantic_min_confidence, 70);

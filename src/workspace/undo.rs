@@ -10,9 +10,8 @@ use crate::model::patch::{PatchSet, PatchValue};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 use crate::oplog::read::{read_head, walk_chain};
 use crate::oplog::types::{OpPayload, Operation};
-use crate::oplog::write::append_operation;
 
-use super::{get_backend, repo_root};
+use super::{get_backend, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root};
 
 pub fn undo(name: &str) -> Result<()> {
     let ws_id = WorkspaceId::new(name)
@@ -176,7 +175,7 @@ fn record_compensation_op(
         },
     };
 
-    append_operation(root, ws_id, &compensate, Some(&head))
+    append_operation_with_runtime_checkpoint(root, ws_id, &compensate, Some(&head))
         .context("Failed to append compensation operation")
 }
 
@@ -198,7 +197,7 @@ fn ensure_workspace_oplog_head(
         },
     };
 
-    append_operation(root, ws_id, &create_op, None)
+    append_operation_with_runtime_checkpoint(root, ws_id, &create_op, None)
         .context("Failed to bootstrap workspace op log for undo")
 }
 

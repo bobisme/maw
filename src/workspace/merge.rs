@@ -1,16 +1,19 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::backend::WorkspaceBackend;
 use crate::config::{ManifoldConfig, MergeDriverKind};
 use crate::format::OutputFormat;
 use crate::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use crate::merge::collect::collect_snapshots;
+use crate::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
 use crate::merge::commit::{
     CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase,
 };
@@ -26,9 +29,15 @@ use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validati
 use crate::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
 use crate::model::conflict::ConflictAtom;
 use crate::model::conflict::Region;
-use crate::model::types::WorkspaceId;
+use crate::model::patch::{FileId, PatchSet as ModelPatchSet, PatchValue};
+use crate::model::types::{EpochId, GitOid, WorkspaceId};
+use crate::oplog::read::read_head;
+use crate::oplog::types::{OpPayload, Operation};
 
-use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, repo_root};
+use super::{
+    DEFAULT_WORKSPACE, MawConfig, get_backend,
+    oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
+};
 
 // ---------------------------------------------------------------------------
 // JSON output types for agent-friendly conflict presentation
@@ -1445,6 +1454,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         textln!("  {}: {}", ws_id, &head.as_str()[..12]);
     }
 
+    if let Err(e) = record_snapshot_operations(&root, &backend, &sources) {
+        abort_merge(&manifold_dir, &format!("snapshot recording failed: {e}"));
+        bail!("Merge PREPARE phase failed: could not record snapshot operations: {e}");
+    }
+
     // -----------------------------------------------------------------------
     // Phase 2: BUILD — collect, partition, resolve, build candidate
     // -----------------------------------------------------------------------
@@ -1707,6 +1721,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Record epoch_after in merge-state
     record_epoch_after(&manifold_dir, &build_output.candidate)?;
 
+    // Record merge operations in source workspace histories.
+    for warning in record_merge_operations(&root, &sources, &frozen.epoch, &build_output.candidate) {
+        eprintln!("WARNING: {warning}");
+    }
+
     // -----------------------------------------------------------------------
     // Phase 5: CLEANUP — destroy workspaces (if requested), remove merge-state
     // -----------------------------------------------------------------------
@@ -1779,6 +1798,299 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: operation-log recording
+// ---------------------------------------------------------------------------
+
+/// Record a Snapshot operation for every source workspace.
+fn record_snapshot_operations<B: WorkspaceBackend>(
+    root: &Path,
+    backend: &B,
+    sources: &[WorkspaceId],
+) -> Result<()> {
+    let patch_sets = collect_snapshots(root, backend, sources)
+        .map_err(|e| anyhow::anyhow!("collect snapshots: {e}"))?;
+
+    for patch_set in &patch_sets {
+        let ws_id = &patch_set.workspace_id;
+        let head = ensure_workspace_oplog_head(root, ws_id, &patch_set.epoch)
+            .map_err(|e| anyhow::anyhow!("bootstrap workspace '{ws_id}' op log: {e}"))?;
+
+        let model_patch_set = to_model_patch_set(root, patch_set)
+            .map_err(|e| anyhow::anyhow!("build patch-set for workspace '{ws_id}': {e}"))?;
+        let patch_set_oid = write_patch_set_blob(root, &model_patch_set)
+            .map_err(|e| anyhow::anyhow!("write patch-set blob for workspace '{ws_id}': {e}"))?;
+
+        let snapshot_op = Operation {
+            parent_ids: vec![head.clone()],
+            workspace_id: ws_id.clone(),
+            timestamp: now_timestamp_iso8601(),
+            payload: OpPayload::Snapshot { patch_set_oid },
+        };
+
+        append_operation_with_runtime_checkpoint(root, ws_id, &snapshot_op, Some(&head))
+            .map_err(|e| anyhow::anyhow!("append snapshot op for workspace '{ws_id}': {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// Record Merge operations in source workspace histories after a successful COMMIT.
+///
+/// Returns warning messages instead of failing the already-committed merge.
+fn record_merge_operations(
+    root: &Path,
+    sources: &[WorkspaceId],
+    epoch_before: &EpochId,
+    epoch_after: &GitOid,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    let epoch_after_id = match EpochId::new(epoch_after.as_str()) {
+        Ok(epoch) => epoch,
+        Err(e) => {
+            warnings.push(format!(
+                "Failed to record merge operations: invalid epoch_after '{}': {e}",
+                epoch_after.as_str()
+            ));
+            return warnings;
+        }
+    };
+
+    for ws_id in sources {
+        let head = match ensure_workspace_oplog_head(root, ws_id, epoch_before) {
+            Ok(head) => head,
+            Err(e) => {
+                warnings.push(format!(
+                    "Could not ensure op-log head for workspace '{ws_id}': {e}"
+                ));
+                continue;
+            }
+        };
+
+        let op = Operation {
+            parent_ids: vec![head.clone()],
+            workspace_id: ws_id.clone(),
+            timestamp: now_timestamp_iso8601(),
+            payload: OpPayload::Merge {
+                sources: sources.to_vec(),
+                epoch_before: epoch_before.clone(),
+                epoch_after: epoch_after_id.clone(),
+            },
+        };
+
+        if let Err(e) = append_operation_with_runtime_checkpoint(root, ws_id, &op, Some(&head)) {
+            warnings.push(format!("Could not append merge op for workspace '{ws_id}': {e}"));
+        }
+    }
+
+    warnings
+}
+
+fn ensure_workspace_oplog_head(root: &Path, ws_id: &WorkspaceId, epoch: &EpochId) -> Result<GitOid> {
+    if let Some(head) = read_head(root, ws_id).map_err(|e| anyhow::anyhow!("read head: {e}"))? {
+        return Ok(head);
+    }
+
+    let create_op = Operation {
+        parent_ids: vec![],
+        workspace_id: ws_id.clone(),
+        timestamp: now_timestamp_iso8601(),
+        payload: OpPayload::Create {
+            epoch: epoch.clone(),
+        },
+    };
+
+    append_operation_with_runtime_checkpoint(root, ws_id, &create_op, None)
+        .map_err(|e| anyhow::anyhow!("append create op: {e}"))
+}
+
+fn to_model_patch_set(root: &Path, patch_set: &CollectedPatchSet) -> Result<ModelPatchSet> {
+    let mut patches = BTreeMap::new();
+
+    for change in &patch_set.changes {
+        match change.kind {
+            ChangeKind::Added => {
+                let blob = change
+                    .blob
+                    .clone()
+                    .or_else(|| change.content.as_deref().and_then(|bytes| git_hash_object(root, bytes)))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not compute blob for added path '{}'",
+                            change.path.display()
+                        )
+                    })?;
+                let file_id = change
+                    .file_id
+                    .unwrap_or_else(|| file_id_from_path(&change.path));
+                patches.insert(change.path.clone(), PatchValue::Add { blob, file_id });
+            }
+            ChangeKind::Modified => {
+                let base_blob = epoch_blob_oid(root, &patch_set.epoch, &change.path)?;
+                let new_blob = change
+                    .blob
+                    .clone()
+                    .or_else(|| change.content.as_deref().and_then(|bytes| git_hash_object(root, bytes)))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not compute blob for modified path '{}'",
+                            change.path.display()
+                        )
+                    })?;
+                let file_id = change
+                    .file_id
+                    .unwrap_or_else(|| file_id_from_blob(&base_blob));
+                patches.insert(
+                    change.path.clone(),
+                    PatchValue::Modify {
+                        base_blob,
+                        new_blob,
+                        file_id,
+                    },
+                );
+            }
+            ChangeKind::Deleted => {
+                let previous_blob = epoch_blob_oid(root, &patch_set.epoch, &change.path)?;
+                let file_id = change
+                    .file_id
+                    .unwrap_or_else(|| file_id_from_blob(&previous_blob));
+                patches.insert(
+                    change.path.clone(),
+                    PatchValue::Delete {
+                        previous_blob,
+                        file_id,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(ModelPatchSet {
+        base_epoch: patch_set.epoch.clone(),
+        patches,
+    })
+}
+
+fn write_patch_set_blob(root: &Path, patch_set: &ModelPatchSet) -> Result<GitOid> {
+    let payload = serde_json::to_vec(patch_set)
+        .map_err(|e| anyhow::anyhow!("serialize patch-set JSON: {e}"))?;
+
+    let mut child = Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("spawn git hash-object: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&payload)
+            .map_err(|e| anyhow::anyhow!("write patch-set payload to git hash-object stdin: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| anyhow::anyhow!("wait for git hash-object: {e}"))?;
+    if !output.status.success() {
+        bail!(
+            "git hash-object -w --stdin failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    GitOid::new(&raw).map_err(|e| anyhow::anyhow!("invalid patch-set blob OID '{raw}': {e}"))
+}
+
+fn git_hash_object(root: &Path, content: &[u8]) -> Option<GitOid> {
+    let mut child = Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(content);
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let hex = String::from_utf8(output.stdout).ok()?;
+    GitOid::new(hex.trim()).ok()
+}
+
+fn epoch_blob_oid(root: &Path, epoch: &EpochId, path: &Path) -> Result<GitOid> {
+    let rev = format!("{}:{}", epoch.as_str(), path.to_string_lossy());
+    let output = Command::new("git")
+        .args(["rev-parse", &rev])
+        .current_dir(root)
+        .output()
+        .map_err(|e| anyhow::anyhow!("spawn git rev-parse for '{}': {e}", path.display()))?;
+
+    if !output.status.success() {
+        bail!(
+            "git rev-parse {} failed: {}",
+            rev,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    GitOid::new(&raw).map_err(|e| anyhow::anyhow!("invalid blob OID '{raw}' for '{}': {e}", path.display()))
+}
+
+fn file_id_from_path(path: &Path) -> FileId {
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    FileId::new(u128::from_be_bytes(bytes))
+}
+
+fn file_id_from_blob(blob: &GitOid) -> FileId {
+    let n = u128::from_str_radix(&blob.as_str()[..32], 16).unwrap_or(0);
+    FileId::new(n)
+}
+
+fn now_timestamp_iso8601() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3_600) % 24;
+    let days = secs / 86_400;
+
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 // ---------------------------------------------------------------------------

@@ -122,6 +122,26 @@ fn status_reports_clean_dirty_and_stale_states() {
 }
 
 #[test]
+fn status_json_includes_global_view_summary_when_oplogs_exist() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "agent-a"]);
+
+    let status = repo.maw_ok(&["ws", "status", "--format", "json"]);
+    let payload: serde_json::Value =
+        serde_json::from_str(&status).expect("ws status --format json should be valid JSON");
+
+    assert!(
+        payload["global_view"].is_object(),
+        "expected global_view summary when workspace op logs exist: {payload}"
+    );
+    assert!(
+        payload["global_view"]["workspace_count"].as_u64().unwrap_or(0) >= 1,
+        "global_view should include at least one workspace snapshot"
+    );
+}
+
+#[test]
 fn workspace_create_template_emits_metadata_and_artifact() {
     let repo = TestRepo::new();
 
@@ -190,6 +210,28 @@ fn ws_commands_work_from_inside_workspace_directory() {
 
     assert!(names.contains(&"default".to_owned()));
     assert!(names.contains(&"agent-a".to_owned()));
+}
+
+#[test]
+fn ws_status_reports_current_workspace_from_invocation_context() {
+    let repo = TestRepo::new();
+    repo.maw_ok(&["ws", "create", "agent-a"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_maw"))
+        .args(["ws", "status", "--format", "json"])
+        .current_dir(repo.workspace_path("agent-a"))
+        .output()
+        .expect("failed to execute maw ws status from workspace directory");
+
+    assert!(
+        output.status.success(),
+        "ws status should succeed from workspace dir: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("ws status --format json should produce valid JSON");
+    assert_eq!(payload["current_workspace"].as_str(), Some("agent-a"));
 }
 
 #[test]

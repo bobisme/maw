@@ -10,12 +10,12 @@ use crate::model::diff::compute_patchset;
 use crate::model::types::{EpochId, WorkspaceId, WorkspaceMode};
 use crate::oplog::read::read_head;
 use crate::oplog::types::{OpPayload, Operation};
-use crate::oplog::write::append_operation;
 use crate::refs as manifold_refs;
 
 use super::{
     DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata, repo_root,
-    templates::WorkspaceTemplate, workspace_path, workspaces_dir,
+    oplog_runtime::append_operation_with_runtime_checkpoint, templates::WorkspaceTemplate,
+    workspace_path, workspaces_dir,
 };
 
 pub fn create(
@@ -318,7 +318,7 @@ fn record_workspace_create_op(root: &std::path::Path, ws_id: &WorkspaceId, epoch
         },
     };
 
-    append_operation(root, ws_id, &op, previous_head.as_ref())
+    append_operation_with_runtime_checkpoint(root, ws_id, &op, previous_head.as_ref())
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("append create op: {e}"))
 }
@@ -337,7 +337,7 @@ fn record_workspace_destroy_op(
         payload: OpPayload::Destroy,
     };
 
-    append_operation(root, ws_id, &op, Some(&head))
+    append_operation_with_runtime_checkpoint(root, ws_id, &op, Some(&head))
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("append destroy op: {e}"))
 }
@@ -362,7 +362,7 @@ fn ensure_workspace_oplog_head(
         },
     };
 
-    append_operation(root, ws_id, &create_op, None)
+    append_operation_with_runtime_checkpoint(root, ws_id, &create_op, None)
         .map_err(|e| anyhow::anyhow!("bootstrap workspace history: {e}"))
 }
 

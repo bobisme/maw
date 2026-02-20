@@ -120,7 +120,8 @@ enum Commands {
     /// Upgrade v1 repo (.workspaces/) to v2 bare model (ws/)
     ///
     /// Migrates from the old .workspaces/ layout to the new bare repo model
-    /// with ws/ directory, default workspace at ws/default/, and git core.bare = true.
+    /// with ws/ directory, default workspace at ws/default/, and a bare
+    /// common-dir topology (`repo.git`, root `.git` gitfile).
     /// Safe to run multiple times — detects v2 and exits early.
     Upgrade,
 
