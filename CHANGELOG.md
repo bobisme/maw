@@ -2,6 +2,13 @@
 
 All notable changes to maw.
 
+## v0.40.0
+
+- Feat: ConflictAtom localization types — replace placeholder with full `Region` enum (Lines, AstNode, WholeFile), `ConflictReason` enum (OverlappingLineEdits, SameAstNodeModified, NonCommutativeEdits, Custom), `AtomEdit` struct (workspace + region + content), and expanded `ConflictAtom` (base_region + edits + reason). Tagged JSON serde. 44 tests. (bd-15yn.2)
+- Feat: Global view computation — CRDT merge of per-workspace `MaterializedView`s via `GlobalView` struct. Epoch max, PatchSet pairwise join, destroyed workspace exclusion, cache key validation. Commutative/associative/idempotent. 21 tests. (bd-28np.2)
+- Feat: `maw ws undo` — compensation operations via inverse PatchSet. Reads latest Snapshot from op log, computes inverse patches, appends Compensate operation, applies to working directory. Forward/inverse for Add/Delete/Modify/Rename. Redo = undo the undo. 21 tests. (bd-12p7)
+- Feat: Workspace lifecycle integration tests — create/list/duplicate/destroy, clean/dirty/stale status assertions. Idempotent destroy. 27 tests. (bd-2hw9.2)
+
 ## v0.39.0
 
 - Feat: Structured Conflict model — `Conflict` enum with 4 variants (Content, AddAdd, ModifyDelete, DivergentRename). `ConflictSide` with workspace/content/timestamp, `ConflictAtom` placeholder for region-level conflict localization. Tagged JSON serde. 23 tests. (bd-15yn.1)
