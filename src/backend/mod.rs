@@ -4,6 +4,7 @@
 //! This is the API contract between maw's CLI layer and the underlying
 //! isolation mechanism (jj, git, or other VCS).
 
+pub mod copy;
 pub mod git;
 pub mod reflink;
 
@@ -324,3 +325,164 @@ mod tests {
 }
 pub mod overlay;
 pub mod platform;
+
+// ---------------------------------------------------------------------------
+// AnyBackend — polymorphic backend enum
+// ---------------------------------------------------------------------------
+
+use copy::CopyBackend;
+use git::GitWorktreeBackend;
+use overlay::OverlayBackend;
+use reflink::RefLinkBackend;
+
+use crate::config::BackendKind;
+
+// ---------------------------------------------------------------------------
+// AnyBackendError
+// ---------------------------------------------------------------------------
+
+/// Error type for [`AnyBackend`] — boxes the underlying backend error.
+#[derive(Debug)]
+pub struct AnyBackendError(pub Box<dyn std::error::Error + Send + Sync + 'static>);
+
+impl std::fmt::Display for AnyBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for AnyBackendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AnyBackend
+// ---------------------------------------------------------------------------
+
+/// A concrete backend selected at runtime based on platform capabilities and
+/// configuration. Dispatches to the appropriate implementation.
+///
+/// Using an enum (rather than `Box<dyn WorkspaceBackend>`) avoids dynamic
+/// dispatch and keeps the `Error` associated type monomorphic.
+pub enum AnyBackend {
+    /// Git worktree backend — always available.
+    GitWorktree(GitWorktreeBackend),
+    /// Reflink (CoW) backend — requires a CoW-capable filesystem.
+    Reflink(RefLinkBackend),
+    /// OverlayFS backend — Linux only.
+    Overlay(OverlayBackend),
+    /// Plain recursive-copy backend — universal fallback.
+    Copy(CopyBackend),
+}
+
+impl AnyBackend {
+    /// Construct the appropriate backend for the resolved (non-Auto) kind and repo root.
+    ///
+    /// If `kind` is `BackendKind::Auto` (which should be resolved before calling
+    /// this function), falls back to `GitWorktree`.
+    ///
+    /// # Errors
+    /// Returns an error if the overlay backend is selected but is not supported
+    /// on this platform (not Linux, or no mount strategy available).
+    pub fn from_kind(kind: BackendKind, root: PathBuf) -> anyhow::Result<Self> {
+        match kind {
+            BackendKind::GitWorktree | BackendKind::Auto => {
+                Ok(Self::GitWorktree(GitWorktreeBackend::new(root)))
+            }
+            BackendKind::Reflink => Ok(Self::Reflink(RefLinkBackend::new(root))),
+            BackendKind::Overlay => {
+                let backend = OverlayBackend::new(root).map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(Self::Overlay(backend))
+            }
+            BackendKind::Copy => Ok(Self::Copy(CopyBackend::new(root))),
+        }
+    }
+
+    /// Name of the active backend for diagnostic/logging output.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::GitWorktree(_) => "git-worktree",
+            Self::Reflink(_) => "reflink",
+            Self::Overlay(_) => "overlay",
+            Self::Copy(_) => "copy",
+        }
+    }
+}
+
+/// Helper: convert a backend-specific error into [`AnyBackendError`].
+fn wrap_err<E>(e: E) -> AnyBackendError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    AnyBackendError(Box::new(e))
+}
+
+impl WorkspaceBackend for AnyBackend {
+    type Error = AnyBackendError;
+
+    fn create(&self, name: &WorkspaceId, epoch: &EpochId) -> Result<WorkspaceInfo, Self::Error> {
+        match self {
+            Self::GitWorktree(b) => b.create(name, epoch).map_err(wrap_err),
+            Self::Reflink(b) => b.create(name, epoch).map_err(wrap_err),
+            Self::Overlay(b) => b.create(name, epoch).map_err(wrap_err),
+            Self::Copy(b) => b.create(name, epoch).map_err(wrap_err),
+        }
+    }
+
+    fn destroy(&self, name: &WorkspaceId) -> Result<(), Self::Error> {
+        match self {
+            Self::GitWorktree(b) => b.destroy(name).map_err(wrap_err),
+            Self::Reflink(b) => b.destroy(name).map_err(wrap_err),
+            Self::Overlay(b) => b.destroy(name).map_err(wrap_err),
+            Self::Copy(b) => b.destroy(name).map_err(wrap_err),
+        }
+    }
+
+    fn list(&self) -> Result<Vec<WorkspaceInfo>, Self::Error> {
+        match self {
+            Self::GitWorktree(b) => b.list().map_err(wrap_err),
+            Self::Reflink(b) => b.list().map_err(wrap_err),
+            Self::Overlay(b) => b.list().map_err(wrap_err),
+            Self::Copy(b) => b.list().map_err(wrap_err),
+        }
+    }
+
+    fn status(&self, name: &WorkspaceId) -> Result<WorkspaceStatus, Self::Error> {
+        match self {
+            Self::GitWorktree(b) => b.status(name).map_err(wrap_err),
+            Self::Reflink(b) => b.status(name).map_err(wrap_err),
+            Self::Overlay(b) => b.status(name).map_err(wrap_err),
+            Self::Copy(b) => b.status(name).map_err(wrap_err),
+        }
+    }
+
+    fn snapshot(&self, name: &WorkspaceId) -> Result<SnapshotResult, Self::Error> {
+        match self {
+            Self::GitWorktree(b) => b.snapshot(name).map_err(wrap_err),
+            Self::Reflink(b) => b.snapshot(name).map_err(wrap_err),
+            Self::Overlay(b) => b.snapshot(name).map_err(wrap_err),
+            Self::Copy(b) => b.snapshot(name).map_err(wrap_err),
+        }
+    }
+
+    fn workspace_path(&self, name: &WorkspaceId) -> PathBuf {
+        match self {
+            Self::GitWorktree(b) => b.workspace_path(name),
+            Self::Reflink(b) => b.workspace_path(name),
+            Self::Overlay(b) => b.workspace_path(name),
+            Self::Copy(b) => b.workspace_path(name),
+        }
+    }
+
+    fn exists(&self, name: &WorkspaceId) -> bool {
+        match self {
+            Self::GitWorktree(b) => b.exists(name),
+            Self::Reflink(b) => b.exists(name),
+            Self::Overlay(b) => b.exists(name),
+            Self::Copy(b) => b.exists(name),
+        }
+    }
+}

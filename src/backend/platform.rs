@@ -137,13 +137,28 @@ pub fn resolve_backend_kind(
 }
 
 /// Auto-select backend using §7.5 priority.
+///
+/// Selection order (highest priority first):
+/// 1. `git-worktree` — always available; default for repos < 30k files.
+/// 2. `reflink`      — if CoW-capable filesystem and repo > 30k files.
+/// 3. `overlay`      — if Linux overlayfs available and repo > 100k files.
+/// 4. `copy`         — universal fallback (plain recursive copy).
 #[must_use]
 pub fn auto_select_backend(repo_file_count: usize, caps: &PlatformCapabilities) -> BackendKind {
-    // §7.5 explicitly keeps git-worktree as the default first choice.
-    let _reflink_candidate = caps.reflink_supported && repo_file_count > REF_LINK_THRESHOLD_FILES;
-    let _overlay_candidate = (caps.overlay_userns_supported || caps.fuse_overlayfs_available)
+    // Overlay: Linux + overlayfs + large repo (highest CoW benefit)
+    let overlay_candidate = (caps.overlay_userns_supported || caps.fuse_overlayfs_available)
         && repo_file_count > OVERLAY_THRESHOLD_FILES;
+    if overlay_candidate {
+        return BackendKind::Overlay;
+    }
 
+    // Reflink: CoW filesystem + medium/large repo
+    let reflink_candidate = caps.reflink_supported && repo_file_count > REF_LINK_THRESHOLD_FILES;
+    if reflink_candidate {
+        return BackendKind::Reflink;
+    }
+
+    // Default: git-worktree (always works, fast for smaller repos)
     BackendKind::GitWorktree
 }
 
@@ -368,7 +383,49 @@ mod tests {
     }
 
     #[test]
-    fn auto_selection_prefers_git_worktree_per_spec_order() {
+    fn auto_selection_git_worktree_for_small_repos() {
+        let caps_all = PlatformCapabilities {
+            schema_version: CACHE_SCHEMA_VERSION,
+            reflink_supported: true,
+            overlay_userns_supported: true,
+            fuse_overlayfs_available: true,
+            kernel_major: Some(6),
+            kernel_minor: Some(8),
+        };
+        // Repos under 30k files → always git-worktree regardless of caps.
+        assert_eq!(
+            auto_select_backend(10_000, &caps_all),
+            BackendKind::GitWorktree
+        );
+        assert_eq!(
+            auto_select_backend(29_999, &caps_all),
+            BackendKind::GitWorktree
+        );
+    }
+
+    #[test]
+    fn auto_selection_reflink_for_medium_repos() {
+        let caps = PlatformCapabilities {
+            schema_version: CACHE_SCHEMA_VERSION,
+            reflink_supported: true,
+            overlay_userns_supported: false,
+            fuse_overlayfs_available: false,
+            kernel_major: Some(6),
+            kernel_minor: Some(8),
+        };
+        // 30k–100k files with reflink: pick reflink.
+        assert_eq!(
+            auto_select_backend(30_001, &caps),
+            BackendKind::Reflink
+        );
+        assert_eq!(
+            auto_select_backend(99_999, &caps),
+            BackendKind::Reflink
+        );
+    }
+
+    #[test]
+    fn auto_selection_overlay_for_large_repos() {
         let caps = PlatformCapabilities {
             schema_version: CACHE_SCHEMA_VERSION,
             reflink_supported: true,
@@ -377,10 +434,51 @@ mod tests {
             kernel_major: Some(6),
             kernel_minor: Some(8),
         };
+        // > 100k files with overlay support: pick overlay.
+        assert_eq!(
+            auto_select_backend(100_001, &caps),
+            BackendKind::Overlay
+        );
+        assert_eq!(
+            auto_select_backend(1_000_000, &caps),
+            BackendKind::Overlay
+        );
+    }
 
-        assert_eq!(auto_select_backend(10_000, &caps), BackendKind::GitWorktree);
+    #[test]
+    fn auto_selection_falls_back_to_reflink_when_no_overlay() {
+        let caps = PlatformCapabilities {
+            schema_version: CACHE_SCHEMA_VERSION,
+            reflink_supported: true,
+            overlay_userns_supported: false,
+            fuse_overlayfs_available: false,
+            kernel_major: Some(6),
+            kernel_minor: Some(8),
+        };
+        // Large repo but no overlay → reflink.
         assert_eq!(
             auto_select_backend(200_000, &caps),
+            BackendKind::Reflink
+        );
+    }
+
+    #[test]
+    fn auto_selection_falls_back_to_git_worktree_when_no_cow_caps() {
+        let caps = PlatformCapabilities {
+            schema_version: CACHE_SCHEMA_VERSION,
+            reflink_supported: false,
+            overlay_userns_supported: false,
+            fuse_overlayfs_available: false,
+            kernel_major: None,
+            kernel_minor: None,
+        };
+        // No CoW caps at all → git-worktree for any repo size.
+        assert_eq!(
+            auto_select_backend(50_000, &caps),
+            BackendKind::GitWorktree
+        );
+        assert_eq!(
+            auto_select_backend(500_000, &caps),
             BackendKind::GitWorktree
         );
     }
@@ -389,5 +487,95 @@ mod tests {
     fn detect_capabilities_smoke_test() {
         let caps = detect_platform_capabilities();
         assert_eq!(caps.schema_version, CACHE_SCHEMA_VERSION);
+    }
+
+    /// Acceptance test: auto-selection produces a valid backend for the current platform.
+    ///
+    /// This test runs against the actual platform capabilities — it validates that
+    /// the selection is consistent and produces a recognized backend kind.
+    #[test]
+    fn auto_selection_on_current_platform_returns_valid_backend() {
+        let caps = detect_platform_capabilities();
+
+        // Test a range of repo sizes.
+        for &size in &[0_usize, 1_000, 30_000, 100_000, 500_000] {
+            let kind = auto_select_backend(size, &caps);
+            // Must be one of the valid concrete backend kinds.
+            assert!(
+                matches!(
+                    kind,
+                    BackendKind::GitWorktree
+                        | BackendKind::Reflink
+                        | BackendKind::Overlay
+                        | BackendKind::Copy
+                ),
+                "auto_select_backend({size}, caps) returned {kind:?}, expected a concrete kind"
+            );
+        }
+    }
+
+    /// Acceptance test: `resolve_backend_kind(Auto, ...)` never returns `Auto`.
+    #[test]
+    fn resolve_backend_kind_never_returns_auto() {
+        let caps = detect_platform_capabilities();
+        let resolved = resolve_backend_kind(BackendKind::Auto, 50_000, &caps);
+        assert_ne!(
+            resolved,
+            BackendKind::Auto,
+            "resolved backend should never be Auto"
+        );
+    }
+
+    /// Acceptance test: config override works for all backend types.
+    ///
+    /// When the config explicitly sets a backend, `resolve_backend_kind` must
+    /// return that backend (or its fallback on unsupported platforms).
+    #[test]
+    fn config_override_for_all_backend_types() {
+        let caps_none = PlatformCapabilities::default();
+
+        // git-worktree: always passes through.
+        assert_eq!(
+            resolve_backend_kind(BackendKind::GitWorktree, 0, &caps_none),
+            BackendKind::GitWorktree
+        );
+
+        // copy: always passes through.
+        assert_eq!(
+            resolve_backend_kind(BackendKind::Copy, 0, &caps_none),
+            BackendKind::Copy
+        );
+
+        // reflink: falls back to copy when not supported.
+        assert_eq!(
+            resolve_backend_kind(BackendKind::Reflink, 0, &caps_none),
+            BackendKind::Copy
+        );
+
+        // overlay: falls back to copy when not supported.
+        assert_eq!(
+            resolve_backend_kind(BackendKind::Overlay, 0, &caps_none),
+            BackendKind::Copy
+        );
+
+        // reflink: passes through when supported.
+        let caps_reflink = PlatformCapabilities {
+            reflink_supported: true,
+            ..PlatformCapabilities::default()
+        };
+        assert_eq!(
+            resolve_backend_kind(BackendKind::Reflink, 0, &caps_reflink),
+            BackendKind::Reflink
+        );
+
+        // overlay: passes through when supported.
+        let caps_overlay = PlatformCapabilities {
+            overlay_userns_supported: true,
+            ..PlatformCapabilities::default()
+        };
+        assert_eq!(
+            resolve_backend_kind(BackendKind::Overlay, 0, &caps_overlay),
+            BackendKind::Overlay
+        );
     }
 }

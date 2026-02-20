@@ -5,8 +5,9 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde::Deserialize;
 
-use crate::backend::WorkspaceBackend;
-use crate::backend::git::GitWorktreeBackend;
+use crate::backend::{AnyBackend, WorkspaceBackend};
+use crate::backend::platform;
+use crate::config::{BackendKind, ManifoldConfig};
 use crate::format::OutputFormat;
 
 mod advance;
@@ -710,10 +711,37 @@ pub fn jj_cwd() -> Result<PathBuf> {
     }
 }
 
-/// Get a `GitWorktreeBackend` instance for the current repository.
-pub fn get_backend() -> Result<GitWorktreeBackend> {
+/// Resolve the workspace backend from `.manifold/config.toml` and platform capabilities.
+///
+/// Auto-selects the best backend for the current platform and repo size (§7.5).
+/// Falls back to `git-worktree` if detection fails or no CoW backend is available.
+pub fn get_backend() -> Result<AnyBackend> {
     let root = repo_root()?;
-    Ok(GitWorktreeBackend::new(root))
+
+    // Load `.manifold/config.toml` (missing file → all defaults).
+    let manifold_config_path = root.join(".manifold").join("config.toml");
+    let manifold_config = ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
+    let configured_kind = manifold_config.workspace.backend.clone();
+
+    // Detect platform capabilities (cached in .manifold/platform-capabilities).
+    let caps = platform::detect_or_load(&root);
+
+    // Estimate repo file count for threshold-based selection.
+    let file_count = platform::estimate_repo_file_count(&root).unwrap_or(0);
+
+    // Resolve the concrete backend kind (auto → specific).
+    let resolved = platform::resolve_backend_kind(configured_kind, file_count, &caps);
+
+    // Construct and return the backend.
+    AnyBackend::from_kind(resolved, root)
+        .or_else(|e| {
+            // If the resolved backend fails to initialize (e.g., overlay not
+            // available despite detection), fall back to git-worktree and warn.
+            eprintln!(
+                "WARNING: Backend init failed ({e}), falling back to git-worktree"
+            );
+            AnyBackend::from_kind(BackendKind::GitWorktree, repo_root()?)
+        })
 }
 
 /// Ensure CWD is the repo root. Mutation commands must run from root
