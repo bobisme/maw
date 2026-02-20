@@ -32,6 +32,7 @@ pub enum GitBackendError {
     /// Workspace not found.
     NotFound { name: String },
     /// Feature not yet implemented.
+    #[allow(dead_code)]
     NotImplemented(&'static str),
 }
 
@@ -86,7 +87,8 @@ pub struct GitWorktreeBackend {
 
 impl GitWorktreeBackend {
     /// Create a new `GitWorktreeBackend`.
-    pub fn new(root: PathBuf) -> Self {
+    #[must_use] 
+    pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
@@ -101,7 +103,7 @@ impl GitWorktreeBackend {
             .args(args)
             .current_dir(&self.root)
             .output()
-            .map_err(|e| GitBackendError::Io(e))?;
+            .map_err(GitBackendError::Io)?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -115,16 +117,12 @@ impl GitWorktreeBackend {
     }
 
     /// Run a git command in a specific directory and return stdout.
-    fn git_stdout_in(
-        &self,
-        dir: &std::path::Path,
-        args: &[&str],
-    ) -> Result<String, GitBackendError> {
+    fn git_stdout_in(dir: &std::path::Path, args: &[&str]) -> Result<String, GitBackendError> {
         let output = Command::new("git")
             .args(args)
             .current_dir(dir)
             .output()
-            .map_err(|e| GitBackendError::Io(e))?;
+            .map_err(GitBackendError::Io)?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -135,12 +133,6 @@ impl GitWorktreeBackend {
                 exit_code: output.status.code(),
             })
         }
-    }
-
-    /// Run a git command, ignoring output.
-    fn git_run(&self, args: &[&str]) -> Result<(), GitBackendError> {
-        self.git_stdout(args)?;
-        Ok(())
     }
 
     /// Get the current epoch from `refs/manifold/epoch/current`, if it exists.
@@ -205,11 +197,11 @@ impl GitWorktreeBackend {
 
         let ref_name = manifold_refs::workspace_state_ref(name.as_str());
 
-        let stash_oid = self.git_stdout_in(ws_path, &["stash", "create"])?;
+        let stash_oid = Self::git_stdout_in(ws_path, &["stash", "create"])?;
         let oid_str = stash_oid.trim();
 
         let materialized = if oid_str.is_empty() {
-            self.git_stdout_in(ws_path, &["rev-parse", "HEAD"])?
+            Self::git_stdout_in(ws_path, &["rev-parse", "HEAD"])?
         } else {
             stash_oid
         };
@@ -269,7 +261,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             .args(["worktree", "add", "--detach", path_str, epoch.as_str()])
             .current_dir(&self.root)
             .output()
-            .map_err(|e| GitBackendError::Io(e))?;
+            .map_err(GitBackendError::Io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -384,16 +376,14 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 continue;
             }
 
-            let (path, head_str) = match (wt_path, wt_head) {
-                (Some(p), Some(h)) => (p, h),
+            let (Some(path), Some(head_str)) = (wt_path, wt_head) else {
                 // Missing HEAD means the worktree is in a broken state; skip.
-                _ => continue,
+                continue;
             };
 
             // Only include workspaces directly under ws/ (e.g., ws/agent-1).
-            let rel = match path.strip_prefix(&ws_dir) {
-                Ok(r) => r,
-                Err(_) => continue,
+            let Ok(rel) = path.strip_prefix(&ws_dir) else {
+                continue;
             };
 
             // Exactly one path component (ws/<name>, not ws/<a>/<b>).
@@ -401,21 +391,18 @@ impl WorkspaceBackend for GitWorktreeBackend {
             if components.len() != 1 {
                 continue;
             }
-            let name_str = match components[0].as_os_str().to_str() {
-                Some(s) => s,
-                None => continue,
+            let Some(name_str) = components[0].as_os_str().to_str() else {
+                continue;
             };
 
-            let id = match WorkspaceId::new(name_str) {
-                Ok(id) => id,
+            let Ok(id) = WorkspaceId::new(name_str) else {
                 // Non-conforming directory name (e.g., uppercase); skip.
-                Err(_) => continue,
+                continue;
             };
 
-            let epoch = match EpochId::new(head_str.trim()) {
-                Ok(e) => e,
+            let Ok(epoch) = EpochId::new(head_str.trim()) else {
                 // Invalid OID (e.g., detached with no commits); skip.
-                Err(_) => continue,
+                continue;
             };
 
             let state = match &current_epoch {
@@ -462,7 +449,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
 
         // The workspace HEAD is the epoch commit it was created at.
         // Agents make working-tree changes only (no commits), so HEAD is stable.
-        let head_str = self.git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
+        let head_str = Self::git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
         let base_epoch =
             EpochId::new(head_str.trim()).map_err(|e| GitBackendError::GitCommand {
                 command: "git rev-parse HEAD".to_owned(),
@@ -471,14 +458,13 @@ impl WorkspaceBackend for GitWorktreeBackend {
             })?;
 
         // Collect dirty files: tracked modifications + untracked files.
-        let status_output = self.git_stdout_in(&ws_path, &["status", "--porcelain"])?;
+        let status_output = Self::git_stdout_in(&ws_path, &["status", "--porcelain"])?;
         let dirty_files = parse_porcelain_status(&status_output);
 
         // Stale = workspace epoch != current epoch.
         let is_stale = self
             .current_epoch_opt()
-            .map(|current| base_epoch != current)
-            .unwrap_or(false);
+            .is_some_and(|current| base_epoch != current);
 
         // Lazily materialize Level 1 workspace state ref for git inspection.
         self.refresh_workspace_state_ref(name, &ws_path)?;
@@ -506,7 +492,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
 
         // Read the base epoch from the worktree's HEAD
         // (worktree HEAD is set to the epoch commit on creation)
-        let head_oid = self.git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
+        let head_oid = Self::git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
         let head_oid = head_oid.trim();
 
         let mut added = Vec::new();
@@ -514,19 +500,19 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let mut deleted = Vec::new();
 
         // 1. Uncommitted changes relative to HEAD (working tree vs index+HEAD)
-        let diff_output = self.git_stdout_in(&ws_path, &["diff", "--name-status", head_oid])?;
+        let diff_output = Self::git_stdout_in(&ws_path, &["diff", "--name-status", head_oid])?;
 
         parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
 
         // 2. Staged changes not yet reflected (index vs HEAD)
         let staged_output =
-            self.git_stdout_in(&ws_path, &["diff", "--name-status", "--cached", head_oid])?;
+            Self::git_stdout_in(&ws_path, &["diff", "--name-status", "--cached", head_oid])?;
 
         parse_name_status(&staged_output, &mut added, &mut modified, &mut deleted);
 
         // 3. Untracked files (not in .gitignore)
         let untracked_output =
-            self.git_stdout_in(&ws_path, &["ls-files", "--others", "--exclude-standard"])?;
+            Self::git_stdout_in(&ws_path, &["ls-files", "--others", "--exclude-standard"])?;
 
         for line in untracked_output.lines() {
             let path = line.trim();
@@ -575,11 +561,10 @@ impl WorkspaceBackend for GitWorktreeBackend {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let path_str = path.to_str().unwrap_or_default();
             for line in stdout.lines() {
-                if let Some(wt_path) = line.strip_prefix("worktree ") {
-                    if wt_path == path_str {
+                if let Some(wt_path) = line.strip_prefix("worktree ")
+                    && wt_path == path_str {
                         return true;
                     }
-                }
             }
         }
 
@@ -725,6 +710,7 @@ fn parse_name_status(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::redundant_clone)]
 mod tests {
     use super::*;
     use std::fs;

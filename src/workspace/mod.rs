@@ -24,6 +24,7 @@ mod status;
 pub mod sync;
 mod touched;
 mod templates;
+mod undo;
 
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;
@@ -36,6 +37,7 @@ const DEFAULT_WORKSPACE: &str = "default";
 #[derive(Debug, Default, Deserialize)]
 pub struct MawConfig {
     #[serde(default)]
+    #[allow(dead_code)]
     merge: MergeConfig,
     #[serde(default)]
     hooks: HooksConfig,
@@ -90,6 +92,7 @@ pub struct MergeConfig {
     /// Paths to auto-resolve from main during merge conflicts.
     /// Supports glob patterns like ".beads/**".
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) auto_resolve_from_main: Vec<String>,
 }
 
@@ -254,7 +257,7 @@ pub enum WorkspaceCommands {
 
     /// List paths touched by a workspace's local changes
     ///
-    /// Uses PatchSet diffing against the workspace's base epoch and returns
+    /// Uses `PatchSet` diffing against the workspace's base epoch and returns
     /// a conservative set of touched paths for conflict prediction.
     /// For renames, both source and destination paths are included.
     ///
@@ -312,17 +315,6 @@ pub enum WorkspaceCommands {
         all: bool,
     },
 
-    /// Deprecated: use `maw exec <workspace> -- <command>` instead.
-    #[command(hide = true)]
-    Jj {
-        /// Workspace name
-        name: String,
-
-        /// Arguments to pass to the command
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// Show commit history for a workspace
     ///
     /// Displays a timeline of commits made in the specified workspace,
@@ -346,6 +338,19 @@ pub enum WorkspaceCommands {
         /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+    },
+
+    /// Undo local workspace changes via a compensation operation
+    ///
+    /// Reverts the workspace's unmerged changes back to its base epoch.
+    /// Records a `Compensate` operation in the workspace op log so undo
+    /// actions are durable and visible in history.
+    ///
+    /// Examples:
+    ///   maw ws undo alice
+    Undo {
+        /// Name of the workspace to undo
+        name: String,
     },
 
     /// Clean up orphaned, stale, or empty workspaces
@@ -581,19 +586,13 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             overlap::overlap(&ws1, &ws2, fmt)
         }
         WorkspaceCommands::Sync { all } => sync::sync(all),
-        WorkspaceCommands::Jj { name, args } => {
-            let args_str = args.join(" ");
-            bail!(
-                "`maw ws jj` is deprecated.\n  \
-                 Use: maw exec {name} -- {args_str}"
-            );
-        }
         WorkspaceCommands::History {
             name,
             limit,
             format,
             json,
         } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
+        WorkspaceCommands::Undo { name } => undo::undo(&name),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
         WorkspaceCommands::Advance { name, format, json } => {
@@ -701,7 +700,7 @@ pub fn repo_root() -> Result<PathBuf> {
 ///
 /// In v2 bare repo model, the repo root has no workspace. This returns
 /// `ws/default/` when it exists, falling back to the repo root.
-pub fn jj_cwd() -> Result<PathBuf> {
+pub fn git_cwd() -> Result<PathBuf> {
     let root = repo_root()?;
     let default_ws = root.join("ws").join("default");
     if default_ws.exists() {
@@ -714,14 +713,14 @@ pub fn jj_cwd() -> Result<PathBuf> {
 /// Resolve the workspace backend from `.manifold/config.toml` and platform capabilities.
 ///
 /// Auto-selects the best backend for the current platform and repo size (§7.5).
-/// Falls back to `git-worktree` if detection fails or no CoW backend is available.
+/// Falls back to `git-worktree` if detection fails or no `CoW` backend is available.
 pub fn get_backend() -> Result<AnyBackend> {
     let root = repo_root()?;
 
     // Load `.manifold/config.toml` (missing file → all defaults).
     let manifold_config_path = root.join(".manifold").join("config.toml");
     let manifold_config = ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
-    let configured_kind = manifold_config.workspace.backend.clone();
+    let configured_kind = manifold_config.workspace.backend;
 
     // Detect platform capabilities (cached in .manifold/platform-capabilities).
     let caps = platform::detect_or_load(&root);

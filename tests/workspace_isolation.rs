@@ -138,8 +138,7 @@ fn status_in_workspace_a_does_not_affect_workspace_b() {
         .collect();
     assert!(
         meaningful_b.is_empty(),
-        "ws-stat-b should be clean, but got: {:?}",
-        meaningful_b
+        "ws-stat-b should be clean, but got: {meaningful_b:?}"
     );
 }
 
@@ -398,21 +397,20 @@ fn isolation_with_many_files() {
     for i in 0..50 {
         repo.add_file(
             "ws-many-a",
-            &format!("file_{:03}.txt", i),
-            &format!("content {}", i),
+            &format!("file_{i:03}.txt"),
+            &format!("content {i}"),
         );
     }
 
     // B should have exactly 0 of these files.
     let b_path = repo.workspace_path("ws-many-b");
     let leaked: Vec<String> = (0..50)
-        .filter(|i| b_path.join(format!("file_{:03}.txt", i)).exists())
-        .map(|i| format!("file_{:03}.txt", i))
+        .filter(|i| b_path.join(format!("file_{i:03}.txt")).exists())
+        .map(|i| format!("file_{i:03}.txt"))
         .collect();
 
     assert!(
         leaked.is_empty(),
-        "No files from ws-many-a should leak to ws-many-b, but found: {:?}",
-        leaked
+        "No files from ws-many-a should leak to ws-many-b, but found: {leaked:?}"
     );
 }

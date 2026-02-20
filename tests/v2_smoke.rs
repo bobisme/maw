@@ -134,7 +134,7 @@ fn smoke_bare_mode_no_working_tree_at_root() {
     // Root should NOT have source files (only .git, .manifold, ws/)
     let root_entries: Vec<_> = std::fs::read_dir(repo.root())
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|name| !name.starts_with('.'))
         .collect();

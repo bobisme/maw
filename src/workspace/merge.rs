@@ -83,16 +83,16 @@ pub struct ConflictSideJson {
 /// ```
 #[derive(Debug, Clone, Serialize)]
 pub struct ConflictJson {
-    /// Conflict type tag: "content", "add_add", "modify_delete", or "missing_base".
+    /// Conflict type tag: "content", "`add_add`", "`modify_delete`", or "`missing_base`".
     #[serde(rename = "type")]
     pub conflict_type: String,
 
     /// Path to the conflicted file (relative to repo root).
     pub path: String,
 
-    /// Conflict reason variant name (snake_case).
+    /// Conflict reason variant name (`snake_case`).
     ///
-    /// One of: "content", "add_add", "modify_delete", "missing_base", "missing_content".
+    /// One of: "content", "`add_add`", "`modify_delete`", "`missing_base`", "`missing_content`".
     pub reason: String,
 
     /// Human-readable description of why this conflict occurred.
@@ -272,13 +272,10 @@ pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
         .sides
         .iter()
         .map(|s| {
-            let (content, is_binary) = match &s.content {
-                Some(bytes) => match std::str::from_utf8(bytes) {
-                    Ok(text) => (Some(text.to_string()), false),
-                    Err(_) => (None, true),
-                },
-                None => (None, false),
-            };
+            let (content, is_binary) = s.content.as_ref().map_or((None, false), |bytes| {
+                std::str::from_utf8(bytes)
+                    .map_or((None, true), |text| (Some(text.to_string()), false))
+            });
             ConflictSideJson {
                 workspace: s.workspace_id.as_str().to_string(),
                 change: s.kind.to_string(),
@@ -289,13 +286,9 @@ pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
         .collect();
 
     // Convert base content
-    let (base_content, base_is_binary) = match &record.base {
-        Some(bytes) => match std::str::from_utf8(bytes) {
-            Ok(text) => (Some(text.to_string()), false),
-            Err(_) => (None, true),
-        },
-        None => (None, false),
-    };
+    let (base_content, base_is_binary) = record.base.as_ref().map_or((None, false), |bytes| {
+        std::str::from_utf8(bytes).map_or((None, true), |text| (Some(text.to_string()), false))
+    });
 
     ConflictJson {
         conflict_type: conflict_type.to_string(),
@@ -496,7 +489,7 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     let primary_ws = &workspaces[0];
     let ws_info = CheckWorkspaceInfo {
         name: primary_ws.clone(),
-        change_id: String::new(), // Not available without jj
+        change_id: String::new(), // Not surfaced in Manifold check output.
     };
 
     if is_stale {
@@ -547,7 +540,7 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
                     let conflicts: Vec<ConflictInfo> = output
                         .conflicts
                         .iter()
-                        .map(|c| conflict_record_to_info(c))
+                        .map(conflict_record_to_info)
                         .collect();
                     let ready = conflicts.is_empty();
                     let result = CheckResult {
@@ -1052,6 +1045,7 @@ fn cleanup_plan_merge_state(manifold_dir: &Path) -> Result<()> {
 ///
 /// Text output lists each conflict with its reason and per-workspace sides.
 /// JSON output is a [`ConflictsOutput`] value — fully parseable by agents.
+#[allow(clippy::too_many_lines)]
 pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()> {
     if workspaces.is_empty() {
         bail!("No workspaces specified");
@@ -1290,12 +1284,11 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
         let mut workspace_files: Vec<(String, Vec<PathBuf>)> = Vec::new();
 
         for ws_name in workspaces {
-            if let Ok(ws_id) = WorkspaceId::new(ws_name) {
-                if let Ok(snapshot) = backend.snapshot(&ws_id) {
+            if let Ok(ws_id) = WorkspaceId::new(ws_name)
+                && let Ok(snapshot) = backend.snapshot(&ws_id) {
                     let files: Vec<PathBuf> = snapshot.all_changed().into_iter().cloned().collect();
                     workspace_files.push((ws_name.clone(), files));
                 }
-            }
         }
 
         let mut conflict_files: Vec<PathBuf> = Vec::new();
@@ -1359,7 +1352,8 @@ pub struct MergeOptions<'a> {
 
 /// Run the merge state machine: PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP.
 ///
-/// This replaces the old jj-based merge with the Manifold merge engine.
+/// This uses the Manifold merge engine and state machine.
+#[allow(clippy::too_many_lines)]
 pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let MergeOptions {
         destroy_after,
@@ -1451,7 +1445,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         Ok(output) => output,
         Err(e) => {
             // Abort: clean up merge-state
-            abort_merge(&manifold_dir, &format!("BUILD failed: {e}"))?;
+            abort_merge(&manifold_dir, &format!("BUILD failed: {e}"));
             bail!("Merge BUILD phase failed: {e}");
         }
     };
@@ -1465,7 +1459,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
         // Abort the merge — conflicts must be resolved first
-        abort_merge(&manifold_dir, "unresolved conflicts")?;
+        abort_merge(&manifold_dir, "unresolved conflicts");
 
         if format == OutputFormat::Json {
             // Emit structured JSON conflict output for agents
@@ -1477,7 +1471,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             let to_fix = format!("maw ws merge {}", ws_to_merge.join(" "));
             let output = MergeConflictOutput {
                 status: "conflict".to_string(),
-                workspaces: ws_to_merge.clone(),
+                workspaces: ws_to_merge,
                 conflict_count: conflict_jsons.len(),
                 conflicts: conflict_jsons,
                 message: format!(
@@ -1512,8 +1506,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let validation_config = &manifold_config.merge.validation;
 
+    println!();
     if validation_config.has_commands() {
-        println!();
         println!("VALIDATE: Running post-merge validation...");
 
         // Advance merge-state to Validate phase
@@ -1523,7 +1517,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             match run_validate_phase(&root, &build_output.candidate, validation_config) {
                 Ok(outcome) => outcome,
                 Err(e) => {
-                    abort_merge(&manifold_dir, &format!("VALIDATE error: {e}"))?;
+                    abort_merge(&manifold_dir, &format!("VALIDATE error: {e}"));
                     bail!("Merge VALIDATE phase failed: {e}");
                 }
             };
@@ -1567,7 +1561,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         eprintln!("    {line}");
                     }
                 }
-                abort_merge(&manifold_dir, "validation failed (policy: block)")?;
+                abort_merge(&manifold_dir, "validation failed (policy: block)");
                 bail!(
                     "Merge validation failed. Fix issues and retry.\n  \
                      Diagnostics: .manifold/artifacts/merge/{}/validation.json",
@@ -1594,14 +1588,14 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 abort_merge(
                     &manifold_dir,
                     &format!("validation failed (policy: {policy_name})"),
-                )?;
+                );
 
                 match create_quarantine_workspace(
                     &root,
                     &manifold_dir,
                     merge_id,
-                    sources.clone(),
-                    frozen.epoch.clone(),
+                    sources,
+                    &frozen.epoch,
                     build_output.candidate.clone(),
                     branch,
                     r.clone(),
@@ -1684,7 +1678,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     println!("  Recovery: both refs already updated.");
                 }
                 Ok(CommitRecovery::NotCommitted) => {
-                    abort_merge(&manifold_dir, "commit phase failed: neither ref updated")?;
+                    abort_merge(&manifold_dir, "commit phase failed: neither ref updated");
                     bail!("Merge COMMIT phase failed: could not update refs.");
                 }
                 Err(e) => {
@@ -1696,7 +1690,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             }
         }
         Err(e) => {
-            abort_merge(&manifold_dir, &format!("COMMIT failed: {e}"))?;
+            abort_merge(&manifold_dir, &format!("COMMIT failed: {e}"));
             bail!("Merge COMMIT phase failed: {e}");
         }
     }
@@ -1730,16 +1724,21 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     run_cleanup_phase(&state, &merge_state_path, false, |_ws| Ok(()))
         .map_err(|e| anyhow::anyhow!("cleanup failed: {e}"))?;
 
-    // Also clean up the commit-phase state file if present
-    let commit_state_path = root.join(".manifold").join("merge-state");
+    // Also clean up commit-phase sidecar state files if present.
+    // `commit-state.json` is current; `merge-state` is a legacy fallback.
+    let commit_state_path = root.join(".manifold").join("commit-state.json");
     if commit_state_path.exists() {
         let _ = std::fs::remove_file(&commit_state_path);
+    }
+    let legacy_commit_state_path = root.join(".manifold").join("merge-state");
+    if legacy_commit_state_path.exists() {
+        let _ = std::fs::remove_file(&legacy_commit_state_path);
     }
 
     run_hooks(&maw_config.hooks.post_merge, "post-merge", &root, false)?;
 
     // Generate the merge message for display
-    let msg = message.unwrap_or_else(|| {
+    let msg = message.unwrap_or({
         if ws_to_merge.len() == 1 {
             "adopt work"
         } else {
@@ -1807,7 +1806,7 @@ fn record_validation_result(
     Ok(())
 }
 
-/// Record the epoch_after in the merge-state file.
+/// Record the `epoch_after` in the merge-state file.
 fn record_epoch_after(manifold_dir: &Path, candidate: &crate::model::types::GitOid) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
     let mut state =
@@ -1824,7 +1823,7 @@ fn record_epoch_after(manifold_dir: &Path, candidate: &crate::model::types::GitO
 }
 
 /// Abort the merge by writing abort reason and removing merge-state.
-fn abort_merge(manifold_dir: &Path, reason: &str) -> Result<()> {
+fn abort_merge(manifold_dir: &Path, reason: &str) {
     let state_path = MergeStateFile::default_path(manifold_dir);
     if state_path.exists() {
         if let Ok(mut state) = MergeStateFile::read(&state_path) {
@@ -1834,7 +1833,6 @@ fn abort_merge(manifold_dir: &Path, reason: &str) -> Result<()> {
         // Clean up the merge-state file
         let _ = std::fs::remove_file(&state_path);
     }
-    Ok(())
 }
 
 /// Get current Unix timestamp in seconds.
@@ -1864,7 +1862,9 @@ fn update_default_workspace(
         .output()
         .context("Failed to update default workspace")?;
 
-    if !output.status.success() {
+    if output.status.success() {
+        println!("  Default workspace updated to new epoch.");
+    } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!(
             "WARNING: Failed to update default workspace to new epoch: {}",
@@ -1875,8 +1875,6 @@ fn update_default_workspace(
             default_ws_path.display(),
             &new_epoch.as_str()[..12]
         );
-    } else {
-        println!("  Default workspace updated to new epoch.");
     }
 
     Ok(())

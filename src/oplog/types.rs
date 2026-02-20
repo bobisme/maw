@@ -1,4 +1,4 @@
-//! Operation struct and OpPayload enum — canonical JSON for deterministic hashing (§5.3).
+//! Operation struct and `OpPayload` enum — canonical JSON for deterministic hashing (§5.3).
 //!
 //! Operations are the fundamental unit of the op log. Each operation records
 //! a single workspace mutation (create, destroy, snapshot, merge, compensate,
@@ -10,7 +10,6 @@
 //! - Deterministic: serialize twice → identical bytes
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 

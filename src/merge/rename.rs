@@ -1,34 +1,34 @@
-//! Rename-aware merge using FileId (§5.8).
+//! Rename-aware merge using `FileId` (§5.8).
 //!
 //! After path-based partitioning, this module detects cases where the same
 //! [`FileId`] appears under different paths in different workspaces — indicating
 //! a rename. It rewrites the partition result to handle these scenarios:
 //!
 //! 1. **Rename + edit**: ws-A renames `foo→bar`, ws-B edits `foo`.
-//!    Same FileId → merge ws-B's edits to `bar` (the renamed path).
+//!    Same `FileId` → merge ws-B's edits to `bar` (the renamed path).
 //!
 //! 2. **Divergent rename**: ws-A renames `foo→bar`, ws-B renames `foo→baz`.
-//!    Same FileId, different destinations → [`RenameConflict::DivergentRename`].
+//!    Same `FileId`, different destinations → [`RenameConflict::DivergentRename`].
 //!
 //! 3. **Rename + delete**: ws-A renames `foo→bar`, ws-B deletes `foo`.
-//!    Same FileId → [`RenameConflict::RenameDelete`].
+//!    Same `FileId` → [`RenameConflict::RenameDelete`].
 //!
 //! 4. **Rename + edit (destination)**: ws-A renames `foo→bar`, ws-B adds a
-//!    *new* file at `bar` with a different FileId → path conflict on `bar`
+//!    *new* file at `bar` with a different `FileId` → path conflict on `bar`
 //!    (handled by normal path-based resolve, not here).
 //!
 //! # Algorithm
 //!
 //! 1. Build a `FileId → Vec<(WorkspaceId, Path, PathEntry)>` index from all
 //!    partition entries.
-//! 2. For each FileId that appears under multiple paths:
+//! 2. For each `FileId` that appears under multiple paths:
 //!    - Classify the scenario (rename+edit, divergent rename, etc.)
 //!    - Rewrite the partition result accordingly.
 //! 3. Return the rewritten partition result + any rename-specific conflicts.
 //!
 //! # Determinism
 //!
-//! - FileId index is built from a BTreeMap (sorted by path).
+//! - `FileId` index is built from a `BTreeMap` (sorted by path).
 //! - Rename conflicts include sorted workspace IDs for commutativity.
 //! - All outputs are deterministic given the same inputs.
 
@@ -57,7 +57,7 @@ pub enum RenameConflict {
         file_id: FileId,
         /// The original path (in the epoch base).
         original_path: PathBuf,
-        /// All (workspace, destination_path) pairs, sorted by workspace ID.
+        /// All (workspace, `destination_path`) pairs, sorted by workspace ID.
         destinations: Vec<(WorkspaceId, PathBuf)>,
     },
 
@@ -129,7 +129,7 @@ pub struct RenameAwareResult {
 impl RenameAwareResult {
     /// Returns `true` if no rename conflicts were detected.
     #[must_use]
-    pub fn has_rename_conflicts(&self) -> bool {
+    pub const fn has_rename_conflicts(&self) -> bool {
         !self.rename_conflicts.is_empty()
     }
 }
@@ -138,7 +138,7 @@ impl RenameAwareResult {
 // Internal: FileId tracking entry
 // ---------------------------------------------------------------------------
 
-/// A tracked occurrence of a FileId in the partition.
+/// A tracked occurrence of a `FileId` in the partition.
 #[derive(Clone, Debug)]
 struct FileIdOccurrence {
     workspace_id: WorkspaceId,
@@ -153,18 +153,20 @@ struct FileIdOccurrence {
 /// Analyze a partition result for rename scenarios and rewrite it.
 ///
 /// This function:
-/// 1. Scans all entries (unique + shared) for FileId metadata.
-/// 2. Groups entries by FileId.
-/// 3. For FileIds that appear under multiple *different* paths, classifies
+/// 1. Scans all entries (unique + shared) for `FileId` metadata.
+/// 2. Groups entries by `FileId`.
+/// 3. For `FileIds` that appear under multiple *different* paths, classifies
 ///    the rename scenario and rewrites the partition.
 /// 4. Returns the rewritten partition + any rename-specific conflicts.
 ///
-/// Entries without FileId metadata are left unchanged (Phase 1 compatibility).
+/// Entries without `FileId` metadata are left unchanged (Phase 1 compatibility).
 ///
 /// # Determinism
 ///
 /// All internal data structures use BTreeMap/sorted Vecs. The output is
 /// deterministic given the same input partition.
+#[allow(clippy::missing_panics_doc, clippy::too_many_lines)]
+#[must_use]
 pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
     // Step 1: Build FileId → occurrences index.
     let mut file_id_index: BTreeMap<FileId, Vec<FileIdOccurrence>> = BTreeMap::new();
@@ -350,13 +352,12 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
                     continue; // Already at destination.
                 }
                 for occ in occs {
+                    consumed_paths.insert((occ.path.clone(), occ.workspace_id.clone()));
                     if occ.entry.is_deletion() {
                         // Deletions at the old path are expected side effects
                         // of a rename — consume them (don't propagate).
-                        consumed_paths.insert((occ.path.clone(), occ.workspace_id.clone()));
                     } else {
                         // Non-deletion at old path → reroute to dest path.
-                        consumed_paths.insert((occ.path.clone(), occ.workspace_id.clone()));
                         rerouted_entries
                             .entry(dest_path.clone())
                             .or_default()
@@ -413,7 +414,7 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
 
     // Finalize: convert shared BTreeMap to sorted Vec, and ensure internal
     // entry order is by workspace ID.
-    let mut final_shared: Vec<(PathBuf, Vec<PathEntry>)> = new_shared
+    let final_shared: Vec<(PathBuf, Vec<PathEntry>)> = new_shared
         .into_iter()
         .map(|(path, mut entries)| {
             entries.sort_by(|a, b| a.workspace_id.as_str().cmp(b.workspace_id.as_str()));
@@ -437,12 +438,12 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
     // Sort rename conflicts for determinism.
     rename_conflicts.sort_by(|a, b| {
         let a_fid = match a {
-            RenameConflict::DivergentRename { file_id, .. } => *file_id,
-            RenameConflict::RenameDelete { file_id, .. } => *file_id,
+            RenameConflict::DivergentRename { file_id, .. }
+            | RenameConflict::RenameDelete { file_id, .. } => *file_id,
         };
         let b_fid = match b {
-            RenameConflict::DivergentRename { file_id, .. } => *file_id,
-            RenameConflict::RenameDelete { file_id, .. } => *file_id,
+            RenameConflict::DivergentRename { file_id, .. }
+            | RenameConflict::RenameDelete { file_id, .. } => *file_id,
         };
         a_fid.cmp(&b_fid)
     });
@@ -750,13 +751,11 @@ mod tests {
         let result = apply_rename_awareness(partition);
         assert!(!result.has_rename_conflicts());
         // unrelated.rs should still be unique.
-        assert!(
-            result
-                .partition
-                .unique
-                .iter()
-                .any(|(p, _)| p == &PathBuf::from("unrelated.rs"))
-        );
+        assert!(result
+            .partition
+            .unique
+            .iter()
+            .any(|(p, _)| p == &PathBuf::from("unrelated.rs")));
         // bar.rs should be shared (ws-a + ws-b rerouted).
         assert_eq!(result.partition.shared.len(), 1);
         assert_eq!(result.partition.shared[0].0, PathBuf::from("bar.rs"));

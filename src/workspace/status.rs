@@ -5,7 +5,7 @@ use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceMode;
 
-use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
+use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
 pub struct WorkspaceStatus {
@@ -91,13 +91,18 @@ pub fn status(format: OutputFormat) -> Result<()> {
 
     match format {
         OutputFormat::Text => {
-            print_status_text(default_ws_name, is_stale, &changes, &workspace_entries);
+            print_status_text(
+                default_ws_name,
+                is_stale,
+                changes.as_ref(),
+                &workspace_entries,
+            );
         }
         OutputFormat::Pretty => {
             print_status_pretty(
                 default_ws_name,
                 is_stale,
-                &changes,
+                changes.as_ref(),
                 &workspace_entries,
                 format.should_use_color(),
             );
@@ -114,7 +119,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 Ok(output) => println!("{output}"),
                 Err(e) => {
                     eprintln!("Warning: Failed to serialize status to JSON: {e}");
-                    print_status_text(default_ws_name, is_stale, &None, &[]);
+                    print_status_text(default_ws_name, is_stale, None, &[]);
                 }
             }
         }
@@ -127,7 +132,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
 fn print_status_text(
     current_ws: &str,
     is_stale: bool,
-    changes: &Option<StatusChanges>,
+    changes: Option<&StatusChanges>,
     workspaces: &[WorkspaceEntry],
 ) {
     // Current workspace and stale warning
@@ -210,7 +215,7 @@ fn print_status_text(
 fn print_status_pretty(
     current_ws: &str,
     is_stale: bool,
-    changes: &Option<StatusChanges>,
+    changes: Option<&StatusChanges>,
     workspaces: &[WorkspaceEntry],
     use_color: bool,
 ) {

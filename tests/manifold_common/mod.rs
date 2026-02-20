@@ -1,4 +1,4 @@
-//! Manifold v2 test infrastructure — git-native, no jj.
+//! Manifold v2 test infrastructure — fully git-native.
 //!
 //! Provides [`TestRepo`], a self-contained Manifold repository in a temporary
 //! directory for integration tests. Each `TestRepo` gets a unique `/tmp` dir,
@@ -6,7 +6,7 @@
 //!
 //! # Design principles
 //!
-//! - **No jj dependency**: Uses `git worktree` directly, matching Manifold v2.
+//! - **Git-native**: Uses `git worktree` directly, matching Manifold v2.
 //! - **Parallel-safe**: Each `TestRepo` lives in its own `TempDir`.
 //! - **Drop-safe**: Temp dirs are deleted when `TestRepo` goes out of scope.
 //! - **Ergonomic**: Helpers like `add_file`, `modify_file`, `delete_file` operate
@@ -36,7 +36,7 @@ use tempfile::TempDir;
 /// A self-contained Manifold v2 repository in a temporary directory.
 ///
 /// Creates a git-native Manifold repo (bare root + `ws/default/` worktree)
-/// with no jj dependency. Each instance gets a unique temp dir.
+/// with no legacy VCS dependency. Each instance gets a unique temp dir.
 ///
 /// Implements `Drop` to clean up the temp dir.
 pub struct TestRepo {
@@ -368,16 +368,14 @@ impl TestRepo {
                 continue;
             }
 
-            if let Some(path) = wt_path {
-                if let Ok(rel) = path.strip_prefix(&ws_dir) {
+            if let Some(path) = wt_path
+                && let Ok(rel) = path.strip_prefix(&ws_dir) {
                     let components: Vec<_> = rel.components().collect();
-                    if components.len() == 1 {
-                        if let Some(name) = components[0].as_os_str().to_str() {
+                    if components.len() == 1
+                        && let Some(name) = components[0].as_os_str().to_str() {
                             names.push(name.to_owned());
                         }
-                    }
                 }
-            }
         }
 
         names.sort();
@@ -433,9 +431,7 @@ impl TestRepo {
         let file_path = ws_path.join(rel_path);
         assert!(
             file_path.exists(),
-            "file '{}' does not exist in workspace '{}' — use add_file for new files",
-            rel_path,
-            workspace
+            "file '{rel_path}' does not exist in workspace '{workspace}' — use add_file for new files"
         );
         std::fs::write(&file_path, content)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", file_path.display()));
@@ -450,9 +446,7 @@ impl TestRepo {
         let file_path = ws_path.join(rel_path);
         assert!(
             file_path.exists(),
-            "file '{}' does not exist in workspace '{}' — nothing to delete",
-            rel_path,
-            workspace
+            "file '{rel_path}' does not exist in workspace '{workspace}' — nothing to delete"
         );
         std::fs::remove_file(&file_path)
             .unwrap_or_else(|e| panic!("failed to delete {}: {e}", file_path.display()));

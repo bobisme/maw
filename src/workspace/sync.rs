@@ -1,13 +1,38 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
 use crate::refs as manifold_refs;
 
-use super::{get_backend, repo_root};
+use super::{get_backend, repo_root, DEFAULT_WORKSPACE};
+
+fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
+    let ws_root = root.join("ws");
+    let Ok(relative) = cwd.strip_prefix(&ws_root) else {
+        return DEFAULT_WORKSPACE.to_string();
+    };
+
+    let Some(component) = relative.components().next() else {
+        return DEFAULT_WORKSPACE.to_string();
+    };
+
+    let std::path::Component::Normal(name) = component else {
+        return DEFAULT_WORKSPACE.to_string();
+    };
+
+    let Some(name) = name.to_str() else {
+        return DEFAULT_WORKSPACE.to_string();
+    };
+
+    if WorkspaceId::new(name).is_ok() {
+        name.to_owned()
+    } else {
+        DEFAULT_WORKSPACE.to_string()
+    }
+}
 
 pub fn sync(all: bool) -> Result<()> {
     if all {
@@ -26,29 +51,28 @@ pub fn sync(all: bool) -> Result<()> {
         return Ok(());
     };
 
-    // Check the default workspace
-    let default_id = WorkspaceId::new("default").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
+    let workspace_name = workspace_name_from_cwd(&root, &cwd);
+    let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    if !backend.exists(&default_id) {
-        println!("No default workspace found.");
+    if !backend.exists(&ws_id) {
+        println!("Workspace '{workspace_name}' not found.");
         return Ok(());
     }
 
-    let ws_status = backend
-        .status(&default_id)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if !ws_status.is_stale {
-        println!("Workspace is up to date.");
+        println!("Workspace '{workspace_name}' is up to date.");
         return Ok(());
     }
 
-    println!("Default workspace is stale (behind current epoch), syncing...");
+    println!("Workspace '{workspace_name}' is stale (behind current epoch), syncing...");
     println!();
 
     // In the git worktree model, "syncing" means updating the worktree's
-    // HEAD to point to the current epoch. This is done via git reset.
-    sync_worktree_to_epoch(&root, "default", current_epoch.as_str())?;
+    // HEAD to point to the current epoch via detached checkout.
+    sync_worktree_to_epoch(&root, &workspace_name, current_epoch.as_str())?;
 
     println!();
     println!("Workspace synced successfully.");
@@ -58,7 +82,7 @@ pub fn sync(all: bool) -> Result<()> {
 
 /// Sync a single worktree to the given epoch commit.
 ///
-/// Uses `git reset --hard <epoch>` inside the worktree to update it.
+/// Uses `git checkout --detach <epoch>` inside the worktree to update it.
 /// This is safe because workspace changes are captured by the merge engine
 /// via snapshot before any merge, so uncommitted changes are not lost
 /// during the normal workflow. However, this function is only called
@@ -80,7 +104,7 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
             "Failed to sync workspace '{ws_name}': {}\n  \
-             Manual fix: cd {} && git checkout --detach {epoch_oid}",
+             Manual fix: git -C {} checkout --detach {epoch_oid}",
             stderr.trim(),
             ws_path.display()
         );
@@ -168,9 +192,8 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     let root = repo_root()?;
     let backend = get_backend()?;
 
-    let ws_id = match WorkspaceId::new(name) {
-        Ok(id) => id,
-        Err(_) => return Ok(()), // Invalid name, skip
+    let Ok(ws_id) = WorkspaceId::new(name) else {
+        return Ok(()); // Invalid name, skip
     };
 
     if !backend.exists(&ws_id) {
@@ -205,6 +228,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
 /// In the git worktree model, each workspace's HEAD is at the epoch it
 /// was created from. If the epoch has advanced, the workspace is stale.
 /// Syncing updates the HEAD to the current epoch before merging.
+#[allow(dead_code)]
 pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result<()> {
     let backend = get_backend()?;
 
@@ -219,9 +243,8 @@ pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Re
     let mut synced_count = 0;
 
     for ws_name in workspaces {
-        let ws_id = match WorkspaceId::new(ws_name) {
-            Ok(id) => id,
-            Err(_) => continue,
+        let Ok(ws_id) = WorkspaceId::new(ws_name) else {
+            continue;
         };
 
         if !backend.exists(&ws_id) {
@@ -247,10 +270,29 @@ pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Re
     Ok(())
 }
 
-// Legacy functions kept as no-ops for backward compatibility during transition
+#[cfg(test)]
+mod tests {
+    use super::workspace_name_from_cwd;
+    use std::path::Path;
 
-/// Resolve divergent working copy — not applicable in git worktree model.
-/// Git worktrees don't have the divergent commit concept that jj has.
-pub fn resolve_divergent_working_copy(_workspace_dir: &Path) -> Result<()> {
-    Ok(())
+    #[test]
+    fn detects_workspace_name_from_workspace_path() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/ws/agent-1/src");
+        assert_eq!(workspace_name_from_cwd(root, cwd), "agent-1");
+    }
+
+    #[test]
+    fn falls_back_to_default_outside_workspace_tree() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/docs");
+        assert_eq!(workspace_name_from_cwd(root, cwd), "default");
+    }
+
+    #[test]
+    fn falls_back_to_default_for_invalid_workspace_segment() {
+        let root = Path::new("/repo");
+        let cwd = Path::new("/repo/ws/not_valid");
+        assert_eq!(workspace_name_from_cwd(root, cwd), "default");
+    }
 }

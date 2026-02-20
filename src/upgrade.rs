@@ -4,10 +4,6 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::init::{
-    clean_root_source_files, ensure_workspaces_gitignored, fix_git_head, set_conflict_marker_style,
-};
-
 /// Upgrade a v1 repo (.workspaces/) to v2 bare model (ws/).
 ///
 /// Migrates workspace layout, sets git bare mode, moves default workspace
@@ -20,7 +16,7 @@ pub fn run() -> Result<()> {
     // Step 1: Check if already v2
     if is_already_v2() {
         // Still apply config upgrades for existing v2 repos
-        set_conflict_marker_style()?;
+        set_conflict_marker_style();
         println!();
         println!("Already v2 (bare repo model). Applied config updates.");
         return Ok(());
@@ -46,7 +42,7 @@ pub fn run() -> Result<()> {
     fix_git_head()?;
 
     // Step 6c: Set conflict-marker-style = snapshot (agent-safe markers)
-    set_conflict_marker_style()?;
+    set_conflict_marker_style();
 
     // Step 7: Clean root source files
     clean_root_source_files()?;
@@ -67,7 +63,7 @@ pub fn run() -> Result<()> {
     println!("  Default workspace: {}/", default_path.display());
     println!();
     println!("Verify:");
-    println!("  jj workspace list          # should show default at ws/default/");
+    println!("  maw ws list                # should include default workspace");
     println!("  git config core.bare       # should be true");
     println!("  ls ws/                     # should have default/");
     println!("  ls .workspaces/ 2>/dev/null # should not exist");
@@ -370,5 +366,97 @@ fn update_gitignore() -> Result<()> {
         ensure_workspaces_gitignored()?;
     }
 
+    Ok(())
+}
+
+fn ensure_workspaces_gitignored() -> Result<()> {
+    let path = Path::new(".gitignore");
+    let mut content = if path.exists() {
+        fs::read_to_string(path).context("Failed to read .gitignore")?
+    } else {
+        String::new()
+    };
+
+    let has_ws = content.lines().any(|line| {
+        matches!(line.trim(), "ws" | "ws/" | "/ws" | "/ws/")
+    });
+
+    if has_ws {
+        println!("[OK] .gitignore already excludes ws/");
+    } else {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str("ws/\n");
+        fs::write(path, content).context("Failed to write .gitignore")?;
+        println!("[OK] Added ws/ to .gitignore");
+    }
+
+    Ok(())
+}
+
+fn fix_git_head() -> Result<()> {
+    let head = Command::new("git").args(["symbolic-ref", "HEAD"]).output();
+    if let Ok(out) = &head
+        && out.status.success()
+    {
+        println!("[OK] git HEAD already points to branch ref");
+        return Ok(());
+    }
+
+    let branch = crate::workspace::MawConfig::load(Path::new("."))
+        .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+    let target = format!("refs/heads/{branch}");
+
+    let set = Command::new("git")
+        .args(["symbolic-ref", "HEAD", &target])
+        .output()
+        .context("Failed to set git HEAD symbolic ref")?;
+
+    if !set.status.success() {
+        let stderr = String::from_utf8_lossy(&set.stderr);
+        bail!(
+            "Failed to set git HEAD to {target}: {}\n  Try: git symbolic-ref HEAD {target}",
+            stderr.trim()
+        );
+    }
+
+    println!("[OK] Set git HEAD -> {target}");
+    Ok(())
+}
+
+fn set_conflict_marker_style() {
+    println!("[OK] Skipping jj conflict-marker-style (not required in Manifold mode)");
+}
+
+fn clean_root_source_files() -> Result<()> {
+    let list = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "HEAD"])
+        .output()
+        .context("Failed to list tracked files at HEAD")?;
+
+    if !list.status.success() {
+        let stderr = String::from_utf8_lossy(&list.stderr);
+        bail!(
+            "Failed to list tracked files: {}\n  Try: git ls-tree -r --name-only HEAD",
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    let mut removed = 0usize;
+
+    for rel in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        if rel.starts_with("ws/") || rel.starts_with(".manifold/") || rel == ".gitignore" {
+            continue;
+        }
+
+        let path = Path::new(rel);
+        if path.is_file() && fs::remove_file(path).is_ok() {
+            removed += 1;
+        }
+    }
+
+    println!("[OK] Cleaned {removed} tracked file(s) from repo root");
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Plain recursive-copy workspace backend (universal fallback).
 //!
 //! Creates workspaces by extracting the epoch's git tree into a fresh
-//! directory using `git archive | tar -x`. No CoW, no overlayfs — works on
+//! directory using `git archive | tar -x`. No `CoW`, no overlayfs — works on
 //! any filesystem and any platform.
 //!
 //! # Directory layout
@@ -131,7 +131,8 @@ pub struct CopyBackend {
 
 impl CopyBackend {
     /// Create a new `CopyBackend` rooted at `root`.
-    pub fn new(root: PathBuf) -> Self {
+    #[must_use] 
+    pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
@@ -143,7 +144,7 @@ impl CopyBackend {
         self.root.join("ws")
     }
 
-    fn read_epoch_file(&self, ws_path: &Path, name: &str) -> Result<EpochId, CopyBackendError> {
+    fn read_epoch_file(ws_path: &Path, name: &str) -> Result<EpochId, CopyBackendError> {
         let epoch_file = ws_path.join(EPOCH_FILE);
         if !epoch_file.exists() {
             return Err(CopyBackendError::MissingEpochFile {
@@ -158,7 +159,7 @@ impl CopyBackend {
         })
     }
 
-    fn write_epoch_file(&self, ws_path: &Path, epoch: &EpochId) -> Result<(), CopyBackendError> {
+    fn write_epoch_file(ws_path: &Path, epoch: &EpochId) -> Result<(), CopyBackendError> {
         let epoch_file = ws_path.join(EPOCH_FILE);
         std::fs::write(&epoch_file, format!("{}\n", epoch.as_str()))?;
         Ok(())
@@ -227,8 +228,8 @@ impl WorkspaceBackend for CopyBackend {
 
         // Idempotency: workspace with correct epoch already exists.
         if ws_path.exists() {
-            if let Ok(existing_epoch) = self.read_epoch_file(&ws_path, name.as_str()) {
-                if existing_epoch == *epoch {
+            if let Ok(existing_epoch) = Self::read_epoch_file(&ws_path, name.as_str())
+                && existing_epoch == *epoch {
                     return Ok(WorkspaceInfo {
                         id: name.clone(),
                         path: ws_path,
@@ -237,7 +238,6 @@ impl WorkspaceBackend for CopyBackend {
                         mode: WorkspaceMode::default(),
                     });
                 }
-            }
             // Partial or mismatched workspace — remove and recreate.
             std::fs::remove_dir_all(&ws_path)?;
         }
@@ -248,7 +248,7 @@ impl WorkspaceBackend for CopyBackend {
         self.extract_epoch(epoch, &ws_path)?;
 
         // Write the epoch marker.
-        self.write_epoch_file(&ws_path, epoch)?;
+        Self::write_epoch_file(&ws_path, epoch)?;
 
         Ok(WorkspaceInfo {
             id: name.clone(),
@@ -282,13 +282,11 @@ impl WorkspaceBackend for CopyBackend {
                 continue;
             }
             let name_str = entry.file_name().to_string_lossy().into_owned();
-            let ws_id = match WorkspaceId::new(&name_str) {
-                Ok(id) => id,
-                Err(_) => continue,
+            let Ok(ws_id) = WorkspaceId::new(&name_str) else {
+                continue;
             };
-            let epoch = match self.read_epoch_file(&path, &name_str) {
-                Ok(e) => e,
-                Err(_) => continue, // skip corrupted entries
+            let Ok(epoch) = Self::read_epoch_file(&path, &name_str) else {
+                continue; // skip corrupted entries
             };
             workspaces.push(WorkspaceInfo {
                 id: ws_id,
@@ -309,7 +307,7 @@ impl WorkspaceBackend for CopyBackend {
             });
         }
 
-        let base_epoch = self.read_epoch_file(&ws_path, name.as_str())?;
+        let base_epoch = Self::read_epoch_file(&ws_path, name.as_str())?;
 
         // Use `git diff --name-only` to find modified/added/deleted files.
         let output = Command::new("git")
@@ -348,13 +346,13 @@ impl WorkspaceBackend for CopyBackend {
             });
         }
 
-        let base_epoch = self.read_epoch_file(&ws_path, name.as_str())?;
+        let base_epoch = Self::read_epoch_file(&ws_path, name.as_str())?;
 
         // Walk the workspace and compare against the base epoch tree.
         let tracked = self.tracked_files_at_epoch(&base_epoch);
-        let workspace_files = self.walk_workspace(&ws_path);
+        let workspace_files = Self::walk_workspace(&ws_path);
 
-        let excluded: HashSet<&str> = [EPOCH_FILE].iter().copied().collect();
+        let is_excluded = |name: &str| name == EPOCH_FILE;
 
         let mut added = Vec::new();
         let mut modified = Vec::new();
@@ -364,7 +362,7 @@ impl WorkspaceBackend for CopyBackend {
         for rel_path in &tracked {
             let rel = std::path::Path::new(rel_path);
             let name_str = rel_path.as_str();
-            if excluded.contains(name_str) {
+            if is_excluded(name_str) {
                 continue;
             }
             let abs = ws_path.join(rel);
@@ -376,11 +374,10 @@ impl WorkspaceBackend for CopyBackend {
         }
 
         // Check for untracked (added) files.
-        let tracked_set: HashSet<&str> = tracked.iter().map(|s| s.as_str()).collect();
+        let tracked_set: HashSet<&str> = tracked.iter().map(std::string::String::as_str).collect();
         for ws_rel in &workspace_files {
             let ws_rel_str = ws_rel.to_string_lossy();
-            if excluded.contains(ws_rel_str.as_ref()) || tracked_set.contains(ws_rel_str.as_ref())
-            {
+            if is_excluded(ws_rel_str.as_ref()) || tracked_set.contains(ws_rel_str.as_ref()) {
                 continue;
             }
             added.push(ws_rel.clone());
@@ -408,12 +405,11 @@ impl CopyBackend {
             .stderr(Stdio::null())
             .output();
 
-        if let Ok(out) = output {
-            if out.status.success() {
+        if let Ok(out) = output
+            && out.status.success() {
                 let current = String::from_utf8_lossy(&out.stdout).trim().to_owned();
                 return current != base_epoch.as_str();
             }
-        }
         false
     }
 
@@ -435,13 +431,13 @@ impl CopyBackend {
     }
 
     /// Walk the workspace directory, returning paths relative to `ws_path`.
-    fn walk_workspace(&self, ws_path: &Path) -> Vec<PathBuf> {
+    fn walk_workspace(ws_path: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        self.walk_dir(ws_path, ws_path, &mut files);
+        Self::walk_dir(ws_path, ws_path, &mut files);
         files
     }
 
-    fn walk_dir(&self, base: &Path, current: &Path, files: &mut Vec<PathBuf>) {
+    fn walk_dir(base: &Path, current: &Path, files: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(current) else {
             return;
         };
@@ -449,11 +445,9 @@ impl CopyBackend {
             let path = entry.path();
             if let Ok(meta) = entry.metadata() {
                 if meta.is_dir() {
-                    self.walk_dir(base, &path, files);
-                } else {
-                    if let Ok(rel) = path.strip_prefix(base) {
-                        files.push(rel.to_path_buf());
-                    }
+                    Self::walk_dir(base, &path, files);
+                } else if let Ok(rel) = path.strip_prefix(base) {
+                    files.push(rel.to_path_buf());
                 }
             }
         }

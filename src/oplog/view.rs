@@ -28,6 +28,8 @@
 //!   → return MaterializedView { epoch, patch_set, metadata, op_count }
 //! ```
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -36,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::patch::PatchSet;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
-use crate::oplog::read::{OpLogReadError, walk_chain};
+use crate::oplog::read::{walk_chain, OpLogReadError};
 use crate::oplog::types::{OpPayload, Operation};
 
 // ---------------------------------------------------------------------------
@@ -80,7 +82,7 @@ pub struct MaterializedView {
 impl MaterializedView {
     /// Create a new empty view for a workspace.
     #[must_use]
-    pub fn empty(workspace_id: WorkspaceId) -> Self {
+    pub const fn empty(workspace_id: WorkspaceId) -> Self {
         Self {
             workspace_id,
             epoch: None,
@@ -95,14 +97,14 @@ impl MaterializedView {
 
     /// Return `true` if the workspace has been destroyed.
     #[must_use]
-    pub fn destroyed(&self) -> bool {
+    pub const fn destroyed(&self) -> bool {
         self.is_destroyed
     }
 
     /// Return `true` if the workspace has a non-empty patch set.
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.patch_set.as_ref().map_or(false, |ps| !ps.is_empty())
+        self.patch_set.as_ref().is_some_and(|ps| !ps.is_empty())
     }
 }
 
@@ -240,6 +242,7 @@ where
 ///
 /// Returns `ViewError::OpLog` if the op log cannot be read, or
 /// `ViewError::PatchSetRead` if a patch set blob cannot be fetched.
+#[allow(dead_code)]
 pub fn materialize<F>(
     root: &Path,
     workspace: &WorkspaceId,
@@ -299,6 +302,7 @@ where
 ///
 /// Returns `ViewError::PatchSetRead` if the blob cannot be read or
 /// deserialized.
+#[allow(dead_code)]
 pub fn read_patch_set_blob(root: &Path, oid: &GitOid) -> Result<PatchSet, ViewError> {
     let output = std::process::Command::new("git")
         .args(["cat-file", "-p", oid.as_str()])

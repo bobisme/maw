@@ -22,6 +22,8 @@
 //! - A persisted `merge-state.json` in `Prepare` phase with all OIDs frozen.
 //! - A [`FrozenInputs`] struct for downstream phases.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -137,7 +139,7 @@ fn read_epoch_ref(repo_root: &Path) -> Result<EpochId, PrepareError> {
 ///
 /// Uses `git rev-parse HEAD` in the workspace directory.
 fn read_workspace_head(
-    repo_root: &Path,
+    _repo_root: &Path,
     workspace: &WorkspaceId,
     workspace_dir: &Path,
 ) -> Result<GitOid, PrepareError> {
@@ -303,8 +305,7 @@ pub fn run_prepare_phase_with_epoch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merge_state::{MergePhase, RecoveryOutcome, recover_from_merge_state};
-    use std::path::PathBuf;
+    use crate::merge_state::{recover_from_merge_state, MergePhase, RecoveryOutcome};
 
     fn test_epoch() -> EpochId {
         EpochId::new(&"a".repeat(40)).unwrap()

@@ -37,6 +37,7 @@ pub const GITIGNORE_PATTERNS: &[&str] = &[
 /// - Existing directories are left alone.
 /// - `config.toml` is created with defaults if missing.
 /// - `.gitignore` is updated with necessary patterns if missing.
+#[allow(clippy::missing_errors_doc)]
 pub fn init_manifold_dir(root: &Path) -> io::Result<()> {
     let manifold_path = root.join(MANIFOLD_DIR);
 
@@ -73,7 +74,7 @@ fn init_config_if_missing(path: &Path) -> io::Result<()> {
             file,
             "# For full options see: https://github.com/mariozechner/manifold"
         )?;
-        writeln!(file, "")?;
+        writeln!(file)?;
         writeln!(file, "[repo]")?;
         writeln!(file, "branch = \"main\"")?;
     }
@@ -88,8 +89,7 @@ fn update_gitignore(root: &Path) -> io::Result<()> {
         String::new()
     };
 
-    let existing_patterns: std::collections::HashSet<_> =
-        content.lines().map(|l| l.trim()).collect();
+    let existing_patterns: std::collections::HashSet<_> = content.lines().map(str::trim).collect();
 
     let mut patterns_to_add = Vec::new();
     for p in GITIGNORE_PATTERNS {

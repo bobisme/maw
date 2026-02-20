@@ -212,6 +212,12 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
 pub fn pull_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<PullSummary> {
     let mut summary = PullSummary::default();
 
+    // Always start from a clean staging area so stale refs from an interrupted
+    // previous pull cannot be mistaken for freshly-fetched remote state.
+    if !dry_run {
+        cleanup_staging(root);
+    }
+
     // Phase 1: Fetch remote manifold refs into staging area.
     fetch_into_staging(root, remote, dry_run)?;
 
@@ -704,32 +710,16 @@ fn cleanup_staging(root: &Path) {
 
 /// Validate a workspace name for security.
 ///
-/// Rejects names that:
-/// - Are empty.
-/// - Contain path separators (`/`, `\`).
-/// - Contain null bytes.
-/// - Start with `.` (hidden / special).
-/// - Contain `..` (path traversal).
+/// Accepts only names that satisfy `WorkspaceId` validation.
+/// This keeps transport-layer refs aligned with workspace naming rules used
+/// across the rest of the system.
 ///
 /// # Errors
 /// Returns a human-readable reason string if validation fails.
 pub fn validate_workspace_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("workspace name is empty".to_string());
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err(format!("workspace name contains path separator: {name:?}"));
-    }
-    if name.contains('\0') {
-        return Err("workspace name contains null byte".to_string());
-    }
-    if name.starts_with('.') {
-        return Err(format!("workspace name starts with '.': {name:?}"));
-    }
-    if name.contains("..") {
-        return Err(format!("workspace name contains '..': {name:?}"));
-    }
-    Ok(())
+    WorkspaceId::new(name)
+        .map(|_| ())
+        .map_err(|e| format!("invalid workspace name: {e}"))
 }
 
 /// Validate a remote op log blob before applying it locally.
@@ -940,7 +930,7 @@ fn chrono_now_or_fallback() -> String {
 /// Convert days since Unix epoch to (year, month, day).
 ///
 /// Simplified Gregorian calendar calculation.
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Offset from 1970-01-01 to 0001-03-01 (the reference point for this algorithm).
     // We use the algorithm from https://www.researchgate.net/publication/316558298
     // (simplified for our purposes).
@@ -1089,49 +1079,44 @@ mod tests {
         assert!(validate_workspace_name("agent-1").is_ok());
         assert!(validate_workspace_name("feature-auth").is_ok());
         assert!(validate_workspace_name("default").is_ok());
-        assert!(validate_workspace_name("noble_forest").is_ok());
+        assert!(validate_workspace_name("noble-forest").is_ok());
     }
 
     #[test]
     fn validate_ws_name_empty() {
         let r = validate_workspace_name("");
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("empty"));
+        assert!(r.unwrap_err().contains("must not be empty"));
     }
 
     #[test]
     fn validate_ws_name_path_separator() {
-        let r = validate_workspace_name("a/b");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("path separator"));
+        assert!(validate_workspace_name("a/b").is_err());
     }
 
     #[test]
     fn validate_ws_name_backslash() {
-        let r = validate_workspace_name("a\\b");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("path separator"));
+        assert!(validate_workspace_name("a\\b").is_err());
     }
 
     #[test]
     fn validate_ws_name_null_byte() {
-        let r = validate_workspace_name("a\0b");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("null byte"));
+        assert!(validate_workspace_name("a\0b").is_err());
     }
 
     #[test]
     fn validate_ws_name_starts_with_dot() {
-        let r = validate_workspace_name(".hidden");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("'.'"));
+        assert!(validate_workspace_name(".hidden").is_err());
     }
 
     #[test]
     fn validate_ws_name_double_dot() {
-        let r = validate_workspace_name("a..b");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("'..'"));
+        assert!(validate_workspace_name("a..b").is_err());
+    }
+
+    #[test]
+    fn validate_ws_name_rejects_underscore() {
+        assert!(validate_workspace_name("noble_forest").is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -1340,6 +1325,40 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert!(r.contains(&"refs/manifold/head/ws-a".to_string()));
         assert!(r.contains(&"refs/manifold/head/ws-b".to_string()));
+    }
+
+    #[test]
+    fn pull_ignores_stale_staging_refs_when_remote_has_no_manifold_refs() {
+        let dir = setup_repo();
+        let root = dir.path();
+
+        let remote_dir = TempDir::new().unwrap();
+        StdCommand::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote_dir.path())
+            .output()
+            .unwrap();
+
+        StdCommand::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote_dir.path().to_str().unwrap(),
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        // Simulate stale staging refs left behind by a previous interrupted pull.
+        let stale_epoch = make_commit(root, "stale-epoch");
+        refs::write_ref(root, "refs/manifold/remote/epoch/current", &stale_epoch).unwrap();
+
+        let summary = pull_manifold_refs(root, "origin", false).unwrap();
+        assert_eq!(summary.epoch, RefMergeResult::NoRemote);
+        assert!(refs::read_ref(root, "refs/manifold/remote/epoch/current")
+            .unwrap()
+            .is_none());
     }
 
     // -----------------------------------------------------------------------

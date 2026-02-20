@@ -26,6 +26,8 @@
 //! 5. **Build** — apply resolved changes to the epoch tree, produce a new
 //!    git tree + commit.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -37,10 +39,14 @@ use glob::Pattern;
 
 use crate::backend::WorkspaceBackend;
 use crate::config::{ConfigError, ManifoldConfig, MergeConfig, MergeDriver, MergeDriverKind};
-use crate::merge::build::{BuildError, ResolvedChange, build_merge_commit};
-use crate::merge::collect::{CollectError, collect_snapshots};
-use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
-use crate::merge::resolve::{ConflictRecord, ResolveError, ResolveResult, resolve_partition};
+use crate::merge::build::{build_merge_commit, BuildError, ResolvedChange};
+use crate::merge::collect::{collect_snapshots, CollectError};
+use crate::merge::partition::{partition_by_path, PartitionResult, PathEntry};
+#[cfg(not(feature = "ast-merge"))]
+use crate::merge::resolve::resolve_partition;
+#[cfg(feature = "ast-merge")]
+use crate::merge::resolve::resolve_partition_with_ast;
+use crate::merge::resolve::{ConflictRecord, ResolveError, ResolveResult};
 use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -90,8 +96,6 @@ pub enum BuildPhaseError {
     ReadBase { path: PathBuf, detail: String },
     /// Merge driver error (invalid config, unsupported shape, or failed command).
     Driver(String),
-    /// A generic git command failure.
-    GitError(String),
 }
 
 impl fmt::Display for BuildPhaseError {
@@ -116,7 +120,6 @@ impl fmt::Display for BuildPhaseError {
                 )
             }
             Self::Driver(detail) => write!(f, "BUILD: merge driver failed: {detail}"),
-            Self::GitError(detail) => write!(f, "BUILD: git error: {detail}"),
         }
     }
 }
@@ -261,11 +264,13 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     // 3. Read base contents for shared paths
     let base_contents = read_base_contents(repo_root, epoch, &partition)?;
 
-    // 4. Resolve shared paths via hash equality / diff3
-    let resolve_result = resolve_partition(&partition, &base_contents)?;
+    // Merge settings used by resolve + deterministic drivers.
+    let merge_config = MergeConfig::default();
+
+    // 4. Resolve shared paths via hash equality / diff3 / AST merge fallback
+    let resolve_result = resolve_partition_for_build(&partition, &base_contents, &merge_config)?;
 
     // 5. Apply deterministic merge drivers
-    let merge_config = MergeConfig::default();
     let (resolved, conflicts) = apply_merge_drivers(
         repo_root,
         epoch,
@@ -311,8 +316,8 @@ fn run_pipeline<B: WorkspaceBackend>(
     // Read base (epoch) content for all shared paths
     let base_contents = read_base_contents(repo_root, &state.epoch_before, &partition)?;
 
-    // Resolve shared paths via hash equality / diff3
-    let resolve_result = resolve_partition(&partition, &base_contents)?;
+    // Resolve shared paths via hash equality / diff3 / AST merge fallback
+    let resolve_result = resolve_partition_for_build(&partition, &base_contents, merge_config)?;
 
     // Apply deterministic merge drivers
     let (resolved, conflicts) = apply_merge_drivers(
@@ -341,6 +346,25 @@ fn run_pipeline<B: WorkspaceBackend>(
         unique_count,
         shared_count,
     })
+}
+
+fn resolve_partition_for_build(
+    partition: &PartitionResult,
+    base_contents: &BTreeMap<PathBuf, Vec<u8>>,
+    merge_config: &MergeConfig,
+) -> Result<ResolveResult, BuildPhaseError> {
+    #[cfg(feature = "ast-merge")]
+    {
+        let ast_config = crate::merge::ast_merge::AstMergeConfig::from_config(&merge_config.ast);
+        resolve_partition_with_ast(partition, base_contents, &ast_config)
+            .map_err(BuildPhaseError::from)
+    }
+
+    #[cfg(not(feature = "ast-merge"))]
+    {
+        let _ = merge_config;
+        resolve_partition(partition, base_contents).map_err(BuildPhaseError::from)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -498,15 +522,15 @@ fn remove_conflict_path(conflicts: &mut Vec<ConflictRecord>, path: &Path) {
 }
 
 fn ours_change(path: &Path, base: Option<&Vec<u8>>) -> ResolvedChange {
-    match base {
-        Some(content) => ResolvedChange::Upsert {
+    base.map_or_else(
+        || ResolvedChange::Delete {
+            path: path.to_path_buf(),
+        },
+        |content| ResolvedChange::Upsert {
             path: path.to_path_buf(),
             content: content.clone(),
         },
-        None => ResolvedChange::Delete {
-            path: path.to_path_buf(),
-        },
-    }
+    )
 }
 
 fn theirs_change(path: &Path, entries: &[PathEntry]) -> Result<ResolvedChange, BuildPhaseError> {
@@ -630,8 +654,7 @@ fn run_regenerate_drivers(
     let _ = fs::remove_dir_all(&worktree_path);
 
     match (result, cleanup_result) {
-        (Err(e), _) => Err(e),
-        (Ok(_), Err(e)) => Err(e),
+        (Err(e), _) | (Ok(_), Err(e)) => Err(e),
         (Ok(changes), Ok(())) => Ok(changes),
     }
 }
@@ -780,7 +803,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::backend::{SnapshotResult, WorkspaceStatus};
-    use crate::merge_state::{RecoveryOutcome, recover_from_merge_state};
+    use crate::merge_state::{recover_from_merge_state, RecoveryOutcome};
     use crate::model::types::WorkspaceInfo;
     use std::fs;
     use std::process::Command as StdCommand;

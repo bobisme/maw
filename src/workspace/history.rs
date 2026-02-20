@@ -1,14 +1,16 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceId;
+use crate::oplog::read::{walk_chain, OpLogReadError};
+use crate::oplog::types::OpPayload;
 
-use super::{get_backend, validate_workspace_name};
+use super::{get_backend, repo_root, validate_workspace_name};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,9 +57,8 @@ pub struct HistoryCommit {
 
 /// Show history for a workspace.
 ///
-/// Tries the manifold op log first (reads `refs/manifold/head/<name>`
-/// and walks the blob chain). Falls back to git commit history if no
-/// op log exists.
+/// Tries the manifold op log first via `oplog::read::walk_chain`.
+/// Falls back to git commit history if no op log exists.
 ///
 /// # Flags
 /// - `--json` / `OutputFormat::Json`: structured JSON envelope
@@ -79,8 +80,10 @@ pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result
 
     let ws_path = backend.workspace_path(&ws_id);
 
-    // Try op log first (reads refs/manifold/head/<name> chain)
-    match fetch_oplog_history(&ws_path, name, limit) {
+    let root = repo_root()?;
+
+    // Try op log first (reads refs/manifold/head/<name> chain via read APIs)
+    match fetch_oplog_history(&root, &ws_id, limit) {
         Ok(operations) if !operations.is_empty() => {
             print_oplog_history(name, &operations, limit, format)?;
         }
@@ -99,188 +102,86 @@ pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Op log history — direct git reads (no lib dependency)
+// Op log history
 // ---------------------------------------------------------------------------
 
-/// Walk the op log chain by reading blobs directly via git cat-file.
-///
-/// 1. Read `refs/manifold/head/<name>` to get the head blob OID.
-/// 2. cat-file blob → parse JSON → extract parent_ids → repeat.
-fn fetch_oplog_history(ws_path: &Path, name: &str, limit: usize) -> Result<Vec<OperationEntry>> {
-    let ref_name = format!("refs/manifold/head/{name}");
-
-    // Read head ref
-    let output = Command::new("git")
-        .args(["rev-parse", &ref_name])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to read op log head ref")?;
-
-    if !output.status.success() {
-        return Ok(vec![]); // No op log for this workspace
-    }
-
-    let head_oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if head_oid.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Walk the chain
-    let mut operations = Vec::new();
-    let mut queue = std::collections::VecDeque::new();
-    let mut visited = std::collections::HashSet::new();
-
-    queue.push_back(head_oid);
-
-    while let Some(oid) = queue.pop_front() {
-        if operations.len() >= limit {
-            break;
+/// Walk the op log chain via `oplog::read::walk_chain`.
+fn fetch_oplog_history(
+    root: &Path,
+    ws_id: &WorkspaceId,
+    limit: usize,
+) -> Result<Vec<OperationEntry>> {
+    let chain = match walk_chain(root, ws_id, Some(limit), None) {
+        Ok(chain) => chain,
+        Err(OpLogReadError::NoHead { .. }) => return Ok(vec![]),
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "Failed to read operation log for workspace '{}': {err}",
+                ws_id.as_str()
+            ));
         }
-        if !visited.insert(oid.clone()) {
-            continue;
-        }
-
-        // Read blob
-        let output = Command::new("git")
-            .args(["cat-file", "-p", &oid])
-            .current_dir(ws_path)
-            .output()?;
-
-        if !output.status.success() {
-            break; // Corrupt or missing blob
-        }
-
-        // Parse JSON
-        let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-            Ok(v) => v,
-            Err(_) => break, // Invalid JSON blob
-        };
-
-        // Extract fields
-        let op_type = json
-            .get("payload")
-            .and_then(|p| p.get("type"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
-
-        let timestamp = json
-            .get("timestamp")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-
-        let workspace_id = json
-            .get("workspace_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-
-        let summary = summarize_payload(&json);
-
-        operations.push(OperationEntry {
-            oid: oid.clone(),
-            op_type,
-            timestamp,
-            summary,
-            workspace_id,
-        });
-
-        // Enqueue parents
-        if let Some(parents) = json.get("parent_ids").and_then(serde_json::Value::as_array) {
-            for parent in parents {
-                if let Some(parent_oid) = parent.as_str() {
-                    if !visited.contains(parent_oid) {
-                        queue.push_back(parent_oid.to_owned());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(operations)
-}
-
-/// Summarize an operation payload from raw JSON.
-fn summarize_payload(json: &serde_json::Value) -> String {
-    let payload = match json.get("payload") {
-        Some(p) => p,
-        None => return "(no payload)".to_owned(),
     };
 
-    let op_type = payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
+    Ok(chain
+        .into_iter()
+        .map(|(oid, op)| OperationEntry {
+            oid: oid.as_str().to_owned(),
+            op_type: op_type(&op.payload).to_owned(),
+            timestamp: op.timestamp,
+            summary: summarize_payload(&op.payload),
+            workspace_id: op.workspace_id.as_str().to_owned(),
+        })
+        .collect())
+}
 
-    match op_type {
-        "create" => {
-            let epoch = payload
-                .get("epoch")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            let prefix = &epoch[..epoch.len().min(8)];
+const fn op_type(payload: &OpPayload) -> &'static str {
+    match payload {
+        OpPayload::Create { .. } => "create",
+        OpPayload::Destroy => "destroy",
+        OpPayload::Snapshot { .. } => "snapshot",
+        OpPayload::Merge { .. } => "merge",
+        OpPayload::Compensate { .. } => "compensate",
+        OpPayload::Describe { .. } => "describe",
+        OpPayload::Annotate { .. } => "annotate",
+    }
+}
+
+/// Summarize an operation payload.
+fn summarize_payload(payload: &OpPayload) -> String {
+    match payload {
+        OpPayload::Create { epoch } => {
+            let prefix = &epoch.as_str()[..epoch.as_str().len().min(8)];
             format!("workspace created (epoch {prefix})")
         }
-        "destroy" => "workspace destroyed".to_owned(),
-        "snapshot" => {
-            let oid = payload
-                .get("patch_set_oid")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            let prefix = &oid[..oid.len().min(8)];
+        OpPayload::Destroy => "workspace destroyed".to_owned(),
+        OpPayload::Snapshot { patch_set_oid } => {
+            let prefix = &patch_set_oid.as_str()[..patch_set_oid.as_str().len().min(8)];
             format!("snapshot (patch {prefix})")
         }
-        "merge" => {
-            let sources = payload
-                .get("sources")
-                .and_then(serde_json::Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let before = payload
-                .get("epoch_before")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            let after = payload
-                .get("epoch_after")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            let bp = &before[..before.len().min(8)];
-            let ap = &after[..after.len().min(8)];
-            format!("merge [{sources}] (epoch {bp} → {ap})")
+        OpPayload::Merge {
+            sources,
+            epoch_before,
+            epoch_after,
+        } => {
+            let sources = sources
+                .iter()
+                .map(WorkspaceId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let before = &epoch_before.as_str()[..epoch_before.as_str().len().min(8)];
+            let after = &epoch_after.as_str()[..epoch_after.as_str().len().min(8)];
+            format!("merge [{sources}] (epoch {before} → {after})")
         }
-        "compensate" => {
-            let reason = payload
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            format!("undo: {reason}")
-        }
-        "describe" => {
-            let message = payload
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
+        OpPayload::Compensate { reason, .. } => format!("undo: {reason}"),
+        OpPayload::Describe { message } => {
             let truncated = if message.len() > 60 {
                 format!("{}…", &message[..60])
             } else {
-                message.to_owned()
+                message.clone()
             };
             format!("describe: {truncated}")
         }
-        "annotate" => {
-            let key = payload
-                .get("key")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            format!("annotate: {key}")
-        }
-        other => format!("{other}"),
+        OpPayload::Annotate { key, .. } => format!("annotate: {key}"),
     }
 }
 
@@ -486,6 +387,19 @@ fn print_commit_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::types::{EpochId, GitOid, WorkspaceId};
+
+    fn epoch(c: char) -> EpochId {
+        EpochId::new(&c.to_string().repeat(40)).unwrap()
+    }
+
+    fn oid(c: char) -> GitOid {
+        GitOid::new(&c.to_string().repeat(40)).unwrap()
+    }
+
+    fn ws(name: &str) -> WorkspaceId {
+        WorkspaceId::new(name).unwrap()
+    }
 
     #[test]
     fn parse_history_lines_normal() {
@@ -512,67 +426,46 @@ mod tests {
 
     #[test]
     fn summarize_create_payload() {
-        let json = serde_json::json!({
-            "payload": {"type": "create", "epoch": "aabbccdd00112233445566778899aabbccddeeff"},
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
+        let summary = summarize_payload(&OpPayload::Create {
+            epoch: EpochId::new("aabbccdd00112233445566778899aabbccddeeff").unwrap(),
         });
-        let summary = summarize_payload(&json);
         assert!(summary.contains("workspace created"));
         assert!(summary.contains("aabbccdd"));
     }
 
     #[test]
     fn summarize_destroy_payload() {
-        let json = serde_json::json!({
-            "payload": {"type": "destroy"},
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
-        });
-        assert_eq!(summarize_payload(&json), "workspace destroyed");
+        assert_eq!(
+            summarize_payload(&OpPayload::Destroy),
+            "workspace destroyed"
+        );
     }
 
     #[test]
     fn summarize_describe_truncation() {
         let long_msg = "a".repeat(100);
-        let json = serde_json::json!({
-            "payload": {"type": "describe", "message": long_msg},
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
-        });
-        let summary = summarize_payload(&json);
+        let summary = summarize_payload(&OpPayload::Describe { message: long_msg });
         assert!(summary.len() < 80);
         assert!(summary.contains('…'));
     }
 
     #[test]
     fn summarize_describe_short() {
-        let json = serde_json::json!({
-            "payload": {"type": "describe", "message": "hello world"},
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
-        });
-        assert_eq!(summarize_payload(&json), "describe: hello world");
+        assert_eq!(
+            summarize_payload(&OpPayload::Describe {
+                message: "hello world".to_string()
+            }),
+            "describe: hello world"
+        );
     }
 
     #[test]
     fn summarize_merge_payload() {
-        let json = serde_json::json!({
-            "payload": {
-                "type": "merge",
-                "sources": ["agent-1", "agent-2"],
-                "epoch_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "epoch_after": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            },
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "default",
-            "parent_ids": []
+        let summary = summarize_payload(&OpPayload::Merge {
+            sources: vec![ws("agent-1"), ws("agent-2")],
+            epoch_before: epoch('a'),
+            epoch_after: epoch('b'),
         });
-        let summary = summarize_payload(&json);
         assert!(summary.contains("agent-1"));
         assert!(summary.contains("agent-2"));
         assert!(summary.contains("merge"));
@@ -580,62 +473,31 @@ mod tests {
 
     #[test]
     fn summarize_compensate_payload() {
-        let json = serde_json::json!({
-            "payload": {
-                "type": "compensate",
-                "target_op": "cccccccccccccccccccccccccccccccccccccccc",
-                "reason": "reverted broken change"
-            },
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
+        let summary = summarize_payload(&OpPayload::Compensate {
+            target_op: oid('c'),
+            reason: "reverted broken change".to_string(),
         });
-        let summary = summarize_payload(&json);
         assert!(summary.contains("undo"));
         assert!(summary.contains("reverted broken change"));
     }
 
     #[test]
     fn summarize_snapshot_payload() {
-        let json = serde_json::json!({
-            "payload": {
-                "type": "snapshot",
-                "patch_set_oid": "dddddddddddddddddddddddddddddddddddddddd"
-            },
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
+        let summary = summarize_payload(&OpPayload::Snapshot {
+            patch_set_oid: oid('d'),
         });
-        let summary = summarize_payload(&json);
         assert!(summary.contains("snapshot"));
         assert!(summary.contains("dddddddd"));
     }
 
     #[test]
     fn summarize_annotate_payload() {
-        let json = serde_json::json!({
-            "payload": {"type": "annotate", "key": "validation", "data": {}},
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
-        });
-        assert_eq!(summarize_payload(&json), "annotate: validation");
-    }
-
-    #[test]
-    fn summarize_unknown_payload() {
-        let json = serde_json::json!({
-            "payload": {"type": "future-type"},
-            "timestamp": "2026-02-19T12:00:00Z",
-            "workspace_id": "w1",
-            "parent_ids": []
-        });
-        assert_eq!(summarize_payload(&json), "future-type");
-    }
-
-    #[test]
-    fn summarize_missing_payload() {
-        let json = serde_json::json!({"timestamp": "t"});
-        assert_eq!(summarize_payload(&json), "(no payload)");
+        assert_eq!(
+            summarize_payload(&OpPayload::Annotate {
+                key: "validation".to_string(),
+                data: std::collections::BTreeMap::new(),
+            }),
+            "annotate: validation"
+        );
     }
 }

@@ -109,13 +109,11 @@ fn analyze_workspaces(
             if analysis.orphaned.contains(name) {
                 continue;
             }
-            if let Ok(ws_id) = WorkspaceId::new(name) {
-                if let Ok(snapshot) = backend.snapshot(&ws_id) {
-                    if snapshot.is_empty() {
+            if let Ok(ws_id) = WorkspaceId::new(name)
+                && let Ok(snapshot) = backend.snapshot(&ws_id)
+                    && snapshot.is_empty() {
                         analysis.empty.push(name.clone());
                     }
-                }
-            }
         }
     }
 

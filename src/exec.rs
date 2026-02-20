@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use crate::workspace;
@@ -24,10 +24,7 @@ impl std::error::Error for ExitCodeError {}
 /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
 /// needing persistent `cd`.
 ///
-/// The workspace name is validated (no path traversal). Stale
-/// workspaces are auto-synced only when running jj commands —
-/// non-jj commands skip the sync to avoid creating jj operations
-/// that cause opforks with concurrent agent workspaces.
+/// The workspace name is validated (no path traversal).
 ///
 /// Examples:
 ///   maw exec alice -- cargo test
@@ -64,43 +61,7 @@ pub fn run(args: &ExecArgs) -> Result<()> {
         );
     }
 
-    // Only auto-sync when running jj commands. Non-jj commands (cargo, br,
-    // ls, etc.) don't need jj state and calling jj to check staleness creates
-    // operations that cause opforks with concurrent agent workspaces.
-    let is_jj_command = args.cmd.first().is_some_and(|c| c == "jj");
-    if is_jj_command {
-        workspace::auto_sync_if_stale(&args.workspace, &path)?;
-    }
-
-    // Block `jj bookmark set <branch>` from non-default workspaces.
-    // Setting the shared branch bookmark from an agent workspace causes
-    // divergent bookmarks and breaks push for everyone.
-    if args.cmd.first().is_some_and(|c| c == "jj")
-        && args.workspace != "default"
-        && let Ok(root) = workspace::repo_root()
-        && let Ok(config) = workspace::MawConfig::load(&root)
-    {
-        let branch = config.branch();
-        let rest: Vec<&str> = args.cmd[1..]
-            .iter()
-            .map(std::string::String::as_str)
-            .collect();
-        // Look for "bookmark" followed by "set" followed by the branch name
-        if let Some(bm_pos) = rest.iter().position(|&a| a == "bookmark")
-            && rest[bm_pos + 1..].contains(&"set")
-            && rest.contains(&branch)
-        {
-            bail!(
-                "Blocked: `jj bookmark set {branch}` from non-default workspace '{ws}'.\n\n\
-                                 Setting the '{branch}' bookmark from an agent workspace causes divergent\n\
-                                 bookmarks and breaks push for all workspaces.\n\n\
-                                 Instead, merge your work into default first:\n\
-                                 \n  maw ws merge {ws}\n  maw push\n",
-                branch = branch,
-                ws = args.workspace,
-            );
-        }
-    }
+    workspace::auto_sync_if_stale(&args.workspace, &path)?;
 
     let status = Command::new(&args.cmd[0])
         .args(&args.cmd[1..])

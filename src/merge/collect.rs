@@ -11,14 +11,14 @@
 //! - **Isolation**: Each workspace is snapshotted independently. A failure in
 //!   one workspace returns `Err` immediately (fail-fast).
 //!
-//! # FileId and blob OID enrichment (Phase 3+)
+//! # `FileId` and blob OID enrichment (Phase 3+)
 //!
 //! When `repo_root` is provided, `collect_snapshots` enriches each
 //! [`FileChange`] with:
 //!
 //! - `file_id`: looked up from `.manifold/fileids` for Modified/Deleted files
 //!   (files that existed in the epoch). Added files receive a fresh random
-//!   [`FileId`]. If the fileids file is absent, FileIds are omitted.
+//!   [`FileId`]. If the fileids file is absent, `FileIds` are omitted.
 //! - `blob`: the git blob OID for the new content, computed via
 //!   `git hash-object -w --stdin`. Enables O(1) hash-equality checks in the
 //!   resolve step.
@@ -41,6 +41,7 @@ use super::types::{ChangeKind, FileChange, PatchSet};
 
 /// Errors that can occur during the collect step.
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum CollectError {
     /// A workspace snapshot operation failed.
     SnapshotFailed {
@@ -76,8 +77,7 @@ impl fmt::Display for CollectError {
             } => {
                 write!(
                     f,
-                    "snapshot failed for workspace '{}': {}",
-                    workspace_id, reason
+                    "snapshot failed for workspace '{workspace_id}': {reason}"
                 )
             }
             Self::ReadFailed {
@@ -99,8 +99,7 @@ impl fmt::Display for CollectError {
             } => {
                 write!(
                     f,
-                    "epoch query failed for workspace '{}': {}",
-                    workspace_id, reason
+                    "epoch query failed for workspace '{workspace_id}': {reason}"
                 )
             }
         }
@@ -130,7 +129,7 @@ impl std::error::Error for CollectError {}
 ///
 /// * `repo_root` — Path to the git repository root, used to:
 ///   - Write blobs via `git hash-object -w --stdin`.
-///   - Load the epoch FileId map from `<repo_root>/.manifold/fileids`.
+///   - Load the epoch `FileId` map from `<repo_root>/.manifold/fileids`.
 ///
 /// # Errors
 ///
@@ -248,14 +247,14 @@ fn collect_one<B: WorkspaceBackend>(
 
 /// Read the current content of a file from a workspace's working tree.
 fn read_workspace_file(
-    ws_path: &PathBuf,
-    rel_path: &PathBuf,
+    ws_path: &Path,
+    rel_path: &Path,
     ws_id: &WorkspaceId,
 ) -> Result<Vec<u8>, CollectError> {
     let full_path = ws_path.join(rel_path);
     std::fs::read(&full_path).map_err(|e| CollectError::ReadFailed {
         workspace_id: ws_id.clone(),
-        path: rel_path.clone(),
+        path: rel_path.to_path_buf(),
         reason: e.to_string(),
     })
 }
@@ -297,8 +296,8 @@ fn git_hash_object(repo_root: &Path, content: &[u8]) -> Option<GitOid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::WorkspaceBackend;
     use crate::backend::git::GitWorktreeBackend;
+    use crate::backend::WorkspaceBackend;
     use crate::model::types::{EpochId, WorkspaceId};
     use std::fs;
     use std::process::Command;
@@ -496,7 +495,7 @@ mod tests {
     /// Deletion-only workspace: PatchSet reports all deletions, none are filtered.
     #[test]
     fn collect_deletion_only_workspace() {
-        let (temp_dir, epoch) = setup_git_repo();
+        let (temp_dir, _epoch) = setup_git_repo();
         let root = temp_dir.path();
         let backend = GitWorktreeBackend::new(root.to_path_buf());
 
@@ -787,9 +786,7 @@ mod tests {
     /// Modified files look up FileId from the epoch FileIdMap when available.
     #[test]
     fn collect_modified_file_uses_file_id_from_map() {
-        use crate::model::file_id::FileIdMap;
         use crate::model::patch::FileId;
-        use std::path::Path;
 
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
@@ -797,16 +794,12 @@ mod tests {
         // Pre-populate .manifold/fileids with a known FileId for README.md.
         let known_id = FileId::new(0xdead_beef_cafe_babe_1234_5678_9abc_def0);
         let fileids_path = temp_dir.path().join(".manifold").join("fileids");
-        let mut map = FileIdMap::new();
-        map.track_new("README.md".into()).unwrap();
         // Replace the random id with our known id by rebuilding.
-        let mut map2 = FileIdMap::new();
         // Manually insert: we use a workaround since track_new is random.
         // Build the map via save+reload with a known value.
         let json = format!(r#"[{{"path":"README.md","file_id":"{}"}}]"#, known_id);
         fs::create_dir_all(fileids_path.parent().unwrap()).unwrap();
         fs::write(&fileids_path, &json).unwrap();
-        let _ = map2; // unused
 
         let ws_id = WorkspaceId::new("fileid-mod").unwrap();
         let info = backend.create(&ws_id, &epoch).unwrap();

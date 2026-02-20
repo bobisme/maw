@@ -5,10 +5,12 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::{Terminal, layout::Rect, prelude::CrosstermBackend};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::{layout::Rect, prelude::CrosstermBackend, Terminal};
 
+use super::event::{self, AppEvent};
 use super::ui;
+use crate::backend::WorkspaceBackend;
 
 /// Which panel is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +107,10 @@ pub struct PanelAreas {
 }
 
 impl App {
+    fn short_oid(oid: &str) -> String {
+        oid.chars().take(12).collect()
+    }
+
     pub fn new() -> Result<Self> {
         // Check if beads is available
         let beads_available = std::path::Path::new(".beads").exists();
@@ -139,16 +145,20 @@ impl App {
             // Draw UI
             terminal.draw(|frame| ui::draw(frame, self))?;
 
-            // Handle events with timeout for periodic refresh
-            if event::poll(Duration::from_millis(100))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        self.handle_key(key.code, key.modifiers)?;
+            // Handle one event with timeout for periodic refresh.
+            match event::next_event(Duration::from_millis(100))? {
+                AppEvent::Key(key) => {
+                    self.handle_key(key.code, key.modifiers)?;
+                }
+                AppEvent::Mouse(mouse) => {
+                    self.handle_mouse(mouse.kind, mouse.column, mouse.row);
+                }
+                AppEvent::Resize { .. } | AppEvent::Tick => {}
+                AppEvent::Paste(text) => {
+                    // Pasted text is only accepted by popup text inputs.
+                    for ch in text.chars() {
+                        self.handle_key(KeyCode::Char(ch), KeyModifiers::NONE)?;
                     }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse(mouse.kind, mouse.column, mouse.row);
-                    }
-                    _ => {}
                 }
             }
 
@@ -501,61 +511,55 @@ impl App {
     }
 
     fn fetch_workspaces(&mut self) -> Result<Vec<Workspace>> {
-        self.log_command("jj workspace list");
+        self.log_command("maw workspace backend list/status");
 
-        let output = Command::new("jj")
-            .args(["workspace", "list"])
-            .output()
-            .context("Failed to run jj workspace list")?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let backend = crate::workspace::get_backend()?;
+        let infos = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let cwd = std::env::current_dir().unwrap_or_default();
         let mut workspaces = Vec::new();
 
-        for line in stdout.lines() {
-            if let Some((name, rest)) = line.split_once(':') {
-                let name = name.trim().to_string();
-                let is_current = rest.contains('@');
-                let is_stale = rest.contains("(stale)");
-                let rest = rest.replace('@', "").replace("(stale)", "");
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-
-                let change_id = parts.first().unwrap_or(&"").to_string();
-                let description = parts
-                    .get(2..)
-                    .map(|p| p.join(" "))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-
-                workspaces.push(Workspace {
-                    name,
-                    change_id,
-                    description,
-                    is_current,
-                    is_stale,
-                });
-            }
+        for info in infos {
+            let status = backend
+                .status(&info.id)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let name = info.id.to_string();
+            let is_current = cwd.starts_with(&info.path);
+            let description = info.path.display().to_string();
+            workspaces.push(Workspace {
+                name,
+                change_id: Self::short_oid(info.epoch.as_str()),
+                description,
+                is_current,
+                is_stale: status.is_stale,
+            });
         }
+
+        workspaces.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(workspaces)
     }
 
     fn fetch_file_changes(&mut self) -> Result<Vec<FileChange>> {
-        self.log_command("jj diff --summary");
+        self.log_command("git status --short");
 
-        let output = Command::new("jj")
-            .args(["diff", "--summary"])
+        let git_cwd = crate::workspace::git_cwd()?;
+        let output = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(&git_cwd)
             .output()
-            .context("Failed to run jj diff --summary")?;
+            .context("Failed to run git status --short")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut changes = Vec::new();
 
         for line in stdout.lines() {
             let line = line.trim();
-            if line.len() >= 2 {
-                let status = line.chars().next().unwrap_or(' ');
-                let path = line[1..].trim().to_string();
+            if line.len() >= 3 {
+                let mut chars = line.chars();
+                let x = chars.next().unwrap_or(' ');
+                let y = chars.next().unwrap_or(' ');
+                let status = if x == ' ' { y } else { x };
+                let path = line[2..].trim().to_string();
                 changes.push(FileChange { status, path });
             }
         }
@@ -564,29 +568,36 @@ impl App {
     }
 
     fn fetch_commits(&mut self) -> Result<Vec<Commit>> {
-        self.log_command("jj log");
+        self.log_command("git log --oneline");
 
-        // Use a template that outputs parseable fields separated by \x00
-        let template = r#"change_id.short() ++ "\x00" ++ commit_id.short() ++ "\x00" ++ if(immutable, "I", "") ++ "\x00" ++ if(conflict, "C", "") ++ "\x00" ++ if(self.contained_in("@"), "W", "") ++ "\x00" ++ description.first_line() ++ "\n""#;
-
-        let output = Command::new("jj")
-            .args(["log", "--no-graph", "-r", "all()", "-T", template])
+        let git_cwd = crate::workspace::git_cwd()?;
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--all",
+                "--decorate=short",
+                "--pretty=format:%h%x00%H%x00%D%x00%s",
+                "-n",
+                "200",
+            ])
+            .current_dir(&git_cwd)
             .output()
-            .context("Failed to run jj log")?;
+            .context("Failed to run git log")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut commits = Vec::new();
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\x00').collect();
-            if parts.len() >= 6 {
+            if parts.len() >= 4 {
+                let decorations = parts[2];
                 commits.push(Commit {
                     change_id: parts[0].to_string(),
                     commit_id: parts[1].to_string(),
-                    is_immutable: parts[2] == "I",
-                    is_conflict: parts[3] == "C",
-                    is_working_copy: parts[4] == "W",
-                    description: parts[5].to_string(),
+                    is_immutable: decorations.contains("tag:"),
+                    is_conflict: false,
+                    is_working_copy: decorations.contains("HEAD ->"),
+                    description: parts[3].to_string(),
                 });
             }
         }

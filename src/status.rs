@@ -543,17 +543,16 @@ fn collect_status() -> Result<StatusSummary> {
     let default_ws_name = config.default_workspace();
 
     // Get non-default workspace names from backend
-    let workspace_names = match get_backend() {
-        Ok(backend) => match backend.list() {
-            Ok(infos) => infos
+    let workspace_names = get_backend()
+        .ok()
+        .and_then(|backend| backend.list().ok())
+        .map_or_else(Vec::new, |infos| {
+            infos
                 .into_iter()
                 .filter(|ws| ws.id.as_str() != default_ws_name)
                 .map(|ws| ws.id.as_str().to_string())
-                .collect(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
+                .collect()
+        });
 
     // Get changed/untracked files in the default workspace
     let default_ws_path = root.join("ws").join(default_ws_name);

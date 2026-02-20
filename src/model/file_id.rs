@@ -1,4 +1,4 @@
-//! FileId ↔ path mapping — persistent sidecar for stable file identity (§5.8).
+//! `FileId` ↔ path mapping — persistent sidecar for stable file identity (§5.8).
 //!
 //! # Overview
 //!
@@ -13,7 +13,7 @@
 //!
 //! # Operations
 //!
-//! | Operation | FileId | Path |
+//! | Operation | `FileId` | Path |
 //! |-----------|--------|------|
 //! | Create    | new (random) | new path |
 //! | Rename    | unchanged | old → new path |
@@ -23,10 +23,10 @@
 //!
 //! # Concurrent rename + edit (§5.8)
 //!
-//! Workspace A renames `foo.rs → bar.rs` (same FileId, different path key).
-//! Workspace B modifies `foo.rs` (same FileId, same path key, different blob).
+//! Workspace A renames `foo.rs → bar.rs` (same `FileId`, different path key).
+//! Workspace B modifies `foo.rs` (same `FileId`, same path key, different blob).
 //!
-//! During patch-set join, both patches carry the same FileId. The merge engine
+//! During patch-set join, both patches carry the same `FileId`. The merge engine
 //! sees:
 //! - One workspace changed the path (Rename).
 //! - The other changed the content (Modify).
@@ -64,16 +64,16 @@ use super::patch::FileId;
 /// tracked file (§5.8).
 ///
 /// Invariants maintained by all mutating methods:
-/// - Every FileId maps to exactly one path.
-/// - Every path maps to exactly one FileId.
+/// - Every `FileId` maps to exactly one path.
+/// - Every path maps to exactly one `FileId`.
 /// - The two maps are always consistent with each other.
 ///
 /// These invariants guarantee O(1) lookup in both directions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileIdMap {
-    /// Canonical index: path → FileId (serialized).
+    /// Canonical index: path → `FileId` (serialized).
     path_to_id: BTreeMap<PathBuf, FileId>,
-    /// Reverse index: FileId → path (rebuilt from path_to_id on load).
+    /// Reverse index: `FileId` → path (rebuilt from `path_to_id` on load).
     id_to_path: BTreeMap<FileId, PathBuf>,
 }
 
@@ -86,7 +86,7 @@ impl Default for FileIdMap {
 impl FileIdMap {
     /// Create an empty map.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             path_to_id: BTreeMap::new(),
             id_to_path: BTreeMap::new(),
@@ -134,13 +134,12 @@ impl FileIdMap {
             .ok_or_else(|| FileIdMapError::PathNotTracked(old_path.to_path_buf()))?;
 
         // Check destination is free.
-        if let Some(&existing_id) = self.path_to_id.get(&new_path) {
-            if existing_id != id {
+        if let Some(&existing_id) = self.path_to_id.get(&new_path)
+            && existing_id != id {
                 // Restore old mapping before returning the error.
                 self.path_to_id.insert(old_path.to_path_buf(), id);
                 return Err(FileIdMapError::PathAlreadyTracked(new_path));
             }
-        }
 
         self.id_to_path.insert(id, new_path.clone());
         self.path_to_id.insert(new_path, id);
@@ -336,13 +335,13 @@ struct FileIdRecord {
 /// Errors produced by [`FileIdMap`] operations.
 #[derive(Debug)]
 pub enum FileIdMapError {
-    /// The specified path is already tracked by a file with a different FileId.
+    /// The specified path is already tracked by a file with a different `FileId`.
     PathAlreadyTracked(PathBuf),
     /// The specified path is not tracked in the map.
     PathNotTracked(PathBuf),
     /// Two records in the persisted file share the same path.
     DuplicatePath(PathBuf),
-    /// Two records in the persisted file share the same FileId.
+    /// Two records in the persisted file share the same `FileId`.
     DuplicateFileId(FileId),
     /// I/O error reading or writing the fileids file.
     Io(io::Error),

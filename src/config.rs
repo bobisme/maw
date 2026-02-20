@@ -16,8 +16,9 @@ use serde::Deserialize;
 ///
 /// Parsed from `.manifold/config.toml`. Missing fields use sensible defaults.
 /// Missing file → all defaults (no error).
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct ManifoldConfig {
     /// Repository-level settings.
     #[serde(default)]
@@ -32,22 +33,13 @@ pub struct ManifoldConfig {
     pub merge: MergeConfig,
 }
 
-impl Default for ManifoldConfig {
-    fn default() -> Self {
-        Self {
-            repo: RepoConfig::default(),
-            workspace: WorkspaceConfig::default(),
-            merge: MergeConfig::default(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // RepoConfig
 // ---------------------------------------------------------------------------
 
 /// Repository-level settings.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     /// The main branch name (default: `"main"`).
@@ -72,7 +64,7 @@ fn default_branch() -> String {
 // ---------------------------------------------------------------------------
 
 /// Workspace backend selection.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     /// Which backend to use for workspace isolation.
@@ -96,12 +88,12 @@ impl Default for WorkspaceConfig {
     }
 }
 
-fn default_git_compat_refs() -> bool {
+const fn default_git_compat_refs() -> bool {
     true
 }
 
 /// The workspace isolation backend.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
     /// Auto-detect the best available backend.
@@ -111,7 +103,7 @@ pub enum BackendKind {
     GitWorktree,
     /// Reflink/CoW backend (Btrfs/XFS/APFS).
     Reflink,
-    /// OverlayFS backend (Linux only).
+    /// `OverlayFS` backend (Linux only).
     Overlay,
     /// Plain copy backend (universal fallback).
     Copy,
@@ -134,8 +126,9 @@ impl fmt::Display for BackendKind {
 // ---------------------------------------------------------------------------
 
 /// Merge behaviour settings.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct MergeConfig {
     /// Post-merge validation settings.
     #[serde(default)]
@@ -150,16 +143,6 @@ pub struct MergeConfig {
     pub ast: AstConfig,
 }
 
-impl Default for MergeConfig {
-    fn default() -> Self {
-        Self {
-            validation: ValidationConfig::default(),
-            // Empty means "use built-in defaults" via `effective_drivers()`.
-            drivers: Vec::new(),
-            ast: AstConfig::default(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // AstConfig — AST-aware merge settings
@@ -177,7 +160,7 @@ impl Default for MergeConfig {
 /// semantic_false_positive_budget_pct = 5
 /// semantic_min_confidence = 70
 /// ```
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AstConfig {
     /// Languages for which AST merge is enabled.
@@ -324,7 +307,7 @@ impl LanguagePreset {
     /// Returns an empty slice for `Auto` — auto-detection must be performed
     /// externally against the actual project directory.
     #[must_use]
-    pub fn commands(&self) -> &'static [&'static str] {
+    pub const fn commands(&self) -> &'static [&'static str] {
         match self {
             Self::Rust => &["cargo check", "cargo test --no-run"],
             Self::Python => &["python -m py_compile", "pytest -q --co"],
@@ -355,7 +338,7 @@ impl fmt::Display for LanguagePreset {
 /// are specified, `command` runs first, then all entries from `commands`.
 /// When neither is set, validation is skipped — unless a `preset` is
 /// configured, in which case the preset's commands are used.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationConfig {
     /// Shell command to run for post-merge validation (e.g. `"cargo test"`).
@@ -407,11 +390,10 @@ impl ValidationConfig {
     #[must_use]
     pub fn effective_commands(&self) -> Vec<&str> {
         let mut result = Vec::new();
-        if let Some(cmd) = &self.command {
-            if !cmd.is_empty() {
+        if let Some(cmd) = &self.command
+            && !cmd.is_empty() {
                 result.push(cmd.as_str());
             }
-        }
         for cmd in &self.commands {
             if !cmd.is_empty() {
                 result.push(cmd.as_str());
@@ -430,12 +412,13 @@ impl ValidationConfig {
     /// Returns `true` if validation is configured — either through explicit
     /// commands or a preset.
     #[must_use]
+    #[allow(dead_code)]
     pub fn has_any_validation(&self) -> bool {
         self.has_commands() || self.preset.is_some()
     }
 }
 
-fn default_validation_timeout() -> u32 {
+const fn default_validation_timeout() -> u32 {
     60
 }
 
@@ -444,13 +427,13 @@ fn default_validation_timeout() -> u32 {
 #[serde(rename_all = "kebab-case")]
 pub enum OnFailure {
     /// Log a warning but allow the merge.
-    #[default]
     Warn,
     /// Block the merge — do not advance the epoch.
     Block,
     /// Create a quarantine workspace with the failed merge result.
     Quarantine,
     /// Block the merge AND create a quarantine workspace.
+    #[default]
     BlockQuarantine,
 }
 
@@ -470,7 +453,7 @@ impl fmt::Display for OnFailure {
 // ---------------------------------------------------------------------------
 
 /// A custom merge driver for specific file patterns.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeDriver {
     /// Glob pattern for matching file paths (e.g. `"*.lock"`, `"schema/*.sql"`).
@@ -604,7 +587,7 @@ mod tests {
         assert_eq!(cfg.merge.validation.command, None);
         assert!(cfg.merge.validation.commands.is_empty());
         assert_eq!(cfg.merge.validation.timeout_seconds, 60);
-        assert_eq!(cfg.merge.validation.on_failure, OnFailure::Warn);
+        assert_eq!(cfg.merge.validation.on_failure, OnFailure::BlockQuarantine);
         assert!(!cfg.merge.validation.has_commands());
         assert!(cfg.merge.drivers.is_empty());
 
@@ -735,9 +718,9 @@ branch = "trunk"
 
     #[test]
     fn parse_rejects_unknown_top_level_field() {
-        let toml = r#"
+        let toml = r"
 unknown_field = true
-"#;
+";
         let err = ManifoldConfig::parse(toml).unwrap_err();
         assert!(
             err.message.contains("unknown field"),
@@ -1133,10 +1116,10 @@ semantic_min_confidence = 80
 
     #[test]
     fn parse_ast_config_empty_languages() {
-        let toml = r#"
+        let toml = r"
 [merge.ast]
 languages = []
-"#;
+";
         let cfg = ManifoldConfig::parse(toml).unwrap();
         assert!(cfg.merge.ast.languages.is_empty());
     }

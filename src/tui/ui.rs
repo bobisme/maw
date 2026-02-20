@@ -1,9 +1,9 @@
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    Frame,
 };
 
 use super::app::{App, Panel, Popup};
@@ -610,7 +610,7 @@ fn draw_confirm_destroy_popup(frame: &mut Frame, name: &str) {
             "  This will:",
             Style::default().fg(Color::DarkGray),
         )]),
-        Line::from(vec![Span::raw("  - Forget workspace from jj")]),
+        Line::from(vec![Span::raw("  - Remove git worktree registration")]),
         Line::from(vec![Span::raw(format!("  - Delete ws/{name}/"))]),
         Line::from(""),
         Line::from(vec![Span::styled(

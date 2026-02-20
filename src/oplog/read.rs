@@ -114,11 +114,10 @@ impl fmt::Display for OpLogReadError {
             Self::NoHead { workspace_id } => {
                 write!(
                     f,
-                    "no op log head for workspace '{}' — \
+                    "no op log head for workspace '{workspace_id}' — \
                      the workspace has no recorded operations yet.\n  \
                      To fix: ensure at least one operation has been appended \
-                     via `append_operation()`.",
-                    workspace_id
+                     via `append_operation()`."
                 )
             }
         }
@@ -250,11 +249,10 @@ pub fn walk_chain(
 
     while let Some(oid) = queue.pop_front() {
         // Check depth limit.
-        if let Some(max) = max_depth {
-            if result.len() >= max {
+        if let Some(max) = max_depth
+            && result.len() >= max {
                 break;
             }
-        }
 
         // Skip already-visited OIDs (prevents duplicates in DAGs).
         if !visited.insert(oid.as_str().to_owned()) {
@@ -264,7 +262,7 @@ pub fn walk_chain(
         let op = read_operation(root, &oid)?;
 
         // Check stop predicate: include this op but don't explore its parents.
-        let should_stop = stop_at.as_ref().map(|pred| pred(&op)).unwrap_or(false);
+        let should_stop = stop_at.as_ref().is_some_and(|pred| pred(&op));
 
         result.push((oid, op.clone()));
 

@@ -24,6 +24,8 @@
 //! function returns [`RefError::CasMismatch`]. Callers should retry on
 //! mismatch.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::fmt;
 use std::path::Path;
 use std::process::Command;

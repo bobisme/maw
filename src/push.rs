@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::transport::ManifoldPushArgs;
-use crate::workspace::{MawConfig, jj_cwd, repo_root};
+use crate::workspace::{MawConfig, git_cwd, repo_root};
 
 #[derive(Args)]
 pub struct PushArgs {
@@ -41,7 +41,7 @@ pub fn run(args: &PushArgs) -> Result<()> {
     let branch = config.branch();
 
     // Ensure we're operating from within the repo
-    let cwd = jj_cwd()?;
+    let cwd = git_cwd()?;
 
     // Step 0: Fetch to ensure we have latest remote state
     // (silently — we just need refs, not a full pull)
@@ -248,8 +248,8 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
         .current_dir(root)
         .output();
 
-    if let (Ok(e), Ok(b)) = (epoch, branch_pos) {
-        if e.status.success() && b.status.success() {
+    if let (Ok(e), Ok(b)) = (epoch, branch_pos)
+        && e.status.success() && b.status.success() {
             let epoch_oid = String::from_utf8_lossy(&e.stdout).trim().to_string();
             let branch_oid = String::from_utf8_lossy(&b.stdout).trim().to_string();
 
@@ -274,7 +274,6 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
                 }
             }
         }
-    }
 }
 
 /// Push unpushed git tags to origin.
@@ -432,17 +431,51 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
         .current_dir(root)
         .output();
 
-    let ahead_n: usize = ahead
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(0);
+    let ahead_n: usize = match ahead {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            match stdout.trim().parse::<usize>() {
+                Ok(n) => n,
+                Err(e) => {
+                    return SyncStatus::Unknown(format!(
+                        "failed to parse ahead count from git rev-list output {stdout:?}: {e}"
+                    ));
+                }
+            }
+        }
+        Ok(o) => {
+            return SyncStatus::Unknown(format!(
+                "git rev-list ahead check failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+        }
+        Err(e) => {
+            return SyncStatus::Unknown(format!("failed to run git rev-list ahead check: {e}"));
+        }
+    };
 
-    let behind_n: usize = behind
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(0);
+    let behind_n: usize = match behind {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            match stdout.trim().parse::<usize>() {
+                Ok(n) => n,
+                Err(e) => {
+                    return SyncStatus::Unknown(format!(
+                        "failed to parse behind count from git rev-list output {stdout:?}: {e}"
+                    ));
+                }
+            }
+        }
+        Ok(o) => {
+            return SyncStatus::Unknown(format!(
+                "git rev-list behind check failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+        }
+        Err(e) => {
+            return SyncStatus::Unknown(format!("failed to run git rev-list behind check: {e}"));
+        }
+    };
 
     match (ahead_n, behind_n) {
         (0, 0) => SyncStatus::UpToDate,

@@ -22,6 +22,8 @@
 //! structure are identical), which git's content-addressable storage makes
 //! unique.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
@@ -60,7 +62,7 @@ pub enum ResolvedChange {
 impl ResolvedChange {
     /// Return the path this change applies to.
     #[must_use]
-    pub fn path(&self) -> &PathBuf {
+    pub const fn path(&self) -> &PathBuf {
         match self {
             Self::Upsert { path, .. } | Self::Delete { path } => path,
         }
@@ -68,13 +70,13 @@ impl ResolvedChange {
 
     /// Return `true` if this is an upsert (add or modify).
     #[must_use]
-    pub fn is_upsert(&self) -> bool {
+    pub const fn is_upsert(&self) -> bool {
         matches!(self, Self::Upsert { .. })
     }
 
     /// Return `true` if this is a deletion.
     #[must_use]
-    pub fn is_delete(&self) -> bool {
+    pub const fn is_delete(&self) -> bool {
         matches!(self, Self::Delete { .. })
     }
 }
@@ -210,8 +212,7 @@ pub fn build_merge_commit(
                 // already exists in the tree; otherwise use 100644.
                 let mode = tree
                     .get(path)
-                    .map(|(m, _)| m.clone())
-                    .unwrap_or_else(|| "100644".to_owned());
+                    .map_or_else(|| "100644".to_owned(), |(m, _)| m.clone());
                 tree.insert(path.clone(), (mode, blob_oid.as_str().to_owned()));
             }
             ResolvedChange::Delete { path } => {
@@ -224,18 +225,18 @@ pub fn build_merge_commit(
     let root_tree_oid = build_tree(root, &tree)?;
 
     // Step 4: Build commit message.
-    let commit_msg = match message {
-        Some(m) => m.to_owned(),
-        None => {
+    let commit_msg = message.map_or_else(
+        || {
             let mut ws_names: Vec<&str> = workspace_ids.iter().map(WorkspaceId::as_str).collect();
-            ws_names.sort(); // deterministic order
+            ws_names.sort_unstable(); // deterministic order
             if ws_names.is_empty() {
                 "epoch: merge".to_owned()
             } else {
                 format!("epoch: merge {}", ws_names.join(" "))
             }
-        }
-    };
+        },
+        str::to_owned,
+    );
 
     // Step 5: Create the commit.
     let commit_oid = create_commit(root, epoch, &root_tree_oid, &commit_msg)?;
@@ -247,7 +248,7 @@ pub fn build_merge_commit(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// A flat representation of a git tree: path → (mode, blob_oid).
+/// A flat representation of a git tree: path → (mode, `blob_oid`).
 ///
 /// Using `BTreeMap` ensures lexicographic ordering when we iterate,
 /// which is required for deterministic tree building.

@@ -30,11 +30,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::join::{self, JoinResult, PathConflict};
+use crate::model::join::{self, PathConflict};
 use crate::model::patch::PatchSet;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -67,7 +66,7 @@ pub struct GlobalView {
     /// Total number of operations across all workspaces.
     pub total_ops: usize,
 
-    /// Cache key: sorted (workspace_id, head_oid) pairs.
+    /// Cache key: sorted (`workspace_id`, `head_oid`) pairs.
     ///
     /// Used to determine if the cached global view is still valid.
     pub cache_key: Vec<(String, String)>,
@@ -99,7 +98,10 @@ impl WorkspaceSnapshot {
         Self {
             epoch: view.epoch.clone(),
             has_changes: view.has_changes(),
-            patch_count: view.patch_set.as_ref().map_or(0, |ps| ps.len()),
+            patch_count: view
+                .patch_set
+                .as_ref()
+                .map_or(0, super::super::model::patch::PatchSet::len),
             description: view.description.clone(),
             op_count: view.op_count,
         }
@@ -109,7 +111,7 @@ impl WorkspaceSnapshot {
 impl GlobalView {
     /// Return `true` if there are no conflicts across workspace patch sets.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
     }
 
@@ -121,14 +123,20 @@ impl GlobalView {
 
     /// Return workspace IDs sorted alphabetically.
     #[must_use]
+    #[allow(dead_code)]
     pub fn workspace_ids(&self) -> Vec<&str> {
-        self.workspace_views.keys().map(|s| s.as_str()).collect()
+        self.workspace_views
+            .keys()
+            .map(std::string::String::as_str)
+            .collect()
     }
 
     /// Return the total number of patches across all workspaces.
     #[must_use]
     pub fn total_patches(&self) -> usize {
-        self.merged_patch_set.as_ref().map_or(0, |ps| ps.len())
+        self.merged_patch_set
+            .as_ref()
+            .map_or(0, super::super::model::patch::PatchSet::len)
     }
 
     /// Check if a given cache key matches this view's cache key.
@@ -166,13 +174,13 @@ impl fmt::Display for GlobalView {
 /// This is the core merge function. It:
 /// 1. Filters out destroyed workspaces
 /// 2. Computes the max epoch (lexicographic comparison)
-/// 3. Merges all patch sets using the PatchSet join operation
+/// 3. Merges all patch sets using the `PatchSet` join operation
 /// 4. Collects conflicts
 ///
 /// # CRDT properties
 ///
 /// The merge is:
-/// - **Commutative**: order of views doesn't affect the result (BTreeMap + sorted conflicts)
+/// - **Commutative**: order of views doesn't affect the result (`BTreeMap` + sorted conflicts)
 /// - **Associative**: merging (a, b, c) is the same regardless of grouping
 /// - **Idempotent**: merging the same view twice produces the same result
 ///
@@ -184,7 +192,8 @@ impl fmt::Display for GlobalView {
 /// # Arguments
 ///
 /// * `views` - workspace views to merge (including potentially destroyed ones)
-/// * `cache_key` - sorted (workspace_id, head_oid) pairs for cache validation
+/// * `cache_key` - sorted (`workspace_id`, `head_oid`) pairs for cache validation
+#[must_use]
 pub fn compute_global_view_from_views(
     views: &[MaterializedView],
     cache_key: Vec<(String, String)>,
@@ -204,16 +213,12 @@ pub fn compute_global_view_from_views(
 
         // Track max epoch (lexicographic comparison on OID string)
         if let Some(epoch) = &view.epoch {
-            max_epoch = Some(match max_epoch {
-                None => epoch.clone(),
-                Some(current) => {
-                    if epoch.as_str() > current.as_str() {
-                        epoch.clone()
-                    } else {
-                        current
-                    }
-                }
-            });
+            let should_update = max_epoch
+                .as_ref()
+                .is_none_or(|current| epoch.as_str() > current.as_str());
+            if should_update {
+                max_epoch = Some(epoch.clone());
+            }
         }
 
         // Collect workspace snapshot
@@ -229,7 +234,7 @@ pub fn compute_global_view_from_views(
     }
 
     // Merge all patch sets using pairwise join
-    let (merged_patch_set, conflicts) = merge_patch_sets(&patch_sets, &max_epoch);
+    let (merged_patch_set, conflicts) = merge_patch_sets(&patch_sets);
 
     GlobalView {
         epoch: max_epoch,
@@ -243,12 +248,11 @@ pub fn compute_global_view_from_views(
 
 /// Merge multiple patch sets into one using pairwise join.
 ///
-/// Returns (merged_patch_set, conflicts). If no patch sets, returns (None, []).
+/// Returns (`merged_patch_set`, conflicts). If no patch sets, returns (None, []).
 /// If one patch set, returns (Some(clone), []).
 /// If multiple, joins them pairwise accumulating conflicts.
 fn merge_patch_sets(
     patch_sets: &[(&WorkspaceId, &PatchSet)],
-    _epoch: &Option<EpochId>,
 ) -> (Option<PatchSet>, Vec<PathConflict>) {
     if patch_sets.is_empty() {
         return (None, vec![]);
@@ -273,7 +277,6 @@ fn merge_patch_sets(
                 // This shouldn't happen in normal operation (all workspaces in
                 // the same epoch), but we handle it gracefully by keeping the
                 // accumulated result so far.
-                continue;
             }
         }
     }
@@ -297,6 +300,7 @@ fn merge_patch_sets(
 /// # Errors
 ///
 /// Returns `ViewError` if any workspace view cannot be materialized.
+#[allow(dead_code)]
 pub fn compute_global_view<F>(
     root: &std::path::Path,
     workspace_ids: &[WorkspaceId],
@@ -315,7 +319,7 @@ where
         let head_oid = view
             .patch_set_oid
             .as_ref()
-            .map_or("empty".to_string(), |o| o.as_str().to_owned());
+            .map_or_else(|| "empty".to_string(), |o| o.as_str().to_owned());
         cache_key.push((ws_id.to_string(), head_oid));
 
         views.push(view);
@@ -336,6 +340,7 @@ mod tests {
     use crate::model::patch::{FileId, PatchValue};
     use crate::model::types::EpochId;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     // Helpers
     fn test_oid(c: char) -> GitOid {
@@ -382,22 +387,6 @@ mod tests {
             PathBuf::from(path),
             PatchValue::Add {
                 blob: test_oid(oid_char),
-                file_id: FileId::new(file_id),
-            },
-        )
-    }
-
-    fn modify_patch(
-        path: &str,
-        base_char: char,
-        new_char: char,
-        file_id: u128,
-    ) -> (PathBuf, PatchValue) {
-        (
-            PathBuf::from(path),
-            PatchValue::Modify {
-                base_blob: test_oid(base_char),
-                new_blob: test_oid(new_char),
                 file_id: FileId::new(file_id),
             },
         )
@@ -793,11 +782,10 @@ mod tests {
         assert_eq!(gv.workspace_count(), 2);
         assert!(!gv.is_clean());
         // Should have conflict on src/shared.rs
-        assert!(
-            gv.conflicts
-                .iter()
-                .any(|c| c.path == PathBuf::from("src/shared.rs"))
-        );
+        assert!(gv
+            .conflicts
+            .iter()
+            .any(|c| c.path == PathBuf::from("src/shared.rs")));
     }
 
     // -----------------------------------------------------------------------

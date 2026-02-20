@@ -190,11 +190,8 @@ fn arb_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
 /// Generate workspaces where multiple workspaces share the same path with
 /// different content (controlled shared-path scenario).
 fn arb_shared_path_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
-    (
-        arb_path(),
-        prop::collection::vec(arb_content(), 2..=5usize),
-    )
-        .prop_map(|(shared_path, contents)| {
+    (arb_path(), prop::collection::vec(arb_content(), 2..=5usize)).prop_map(
+        |(shared_path, contents)| {
             contents
                 .into_iter()
                 .enumerate()
@@ -207,7 +204,8 @@ fn arb_shared_path_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
                     )],
                 })
                 .collect()
-        })
+        },
+    )
 }
 
 /// Generate workspaces where some workspaces modify and some delete the same
@@ -240,10 +238,7 @@ fn arb_modify_delete_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
 /// Generate workspaces that each add the same path with different content
 /// (guaranteed add/add conflict).
 fn arb_add_add_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
-    (
-        arb_path(),
-        prop::collection::vec(arb_content(), 2..=4usize),
-    )
+    (arb_path(), prop::collection::vec(arb_content(), 2..=4usize))
         .prop_filter("contents must differ", |(_, contents)| {
             // At least two distinct contents.
             contents.windows(2).any(|w| w[0] != w[1])
@@ -267,7 +262,8 @@ fn arb_add_add_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
 /// Generate non-overlapping edits to a shared file (should merge cleanly).
 /// Creates a base with N regions separated by spacers, and N workspaces
 /// each editing a different region.
-fn arb_non_overlapping_workspaces() -> impl Strategy<Value = (Vec<TestWorkspace>, BTreeMap<PathBuf, Vec<u8>>)> {
+fn arb_non_overlapping_workspaces(
+) -> impl Strategy<Value = (Vec<TestWorkspace>, BTreeMap<PathBuf, Vec<u8>>)> {
     (2..=6usize).prop_flat_map(|n_workspaces| {
         let path = PathBuf::from("shared.txt");
 
@@ -317,16 +313,10 @@ fn arb_non_overlapping_workspaces() -> impl Strategy<Value = (Vec<TestWorkspace>
 // ---------------------------------------------------------------------------
 
 /// Check the embedding property for a merge result.
-fn verify_embedding(
-    workspaces: &[TestWorkspace],
-    result: &ResolveResult,
-) -> Result<(), String> {
+fn verify_embedding(workspaces: &[TestWorkspace], result: &ResolveResult) -> Result<(), String> {
     // Build a lookup: path → which collection it's in.
-    let resolved_paths: BTreeSet<PathBuf> = result
-        .resolved
-        .iter()
-        .map(|r| r.path().clone())
-        .collect();
+    let resolved_paths: BTreeSet<PathBuf> =
+        result.resolved.iter().map(|r| r.path().clone()).collect();
 
     let conflict_map: BTreeMap<PathBuf, &ConflictRecord> = result
         .conflicts
@@ -421,15 +411,11 @@ fn verify_content_embedding(
         };
 
         // If all workspace contents are identical, the merged content should match.
-        let contents: Vec<Option<&Vec<u8>>> = ws_changes
-            .iter()
-            .map(|(_, c)| c.content.as_ref())
-            .collect();
+        let contents: Vec<Option<&Vec<u8>>> =
+            ws_changes.iter().map(|(_, c)| c.content.as_ref()).collect();
 
         let non_none_contents: Vec<&Vec<u8>> = contents.iter().filter_map(|c| *c).collect();
-        if non_none_contents.len() >= 2
-            && non_none_contents.windows(2).all(|w| w[0] == w[1])
-        {
+        if non_none_contents.len() >= 2 && non_none_contents.windows(2).all(|w| w[0] == w[1]) {
             // All identical — merged content should match any of them.
             if *merged_content != non_none_contents[0].as_slice() {
                 return Err(format!(
@@ -475,11 +461,7 @@ fn verify_content_embedding(
                                  line is missing from merged content.\n\
                                  Merged:\n{}\n\
                                  Workspace content:\n{}",
-                                w.name,
-                                unique_line,
-                                path,
-                                merged_str,
-                                ws_str,
+                                w.name, unique_line, path, merged_str, ws_str,
                             ));
                         }
                     }
@@ -513,11 +495,8 @@ fn verify_minimality(
     result: &ResolveResult,
     base_contents: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), String> {
-    let resolved_paths: BTreeSet<PathBuf> = result
-        .resolved
-        .iter()
-        .map(|r| r.path().clone())
-        .collect();
+    let resolved_paths: BTreeSet<PathBuf> =
+        result.resolved.iter().map(|r| r.path().clone()).collect();
 
     // No path should appear in both resolved and conflicts.
     for conflict in &result.conflicts {
@@ -584,13 +563,9 @@ fn verify_minimality(
                     ));
                 }
                 // Contents must actually differ.
-                let contents: Vec<Option<&Vec<u8>>> = conflict
-                    .sides
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect();
-                let non_none: Vec<&Vec<u8>> =
-                    contents.iter().filter_map(|c| *c).collect();
+                let contents: Vec<Option<&Vec<u8>>> =
+                    conflict.sides.iter().map(|s| s.content.as_ref()).collect();
+                let non_none: Vec<&Vec<u8>> = contents.iter().filter_map(|c| *c).collect();
                 if non_none.len() >= 2 && non_none.windows(2).all(|w| w[0] == w[1]) {
                     return Err(format!(
                         "MINIMALITY VIOLATION: AddAddDifferent conflict on {:?} but \
@@ -609,13 +584,9 @@ fn verify_minimality(
                         conflict.path,
                     ));
                 }
-                let contents: Vec<Option<&Vec<u8>>> = conflict
-                    .sides
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect();
-                let non_none: Vec<&Vec<u8>> =
-                    contents.iter().filter_map(|c| *c).collect();
+                let contents: Vec<Option<&Vec<u8>>> =
+                    conflict.sides.iter().map(|s| s.content.as_ref()).collect();
+                let non_none: Vec<&Vec<u8>> = contents.iter().filter_map(|c| *c).collect();
                 if non_none.len() >= 2 && non_none.windows(2).all(|w| w[0] == w[1]) {
                     return Err(format!(
                         "MINIMALITY VIOLATION: Diff3Conflict on {:?} but all sides \

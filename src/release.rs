@@ -1,9 +1,9 @@
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 
-use crate::workspace::{MawConfig, jj_cwd, repo_root};
+use crate::workspace::{git_cwd, repo_root, MawConfig};
 
 #[derive(Args)]
 pub struct ReleaseArgs {
@@ -23,6 +23,7 @@ pub struct ReleaseArgs {
 ///   4. Push git tag to origin
 ///
 /// Assumes the version bump is already merged (via `maw ws merge`).
+#[allow(clippy::too_many_lines)]
 pub fn run(args: &ReleaseArgs) -> Result<()> {
     let tag = &args.tag;
 
@@ -35,7 +36,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     }
 
     let root = repo_root()?;
-    let _cwd = jj_cwd()?;
+    let _cwd = git_cwd()?;
     let config = MawConfig::load(&root)?;
     let branch = config.branch();
 
@@ -72,7 +73,9 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         .unwrap_or_default();
 
     // Advance branch if it's behind the epoch
-    if branch_oid != epoch_oid {
+    if branch_oid == epoch_oid {
+        println!("  {branch} already at current epoch.");
+    } else {
         println!("  Advancing {branch} to epoch ({})...", &epoch_oid[..12]);
         let update = Command::new("git")
             .args(["update-ref", &branch_ref, &epoch_oid])
@@ -84,8 +87,6 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
             let stderr = String::from_utf8_lossy(&update.stderr);
             bail!("Failed to advance {branch}: {}", stderr.trim());
         }
-    } else {
-        println!("  {branch} already at current epoch.");
     }
 
     // Get commit info for reporting
@@ -170,6 +171,6 @@ fn get_commit_info(root: &std::path::Path, oid: &str) -> Result<String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
-        Ok(format!("{}", &oid[..12.min(oid.len())]))
+        Ok(oid[..12.min(oid.len())].to_string())
     }
 }

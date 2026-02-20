@@ -38,21 +38,18 @@ fn maw_instructions() -> String {
 
 ## Multi-Agent Workspaces with maw
 
-This project uses maw for coordinating multiple agents via jj (Jujutsu) workspaces.
-jj is a **git-compatible version control system**. Key differences from git:
-- **No staging area** — all changes are tracked automatically (no `git add`)
-- **Always in a commit** — your work is always saved in a commit; use `describe` to set the message
-- **Conflicts don't block** — jj records conflicts in commits, you resolve them later
-
-Each agent gets an isolated working copy (like a git worktree but lightweight) and **their own commit** — you can edit files without blocking other agents.
+This project uses maw for coordinating multiple agents with isolated git workspaces.
+Each agent gets an independent working copy under `ws/<name>/` so edits can happen
+concurrently without stomping each other.
 
 ### Quick Start
 
 ```bash
 maw ws create <your-name>      # Creates workspace + your own commit
 # Edit files using the absolute workspace path shown by create
-# Set your commit message (like git commit --amend -m):
-maw exec <your-name> -- jj describe -m "feat: what you did"
+# Save your work in your workspace:
+maw exec <your-name> -- git add -A
+maw exec <your-name> -- git commit -m "feat: what you did"
 maw ws status                  # See all agent work
 ```
 
@@ -65,9 +62,10 @@ maw ws status                  # See all agent work
 | Sync stale workspace | `maw ws sync` |
 | Run command in workspace | `maw exec <name> -- <command>` |
 | Merge work | `maw ws merge <a> <b>` |
-| Destroy workspace | `maw ws destroy <name> --force` |
+| Destroy workspace | `maw ws destroy <name>` |
 
-**Note:** Your workspace starts with an empty commit (no file changes yet). This is intentional — it gives you a dedicated commit immediately, preventing conflicts when multiple agents work concurrently. Just use `describe` to set the message as you work.
+**Note:** Always run commands through `maw exec <name> -- ...` in sandboxed environments
+where `cd` does not persist.
 
 ### Session Start
 
@@ -81,18 +79,16 @@ maw ws status                  # See all agent work
 ### During Work
 
 ```bash
-maw exec <name> -- jj diff                        # See changes (like git diff)
-maw exec <name> -- jj log                         # See commit history (like git log)
-maw exec <name> -- jj log -r 'working_copies()'   # See all workspace commits (revset query)
-maw exec <name> -- jj describe -m "feat: ..."     # Set commit message (like git commit --amend -m)
-maw exec <name> -- jj commit -m "feat: ..."       # Save current work + start new empty commit
+maw exec <name> -- git status
+maw exec <name> -- git add -A
+maw exec <name> -- git commit -m "feat: ..."
 ```
 
 `maw exec` runs any command in the workspace directory. Use this instead of `cd ws/<name> && ...` — it works reliably in sandboxed environments where cd doesn't persist.
 
 ### Stale Workspace
 
-If you see "working copy is stale" (another workspace changed shared history — your files are outdated):
+If you see "workspace is stale" (epoch advanced while you were working):
 
 ```bash
 maw ws sync
@@ -100,12 +96,13 @@ maw ws sync
 
 ### Conflicts
 
-jj records conflicts in commits instead of blocking your work. If you see conflicts:
+If merge reports conflicts, resolve them in workspace files, then commit the resolution:
 
 ```bash
-maw exec <name> -- jj status                      # Shows conflicted files
-# Edit files to remove <<<<<<< conflict markers (similar to git)
-maw exec <name> -- jj describe -m "resolve: ..."  # Update commit message
+maw exec <name> -- git status
+# Edit files to remove <<<<<<< conflict markers
+maw exec <name> -- git add -A
+maw exec <name> -- git commit -m "resolve: ..."
 ```
 
 ### Pushing to Remote (Coordinator)
@@ -128,8 +125,8 @@ For tagged releases:
 maw release v1.2.3             # Tag + push branch + push tag in one step
 ```
 
-**IMPORTANT**: When jj/maw says "Changes to push to origin:", the push is ALREADY DONE.
-This is different from git — it reports what it pushed, not what it will push.
+**IMPORTANT**: When maw says "Changes to push to origin:", the push is ALREADY DONE.
+This reports what was pushed, not what will be pushed.
 Do NOT run `git push` afterwards.
 
 {MAW_SECTION_END}

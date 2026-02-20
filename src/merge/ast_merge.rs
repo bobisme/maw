@@ -8,10 +8,10 @@
 //! 2. Extracts top-level items (functions, structs, classes, etc.)
 //! 3. Computes edit scripts: which items changed in each variant
 //! 4. Checks for conflicts:
-//!    - Same item modified differently → conflict (with AstNode regions)
+//!    - Same item modified differently → conflict (with `AstNode` regions)
 //!    - Independent items → merge cleanly
 //! 5. Acyclic: reconstructs the merged file by splicing item content
-//! 6. Cyclic/overlapping: emits ConflictAtoms with AstNode regions
+//! 6. Cyclic/overlapping: emits `ConflictAtoms` with `AstNode` regions
 //!
 //! # Supported languages
 //!
@@ -77,7 +77,7 @@ impl AstLanguage {
     }
 
     /// Node kinds that represent top-level named items for this language.
-    fn named_item_kinds(self) -> &'static [&'static str] {
+    const fn named_item_kinds(self) -> &'static [&'static str] {
         match self {
             Self::Rust => &[
                 "function_item",
@@ -124,7 +124,7 @@ impl AstLanguage {
     }
 
     #[must_use]
-    fn from_config_language(lang: crate::config::AstConfigLanguage) -> Self {
+    const fn from_config_language(lang: crate::config::AstConfigLanguage) -> Self {
         use crate::config::AstConfigLanguage;
         match lang {
             AstConfigLanguage::Rust => Self::Rust,
@@ -136,7 +136,7 @@ impl AstLanguage {
     }
 
     #[must_use]
-    fn pack_languages(pack: crate::config::AstLanguagePack) -> &'static [Self] {
+    const fn pack_languages(pack: crate::config::AstLanguagePack) -> &'static [Self] {
         use crate::config::AstLanguagePack;
         match pack {
             AstLanguagePack::Core => &[Self::Rust, Self::Python, Self::TypeScript],
@@ -248,14 +248,14 @@ impl AstMergeConfig {
 /// identity fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopLevelItem {
-    /// Tree-sitter node kind (e.g., "function_item", "class_definition").
+    /// Tree-sitter node kind (e.g., "`function_item`", "`class_definition`").
     pub kind: String,
     /// Item name if extractable (function name, struct name, etc.).
     pub name: Option<String>,
-    /// Byte range in the source: [start_byte, end_byte).
+    /// Byte range in the source: [`start_byte`, `end_byte`).
     pub start_byte: usize,
     pub end_byte: usize,
-    /// The item's source content (the bytes within [start_byte, end_byte)).
+    /// The item's source content (the bytes within [`start_byte`, `end_byte`)).
     pub content: Vec<u8>,
 }
 
@@ -264,16 +264,16 @@ impl TopLevelItem {
     ///
     /// Named items use (kind, name). Unnamed items use (kind, position-index).
     fn identity_key(&self, index: usize) -> ItemKey {
-        match &self.name {
-            Some(name) => ItemKey::Named {
-                kind: self.kind.clone(),
-                name: name.clone(),
-            },
-            None => ItemKey::Positional {
+        self.name.as_ref().map_or_else(
+            || ItemKey::Positional {
                 kind: self.kind.clone(),
                 index,
             },
-        }
+            |name| ItemKey::Named {
+                kind: self.kind.clone(),
+                name: name.clone(),
+            },
+        )
     }
 }
 
@@ -471,9 +471,10 @@ struct ItemConstraint {
 /// 2. Computes per-variant edit scripts
 /// 3. Checks for conflicting edits on the same item
 /// 4. If clean: reconstructs the merged file
-/// 5. If conflicts: returns structured ConflictAtoms with AstNode regions
+/// 5. If conflicts: returns structured `ConflictAtoms` with `AstNode` regions
 ///
 /// Returns `AstMergeResult::Unsupported` if files can't be parsed.
+#[must_use]
 pub fn try_ast_merge(
     base: &[u8],
     variants: &[(WorkspaceId, Vec<u8>)],
@@ -483,6 +484,7 @@ pub fn try_ast_merge(
 }
 
 /// Attempt AST-aware merge with semantic conflict tuning from config.
+#[must_use]
 pub fn try_ast_merge_with_config(
     base: &[u8],
     variants: &[(WorkspaceId, Vec<u8>)],
@@ -490,9 +492,8 @@ pub fn try_ast_merge_with_config(
     config: &AstMergeConfig,
 ) -> AstMergeResult {
     // Parse base.
-    let (_base_tree, base_items) = match parse_and_extract(base, lang) {
-        Ok(result) => result,
-        Err(_) => return AstMergeResult::Unsupported,
+    let Ok((_base_tree, base_items)) = parse_and_extract(base, lang) else {
+        return AstMergeResult::Unsupported;
     };
 
     // If no top-level items were found, AST merge can't help.
@@ -504,9 +505,8 @@ pub fn try_ast_merge_with_config(
     let mut all_constraints: Vec<ItemConstraint> = Vec::new();
 
     for (ws_id, variant_content) in variants {
-        let (_variant_tree, variant_items) = match parse_and_extract(variant_content, lang) {
-            Ok(result) => result,
-            Err(_) => return AstMergeResult::Unsupported,
+        let Ok((_variant_tree, variant_items)) = parse_and_extract(variant_content, lang) else {
+            return AstMergeResult::Unsupported;
         };
 
         let edit_script = compute_edit_script(&base_items, &variant_items);
@@ -587,10 +587,12 @@ pub fn try_ast_merge_with_config(
     }
 
     // All changes are to disjoint items — reconstruct the merged file.
-    match reconstruct_merged_file(base, &base_items, &resolutions, variants) {
-        Some(merged) => AstMergeResult::Clean(merged),
-        None => AstMergeResult::Unsupported,
-    }
+    AstMergeResult::Clean(reconstruct_merged_file(
+        base,
+        &base_items,
+        &resolutions,
+        variants,
+    ))
 }
 
 /// Check if all constraints make the same effective change.
@@ -644,25 +646,30 @@ fn build_modify_delete_atom(
     ConflictAtom::new(base_region, edits, reason).with_semantic(semantic)
 }
 
+fn narrow_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 fn conflict_base_region(constraints: &[&ItemConstraint]) -> Region {
     constraints
         .iter()
-        .find_map(|c| match &c.change {
+        .map(|c| match &c.change {
             ItemChange::Modified { base_item, .. } | ItemChange::Deleted { base_item, .. } => {
-                Some(Region::ast_node(
+                Region::ast_node(
                     &base_item.kind,
                     base_item.name.clone(),
-                    base_item.start_byte as u32,
-                    base_item.end_byte as u32,
-                ))
+                    narrow_u32(base_item.start_byte),
+                    narrow_u32(base_item.end_byte),
+                )
             }
-            ItemChange::Added { variant_item, .. } => Some(Region::ast_node(
+            ItemChange::Added { variant_item, .. } => Region::ast_node(
                 &variant_item.kind,
                 variant_item.name.clone(),
-                variant_item.start_byte as u32,
-                variant_item.end_byte as u32,
-            )),
+                narrow_u32(variant_item.start_byte),
+                narrow_u32(variant_item.end_byte),
+            ),
         })
+        .next()
         .unwrap_or(Region::whole_file())
 }
 
@@ -676,8 +683,8 @@ fn conflict_edits(constraints: &[&ItemConstraint]) -> Vec<AtomEdit> {
                     Region::ast_node(
                         &variant_item.kind,
                         variant_item.name.clone(),
-                        variant_item.start_byte as u32,
-                        variant_item.end_byte as u32,
+                        narrow_u32(variant_item.start_byte),
+                        narrow_u32(variant_item.end_byte),
                     ),
                     String::from_utf8_lossy(&variant_item.content).to_string(),
                 ),
@@ -685,8 +692,8 @@ fn conflict_edits(constraints: &[&ItemConstraint]) -> Vec<AtomEdit> {
                     Region::ast_node(
                         &base_item.kind,
                         base_item.name.clone(),
-                        base_item.start_byte as u32,
-                        base_item.end_byte as u32,
+                        narrow_u32(base_item.start_byte),
+                        narrow_u32(base_item.end_byte),
                     ),
                     String::new(),
                 ),
@@ -848,7 +855,7 @@ fn reconstruct_merged_file(
     base_items: &[TopLevelItem],
     resolutions: &BTreeMap<ItemKey, &ItemConstraint>,
     variants: &[(WorkspaceId, Vec<u8>)],
-) -> Option<Vec<u8>> {
+) -> Vec<u8> {
     let mut result = Vec::with_capacity(base.len());
     let mut cursor = 0_usize;
 
@@ -927,7 +934,7 @@ fn reconstruct_merged_file(
     // (The above loop handles all added items from resolutions.)
     let _ = variants; // Used indirectly through resolutions
 
-    Some(result)
+    result
 }
 
 /// Skip trailing whitespace (spaces, tabs, newlines) after a byte position.
@@ -1084,7 +1091,7 @@ function goodbye(): void {
 
     #[test]
     fn parse_javascript_file_extracts_items() {
-        let source = br#"
+        let source = br"
 function hello() {
     return 1;
 }
@@ -1092,7 +1099,7 @@ function hello() {
 class Point {
     value() { return 1; }
 }
-"#;
+";
         let (_tree, items) = parse_and_extract(source, AstLanguage::JavaScript).unwrap();
         assert!(!items.is_empty());
         assert_eq!(items[0].kind, "function_declaration");
@@ -1101,7 +1108,7 @@ class Point {
 
     #[test]
     fn parse_go_file_extracts_items() {
-        let source = br#"
+        let source = br"
 package main
 
 func hello() int {
@@ -1111,7 +1118,7 @@ func hello() int {
 type Point struct {
     x int
 }
-"#;
+";
         let (_tree, items) = parse_and_extract(source, AstLanguage::Go).unwrap();
         assert!(!items.is_empty());
         assert_eq!(items[0].kind, "function_declaration");

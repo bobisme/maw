@@ -1,4 +1,4 @@
-//! OverlayFS workspace backend (Linux only).
+//! `OverlayFS` workspace backend (Linux only).
 //!
 //! Provides zero-copy workspace isolation using Linux overlayfs (via
 //! `fuse-overlayfs` or kernel overlayfs in user namespaces). Each workspace is
@@ -48,10 +48,10 @@ use crate::model::types::{EpochId, WorkspaceId, WorkspaceInfo, WorkspaceMode, Wo
 // Error type
 // ---------------------------------------------------------------------------
 
-/// Errors produced by the OverlayFS workspace backend.
+/// Errors produced by the `OverlayFS` workspace backend.
 #[derive(Debug)]
 pub enum OverlayBackendError {
-    /// OverlayFS backend is Linux-only.
+    /// `OverlayFS` backend is Linux-only.
     NotLinux,
     /// Neither fuse-overlayfs nor kernel overlayfs (user namespaces) is available.
     NotSupported { reason: String },
@@ -120,7 +120,7 @@ impl From<std::io::Error> for OverlayBackendError {
 // Mount strategy
 // ---------------------------------------------------------------------------
 
-/// Which OverlayFS mount mechanism to use.
+/// Which `OverlayFS` mount mechanism to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountStrategy {
     /// `fuse-overlayfs` user-space FUSE daemon (preferred — persistent).
@@ -152,7 +152,7 @@ impl MountStrategy {
 // OverlayBackend
 // ---------------------------------------------------------------------------
 
-/// OverlayFS workspace backend.
+/// `OverlayFS` workspace backend.
 ///
 /// Creates isolated workspaces via overlay mounts using immutable epoch
 /// snapshots as the read-only lower layer.
@@ -182,11 +182,6 @@ impl OverlayBackend {
                         .to_owned(),
             })?;
         Ok(Self { root, strategy })
-    }
-
-    /// Create a backend with an explicit mount strategy (for testing).
-    pub fn with_strategy(root: PathBuf, strategy: MountStrategy) -> Self {
-        Self { root, strategy }
     }
 
     // --- directory helpers --------------------------------------------------
@@ -256,8 +251,7 @@ impl OverlayBackend {
                 .map(|mut rd| {
                     rd.any(|e| {
                         e.ok()
-                            .map(|e| e.file_name() != ".refcount")
-                            .unwrap_or(false)
+                            .is_some_and(|e| e.file_name() != ".refcount")
                     })
                 })
                 .unwrap_or(false);
@@ -377,10 +371,10 @@ impl OverlayBackend {
 
         match self.strategy {
             MountStrategy::FuseOverlayfs => {
-                self.mount_fuse_overlayfs(&snapshot_dir, &upper_dir, &work_dir, &mount_point)?;
+                Self::mount_fuse_overlayfs(&snapshot_dir, &upper_dir, &work_dir, &mount_point)?;
             }
             MountStrategy::KernelUserNamespace => {
-                self.mount_kernel_overlay(&snapshot_dir, &upper_dir, &work_dir, &mount_point)?;
+                Self::mount_kernel_overlay(&snapshot_dir, &upper_dir, &work_dir, &mount_point)?;
             }
         }
 
@@ -389,7 +383,6 @@ impl OverlayBackend {
 
     /// Mount using `fuse-overlayfs` (persistent FUSE daemon).
     fn mount_fuse_overlayfs(
-        &self,
         lower: &Path,
         upper: &Path,
         work: &Path,
@@ -424,7 +417,6 @@ impl OverlayBackend {
     /// does not persist after the process exits. Prefer `fuse-overlayfs` for
     /// persistent workspaces.
     fn mount_kernel_overlay(
-        &self,
         lower: &Path,
         upper: &Path,
         work: &Path,
@@ -480,11 +472,10 @@ impl OverlayBackend {
                 .stderr(Stdio::null())
                 .status();
 
-            if let Ok(s) = status {
-                if s.success() {
+            if let Ok(s) = status
+                && s.success() {
                     return Ok(());
                 }
-            }
         }
 
         // Last resort: unshare umount
@@ -633,20 +624,17 @@ impl WorkspaceBackend for OverlayBackend {
         for entry in fs::read_dir(&cow_dir)? {
             let entry = entry?;
             let file_name = entry.file_name();
-            let name_str = match file_name.to_str() {
-                Some(s) => s,
-                None => continue,
+            let Some(name_str) = file_name.to_str() else {
+                continue;
             };
 
-            let name = match WorkspaceId::new(name_str) {
-                Ok(n) => n,
-                Err(_) => continue,
+            let Ok(name) = WorkspaceId::new(name_str) else {
+                continue;
             };
 
             // Read the epoch recorded for this workspace.
-            let epoch = match self.read_workspace_epoch(&name) {
-                Ok(e) => e,
-                Err(_) => continue,
+            let Ok(epoch) = self.read_workspace_epoch(&name) else {
+                continue;
             };
 
             let mount_point = self.mount_point(&name);
@@ -762,9 +750,8 @@ fn kernel_userns_overlay_available() -> bool {
         return false;
     }
 
-    let dir = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(_) => return false,
+    let Ok(dir) = tempfile::tempdir() else {
+        return false;
     };
 
     let lower = dir.path().join("lower");
@@ -810,27 +797,23 @@ pub fn is_overlay_mounted(path: &Path) -> bool {
         return false;
     }
 
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return false,
+    let Some(path_str) = path.to_str() else {
+        return false;
     };
 
-    let mounts = match fs::read_to_string("/proc/mounts") {
-        Ok(m) => m,
-        Err(_) => return false,
+    let Ok(mounts) = fs::read_to_string("/proc/mounts") else {
+        return false;
     };
 
     for line in mounts.lines() {
         // /proc/mounts format: <device> <mountpoint> <fstype> <options> <dump> <pass>
         let mut fields = line.split_whitespace();
         let _device = fields.next();
-        let mountpoint = match fields.next() {
-            Some(mp) => mp,
-            None => continue,
+        let Some(mountpoint) = fields.next() else {
+            continue;
         };
-        let fstype = match fields.next() {
-            Some(ft) => ft,
-            None => continue,
+        let Some(fstype) = fields.next() else {
+            continue;
         };
 
         if (fstype == "overlay" || fstype == "fuse.fuse-overlayfs") && mountpoint == path_str {
@@ -846,6 +829,7 @@ pub fn is_overlay_mounted(path: &Path) -> bool {
 /// Returns all files present in the upper directory (excluding overlayfs
 /// whiteout files and the `work/` directory). Paths are relative to the
 /// upper directory root.
+#[allow(clippy::items_after_statements)]
 fn scan_upper_dir_for_dirty(upper: &Path) -> Result<Vec<PathBuf>, OverlayBackendError> {
     let mut dirty = Vec::new();
 
@@ -894,7 +878,7 @@ fn is_whiteout_file(path: &Path) -> bool {
         use std::os::unix::fs::MetadataExt;
         if let Ok(meta) = fs::metadata(path) {
             // Whiteout: char device (S_IFCHR = 0o20000) with rdev == 0.
-            let is_char_dev = (meta.mode() & 0o170000) == 0o020000;
+            let is_char_dev = (meta.mode() & 0o170_000) == 0o020_000;
             return is_char_dev && meta.rdev() == 0;
         }
     }
@@ -911,6 +895,7 @@ fn is_whiteout_file(path: &Path) -> bool {
 /// - **Deleted**: path is a whiteout file in `upper` (deletion marker).
 ///
 /// All returned paths are relative to `upper` (== relative to the workspace root).
+#[allow(clippy::items_after_statements)]
 fn diff_upper_vs_lower(upper: &Path, lower: &Path) -> Result<SnapshotResult, OverlayBackendError> {
     let mut added = Vec::new();
     let mut modified = Vec::new();

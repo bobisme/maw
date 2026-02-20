@@ -108,7 +108,7 @@ impl EpochId {
 
     /// Return the inner [`GitOid`].
     #[must_use]
-    pub fn oid(&self) -> &GitOid {
+    pub const fn oid(&self) -> &GitOid {
         &self.0
     }
 
@@ -276,19 +276,19 @@ pub enum WorkspaceState {
 impl WorkspaceState {
     /// Returns `true` if the workspace is active.
     #[must_use]
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }
 
     /// Returns `true` if the workspace is stale.
     #[must_use]
-    pub fn is_stale(&self) -> bool {
+    pub const fn is_stale(&self) -> bool {
         matches!(self, Self::Stale { .. })
     }
 
     /// Returns `true` if the workspace is destroyed.
     #[must_use]
-    pub fn is_destroyed(&self) -> bool {
+    pub const fn is_destroyed(&self) -> bool {
         matches!(self, Self::Destroyed)
     }
 }
@@ -328,13 +328,13 @@ pub enum WorkspaceMode {
 impl WorkspaceMode {
     /// Returns `true` if this is a persistent workspace.
     #[must_use]
-    pub fn is_persistent(&self) -> bool {
+    pub const fn is_persistent(&self) -> bool {
         matches!(self, Self::Persistent)
     }
 
     /// Returns `true` if this is an ephemeral workspace.
     #[must_use]
-    pub fn is_ephemeral(&self) -> bool {
+    pub const fn is_ephemeral(&self) -> bool {
         matches!(self, Self::Ephemeral)
     }
 }

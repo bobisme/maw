@@ -1,6 +1,5 @@
 mod app;
 mod event;
-mod panels;
 mod theme;
 mod ui;
 
@@ -12,9 +11,9 @@ use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{Terminal, prelude::CrosstermBackend};
+use ratatui::{prelude::CrosstermBackend, Terminal};
 
 /// Run the TUI application
 pub fn run() -> Result<()> {

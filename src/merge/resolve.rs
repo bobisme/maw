@@ -26,6 +26,8 @@
 //! The function returns both successful resolutions and conflicts so callers can
 //! either proceed directly to BUILD or surface rich conflict diagnostics.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,7 +39,7 @@ use crate::model::conflict::{
 use crate::model::types::WorkspaceId;
 
 #[cfg(feature = "ast-merge")]
-use super::ast_merge::{AstMergeConfig, AstMergeResult, try_ast_merge_with_config};
+use super::ast_merge::{try_ast_merge_with_config, AstMergeConfig, AstMergeResult};
 
 use super::build::ResolvedChange;
 use super::partition::{PartitionResult, PathEntry};
@@ -113,7 +115,7 @@ pub struct ResolveResult {
 impl ResolveResult {
     /// Returns `true` if there are no conflicts.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
     }
 }
@@ -420,6 +422,7 @@ fn resolve_shared_path(
 /// Pipeline: hash eq → diff3 → AST merge → conflict.
 /// If AST merge is not enabled for this path's language, falls back to diff3 conflict.
 #[cfg(feature = "ast-merge")]
+#[allow(clippy::too_many_lines)]
 fn resolve_shared_path_with_ast(
     path: &Path,
     entries: &[PathEntry],
@@ -505,7 +508,7 @@ fn resolve_shared_path_with_ast(
                 ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
             }
             Diff3Outcome::Conflict { marker_output } => {
-                diff3_conflict = Some((marker_output, ours_ws_label.clone(), theirs_ws_label));
+                diff3_conflict = Some((marker_output, ours_ws_label, theirs_ws_label));
                 break;
             }
         }
@@ -707,6 +710,7 @@ fn retry_with_shifted_alignment(
 /// - Reassemble blocks in ranked order.
 ///
 /// This is O(b log b) where b = number of blocks in the file.
+#[allow(clippy::option_if_let_else)]
 fn normalize_shifted_blocks(base: &[u8], variant: &[u8]) -> Option<Vec<u8>> {
     let base_text = std::str::from_utf8(base).ok()?;
     let variant_text = std::str::from_utf8(variant).ok()?;
@@ -717,8 +721,6 @@ fn normalize_shifted_blocks(base: &[u8], variant: &[u8]) -> Option<Vec<u8>> {
     if base_blocks.len() < 2 || variant_blocks.len() < 2 {
         return None;
     }
-
-    use std::collections::BTreeMap;
 
     let mut base_positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (idx, block) in base_blocks.iter().enumerate() {
@@ -780,15 +782,24 @@ fn normalize_shifted_blocks(base: &[u8], variant: &[u8]) -> Option<Vec<u8>> {
 
     let mut ranked: Vec<(i64, usize, &str)> = Vec::with_capacity(variant_blocks.len());
     for (idx, block) in variant_blocks.iter().enumerate() {
-        let rank = if let Some(base_idx) = anchors[idx] {
-            (base_idx as i64) * 4 + 2
-        } else if let Some(prev) = prev_anchor[idx] {
-            (prev as i64) * 4 + 3
-        } else if let Some(next) = next_anchor[idx] {
-            (next as i64) * 4 + 1
-        } else {
-            (base_blocks.len() as i64) * 4 + idx as i64
-        };
+        let rank = anchors[idx].map_or_else(
+            || {
+                prev_anchor[idx].map_or_else(
+                    || {
+                        next_anchor[idx].map_or_else(
+                            || {
+                                usize_to_i64(base_blocks.len())
+                                    .saturating_mul(4)
+                                    .saturating_add(usize_to_i64(idx))
+                            },
+                            |next| usize_to_i64(next).saturating_mul(4).saturating_add(1),
+                        )
+                    },
+                    |prev| usize_to_i64(prev).saturating_mul(4).saturating_add(3),
+                )
+            },
+            |base_idx| usize_to_i64(base_idx).saturating_mul(4).saturating_add(2),
+        );
         ranked.push((rank, idx, block.as_str()));
     }
 
@@ -808,6 +819,14 @@ fn normalize_shifted_blocks(base: &[u8], variant: &[u8]) -> Option<Vec<u8>> {
 
 fn block_signature(block: &str) -> String {
     block.trim_end().to_owned()
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Split text into paragraph-like blocks separated by blank lines.
@@ -858,6 +877,15 @@ fn split_blocks(text: &str) -> Vec<String> {
 ///
 /// `ws_ours` and `ws_theirs` are the workspace ID strings used to label each
 /// side's [`AtomEdit`].
+#[derive(Clone, Copy, PartialEq)]
+enum Diff3ParseState {
+    Context,
+    Ours,
+    Base,
+    Theirs,
+}
+
+#[must_use]
 pub fn parse_diff3_atoms(
     marker_output: &[u8],
     ws_ours: &str,
@@ -866,15 +894,7 @@ pub fn parse_diff3_atoms(
     let text = String::from_utf8_lossy(marker_output);
     let lines: Vec<&str> = text.lines().collect();
 
-    #[derive(Clone, Copy, PartialEq)]
-    enum State {
-        Context,
-        Ours,
-        Base,
-        Theirs,
-    }
-
-    let mut state = State::Context;
+    let mut state = Diff3ParseState::Context;
     // 1-indexed position in the base file, advancing as we consume context
     // and completed base sections.
     let mut base_line: u32 = 1;
@@ -890,20 +910,20 @@ pub fn parse_diff3_atoms(
     for line in &lines {
         if line.starts_with("<<<<<<<") {
             // Start of a new conflict block.
-            state = State::Ours;
+            state = Diff3ParseState::Ours;
             block_base_start = base_line;
             ours_lines.clear();
             base_lines.clear();
             theirs_lines.clear();
-        } else if line.starts_with("|||||||") && state == State::Ours {
+        } else if line.starts_with("|||||||") && state == Diff3ParseState::Ours {
             // Transition: ours → base section.
-            state = State::Base;
-        } else if *line == "=======" && state == State::Base {
+            state = Diff3ParseState::Base;
+        } else if *line == "=======" && state == Diff3ParseState::Base {
             // Transition: base → theirs section.
-            state = State::Theirs;
-        } else if line.starts_with(">>>>>>>") && state == State::Theirs {
+            state = Diff3ParseState::Theirs;
+        } else if line.starts_with(">>>>>>>") && state == Diff3ParseState::Theirs {
             // End of conflict block — build the atom.
-            let base_len = base_lines.len() as u32;
+            let base_len = usize_to_u32(base_lines.len());
             // The base section covers [block_base_start, block_base_start + base_len).
             // If the base section is empty (pure insertion conflict), the region
             // is a zero-length marker at the insertion point.
@@ -922,11 +942,13 @@ pub fn parse_diff3_atoms(
             // For the AtomEdit regions we use the base region as an approximation.
             // Exact workspace-version line numbers would require tracking per-file
             // offsets across multiple conflict blocks, which is Phase 2 work.
-            let ours_region =
-                Region::lines(block_base_start, block_base_start + ours_lines.len() as u32);
+            let ours_region = Region::lines(
+                block_base_start,
+                block_base_start + usize_to_u32(ours_lines.len()),
+            );
             let theirs_region = Region::lines(
                 block_base_start,
-                block_base_start + theirs_lines.len() as u32,
+                block_base_start + usize_to_u32(theirs_lines.len()),
             );
 
             let edits = vec![
@@ -942,14 +964,14 @@ pub fn parse_diff3_atoms(
 
             // Advance base_line past the base section just consumed.
             base_line += base_len;
-            state = State::Context;
+            state = Diff3ParseState::Context;
         } else {
             // Accumulate or count lines based on current state.
             match state {
-                State::Context => base_line += 1,
-                State::Ours => ours_lines.push(line),
-                State::Base => base_lines.push(line),
-                State::Theirs => theirs_lines.push(line),
+                Diff3ParseState::Context => base_line += 1,
+                Diff3ParseState::Ours => ours_lines.push(line),
+                Diff3ParseState::Base => base_lines.push(line),
+                Diff3ParseState::Theirs => theirs_lines.push(line),
             }
         }
     }
@@ -1843,7 +1865,7 @@ mod tests {
     #[cfg(feature = "ast-merge")]
     mod ast_resolve_tests {
         use super::*;
-        use crate::merge::ast_merge::{AstLanguage, AstMergeConfig};
+        use crate::merge::ast_merge::AstMergeConfig;
         use crate::merge::resolve::resolve_partition_with_ast;
 
         fn shared_rs(path: &str, entries: Vec<PathEntry>) -> PartitionResult {

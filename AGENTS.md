@@ -23,6 +23,16 @@ This repo is a clone of maw on the **`manifold`** branch. It is where we build t
 
 **Design doc:** `notes/manifold-v2.md` — full architecture, data model, implementation phases.
 
+## Repo model terminology (important)
+
+Use these terms precisely when discussing migration work:
+
+- **v1 model (legacy):** `.workspaces/` layout with jj-centric workspace handling.
+- **v2 bare model (legacy transition):** `ws/<name>/` layout with bare-root workflow. This model predates full Manifold metadata adoption.
+- **Manifold model (target):** Manifold metadata and transport (`.manifold/`, `refs/manifold/*`) replacing jj-specific coordination paths.
+
+Current repo state is a **hybrid transition**: some commands and docs are still jj-based while Manifold pieces are being integrated. Do not assume "v2" means "fully Manifold".
+
 ---
 
 This project uses **maw** for workspace management, **jj** (Jujutsu) for version control, and **beads** for issue tracking.

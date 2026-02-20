@@ -1,6 +1,6 @@
 //! Integration tests for merge scenarios: disjoint, conflicting, and N-way.
 //!
-//! Uses the git-native `TestRepo` infrastructure (no jj dependency).
+//! Uses the git-native `TestRepo` infrastructure.
 //! Tests exercise the full collect → partition → resolve → build merge pipeline
 //! via [`run_build_phase_with_inputs`].
 //!
@@ -920,24 +920,17 @@ fn maw_cli_merge_with_destroy() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // The merge might use old jj path or new git path — either way, check outcome
-    // If maw ws merge is still using the jj path, this test validates the CLI wiring
-    if out.status.success() {
-        // After destroy, workspace should not be listed
-        let list = repo.maw_ok(&["ws", "list"]);
-        assert!(
-            !list.contains("agent-1"),
-            "agent-1 should be destroyed after --destroy. List output: {list}"
-        );
-    } else {
-        // If merge fails (e.g., jj not installed for old code path), that's expected
-        // during transition. Just verify the error is meaningful.
-        let combined = format!("{stdout}\n{stderr}");
-        assert!(
-            combined.contains("merge") || combined.contains("jj") || combined.contains("error"),
-            "merge failure should have meaningful output: {combined}"
-        );
-    }
+    assert!(
+        out.status.success(),
+        "merge with --destroy should succeed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // After destroy, workspace should not be listed
+    let list = repo.maw_ok(&["ws", "list"]);
+    assert!(
+        !list.contains("agent-1"),
+        "agent-1 should be destroyed after --destroy. List output: {list}"
+    );
 }
 
 // ==========================================================================

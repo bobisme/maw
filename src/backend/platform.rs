@@ -1,6 +1,6 @@
 //! Platform capability detection for workspace backend selection.
 //!
-//! Detects runtime capabilities needed by CoW backends and caches the result
+//! Detects runtime capabilities needed by `CoW` backends and caches the result
 //! in `.manifold/platform-capabilities`.
 
 use std::ffi::OsStr;
@@ -22,7 +22,7 @@ pub struct PlatformCapabilities {
     pub schema_version: u32,
     /// Runtime reflink capability (best-effort test via `cp --reflink=always`).
     pub reflink_supported: bool,
-    /// Runtime OverlayFS in user namespace capability.
+    /// Runtime `OverlayFS` in user namespace capability.
     pub overlay_userns_supported: bool,
     /// `fuse-overlayfs` binary availability on compatible Linux kernels.
     pub fuse_overlayfs_available: bool,
@@ -64,6 +64,7 @@ pub fn load_cached(repo_root: &Path) -> Option<PlatformCapabilities> {
 }
 
 /// Detect capabilities (or read from cache), then persist cache.
+#[must_use]
 pub fn detect_or_load(repo_root: &Path) -> PlatformCapabilities {
     if let Some(cached) = load_cached(repo_root) {
         return cached;
@@ -75,6 +76,7 @@ pub fn detect_or_load(repo_root: &Path) -> PlatformCapabilities {
 }
 
 /// Persist capability cache to `.manifold/platform-capabilities`.
+#[allow(clippy::missing_errors_doc)]
 pub fn persist_cache(repo_root: &Path, caps: &PlatformCapabilities) -> std::io::Result<()> {
     let path = cache_path(repo_root);
     if let Some(parent) = path.parent() {
@@ -111,7 +113,7 @@ pub fn detect_platform_capabilities() -> PlatformCapabilities {
 /// 3. overlay (when supported and repo > 100k files)
 /// 4. copy fallback
 #[must_use]
-pub fn resolve_backend_kind(
+pub const fn resolve_backend_kind(
     configured: BackendKind,
     repo_file_count: usize,
     caps: &PlatformCapabilities,
@@ -144,7 +146,10 @@ pub fn resolve_backend_kind(
 /// 3. `overlay`      — if Linux overlayfs available and repo > 100k files.
 /// 4. `copy`         — universal fallback (plain recursive copy).
 #[must_use]
-pub fn auto_select_backend(repo_file_count: usize, caps: &PlatformCapabilities) -> BackendKind {
+pub const fn auto_select_backend(
+    repo_file_count: usize,
+    caps: &PlatformCapabilities,
+) -> BackendKind {
     // Overlay: Linux + overlayfs + large repo (highest CoW benefit)
     let overlay_candidate = (caps.overlay_userns_supported || caps.fuse_overlayfs_available)
         && repo_file_count > OVERLAY_THRESHOLD_FILES;
@@ -200,9 +205,8 @@ fn detect_reflink_support() -> bool {
         return false;
     }
 
-    let dir = match tempfile::tempdir() {
-        Ok(dir) => dir,
-        Err(_) => return false,
+    let Ok(dir) = tempfile::tempdir() else {
+        return false;
     };
 
     let src = dir.path().join("src.tmp");
@@ -234,9 +238,8 @@ fn detect_overlay_userns_support(kernel_major: Option<u32>, kernel_minor: Option
         return false;
     }
 
-    let dir = match tempfile::tempdir() {
-        Ok(dir) => dir,
-        Err(_) => return false,
+    let Ok(dir) = tempfile::tempdir() else {
+        return false;
     };
     let lower = dir.path().join("lower");
     let upper = dir.path().join("upper");
@@ -282,7 +285,7 @@ fn detect_fuse_overlayfs(kernel_major: Option<u32>, kernel_minor: Option<u32>) -
     command_available("fuse-overlayfs")
 }
 
-fn kernel_at_least(
+const fn kernel_at_least(
     kernel_major: Option<u32>,
     kernel_minor: Option<u32>,
     min_major: u32,
@@ -317,7 +320,7 @@ fn parse_kernel_version(release: &str) -> (Option<u32>, Option<u32>) {
 
     let minor_str = parts.next().map(|m| {
         m.chars()
-            .take_while(|c| c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
             .collect::<String>()
     });
     let minor = minor_str.and_then(|s| s.parse::<u32>().ok());
@@ -414,14 +417,8 @@ mod tests {
             kernel_minor: Some(8),
         };
         // 30k–100k files with reflink: pick reflink.
-        assert_eq!(
-            auto_select_backend(30_001, &caps),
-            BackendKind::Reflink
-        );
-        assert_eq!(
-            auto_select_backend(99_999, &caps),
-            BackendKind::Reflink
-        );
+        assert_eq!(auto_select_backend(30_001, &caps), BackendKind::Reflink);
+        assert_eq!(auto_select_backend(99_999, &caps), BackendKind::Reflink);
     }
 
     #[test]
@@ -435,14 +432,8 @@ mod tests {
             kernel_minor: Some(8),
         };
         // > 100k files with overlay support: pick overlay.
-        assert_eq!(
-            auto_select_backend(100_001, &caps),
-            BackendKind::Overlay
-        );
-        assert_eq!(
-            auto_select_backend(1_000_000, &caps),
-            BackendKind::Overlay
-        );
+        assert_eq!(auto_select_backend(100_001, &caps), BackendKind::Overlay);
+        assert_eq!(auto_select_backend(1_000_000, &caps), BackendKind::Overlay);
     }
 
     #[test]
@@ -456,10 +447,7 @@ mod tests {
             kernel_minor: Some(8),
         };
         // Large repo but no overlay → reflink.
-        assert_eq!(
-            auto_select_backend(200_000, &caps),
-            BackendKind::Reflink
-        );
+        assert_eq!(auto_select_backend(200_000, &caps), BackendKind::Reflink);
     }
 
     #[test]
@@ -473,10 +461,7 @@ mod tests {
             kernel_minor: None,
         };
         // No CoW caps at all → git-worktree for any repo size.
-        assert_eq!(
-            auto_select_backend(50_000, &caps),
-            BackendKind::GitWorktree
-        );
+        assert_eq!(auto_select_backend(50_000, &caps), BackendKind::GitWorktree);
         assert_eq!(
             auto_select_backend(500_000, &caps),
             BackendKind::GitWorktree

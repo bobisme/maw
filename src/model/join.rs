@@ -1,11 +1,11 @@
-//! PatchSet join — CRDT merge of two patch-sets sharing the same base epoch.
+//! `PatchSet` join — CRDT merge of two patch-sets sharing the same base epoch.
 //!
 //! The join operation combines two [`PatchSet`]s into one by unioning their
 //! path maps. When both patch-sets touch the same path, we resolve:
 //!
 //! 1. **Identical** — same [`PatchValue`]: idempotent, keep one copy.
 //! 2. **Compatible** — mergeable edits on the same path (e.g. both Add the
-//!    same blob via different FileIds would conflict, but identical Adds are
+//!    same blob via different `FileIds` would conflict, but identical Adds are
 //!    idempotent per case 1).
 //! 3. **Conflicting** — incompatible edits: emit a [`PathConflict`].
 //!
@@ -21,6 +21,8 @@
 //! - Identical entries collapse (idempotent).
 //! - Conflict detection is symmetric (both sides produce the same
 //!   [`PathConflict`] regardless of argument order because sides are sorted).
+
+#![allow(clippy::missing_errors_doc)]
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -47,7 +49,7 @@ pub struct JoinResult {
 impl JoinResult {
     /// Returns `true` if the join completed without conflicts.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
     }
 }
@@ -145,7 +147,7 @@ impl std::error::Error for EpochMismatch {}
 ///
 /// # Algorithm
 ///
-/// 1. Iterate the union of all paths from both patch-sets (BTreeMap ensures
+/// 1. Iterate the union of all paths from both patch-sets (`BTreeMap` ensures
 ///    sorted, deterministic order).
 /// 2. For each path:
 ///    - Present in only one side → take it (disjoint union).
@@ -226,9 +228,9 @@ pub fn join(a: &PatchSet, b: &PatchSet) -> Result<JoinResult, EpochMismatch> {
 // Conflict classification
 // ---------------------------------------------------------------------------
 
-/// Classify why two different PatchValues on the same path conflict.
+/// Classify why two different `PatchValues` on the same path conflict.
 fn classify_conflict(left: &PatchValue, right: &PatchValue) -> ConflictReason {
-    use PatchValue::*;
+    use PatchValue::{Add, Delete, Modify, Rename};
     match (left, right) {
         // Both Add, different content/identity → divergent add.
         (Add { .. }, Add { .. }) => ConflictReason::DivergentAdd,
@@ -345,18 +347,14 @@ mod tests {
         let result = join(&a, &b).unwrap();
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 2);
-        assert!(
-            result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("src/foo.rs"))
-        );
-        assert!(
-            result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("src/bar.rs"))
-        );
+        assert!(result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("src/foo.rs")));
+        assert!(result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("src/bar.rs")));
     }
 
     #[test]
@@ -490,12 +488,10 @@ mod tests {
         assert_eq!(result.conflicts[0].path, PathBuf::from("file.rs"));
         assert_eq!(result.conflicts[0].reason, ConflictReason::DivergentAdd);
         // Conflicted path should NOT be in merged.
-        assert!(
-            !result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("file.rs"))
-        );
+        assert!(!result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("file.rs")));
     }
 
     #[test]
@@ -709,30 +705,22 @@ mod tests {
         let result = join(&a, &b).unwrap();
         // 3 paths merged (only_a, only_b, shared), 1 conflict
         assert_eq!(result.merged.len(), 3);
-        assert!(
-            result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("only_a.rs"))
-        );
-        assert!(
-            result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("only_b.rs"))
-        );
-        assert!(
-            result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("shared.rs"))
-        );
-        assert!(
-            !result
-                .merged
-                .patches
-                .contains_key(&PathBuf::from("conflict.rs"))
-        );
+        assert!(result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("only_a.rs")));
+        assert!(result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("only_b.rs")));
+        assert!(result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("shared.rs")));
+        assert!(!result
+            .merged
+            .patches
+            .contains_key(&PathBuf::from("conflict.rs")));
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].path, PathBuf::from("conflict.rs"));
     }

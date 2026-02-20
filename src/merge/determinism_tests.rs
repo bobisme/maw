@@ -24,9 +24,9 @@ use std::process::Command;
 
 use proptest::prelude::*;
 
-use crate::merge::build::{ResolvedChange, build_merge_commit};
+use crate::merge::build::{build_merge_commit, ResolvedChange};
 use crate::merge::partition::partition_by_path;
-use crate::merge::resolve::{ConflictRecord, ResolveResult, resolve_partition};
+use crate::merge::resolve::{resolve_partition, ConflictRecord, ResolveResult};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -1161,7 +1161,7 @@ fn e2e_identical_changes_collapse() {
 /// When workspaces conflict, the conflict set must be the same for all orderings.
 #[test]
 fn e2e_conflicts_deterministic_across_orderings() {
-    let (dir, epoch, base_files) = setup_git_repo_with_base_files(1, 1);
+    let (dir, _epoch, base_files) = setup_git_repo_with_base_files(1, 1);
     let root = dir.path();
     let (path, base_content) = &base_files[0];
     let _ = root; // not used for build (conflicts skip build)

@@ -99,7 +99,7 @@ fn promote(merge_id: &str) -> Result<()> {
         state
             .sources
             .iter()
-            .map(|s| s.as_str())
+            .map(super::model::types::WorkspaceId::as_str)
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -206,7 +206,7 @@ fn abandon(merge_id: &str) -> Result<()> {
                 state
                     .sources
                     .iter()
-                    .map(|s| s.as_str())
+                    .map(super::model::types::WorkspaceId::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -264,7 +264,7 @@ fn list() -> Result<()> {
             "  Sources:  {}",
             q.sources
                 .iter()
-                .map(|s| s.as_str())
+                .map(super::model::types::WorkspaceId::as_str)
                 .collect::<Vec<_>>()
                 .join(", ")
         );

@@ -44,7 +44,7 @@ impl std::fmt::Display for ChangeKind {
 ///
 /// `file_id` is the stable [`FileId`] assigned when the file was created. It
 /// survives renames and modifications, enabling rename-aware merge (§5.8).
-/// `None` if FileId tracking was not available at collect time.
+/// `None` if `FileId` tracking was not available at collect time.
 ///
 /// `blob` is the git blob OID for the new content (computed via
 /// `git hash-object`). Present for `Added` and `Modified` changes when the
@@ -60,8 +60,7 @@ pub struct FileChange {
     pub content: Option<Vec<u8>>,
     /// Stable file identity that persists across renames (§5.8).
     ///
-    /// `None` when FileId tracking is unavailable (e.g., legacy workspaces
-    /// that predate FileId introduction, or tests that don't supply one).
+    /// `None` only for legacy artifacts and explicit test fixtures.
     pub file_id: Option<FileId>,
     /// Git blob OID for the new content (present for Add/Modify; `None` for
     /// Delete and for changes collected without git access).
@@ -73,12 +72,12 @@ pub struct FileChange {
 }
 
 impl FileChange {
-    /// Create a new `FileChange` without FileId or blob OID metadata.
+    /// Create a new `FileChange` without `FileId` or blob OID metadata.
     ///
-    /// Suitable for Phase 1 tests and code paths that don't yet track
-    /// stable file identity. Use [`FileChange::with_identity`] when those
-    /// fields are available.
-    pub fn new(path: PathBuf, kind: ChangeKind, content: Option<Vec<u8>>) -> Self {
+    /// Suitable for explicit legacy/test fixtures. Production collect paths
+    /// should prefer [`FileChange::with_identity`].
+    #[must_use]
+    pub const fn new(path: PathBuf, kind: ChangeKind, content: Option<Vec<u8>>) -> Self {
         Self {
             path,
             kind,
@@ -91,9 +90,10 @@ impl FileChange {
     /// Create a new `FileChange` with full identity metadata.
     ///
     /// Preferred constructor for Phase 3+ code paths where `file_id` and
-    /// `blob` OID are available from the workspace's FileId map and git
+    /// `blob` OID are available from the workspace's `FileId` map and git
     /// object store.
-    pub fn with_identity(
+    #[must_use]
+    pub const fn with_identity(
         path: PathBuf,
         kind: ChangeKind,
         content: Option<Vec<u8>>,
@@ -111,13 +111,13 @@ impl FileChange {
 
     /// Returns `true` if this change is a deletion.
     #[must_use]
-    pub fn is_deletion(&self) -> bool {
+    pub const fn is_deletion(&self) -> bool {
         matches!(self.kind, ChangeKind::Deleted)
     }
 
     /// Returns `true` if this change adds or modifies a file (has content).
     #[must_use]
-    pub fn has_content(&self) -> bool {
+    pub const fn has_content(&self) -> bool {
         self.content.is_some()
     }
 }
@@ -144,6 +144,7 @@ pub struct PatchSet {
 
 impl PatchSet {
     /// Create a new `PatchSet`, sorting changes by path for determinism.
+    #[must_use]
     pub fn new(workspace_id: WorkspaceId, epoch: EpochId, mut changes: Vec<FileChange>) -> Self {
         // Lexicographic sort by path ensures determinism regardless of insertion order.
         changes.sort_by(|a, b| a.path.cmp(&b.path));
@@ -156,13 +157,13 @@ impl PatchSet {
 
     /// Returns `true` if there are no changes.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
 
     /// Total count of all changes.
     #[must_use]
-    pub fn change_count(&self) -> usize {
+    pub const fn change_count(&self) -> usize {
         self.changes.len()
     }
 

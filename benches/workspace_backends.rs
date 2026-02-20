@@ -228,7 +228,7 @@ fn bench_platform_detect_cached(c: &mut Criterion) {
     let dir = tempfile::tempdir().expect("tempdir");
 
     // Warm the cache.
-    let caps = detect_or_load(dir.path());
+    let _caps = detect_or_load(dir.path());
     // Verify it's cached.
     assert!(
         maw::backend::platform::load_cached(dir.path()).is_some(),
@@ -272,7 +272,7 @@ fn bench_estimate_file_count(c: &mut Criterion) {
 /// Benchmark `backend.snapshot()` across change counts and repo sizes.
 ///
 /// The key invariant under test: snapshot time should track `changed_files`,
-/// not `repo_files`.  We benchmark (repo_size × changes) pairs.
+/// not `repo_files`.  We benchmark (`repo_size` × changes) pairs.
 fn bench_snapshot_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot/git-worktree");
 
@@ -333,7 +333,7 @@ fn bench_snapshot_scaling(c: &mut Criterion) {
 // Strategy 2: vary total touched files (across workspaces) → linear growth.
 // ---------------------------------------------------------------------------
 
-/// Build a synthetic `PatchSet` for benchmarking partition_by_path.
+/// Build a synthetic `PatchSet` for benchmarking `partition_by_path`.
 ///
 /// Each workspace gets `files_per_ws` unique non-overlapping modified files,
 /// named `ws<ws_idx>_file<file_idx>.txt` to guarantee no conflicts.
@@ -353,7 +353,7 @@ fn make_patch_set(ws_idx: usize, files_per_ws: usize, epoch: &EpochId) -> PatchS
 
 /// Benchmark: fixed total touched files, varying workspace count.
 ///
-/// Total files = 100 (constant). As workspace count grows, files_per_ws shrinks.
+/// Total files = 100 (constant). As workspace count grows, `files_per_ws` shrinks.
 /// `partition_by_path` time should stay roughly constant.
 fn bench_merge_partition_fixed_total(c: &mut Criterion) {
     // We need any epoch OID — use a fake 40-char hex string.

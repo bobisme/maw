@@ -4,7 +4,7 @@
 //! Error messages are designed to be agent-friendly: each variant includes
 //! a clear description of what went wrong and actionable guidance on how to fix it.
 //!
-//! No jj-specific concepts leak into this module — all errors are expressed in
+//! No legacy VCS-specific concepts leak into this module — all errors are expressed in
 //! terms of Manifold's own abstractions (workspaces, epochs, merge).
 
 use std::fmt;
@@ -115,7 +115,7 @@ pub struct ConflictInfo {
 
 impl ConflictInfo {
     /// Create a new conflict summary.
-    pub fn new(path: PathBuf, description: String) -> Self {
+    pub const fn new(path: PathBuf, description: String) -> Self {
         Self { path, description }
     }
 }
@@ -136,36 +136,31 @@ impl fmt::Display for ManifoldError {
             Self::WorkspaceExists { name } => {
                 write!(
                     f,
-                    "workspace '{}' already exists.\n  To fix: use a different name, or destroy the existing workspace first:\n    maw ws destroy {}",
-                    name, name
+                    "workspace '{name}' already exists.\n  To fix: use a different name, or destroy the existing workspace first:\n    maw ws destroy {name}"
                 )
             }
             Self::WorkspaceNotFound { name } => {
                 write!(
                     f,
-                    "workspace '{}' not found.\n  To fix: check available workspaces:\n    maw ws list",
-                    name
+                    "workspace '{name}' not found.\n  To fix: check available workspaces:\n    maw ws list"
                 )
             }
             Self::WorkspaceCorrupted { name, detail } => {
                 write!(
                     f,
-                    "workspace '{}' is corrupted: {}\n  To fix: destroy and re-create the workspace:\n    maw ws destroy {}\n    maw ws create {}",
-                    name, detail, name, name
+                    "workspace '{name}' is corrupted: {detail}\n  To fix: destroy and re-create the workspace:\n    maw ws destroy {name}\n    maw ws create {name}"
                 )
             }
             Self::InvalidWorkspaceName { name, reason } => {
                 write!(
                     f,
-                    "invalid workspace name '{}': {}\n  Workspace names must be lowercase alphanumeric with hyphens, 1-64 characters.\n  Examples: agent-1, feature-auth, bugfix-123",
-                    name, reason
+                    "invalid workspace name '{name}': {reason}\n  Workspace names must be lowercase alphanumeric with hyphens, 1-64 characters.\n  Examples: agent-1, feature-auth, bugfix-123"
                 )
             }
             Self::EpochNotFound { epoch } => {
                 write!(
                     f,
-                    "epoch '{}' not found.\n  To fix: check the current epoch:\n    git show-ref refs/manifold/epoch/current",
-                    epoch
+                    "epoch '{epoch}' not found.\n  To fix: check the current epoch:\n    git show-ref refs/manifold/epoch/current"
                 )
             }
             Self::MergeConflict { conflicts } => {

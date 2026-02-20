@@ -29,6 +29,8 @@
 //! 6. Enforce the [`OnFailure`] policy.
 //! 7. Clean up the temporary worktree.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -63,7 +65,7 @@ pub enum ValidateOutcome {
 impl ValidateOutcome {
     /// Returns `true` if the merge should proceed (passed, skipped, or warn).
     #[must_use]
-    pub fn may_proceed(&self) -> bool {
+    pub const fn may_proceed(&self) -> bool {
         matches!(
             self,
             Self::Skipped | Self::Passed(_) | Self::PassedWithWarnings(_) | Self::Quarantine(_)
@@ -72,13 +74,13 @@ impl ValidateOutcome {
 
     /// Returns `true` if a quarantine workspace should be created.
     #[must_use]
-    pub fn needs_quarantine(&self) -> bool {
+    pub const fn needs_quarantine(&self) -> bool {
         matches!(self, Self::Quarantine(_) | Self::BlockedAndQuarantine(_))
     }
 
     /// Extract the validation result, if any.
     #[must_use]
-    pub fn result(&self) -> Option<&ValidationResult> {
+    pub const fn result(&self) -> Option<&ValidationResult> {
         match self {
             Self::Skipped => None,
             Self::Passed(r)
@@ -245,10 +247,9 @@ pub fn resolve_commands(config: &ValidationConfig, worktree_dir: &Path) -> Vec<S
         Some(p) => Some(p.clone()),
     };
 
-    match preset {
-        Some(p) => p.commands().iter().map(|s| (*s).to_owned()).collect(),
-        None => Vec::new(),
-    }
+    preset.map_or_else(Vec::new, |p| {
+        p.commands().iter().map(|s| (*s).to_owned()).collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +459,7 @@ fn run_commands_pipeline(
     let summary_idx = command_results
         .iter()
         .position(|r| !r.passed)
-        .unwrap_or(command_results.len().saturating_sub(1));
+        .unwrap_or_else(|| command_results.len().saturating_sub(1));
     let summary = &command_results[summary_idx];
 
     let all_passed = command_results.iter().all(|r| r.passed);
@@ -529,7 +530,7 @@ fn run_single_command(
                     exit_code,
                     stdout,
                     stderr,
-                    duration_ms: duration.as_millis() as u64,
+                    duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
                 };
             }
             Ok(None) => {
@@ -544,7 +545,7 @@ fn run_single_command(
                         exit_code: None,
                         stdout: String::new(),
                         stderr: format!("killed by timeout after {timeout_seconds}s"),
-                        duration_ms: start.elapsed().as_millis() as u64,
+                        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
                     };
                 }
                 std::thread::sleep(Duration::from_millis(50));

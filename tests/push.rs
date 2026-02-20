@@ -1,98 +1,67 @@
-//! Integration tests for `maw push`
-//!
-//! Tests push workflow with a local bare git remote.
-//! Each test creates an isolated jj repo with a remote in temp directories.
+//! Integration tests for `maw push` in git-native Manifold repos.
 
-mod common;
+mod manifold_common;
 
-use common::{default_ws, maw_ok, run_jj, setup_with_remote, write_in_ws};
+use std::process::Command;
+
+use manifold_common::TestRepo;
 use tempfile::TempDir;
 
-#[test]
-#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
-fn push_after_merge() {
-    let (repo, remote) = setup_with_remote();
-
-    // Create workspace and add a feature
-    maw_ok(repo.path(), &["ws", "create", "alice"]);
-    write_in_ws(repo.path(), "alice", "feature.txt", "new feature");
-
-    // Describe the work
-    let alice_ws = repo.path().join("ws").join("alice");
-    run_jj(&alice_ws, &["describe", "-m", "feat: add feature"]);
-
-    // Merge the workspace
-    maw_ok(repo.path(), &["ws", "merge", "alice", "--destroy"]);
-
-    // Push to remote
-    let output = maw_ok(repo.path(), &["push"]);
-    assert!(
-        output.contains("main") || output.contains("push"),
-        "Expected push confirmation, got: {output}"
-    );
-
-    // Verify the push landed by cloning the remote
-    let verify_dir = TempDir::new().unwrap();
-    let out = std::process::Command::new("git")
-        .args(["clone", &remote.path().display().to_string(), "."])
+fn clone_remote(remote: &std::path::Path) -> TempDir {
+    let verify_dir = TempDir::new().expect("failed to create verify temp dir");
+    let out = Command::new("git")
+        .args(["clone", remote.to_str().unwrap(), "."])
         .current_dir(verify_dir.path())
         .output()
-        .unwrap();
+        .expect("failed to run git clone");
     assert!(
         out.status.success(),
         "Failed to clone remote for verification: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-
-    // Check the feature file exists in the clone
-    let feature_file = verify_dir.path().join("feature.txt");
-    assert!(
-        feature_file.exists(),
-        "feature.txt should exist in remote after push"
-    );
-    let content = std::fs::read_to_string(&feature_file).unwrap();
-    assert_eq!(content, "new feature");
+    verify_dir
 }
 
 #[test]
-#[ignore = "requires jj push - being replaced by git-native push (bd-1xfd.3)"]
-fn push_advance() {
-    let (repo, remote) = setup_with_remote();
+fn push_after_merge() {
+    let (repo, remote) = TestRepo::with_remote();
 
-    // Write directly in default workspace (simulating hotfix workflow)
-    write_in_ws(repo.path(), "default", "hotfix.txt", "urgent fix");
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("alice", "feature.txt", "new feature\n");
+    repo.maw_ok(&["ws", "merge", "alice", "--destroy"]);
 
-    // Describe and commit from default workspace
-    let ws = default_ws(repo.path());
-    run_jj(&ws, &["describe", "-m", "fix: hotfix"]);
-    run_jj(&ws, &["commit", "-m", "fix: hotfix"]);
+    let output = repo.maw_ok(&["push"]);
+    assert!(output.contains("push") || output.contains("origin"));
 
-    // Push with --advance flag
-    let output = maw_ok(repo.path(), &["push", "--advance"]);
-    assert!(
-        output.contains("main") || output.contains("push"),
-        "Expected push confirmation, got: {output}"
-    );
+    let verify_dir = clone_remote(remote.path());
+    let feature_file = verify_dir.path().join("feature.txt");
+    assert!(feature_file.exists());
+    let content = std::fs::read_to_string(&feature_file).unwrap();
+    assert_eq!(content, "new feature\n");
+}
 
-    // Verify the push landed by cloning the remote
-    let verify_dir = TempDir::new().unwrap();
-    let out = std::process::Command::new("git")
-        .args(["clone", &remote.path().display().to_string(), "."])
-        .current_dir(verify_dir.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "Failed to clone remote for verification: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+#[test]
+fn push_advance_moves_branch_to_current_epoch() {
+    let (repo, remote) = TestRepo::with_remote();
 
-    // Check the hotfix file exists in the clone
-    let hotfix_file = verify_dir.path().join("hotfix.txt");
-    assert!(
-        hotfix_file.exists(),
-        "hotfix.txt should exist in remote after push --advance"
-    );
-    let content = std::fs::read_to_string(&hotfix_file).unwrap();
-    assert_eq!(content, "urgent fix");
+    repo.add_file("default", "hotfix.txt", "urgent fix\n");
+    repo.git_in_workspace("default", &["add", "hotfix.txt"]);
+    repo.git_in_workspace("default", &["commit", "-m", "fix: hotfix"]);
+
+    let detached_head = repo.workspace_head("default");
+    repo.git(&[
+        "update-ref",
+        "refs/manifold/epoch/current",
+        detached_head.as_str(),
+    ]);
+    repo.git(&["update-ref", "refs/heads/main", repo.epoch0()]);
+
+    let output = repo.maw_ok(&["push", "--advance"]);
+    assert!(output.contains("push") || output.contains("Advancing"));
+
+    let verify_dir = clone_remote(remote.path());
+    let hotfix = verify_dir.path().join("hotfix.txt");
+    assert!(hotfix.exists());
+    let content = std::fs::read_to_string(&hotfix).unwrap();
+    assert_eq!(content, "urgent fix\n");
 }

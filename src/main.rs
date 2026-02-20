@@ -7,17 +7,23 @@ mod backend;
 mod config;
 mod doctor;
 mod epoch_gc;
+#[allow(dead_code)]
 mod error;
+#[allow(dead_code)]
 mod eval;
 mod exec;
 mod format;
-mod init;
+#[allow(dead_code)]
 mod merge;
 mod merge_cmd;
+#[allow(dead_code)]
 mod merge_state;
+#[allow(dead_code)]
 mod model;
+#[allow(dead_code)]
 mod oplog;
 mod push;
+#[allow(dead_code)]
 mod refs;
 mod release;
 mod status;
@@ -29,25 +35,18 @@ mod workspace;
 
 /// Multi-Agent Workspaces coordinator
 ///
-/// maw coordinates multiple AI agents on the same codebase using jj
-/// (Jujutsu), a git-compatible version control system. Each agent gets
-/// an isolated working copy (separate view of the codebase) — edit
-/// files concurrently without blocking each other.
-///
-/// KEY DIFFERENCES FROM GIT:
-///   - No staging area — jj tracks all changes automatically (no git add)
-///   - You're always in a commit — use 'describe' to set the message
-///   - Conflicts are recorded in commits, not blocking
+/// maw coordinates multiple AI agents on the same codebase using
+/// Manifold metadata and git worktrees. Each agent gets an isolated
+/// workspace under `ws/<name>/` so edits can happen concurrently.
 ///
 /// QUICK START:
 ///
 ///   maw ws create <your-name>
 ///
 ///   # All file operations use the workspace path shown by create.
-///   # Run jj commands via maw (works in sandboxed environments):
-///   maw exec <your-name> -- jj describe -m "feat: what you did"
-///   #   ('describe' sets the commit message — like git commit --amend -m)
-///   maw exec <your-name> -- jj diff
+///   # Run tools inside your workspace:
+///   maw exec <your-name> -- cargo test
+///   maw exec <your-name> -- git status
 ///
 ///   # Run other tools in your workspace:
 ///   maw exec <your-name> -- cargo test
@@ -60,10 +59,10 @@ mod workspace;
 ///
 ///   1. Create workspace: maw ws create <name>
 ///   2. Edit files under ws/<name>/ (use absolute paths)
-///   3. Save work: maw exec <name> -- jj describe -m "feat: ..."
+///   3. Save work with git commits in your workspace
 ///   4. Check status: maw ws status
 ///   5. Merge work: maw ws merge <name1> <name2>
-///   6. Conflicts are recorded in commits, resolve and continue
+///   6. Resolve conflicts if needed, then continue
 #[derive(Parser)]
 #[command(name = "maw")]
 #[command(version, about)]
@@ -184,13 +183,13 @@ enum Commands {
     /// One command to replace the manual release sequence:
     ///   1. Advance branch bookmark to @- (your version bump commit)
     ///   2. Push branch to origin
-    ///   3. Create jj tag + git tag
+    ///   3. Create and push git tag
     ///   4. Push tag to origin
     ///
     /// Usage: maw release v0.30.0
     ///
     /// Assumes your version bump is already committed. Run this after:
-    ///   jj new && <edit version> && jj describe -m "chore: bump to vX.Y.Z"
+    ///   <edit version> && git commit -m "chore: bump to vX.Y.Z"
     Release(release::ReleaseArgs),
 
     /// Garbage-collect unreferenced epoch snapshots
@@ -245,7 +244,7 @@ fn main() {
     let result = match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(ref cmd) => agents::run(cmd),
-        Commands::Init => init::run(),
+        Commands::Init => v2_init::run(),
         Commands::Upgrade => upgrade::run(),
         Commands::Doctor { format, json } => {
             doctor::run(format::OutputFormat::with_json_flag(format, json))
@@ -273,11 +272,14 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
+    use clap::CommandFactory;
     use tempfile::tempdir;
 
-    use super::should_emit_migration_notice;
+    use super::{should_emit_migration_notice, Cli};
 
     #[test]
     fn emits_notice_for_jj_only_repo() {
@@ -309,5 +311,161 @@ mod tests {
         let dir = tempdir().unwrap();
 
         assert!(!should_emit_migration_notice(dir.path()));
+    }
+
+    fn collect_rs_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let Ok(entries) = fs::read_dir(root) else {
+            return files;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_rs_files(&path));
+                continue;
+            }
+
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+
+        files
+    }
+
+    fn has_jj_token(content: &str) -> bool {
+        content
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token.eq_ignore_ascii_case("jj") || token.eq_ignore_ascii_case("jujutsu"))
+    }
+
+    fn collect_help_texts(
+        cmd: clap::Command,
+        command_path: String,
+        output: &mut Vec<(String, String)>,
+    ) {
+        let mut renderable = cmd.clone();
+        let mut help = Vec::new();
+        let _ = renderable.write_long_help(&mut help);
+        output.push((
+            command_path.clone(),
+            String::from_utf8_lossy(&help).into_owned(),
+        ));
+
+        for sub in cmd.get_subcommands() {
+            let sub = sub.clone();
+            let path = if command_path.is_empty() {
+                sub.get_name().to_string()
+            } else {
+                format!("{command_path} {}", sub.get_name())
+            };
+            collect_help_texts(sub, path, output);
+        }
+    }
+
+    #[test]
+    fn jj_runtime_calls_are_migration_only() {
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let files = collect_rs_files(&src_root);
+        let mut offenders = Vec::new();
+
+        for file in files {
+            if file.ends_with("src/upgrade.rs") {
+                continue;
+            }
+
+            let Ok(content) = fs::read_to_string(&file) else {
+                continue;
+            };
+
+            if content.contains("Command::new(\"jj\")") {
+                offenders.push(file);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "Non-migration jj runtime calls found: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn help_text_is_jj_free() {
+        let mut help_texts = Vec::new();
+        collect_help_texts(Cli::command(), "maw".to_string(), &mut help_texts);
+
+        let offenders: Vec<_> = help_texts
+            .into_iter()
+            .filter_map(|(command_path, help)| has_jj_token(&help).then_some(command_path))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "Unexpected jj mentions in help output: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn no_deprecated_ws_jj_help_text_in_source() {
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let files = collect_rs_files(&src_root);
+        let deprecated = ["maw", "ws", "jj"].join(" ");
+        let mut offenders = Vec::new();
+
+        for file in files {
+            let Ok(content) = fs::read_to_string(&file) else {
+                continue;
+            };
+
+            if content.contains(&deprecated) {
+                offenders.push(file);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "Deprecated ws-jj help text found: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn jj_mentions_are_scoped_to_migration_files() {
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let files = collect_rs_files(&src_root);
+
+        let allowed: BTreeSet<&str> = [
+            "main.rs",
+            "upgrade.rs",
+            "doctor.rs",
+            "workspace/create.rs",
+        ]
+        .into_iter()
+        .collect();
+
+        let mut offenders = Vec::new();
+        for file in files {
+            let Ok(content) = fs::read_to_string(&file) else {
+                continue;
+            };
+
+            if !has_jj_token(&content) {
+                continue;
+            }
+
+            let Ok(rel) = file.strip_prefix(&src_root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+
+            if !allowed.contains(rel.as_str()) {
+                offenders.push(rel);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "Unexpected jj mentions outside allowlist: {offenders:#?}"
+        );
     }
 }

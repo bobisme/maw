@@ -182,7 +182,7 @@ pub fn compute_merge_id(
     let result = hasher.finalize();
     // Return lowercase hex string (64 chars)
     let mut hex = String::with_capacity(64);
-    for b in result.iter() {
+    for b in &result {
         use std::fmt::Write as _;
         let _ = write!(hex, "{b:02x}");
     }

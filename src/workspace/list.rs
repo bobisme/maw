@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
-use crate::model::types::{WorkspaceMode, WorkspaceState};
+use crate::model::types::WorkspaceState;
 use crate::workspace::templates::TemplateDefaults;
 
 use crate::merge::quarantine::QUARANTINE_NAME_PREFIX;

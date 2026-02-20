@@ -128,7 +128,7 @@ impl From<std::io::Error> for ReflinkBackendError {
 // RefLinkBackend
 // ---------------------------------------------------------------------------
 
-/// A workspace backend that uses reflink (CoW) copies of epoch snapshots.
+/// A workspace backend that uses reflink (`CoW`) copies of epoch snapshots.
 ///
 /// Each workspace is a `cp --reflink=auto` copy of the immutable epoch
 /// snapshot directory located at `.manifold/epochs/e-{epoch_hash}/`.
@@ -147,7 +147,8 @@ impl RefLinkBackend {
     ///
     /// `root` must be the repository root — the directory that contains `.git/`
     /// and `.manifold/`.
-    pub fn new(root: PathBuf) -> Self {
+    #[must_use] 
+    pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
@@ -171,7 +172,7 @@ impl RefLinkBackend {
     }
 
     /// Read the base epoch from a workspace's `.maw-epoch` file.
-    fn read_epoch_file(&self, ws_path: &Path, name: &str) -> Result<EpochId, ReflinkBackendError> {
+    fn read_epoch_file(ws_path: &Path, name: &str) -> Result<EpochId, ReflinkBackendError> {
         let epoch_file = ws_path.join(EPOCH_FILE);
         if !epoch_file.exists() {
             return Err(ReflinkBackendError::MissingEpochFile {
@@ -187,7 +188,7 @@ impl RefLinkBackend {
     }
 
     /// Write the base epoch to a workspace's `.maw-epoch` file.
-    fn write_epoch_file(&self, ws_path: &Path, epoch: &EpochId) -> Result<(), ReflinkBackendError> {
+    fn write_epoch_file(ws_path: &Path, epoch: &EpochId) -> Result<(), ReflinkBackendError> {
         let epoch_file = ws_path.join(EPOCH_FILE);
         let content = format!("{}\n", epoch.as_str());
         std::fs::write(&epoch_file, content)?;
@@ -215,11 +216,11 @@ impl RefLinkBackend {
 
     /// Copy `src` into `dst` using `cp --reflink=auto -r`.
     ///
-    /// On CoW filesystems (Btrfs, XFS, APFS) this is nearly instant.
+    /// On `CoW` filesystems (Btrfs, XFS, APFS) this is nearly instant.
     /// Falls back silently to a regular copy on non-CoW filesystems.
     ///
     /// `src` must be an existing directory. `dst` must not already exist.
-    fn reflink_copy(&self, src: &Path, dst: &Path) -> Result<(), ReflinkBackendError> {
+    fn reflink_copy(src: &Path, dst: &Path) -> Result<(), ReflinkBackendError> {
         // First try --reflink=auto (most portable: GNU coreutils / macOS `cp`)
         let output = Command::new("cp")
             .args(["-r", "--reflink=auto"])
@@ -247,11 +248,11 @@ impl RefLinkBackend {
         }
 
         // Fallback: portable recursive copy via Rust std::fs
-        self.recursive_copy(src, dst)
+        Self::recursive_copy(src, dst)
     }
 
     /// Portable recursive directory copy using `std::fs`.
-    fn recursive_copy(&self, src: &Path, dst: &Path) -> Result<(), ReflinkBackendError> {
+    fn recursive_copy(src: &Path, dst: &Path) -> Result<(), ReflinkBackendError> {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
@@ -259,7 +260,7 @@ impl RefLinkBackend {
             let dst_path = dst.join(entry.file_name());
             let metadata = entry.metadata()?;
             if metadata.is_dir() {
-                self.recursive_copy(&src_path, &dst_path)?;
+                Self::recursive_copy(&src_path, &dst_path)?;
             } else if metadata.is_symlink() {
                 let target = std::fs::read_link(&src_path)?;
                 #[cfg(unix)]
@@ -297,8 +298,8 @@ impl WorkspaceBackend for RefLinkBackend {
 
         // Idempotency: if workspace already exists with correct epoch, return it.
         if ws_path.exists() {
-            if let Ok(existing_epoch) = self.read_epoch_file(&ws_path, name.as_str()) {
-                if existing_epoch == *epoch {
+            if let Ok(existing_epoch) = Self::read_epoch_file(&ws_path, name.as_str())
+                && existing_epoch == *epoch {
                     return Ok(WorkspaceInfo {
                         id: name.clone(),
                         path: ws_path,
@@ -307,7 +308,6 @@ impl WorkspaceBackend for RefLinkBackend {
                         mode: WorkspaceMode::default(),
                     });
                 }
-            }
             // Partial/mismatched workspace: remove and recreate.
             std::fs::remove_dir_all(&ws_path)?;
         }
@@ -325,10 +325,10 @@ impl WorkspaceBackend for RefLinkBackend {
         std::fs::create_dir_all(&ws_dir)?;
 
         // Reflink-copy the snapshot into the workspace directory.
-        self.reflink_copy(&snapshot_path, &ws_path)?;
+        Self::reflink_copy(&snapshot_path, &ws_path)?;
 
         // Write the base epoch identifier into the workspace.
-        self.write_epoch_file(&ws_path, epoch)?;
+        Self::write_epoch_file(&ws_path, epoch)?;
 
         Ok(WorkspaceInfo {
             id: name.clone(),
@@ -374,14 +374,12 @@ impl WorkspaceBackend for RefLinkBackend {
                 Some(s) => s.to_owned(),
                 None => continue,
             };
-            let id = match WorkspaceId::new(&name_str) {
-                Ok(id) => id,
-                Err(_) => continue, // Skip directories with non-conforming names
+            let Ok(id) = WorkspaceId::new(&name_str) else {
+                continue; // Skip directories with non-conforming names
             };
 
-            let epoch = match self.read_epoch_file(&path, &name_str) {
-                Ok(e) => e,
-                Err(_) => continue, // Not a valid workspace (no metadata file)
+            let Ok(epoch) = Self::read_epoch_file(&path, &name_str) else {
+                continue; // Not a valid workspace (no metadata file)
             };
 
             let state = match &current_epoch {
@@ -414,7 +412,7 @@ impl WorkspaceBackend for RefLinkBackend {
             });
         }
 
-        let base_epoch = self.read_epoch_file(&ws_path, name.as_str())?;
+        let base_epoch = Self::read_epoch_file(&ws_path, name.as_str())?;
         let snapshot_path = self.epoch_snapshot_path(&base_epoch);
 
         let snap = diff_dirs(&snapshot_path, &ws_path);
@@ -430,8 +428,7 @@ impl WorkspaceBackend for RefLinkBackend {
 
         let is_stale = self
             .current_epoch_opt()
-            .map(|current| base_epoch != current)
-            .unwrap_or(false);
+            .is_some_and(|current| base_epoch != current);
 
         Ok(WorkspaceStatus::new(base_epoch, dirty_files, is_stale))
     }
@@ -451,7 +448,7 @@ impl WorkspaceBackend for RefLinkBackend {
             });
         }
 
-        let base_epoch = self.read_epoch_file(&ws_path, name.as_str())?;
+        let base_epoch = Self::read_epoch_file(&ws_path, name.as_str())?;
         let snapshot_path = self.epoch_snapshot_path(&base_epoch);
 
         Ok(diff_dirs(&snapshot_path, &ws_path))
@@ -505,15 +502,15 @@ fn diff_dirs(base_dir: &Path, ws_dir: &Path) -> SnapshotResult {
 
     // Files in workspace: added or modified
     for rel in &ws_files {
-        if !base_files.contains(rel) {
-            added.push(rel.clone());
-        } else {
+        if base_files.contains(rel) {
             // Both exist — compare content
             let base_file = base_dir.join(rel);
             let ws_file = ws_dir.join(rel);
             if !files_equal(&base_file, &ws_file) {
                 modified.push(rel.clone());
             }
+        } else {
+            added.push(rel.clone());
         }
     }
 
@@ -589,6 +586,7 @@ fn files_equal(a: &Path, b: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::redundant_clone)]
 mod tests {
     use super::*;
     use std::fs;
@@ -928,7 +926,7 @@ mod tests {
             .iter()
             .chain(snap.modified.iter())
             .chain(snap.deleted.iter())
-            .any(|p| p.file_name().map(|n| n == EPOCH_FILE).unwrap_or(false));
+            .any(|p| p.file_name().is_some_and(|n| n == EPOCH_FILE));
         assert!(!has_epoch_file, ".maw-epoch must be excluded: {snap:?}");
     }
 
@@ -1105,8 +1103,7 @@ mod tests {
         fs::write(src.join("file.txt"), "hello").unwrap();
         fs::write(src.join("subdir").join("nested.txt"), "nested").unwrap();
 
-        let backend = RefLinkBackend::new(temp.path().to_path_buf());
-        backend.recursive_copy(&src, &dst).unwrap();
+        RefLinkBackend::recursive_copy(&src, &dst).unwrap();
 
         assert!(dst.join("file.txt").exists());
         assert!(dst.join("subdir").join("nested.txt").exists());

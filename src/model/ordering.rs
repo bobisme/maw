@@ -45,7 +45,12 @@ pub struct OrderingKey {
 impl OrderingKey {
     /// Create a new ordering key with explicit values.
     #[must_use]
-    pub fn new(epoch_id: EpochId, workspace_id: WorkspaceId, seq: u64, wall_clock_ms: u64) -> Self {
+    pub const fn new(
+        epoch_id: EpochId,
+        workspace_id: WorkspaceId,
+        seq: u64,
+        wall_clock_ms: u64,
+    ) -> Self {
         Self {
             epoch_id,
             workspace_id,
@@ -118,7 +123,7 @@ pub struct SequenceGenerator {
 impl SequenceGenerator {
     /// Create a new generator starting at seq=0 (next call returns 1).
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             last_seq: 0,
             last_wall_clock_ms: 0,
@@ -127,7 +132,7 @@ impl SequenceGenerator {
 
     /// Resume from a known state (e.g., loaded from persistent storage).
     #[must_use]
-    pub fn resume(last_seq: u64, last_wall_clock_ms: u64) -> Self {
+    pub const fn resume(last_seq: u64, last_wall_clock_ms: u64) -> Self {
         Self {
             last_seq,
             last_wall_clock_ms,
@@ -138,6 +143,7 @@ impl SequenceGenerator {
     ///
     /// Wall clock is clamped: if the system clock went backward (NTP step,
     /// VM resume), we use `last_seen + 1` instead of going backward.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> (u64, u64) {
         self.last_seq += 1;
         let now_ms = current_time_ms();
@@ -156,13 +162,13 @@ impl SequenceGenerator {
 
     /// The last sequence number generated (0 if none yet).
     #[must_use]
-    pub fn last_seq(&self) -> u64 {
+    pub const fn last_seq(&self) -> u64 {
         self.last_seq
     }
 
     /// The last wall-clock value generated (0 if none yet).
     #[must_use]
-    pub fn last_wall_clock_ms(&self) -> u64 {
+    pub const fn last_wall_clock_ms(&self) -> u64 {
         self.last_wall_clock_ms
     }
 }
@@ -177,7 +183,7 @@ impl Default for SequenceGenerator {
 fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 

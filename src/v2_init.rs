@@ -1,4 +1,4 @@
-//! Manifold v2 greenfield initialization — git-native, no jj.
+//! Manifold v2 greenfield initialization — git-native.
 //!
 //! Creates a new Manifold-managed repository from scratch when no `.git/`
 //! exists. Sets up a bare-mode git repo, `.manifold/` metadata, epoch₀,
@@ -126,8 +126,7 @@ impl fmt::Display for InitResult {
         writeln!(f, "  Epoch₀:    {}", &self.epoch0.as_str()[..12])?;
         writeln!(f)?;
         writeln!(f, "Next steps:")?;
-        writeln!(f, "  cd {}", self.default_workspace.display())?;
-        writeln!(f, "  # Add your files, then:")?;
+        writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
         writeln!(
             f,
             "  maw ws create <agent-name>    # create agent workspace"
@@ -609,13 +608,11 @@ mod tests {
 
         // EpochId validates as a proper 40-char hex OID
         assert_eq!(result.epoch0.as_str().len(), 40);
-        assert!(
-            result
-                .epoch0
-                .as_str()
-                .chars()
-                .all(|c| c.is_ascii_hexdigit())
-        );
+        assert!(result
+            .epoch0
+            .as_str()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -842,8 +839,7 @@ impl fmt::Display for BrownfieldInitResult {
         }
         writeln!(f)?;
         writeln!(f, "Next steps:")?;
-        writeln!(f, "  cd {}", self.default_workspace.display())?;
-        writeln!(f, "  # Your project files are in ws/default/")?;
+        writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
         writeln!(
             f,
             "  maw ws create <agent-name>    # create agent workspace"
@@ -856,9 +852,39 @@ impl fmt::Display for BrownfieldInitResult {
 }
 
 /// Options for brownfield initialization.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct BrownfieldInitOptions {
-    // No options yet — placeholder for future configurability (e.g., branch name override).
+    /// Remove tracked files from repo root after creating `ws/default/`.
+    ///
+    /// When enabled (default), tracked source files are moved out of the root
+    /// metadata directory and remain accessible in `ws/default/`. Dirty files
+    /// are still preserved at root.
+    pub clean_root_tracked_files: bool,
+}
+
+impl Default for BrownfieldInitOptions {
+    fn default() -> Self {
+        Self {
+            clean_root_tracked_files: true,
+        }
+    }
+}
+
+pub fn run() -> anyhow::Result<()> {
+    let root = std::env::current_dir()?;
+    let git_dir = root.join(".git");
+
+    if git_dir.exists() {
+        let result = brownfield_init(&root, &BrownfieldInitOptions::default())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{result}");
+    } else {
+        let result = greenfield_init(&root, &InitOptions::default())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{result}");
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -893,7 +919,7 @@ pub struct BrownfieldInitOptions {
 /// it returns early with `already_initialized = true`.
 pub fn brownfield_init(
     root: &Path,
-    _opts: &BrownfieldInitOptions,
+    opts: &BrownfieldInitOptions,
 ) -> Result<BrownfieldInitResult, BrownfieldInitError> {
     let root = std::fs::canonicalize(root)?;
 
@@ -968,8 +994,12 @@ pub fn brownfield_init(
     bf_create_default_workspace(&root, &epoch0, &ws_default)?;
 
     // 12. Remove tracked source files from root (skip dirty ones)
-    let dirty_set: std::collections::HashSet<_> = dirty_files.iter().cloned().collect();
-    let cleaned_count = bf_clean_root_tracked_files(&root, &dirty_set)?;
+    let cleaned_count = if opts.clean_root_tracked_files {
+        let dirty_set: std::collections::HashSet<_> = dirty_files.iter().cloned().collect();
+        bf_clean_root_tracked_files(&root, &dirty_set)?
+    } else {
+        0
+    };
 
     Ok(BrownfieldInitResult {
         repo_root: root,
@@ -1232,24 +1262,22 @@ fn bf_clean_root_tracked_files(
         }
 
         let abs = root.join(&rel);
-        if abs.exists() && abs.is_file() {
-            if std::fs::remove_file(&abs).is_ok() {
+        if abs.exists() && abs.is_file()
+            && std::fs::remove_file(&abs).is_ok() {
                 removed += 1;
                 // Track parent directory for cleanup
-                if let Some(parent) = rel.parent() {
-                    if parent != Path::new("") {
+                if let Some(parent) = rel.parent()
+                    && parent != Path::new("") {
                         let abs_parent = root.join(parent);
                         if !dirs_to_check.contains(&abs_parent) {
                             dirs_to_check.push(abs_parent);
                         }
                     }
-                }
             }
-        }
     }
 
     // Remove empty directories (deepest first)
-    dirs_to_check.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    dirs_to_check.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
     for dir in &dirs_to_check {
         // Only remove if empty
         let _ = std::fs::remove_dir(dir); // silently ignore errors (not empty = fine)
@@ -1488,6 +1516,27 @@ mod brownfield_tests {
         assert!(result.cleaned_root_files > 0);
 
         // But files are present in ws/default/
+        assert!(result.default_workspace.join("README.md").exists());
+        assert!(result.default_workspace.join("main.rs").exists());
+    }
+
+    #[test]
+    fn brownfield_can_preserve_root_tracked_files_when_cleanup_disabled() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        setup_existing_repo(root);
+
+        let opts = BrownfieldInitOptions {
+            clean_root_tracked_files: false,
+        };
+        let result = brownfield_init(root, &opts).unwrap();
+
+        // Root tracked files are intentionally preserved.
+        assert!(root.join("README.md").exists());
+        assert!(root.join("main.rs").exists());
+        assert_eq!(result.cleaned_root_files, 0);
+
+        // The default workspace still has the full tracked tree.
         assert!(result.default_workspace.join("README.md").exists());
         assert!(result.default_workspace.join("main.rs").exists());
     }

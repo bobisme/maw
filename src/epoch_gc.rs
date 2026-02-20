@@ -4,8 +4,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::backend::WorkspaceBackend;
 use crate::backend::git::GitWorktreeBackend;
+use crate::backend::WorkspaceBackend;
 use crate::refs;
 
 /// Result of an epoch GC pass.
@@ -17,6 +17,7 @@ pub struct EpochGcReport {
 }
 
 /// Run epoch GC for the current repo and print a concise summary.
+#[allow(clippy::missing_errors_doc)]
 pub fn run_cli(dry_run: bool) -> Result<()> {
     let root = repo_root()?;
     let report = gc_unreferenced_epochs(&root, dry_run)?;
@@ -70,6 +71,7 @@ fn repo_root() -> Result<PathBuf> {
 /// A snapshot is kept if its epoch is referenced by:
 /// - any active workspace (via git worktree HEAD)
 /// - `refs/manifold/epoch/current`
+#[allow(clippy::missing_errors_doc)]
 pub fn gc_unreferenced_epochs(root: &Path, dry_run: bool) -> Result<EpochGcReport> {
     let epochs_dir = root.join(".manifold").join("epochs");
     if !epochs_dir.exists() {
@@ -131,7 +133,11 @@ fn epoch_snapshot_dirs(epochs_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
             continue;
         }
 
-        let Some(name) = entry.file_name().to_str().map(|s| s.to_owned()) else {
+        let Some(name) = entry
+            .file_name()
+            .to_str()
+            .map(std::borrow::ToOwned::to_owned)
+        else {
             continue;
         };
 

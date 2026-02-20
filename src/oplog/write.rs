@@ -107,10 +107,9 @@ impl fmt::Display for OpLogWriteError {
             Self::CasMismatch { workspace_id } => {
                 write!(
                     f,
-                    "CAS mismatch on workspace '{}' head ref — \
+                    "CAS mismatch on workspace '{workspace_id}' head ref — \
                      the single-writer invariant was violated.\n  \
-                     To fix: check that no other process is writing to this workspace.",
-                    workspace_id
+                     To fix: check that no other process is writing to this workspace."
                 )
             }
             Self::RefError(e) => write!(f, "ref update failed: {e}"),
@@ -223,6 +222,7 @@ pub fn write_operation_blob(root: &Path, op: &Operation) -> Result<GitOid, OpLog
 /// # Errors
 /// Returns an error if the blob write fails, if the ref update fails,
 /// or if the CAS guard is violated.
+#[allow(clippy::missing_panics_doc)]
 pub fn append_operation(
     root: &Path,
     workspace_id: &WorkspaceId,
@@ -235,18 +235,18 @@ pub fn append_operation(
     // Step 2: update the head ref atomically.
     let ref_name = manifold_refs::workspace_head_ref(workspace_id.as_str());
 
-    let result = match old_head {
-        None => {
+    let result = old_head.map_or_else(
+        || {
             // First operation: the ref must not yet exist.
             // Use the zero OID as the expected old value.
             let zero = GitOid::new(&"0".repeat(40)).expect("zero OID is valid");
             manifold_refs::write_ref_cas(root, &ref_name, &zero, &new_oid)
-        }
-        Some(old_oid) => {
+        },
+        |old_oid| {
             // Subsequent operations: CAS from old → new.
             manifold_refs::write_ref_cas(root, &ref_name, old_oid, &new_oid)
-        }
-    };
+        },
+    );
 
     result.map_err(|e| match e {
         manifold_refs::RefError::CasMismatch { .. } => OpLogWriteError::CasMismatch {
@@ -367,11 +367,10 @@ mod tests {
         let oid = write_operation_blob(root, &op).unwrap();
         // OID should be a valid 40-char hex string
         assert_eq!(oid.as_str().len(), 40);
-        assert!(
-            oid.as_str()
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        );
+        assert!(oid
+            .as_str()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]

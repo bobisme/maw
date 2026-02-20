@@ -2,7 +2,7 @@
 //!
 //! Defines the interface that all workspace backends must implement.
 //! This is the API contract between maw's CLI layer and the underlying
-//! isolation mechanism (jj, git, or other VCS).
+//! isolation mechanism (git worktrees, copy-on-write snapshots, or other backends).
 
 pub mod copy;
 pub mod git;
@@ -16,7 +16,7 @@ use crate::model::types::{EpochId, WorkspaceId, WorkspaceInfo};
 ///
 /// The `WorkspaceBackend` trait defines the interface for creating, managing,
 /// and querying workspaces. Implementations of this trait are responsible for
-/// the actual isolation mechanism (e.g., jj working copies, git worktrees, etc.).
+/// the actual isolation mechanism (e.g., git worktrees, reflinks, overlays).
 ///
 /// # Key Invariants
 ///
@@ -26,6 +26,7 @@ use crate::model::types::{EpochId, WorkspaceId, WorkspaceInfo};
 ///   within a given repository.
 /// - **Epoch tracking**: Each workspace is anchored to an epoch (a specific
 ///   repository state). Workspaces can become stale if the repository advances.
+#[allow(clippy::missing_errors_doc)]
 pub trait WorkspaceBackend {
     /// The error type returned by backend operations.
     type Error: std::error::Error + Send + Sync + 'static;
@@ -166,7 +167,8 @@ impl WorkspaceStatus {
     /// * `base_epoch` - The epoch this workspace is based on
     /// * `dirty_files` - List of modified file paths (relative to workspace root)
     /// * `is_stale` - Whether the workspace is behind the current epoch
-    pub fn new(base_epoch: EpochId, dirty_files: Vec<PathBuf>, is_stale: bool) -> Self {
+    #[must_use] 
+    pub const fn new(base_epoch: EpochId, dirty_files: Vec<PathBuf>, is_stale: bool) -> Self {
         Self {
             base_epoch,
             dirty_files,
@@ -176,13 +178,15 @@ impl WorkspaceStatus {
 
     /// Returns `true` if there are no dirty files.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    #[allow(dead_code)]
+    pub const fn is_clean(&self) -> bool {
         self.dirty_files.is_empty()
     }
 
     /// Returns the number of dirty files.
     #[must_use]
-    pub fn dirty_count(&self) -> usize {
+    #[allow(dead_code)]
+    pub const fn dirty_count(&self) -> usize {
         self.dirty_files.len()
     }
 }
@@ -208,7 +212,8 @@ impl SnapshotResult {
     /// * `added` - Paths to files that were added
     /// * `modified` - Paths to files that were modified
     /// * `deleted` - Paths to files that were deleted
-    pub fn new(added: Vec<PathBuf>, modified: Vec<PathBuf>, deleted: Vec<PathBuf>) -> Self {
+    #[must_use] 
+    pub const fn new(added: Vec<PathBuf>, modified: Vec<PathBuf>, deleted: Vec<PathBuf>) -> Self {
         Self {
             added,
             modified,
@@ -228,13 +233,13 @@ impl SnapshotResult {
 
     /// Total count of all changes.
     #[must_use]
-    pub fn change_count(&self) -> usize {
+    pub const fn change_count(&self) -> usize {
         self.added.len() + self.modified.len() + self.deleted.len()
     }
 
     /// Returns `true` if there are no changes.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.change_count() == 0
     }
 }
@@ -312,7 +317,7 @@ mod tests {
         let added = vec![PathBuf::from("new.rs")];
         let modified = vec![PathBuf::from("src/main.rs")];
         let deleted = vec![PathBuf::from("deprecated.rs")];
-        let snapshot = SnapshotResult::new(added.clone(), modified.clone(), deleted.clone());
+        let snapshot = SnapshotResult::new(added, modified, deleted);
         assert!(!snapshot.is_empty());
         assert_eq!(snapshot.change_count(), 3);
 
@@ -369,9 +374,9 @@ impl std::error::Error for AnyBackendError {
 pub enum AnyBackend {
     /// Git worktree backend — always available.
     GitWorktree(GitWorktreeBackend),
-    /// Reflink (CoW) backend — requires a CoW-capable filesystem.
+    /// Reflink (`CoW`) backend — requires a CoW-capable filesystem.
     Reflink(RefLinkBackend),
-    /// OverlayFS backend — Linux only.
+    /// `OverlayFS` backend — Linux only.
     Overlay(OverlayBackend),
     /// Plain recursive-copy backend — universal fallback.
     Copy(CopyBackend),
@@ -400,16 +405,6 @@ impl AnyBackend {
         }
     }
 
-    /// Name of the active backend for diagnostic/logging output.
-    #[must_use]
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::GitWorktree(_) => "git-worktree",
-            Self::Reflink(_) => "reflink",
-            Self::Overlay(_) => "overlay",
-            Self::Copy(_) => "copy",
-        }
-    }
 }
 
 /// Helper: convert a backend-specific error into [`AnyBackendError`].

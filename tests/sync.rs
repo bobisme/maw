@@ -1,107 +1,66 @@
-//! Tests for workspace sync and divergent resolution
-//!
-//! Each test creates an isolated bare maw repo in a temp directory.
+//! Integration tests for workspace staleness and sync behavior.
 
-mod common;
+mod manifold_common;
 
-use common::*;
+use manifold_common::TestRepo;
 
-#[test]
-#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
-fn stale_workspace_detected() {
-    // Create a bare maw repo
-    let repo = setup_bare_repo();
-
-    // Create workspace "alice"
-    maw_ok(repo.path(), &["ws", "create", "alice"]);
-
-    // Make a change in default workspace that modifies shared history
-    // This will cause alice's working copy to become stale
-    write_in_ws(repo.path(), "default", "newfile.txt", "trigger stale");
-    run_jj(&default_ws(repo.path()), &["commit", "-m", "trigger stale"]);
-
-    // Check workspace status - should report alice as stale
-    let status_output = maw_ok(repo.path(), &["ws", "status"]);
-
-    // The status output should mention stale or indicate alice needs sync
-    assert!(
-        status_output.contains("stale")
-            || status_output.contains("Stale")
-            || status_output.contains("sync"),
-        "Expected status to report stale workspace, got: {status_output}"
-    );
-
-    // Run sync from repo root - should succeed
-    let sync_output = maw_ok(repo.path(), &["ws", "sync"]);
-
-    // Verify sync completed successfully (may report "up to date" if default already synced)
-    assert!(
-        sync_output.contains("sync")
-            || sync_output.contains("Sync")
-            || sync_output.contains("updated")
-            || sync_output.contains("Updated")
-            || sync_output.contains("up to date"),
-        "Expected sync success message, got: {sync_output}"
-    );
+fn workspace_state(repo: &TestRepo, name: &str) -> String {
+    let status = repo.maw_ok(&["ws", "status", "--format", "json"]);
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status).expect("ws status --format json should be valid JSON");
+    status_json["workspaces"]
+        .as_array()
+        .expect("workspaces should be an array")
+        .iter()
+        .find(|w| w["name"].as_str() == Some(name))
+        .and_then(|w| w["state"].as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[test]
-#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
-fn auto_sync_on_exec() {
-    // Create a bare maw repo
-    let repo = setup_bare_repo();
+fn stale_workspace_detected_and_sync_clears_it() {
+    let repo = TestRepo::new();
 
-    // Create workspace "alice"
-    maw_ok(repo.path(), &["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
 
-    // Make alice stale by committing in default workspace
-    write_in_ws(repo.path(), "default", "trigger.txt", "make alice stale");
-    run_jj(&default_ws(repo.path()), &["commit", "-m", "trigger stale"]);
+    assert!(workspace_state(&repo, "alice").contains("stale"));
 
-    // Now run a jj command via maw exec in alice workspace
-    // This should auto-sync the stale workspace before running the command
-    let exec_output = maw_ok(repo.path(), &["exec", "alice", "--", "jj", "status"]);
-
-    // The command should succeed (not fail with stale error)
-    // The output should show jj status executed successfully
-    assert!(
-        exec_output.contains("working copy")
-            || exec_output.contains("Working copy")
-            || exec_output.contains("parent")
-            || exec_output.contains("Parent"),
-        "Expected jj status output, got: {exec_output}"
-    );
+    repo.maw_ok(&["ws", "sync", "--all"]);
+    assert!(!workspace_state(&repo, "alice").contains("stale"));
 }
 
 #[test]
-#[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
-fn sync_resolves_divergent_identical() {
-    // Create a bare maw repo
-    let repo = setup_bare_repo();
+fn exec_auto_syncs_stale_workspace_before_running_command() {
+    let repo = TestRepo::new();
 
-    // Create workspace "bob"
-    maw_ok(repo.path(), &["ws", "create", "bob"]);
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
 
-    // Make a change in bob's workspace
-    write_in_ws(repo.path(), "bob", "test.txt", "same content");
-    run_jj(
-        &repo.path().join("ws").join("bob"),
-        &["describe", "-m", "test change"],
-    );
+    let old_head = repo.workspace_head("alice");
+    assert_ne!(old_head, repo.current_epoch());
 
-    // Trigger stale by committing in default
-    write_in_ws(repo.path(), "default", "other.txt", "other file");
-    run_jj(&default_ws(repo.path()), &["commit", "-m", "trigger stale"]);
+    repo.maw_ok(&["exec", "alice", "--", "git", "rev-parse", "HEAD"]);
 
-    // Running sync should handle any divergence automatically
-    maw_ok(repo.path(), &["ws", "sync"]);
+    let new_head = repo.workspace_head("alice");
+    assert_eq!(new_head, repo.current_epoch());
+}
 
-    // After sync, workspace status should be clean (no divergent warnings)
-    let status_output = maw_ok(repo.path(), &["ws", "status"]);
+#[test]
+fn sync_all_updates_multiple_stale_workspaces() {
+    let repo = TestRepo::new();
 
-    // Should not report divergent commits after sync
-    assert!(
-        !status_output.contains("divergent") && !status_output.contains("Divergent"),
-        "Expected no divergent commits after sync, got: {status_output}"
-    );
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
+
+    repo.maw_ok(&["ws", "sync", "--all"]);
+
+    assert!(!workspace_state(&repo, "alice").contains("stale"));
+    assert!(!workspace_state(&repo, "bob").contains("stale"));
 }

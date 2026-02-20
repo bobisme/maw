@@ -83,7 +83,7 @@ pub struct ConflictSide {
 impl ConflictSide {
     /// Create a new conflict side.
     #[must_use]
-    pub fn new(workspace: String, content: GitOid, timestamp: OrderingKey) -> Self {
+    pub const fn new(workspace: String, content: GitOid, timestamp: OrderingKey) -> Self {
         Self {
             workspace,
             content,
@@ -100,11 +100,11 @@ impl ConflictSide {
 ///
 /// Regions localize conflicts to specific parts of a file — either line ranges
 /// or AST node spans. This is the difference between "file has conflict" and
-/// "lines 42-67 of function process_order have a conflict."
+/// "lines 42-67 of function `process_order` have a conflict."
 ///
 /// # Serialization
 ///
-/// Uses `#[serde(tag = "kind")]` with snake_case variant names:
+/// Uses `#[serde(tag = "kind")]` with `snake_case` variant names:
 ///
 /// ```json
 /// { "kind": "lines", "start": 42, "end": 67 }
@@ -136,7 +136,7 @@ pub enum Region {
     /// AstNode { node_kind: "function_item", name: Some("process_order"), start_byte: 1024, end_byte: 2048 }
     /// ```
     AstNode {
-        /// The tree-sitter node kind (e.g., "function_item", "struct_item").
+        /// The tree-sitter node kind (e.g., "`function_item`", "`struct_item`").
         node_kind: String,
         /// The name of the node if available (e.g., function name, struct name).
         name: Option<String>,
@@ -153,7 +153,7 @@ pub enum Region {
 impl Region {
     /// Create a line-based region.
     #[must_use]
-    pub fn lines(start: u32, end: u32) -> Self {
+    pub const fn lines(start: u32, end: u32) -> Self {
         Self::Lines { start, end }
     }
 
@@ -175,7 +175,7 @@ impl Region {
 
     /// Create a whole-file region.
     #[must_use]
-    pub fn whole_file() -> Self {
+    pub const fn whole_file() -> Self {
         Self::WholeFile
     }
 
@@ -186,10 +186,9 @@ impl Region {
             Self::Lines { start, end } => format!("lines {start}..{end}"),
             Self::AstNode {
                 node_kind, name, ..
-            } => match name {
-                Some(n) => format!("{node_kind} `{n}`"),
-                None => format!("{node_kind}"),
-            },
+            } => name
+                .as_ref()
+                .map_or_else(|| node_kind.clone(), |n| format!("{node_kind} `{n}`")),
             Self::WholeFile => "whole file".to_string(),
         }
     }
@@ -213,7 +212,7 @@ impl fmt::Display for Region {
 ///
 /// # Serialization
 ///
-/// Uses `#[serde(tag = "reason")]` with snake_case variant names:
+/// Uses `#[serde(tag = "reason")]` with `snake_case` variant names:
 ///
 /// ```json
 /// { "reason": "overlapping_line_edits", "description": "Both sides edited lines 42-67" }
@@ -349,7 +348,7 @@ impl ConflictReason {
 
     /// Return the reason variant name as a static string.
     #[must_use]
-    pub fn variant_name(&self) -> &'static str {
+    pub const fn variant_name(&self) -> &'static str {
         match self {
             Self::OverlappingLineEdits { .. } => "overlapping_line_edits",
             Self::SameAstNodeModified { .. } => "same_ast_node_modified",
@@ -468,7 +467,7 @@ impl SemanticConflictExplanation {
 /// # Design philosophy
 ///
 /// From §5.7: "An agent receiving 'two edits are non-commutative because both
-/// modify AST node process_order at lines 42-67' can resolve the conflict
+/// modify AST node `process_order` at lines 42-67' can resolve the conflict
 /// surgically. An agent receiving 'file has conflict' with marker soup cannot."
 ///
 /// # Example JSON
@@ -505,7 +504,7 @@ pub struct ConflictAtom {
 impl ConflictAtom {
     /// Create a new conflict atom.
     #[must_use]
-    pub fn new(base_region: Region, edits: Vec<AtomEdit>, reason: ConflictReason) -> Self {
+    pub const fn new(base_region: Region, edits: Vec<AtomEdit>, reason: ConflictReason) -> Self {
         Self {
             base_region,
             edits,
@@ -616,7 +615,7 @@ pub enum Conflict {
         ///
         /// `None` if no common ancestor exists (e.g., both sides added
         /// different content to a previously nonexistent path with the
-        /// same FileId — unusual but possible after merge).
+        /// same `FileId` — unusual but possible after merge).
         base: Option<GitOid>,
 
         /// The conflicting sides (one per workspace that modified this region).
@@ -689,7 +688,7 @@ pub enum Conflict {
     /// The same file was renamed to different destinations by different
     /// workspaces.
     ///
-    /// The FileId is the same across all sides — only the destination paths
+    /// The `FileId` is the same across all sides — only the destination paths
     /// differ. Content may or may not have changed.
     ///
     /// # Example
@@ -698,7 +697,7 @@ pub enum Conflict {
     /// - Workspace `alice` renames to `src/helpers.rs`
     /// - Workspace `bob` renames to `src/common.rs`
     ///
-    /// Both operations share the same FileId, but the destinations diverge.
+    /// Both operations share the same `FileId`, but the destinations diverge.
     DivergentRename {
         /// Stable file identity (same across all sides).
         file_id: FileId,
@@ -720,7 +719,7 @@ impl Conflict {
     /// For `DivergentRename`, returns the original path.
     /// For all other variants, returns the conflict path.
     #[must_use]
-    pub fn path(&self) -> &PathBuf {
+    pub const fn path(&self) -> &PathBuf {
         match self {
             Self::Content { path, .. }
             | Self::AddAdd { path, .. }
@@ -731,7 +730,7 @@ impl Conflict {
 
     /// Return the conflict variant name as a static string.
     #[must_use]
-    pub fn variant_name(&self) -> &'static str {
+    pub const fn variant_name(&self) -> &'static str {
         match self {
             Self::Content { .. } => "content",
             Self::AddAdd { .. } => "add_add",
@@ -742,7 +741,7 @@ impl Conflict {
 
     /// Return the number of sides involved in this conflict.
     #[must_use]
-    pub fn side_count(&self) -> usize {
+    pub const fn side_count(&self) -> usize {
         match self {
             Self::Content { sides, .. } | Self::AddAdd { sides, .. } => sides.len(),
             Self::ModifyDelete { .. } => 2,

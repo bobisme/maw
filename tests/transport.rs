@@ -62,17 +62,15 @@ fn create_test_commit(repo: &Path, message: &str) -> String {
         .current_dir(repo)
         .output()
         .expect("failed to create commit");
-    if !out.status.success() {
-        panic!(
-            "Failed to create commit: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    assert!(out.status.success(), 
+        "Failed to create commit: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     git_ok(repo, &["rev-parse", "HEAD"]).trim().to_string()
 }
 
 /// Set up a second Manifold repo by cloning the bare remote.
-/// Returns (local_root, _temp_dir_holder).
+/// Returns (`local_root`, _`temp_dir_holder`).
 fn clone_from_bare(
     bare_remote: &Path,
     ws_name: &str,
@@ -157,13 +155,11 @@ fn push_manifold_refs_sends_all_manifold_refs_to_remote() {
         .output()
         .expect("failed to run maw push --manifold");
 
-    if !out.status.success() {
-        panic!(
-            "maw push --manifold failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    assert!(out.status.success(), 
+        "maw push --manifold failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // After push: remote should have the manifold refs.
     let remote_ws_a = read_ref(remote_path, "refs/manifold/head/ws-a");
@@ -231,13 +227,11 @@ fn pull_manifold_refs_fast_forwards_workspace_head() {
         .output()
         .expect("failed to run maw pull --manifold");
 
-    if !out.status.success() {
-        panic!(
-            "maw pull --manifold failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    assert!(out.status.success(), 
+        "maw pull --manifold failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // After pull: machine B should have the head ref.
     let local_head = read_ref(&root_b, "refs/manifold/head/agent-1");

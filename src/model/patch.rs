@@ -6,7 +6,7 @@
 //!
 //! Key types:
 //! - [`FileId`] — stable identity that survives renames (§5.8)
-//! - [`PatchSet`] — epoch + BTreeMap of path → change
+//! - [`PatchSet`] — epoch + `BTreeMap` of path → change
 //! - [`PatchValue`] — the four kinds of change (Add, Delete, Modify, Rename)
 
 use std::collections::BTreeMap;
@@ -36,7 +36,7 @@ pub struct FileId(u128);
 impl FileId {
     /// Create a `FileId` from a raw `u128`.
     #[must_use]
-    pub fn new(id: u128) -> Self {
+    pub const fn new(id: u128) -> Self {
         Self(id)
     }
 
@@ -51,7 +51,7 @@ impl FileId {
 
     /// Return the inner `u128` value.
     #[must_use]
-    pub fn as_u128(self) -> u128 {
+    pub const fn as_u128(self) -> u128 {
         self.0
     }
 
@@ -148,7 +148,7 @@ pub struct PatchSet {
 impl PatchSet {
     /// Create an empty `PatchSet` relative to the given epoch.
     #[must_use]
-    pub fn empty(base_epoch: EpochId) -> Self {
+    pub const fn empty(base_epoch: EpochId) -> Self {
         Self {
             base_epoch,
             patches: BTreeMap::new(),

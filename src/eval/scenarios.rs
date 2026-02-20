@@ -2,14 +2,14 @@
 //!
 //! Each scenario tests a specific aspect of the agent experience with maw.
 //! Scenarios are designed to be run by real Claude agents against /tmp repos
-//! with no prior git/jj knowledge — only directories, files, and JSON output.
+//! with no prior git knowledge — only directories, files, and JSON output.
 //!
 //! # Design Principles
 //!
 //! - **Non-leading prompts**: task descriptions tell agents *what* to do, not *how*.
 //! - **Objective scoring**: rubric uses observable metrics (errors, retries, confusion).
 //! - **Reproducible**: each scenario creates a deterministic initial state.
-//! - **Zero VCS knowledge**: agents never need to understand git, jj, or VCS concepts.
+//! - **Zero VCS knowledge**: agents never need to understand git or VCS concepts.
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +53,7 @@ pub struct Scenario {
     /// Repository state that must exist before the agent starts.
     pub preconditions: Preconditions,
     /// The plain-English task prompt given to the agent.
-    /// Must NOT mention git, jj, branches, commits, or VCS concepts.
+    /// Must NOT mention git, branches, commits, or VCS concepts.
     pub task_prompt: &'static str,
     /// Observable outcomes that determine success.
     pub expected_outcomes: &'static [&'static str],
@@ -120,7 +120,7 @@ pub enum FrictionScore {
 pub struct RunMetrics {
     /// Total tool invocations (Bash, Read, Write, Edit, etc.).
     pub tool_calls: u32,
-    /// Maw commands specifically (subset of tool_calls).
+    /// Maw commands specifically (subset of `tool_calls`).
     pub maw_commands: u32,
     /// Commands that returned non-zero exit codes.
     pub errors: u32,
@@ -154,14 +154,14 @@ pub struct EvalReport {
     pub results: Vec<ScenarioResult>,
     /// Average friction score across all scenarios.
     pub average_score: f64,
-    /// Whether the overall eval passed (average ≤ TARGET_AVERAGE_SCORE).
+    /// Whether the overall eval passed (average ≤ `TARGET_AVERAGE_SCORE`).
     pub passed: bool,
 }
 
 impl RunMetrics {
     /// Compute the friction score from raw metrics.
     #[must_use]
-    pub fn score(&self) -> FrictionScore {
+    pub const fn score(&self) -> FrictionScore {
         if !self.goal_achieved {
             return FrictionScore::Failed;
         }
@@ -191,8 +191,8 @@ impl EvalReport {
     #[must_use]
     pub fn from_results(results: Vec<ScenarioResult>) -> Self {
         let sum: u32 = results.iter().map(|r| u32::from(r.score.value())).sum();
-        let count = results.len().max(1);
-        let average_score = f64::from(sum) / count as f64;
+        let count = u32::try_from(results.len().max(1)).unwrap_or(u32::MAX);
+        let average_score = f64::from(sum) / f64::from(count);
         let passed = average_score <= TARGET_AVERAGE_SCORE;
         Self {
             results,
@@ -208,7 +208,7 @@ impl EvalReport {
 
 /// Return all 5 defined scenarios.
 #[must_use]
-pub fn all_scenarios() -> [Scenario; SCENARIO_COUNT] {
+pub const fn all_scenarios() -> [Scenario; SCENARIO_COUNT] {
     [
         scenario_basic_lifecycle(),
         scenario_multi_file_edit(),
@@ -223,13 +223,14 @@ pub fn all_scenarios() -> [Scenario; SCENARIO_COUNT] {
 /// Tests the minimal happy path: create workspace, add a file, merge.
 /// This is the simplest possible agent interaction with maw.
 #[must_use]
-pub fn scenario_basic_lifecycle() -> Scenario {
+pub const fn scenario_basic_lifecycle() -> Scenario {
     Scenario {
         id: ScenarioId::BasicLifecycle,
         name: "basic-lifecycle",
         tests: "Minimal lifecycle: create workspace, add file, merge, verify",
         preconditions: Preconditions {
-            repo_state: "Fresh maw repo with a seed Rust project (Cargo.toml, src/main.rs, src/lib.rs)",
+            repo_state:
+                "Fresh maw repo with a seed Rust project (Cargo.toml, src/main.rs, src/lib.rs)",
             seed_files: &[
                 SeedFile {
                     path: "Cargo.toml",
@@ -263,13 +264,13 @@ pub fn scenario_basic_lifecycle() -> Scenario {
             "3. Merge workspace agent-1 back (destroy the workspace after merge).\n",
             "4. Confirm that src/hello.rs exists in the main workspace (ws/default/).\n",
             "\n",
-            "Use only maw commands and file operations. Do not use git or jj directly.\n",
+            "Use only maw commands and file operations. Do not use git directly.\n",
             "Use absolute paths for all file operations.\n",
         ),
         expected_outcomes: &[
             "src/hello.rs exists in ws/default/ with correct content",
             "workspace agent-1 no longer exists (destroyed)",
-            "no git/jj commands were used by the agent",
+            "no git commands were used by the agent",
         ],
         expected_commands: &[
             "maw ws create agent-1",
@@ -285,7 +286,7 @@ pub fn scenario_basic_lifecycle() -> Scenario {
 /// Tests editing multiple existing files and adding new ones, then merging.
 /// More realistic than S1 — agents commonly modify several files per task.
 #[must_use]
-pub fn scenario_multi_file_edit() -> Scenario {
+pub const fn scenario_multi_file_edit() -> Scenario {
     Scenario {
         id: ScenarioId::MultiFileEdit,
         name: "multi-file-edit",
@@ -342,7 +343,7 @@ pub fn scenario_multi_file_edit() -> Scenario {
             "3. Merge workspace feature-work back (destroy after merge).\n",
             "4. Confirm all three changes are present in the main workspace.\n",
             "\n",
-            "Use only maw commands and file operations. Do not use git or jj directly.\n",
+            "Use only maw commands and file operations. Do not use git directly.\n",
             "Use absolute paths for all file operations.\n",
         ),
         expected_outcomes: &[
@@ -368,7 +369,7 @@ pub fn scenario_multi_file_edit() -> Scenario {
 /// agent creates a second workspace, edits different files, and merges both.
 /// This validates that agents can reason about parallel workspaces.
 #[must_use]
-pub fn scenario_multi_agent() -> Scenario {
+pub const fn scenario_multi_agent() -> Scenario {
     Scenario {
         id: ScenarioId::MultiAgent,
         name: "multi-agent",
@@ -441,7 +442,7 @@ pub fn scenario_multi_agent() -> Scenario {
             "   - src/auth.rs should contain an is_admin function\n",
             "   - src/api.rs should contain a handle_error function\n",
             "\n",
-            "Use only maw commands and file operations. Do not use git or jj directly.\n",
+            "Use only maw commands and file operations. Do not use git directly.\n",
             "Use absolute paths for all file operations.\n",
         ),
         expected_outcomes: &[
@@ -466,7 +467,7 @@ pub fn scenario_multi_agent() -> Scenario {
 /// merge produces a conflict, agent must resolve it. This is the hardest
 /// scenario and validates error message quality.
 #[must_use]
-pub fn scenario_conflict_resolution() -> Scenario {
+pub const fn scenario_conflict_resolution() -> Scenario {
     Scenario {
         id: ScenarioId::ConflictResolution,
         name: "conflict-resolution",
@@ -544,7 +545,7 @@ pub fn scenario_conflict_resolution() -> Scenario {
             "4. Confirm src/lib.rs in the main workspace uses checked_add.\n",
             "5. Destroy both workspaces if not already destroyed.\n",
             "\n",
-            "Use only maw commands and file operations. Do not use git or jj directly.\n",
+            "Use only maw commands and file operations. Do not use git directly.\n",
             "Use absolute paths for all file operations.\n",
         ),
         expected_outcomes: &[
@@ -570,7 +571,7 @@ pub fn scenario_conflict_resolution() -> Scenario {
 /// get history. This validates that agents can gather information without
 /// modifying state — essential for debugging and coordination.
 #[must_use]
-pub fn scenario_read_only_inspection() -> Scenario {
+pub const fn scenario_read_only_inspection() -> Scenario {
     Scenario {
         id: ScenarioId::ReadOnlyInspection,
         name: "read-only-inspection",
@@ -637,7 +638,7 @@ pub fn scenario_read_only_inspection() -> Scenario {
             "\n",
             "Output your findings as a structured summary.\n",
             "\n",
-            "Use only maw commands and file read operations. Do not use git or jj directly.\n",
+            "Use only maw commands and file read operations. Do not use git directly.\n",
             "Do NOT merge, create, or destroy any workspaces.\n",
         ),
         expected_outcomes: &[
@@ -773,14 +774,14 @@ mod tests {
 
     #[test]
     fn task_prompts_do_not_mention_vcs() {
-        let forbidden = ["git ", "jj ", "branch", "commit", "checkout", "rebase"];
+        let forbidden = ["git ", "branch", "commit", "checkout", "rebase"];
         for s in &all_scenarios() {
             for word in &forbidden {
-                // Allow "git" or "jj" only in the "Do not use git or jj" instruction
+                // Allow "git" only in the "Do not use git" instruction
                 let prompt_lower = s.task_prompt.to_lowercase();
                 let occurrences: Vec<_> = prompt_lower.match_indices(word).collect();
                 for (idx, _) in &occurrences {
-                    // Check context: it's OK if it's in "do not use git" or "do not use jj"
+                    // Check context: it's OK if it's in "do not use git"
                     let start = idx.saturating_sub(20);
                     let context = &prompt_lower[start..prompt_lower.len().min(idx + 30)];
                     assert!(

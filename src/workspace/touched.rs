@@ -13,7 +13,7 @@ use crate::model::types::WorkspaceId;
 use super::get_backend;
 
 #[derive(Debug, Clone)]
-pub(crate) struct WorkspaceTouched {
+pub struct WorkspaceTouched {
     pub(crate) workspace: String,
     pub(crate) base_epoch: String,
     pub(crate) is_stale: bool,
@@ -59,7 +59,7 @@ pub fn touched(workspace: &str, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn collect_touched_workspace<B: WorkspaceBackend>(
+pub fn collect_touched_workspace<B: WorkspaceBackend>(
     backend: &B,
     ws_id: &WorkspaceId,
 ) -> Result<WorkspaceTouched>
@@ -90,7 +90,7 @@ where
     })
 }
 
-pub(crate) fn touched_paths_from_patchset(patch_set: &PatchSet) -> Vec<PathBuf> {
+pub fn touched_paths_from_patchset(patch_set: &PatchSet) -> Vec<PathBuf> {
     let mut touched = BTreeSet::new();
 
     for (path, value) in &patch_set.patches {

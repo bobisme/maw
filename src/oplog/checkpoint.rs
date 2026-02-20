@@ -23,6 +23,8 @@
 //! a checkpoint annotation, then replays only the operations after the
 //! checkpoint. This is semantically equivalent to full replay.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -31,10 +33,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::patch::PatchSet;
 use crate::model::types::{GitOid, WorkspaceId};
-use crate::oplog::read::{OpLogReadError, walk_chain};
+use crate::oplog::read::{walk_chain, OpLogReadError};
 use crate::oplog::types::{OpPayload, Operation};
-use crate::oplog::view::{MaterializedView, ViewError, materialize_from_ops};
-use crate::oplog::write::{OpLogWriteError, append_operation};
+use crate::oplog::view::{materialize_from_ops, MaterializedView, ViewError};
+use crate::oplog::write::{append_operation, OpLogWriteError};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -44,6 +46,7 @@ use crate::oplog::write::{OpLogWriteError, append_operation};
 pub const CHECKPOINT_KEY: &str = "checkpoint";
 
 /// Default checkpoint interval: write a checkpoint every N operations.
+#[allow(dead_code)]
 pub const DEFAULT_CHECKPOINT_INTERVAL: usize = 100;
 
 // ---------------------------------------------------------------------------
@@ -249,6 +252,7 @@ pub fn is_checkpoint(op: &Operation) -> bool {
 ///
 /// Returns `None` if the operation is not a checkpoint annotation or if
 /// the data cannot be parsed.
+#[must_use]
 pub fn extract_checkpoint(op: &Operation) -> Option<CheckpointData> {
     match &op.payload {
         OpPayload::Annotate { key, data } if key == CHECKPOINT_KEY => {
@@ -270,8 +274,8 @@ pub fn extract_checkpoint(op: &Operation) -> Option<CheckpointData> {
 ///
 /// Returns `true` if `op_count` is a multiple of `interval` and `op_count > 0`.
 #[must_use]
-pub fn should_checkpoint(op_count: usize, interval: usize) -> bool {
-    interval > 0 && op_count > 0 && op_count % interval == 0
+pub const fn should_checkpoint(op_count: usize, interval: usize) -> bool {
+    interval > 0 && op_count > 0 && op_count.is_multiple_of(interval)
 }
 
 /// Create a checkpoint [`Operation`] from a materialized view.
@@ -283,6 +287,7 @@ pub fn should_checkpoint(op_count: usize, interval: usize) -> bool {
 /// * `view` — the materialized view to checkpoint.
 /// * `trigger_oid` — the OID of the operation that triggered this checkpoint.
 /// * `parent_oid` — the parent operation OID for the checkpoint op.
+#[must_use]
 pub fn create_checkpoint_op(
     view: &MaterializedView,
     trigger_oid: &GitOid,
@@ -339,7 +344,7 @@ pub fn create_checkpoint_op(
 /// * `workspace_id` — workspace to checkpoint.
 /// * `current_view` — the just-materialized view.
 /// * `trigger_oid` — OID of the operation that just completed.
-/// * `current_head` — current head ref value (= trigger_oid usually).
+/// * `current_head` — current head ref value (= `trigger_oid` usually).
 /// * `interval` — checkpoint every N operations.
 pub fn maybe_write_checkpoint(
     root: &Path,
@@ -404,44 +409,40 @@ where
         }
     }
 
-    match checkpoint_idx {
-        Some(cp_idx) => {
-            // Extract checkpoint data
-            let (_cp_oid, cp_op) = &chain[cp_idx];
-            let cp_data =
-                extract_checkpoint(cp_op).ok_or_else(|| CheckpointError::InvalidData {
-                    detail: "checkpoint annotation has unparseable data".to_owned(),
-                })?;
+    if let Some(cp_idx) = checkpoint_idx {
+        // Extract checkpoint data
+        let (_cp_oid, cp_op) = &chain[cp_idx];
+        let cp_data = extract_checkpoint(cp_op).ok_or_else(|| CheckpointError::InvalidData {
+            detail: "checkpoint annotation has unparseable data".to_owned(),
+        })?;
 
-            // Restore view from checkpoint
-            let mut view = cp_data.view.to_view(cp_data.op_count)?;
+        // Restore view from checkpoint
+        let mut view = cp_data.view.to_view(cp_data.op_count)?;
 
-            // Replay operations AFTER the checkpoint (newer operations)
-            // chain[0..cp_idx] are newer than the checkpoint, reversed for causal order
-            let post_checkpoint: Vec<_> = chain[..cp_idx].iter().rev().cloned().collect();
+        // Replay operations AFTER the checkpoint (newer operations)
+        // chain[0..cp_idx] are newer than the checkpoint, reversed for causal order
+        let post_checkpoint: Vec<_> = chain[..cp_idx].iter().rev().cloned().collect();
 
-            for (oid, op) in &post_checkpoint {
-                // Skip checkpoint annotations during replay
-                if is_checkpoint(op) {
-                    view.op_count += 1;
-                    continue;
-                }
-                replay_single_op(&mut view, oid, op, &read_patch_set)?;
+        for (oid, op) in &post_checkpoint {
+            // Skip checkpoint annotations during replay
+            if is_checkpoint(op) {
+                view.op_count += 1;
+                continue;
             }
+            replay_single_op(&mut view, oid, op, &read_patch_set)?;
+        }
 
-            Ok(view)
-        }
-        None => {
-            // No checkpoint found — full replay
-            let mut ops: Vec<_> = chain;
-            ops.reverse(); // causal order (oldest first)
-            let view = materialize_from_ops(workspace_id.clone(), &ops, read_patch_set)?;
-            Ok(view)
-        }
+        Ok(view)
+    } else {
+        // No checkpoint found — full replay
+        let mut ops: Vec<_> = chain;
+        ops.reverse(); // causal order (oldest first)
+        let view = materialize_from_ops(workspace_id.clone(), &ops, read_patch_set)?;
+        Ok(view)
     }
 }
 
-/// Replay a single operation on a mutable view (mirrors apply_operation in view.rs).
+/// Replay a single operation on a mutable view (mirrors `apply_operation` in view.rs).
 fn replay_single_op<F>(
     view: &mut MaterializedView,
     _oid: &GitOid,
@@ -502,6 +503,7 @@ where
 #[derive(Clone, Debug)]
 pub struct CompactionResult {
     /// The new head OID after compaction.
+    #[allow(dead_code)]
     pub new_head: GitOid,
 
     /// Number of operations before compaction.
@@ -602,7 +604,7 @@ pub fn compact(
 
     // Step 2: Write checkpoint annotation on top of synthetic Create
     let mut cp_annotate = cp_op.clone();
-    cp_annotate.parent_ids = vec![create_oid.clone()];
+    cp_annotate.parent_ids = vec![create_oid];
     let cp_new_oid = crate::oplog::write::write_operation_blob(root, &cp_annotate)?;
 
     // Step 3: Re-write post-checkpoint ops with updated parent pointers
@@ -613,13 +615,9 @@ pub fn compact(
     let mut prev_oid = cp_new_oid;
     let mut ops_after = 2; // synthetic create + checkpoint
 
-    for (_i, (_old_oid, mut op)) in post_ops.into_iter().enumerate() {
+    for (_old_oid, mut op) in post_ops {
         // Replace parent with prev_oid
-        if op.parent_ids.is_empty() {
-            op.parent_ids = vec![prev_oid.clone()];
-        } else {
-            op.parent_ids = vec![prev_oid.clone()];
-        }
+        op.parent_ids = vec![prev_oid.clone()];
         let new_oid = crate::oplog::write::write_operation_blob(root, &op)?;
         prev_oid = new_oid;
         ops_after += 1;
@@ -1107,7 +1105,7 @@ mod tests {
     #[test]
     fn maybe_write_checkpoint_respects_interval() {
         // When op_count is not at the interval, should return None
-        let view = MaterializedView {
+        let _view = MaterializedView {
             op_count: 50,
             ..make_view("ws-1", 'a', 50)
         };

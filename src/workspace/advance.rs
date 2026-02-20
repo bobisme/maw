@@ -17,14 +17,14 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceMode;
 use crate::refs as manifold_refs;
 
-use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
+use super::{metadata, repo_root, workspace_path, DEFAULT_WORKSPACE};
 
 // ---------------------------------------------------------------------------
 // Conflict info
@@ -115,24 +115,21 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
 
     // Already up to date?
     if old_epoch == current_epoch.as_str() {
-        match format {
-            OutputFormat::Json => {
-                let result = AdvanceResult {
-                    workspace: name.to_owned(),
-                    old_epoch: old_epoch.clone(),
-                    new_epoch: old_epoch,
-                    success: true,
-                    conflicts: vec![],
-                    message: format!("Workspace '{name}' is already at the current epoch."),
-                };
-                println!("{}", format.serialize(&result)?);
-            }
-            _ => {
-                println!("Workspace '{name}' is already at the current epoch.");
-                println!("  Epoch: {}...", &current_epoch.as_str()[..12]);
-                println!();
-                println!("Nothing to do.");
-            }
+        if format == OutputFormat::Json {
+            let result = AdvanceResult {
+                workspace: name.to_owned(),
+                old_epoch: old_epoch.clone(),
+                new_epoch: old_epoch,
+                success: true,
+                conflicts: vec![],
+                message: format!("Workspace '{name}' is already at the current epoch."),
+            };
+            println!("{}", format.serialize(&result)?);
+        } else {
+            println!("Workspace '{name}' is already at the current epoch.");
+            println!("  Epoch: {}...", &current_epoch.as_str()[..12]);
+            println!();
+            println!("Nothing to do.");
         }
         return Ok(());
     }
@@ -182,8 +179,8 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         old_epoch: old_epoch.clone(),
         new_epoch: new_epoch.clone(),
         success,
-        conflicts: conflicts.clone(),
-        message: message.clone(),
+        conflicts,
+        message,
     };
 
     match format {
@@ -339,17 +336,16 @@ fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<AdvanceConflict>> 
 
 fn print_advance_text(result: &AdvanceResult) {
     println!("{}", result.message);
-    if !result.conflicts.is_empty() {
-        println!();
+    println!();
+    if result.conflicts.is_empty() {
+        println!("Next: maw exec {} -- <command>", result.workspace);
+    } else {
         println!("Conflicts:");
         for c in &result.conflicts {
             println!("  [{:>20}] {}", c.conflict_type, c.path);
         }
         println!();
         println!("Resolve conflicts manually, then continue working.");
-    } else {
-        println!();
-        println!("Next: maw exec {} -- <command>", result.workspace);
     }
 }
 

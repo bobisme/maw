@@ -45,7 +45,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ValidationConfig;
-use crate::merge::validate::{ValidateOutcome, run_validate_config_in_dir};
+use crate::merge::validate::{run_validate_config_in_dir, ValidateOutcome};
 use crate::merge_state::ValidationResult;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -122,6 +122,7 @@ impl QuarantineState {
     }
 
     /// Write the quarantine state file atomically (write-tmp + fsync + rename).
+    #[allow(clippy::missing_errors_doc)]
     pub fn write_atomic(&self, manifold_dir: &Path) -> Result<(), QuarantineError> {
         let dir = state_dir(manifold_dir, &self.merge_id);
         fs::create_dir_all(&dir)
@@ -160,7 +161,7 @@ impl QuarantineState {
 /// Errors from quarantine operations.
 #[derive(Debug)]
 pub enum QuarantineError {
-    /// No quarantine with the given merge_id exists.
+    /// No quarantine with the given `merge_id` exists.
     NotFound { merge_id: String },
     /// The quarantine worktree directory does not exist.
     WorktreeNotFound { merge_id: String, path: PathBuf },
@@ -201,17 +202,19 @@ impl std::error::Error for QuarantineError {}
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Return the name of the quarantine workspace for the given merge_id.
+/// Return the name of the quarantine workspace for the given `merge_id`.
 ///
 /// The name is `merge-quarantine-<merge_id>` which:
 /// - Passes workspace name validation (alphanumeric + hyphens only)
 /// - Is identifiable by the [`QUARANTINE_NAME_PREFIX`] prefix
 /// - Creates the worktree at `ws/merge-quarantine-<merge_id>/`
+#[must_use]
 pub fn quarantine_workspace_name(merge_id: &str) -> String {
     format!("{QUARANTINE_NAME_PREFIX}{merge_id}")
 }
 
-/// Return the workspace path for a quarantine with the given merge_id.
+/// Return the workspace path for a quarantine with the given `merge_id`.
+#[must_use]
 pub fn quarantine_workspace_path(repo_root: &Path, merge_id: &str) -> PathBuf {
     repo_root
         .join("ws")
@@ -228,8 +231,9 @@ fn state_path(manifold_dir: &Path, merge_id: &str) -> PathBuf {
     state_dir(manifold_dir, merge_id).join("state.json")
 }
 
-/// Extract the merge_id from a quarantine workspace name, if it has the
+/// Extract the `merge_id` from a quarantine workspace name, if it has the
 /// quarantine prefix.
+#[must_use]
 pub fn merge_id_from_name(name: &str) -> Option<&str> {
     name.strip_prefix(QUARANTINE_NAME_PREFIX)
 }
@@ -243,7 +247,7 @@ pub fn merge_id_from_name(name: &str) -> Option<&str> {
 /// 1. Creates a git worktree at `ws/merge-quarantine-<merge_id>/` checked
 ///    out at `candidate`.
 /// 2. Writes validation diagnostics to the quarantine state directory.
-/// 3. Writes a `state.json` with merge intent (sources, epoch_before, candidate).
+/// 3. Writes a `state.json` with merge intent (sources, `epoch_before`, candidate).
 ///
 /// # Arguments
 ///
@@ -265,12 +269,13 @@ pub fn merge_id_from_name(name: &str) -> Option<&str> {
 ///
 /// Returns [`QuarantineError`] if the worktree cannot be created or the
 /// state file cannot be written.
+#[allow(clippy::too_many_arguments)]
 pub fn create_quarantine_workspace(
     repo_root: &Path,
     manifold_dir: &Path,
     merge_id: &str,
     sources: Vec<WorkspaceId>,
-    epoch_before: EpochId,
+    epoch_before: &EpochId,
     candidate: GitOid,
     branch: &str,
     validation_result: ValidationResult,
@@ -342,7 +347,7 @@ pub enum PromoteResult {
 
 /// Promote a quarantine workspace: re-validate, then commit if green.
 ///
-/// 1. Read the quarantine state (epoch_before, candidate, branch, sources).
+/// 1. Read the quarantine state (`epoch_before`, candidate, branch, sources).
 /// 2. Stage and commit any uncommitted changes in the quarantine workspace
 ///    (a no-op if there are no changes, preserving the original candidate OID).
 /// 3. Re-run validation commands in the quarantine workspace directory.
@@ -483,6 +488,7 @@ pub fn abandon_quarantine(
 /// [`QuarantineState`] for each valid quarantine.
 ///
 /// Invalid or unreadable state files are silently skipped.
+#[must_use]
 pub fn list_quarantines(manifold_dir: &Path) -> Vec<QuarantineState> {
     let quarantine_base = manifold_dir.join(QUARANTINE_STATE_SUBDIR);
     if !quarantine_base.exists() {
@@ -523,7 +529,7 @@ pub fn list_quarantines(manifold_dir: &Path) -> Vec<QuarantineState> {
 /// If there are no changes (workspace is clean), returns the existing HEAD OID
 /// unchanged. Otherwise, creates a new commit with message "quarantine: fix-forward".
 fn commit_quarantine_edits(
-    repo_root: &Path,
+    _repo_root: &Path,
     ws_path: &Path,
     original_candidate: &GitOid,
 ) -> Result<GitOid, QuarantineError> {
@@ -653,6 +659,7 @@ fn now_secs() -> u64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::similar_names)]
 mod tests {
     use super::*;
     use std::process::Command as StdCmd;
@@ -807,7 +814,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -847,7 +854,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id.clone(),
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -860,7 +867,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -895,7 +902,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             vr.clone(),
@@ -934,7 +941,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -972,7 +979,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -1023,7 +1030,7 @@ mod tests {
             &manifold_dir,
             &id1,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id.clone(),
+            &epoch_id,
             c1.clone(),
             "main",
             dummy_validation_result(false),
@@ -1053,7 +1060,7 @@ mod tests {
             &manifold_dir,
             &id2,
             vec![WorkspaceId::new("ws-2").unwrap()],
-            epoch_id,
+            &epoch_id,
             c2,
             "main",
             dummy_validation_result(false),
@@ -1094,7 +1101,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -1161,7 +1168,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
@@ -1229,7 +1236,7 @@ mod tests {
             &manifold_dir,
             merge_id,
             vec![WorkspaceId::new("ws-1").unwrap()],
-            epoch_id,
+            &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),

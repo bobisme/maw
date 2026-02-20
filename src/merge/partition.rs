@@ -65,7 +65,12 @@ pub struct PathEntry {
 
 impl PathEntry {
     /// Create a `PathEntry` without identity metadata (Phase 1 compat).
-    pub fn new(workspace_id: WorkspaceId, kind: ChangeKind, content: Option<Vec<u8>>) -> Self {
+    #[must_use]
+    pub const fn new(
+        workspace_id: WorkspaceId,
+        kind: ChangeKind,
+        content: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             workspace_id,
             kind,
@@ -76,7 +81,8 @@ impl PathEntry {
     }
 
     /// Create a `PathEntry` with full identity metadata (Phase 3+).
-    pub fn with_identity(
+    #[must_use]
+    pub const fn with_identity(
         workspace_id: WorkspaceId,
         kind: ChangeKind,
         content: Option<Vec<u8>>,
@@ -94,7 +100,7 @@ impl PathEntry {
 
     /// Returns `true` if this entry is a deletion.
     #[must_use]
-    pub fn is_deletion(&self) -> bool {
+    pub const fn is_deletion(&self) -> bool {
         matches!(self.kind, ChangeKind::Deleted)
     }
 }
@@ -126,25 +132,25 @@ pub struct PartitionResult {
 impl PartitionResult {
     /// Total count of unique paths.
     #[must_use]
-    pub fn unique_count(&self) -> usize {
+    pub const fn unique_count(&self) -> usize {
         self.unique.len()
     }
 
     /// Total count of shared (potentially conflicting) paths.
     #[must_use]
-    pub fn shared_count(&self) -> usize {
+    pub const fn shared_count(&self) -> usize {
         self.shared.len()
     }
 
     /// Total count of all paths across unique and shared.
     #[must_use]
-    pub fn total_path_count(&self) -> usize {
+    pub const fn total_path_count(&self) -> usize {
         self.unique.len() + self.shared.len()
     }
 
     /// Returns `true` if there are no shared paths (no conflicts possible).
     #[must_use]
-    pub fn is_conflict_free(&self) -> bool {
+    pub const fn is_conflict_free(&self) -> bool {
         self.shared.is_empty()
     }
 }
@@ -172,6 +178,7 @@ impl PartitionResult {
 /// # Returns
 ///
 /// A [`PartitionResult`] with unique and shared paths.
+#[must_use]
 pub fn partition_by_path(patch_sets: &[PatchSet]) -> PartitionResult {
     // Build inverted index using BTreeMap for lexicographic ordering.
     let mut index: BTreeMap<PathBuf, Vec<PathEntry>> = BTreeMap::new();
@@ -599,7 +606,7 @@ mod tests {
     fn partition_propagates_file_id_and_blob_to_path_entry() {
         use crate::model::patch::FileId;
 
-        let fid = FileId::new(0xdeadbeef_cafebabe_12345678_9abcdef0);
+        let fid = FileId::new(0xdead_beef_cafe_babe_1234_5678_9abc_def0);
         let blob_hex = "a".repeat(40);
 
         let change = make_change_with_identity(

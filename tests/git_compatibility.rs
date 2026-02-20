@@ -92,7 +92,7 @@ fn git_blame_and_bisect_work_with_manifold_refs_present() {
     // git blame should still attribute line origins.
     let blame = git_ok_in(&ws_default, &["blame", "-L", "2,2", "src/main.rs"]);
     assert!(
-        blame.contains("2"),
+        blame.contains('2'),
         "blame should include current line content: {blame}"
     );
 

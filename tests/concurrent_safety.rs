@@ -11,7 +11,7 @@
 //!   worktrees simultaneously via real OS threads, using a Barrier to ensure
 //!   maximum interleaving.
 //! - **Randomized op sequences**: each agent performs a random mix of
-//!   AddFile, ModifyFile, DeleteFile, and StatusCheck ops.
+//!   `AddFile`, `ModifyFile`, `DeleteFile`, and `StatusCheck` ops.
 //! - **Merge correctness**: after all agents finish, a lead thread runs the
 //!   Manifold merge pipeline and verifies the candidate commit.
 //! - **No corruption**: `git fsck --strict` is run after each merge.
@@ -443,8 +443,7 @@ fn run_scenario(seed: u64) -> ScenarioRun {
             assert!(
                 candidate_files.contains(rel_path),
                 "seed={seed}: DATA LOSS — agent-{i}'s file '{rel_path}' missing from merge candidate\n  \
-                 candidate files: {:?}",
-                candidate_files,
+                 candidate files: {candidate_files:?}",
             );
 
             // Content must match.
@@ -749,13 +748,12 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
     for (path, expected_content) in &all_expected {
         if !candidate_files.contains(path) {
             lost.push(path.clone());
-        } else if let Some(actual) = read_tree_file(repo.root(), candidate_oid, path) {
-            if actual != *expected_content {
+        } else if let Some(actual) = read_tree_file(repo.root(), candidate_oid, path)
+            && actual != *expected_content {
                 corrupted.push(format!(
                     "path={path}\n  expected={expected_content:?}\n  actual={actual:?}"
                 ));
             }
-        }
     }
 
     assert!(

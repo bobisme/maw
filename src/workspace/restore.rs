@@ -1,15 +1,15 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
 
-use super::{DEFAULT_WORKSPACE, create::create, get_backend, repo_root, workspace_path};
+use super::{create::create, get_backend, repo_root, workspace_path, DEFAULT_WORKSPACE};
 
 /// Restore a previously destroyed workspace.
 ///
 /// In the git worktree model, restoring means recreating the workspace
-/// at the current epoch. Unlike jj, git worktrees don't have an operation
-/// log to revert from, so we create a fresh workspace.
+/// at the current epoch. There is no workspace operation log to revert,
+/// so restore creates a fresh workspace.
 ///
 /// If a backup of the workspace content exists, it would need to be
 /// restored separately (e.g., from git stash or reflog).
@@ -32,10 +32,9 @@ pub fn restore(name: &str) -> Result<()> {
                  Nothing to restore. Use 'maw ws list' to see all workspaces.",
                 path.display()
             );
-        } else {
-            // Directory exists but not tracked — try to attach
-            println!("Directory exists but workspace not tracked. Re-creating...");
         }
+        // Directory exists but not tracked — try to attach
+        println!("Directory exists but workspace not tracked. Re-creating...");
     }
 
     println!("Restoring workspace '{name}'...");

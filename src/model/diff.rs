@@ -1,4 +1,4 @@
-//! PatchSet computation from working directory diff (§5.4).
+//! `PatchSet` computation from working directory diff (§5.4).
 //!
 //! Builds a [`PatchSet`] by comparing a workspace's working directory against
 //! a base epoch commit using `git diff` and `git ls-files`.
@@ -14,13 +14,12 @@
 //! 3. For each change, looks up or computes the relevant blob OID(s) using
 //!    `git hash-object -w` and `git rev-parse <epoch>:<path>`.
 //!
-//! # FileId allocation
+//! # `FileId` allocation
 //!
-//! Until the persistent FileId registry (`bd-b2y4`) exists:
-//! - **New files** (Add) receive a randomly generated FileId.
-//! - **Pre-existing files** (Modify, Delete, Rename) receive a deterministic
-//!   FileId derived from the first 16 bytes of the epoch blob OID. This is a
-//!   placeholder — the registry will provide true stability.
+//! File identity is resolved in this order:
+//! 1. `.manifold/fileids` mapping (when present) for stable cross-run IDs.
+//! 2. Deterministic fallback from the epoch blob OID (existing files).
+//! 3. Deterministic fallback from path hash (new files not yet in map).
 //!
 //! # Example flow
 //!
@@ -36,8 +35,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rand::Rng;
+use sha2::{Digest, Sha256};
 
+use crate::model::file_id::FileIdMap;
 use crate::model::patch::{FileId, PatchSet, PatchValue};
 use crate::model::types::{EpochId, GitOid};
 
@@ -66,6 +66,8 @@ pub enum DiffError {
     Io(std::io::Error),
     /// A line in `git diff --name-status` output was malformed.
     MalformedDiffLine(String),
+    /// Loading `.manifold/fileids` failed.
+    FileIdMap(String),
 }
 
 impl std::fmt::Display for DiffError {
@@ -88,6 +90,7 @@ impl std::fmt::Display for DiffError {
             Self::InvalidOid { raw } => write!(f, "invalid git OID: {raw:?}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::MalformedDiffLine(line) => write!(f, "malformed diff line: {line:?}"),
+            Self::FileIdMap(message) => write!(f, "failed to load FileId map: {message}"),
         }
     }
 }
@@ -210,27 +213,39 @@ fn epoch_blob_oid(
     })
 }
 
-/// Allocate a new random [`FileId`] for a freshly created file.
+/// Derive a deterministic fallback [`FileId`] from a file path.
 ///
-/// NOTE: Until the persistent FileId registry (`bd-b2y4`) exists, FileIds for
-/// new files are generated randomly and are not stable across invocations.
-/// Future work will replace this with a registry-backed allocation.
-fn new_file_id() -> FileId {
-    let mut rng = rand::rng();
-    FileId::new(rng.random::<u128>())
+/// Used when a path is not yet present in `.manifold/fileids`.
+fn file_id_from_path(path: &Path) -> FileId {
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    FileId::new(u128::from_be_bytes(bytes))
 }
 
 /// Derive a deterministic [`FileId`] from an existing blob OID.
 ///
-/// Used for pre-existing files (Modify, Delete, Rename) to give a stable
-/// (within one invocation) FileId derived from the blob. The FileId registry
-/// (`bd-b2y4`) will provide true cross-invocation stability.
+/// Used for pre-existing files (Modify, Delete, Rename) when no `FileId` mapping
+/// is available for the path.
 fn file_id_from_blob(blob: &GitOid) -> FileId {
     // Parse the first 32 hex characters of the OID as a u128.
     let hex = &blob.as_str()[..32];
     // This cannot fail: GitOid is validated to be 40 lowercase hex chars.
     let n = u128::from_str_radix(hex, 16).unwrap_or(0);
     FileId::new(n)
+}
+
+fn repo_root_for_workspace(workspace_path: &Path) -> Result<PathBuf, DiffError> {
+    let root = git_cmd(workspace_path, &["rev-parse", "--show-toplevel"])?;
+    Ok(PathBuf::from(root))
+}
+
+fn load_file_id_map(workspace_path: &Path) -> Result<FileIdMap, DiffError> {
+    let repo_root = repo_root_for_workspace(workspace_path)?;
+    let fileids_path = repo_root.join(".manifold").join("fileids");
+    FileIdMap::load(&fileids_path).map_err(|e| DiffError::FileIdMap(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -256,11 +271,10 @@ fn file_id_from_blob(blob: &GitOid) -> FileId {
 ///    - Working-directory file content → `git hash-object -w`
 ///    - Epoch tree blob → `git rev-parse <epoch>:<path>`
 ///
-/// # FileId note
+/// # `FileId` note
 ///
-/// FileIds are placeholders until `bd-b2y4` (stable FileId system) is
-/// implemented. New files get random FileIds; pre-existing files get a
-/// deterministic FileId derived from their base blob OID.
+/// `FileIds` come from `.manifold/fileids` when available, with deterministic
+/// fallbacks for repositories that do not yet have an identity map.
 ///
 /// # Errors
 ///
@@ -270,6 +284,7 @@ pub fn compute_patchset(
     base_epoch: &EpochId,
 ) -> Result<PatchSet, DiffError> {
     let mut patches: BTreeMap<PathBuf, PatchValue> = BTreeMap::new();
+    let file_id_map = load_file_id_map(workspace_path)?;
 
     // -----------------------------------------------------------------------
     // Step 1: tracked changes from git diff
@@ -291,14 +306,18 @@ pub fn compute_patchset(
             DiffEntry::Added(path) => {
                 let abs = workspace_path.join(&path);
                 let blob = hash_object_write(workspace_path, &abs)?;
-                let file_id = new_file_id();
+                let file_id = file_id_map
+                    .id_for_path(&path)
+                    .unwrap_or_else(|| file_id_from_path(&path));
                 patches.insert(path, PatchValue::Add { blob, file_id });
             }
             DiffEntry::Modified(path) => {
                 let base_blob = epoch_blob_oid(workspace_path, base_epoch, &path)?;
                 let abs = workspace_path.join(&path);
                 let new_blob = hash_object_write(workspace_path, &abs)?;
-                let file_id = file_id_from_blob(&base_blob);
+                let file_id = file_id_map
+                    .id_for_path(&path)
+                    .unwrap_or_else(|| file_id_from_blob(&base_blob));
                 patches.insert(
                     path,
                     PatchValue::Modify {
@@ -310,7 +329,9 @@ pub fn compute_patchset(
             }
             DiffEntry::Deleted(path) => {
                 let previous_blob = epoch_blob_oid(workspace_path, base_epoch, &path)?;
-                let file_id = file_id_from_blob(&previous_blob);
+                let file_id = file_id_map
+                    .id_for_path(&path)
+                    .unwrap_or_else(|| file_id_from_blob(&previous_blob));
                 patches.insert(
                     path,
                     PatchValue::Delete {
@@ -323,12 +344,15 @@ pub fn compute_patchset(
                 let base_blob = epoch_blob_oid(workspace_path, base_epoch, &from)?;
                 let abs_to = workspace_path.join(&to);
                 let new_blob_oid = hash_object_write(workspace_path, &abs_to)?;
-                let file_id = file_id_from_blob(&base_blob);
+                let file_id = file_id_map
+                    .id_for_path(&from)
+                    .or_else(|| file_id_map.id_for_path(&to))
+                    .unwrap_or_else(|| file_id_from_blob(&base_blob));
                 // Record new_blob only if content changed.
-                let new_blob = if new_blob_oid != base_blob {
-                    Some(new_blob_oid)
-                } else {
+                let new_blob = if new_blob_oid == base_blob {
                     None
+                } else {
+                    Some(new_blob_oid)
                 };
                 patches.insert(
                     to,
@@ -361,7 +385,9 @@ pub fn compute_patchset(
         }
         let abs = workspace_path.join(&path);
         let blob = hash_object_write(workspace_path, &abs)?;
-        let file_id = new_file_id();
+        let file_id = file_id_map
+            .id_for_path(&path)
+            .unwrap_or_else(|| file_id_from_path(&path));
         patches.insert(path, PatchValue::Add { blob, file_id });
     }
 
@@ -502,6 +528,25 @@ mod tests {
         let input = "Z\tunknown_status";
         let result = parse_diff_name_status(input);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // file_id_from_path / file_id_from_blob
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_id_from_path_is_deterministic() {
+        let path = Path::new("src/lib.rs");
+        let id1 = file_id_from_path(path);
+        let id2 = file_id_from_path(path);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn file_id_from_path_differs_for_different_paths() {
+        let id1 = file_id_from_path(Path::new("src/a.rs"));
+        let id2 = file_id_from_path(Path::new("src/b.rs"));
+        assert_ne!(id1, id2);
     }
 
     // -----------------------------------------------------------------------
@@ -845,7 +890,7 @@ mod tests {
         let root = dir.path();
 
         git_init(root);
-        let epoch = make_epoch(root, &[("placeholder.rs", "x")]);
+        let epoch = make_epoch(root, &[("baseline.rs", "x")]);
 
         // Add files that would sort differently by insertion order vs alpha.
         write_file(root, "z.rs", "z");
@@ -859,5 +904,65 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted, "PatchSet paths must be in sorted order");
+    }
+
+    #[test]
+    fn compute_patchset_uses_fileid_map_for_modify() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        git_init(root);
+        let epoch = make_epoch(
+            root,
+            &[(".gitignore", ".manifold/\n"), ("tracked.rs", "v1")],
+        );
+
+        let fileids_dir = root.join(".manifold");
+        fs::create_dir_all(&fileids_dir).unwrap();
+        fs::write(
+            fileids_dir.join("fileids"),
+            r#"[
+  {"path": "tracked.rs", "file_id": "0000000000000000000000000000002a"}
+]"#,
+        )
+        .unwrap();
+
+        write_file(root, "tracked.rs", "v2");
+        run_git(root, &["add", "tracked.rs"]);
+
+        let ps = compute_patchset(root, &epoch).unwrap();
+        let patch = ps.patches.get(&PathBuf::from("tracked.rs")).unwrap();
+        let PatchValue::Modify { file_id, .. } = patch else {
+            panic!("expected Modify patch");
+        };
+        assert_eq!(*file_id, FileId::new(42));
+    }
+
+    #[test]
+    fn compute_patchset_add_file_id_is_deterministic_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        git_init(root);
+        let epoch = make_epoch(root, &[("base.rs", "base")]);
+
+        write_file(root, "new_file.rs", "new content");
+        run_git(root, &["add", "new_file.rs"]);
+
+        let ps1 = compute_patchset(root, &epoch).unwrap();
+        let ps2 = compute_patchset(root, &epoch).unwrap();
+
+        let PatchValue::Add { file_id: id1, .. } =
+            ps1.patches.get(&PathBuf::from("new_file.rs")).unwrap()
+        else {
+            panic!("expected Add patch in first call");
+        };
+        let PatchValue::Add { file_id: id2, .. } =
+            ps2.patches.get(&PathBuf::from("new_file.rs")).unwrap()
+        else {
+            panic!("expected Add patch in second call");
+        };
+
+        assert_eq!(id1, id2);
     }
 }

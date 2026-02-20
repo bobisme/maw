@@ -14,6 +14,8 @@
 //!
 //! Any phase can also transition to `Aborted` on unrecoverable error.
 
+#![allow(clippy::missing_errors_doc)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -55,7 +57,7 @@ pub enum MergePhase {
 impl MergePhase {
     /// Returns `true` if this is a terminal state (`Complete` or `Aborted`).
     #[must_use]
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Complete | Self::Aborted)
     }
 
@@ -63,7 +65,7 @@ impl MergePhase {
     ///
     /// `Aborted` can be reached from any non-terminal phase.
     #[must_use]
-    pub fn valid_transitions(&self) -> &'static [MergePhase] {
+    pub const fn valid_transitions(&self) -> &'static [Self] {
         match self {
             Self::Prepare => &[Self::Build, Self::Aborted],
             Self::Build => &[Self::Validate, Self::Aborted],
@@ -76,7 +78,7 @@ impl MergePhase {
 
     /// Check whether transitioning to `next` is valid.
     #[must_use]
-    pub fn can_transition_to(&self, next: &MergePhase) -> bool {
+    pub fn can_transition_to(&self, next: &Self) -> bool {
         self.valid_transitions().contains(next)
     }
 }
@@ -201,7 +203,7 @@ impl MergeStateFile {
     /// * `epoch_before` - The current epoch at the start of the merge.
     /// * `now` - The current Unix timestamp in seconds.
     #[must_use]
-    pub fn new(sources: Vec<WorkspaceId>, epoch_before: EpochId, now: u64) -> Self {
+    pub const fn new(sources: Vec<WorkspaceId>, epoch_before: EpochId, now: u64) -> Self {
         Self {
             phase: MergePhase::Prepare,
             sources,

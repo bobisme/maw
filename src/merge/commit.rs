@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc)]
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::model::types::GitOid;
 use crate::refs::{self, RefError};
 
-/// Merge-state persistence path relative to the repo root.
-const MERGE_STATE_REL_PATH: &str = ".manifold/merge-state";
+/// Commit-phase state persistence path relative to the repo root.
+///
+/// This is intentionally distinct from `.manifold/merge-state.json` used by
+/// the main merge state machine (`merge_state.rs`).
+const MERGE_STATE_REL_PATH: &str = ".manifold/commit-state.json";
 
 /// Result of running the COMMIT phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
