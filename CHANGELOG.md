@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.39.0
+
+- Feat: Structured Conflict model — `Conflict` enum with 4 variants (Content, AddAdd, ModifyDelete, DivergentRename). `ConflictSide` with workspace/content/timestamp, `ConflictAtom` placeholder for region-level conflict localization. Tagged JSON serde. 23 tests. (bd-15yn.1)
+- Feat: Per-workspace view materialization — `MaterializedView` struct produced by replaying op log in causal order. Handles all 7 op types (Create, Snapshot, Compensate, Merge, Describe, Annotate, Destroy). Pluggable patch-set reader. `materialize()` and `materialize_from_ops()` APIs. 18 tests. (bd-28np.1)
+- Feat: Level 1 Git compatibility — workspace state materialized as `refs/manifold/ws/<name>` via `git stash create`. Config toggle `workspace.git_compat_refs` (default true). Refs pruned on workspace destroy. Enables `git diff refs/manifold/ws/<name>..main` for debugging. 7 tests. (bd-4dsf)
+
 ## v0.38.0
 
 - Feat: Stable FileId system — 128-bit random FileId for deterministic rename tracking. FileIdMap with bidirectional path↔id mapping, atomic persistence to `.manifold/fileids`, concurrent rename+edit resolution. 27 tests. (bd-b2y4)
