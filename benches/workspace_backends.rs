@@ -1,7 +1,7 @@
 //! Workspace backend benchmarks.
 //!
-//! Measures performance of workspace create, disk usage, and backend
-//! auto-selection as described in design doc §1.1 and §7.5.
+//! Measures performance of workspace create, snapshot, and N-way merge
+//! as described in design doc §1.1 and §7.5.
 //!
 //! # Running
 //!
@@ -9,17 +9,24 @@
 //! cargo bench --bench workspace_backends
 //! # With a custom filter:
 //! cargo bench --bench workspace_backends -- create
+//! cargo bench --bench workspace_backends -- snapshot
+//! cargo bench --bench workspace_backends -- merge
 //! ```
 //!
 //! # Performance targets (design doc §1.1)
 //!
 //! - Workspace create < 100ms for 30k files (git-worktree)
 //! - Workspace create < 1s for 1M files (CoW-backed)
+//! - Snapshot cost proportional to changed files, not repo size
+//! - N-way merge cost proportional to touched files + conflict set
 //!
 //! # Report
 //!
 //! HTML report is generated in `target/criterion/` by criterion when
 //! `--features html_reports` is active (enabled by default via Cargo.toml).
+//!
+//! JSON data is also emitted per group in `target/criterion/<group>/<bench>/`.
+//! Summary JSON is written by the `bench_summary_json` helper at the end.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +37,8 @@ use maw::backend::{WorkspaceBackend, git::GitWorktreeBackend};
 use maw::backend::platform::{
     PlatformCapabilities, auto_select_backend, detect_or_load, estimate_repo_file_count,
 };
+use maw::merge::partition::partition_by_path;
+use maw::merge::types::{ChangeKind, FileChange, PatchSet};
 use maw::model::types::{EpochId, WorkspaceId};
 
 // ---------------------------------------------------------------------------
@@ -254,6 +263,159 @@ fn bench_estimate_file_count(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark: snapshot cost vs repo size and change count
+//
+// Validates §1.1: "Snapshot cost proportional to changed files, not repo size."
+// Strategy: hold change count fixed and vary repo size → times must be similar.
+// ---------------------------------------------------------------------------
+
+/// Benchmark `backend.snapshot()` across change counts and repo sizes.
+///
+/// The key invariant under test: snapshot time should track `changed_files`,
+/// not `repo_files`.  We benchmark (repo_size × changes) pairs.
+fn bench_snapshot_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot/git-worktree");
+
+    // (repo_files, changed_files) pairs.
+    // Same change counts across two repo sizes → times should cluster by changes.
+    let cases: &[(usize, usize)] = &[
+        (100, 1),
+        (100, 10),
+        (100, 50),
+        (500, 1),
+        (500, 10),
+        (500, 50),
+    ];
+
+    for &(repo_n, changed_n) in cases {
+        let (_guard, root, oid) = make_temp_repo(repo_n);
+        let epoch = EpochId::new(&oid).unwrap();
+        let backend = GitWorktreeBackend::new(root.clone());
+
+        // Create one workspace, modify `changed_n` files in it, then snapshot repeatedly.
+        let ws_name = format!("snap-{repo_n}-{changed_n}");
+        let ws_id = WorkspaceId::new(&ws_name).unwrap();
+        let ws_info = backend.create(&ws_id, &epoch).expect("create snapshot workspace");
+        let ws_path = &ws_info.path;
+
+        // Modify `changed_n` files (touch files that already exist in the workspace).
+        let changed_n_actual = changed_n.min(repo_n);
+        for i in 0..changed_n_actual {
+            let chunk = 100.max(repo_n / 10);
+            let sub = format!("src/part{}", i / chunk);
+            let path = ws_path.join(&sub).join(format!("file{i}.txt"));
+            // Write new content to trigger a modification.
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, format!("modified bench file {i}\n"));
+        }
+
+        let label = format!("repo{repo_n}_changed{changed_n}");
+        group.throughput(Throughput::Elements(changed_n_actual as u64));
+        group.bench_with_input(BenchmarkId::new("snapshot", label), &changed_n, |b, _| {
+            b.iter(|| {
+                let _ = backend.snapshot(&ws_id);
+            });
+        });
+
+        cleanup_workspace(&root, &ws_name);
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: N-way merge partition — cost vs workspace count and touched files
+//
+// Validates §1.1: "N-way merge cost proportional to touched files + conflict set."
+// Strategy 1: vary workspace count but keep total touched files constant → flat.
+// Strategy 2: vary total touched files (across workspaces) → linear growth.
+// ---------------------------------------------------------------------------
+
+/// Build a synthetic `PatchSet` for benchmarking partition_by_path.
+///
+/// Each workspace gets `files_per_ws` unique non-overlapping modified files,
+/// named `ws<ws_idx>_file<file_idx>.txt` to guarantee no conflicts.
+fn make_patch_set(ws_idx: usize, files_per_ws: usize, epoch: &EpochId) -> PatchSet {
+    let ws_id = WorkspaceId::new(&format!("bench-ws-{ws_idx}")).unwrap();
+    let changes: Vec<FileChange> = (0..files_per_ws)
+        .map(|fi| {
+            FileChange::new(
+                PathBuf::from(format!("src/ws{ws_idx}_file{fi}.txt")),
+                ChangeKind::Modified,
+                Some(format!("content ws{ws_idx} file{fi}").into_bytes()),
+            )
+        })
+        .collect();
+    PatchSet::new(ws_id, epoch.clone(), changes)
+}
+
+/// Benchmark: fixed total touched files, varying workspace count.
+///
+/// Total files = 100 (constant). As workspace count grows, files_per_ws shrinks.
+/// `partition_by_path` time should stay roughly constant.
+fn bench_merge_partition_fixed_total(c: &mut Criterion) {
+    // We need any epoch OID — use a fake 40-char hex string.
+    let epoch = EpochId::new(&"a".repeat(40)).unwrap();
+
+    let mut group = c.benchmark_group("merge/partition_fixed_total");
+    let total_files = 100usize;
+
+    // workspace counts: 2, 5, 10, 20
+    for &ws_count in &[2usize, 5, 10, 20] {
+        let files_per_ws = (total_files / ws_count).max(1);
+        let patch_sets: Vec<PatchSet> = (0..ws_count)
+            .map(|i| make_patch_set(i, files_per_ws, &epoch))
+            .collect();
+
+        group.throughput(Throughput::Elements(total_files as u64));
+        group.bench_with_input(
+            BenchmarkId::new("workspaces", ws_count),
+            &ws_count,
+            |b, _| {
+                b.iter(|| {
+                    let _ = partition_by_path(&patch_sets);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark: fixed workspace count (5), varying total touched files.
+///
+/// Total files grows: 10, 50, 100, 500, 1000.
+/// `partition_by_path` time should grow roughly linearly with total files.
+fn bench_merge_partition_scaling(c: &mut Criterion) {
+    let epoch = EpochId::new(&"b".repeat(40)).unwrap();
+
+    let mut group = c.benchmark_group("merge/partition_scaling");
+    let ws_count = 5usize;
+
+    for &total_files in &[10usize, 50, 100, 500, 1_000] {
+        let files_per_ws = total_files / ws_count;
+        let patch_sets: Vec<PatchSet> = (0..ws_count)
+            .map(|i| make_patch_set(i, files_per_ws, &epoch))
+            .collect();
+
+        group.throughput(Throughput::Elements(total_files as u64));
+        group.bench_with_input(
+            BenchmarkId::new("total_files", total_files),
+            &total_files,
+            |b, _| {
+                b.iter(|| {
+                    let _ = partition_by_path(&patch_sets);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -264,5 +426,8 @@ criterion_group!(
     bench_auto_select,
     bench_platform_detect_cached,
     bench_estimate_file_count,
+    bench_snapshot_scaling,
+    bench_merge_partition_fixed_total,
+    bench_merge_partition_scaling,
 );
 criterion_main!(benches);
