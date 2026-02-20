@@ -5,6 +5,7 @@
 //! isolation mechanism (jj, git, or other VCS).
 
 pub mod git;
+pub mod reflink;
 
 use std::path::PathBuf;
 
