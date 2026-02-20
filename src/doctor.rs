@@ -137,7 +137,11 @@ fn check_tool(name: &str, args: &[&str], install_url: &str) -> DoctorCheck {
 fn check_jj_repo(cwd: Option<&Path>) -> DoctorCheck {
     let cwd = cwd.unwrap_or_else(|| Path::new("."));
 
-    let Ok(output) = Command::new("jj").args(["status"]).current_dir(cwd).output() else {
+    let Ok(output) = Command::new("jj")
+        .args(["status"])
+        .current_dir(cwd)
+        .output()
+    else {
         // jj not installed — already reported by check_tool
         return DoctorCheck {
             name: "jj repository".to_string(),
@@ -202,19 +206,20 @@ fn check_default_workspace(root: Option<&Path>) -> DoctorCheck {
     // Check that it has a .gitignore with ws/ entry
     let gitignore = default_ws.join(".gitignore");
     if gitignore.exists()
-        && let Ok(content) = std::fs::read_to_string(&gitignore) {
-            let has_ws = content
-                .lines()
-                .any(|l| matches!(l.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
-            if !has_ws {
-                return DoctorCheck {
-                    name: "default workspace".to_string(),
-                    status: "warn".to_string(),
-                    message: "default workspace: .gitignore missing ws/ entry".to_string(),
-                    fix: Some("Run: maw init".to_string()),
-                };
-            }
+        && let Ok(content) = std::fs::read_to_string(&gitignore)
+    {
+        let has_ws = content
+            .lines()
+            .any(|l| matches!(l.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
+        if !has_ws {
+            return DoctorCheck {
+                name: "default workspace".to_string(),
+                status: "warn".to_string(),
+                message: "default workspace: .gitignore missing ws/ entry".to_string(),
+                fix: Some("Run: maw init".to_string()),
+            };
         }
+    }
 
     // Check that source files exist (not an empty workspace)
     let has_files = std::fs::read_dir(&default_ws)
@@ -302,7 +307,8 @@ fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
         DoctorCheck {
             name: "ghost working copy".to_string(),
             status: "fail".to_string(),
-            message: "ghost working copy: .jj/working_copy/ exists at root (causes file leaks)".to_string(),
+            message: "ghost working copy: .jj/working_copy/ exists at root (causes file leaks)"
+                .to_string(),
             fix: Some("Fix: rm -rf .jj/working_copy/  (or run: maw init)".to_string()),
         }
     } else {
@@ -341,9 +347,7 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
 /// configured branch). A detached HEAD causes `git log` and other tools to
 /// show stale history.
 fn check_git_head() -> DoctorCheck {
-    let output = Command::new("git")
-        .args(["symbolic-ref", "HEAD"])
-        .output();
+    let output = Command::new("git").args(["symbolic-ref", "HEAD"]).output();
 
     match output {
         Ok(out) if out.status.success() => {
@@ -358,12 +362,15 @@ fn check_git_head() -> DoctorCheck {
         _ => {
             // HEAD is detached or git failed
             let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
-            let branch = crate::workspace::MawConfig::load(&root).map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
+            let branch = crate::workspace::MawConfig::load(&root)
+                .map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
             DoctorCheck {
                 name: "git HEAD".to_string(),
                 status: "fail".to_string(),
                 message: "git HEAD: detached (git log shows stale history)".to_string(),
-                fix: Some(format!("Fix: git symbolic-ref HEAD refs/heads/{branch}  (or run: maw init)")),
+                fix: Some(format!(
+                    "Fix: git symbolic-ref HEAD refs/heads/{branch}  (or run: maw init)"
+                )),
             }
         }
     }
@@ -405,7 +412,9 @@ fn check_jj_version() -> DoctorCheck {
                 DoctorCheck {
                     name: "jj version".to_string(),
                     status: "ok".to_string(),
-                    message: format!("jj version: {major}.{minor}.{patch} (>= {req_major}.{req_minor}.{req_patch})"),
+                    message: format!(
+                        "jj version: {major}.{minor}.{patch} (>= {req_major}.{req_minor}.{req_patch})"
+                    ),
                     fix: None,
                 }
             } else {
@@ -433,9 +442,7 @@ fn check_jj_version() -> DoctorCheck {
 /// Parse a jj version string like "jj 0.38.0" or "jj 0.38.0-dev" into (major, minor, patch).
 fn parse_jj_version(version_line: &str) -> Option<(u32, u32, u32)> {
     // "jj 0.38.0" -> "0.38.0"
-    let version_part = version_line
-        .strip_prefix("jj ")
-        .unwrap_or(version_line);
+    let version_part = version_line.strip_prefix("jj ").unwrap_or(version_line);
 
     // Strip any pre-release suffix: "0.38.0-dev" -> "0.38.0"
     let version_part = version_part.split('-').next()?;

@@ -31,12 +31,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::patch::PatchSet;
 use crate::model::types::{GitOid, WorkspaceId};
-use crate::oplog::read::{walk_chain, OpLogReadError};
+use crate::oplog::read::{OpLogReadError, walk_chain};
 use crate::oplog::types::{OpPayload, Operation};
-use crate::oplog::view::{
-    materialize_from_ops, MaterializedView, ViewError,
-};
-use crate::oplog::write::{append_operation, OpLogWriteError};
+use crate::oplog::view::{MaterializedView, ViewError, materialize_from_ops};
+use crate::oplog::write::{OpLogWriteError, append_operation};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,11 +139,10 @@ impl CheckpointView {
                 detail: format!("invalid patch_set OID: {:?}", self.patch_set_oid),
             })?;
 
-        let ws_id = WorkspaceId::new(&self.workspace_id).map_err(|_| {
-            CheckpointError::InvalidData {
+        let ws_id =
+            WorkspaceId::new(&self.workspace_id).map_err(|_| CheckpointError::InvalidData {
                 detail: format!("invalid workspace_id: {:?}", self.workspace_id),
-            }
-        })?;
+            })?;
 
         Ok(MaterializedView {
             workspace_id: ws_id,
@@ -257,9 +254,7 @@ pub fn extract_checkpoint(op: &Operation) -> Option<CheckpointData> {
         OpPayload::Annotate { key, data } if key == CHECKPOINT_KEY => {
             // Convert BTreeMap<String, Value> to CheckpointData via JSON
             let value = serde_json::Value::Object(
-                data.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
+                data.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             );
             serde_json::from_value(value).ok()
         }
@@ -413,11 +408,10 @@ where
         Some(cp_idx) => {
             // Extract checkpoint data
             let (_cp_oid, cp_op) = &chain[cp_idx];
-            let cp_data = extract_checkpoint(cp_op).ok_or_else(|| {
-                CheckpointError::InvalidData {
+            let cp_data =
+                extract_checkpoint(cp_op).ok_or_else(|| CheckpointError::InvalidData {
                     detail: "checkpoint annotation has unparseable data".to_owned(),
-                }
-            })?;
+                })?;
 
             // Restore view from checkpoint
             let mut view = cp_data.view.to_view(cp_data.op_count)?;
@@ -582,16 +576,17 @@ pub fn compact(
     })?;
 
     // Extract epoch from checkpoint
-    let epoch = cp_data.view.epoch.as_ref().ok_or_else(|| {
-        CheckpointError::InvalidData {
+    let epoch = cp_data
+        .view
+        .epoch
+        .as_ref()
+        .ok_or_else(|| CheckpointError::InvalidData {
             detail: "checkpoint has no epoch".to_owned(),
-        }
-    })?;
-    let epoch_id = crate::model::types::EpochId::new(epoch).map_err(|_| {
-        CheckpointError::InvalidData {
+        })?;
+    let epoch_id =
+        crate::model::types::EpochId::new(epoch).map_err(|_| CheckpointError::InvalidData {
             detail: format!("invalid epoch in checkpoint: {epoch}"),
-        }
-    })?;
+        })?;
 
     // Step 1: Write synthetic Create (new root, no parents)
     let synthetic_create = Operation {
@@ -633,15 +628,13 @@ pub fn compact(
     // Step 4: Update head ref to point to the new chain head
     let ref_name = crate::refs::workspace_head_ref(workspace_id.as_str());
     let current_head = chain[0].0.clone();
-    crate::refs::write_ref_cas(root, &ref_name, &current_head, &prev_oid).map_err(|e| {
-        match e {
-            crate::refs::RefError::CasMismatch { .. } => CheckpointError::OpLogWrite(
-                OpLogWriteError::CasMismatch {
-                    workspace_id: workspace_id.clone(),
-                },
-            ),
-            other => CheckpointError::OpLogWrite(OpLogWriteError::RefError(other)),
+    crate::refs::write_ref_cas(root, &ref_name, &current_head, &prev_oid).map_err(|e| match e {
+        crate::refs::RefError::CasMismatch { .. } => {
+            CheckpointError::OpLogWrite(OpLogWriteError::CasMismatch {
+                workspace_id: workspace_id.clone(),
+            })
         }
+        other => CheckpointError::OpLogWrite(OpLogWriteError::RefError(other)),
     })?;
 
     Ok(CompactionResult {
@@ -813,8 +806,7 @@ mod tests {
 
         let mut other_data = BTreeMap::new();
         other_data.insert("passed".into(), serde_json::Value::Bool(true));
-        view.annotations
-            .insert("validation".to_owned(), other_data);
+        view.annotations.insert("validation".to_owned(), other_data);
 
         let cp_view = CheckpointView::from_view(&view);
 
@@ -932,7 +924,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -946,12 +943,7 @@ mod tests {
         ];
 
         // Full replay should give us the view at snapshot
-        let view = materialize_from_ops(
-            test_ws("ws-1"),
-            &ops,
-            mock_reader(ps.clone()),
-        )
-        .unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone())).unwrap();
 
         assert_eq!(view.epoch, Some(test_epoch('a')));
         assert_eq!(view.patch_set, Some(ps.clone()));
@@ -969,7 +961,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -995,25 +992,15 @@ mod tests {
             materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone())).unwrap();
 
         // Create checkpoint from the view at op 2
-        let partial_view = materialize_from_ops(
-            test_ws("ws-1"),
-            &ops[..2],
-            mock_reader(ps.clone()),
-        )
-        .unwrap();
+        let partial_view =
+            materialize_from_ops(test_ws("ws-1"), &ops[..2], mock_reader(ps.clone())).unwrap();
         let cp_view = CheckpointView::from_view(&partial_view);
         let mut restored = cp_view.to_view(2).unwrap();
 
         // Replay the remaining op (Describe)
         let remaining_ops = &ops[2..];
         for (oid, op) in remaining_ops {
-            replay_single_op(
-                &mut restored,
-                oid,
-                op,
-                &mock_reader(ps.clone()),
-            )
-            .unwrap();
+            replay_single_op(&mut restored, oid, op, &mock_reader(ps.clone())).unwrap();
         }
 
         // Should be equivalent to full replay
@@ -1220,18 +1207,12 @@ mod tests {
             (oid2.clone(), op2.clone()),
             (oid3.clone(), op3.clone()),
         ];
-        let view =
-            materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
+        let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
         assert_eq!(view.op_count, 3);
 
         // Write a checkpoint
         let cp_oid = maybe_write_checkpoint(
-            &root,
-            &ws_id,
-            &view,
-            &oid3,
-            &oid3,
-            3, // checkpoint every 3 ops
+            &root, &ws_id, &view, &oid3, &oid3, 3, // checkpoint every 3 ops
         )
         .unwrap();
         assert!(cp_oid.is_some(), "should write checkpoint at op 3");
@@ -1272,8 +1253,7 @@ mod tests {
         let mut chain_causal: Vec<_> = chain;
         chain_causal.reverse();
         let compacted_view =
-            materialize_from_ops(ws_id.clone(), &chain_causal, mock_reader(ps.clone()))
-                .unwrap();
+            materialize_from_ops(ws_id.clone(), &chain_causal, mock_reader(ps.clone())).unwrap();
 
         assert_eq!(compacted_view.description, Some("step 5".into()));
         assert_eq!(compacted_view.epoch, Some(test_epoch('a')));
@@ -1322,8 +1302,7 @@ mod tests {
             (oid2.clone(), op2.clone()),
             (oid3.clone(), op3.clone()),
         ];
-        let view =
-            materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
+        let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
 
         let cp_oid = maybe_write_checkpoint(&root, &ws_id, &view, &oid3, &oid3, 3)
             .unwrap()
@@ -1341,14 +1320,10 @@ mod tests {
         let _oid4 = append_operation(&root, &ws_id, &op4, Some(&cp_oid)).unwrap();
 
         // Materialize from checkpoint
-        let cp_view =
-            materialize_from_checkpoint(&root, &ws_id, mock_reader(ps.clone())).unwrap();
+        let cp_view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps.clone())).unwrap();
 
         // Should have the latest description
-        assert_eq!(
-            cp_view.description,
-            Some("step 4 after checkpoint".into())
-        );
+        assert_eq!(cp_view.description, Some("step 4 after checkpoint".into()));
         assert_eq!(cp_view.epoch, Some(test_epoch('a')));
     }
 
@@ -1378,8 +1353,7 @@ mod tests {
         let _oid2 = append_operation(&root, &ws_id, &op2, Some(&oid1)).unwrap();
 
         let ps = test_patch_set('a');
-        let view =
-            materialize_from_checkpoint(&root, &ws_id, mock_reader(ps)).unwrap();
+        let view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps)).unwrap();
 
         assert_eq!(view.description, Some("no checkpoint here".into()));
         assert_eq!(view.op_count, 2);

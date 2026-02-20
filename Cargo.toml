@@ -5,6 +5,15 @@ edition = "2024"
 description = "Multi-Agent Workflow coordinator for jj workspaces"
 license = "MIT"
 
+[features]
+default = ["ast-merge"]
+ast-merge = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-typescript",
+]
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 anyhow = "1"
@@ -16,6 +25,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 glob = "0.3"
+
+# AST-aware merge (optional, enabled by default)
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -668,9 +668,10 @@ impl Conflict {
             Self::ModifyDelete {
                 modifier, deleter, ..
             } => vec![modifier.workspace.as_str(), deleter.workspace.as_str()],
-            Self::DivergentRename { destinations, .. } => {
-                destinations.iter().map(|(_, s)| s.workspace.as_str()).collect()
-            }
+            Self::DivergentRename { destinations, .. } => destinations
+                .iter()
+                .map(|(_, s)| s.workspace.as_str())
+                .collect(),
         }
     }
 }
@@ -766,7 +767,8 @@ mod tests {
     // Helper to create a simple test ConflictAtom with a description
     fn test_atom(desc: &str) -> ConflictAtom {
         ConflictAtom::line_overlap(
-            1, 10,
+            1,
+            10,
             vec![
                 AtomEdit::new("ws-1", Region::lines(1, 5), "side-1"),
                 AtomEdit::new("ws-2", Region::lines(5, 10), "side-2"),
@@ -875,7 +877,8 @@ mod tests {
 
     #[test]
     fn conflict_reason_non_commutative() {
-        let r = ConflictReason::non_commutative("edits produce different results in different order");
+        let r =
+            ConflictReason::non_commutative("edits produce different results in different order");
         assert_eq!(r.variant_name(), "non_commutative_edits");
     }
 
@@ -1002,12 +1005,23 @@ mod tests {
         let atom = ConflictAtom::new(
             Region::ast_node("function_item", Some("process_order".into()), 1024, 2048),
             vec![
-                AtomEdit::new("alice", Region::ast_node("function_item", Some("process_order".into()), 1024, 1800), "alice version"),
-                AtomEdit::new("bob", Region::ast_node("function_item", Some("process_order".into()), 1024, 1900), "bob version"),
+                AtomEdit::new(
+                    "alice",
+                    Region::ast_node("function_item", Some("process_order".into()), 1024, 1800),
+                    "alice version",
+                ),
+                AtomEdit::new(
+                    "bob",
+                    Region::ast_node("function_item", Some("process_order".into()), 1024, 1900),
+                    "bob version",
+                ),
             ],
             ConflictReason::same_ast_node("function `process_order` modified by both"),
         );
-        assert_eq!(atom.summary(), "function_item `process_order` — function `process_order` modified by both [alice, bob]");
+        assert_eq!(
+            atom.summary(),
+            "function_item `process_order` — function `process_order` modified by both [alice, bob]"
+        );
     }
 
     #[test]
@@ -1031,8 +1045,12 @@ mod tests {
     #[test]
     fn conflict_atom_display() {
         let atom = ConflictAtom::line_overlap(
-            1, 5,
-            vec![AtomEdit::new("a", Region::lines(1, 3), "x"), AtomEdit::new("b", Region::lines(2, 5), "y")],
+            1,
+            5,
+            vec![
+                AtomEdit::new("a", Region::lines(1, 3), "x"),
+                AtomEdit::new("b", Region::lines(2, 5), "y"),
+            ],
             "test",
         );
         let display = format!("{atom}");
@@ -1088,10 +1106,7 @@ mod tests {
                 test_side("bob", 'b', 2),
                 test_side("carol", 'c', 3),
             ],
-            atoms: vec![
-                test_atom("header section"),
-                test_atom("footer section"),
-            ],
+            atoms: vec![test_atom("header section"), test_atom("footer section")],
         };
 
         assert_eq!(conflict.side_count(), 3);

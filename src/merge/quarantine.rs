@@ -45,7 +45,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ValidationConfig;
-use crate::merge::validate::{run_validate_config_in_dir, ValidateOutcome};
+use crate::merge::validate::{ValidateOutcome, run_validate_config_in_dir};
 use crate::merge_state::ValidationResult;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -110,7 +110,9 @@ impl QuarantineState {
         let path = state_path(manifold_dir, merge_id);
         let contents = fs::read_to_string(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                QuarantineError::NotFound { merge_id: merge_id.to_owned() }
+                QuarantineError::NotFound {
+                    merge_id: merge_id.to_owned(),
+                }
             } else {
                 QuarantineError::Io(format!("read {}: {e}", path.display()))
             }
@@ -211,7 +213,9 @@ pub fn quarantine_workspace_name(merge_id: &str) -> String {
 
 /// Return the workspace path for a quarantine with the given merge_id.
 pub fn quarantine_workspace_path(repo_root: &Path, merge_id: &str) -> PathBuf {
-    repo_root.join("ws").join(quarantine_workspace_name(merge_id))
+    repo_root
+        .join("ws")
+        .join(quarantine_workspace_name(merge_id))
 }
 
 /// Return the directory that holds the quarantine state files.
@@ -282,8 +286,7 @@ pub fn create_quarantine_workspace(
 
     // Ensure ws/ directory exists
     let ws_dir = repo_root.join("ws");
-    fs::create_dir_all(&ws_dir)
-        .map_err(|e| QuarantineError::Io(format!("create ws/ dir: {e}")))?;
+    fs::create_dir_all(&ws_dir).map_err(|e| QuarantineError::Io(format!("create ws/ dir: {e}")))?;
 
     // Create a detached git worktree at the candidate commit
     let output = Command::new("git")
@@ -389,7 +392,9 @@ pub fn promote_quarantine(
         .map_err(|e| QuarantineError::Validate(format!("{e}")))?;
 
     match validate_outcome {
-        ValidateOutcome::Skipped | ValidateOutcome::Passed(_) | ValidateOutcome::PassedWithWarnings(_) => {
+        ValidateOutcome::Skipped
+        | ValidateOutcome::Passed(_)
+        | ValidateOutcome::PassedWithWarnings(_) => {
             // 4a. Advance epoch refs
             let epoch_before_oid = state.epoch_before.clone();
             crate::refs::advance_epoch(repo_root, &epoch_before_oid, &commit_oid)
@@ -402,15 +407,21 @@ pub fn promote_quarantine(
             // 4b. Clean up quarantine (best-effort)
             let _ = abandon_quarantine(repo_root, manifold_dir, merge_id);
 
-            Ok(PromoteResult::Committed { new_epoch: commit_oid })
+            Ok(PromoteResult::Committed {
+                new_epoch: commit_oid,
+            })
         }
         ValidateOutcome::Blocked(r) | ValidateOutcome::BlockedAndQuarantine(r) => {
-            Ok(PromoteResult::ValidationFailed { validation_result: r })
+            Ok(PromoteResult::ValidationFailed {
+                validation_result: r,
+            })
         }
         ValidateOutcome::Quarantine(r) => {
             // Quarantine policy (not block) — still counts as a validation failure
             // for the purposes of promote: we only promote when validation fully passes.
-            Ok(PromoteResult::ValidationFailed { validation_result: r })
+            Ok(PromoteResult::ValidationFailed {
+                validation_result: r,
+            })
         }
     }
 }
@@ -489,7 +500,11 @@ pub fn list_quarantines(manifold_dir: &Path) -> Vec<QuarantineState> {
         if !path.is_dir() {
             continue;
         }
-        let merge_id = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let merge_id = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if let Ok(state) = QuarantineState::read(manifold_dir, &merge_id) {
             result.push(state);
         }
@@ -534,7 +549,9 @@ fn commit_quarantine_edits(
         .map_err(|e| QuarantineError::Git(format!("spawn git add: {e}")))?;
 
     if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&add_output.stderr)
+            .trim()
+            .to_owned();
         return Err(QuarantineError::Git(format!("git add -A failed: {stderr}")));
     }
 
@@ -546,7 +563,9 @@ fn commit_quarantine_edits(
         .map_err(|e| QuarantineError::Git(format!("spawn git commit: {e}")))?;
 
     if !commit_output.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_output.stderr).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&commit_output.stderr)
+            .trim()
+            .to_owned();
         return Err(QuarantineError::Git(format!("git commit failed: {stderr}")));
     }
 
@@ -558,11 +577,17 @@ fn commit_quarantine_edits(
         .map_err(|e| QuarantineError::Git(format!("spawn git rev-parse: {e}")))?;
 
     if !head_output.status.success() {
-        let stderr = String::from_utf8_lossy(&head_output.stderr).trim().to_owned();
-        return Err(QuarantineError::Git(format!("git rev-parse HEAD failed: {stderr}")));
+        let stderr = String::from_utf8_lossy(&head_output.stderr)
+            .trim()
+            .to_owned();
+        return Err(QuarantineError::Git(format!(
+            "git rev-parse HEAD failed: {stderr}"
+        )));
     }
 
-    let oid_str = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+    let oid_str = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
     GitOid::new(&oid_str).map_err(|e| QuarantineError::Git(format!("parse HEAD OID: {e}")))
 }
 
@@ -571,12 +596,7 @@ fn commit_quarantine_edits(
 /// Idempotent: if the worktree is not registered with git, silently succeeds.
 fn remove_worktree(repo_root: &Path, path: &Path) -> Result<(), QuarantineError> {
     let output = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &path.to_string_lossy(),
-        ])
+        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
         .current_dir(repo_root)
         .output()
         .map_err(|e| QuarantineError::Git(format!("spawn git worktree remove: {e}")))?;
@@ -926,7 +946,10 @@ mod tests {
 
         abandon_quarantine(root, &manifold_dir, merge_id).unwrap();
 
-        assert!(!ws_path.exists(), "worktree should be removed after abandon");
+        assert!(
+            !ws_path.exists(),
+            "worktree should be removed after abandon"
+        );
         let state_result = QuarantineState::read(&manifold_dir, merge_id);
         assert!(
             matches!(state_result, Err(QuarantineError::NotFound { .. })),
@@ -1061,7 +1084,10 @@ mod tests {
 
         // Reset refs so COMMIT phase can CAS from epoch_oid → candidate
         run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
-        run_git(root, &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()]);
+        run_git(
+            root,
+            &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()],
+        );
 
         create_quarantine_workspace(
             root,
@@ -1102,7 +1128,10 @@ mod tests {
 
         // Quarantine should be cleaned up after promote
         let ws_path = quarantine_workspace_path(root, merge_id);
-        assert!(!ws_path.exists(), "quarantine worktree should be removed after promote");
+        assert!(
+            !ws_path.exists(),
+            "quarantine worktree should be removed after promote"
+        );
 
         let state_result = QuarantineState::read(&manifold_dir, merge_id);
         assert!(
@@ -1122,7 +1151,10 @@ mod tests {
         let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
 
         run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
-        run_git(root, &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()]);
+        run_git(
+            root,
+            &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()],
+        );
 
         create_quarantine_workspace(
             root,
@@ -1158,14 +1190,21 @@ mod tests {
 
         // Quarantine should still exist
         let ws_path = quarantine_workspace_path(root, merge_id);
-        assert!(ws_path.exists(), "quarantine should remain after failed promote");
+        assert!(
+            ws_path.exists(),
+            "quarantine should remain after failed promote"
+        );
 
         let state = QuarantineState::read(&manifold_dir, merge_id).unwrap();
         assert_eq!(state.candidate, candidate);
 
         // Epoch ref should NOT have advanced
         let epoch_ref = run_git(root, &["rev-parse", crate::refs::EPOCH_CURRENT]);
-        assert_eq!(epoch_ref, epoch_oid.as_str(), "epoch should not advance after failed promote");
+        assert_eq!(
+            epoch_ref,
+            epoch_oid.as_str(),
+            "epoch should not advance after failed promote"
+        );
     }
 
     #[test]
@@ -1180,7 +1219,10 @@ mod tests {
         let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
 
         run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
-        run_git(root, &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()]);
+        run_git(
+            root,
+            &["update-ref", crate::refs::EPOCH_CURRENT, epoch_oid.as_str()],
+        );
 
         create_quarantine_workspace(
             root,
@@ -1247,7 +1289,10 @@ mod tests {
 
         // No uncommitted changes
         let oid = commit_quarantine_edits(root, root, &candidate).unwrap();
-        assert_eq!(oid, candidate, "clean worktree should return original candidate");
+        assert_eq!(
+            oid, candidate,
+            "clean worktree should return original candidate"
+        );
     }
 
     #[test]

@@ -25,7 +25,9 @@ fn stale_workspace_detected() {
 
     // The status output should mention stale or indicate alice needs sync
     assert!(
-        status_output.contains("stale") || status_output.contains("Stale") || status_output.contains("sync"),
+        status_output.contains("stale")
+            || status_output.contains("Stale")
+            || status_output.contains("sync"),
         "Expected status to report stale workspace, got: {status_output}"
     );
 
@@ -34,8 +36,10 @@ fn stale_workspace_detected() {
 
     // Verify sync completed successfully (may report "up to date" if default already synced)
     assert!(
-        sync_output.contains("sync") || sync_output.contains("Sync")
-            || sync_output.contains("updated") || sync_output.contains("Updated")
+        sync_output.contains("sync")
+            || sync_output.contains("Sync")
+            || sync_output.contains("updated")
+            || sync_output.contains("Updated")
             || sync_output.contains("up to date"),
         "Expected sync success message, got: {sync_output}"
     );
@@ -61,10 +65,10 @@ fn auto_sync_on_exec() {
     // The command should succeed (not fail with stale error)
     // The output should show jj status executed successfully
     assert!(
-        exec_output.contains("working copy") ||
-        exec_output.contains("Working copy") ||
-        exec_output.contains("parent") ||
-        exec_output.contains("Parent"),
+        exec_output.contains("working copy")
+            || exec_output.contains("Working copy")
+            || exec_output.contains("parent")
+            || exec_output.contains("Parent"),
         "Expected jj status output, got: {exec_output}"
     );
 }
@@ -80,7 +84,10 @@ fn sync_resolves_divergent_identical() {
 
     // Make a change in bob's workspace
     write_in_ws(repo.path(), "bob", "test.txt", "same content");
-    run_jj(&repo.path().join("ws").join("bob"), &["describe", "-m", "test change"]);
+    run_jj(
+        &repo.path().join("ws").join("bob"),
+        &["describe", "-m", "test change"],
+    );
 
     // Trigger stale by committing in default
     write_in_ws(repo.path(), "default", "other.txt", "other file");

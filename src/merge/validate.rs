@@ -1176,7 +1176,11 @@ mod tests {
     #[test]
     fn detect_preset_python_from_setup_py() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("setup.py"), "from setuptools import setup\n").unwrap();
+        std::fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::Python)

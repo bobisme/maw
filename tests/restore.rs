@@ -14,7 +14,12 @@ fn restore_destroyed_workspace_with_changes() {
 
     // Create a workspace and make changes
     maw_ok(repo.path(), &["ws", "create", "alice"]);
-    write_in_ws(repo.path(), "alice", "feature.txt", "Alice's important work");
+    write_in_ws(
+        repo.path(),
+        "alice",
+        "feature.txt",
+        "Alice's important work",
+    );
     let alice_ws = repo.path().join("ws").join("alice");
     run_jj(&alice_ws, &["describe", "-m", "feat: alice's feature"]);
 

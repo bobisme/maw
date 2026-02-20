@@ -4,8 +4,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::backend::git::GitWorktreeBackend;
 use crate::backend::WorkspaceBackend;
+use crate::backend::git::GitWorktreeBackend;
 use crate::refs;
 
 /// Result of an epoch GC pass.
@@ -87,8 +87,9 @@ pub fn gc_unreferenced_epochs(root: &Path, dry_run: bool) -> Result<EpochGcRepor
             report.kept.push(oid);
         } else {
             if !dry_run {
-                std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("Failed to remove epoch snapshot {}", path.display()))?;
+                std::fs::remove_dir_all(&path).with_context(|| {
+                    format!("Failed to remove epoch snapshot {}", path.display())
+                })?;
             }
             report.removed.push(oid);
         }
@@ -166,7 +167,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
 
-        Command::new("git").args(["init"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(root)
@@ -234,7 +239,9 @@ mod tests {
 
         let backend = GitWorktreeBackend::new(root.to_path_buf());
         let ws = WorkspaceId::new("persist").unwrap();
-        backend.create(&ws, &EpochId::new(&epoch0).unwrap()).unwrap();
+        backend
+            .create(&ws, &EpochId::new(&epoch0).unwrap())
+            .unwrap();
 
         let epoch1 = commit(root, "new.txt");
         Command::new("git")
@@ -262,7 +269,9 @@ mod tests {
 
         let backend = GitWorktreeBackend::new(root.to_path_buf());
         let ws = WorkspaceId::new("tempws").unwrap();
-        backend.create(&ws, &EpochId::new(&epoch0).unwrap()).unwrap();
+        backend
+            .create(&ws, &EpochId::new(&epoch0).unwrap())
+            .unwrap();
         fs::create_dir_all(root.join(format!(".manifold/epochs/e-{}", epoch0))).unwrap();
 
         // Keep current epoch elsewhere so epoch0 is not retained by epoch/current.

@@ -103,9 +103,18 @@ fn two_way_merge_disjoint_files_clean() {
 
     // Both files should be in the candidate tree
     let files = list_candidate_files(&repo, output.candidate.as_str());
-    assert!(files.contains(&"alice.txt".to_string()), "alice.txt missing from merge result");
-    assert!(files.contains(&"bob.txt".to_string()), "bob.txt missing from merge result");
-    assert!(files.contains(&"README.md".to_string()), "README.md should be preserved");
+    assert!(
+        files.contains(&"alice.txt".to_string()),
+        "alice.txt missing from merge result"
+    );
+    assert!(
+        files.contains(&"bob.txt".to_string()),
+        "bob.txt missing from merge result"
+    );
+    assert!(
+        files.contains(&"README.md".to_string()),
+        "README.md should be preserved"
+    );
 
     // Content should match
     assert_eq!(
@@ -176,10 +185,19 @@ fn two_way_merge_same_file_different_regions_diff3_clean() {
     // Merged content should have both changes
     let content = read_candidate_file(&repo, output.candidate.as_str(), "shared.txt")
         .expect("shared.txt should exist in candidate");
-    assert!(content.contains("ALICE1"), "alice's edit missing: {content}");
+    assert!(
+        content.contains("ALICE1"),
+        "alice's edit missing: {content}"
+    );
     assert!(content.contains("BOB3"), "bob's edit missing: {content}");
-    assert!(!content.contains("line1"), "original line1 should be replaced");
-    assert!(!content.contains("line3"), "original line3 should be replaced");
+    assert!(
+        !content.contains("line1"),
+        "original line1 should be replaced"
+    );
+    assert!(
+        !content.contains("line3"),
+        "original line3 should be replaced"
+    );
 
     // Stats
     assert_eq!(output.shared_count, 1, "one shared path");
@@ -230,7 +248,11 @@ fn two_way_merge_same_file_same_region_conflict() {
     );
 
     // Conflict sides
-    assert_eq!(output.conflicts[0].sides.len(), 2, "2 conflict sides expected");
+    assert_eq!(
+        output.conflicts[0].sides.len(),
+        2,
+        "2 conflict sides expected"
+    );
     let side_ws: Vec<_> = output.conflicts[0]
         .sides
         .iter()
@@ -275,13 +297,19 @@ fn three_way_merge_disjoint_files_clean() {
     let output =
         maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
 
-    assert!(output.conflicts.is_empty(), "disjoint 3-way should be clean");
+    assert!(
+        output.conflicts.is_empty(),
+        "disjoint 3-way should be clean"
+    );
 
     let files = list_candidate_files(&repo, output.candidate.as_str());
     assert!(files.contains(&"alice.txt".to_string()));
     assert!(files.contains(&"bob.txt".to_string()));
     assert!(files.contains(&"carol.txt".to_string()));
-    assert!(files.contains(&"base.txt".to_string()), "base.txt preserved");
+    assert!(
+        files.contains(&"base.txt".to_string()),
+        "base.txt preserved"
+    );
 
     assert_eq!(output.unique_count, 3);
     assert_eq!(output.shared_count, 0);
@@ -300,7 +328,11 @@ fn five_way_merge_disjoint_files_clean() {
     let names = ["ws-0", "ws-1", "ws-2", "ws-3", "ws-4"];
     for name in &names {
         repo.create_workspace(name);
-        repo.add_file(name, &format!("{name}.txt"), &format!("content from {name}\n"));
+        repo.add_file(
+            name,
+            &format!("{name}.txt"),
+            &format!("content from {name}\n"),
+        );
     }
 
     let backend = backend_for(&repo);
@@ -313,7 +345,10 @@ fn five_way_merge_disjoint_files_clean() {
     let output =
         maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
 
-    assert!(output.conflicts.is_empty(), "disjoint 5-way should be clean");
+    assert!(
+        output.conflicts.is_empty(),
+        "disjoint 5-way should be clean"
+    );
 
     let files = list_candidate_files(&repo, output.candidate.as_str());
     for name in &names {
@@ -397,14 +432,26 @@ fn merge_with_empty_workspace_is_noop_for_that_workspace() {
     let output =
         maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
 
-    assert!(output.conflicts.is_empty(), "empty workspace should not cause conflicts");
+    assert!(
+        output.conflicts.is_empty(),
+        "empty workspace should not cause conflicts"
+    );
 
     let files = list_candidate_files(&repo, output.candidate.as_str());
-    assert!(files.contains(&"feature.txt".to_string()), "feature.txt from active ws");
-    assert!(files.contains(&"README.md".to_string()), "README.md preserved");
+    assert!(
+        files.contains(&"feature.txt".to_string()),
+        "feature.txt from active ws"
+    );
+    assert!(
+        files.contains(&"README.md".to_string()),
+        "README.md preserved"
+    );
 
     // The empty workspace contributes nothing
-    assert_eq!(output.unique_count, 1, "only 1 unique change from active ws");
+    assert_eq!(
+        output.unique_count, 1,
+        "only 1 unique change from active ws"
+    );
     assert_eq!(output.resolved_count, 1);
 }
 
@@ -465,8 +512,7 @@ fn three_way_merge_same_file_different_regions_diff3_clean() {
     assert!(content.contains("B2"), "ws-b's edit missing");
     assert!(content.contains("C3"), "ws-c's edit missing");
     assert_eq!(
-        content,
-        "A1\n---\n---\n---\n---\nB2\n---\n---\n---\n---\nC3\n",
+        content, "A1\n---\n---\n---\n---\nB2\n---\n---\n---\n---\nC3\n",
         "merged content should combine all edits"
     );
 }
@@ -550,7 +596,11 @@ fn add_add_different_content_produces_conflict() {
     let output =
         maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
 
-    assert_eq!(output.conflicts.len(), 1, "add/add with different content should conflict");
+    assert_eq!(
+        output.conflicts.len(),
+        1,
+        "add/add with different content should conflict"
+    );
     assert_eq!(output.conflicts[0].path.to_str(), Some("new.txt"));
     assert_eq!(
         output.conflicts[0].reason,
@@ -599,10 +649,7 @@ fn modify_delete_produces_conflict() {
 #[test]
 fn delete_delete_resolves_cleanly() {
     let repo = TestRepo::new();
-    repo.seed_files(&[
-        ("keep.txt", "keep this\n"),
-        ("remove.txt", "remove this\n"),
-    ]);
+    repo.seed_files(&[("keep.txt", "keep this\n"), ("remove.txt", "remove this\n")]);
 
     repo.create_workspace("alice");
     repo.create_workspace("bob");
@@ -621,11 +668,20 @@ fn delete_delete_resolves_cleanly() {
     let output =
         maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
 
-    assert!(output.conflicts.is_empty(), "delete/delete should resolve cleanly");
+    assert!(
+        output.conflicts.is_empty(),
+        "delete/delete should resolve cleanly"
+    );
 
     let files = list_candidate_files(&repo, output.candidate.as_str());
-    assert!(!files.contains(&"remove.txt".to_string()), "remove.txt should be deleted");
-    assert!(files.contains(&"keep.txt".to_string()), "keep.txt should be preserved");
+    assert!(
+        !files.contains(&"remove.txt".to_string()),
+        "remove.txt should be deleted"
+    );
+    assert!(
+        files.contains(&"keep.txt".to_string()),
+        "keep.txt should be preserved"
+    );
 }
 
 // ==========================================================================
@@ -635,10 +691,7 @@ fn delete_delete_resolves_cleanly() {
 #[test]
 fn mixed_disjoint_and_shared_changes() {
     let repo = TestRepo::new();
-    repo.seed_files(&[(
-        "shared.txt",
-        "header\n---\n---\n---\n---\nfooter\n",
-    )]);
+    repo.seed_files(&[("shared.txt", "header\n---\n---\n---\n---\nfooter\n")]);
 
     repo.create_workspace("alice");
     repo.create_workspace("bob");
@@ -669,7 +722,10 @@ fn mixed_disjoint_and_shared_changes() {
     let output =
         maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
 
-    assert!(output.conflicts.is_empty(), "mixed clean scenario should have no conflicts");
+    assert!(
+        output.conflicts.is_empty(),
+        "mixed clean scenario should have no conflicts"
+    );
 
     let files = list_candidate_files(&repo, output.candidate.as_str());
     assert!(files.contains(&"alice_only.txt".to_string()));
@@ -678,7 +734,10 @@ fn mixed_disjoint_and_shared_changes() {
 
     let shared = read_candidate_file(&repo, output.candidate.as_str(), "shared.txt")
         .expect("shared.txt should exist");
-    assert!(shared.contains("ALICE HEADER"), "alice's header edit missing");
+    assert!(
+        shared.contains("ALICE HEADER"),
+        "alice's header edit missing"
+    );
     assert!(shared.contains("BOB FOOTER"), "bob's footer edit missing");
 
     // Stats: 2 unique (one add from each) + 1 shared (shared.txt)
@@ -756,13 +815,9 @@ fn merge_is_deterministic() {
             maw::model::types::WorkspaceId::new("bob").unwrap(),
         ];
 
-        let output = maw::merge::run_build_phase_with_inputs(
-            repo.root(),
-            &backend,
-            &epoch,
-            &sources,
-        )
-        .unwrap();
+        let output =
+            maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+                .unwrap();
 
         assert!(output.conflicts.is_empty());
 
@@ -792,10 +847,7 @@ fn merge_is_deterministic() {
 #[test]
 fn nway_mixed_conflicts_and_clean() {
     let repo = TestRepo::new();
-    repo.seed_files(&[
-        ("clean.txt", "clean\n"),
-        ("conflict.txt", "original\n"),
-    ]);
+    repo.seed_files(&[("clean.txt", "clean\n"), ("conflict.txt", "original\n")]);
 
     repo.create_workspace("ws-a");
     repo.create_workspace("ws-b");
@@ -829,10 +881,22 @@ fn nway_mixed_conflicts_and_clean() {
 
     // Clean changes should still be resolved
     let files = list_candidate_files(&repo, output.candidate.as_str());
-    assert!(files.contains(&"a_only.txt".to_string()), "a_only.txt should be merged");
-    assert!(files.contains(&"b_only.txt".to_string()), "b_only.txt should be merged");
-    assert!(files.contains(&"c_only.txt".to_string()), "c_only.txt should be merged");
-    assert!(files.contains(&"clean.txt".to_string()), "clean.txt preserved");
+    assert!(
+        files.contains(&"a_only.txt".to_string()),
+        "a_only.txt should be merged"
+    );
+    assert!(
+        files.contains(&"b_only.txt".to_string()),
+        "b_only.txt should be merged"
+    );
+    assert!(
+        files.contains(&"c_only.txt".to_string()),
+        "c_only.txt should be merged"
+    );
+    assert!(
+        files.contains(&"clean.txt".to_string()),
+        "clean.txt preserved"
+    );
 }
 
 // ==========================================================================
@@ -976,9 +1040,18 @@ fn eval_three_agent_parallel_disjoint_files() {
 
     // Verify list shows all workspaces before merge
     let ws_list_before = repo.maw_ok(&["ws", "list"]);
-    assert!(ws_list_before.contains("agent-1"), "agent-1 should be listed");
-    assert!(ws_list_before.contains("agent-2"), "agent-2 should be listed");
-    assert!(ws_list_before.contains("agent-3"), "agent-3 should be listed");
+    assert!(
+        ws_list_before.contains("agent-1"),
+        "agent-1 should be listed"
+    );
+    assert!(
+        ws_list_before.contains("agent-2"),
+        "agent-2 should be listed"
+    );
+    assert!(
+        ws_list_before.contains("agent-3"),
+        "agent-3 should be listed"
+    );
 
     // Step 2-4: Each agent creates a different file (non-overlapping edits)
     repo.add_file(
@@ -1160,10 +1233,16 @@ fn eval_conflict_detection_and_resolution() {
 
     // Step 1: Create two agent workspaces.
     let out1 = repo.maw_ok(&["ws", "create", "agent-1"]);
-    assert!(out1.contains("agent-1"), "agent-1 workspace created: {out1}");
+    assert!(
+        out1.contains("agent-1"),
+        "agent-1 workspace created: {out1}"
+    );
 
     let out2 = repo.maw_ok(&["ws", "create", "agent-2"]);
-    assert!(out2.contains("agent-2"), "agent-2 workspace created: {out2}");
+    assert!(
+        out2.contains("agent-2"),
+        "agent-2 workspace created: {out2}"
+    );
 
     // Step 2: Both agents modify src/lib.rs at the same function body — same
     // region, different edits → diff3 will detect the conflict.
@@ -1187,7 +1266,9 @@ fn eval_conflict_detection_and_resolution() {
     repo.modify_file("agent-2", "src/lib.rs", agent2_lib_rs);
 
     // Step 3: Run --check --format json and verify structured JSON output.
-    let check_out = repo.maw_raw(&["ws", "merge", "agent-1", "agent-2", "--check", "--format", "json"]);
+    let check_out = repo.maw_raw(&[
+        "ws", "merge", "agent-1", "agent-2", "--check", "--format", "json",
+    ]);
     let check_stdout = String::from_utf8_lossy(&check_out.stdout).to_string();
     let check_stderr = String::from_utf8_lossy(&check_out.stderr).to_string();
 
@@ -1198,8 +1279,9 @@ fn eval_conflict_detection_and_resolution() {
     );
 
     // Parse the JSON output.
-    let json: serde_json::Value = serde_json::from_str(&check_stdout)
-        .unwrap_or_else(|e| panic!("check --format json output is not valid JSON: {e}\nstdout: {check_stdout}"));
+    let json: serde_json::Value = serde_json::from_str(&check_stdout).unwrap_or_else(|e| {
+        panic!("check --format json output is not valid JSON: {e}\nstdout: {check_stdout}")
+    });
 
     // Verify: ready is false (conflict present).
     assert_eq!(
@@ -1209,7 +1291,8 @@ fn eval_conflict_detection_and_resolution() {
     );
 
     // Verify: conflicts array is non-empty.
-    let conflicts = json["conflicts"].as_array()
+    let conflicts = json["conflicts"]
+        .as_array()
         .expect("conflicts should be an array");
     assert!(
         !conflicts.is_empty(),
@@ -1232,16 +1315,14 @@ fn eval_conflict_detection_and_resolution() {
     );
 
     // Verify: sides array identifies both workspaces.
-    let sides = first["sides"].as_array()
+    let sides = first["sides"]
+        .as_array()
         .expect("conflict.sides should be an array");
     assert!(
         sides.len() >= 2,
         "conflict should list at least 2 sides: {first}"
     );
-    let side_names: Vec<&str> = sides
-        .iter()
-        .filter_map(|s| s.as_str())
-        .collect();
+    let side_names: Vec<&str> = sides.iter().filter_map(|s| s.as_str()).collect();
     assert!(
         side_names.contains(&"agent-1"),
         "agent-1 should be listed as a conflict side: {first}"
@@ -1259,8 +1340,12 @@ fn eval_conflict_detection_and_resolution() {
             "NOTE: line_start/line_end not present in conflict JSON (atom extraction may not have run): {first}"
         );
     } else {
-        let line_start = first["line_start"].as_u64().expect("line_start should be a number");
-        let line_end   = first["line_end"].as_u64().expect("line_end should be a number");
+        let line_start = first["line_start"]
+            .as_u64()
+            .expect("line_start should be a number");
+        let line_end = first["line_end"]
+            .as_u64()
+            .expect("line_end should be a number");
         assert!(
             line_start >= 1,
             "line_start should be ≥ 1 (1-indexed): {line_start}"
@@ -1303,7 +1388,9 @@ fn eval_conflict_detection_and_resolution() {
     repo.modify_file("agent-2", "src/lib.rs", resolved_lib_rs);
 
     // Verify --check now says ready.
-    let recheck_out = repo.maw_raw(&["ws", "merge", "agent-1", "agent-2", "--check", "--format", "json"]);
+    let recheck_out = repo.maw_raw(&[
+        "ws", "merge", "agent-1", "agent-2", "--check", "--format", "json",
+    ]);
     let recheck_stdout = String::from_utf8_lossy(&recheck_out.stdout).to_string();
 
     let recheck_json: serde_json::Value = serde_json::from_str(&recheck_stdout)
@@ -1313,7 +1400,9 @@ fn eval_conflict_detection_and_resolution() {
         serde_json::Value::Bool(true),
         "after resolution, check should be ready: {recheck_json}"
     );
-    let recheck_conflicts = recheck_json["conflicts"].as_array().expect("conflicts should be an array");
+    let recheck_conflicts = recheck_json["conflicts"]
+        .as_array()
+        .expect("conflicts should be an array");
     assert!(
         recheck_conflicts.is_empty(),
         "after resolution, conflicts should be empty: {recheck_json}"
@@ -1322,7 +1411,9 @@ fn eval_conflict_detection_and_resolution() {
     // Step 6: Re-merge after resolution — should succeed.
     let final_merge = repo.maw_ok(&["ws", "merge", "agent-1", "agent-2", "--destroy"]);
     assert!(
-        final_merge.contains("Merged") || final_merge.contains("merge") || final_merge.contains("adopt"),
+        final_merge.contains("Merged")
+            || final_merge.contains("merge")
+            || final_merge.contains("adopt"),
         "final merge should confirm success: {final_merge}"
     );
 

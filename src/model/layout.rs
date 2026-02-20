@@ -39,11 +39,11 @@ pub const GITIGNORE_PATTERNS: &[&str] = &[
 /// - `.gitignore` is updated with necessary patterns if missing.
 pub fn init_manifold_dir(root: &Path) -> io::Result<()> {
     let manifold_path = root.join(MANIFOLD_DIR);
-    
+
     // Create directory structure
     create_dir_all_idempotent(&manifold_path)?;
     create_dir_all_idempotent(&manifold_path.join(EPOCHS_DIR))?;
-    
+
     let artifacts_path = manifold_path.join(ARTIFACTS_DIR);
     create_dir_all_idempotent(&artifacts_path)?;
     create_dir_all_idempotent(&artifacts_path.join(WS_ARTIFACTS_DIR))?;
@@ -69,7 +69,10 @@ fn init_config_if_missing(path: &Path) -> io::Result<()> {
     if !path.exists() {
         let mut file = fs::File::create(path)?;
         writeln!(file, "# Manifold repository configuration")?;
-        writeln!(file, "# For full options see: https://github.com/mariozechner/manifold")?;
+        writeln!(
+            file,
+            "# For full options see: https://github.com/mariozechner/manifold"
+        )?;
         writeln!(file, "")?;
         writeln!(file, "[repo]")?;
         writeln!(file, "branch = \"main\"")?;
@@ -85,8 +88,9 @@ fn update_gitignore(root: &Path) -> io::Result<()> {
         String::new()
     };
 
-    let existing_patterns: std::collections::HashSet<_> = content.lines().map(|l| l.trim()).collect();
-    
+    let existing_patterns: std::collections::HashSet<_> =
+        content.lines().map(|l| l.trim()).collect();
+
     let mut patterns_to_add = Vec::new();
     for p in GITIGNORE_PATTERNS {
         if !existing_patterns.contains(p) {

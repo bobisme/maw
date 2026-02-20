@@ -29,10 +29,11 @@ branch = "develop"
     // It might be in main_sync or mentioned in the JSON structure
     // Since we configured branch=develop, the status should check develop (not main)
     // With no remote, main_sync should be "no-remote" rather than "no-main"
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("status --format=json should produce valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status --format=json should produce valid JSON");
 
-    let main_sync = parsed.get("main_sync")
+    let main_sync = parsed
+        .get("main_sync")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -52,15 +53,30 @@ fn status_json_format() {
     let stdout = maw_ok(repo.path(), &["status", "--format=json"]);
 
     // Parse the JSON to verify it's valid
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("status --format=json should produce valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status --format=json should produce valid JSON");
 
     // Verify expected top-level keys exist
-    assert!(parsed.get("workspaces").is_some(), "JSON should have 'workspaces' field");
-    assert!(parsed.get("changed_files").is_some(), "JSON should have 'changed_files' field");
-    assert!(parsed.get("untracked_files").is_some(), "JSON should have 'untracked_files' field");
-    assert!(parsed.get("is_stale").is_some(), "JSON should have 'is_stale' field");
-    assert!(parsed.get("main_sync").is_some(), "JSON should have 'main_sync' field");
+    assert!(
+        parsed.get("workspaces").is_some(),
+        "JSON should have 'workspaces' field"
+    );
+    assert!(
+        parsed.get("changed_files").is_some(),
+        "JSON should have 'changed_files' field"
+    );
+    assert!(
+        parsed.get("untracked_files").is_some(),
+        "JSON should have 'untracked_files' field"
+    );
+    assert!(
+        parsed.get("is_stale").is_some(),
+        "JSON should have 'is_stale' field"
+    );
+    assert!(
+        parsed.get("main_sync").is_some(),
+        "JSON should have 'main_sync' field"
+    );
 }
 
 /// Test that status text format uses [OK]/[WARN] markers

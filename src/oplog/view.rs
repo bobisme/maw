@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::patch::PatchSet;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
-use crate::oplog::read::{walk_chain, OpLogReadError};
+use crate::oplog::read::{OpLogReadError, walk_chain};
 use crate::oplog::types::{OpPayload, Operation};
 
 // ---------------------------------------------------------------------------
@@ -102,9 +102,7 @@ impl MaterializedView {
     /// Return `true` if the workspace has a non-empty patch set.
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.patch_set
-            .as_ref()
-            .map_or(false, |ps| !ps.is_empty())
+        self.patch_set.as_ref().map_or(false, |ps| !ps.is_empty())
     }
 }
 
@@ -210,9 +208,7 @@ where
             view.patch_set_oid = None;
         }
 
-        OpPayload::Merge {
-            epoch_after, ..
-        } => {
+        OpPayload::Merge { epoch_after, .. } => {
             view.epoch = Some(epoch_after.clone());
             view.patch_set = None;
             view.patch_set_oid = None;
@@ -451,9 +447,15 @@ mod tests {
     fn replay_create() {
         let ops = vec![(
             test_oid('1'),
-            make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+            make_op(
+                "ws-1",
+                OpPayload::Create {
+                    epoch: test_epoch('a'),
+                },
+            ),
         )];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert_eq!(view.epoch, Some(test_epoch('a')));
         assert!(view.patch_set.is_none());
@@ -471,7 +473,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -497,7 +504,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -523,7 +535,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -562,7 +579,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -585,7 +607,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert_eq!(view.epoch, Some(test_epoch('b')));
         assert!(view.patch_set.is_none(), "merge clears patch set");
@@ -601,7 +624,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -613,7 +641,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert_eq!(view.description, Some("implementing auth".into()));
         assert_eq!(view.op_count, 2);
@@ -624,7 +653,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -645,7 +679,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert_eq!(view.description, Some("updated description".into()));
     }
@@ -662,7 +697,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -675,10 +715,14 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert!(view.annotations.contains_key("validation"));
-        assert_eq!(view.annotations["validation"]["passed"], serde_json::Value::Bool(true));
+        assert_eq!(
+            view.annotations["validation"]["passed"],
+            serde_json::Value::Bool(true)
+        );
     }
 
     #[test]
@@ -687,12 +731,20 @@ mod tests {
         data1.insert("status".into(), serde_json::Value::String("pending".into()));
 
         let mut data2 = BTreeMap::new();
-        data2.insert("status".into(), serde_json::Value::String("approved".into()));
+        data2.insert(
+            "status".into(),
+            serde_json::Value::String("approved".into()),
+        );
 
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -715,7 +767,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert_eq!(
             view.annotations["review"]["status"],
@@ -732,11 +785,17 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (test_oid('2'), make_op("ws-1", OpPayload::Destroy)),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert!(view.is_destroyed);
         assert!(view.destroyed());
@@ -753,7 +812,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -798,7 +862,8 @@ mod tests {
     #[test]
     fn empty_op_list_produces_empty_view() {
         let ops: Vec<(GitOid, Operation)> = vec![];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
 
         assert_eq!(view.op_count, 0);
         assert!(view.epoch.is_none());
@@ -843,7 +908,12 @@ mod tests {
         let ops = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (
                 test_oid('2'),
@@ -880,11 +950,17 @@ mod tests {
         let ops1 = vec![
             (
                 test_oid('1'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('a') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('a'),
+                    },
+                ),
             ),
             (test_oid('2'), make_op("ws-1", OpPayload::Destroy)),
         ];
-        let view1 = materialize_from_ops(test_ws("ws-1"), &ops1, mock_reader(test_patch_set('a'))).unwrap();
+        let view1 =
+            materialize_from_ops(test_ws("ws-1"), &ops1, mock_reader(test_patch_set('a'))).unwrap();
         assert!(view1.is_destroyed);
 
         // Destroy then create → not destroyed (re-created)
@@ -892,10 +968,16 @@ mod tests {
             (test_oid('1'), make_op("ws-1", OpPayload::Destroy)),
             (
                 test_oid('2'),
-                make_op("ws-1", OpPayload::Create { epoch: test_epoch('b') }),
+                make_op(
+                    "ws-1",
+                    OpPayload::Create {
+                        epoch: test_epoch('b'),
+                    },
+                ),
             ),
         ];
-        let view2 = materialize_from_ops(test_ws("ws-1"), &ops2, mock_reader(test_patch_set('a'))).unwrap();
+        let view2 =
+            materialize_from_ops(test_ws("ws-1"), &ops2, mock_reader(test_patch_set('a'))).unwrap();
         assert!(!view2.is_destroyed);
         assert_eq!(view2.epoch, Some(test_epoch('b')));
     }

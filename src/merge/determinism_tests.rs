@@ -24,7 +24,7 @@ use std::process::Command;
 
 use proptest::prelude::*;
 
-use crate::merge::build::{build_merge_commit, ResolvedChange};
+use crate::merge::build::{ResolvedChange, build_merge_commit};
 use crate::merge::partition::partition_by_path;
 use crate::merge::resolve::{ConflictRecord, ResolveResult, resolve_partition};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
@@ -219,9 +219,13 @@ fn sampled_orderings(n: usize, sample_count: usize) -> Vec<Vec<usize>> {
     for seed in 0..(sample_count.saturating_sub(result.len())) {
         let mut indices: Vec<usize> = (0..n).collect();
         // Fisher-Yates shuffle with deterministic LCG.
-        let mut state: u64 = (seed as u64).wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let mut state: u64 = (seed as u64)
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         for i in (1..n).rev() {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             let j = (state >> 33) as usize % (i + 1);
             indices.swap(i, j);
         }
@@ -235,17 +239,20 @@ fn sampled_orderings(n: usize, sample_count: usize) -> Vec<Vec<usize>> {
 /// Generate 2-10 workspaces, each with 1-8 file changes.
 /// Used for large-N determinism testing.
 fn arb_large_scenario() -> impl Strategy<Value = Vec<WorkspaceScenario>> {
-    prop::collection::vec(prop::collection::vec(arb_file_change(), 1..=8usize), 2..=10usize)
-        .prop_map(|workspace_changes| {
-            workspace_changes
-                .into_iter()
-                .enumerate()
-                .map(|(i, changes)| WorkspaceScenario {
-                    name: format!("ws-{i:02}"),
-                    changes,
-                })
-                .collect()
-        })
+    prop::collection::vec(
+        prop::collection::vec(arb_file_change(), 1..=8usize),
+        2..=10usize,
+    )
+    .prop_map(|workspace_changes| {
+        workspace_changes
+            .into_iter()
+            .enumerate()
+            .map(|(i, changes)| WorkspaceScenario {
+                name: format!("ws-{i:02}"),
+                changes,
+            })
+            .collect()
+    })
 }
 
 /// Format a scenario for reproduction on failure.
@@ -327,7 +334,10 @@ fn setup_git_repo() -> (tempfile::TempDir, EpochId) {
 
 /// Set up a git repo with multiple base files for richer merge scenarios.
 /// Creates files with spaced-out regions so diff3 can resolve non-overlapping edits.
-fn setup_git_repo_with_base_files(file_count: usize, regions_per_file: usize) -> (tempfile::TempDir, EpochId, Vec<(PathBuf, String)>) {
+fn setup_git_repo_with_base_files(
+    file_count: usize,
+    regions_per_file: usize,
+) -> (tempfile::TempDir, EpochId, Vec<(PathBuf, String)>) {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
 
@@ -824,17 +834,12 @@ fn run_full_merge(
 ) -> GitOid {
     let patch_sets = to_patch_sets(scenarios);
     let partition = partition_by_path(&patch_sets);
-    let result = resolve_partition(&partition, base_contents)
-        .expect("resolve should not error");
+    let result = resolve_partition(&partition, base_contents).expect("resolve should not error");
 
     // Only build if we have resolved changes (skip conflicts for this test).
-    let ws_ids: Vec<WorkspaceId> = scenarios
-        .iter()
-        .map(|s| ws(&s.name))
-        .collect();
+    let ws_ids: Vec<WorkspaceId> = scenarios.iter().map(|s| ws(&s.name)).collect();
 
-    build_merge_commit(root, epoch, &ws_ids, &result.resolved, None)
-        .expect("build should succeed")
+    build_merge_commit(root, epoch, &ws_ids, &result.resolved, None).expect("build should succeed")
 }
 
 /// End-to-end determinism: 2 workspaces with disjoint file additions.
@@ -866,7 +871,12 @@ fn e2e_determinism_2_workspaces_disjoint() {
     let base = BTreeMap::new();
 
     let oid_forward = run_full_merge(root, &epoch, &scenarios, &base);
-    let oid_reverse = run_full_merge(root, &epoch, &[scenarios[1].clone(), scenarios[0].clone()], &base);
+    let oid_reverse = run_full_merge(
+        root,
+        &epoch,
+        &[scenarios[1].clone(), scenarios[0].clone()],
+        &base,
+    );
 
     assert_eq!(
         oid_forward, oid_reverse,
@@ -909,7 +919,8 @@ fn e2e_determinism_3_workspaces_shared_file() {
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
 
     for (i, perm) in perms.iter().enumerate().skip(1) {
-        let reordered: Vec<WorkspaceScenario> = perm.iter().map(|&j| scenarios[j].clone()).collect();
+        let reordered: Vec<WorkspaceScenario> =
+            perm.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
         assert_eq!(
             reference_oid, oid,
@@ -945,7 +956,8 @@ fn e2e_determinism_5_workspaces_mixed() {
                 path0.clone(),
                 ChangeKind::Modified,
                 Some({
-                    let mut lines: Vec<String> = base0_lines.iter().map(|l| l.to_string()).collect();
+                    let mut lines: Vec<String> =
+                        base0_lines.iter().map(|l| l.to_string()).collect();
                     lines[0] = "MODIFIED-BY-WS-01".to_string();
                     (lines.join("\n") + "\n").into_bytes()
                 }),
@@ -958,7 +970,8 @@ fn e2e_determinism_5_workspaces_mixed() {
                 path0.clone(),
                 ChangeKind::Modified,
                 Some({
-                    let mut lines: Vec<String> = base0_lines.iter().map(|l| l.to_string()).collect();
+                    let mut lines: Vec<String> =
+                        base0_lines.iter().map(|l| l.to_string()).collect();
                     lines[10] = "MODIFIED-BY-WS-02".to_string();
                     (lines.join("\n") + "\n").into_bytes()
                 }),
@@ -967,11 +980,7 @@ fn e2e_determinism_5_workspaces_mixed() {
         // ws-03: deletes file-01
         WorkspaceScenario {
             name: "ws-03".to_string(),
-            changes: vec![FileChange::new(
-                path1.clone(),
-                ChangeKind::Deleted,
-                None,
-            )],
+            changes: vec![FileChange::new(path1.clone(), ChangeKind::Deleted, None)],
         },
         // ws-04: adds another new file
         WorkspaceScenario {
@@ -994,7 +1003,8 @@ fn e2e_determinism_5_workspaces_mixed() {
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
 
     for (i, perm) in perms.iter().enumerate().skip(1) {
-        let reordered: Vec<WorkspaceScenario> = perm.iter().map(|&j| scenarios[j].clone()).collect();
+        let reordered: Vec<WorkspaceScenario> =
+            perm.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
         assert_eq!(
             reference_oid, oid,
@@ -1043,7 +1053,10 @@ fn e2e_determinism_10_workspaces_same_file() {
         let patch_sets = to_patch_sets(&scenarios);
         let partition = partition_by_path(&patch_sets);
         let result = resolve_partition(&partition, &base).expect("resolve should succeed");
-        assert!(result.is_clean(), "10 non-overlapping edits should merge cleanly");
+        assert!(
+            result.is_clean(),
+            "10 non-overlapping edits should merge cleanly"
+        );
         match &result.resolved[0] {
             ResolvedChange::Upsert { content, .. } => {
                 let text = String::from_utf8_lossy(content);
@@ -1059,7 +1072,8 @@ fn e2e_determinism_10_workspaces_same_file() {
     }
 
     for (i, ordering) in orderings.iter().enumerate().skip(1) {
-        let reordered: Vec<WorkspaceScenario> = ordering.iter().map(|&j| scenarios[j].clone()).collect();
+        let reordered: Vec<WorkspaceScenario> =
+            ordering.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
         assert_eq!(
             reference_oid, oid,
@@ -1093,7 +1107,8 @@ fn e2e_determinism_10_workspaces_disjoint() {
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
 
     for (i, ordering) in orderings.iter().enumerate().skip(1) {
-        let reordered: Vec<WorkspaceScenario> = ordering.iter().map(|&j| scenarios[j].clone()).collect();
+        let reordered: Vec<WorkspaceScenario> =
+            ordering.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
         assert_eq!(
             reference_oid, oid,
@@ -1131,7 +1146,8 @@ fn e2e_identical_changes_collapse() {
     let reference_tree = git_tree_oid(root, reference_oid.as_str());
 
     for (i, perm) in perms.iter().enumerate().skip(1) {
-        let reordered: Vec<WorkspaceScenario> = perm.iter().map(|&j| scenarios[j].clone()).collect();
+        let reordered: Vec<WorkspaceScenario> =
+            perm.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
         let tree = git_tree_oid(root, oid.as_str());
         assert_eq!(
@@ -1163,11 +1179,7 @@ fn e2e_conflicts_deterministic_across_orderings() {
         },
         WorkspaceScenario {
             name: "ws-01".to_string(),
-            changes: vec![FileChange::new(
-                path.clone(),
-                ChangeKind::Deleted,
-                None,
-            )],
+            changes: vec![FileChange::new(path.clone(), ChangeKind::Deleted, None)],
         },
         WorkspaceScenario {
             name: "ws-02".to_string(),
@@ -1186,7 +1198,8 @@ fn e2e_conflicts_deterministic_across_orderings() {
     let mut results: Vec<ResolveResult> = Vec::new();
 
     for perm in &perms {
-        let reordered: Vec<WorkspaceScenario> = perm.iter().map(|&j| scenarios[j].clone()).collect();
+        let reordered: Vec<WorkspaceScenario> =
+            perm.iter().map(|&j| scenarios[j].clone()).collect();
         let patch_sets = to_patch_sets(&reordered);
         let partition = partition_by_path(&patch_sets);
         let result = resolve_partition(&partition, &base).expect("resolve should succeed");
@@ -1203,8 +1216,10 @@ fn e2e_conflicts_deterministic_across_orderings() {
              Perm 0: {} resolved, {} conflicts\n\
              Perm {i}: {} resolved, {} conflicts",
             perms[i],
-            first.resolved.len(), first.conflicts.len(),
-            result.resolved.len(), result.conflicts.len(),
+            first.resolved.len(),
+            first.conflicts.len(),
+            result.resolved.len(),
+            result.conflicts.len(),
         );
     }
 }

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
@@ -27,15 +27,15 @@ pub fn sync(all: bool) -> Result<()> {
     };
 
     // Check the default workspace
-    let default_id = WorkspaceId::new("default")
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let default_id = WorkspaceId::new("default").map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if !backend.exists(&default_id) {
         println!("No default workspace found.");
         return Ok(());
     }
 
-    let ws_status = backend.status(&default_id)
+    let ws_status = backend
+        .status(&default_id)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if !ws_status.is_stale {
@@ -86,7 +86,10 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         );
     }
 
-    println!("  \u{2713} {ws_name} - synced to epoch {}", &epoch_oid[..12]);
+    println!(
+        "  \u{2713} {ws_name} - synced to epoch {}",
+        &epoch_oid[..12]
+    );
     Ok(())
 }
 
@@ -103,8 +106,7 @@ fn sync_all() -> Result<()> {
         return Ok(());
     };
 
-    let workspaces = backend.list()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if workspaces.is_empty() {
         println!("No workspaces found.");
@@ -118,7 +120,11 @@ fn sync_all() -> Result<()> {
         return Ok(());
     }
 
-    println!("Syncing {} stale workspace(s) of {} total...", stale_count, workspaces.len());
+    println!(
+        "Syncing {} stale workspace(s) of {} total...",
+        stale_count,
+        workspaces.len()
+    );
     println!();
 
     let mut synced = 0;
@@ -171,8 +177,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let ws_status = backend.status(&ws_id)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if !ws_status.is_stale {
         return Ok(());
@@ -223,8 +228,7 @@ pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Re
             continue;
         }
 
-        let ws_status = backend.status(&ws_id)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         if !ws_status.is_stale {
             continue;
@@ -236,9 +240,7 @@ pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Re
     }
 
     if synced_count > 0 {
-        println!(
-            "Synced {synced_count} stale workspace(s). Proceeding with merge."
-        );
+        println!("Synced {synced_count} stale workspace(s). Proceeding with merge.");
         println!();
     }
 

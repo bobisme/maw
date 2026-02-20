@@ -28,8 +28,7 @@ pub fn run() -> Result<()> {
     ensure_gitignore_in_workspace()?;
     refresh_workspace_state();
 
-    let cwd = std::env::current_dir()
-        .context("Could not determine current directory")?;
+    let cwd = std::env::current_dir().context("Could not determine current directory")?;
     let default_path = cwd.join("ws").join("default");
 
     println!();
@@ -47,9 +46,13 @@ fn ensure_jj_repo() -> Result<()> {
     } else {
         Path::new(".")
     };
-    let check = Command::new("jj").args(["status"]).current_dir(jj_cwd).output().context(
-        "jj not found — install from https://martinvonz.github.io/jj/latest/install-and-setup/",
-    )?;
+    let check = Command::new("jj")
+        .args(["status"])
+        .current_dir(jj_cwd)
+        .output()
+        .context(
+            "jj not found — install from https://martinvonz.github.io/jj/latest/install-and-setup/",
+        )?;
 
     if check.status.success() {
         println!("[OK] jj repository already initialized");
@@ -99,10 +102,7 @@ pub fn ensure_workspaces_gitignored() -> Result<()> {
         // Check for common patterns that would cover ws/
         let dominated = content.lines().any(|line| {
             let line = line.trim();
-            line == "ws"
-                || line == "ws/"
-                || line == "/ws"
-                || line == "/ws/"
+            line == "ws" || line == "ws/" || line == "/ws" || line == "/ws/"
         });
 
         if dominated {
@@ -189,8 +189,7 @@ fn setup_bare_default_workspace() -> Result<()> {
     }
 
     // Ensure ws/ directory exists
-    fs::create_dir_all(ws_dir)
-        .with_context(|| format!("Failed to create {}", ws_dir.display()))?;
+    fs::create_dir_all(ws_dir).with_context(|| format!("Failed to create {}", ws_dir.display()))?;
 
     // If default exists at root, forget it so we can recreate at ws/default/
     if has_default {
@@ -266,9 +265,7 @@ fn setup_bare_default_workspace() -> Result<()> {
 /// Set git core.bare = true so git treats this as a bare repo.
 fn set_git_bare_mode() -> Result<()> {
     // Check current value first
-    let check = Command::new("git")
-        .args(["config", "core.bare"])
-        .output();
+    let check = Command::new("git").args(["config", "core.bare"]).output();
 
     if let Ok(out) = &check {
         let val = String::from_utf8_lossy(&out.stdout);
@@ -305,14 +302,13 @@ fn set_git_bare_mode() -> Result<()> {
 pub fn fix_git_head() -> Result<()> {
     // Read branch from .maw.toml if available, fall back to "main"
     let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
-    let branch = crate::workspace::MawConfig::load(&root).map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
+    let branch = crate::workspace::MawConfig::load(&root)
+        .map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
 
     let ref_name = format!("refs/heads/{branch}");
 
     // Check current HEAD
-    let current = Command::new("git")
-        .args(["symbolic-ref", "HEAD"])
-        .output();
+    let current = Command::new("git").args(["symbolic-ref", "HEAD"]).output();
 
     if let Ok(out) = &current {
         let val = String::from_utf8_lossy(&out.stdout);
@@ -361,17 +357,24 @@ pub fn set_conflict_marker_style() -> Result<()> {
         .output();
 
     if let Ok(out) = &check
-        && out.status.success() {
-            let val = String::from_utf8_lossy(&out.stdout);
-            if val.trim() == "snapshot" {
-                println!("[OK] jj conflict-marker-style already set to snapshot");
-                return Ok(());
-            }
+        && out.status.success()
+    {
+        let val = String::from_utf8_lossy(&out.stdout);
+        if val.trim() == "snapshot" {
+            println!("[OK] jj conflict-marker-style already set to snapshot");
+            return Ok(());
         }
+    }
 
     // Set it
     let output = Command::new("jj")
-        .args(["config", "set", "--repo", "ui.conflict-marker-style", "snapshot"])
+        .args([
+            "config",
+            "set",
+            "--repo",
+            "ui.conflict-marker-style",
+            "snapshot",
+        ])
         .current_dir(jj_cwd)
         .output()
         .context("Failed to run jj config set")?;
@@ -381,8 +384,13 @@ pub fn set_conflict_marker_style() -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Non-fatal — old jj versions may not support this config key
-        println!("[WARN] Could not set conflict-marker-style: {}", stderr.trim());
-        println!("       Requires jj >= 0.38.0. Upgrade: https://jj-vcs.github.io/jj/latest/install-and-setup/");
+        println!(
+            "[WARN] Could not set conflict-marker-style: {}",
+            stderr.trim()
+        );
+        println!(
+            "       Requires jj >= 0.38.0. Upgrade: https://jj-vcs.github.io/jj/latest/install-and-setup/"
+        );
     }
 
     Ok(())
@@ -458,7 +466,10 @@ pub fn clean_root_source_files() -> Result<()> {
         println!("[OK] Cleaned {cleaned} tracked root file(s)/dir(s)");
     }
     if !untracked.is_empty() {
-        println!("[WARN] Skipped {} untracked file(s) — see warnings above", untracked.len());
+        println!(
+            "[WARN] Skipped {} untracked file(s) — see warnings above",
+            untracked.len()
+        );
     }
 
     Ok(())
@@ -467,10 +478,9 @@ pub fn clean_root_source_files() -> Result<()> {
 /// Remove ghost .`jj/working_copy`/ if present — left behind by `jj workspace forget`.
 fn clean_ghost_working_copy() {
     let ghost_wc = Path::new(".jj").join("working_copy");
-    if ghost_wc.exists()
-        && fs::remove_dir_all(&ghost_wc).is_ok() {
-            println!("[OK] Removed ghost .jj/working_copy/ (prevents root pollution)");
-        }
+    if ghost_wc.exists() && fs::remove_dir_all(&ghost_wc).is_ok() {
+        println!("[OK] Removed ghost .jj/working_copy/ (prevents root pollution)");
+    }
 }
 
 /// Check whether a file at root is tracked by jj (present in the main branch).

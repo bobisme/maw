@@ -62,8 +62,8 @@ pub fn write(repo_root: &Path, name: &str, meta: &WorkspaceMetadata) -> Result<(
     let dir = path.parent().expect("metadata path always has a parent");
     std::fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create metadata directory: {}", dir.display()))?;
-    let content = toml::to_string_pretty(meta)
-        .with_context(|| "Failed to serialize workspace metadata")?;
+    let content =
+        toml::to_string_pretty(meta).with_context(|| "Failed to serialize workspace metadata")?;
     std::fs::write(&path, content)
         .with_context(|| format!("Failed to write workspace metadata: {}", path.display()))
 }
@@ -143,14 +143,20 @@ mod tests {
             mode: WorkspaceMode::Persistent,
         };
         write(dir.path(), "my-ws", &meta).unwrap();
-        let expected_path = dir.path().join(".manifold").join("workspaces").join("my-ws.toml");
+        let expected_path = dir
+            .path()
+            .join(".manifold")
+            .join("workspaces")
+            .join("my-ws.toml");
         assert!(expected_path.exists());
     }
 
     #[test]
     fn delete_existing() {
         let dir = tempdir().unwrap();
-        let meta = WorkspaceMetadata { mode: WorkspaceMode::Persistent };
+        let meta = WorkspaceMetadata {
+            mode: WorkspaceMode::Persistent,
+        };
         write(dir.path(), "ws", &meta).unwrap();
         delete(dir.path(), "ws").unwrap();
         // After delete, reading returns default (file gone).
@@ -168,6 +174,9 @@ mod tests {
     #[test]
     fn metadata_path_format() {
         let path = metadata_path(Path::new("/repo"), "my-workspace");
-        assert_eq!(path, PathBuf::from("/repo/.manifold/workspaces/my-workspace.toml"));
+        assert_eq!(
+            path,
+            PathBuf::from("/repo/.manifold/workspaces/my-workspace.toml")
+        );
     }
 }

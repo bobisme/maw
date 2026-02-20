@@ -131,10 +131,7 @@ enum DiffEntry {
 
 /// Run a git command in `dir` and return trimmed stdout, or a [`DiffError`].
 fn git_cmd(dir: &Path, args: &[&str]) -> Result<String, DiffError> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()?;
+    let out = Command::new("git").args(args).current_dir(dir).output()?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
     } else {
@@ -200,7 +197,11 @@ fn hash_object_write(workspace_path: &Path, abs_file: &Path) -> Result<GitOid, D
 /// Look up the blob OID of `path` in the epoch commit's tree.
 ///
 /// Equivalent to `git rev-parse <epoch>:<path>`.
-fn epoch_blob_oid(workspace_path: &Path, epoch: &EpochId, path: &Path) -> Result<GitOid, DiffError> {
+fn epoch_blob_oid(
+    workspace_path: &Path,
+    epoch: &EpochId,
+    path: &Path,
+) -> Result<GitOid, DiffError> {
     let rev = format!("{}:{}", epoch.as_str(), path.to_string_lossy());
     let stdout = git_cmd(workspace_path, &["rev-parse", &rev])?;
     let trimmed = stdout.trim();
@@ -275,7 +276,12 @@ pub fn compute_patchset(
     // -----------------------------------------------------------------------
     let diff_out = git_cmd(
         workspace_path,
-        &["diff", "--find-renames", "--name-status", base_epoch.as_str()],
+        &[
+            "diff",
+            "--find-renames",
+            "--name-status",
+            base_epoch.as_str(),
+        ],
     )?;
 
     let entries = parse_diff_name_status(&diff_out)?;
@@ -305,7 +311,13 @@ pub fn compute_patchset(
             DiffEntry::Deleted(path) => {
                 let previous_blob = epoch_blob_oid(workspace_path, base_epoch, &path)?;
                 let file_id = file_id_from_blob(&previous_blob);
-                patches.insert(path, PatchValue::Delete { previous_blob, file_id });
+                patches.insert(
+                    path,
+                    PatchValue::Delete {
+                        previous_blob,
+                        file_id,
+                    },
+                );
             }
             DiffEntry::Renamed { from, to } => {
                 let base_blob = epoch_blob_oid(workspace_path, base_epoch, &from)?;
@@ -318,7 +330,14 @@ pub fn compute_patchset(
                 } else {
                     None
                 };
-                patches.insert(to, PatchValue::Rename { from, file_id, new_blob });
+                patches.insert(
+                    to,
+                    PatchValue::Rename {
+                        from,
+                        file_id,
+                        new_blob,
+                    },
+                );
             }
         }
     }
@@ -384,11 +403,7 @@ mod tests {
             .expect("git must be installed");
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            panic!(
-                "git {} failed: {}",
-                args.join(" "),
-                stderr
-            );
+            panic!("git {} failed: {}", args.join(" "), stderr);
         }
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
@@ -545,7 +560,10 @@ mod tests {
         let ps = compute_patchset(root, &epoch).unwrap();
         assert_eq!(ps.len(), 1);
 
-        let pv = ps.patches.get(&PathBuf::from("new.rs")).expect("new.rs in PatchSet");
+        let pv = ps
+            .patches
+            .get(&PathBuf::from("new.rs"))
+            .expect("new.rs in PatchSet");
         assert!(
             matches!(pv, PatchValue::Add { .. }),
             "expected Add, got {pv:?}"
@@ -592,12 +610,20 @@ mod tests {
         let ps = compute_patchset(root, &epoch).unwrap();
         assert_eq!(ps.len(), 1);
 
-        let pv = ps.patches.get(&PathBuf::from("lib.rs")).expect("lib.rs in PatchSet");
+        let pv = ps
+            .patches
+            .get(&PathBuf::from("lib.rs"))
+            .expect("lib.rs in PatchSet");
         assert!(
             matches!(pv, PatchValue::Modify { .. }),
             "expected Modify, got {pv:?}"
         );
-        if let PatchValue::Modify { base_blob, new_blob, .. } = pv {
+        if let PatchValue::Modify {
+            base_blob,
+            new_blob,
+            ..
+        } = pv
+        {
             // base_blob is the epoch's blob, new_blob is the current content.
             assert_ne!(base_blob, new_blob, "blobs must differ after modification");
             assert_eq!(base_blob.as_str().len(), 40);
@@ -658,7 +684,10 @@ mod tests {
         );
         if let PatchValue::Rename { from, new_blob, .. } = pv {
             assert_eq!(from, &PathBuf::from("old_name.rs"));
-            assert!(new_blob.is_none(), "content unchanged → new_blob should be None");
+            assert!(
+                new_blob.is_none(),
+                "content unchanged → new_blob should be None"
+            );
         }
     }
 
@@ -680,11 +709,20 @@ mod tests {
         let ps = compute_patchset(root, &epoch).unwrap();
         assert_eq!(ps.len(), 1);
 
-        let pv = ps.patches.get(&PathBuf::from("new.rs")).expect("new.rs in PatchSet");
-        assert!(matches!(pv, PatchValue::Rename { .. }), "expected Rename, got {pv:?}");
+        let pv = ps
+            .patches
+            .get(&PathBuf::from("new.rs"))
+            .expect("new.rs in PatchSet");
+        assert!(
+            matches!(pv, PatchValue::Rename { .. }),
+            "expected Rename, got {pv:?}"
+        );
         if let PatchValue::Rename { from, new_blob, .. } = pv {
             assert_eq!(from, &PathBuf::from("old.rs"));
-            assert!(new_blob.is_some(), "content changed → new_blob should be Some");
+            assert!(
+                new_blob.is_some(),
+                "content changed → new_blob should be Some"
+            );
         }
     }
 
@@ -704,9 +742,9 @@ mod tests {
         );
 
         // Apply multiple changes.
-        write_file(root, "add.rs", "fn add() {}");       // new untracked
+        write_file(root, "add.rs", "fn add() {}"); // new untracked
         write_file(root, "modify.rs", "fn modified() {}"); // changed
-        run_git(root, &["rm", "delete.rs"]);              // deleted
+        run_git(root, &["rm", "delete.rs"]); // deleted
         run_git(root, &["add", "."]);
 
         let ps = compute_patchset(root, &epoch).unwrap();
@@ -744,7 +782,10 @@ mod tests {
         let epoch_id = make_epoch(root, &[("file.rs", "original")]);
 
         // Get epoch blob OID directly.
-        let expected_base_blob = run_git(root, &["rev-parse", &format!("{}:file.rs", epoch_id.as_str())]);
+        let expected_base_blob = run_git(
+            root,
+            &["rev-parse", &format!("{}:file.rs", epoch_id.as_str())],
+        );
 
         write_file(root, "file.rs", "modified");
         run_git(root, &["add", "file.rs"]);
@@ -759,11 +800,22 @@ mod tests {
             .to_owned();
 
         let ps = compute_patchset(root, &epoch_id).unwrap();
-        if let Some(PatchValue::Modify { base_blob, new_blob, .. }) =
-            ps.patches.get(&PathBuf::from("file.rs"))
+        if let Some(PatchValue::Modify {
+            base_blob,
+            new_blob,
+            ..
+        }) = ps.patches.get(&PathBuf::from("file.rs"))
         {
-            assert_eq!(base_blob.as_str(), expected_base_blob, "base_blob must match epoch blob");
-            assert_eq!(new_blob.as_str(), expected_new_oid, "new_blob must match staged blob");
+            assert_eq!(
+                base_blob.as_str(),
+                expected_base_blob,
+                "base_blob must match epoch blob"
+            );
+            assert_eq!(
+                new_blob.as_str(),
+                expected_new_oid,
+                "new_blob must match staged blob"
+            );
         } else {
             panic!("expected Modify for file.rs");
         }
@@ -781,7 +833,10 @@ mod tests {
         run_git(root, &["add", "b.rs"]);
 
         let ps = compute_patchset(root, &epoch).unwrap();
-        assert_eq!(ps.base_epoch, epoch, "base_epoch must match the epoch passed in");
+        assert_eq!(
+            ps.base_epoch, epoch,
+            "base_epoch must match the epoch passed in"
+        );
     }
 
     #[test]

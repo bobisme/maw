@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
@@ -106,11 +106,7 @@ pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result
 ///
 /// 1. Read `refs/manifold/head/<name>` to get the head blob OID.
 /// 2. cat-file blob → parse JSON → extract parent_ids → repeat.
-fn fetch_oplog_history(
-    ws_path: &Path,
-    name: &str,
-    limit: usize,
-) -> Result<Vec<OperationEntry>> {
+fn fetch_oplog_history(ws_path: &Path, name: &str, limit: usize) -> Result<Vec<OperationEntry>> {
     let ref_name = format!("refs/manifold/head/{name}");
 
     // Read head ref
@@ -417,9 +413,7 @@ fn print_empty_history(name: &str, format: OutputFormat) -> Result<()> {
         OutputFormat::Text => {
             println!("Workspace '{name}' has no history.");
             println!();
-            println!(
-                "Next: edit files in the workspace, then merge with maw ws merge {name}"
-            );
+            println!("Next: edit files in the workspace, then merge with maw ws merge {name}");
         }
         OutputFormat::Pretty => {
             println!("Workspace '{name}' has no history.");
@@ -458,9 +452,7 @@ fn print_commit_history(
                 );
             }
             println!();
-            println!(
-                "Note: showing git commit history (no operation log for workspace '{name}')"
-            );
+            println!("Note: showing git commit history (no operation log for workspace '{name}')");
             println!("Next: maw exec {name} -- git show <commit-id>");
         }
         OutputFormat::Pretty => {
@@ -497,7 +489,8 @@ mod tests {
 
     #[test]
     fn parse_history_lines_normal() {
-        let raw = "abc123def456abc123def456abc123def456ab1234 2026-02-19 12:00:00 +0000 fix: something";
+        let raw =
+            "abc123def456abc123def456abc123def456ab1234 2026-02-19 12:00:00 +0000 fix: something";
         let commits = parse_history_lines(raw);
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].commit_id, "abc123def456");

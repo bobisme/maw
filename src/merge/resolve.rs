@@ -19,6 +19,9 @@
 //!    - K=2: one diff3 merge
 //!    - K>2: deterministic sequential merges against the same base, in sorted
 //!      workspace order.
+//! 4. **Shifted-code alignment retry**: if diff3 conflicts, detect moved blocks,
+//!    normalize variant block positions back toward base ordering, and retry
+//!    diff3 once before declaring conflict.
 //!
 //! The function returns both successful resolutions and conflicts so callers can
 //! either proceed directly to BUILD or surface rich conflict diagnostics.
@@ -28,8 +31,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::model::conflict::{AtomEdit, ConflictAtom, ConflictReason as ModelConflictReason, Region};
+use crate::model::conflict::{
+    AtomEdit, ConflictAtom, ConflictReason as ModelConflictReason, Region,
+};
 use crate::model::types::WorkspaceId;
+
+#[cfg(feature = "ast-merge")]
+use super::ast_merge::{AstLanguage, AstMergeConfig, AstMergeResult, try_ast_merge};
 
 use super::build::ResolvedChange;
 use super::partition::{PartitionResult, PathEntry};
@@ -224,6 +232,70 @@ pub fn resolve_partition(
     })
 }
 
+/// Resolve all paths in a partition result with AST-aware merge support.
+///
+/// Like [`resolve_partition`] but with an additional AST merge configuration.
+/// When AST merge is enabled for a language and diff3 fails, the AST merge
+/// layer is tried before emitting a conflict.
+///
+/// The merge pipeline order for shared paths is:
+/// 1. Hash equality
+/// 2. diff3 line merge
+/// 3. AST-aware merge (if enabled for the file's language)
+/// 4. Emit structured conflict
+#[cfg(feature = "ast-merge")]
+pub fn resolve_partition_with_ast(
+    partition: &PartitionResult,
+    base_contents: &BTreeMap<PathBuf, Vec<u8>>,
+    ast_config: &AstMergeConfig,
+) -> Result<ResolveResult, ResolveError> {
+    let mut resolved: Vec<ResolvedChange> = Vec::new();
+    let mut conflicts: Vec<ConflictRecord> = Vec::new();
+
+    // Unique paths: same as resolve_partition.
+    for (path, entry) in &partition.unique {
+        if entry.is_deletion() {
+            resolved.push(ResolvedChange::Delete { path: path.clone() });
+            continue;
+        }
+
+        match &entry.content {
+            Some(content) => resolved.push(ResolvedChange::Upsert {
+                path: path.clone(),
+                content: content.clone(),
+            }),
+            None => conflicts.push(ConflictRecord {
+                path: path.clone(),
+                base: base_contents.get(path).cloned(),
+                sides: vec![ConflictSide {
+                    workspace_id: entry.workspace_id.clone(),
+                    kind: entry.kind.clone(),
+                    content: None,
+                }],
+                reason: ConflictReason::MissingContent,
+                atoms: vec![],
+            }),
+        }
+    }
+
+    // Shared paths: apply hash-equality / diff3 / AST merge strategy.
+    for (path, entries) in &partition.shared {
+        let base = base_contents.get(path).cloned();
+        match resolve_shared_path_with_ast(path, entries, base.as_deref(), ast_config)? {
+            SharedOutcome::Resolved(change) => resolved.push(change),
+            SharedOutcome::Conflict(conflict) => conflicts.push(conflict),
+        }
+    }
+
+    resolved.sort_by(|a, b| a.path().cmp(b.path()));
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(ResolveResult {
+        resolved,
+        conflicts,
+    })
+}
+
 enum SharedOutcome {
     Resolved(ResolvedChange),
     Conflict(ConflictRecord),
@@ -290,7 +362,11 @@ fn resolve_shared_path(
             ConflictReason::MissingBase
         };
         return Ok(SharedOutcome::Conflict(conflict_record(
-            path, entries, None, reason, vec![],
+            path,
+            entries,
+            None,
+            reason,
+            vec![],
         )));
     };
 
@@ -315,6 +391,12 @@ fn resolve_shared_path(
                 ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
             }
             Diff3Outcome::Conflict { marker_output } => {
+                if let Some(retried) = retry_with_shifted_alignment(base_bytes, &merged, next)? {
+                    merged = retried;
+                    ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
+                    continue;
+                }
+
                 let atoms = parse_diff3_atoms(&marker_output, &ours_ws_label, &theirs_ws_label);
                 return Ok(SharedOutcome::Conflict(conflict_record(
                     path,
@@ -333,6 +415,149 @@ fn resolve_shared_path(
     }))
 }
 
+/// Resolve a shared path with AST-aware merge as fallback after diff3.
+///
+/// Pipeline: hash eq → diff3 → AST merge → conflict.
+/// If AST merge is not enabled for this path's language, falls back to diff3 conflict.
+#[cfg(feature = "ast-merge")]
+fn resolve_shared_path_with_ast(
+    path: &Path,
+    entries: &[PathEntry],
+    base: Option<&[u8]>,
+    ast_config: &AstMergeConfig,
+) -> Result<SharedOutcome, ResolveError> {
+    // delete/delete[/...] => resolved delete
+    if entries.iter().all(PathEntry::is_deletion) {
+        return Ok(SharedOutcome::Resolved(ResolvedChange::Delete {
+            path: path.to_path_buf(),
+        }));
+    }
+
+    // Any deletion mixed with non-deletion => modify/delete conflict.
+    let has_delete = entries.iter().any(PathEntry::is_deletion);
+    let has_non_delete = entries.iter().any(|e| !e.is_deletion());
+    if has_delete && has_non_delete {
+        return Ok(SharedOutcome::Conflict(conflict_record(
+            path,
+            entries,
+            base,
+            ConflictReason::ModifyDelete,
+            vec![],
+        )));
+    }
+
+    // Remaining cases are all non-deletions; gather bytes.
+    let mut variants: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(content) = &entry.content else {
+            return Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                base,
+                ConflictReason::MissingContent,
+                vec![],
+            )));
+        };
+        variants.push(content.clone());
+    }
+
+    // Hash equality short-circuit.
+    if all_blobs_equal(entries) || all_equal(&variants) {
+        return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+            path: path.to_path_buf(),
+            content: variants[0].clone(),
+        }));
+    }
+
+    // Without base, differing non-delete variants are add/add.
+    let Some(base_bytes) = base else {
+        let reason = if entries.iter().all(|e| matches!(e.kind, ChangeKind::Added)) {
+            ConflictReason::AddAddDifferent
+        } else {
+            ConflictReason::MissingBase
+        };
+        return Ok(SharedOutcome::Conflict(conflict_record(
+            path, entries, None, reason, vec![],
+        )));
+    };
+
+    // Try diff3 first.
+    let mut merged = variants[0].clone();
+    let mut ours_ws_label: String = entries[0].workspace_id.to_string();
+    let mut diff3_conflict: Option<(Vec<u8>, String, String)> = None;
+
+    for (i, next) in variants[1..].iter().enumerate() {
+        if merged == *next {
+            let theirs_ws = &entries[i + 1].workspace_id;
+            ours_ws_label = format!("{ours_ws_label}+{theirs_ws}");
+            continue;
+        }
+
+        let theirs_ws_label = entries[i + 1].workspace_id.to_string();
+
+        match diff3_merge_bytes(base_bytes, &merged, next)? {
+            Diff3Outcome::Clean(out) => {
+                merged = out;
+                ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
+            }
+            Diff3Outcome::Conflict { marker_output } => {
+                diff3_conflict = Some((marker_output, ours_ws_label.clone(), theirs_ws_label));
+                break;
+            }
+        }
+    }
+
+    // If diff3 succeeded, return the merge.
+    if diff3_conflict.is_none() {
+        return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+            path: path.to_path_buf(),
+            content: merged,
+        }));
+    }
+
+    // diff3 failed. Try AST merge if enabled for this language.
+    if let Some(lang) = ast_config.is_enabled_for(path) {
+        let ast_variants: Vec<_> = entries
+            .iter()
+            .zip(variants.iter())
+            .map(|(entry, content)| (entry.workspace_id.clone(), content.clone()))
+            .collect();
+
+        match try_ast_merge(base_bytes, &ast_variants, lang) {
+            AstMergeResult::Clean(ast_merged) => {
+                return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+                    path: path.to_path_buf(),
+                    content: ast_merged,
+                }));
+            }
+            AstMergeResult::Conflict { atoms } => {
+                // Use AST conflict atoms instead of diff3 atoms for better diagnostics.
+                return Ok(SharedOutcome::Conflict(conflict_record(
+                    path,
+                    entries,
+                    Some(base_bytes),
+                    ConflictReason::Diff3Conflict,
+                    atoms,
+                )));
+            }
+            AstMergeResult::Unsupported => {
+                // Fall through to diff3 conflict.
+            }
+        }
+    }
+
+    // Fall back to diff3 conflict.
+    let (marker_output, ours_label, theirs_label) = diff3_conflict.unwrap();
+    let atoms = parse_diff3_atoms(&marker_output, &ours_label, &theirs_label);
+    Ok(SharedOutcome::Conflict(conflict_record(
+        path,
+        entries,
+        Some(base_bytes),
+        ConflictReason::Diff3Conflict,
+        atoms,
+    )))
+}
+
 fn all_equal(contents: &[Vec<u8>]) -> bool {
     contents
         .split_first()
@@ -347,7 +572,9 @@ fn all_equal(contents: &[Vec<u8>]) -> bool {
 /// [`all_equal`] (byte comparison).
 fn all_blobs_equal(entries: &[PathEntry]) -> bool {
     let mut iter = entries.iter();
-    let Some(first) = iter.next() else { return true };
+    let Some(first) = iter.next() else {
+        return true;
+    };
     let Some(ref first_blob) = first.blob else {
         return false;
     };
@@ -437,6 +664,167 @@ fn diff3_merge_bytes(
             exit_code: code,
         }),
     }
+}
+
+/// Retry a diff3 merge after normalizing shifted block positions.
+///
+/// Returns:
+/// - `Ok(Some(merged_bytes))` if normalization enabled a clean merge
+/// - `Ok(None)` if no normalization opportunity was detected, or retry still conflicts
+/// - `Err(..)` if invoking diff3 fails
+fn retry_with_shifted_alignment(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+) -> Result<Option<Vec<u8>>, ResolveError> {
+    let normalized_ours = normalize_shifted_blocks(base, ours);
+    let normalized_theirs = normalize_shifted_blocks(base, theirs);
+
+    // If neither side could be normalized, don't retry.
+    if normalized_ours.is_none() && normalized_theirs.is_none() {
+        return Ok(None);
+    }
+
+    let ours_aligned = normalized_ours.as_deref().unwrap_or(ours);
+    let theirs_aligned = normalized_theirs.as_deref().unwrap_or(theirs);
+
+    match diff3_merge_bytes(base, ours_aligned, theirs_aligned)? {
+        Diff3Outcome::Clean(out) => Ok(Some(out)),
+        Diff3Outcome::Conflict { .. } => Ok(None),
+    }
+}
+
+/// Detect moved/shifted paragraph-like blocks and reorder them toward base order.
+///
+/// Heuristic details:
+/// - Split into blocks separated by one or more blank lines.
+/// - Hash each block and anchor blocks that are unique in both base and variant.
+/// - Assign each variant block a sortable rank derived from nearest anchored base blocks.
+/// - Reassemble blocks in ranked order.
+///
+/// This is O(b log b) where b = number of blocks in the file.
+fn normalize_shifted_blocks(base: &[u8], variant: &[u8]) -> Option<Vec<u8>> {
+    let base_text = std::str::from_utf8(base).ok()?;
+    let variant_text = std::str::from_utf8(variant).ok()?;
+
+    let base_blocks = split_blocks(base_text);
+    let variant_blocks = split_blocks(variant_text);
+
+    if base_blocks.len() < 2 || variant_blocks.len() < 2 {
+        return None;
+    }
+
+    use std::collections::BTreeMap;
+
+    let mut base_positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (idx, block) in base_blocks.iter().enumerate() {
+        base_positions
+            .entry(block_signature(block))
+            .or_default()
+            .push(idx);
+    }
+
+    let mut variant_positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (idx, block) in variant_blocks.iter().enumerate() {
+        variant_positions
+            .entry(block_signature(block))
+            .or_default()
+            .push(idx);
+    }
+
+    let mut anchors: Vec<Option<usize>> = vec![None; variant_blocks.len()];
+    for (idx, block) in variant_blocks.iter().enumerate() {
+        let signature = block_signature(block);
+        let Some(base_pos) = base_positions.get(&signature) else {
+            continue;
+        };
+        let Some(var_pos) = variant_positions.get(&signature) else {
+            continue;
+        };
+
+        if base_pos.len() == 1 && var_pos.len() == 1 {
+            anchors[idx] = Some(base_pos[0]);
+        }
+    }
+
+    let moved_anchor_count = anchors
+        .iter()
+        .enumerate()
+        .filter(|(idx, anchor)| anchor.is_some_and(|a| a != *idx))
+        .count();
+    if moved_anchor_count == 0 {
+        return None;
+    }
+
+    let mut prev_anchor: Vec<Option<usize>> = vec![None; anchors.len()];
+    let mut last: Option<usize> = None;
+    for (idx, anchor) in anchors.iter().enumerate() {
+        if let Some(a) = anchor {
+            last = Some(*a);
+        }
+        prev_anchor[idx] = last;
+    }
+
+    let mut next_anchor: Vec<Option<usize>> = vec![None; anchors.len()];
+    let mut next: Option<usize> = None;
+    for (idx, anchor) in anchors.iter().enumerate().rev() {
+        if let Some(a) = anchor {
+            next = Some(*a);
+        }
+        next_anchor[idx] = next;
+    }
+
+    let mut ranked: Vec<(i64, usize, &str)> = Vec::with_capacity(variant_blocks.len());
+    for (idx, block) in variant_blocks.iter().enumerate() {
+        let rank = if let Some(base_idx) = anchors[idx] {
+            (base_idx as i64) * 4 + 2
+        } else if let Some(prev) = prev_anchor[idx] {
+            (prev as i64) * 4 + 3
+        } else if let Some(next) = next_anchor[idx] {
+            (next as i64) * 4 + 1
+        } else {
+            (base_blocks.len() as i64) * 4 + idx as i64
+        };
+        ranked.push((rank, idx, block.as_str()));
+    }
+
+    ranked.sort_by_key(|(rank, idx, _)| (*rank, *idx));
+
+    let mut normalized = String::new();
+    for (_, _, block) in ranked {
+        normalized.push_str(block);
+    }
+
+    if normalized.as_bytes() == variant {
+        None
+    } else {
+        Some(normalized.into_bytes())
+    }
+}
+
+fn block_signature(block: &str) -> String {
+    block.trim_end().to_owned()
+}
+
+/// Split text into paragraph-like blocks separated by blank lines.
+fn split_blocks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+
+    for segment in text.split_inclusive('\n') {
+        let is_blank = segment.trim().is_empty();
+        current.push_str(segment);
+
+        if is_blank {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+
+    out
 }
 
 /// Parse diff3 conflict marker output and extract [`ConflictAtom`]s.
@@ -530,8 +918,12 @@ pub fn parse_diff3_atoms(
             // For the AtomEdit regions we use the base region as an approximation.
             // Exact workspace-version line numbers would require tracking per-file
             // offsets across multiple conflict blocks, which is Phase 2 work.
-            let ours_region = Region::lines(block_base_start, block_base_start + ours_lines.len() as u32);
-            let theirs_region = Region::lines(block_base_start, block_base_start + theirs_lines.len() as u32);
+            let ours_region =
+                Region::lines(block_base_start, block_base_start + ours_lines.len() as u32);
+            let theirs_region = Region::lines(
+                block_base_start,
+                block_base_start + theirs_lines.len() as u32,
+            );
 
             let edits = vec![
                 AtomEdit::new(ws_ours, ours_region, ours_lines.join("\n")),
@@ -795,6 +1187,98 @@ mod tests {
     }
 
     #[test]
+    fn shifted_function_move_resolves_after_alignment_retry() {
+        let base_text = b"fn one() {\n}\n\nfn two() {\n}\n\nfn three() {\n}\n";
+        // ws-a moved `three` to the top.
+        let moved = b"fn three() {\n}\n\nfn one() {\n}\n\nfn two() {\n}\n";
+        // ws-b edited `two` in place.
+        let edited = b"fn one() {\n}\n\nfn two() {\n    println!(\"2\");\n}\n\nfn three() {\n}\n";
+
+        // Bare diff3 conflicts on this shifted-code fixture.
+        match diff3_merge_bytes(base_text, moved, edited).unwrap() {
+            Diff3Outcome::Conflict { .. } => {}
+            Diff3Outcome::Clean(_) => panic!("fixture should conflict before shifted alignment retry"),
+        }
+
+        let partition = shared_only(
+            "src/lib.rs",
+            vec![
+                entry("ws-a", ChangeKind::Modified, Some(moved)),
+                entry("ws-b", ChangeKind::Modified, Some(edited)),
+            ],
+        );
+        let mut base = BTreeMap::new();
+        base.insert(PathBuf::from("src/lib.rs"), base_text.to_vec());
+
+        let result = resolve_partition(&partition, &base).unwrap();
+        assert!(result.is_clean(), "alignment retry should auto-resolve moved block");
+
+        let merged = String::from_utf8(upsert_content(&result).to_vec()).unwrap();
+        assert!(merged.contains("println!(\"2\")"));
+        assert!(merged.contains("fn three()"));
+    }
+
+    #[test]
+    fn shifted_block_normalization_handles_inserted_block_context() {
+        let base = b"fn one() {\n    println!(\"1\");\n}\n\nfn two() {\n    println!(\"2\");\n}\n";
+        let variant = b"fn two() {\n    println!(\"2\");\n}\n\nfn helper() {\n    println!(\"h\");\n}\n\nfn one() {\n    println!(\"1\");\n}\n";
+
+        let normalized = normalize_shifted_blocks(base, variant).expect("expected normalization");
+        let normalized_text = String::from_utf8(normalized).unwrap();
+
+        // Anchored functions should be restored to base-relative order.
+        let one_pos = normalized_text.find("fn one()").unwrap();
+        let two_pos = normalized_text.find("fn two()").unwrap();
+        assert!(one_pos < two_pos, "fn one should appear before fn two after normalization");
+        // Inserted helper block should be preserved.
+        assert!(normalized_text.contains("fn helper()"));
+    }
+
+    #[test]
+    fn alignment_retry_improves_resolution_over_bare_diff3_fixture_set() {
+        let base = b"fn one() {\n}\n\nfn two() {\n}\n\nfn three() {\n}\n";
+
+        let fixtures: Vec<(&[u8], &[u8])> = vec![
+            // Move + in-place edit: bare diff3 conflict, alignment retry should resolve.
+            (
+                b"fn three() {\n}\n\nfn one() {\n}\n\nfn two() {\n}\n",
+                b"fn one() {\n}\n\nfn two() {\n    println!(\"2\");\n}\n\nfn three() {\n}\n",
+            ),
+            // Non-overlapping edits are already clean under bare diff3.
+            (
+                b"fn one() {\n    println!(\"A\");\n}\n\nfn two() {\n}\n\nfn three() {\n}\n",
+                b"fn one() {\n}\n\nfn two() {\n    println!(\"B\");\n}\n\nfn three() {\n}\n",
+            ),
+            // Identical edits are clean in both paths.
+            (
+                b"fn one() {\n}\n\nfn two() {\n    println!(\"same\");\n}\n\nfn three() {\n}\n",
+                b"fn one() {\n}\n\nfn two() {\n    println!(\"same\");\n}\n\nfn three() {\n}\n",
+            ),
+        ];
+
+        let mut bare_clean = 0usize;
+        let mut aligned_clean = 0usize;
+
+        for (ours, theirs) in fixtures {
+            if matches!(diff3_merge_bytes(base, ours, theirs).unwrap(), Diff3Outcome::Clean(_)) {
+                bare_clean += 1;
+            }
+            if retry_with_shifted_alignment(base, ours, theirs)
+                .unwrap()
+                .is_some()
+                || matches!(diff3_merge_bytes(base, ours, theirs).unwrap(), Diff3Outcome::Clean(_))
+            {
+                aligned_clean += 1;
+            }
+        }
+
+        assert!(
+            aligned_clean > bare_clean,
+            "shifted alignment retry should improve clean-merge count over bare diff3"
+        );
+    }
+
+    #[test]
     fn unique_and_shared_results_are_path_sorted() {
         let partition = PartitionResult {
             unique: vec![(
@@ -848,7 +1332,12 @@ mod tests {
         assert_eq!(record.reason, ConflictReason::Diff3Conflict);
 
         // Must have exactly one ConflictAtom for the single conflicting hunk.
-        assert_eq!(record.atoms.len(), 1, "expected 1 atom, got {:?}", record.atoms);
+        assert_eq!(
+            record.atoms.len(),
+            1,
+            "expected 1 atom, got {:?}",
+            record.atoms
+        );
 
         let atom = &record.atoms[0];
         // The base line that conflicted is line 2 ("b").
@@ -864,8 +1353,14 @@ mod tests {
 
         // Edits carry the correct workspace labels.
         let ws_labels: Vec<&str> = atom.edits.iter().map(|e| e.workspace.as_str()).collect();
-        assert!(ws_labels.contains(&"ws-a"), "expected ws-a in edits: {ws_labels:?}");
-        assert!(ws_labels.contains(&"ws-b"), "expected ws-b in edits: {ws_labels:?}");
+        assert!(
+            ws_labels.contains(&"ws-a"),
+            "expected ws-a in edits: {ws_labels:?}"
+        );
+        assert!(
+            ws_labels.contains(&"ws-b"),
+            "expected ws-b in edits: {ws_labels:?}"
+        );
 
         // Edits carry the correct content.
         let content_a = atom.edits.iter().find(|e| e.workspace == "ws-a").unwrap();
@@ -905,7 +1400,8 @@ mod tests {
         assert_eq!(
             atom.base_region,
             crate::model::conflict::Region::lines(3, 5),
-            "atom should cover base lines 3-4; got {:?}", atom.base_region
+            "atom should cover base lines 3-4; got {:?}",
+            atom.base_region
         );
 
         // The reason must be OverlappingLineEdits.
@@ -924,7 +1420,7 @@ mod tests {
         // treat them as separate hunks.
         let base = b"ctx\na\nctx\nctx\nctx\nb\nctx\n";
         // ws-a edits lines 2 and 6 (1-indexed); ws-b edits same lines differently.
-        let ours   = b"ctx\nA1\nctx\nctx\nctx\nB1\nctx\n";
+        let ours = b"ctx\nA1\nctx\nctx\nctx\nB1\nctx\n";
         let theirs = b"ctx\nA2\nctx\nctx\nctx\nB2\nctx\n";
 
         let partition = shared_only(
@@ -946,7 +1442,8 @@ mod tests {
         assert_eq!(
             record.atoms.len(),
             2,
-            "expected 2 atoms (one per conflict hunk), got {:?}", record.atoms
+            "expected 2 atoms (one per conflict hunk), got {:?}",
+            record.atoms
         );
 
         // Atoms should be for distinct base line ranges.
@@ -969,7 +1466,11 @@ mod tests {
             ],
         );
         let result = resolve_partition(&partition, &BTreeMap::new()).unwrap();
-        assert_eq!(result.conflicts[0].atoms.len(), 0, "add/add should have no atoms");
+        assert_eq!(
+            result.conflicts[0].atoms.len(),
+            0,
+            "add/add should have no atoms"
+        );
 
         // modify/delete
         let partition2 = shared_only(
@@ -982,7 +1483,11 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("gone.txt"), b"old\n".to_vec());
         let result2 = resolve_partition(&partition2, &base).unwrap();
-        assert_eq!(result2.conflicts[0].atoms.len(), 0, "modify/delete should have no atoms");
+        assert_eq!(
+            result2.conflicts[0].atoms.len(),
+            0,
+            "modify/delete should have no atoms"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -994,7 +1499,8 @@ mod tests {
     fn parse_diff3_atoms_single_block() {
         // Simulated diff3 output for base="b\n", ours="B1\n", theirs="B2\n"
         // with context "a\n" before and "c\n" after.
-        let marker_output = b"a\n<<<<<<< ours.tmp\nB1\n||||||| base.tmp\nb\n=======\nB2\n>>>>>>> theirs.tmp\nc\n";
+        let marker_output =
+            b"a\n<<<<<<< ours.tmp\nB1\n||||||| base.tmp\nb\n=======\nB2\n>>>>>>> theirs.tmp\nc\n";
 
         let atoms = parse_diff3_atoms(marker_output, "alice", "bob");
         assert_eq!(atoms.len(), 1, "expected 1 atom");
@@ -1002,11 +1508,14 @@ mod tests {
         let atom = &atoms[0];
         // "a\n" is context (line 1 in base). The base section "b\n" is line 2.
         // Region: lines(2, 3) = just line 2.
-        assert_eq!(atom.base_region, crate::model::conflict::Region::lines(2, 3));
+        assert_eq!(
+            atom.base_region,
+            crate::model::conflict::Region::lines(2, 3)
+        );
         assert_eq!(atom.edits.len(), 2);
 
         let alice = atom.edits.iter().find(|e| e.workspace == "alice").unwrap();
-        let bob   = atom.edits.iter().find(|e| e.workspace == "bob").unwrap();
+        let bob = atom.edits.iter().find(|e| e.workspace == "bob").unwrap();
         assert_eq!(alice.content, "B1");
         assert_eq!(bob.content, "B2");
 
@@ -1038,22 +1547,61 @@ mod tests {
             "B2\n",
             ">>>>>>> theirs\n",
             "ctx\n",
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let atoms = parse_diff3_atoms(marker_output, "ws-a", "ws-b");
         assert_eq!(atoms.len(), 2, "expected 2 atoms");
 
         // First block: base section = "a" at line 2 (after 1 context line).
-        assert_eq!(atoms[0].base_region, crate::model::conflict::Region::lines(2, 3));
-        assert_eq!(atoms[0].edits.iter().find(|e| e.workspace == "ws-a").unwrap().content, "A1");
-        assert_eq!(atoms[0].edits.iter().find(|e| e.workspace == "ws-b").unwrap().content, "A2");
+        assert_eq!(
+            atoms[0].base_region,
+            crate::model::conflict::Region::lines(2, 3)
+        );
+        assert_eq!(
+            atoms[0]
+                .edits
+                .iter()
+                .find(|e| e.workspace == "ws-a")
+                .unwrap()
+                .content,
+            "A1"
+        );
+        assert_eq!(
+            atoms[0]
+                .edits
+                .iter()
+                .find(|e| e.workspace == "ws-b")
+                .unwrap()
+                .content,
+            "A2"
+        );
 
         // Second block: base section = "b" at line 6
         // After block 1: base_line = 2 + 1(base-len) = 3
         // ctx(3) → 4, ctx(4) → 5, ctx(5) → 6: block_base_start = 6
-        assert_eq!(atoms[1].base_region, crate::model::conflict::Region::lines(6, 7));
-        assert_eq!(atoms[1].edits.iter().find(|e| e.workspace == "ws-a").unwrap().content, "B1");
-        assert_eq!(atoms[1].edits.iter().find(|e| e.workspace == "ws-b").unwrap().content, "B2");
+        assert_eq!(
+            atoms[1].base_region,
+            crate::model::conflict::Region::lines(6, 7)
+        );
+        assert_eq!(
+            atoms[1]
+                .edits
+                .iter()
+                .find(|e| e.workspace == "ws-a")
+                .unwrap()
+                .content,
+            "B1"
+        );
+        assert_eq!(
+            atoms[1]
+                .edits
+                .iter()
+                .find(|e| e.workspace == "ws-b")
+                .unwrap()
+                .content,
+            "B2"
+        );
     }
 
     /// Parser returns empty vec for marker output with no conflict blocks.
@@ -1071,7 +1619,7 @@ mod tests {
             "doc.txt",
             vec![
                 entry("alice", ChangeKind::Modified, Some(b"a\nALICE\nc\n")),
-                entry("bob",   ChangeKind::Modified, Some(b"a\nBOB\nc\n")),
+                entry("bob", ChangeKind::Modified, Some(b"a\nBOB\nc\n")),
             ],
         );
 
@@ -1083,7 +1631,11 @@ mod tests {
         let atoms = &result.conflicts[0].atoms;
         assert_eq!(atoms.len(), 1);
 
-        let edit_ws: Vec<&str> = atoms[0].edits.iter().map(|e| e.workspace.as_str()).collect();
+        let edit_ws: Vec<&str> = atoms[0]
+            .edits
+            .iter()
+            .map(|e| e.workspace.as_str())
+            .collect();
         // "alice" is first in lexicographic order (ours), "bob" is theirs.
         assert!(
             edit_ws.contains(&"alice"),
@@ -1145,9 +1697,24 @@ mod tests {
         let partition = shared_only(
             "shared.rs",
             vec![
-                entry_with_blob("ws-a", ChangeKind::Modified, Some(b"fn f() {}\n"), &same_blob),
-                entry_with_blob("ws-b", ChangeKind::Modified, Some(b"fn f() {}\n"), &same_blob),
-                entry_with_blob("ws-c", ChangeKind::Modified, Some(b"fn f() {}\n"), &same_blob),
+                entry_with_blob(
+                    "ws-a",
+                    ChangeKind::Modified,
+                    Some(b"fn f() {}\n"),
+                    &same_blob,
+                ),
+                entry_with_blob(
+                    "ws-b",
+                    ChangeKind::Modified,
+                    Some(b"fn f() {}\n"),
+                    &same_blob,
+                ),
+                entry_with_blob(
+                    "ws-c",
+                    ChangeKind::Modified,
+                    Some(b"fn f() {}\n"),
+                    &same_blob,
+                ),
             ],
         );
 
@@ -1163,8 +1730,18 @@ mod tests {
         let partition = shared_only(
             "diff.txt",
             vec![
-                entry_with_blob("ws-a", ChangeKind::Modified, Some(b"A\nb\nc\n"), &"a".repeat(40)),
-                entry_with_blob("ws-b", ChangeKind::Modified, Some(b"a\nb\nC\n"), &"b".repeat(40)),
+                entry_with_blob(
+                    "ws-a",
+                    ChangeKind::Modified,
+                    Some(b"A\nb\nc\n"),
+                    &"a".repeat(40),
+                ),
+                entry_with_blob(
+                    "ws-b",
+                    ChangeKind::Modified,
+                    Some(b"a\nb\nC\n"),
+                    &"b".repeat(40),
+                ),
             ],
         );
 
@@ -1173,7 +1750,10 @@ mod tests {
 
         let result = resolve_partition(&partition, &base).unwrap();
         // Non-overlapping edits should still auto-resolve via diff3.
-        assert!(result.is_clean(), "non-overlapping edits should auto-resolve");
+        assert!(
+            result.is_clean(),
+            "non-overlapping edits should auto-resolve"
+        );
     }
 
     /// If one entry is missing a blob OID, fall back to byte comparison.
@@ -1236,5 +1816,166 @@ mod tests {
             entry_with_blob("ws-b", ChangeKind::Modified, Some(b"y\n"), &"0".repeat(40)),
         ];
         assert!(!all_blobs_equal(&entries));
+    }
+
+    // -----------------------------------------------------------------------
+    // AST-enhanced resolve pipeline integration tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "ast-merge")]
+    mod ast_resolve_tests {
+        use super::*;
+        use crate::merge::ast_merge::{AstLanguage, AstMergeConfig};
+        use crate::merge::resolve::resolve_partition_with_ast;
+
+        fn shared_rs(path: &str, entries: Vec<PathEntry>) -> PartitionResult {
+            PartitionResult {
+                unique: vec![],
+                shared: vec![(PathBuf::from(path), entries)],
+            }
+        }
+
+        /// AST merge resolves overlapping-line edits in different functions.
+        ///
+        /// diff3 reports a conflict because lines overlap (adjacent changes),
+        /// but AST merge sees the edits are in different function_items.
+        #[test]
+        fn ast_resolves_different_functions_where_diff3_fails() {
+            // Two functions back-to-back with no separating context.
+            // diff3 will conflict because the changes are too close together.
+            let base = b"fn foo() {\n    old_a();\n}\nfn bar() {\n    old_b();\n}\n";
+            let ws_a = b"fn foo() {\n    new_a();\n}\nfn bar() {\n    old_b();\n}\n";
+            let ws_b = b"fn foo() {\n    old_a();\n}\nfn bar() {\n    new_b();\n}\n";
+
+            // First verify: plain resolve_partition conflicts.
+            let partition = shared_rs(
+                "src/lib.rs",
+                vec![
+                    entry("ws-a", ChangeKind::Modified, Some(ws_a)),
+                    entry("ws-b", ChangeKind::Modified, Some(ws_b)),
+                ],
+            );
+            let mut base_map = BTreeMap::new();
+            base_map.insert(PathBuf::from("src/lib.rs"), base.to_vec());
+
+            let plain_result = resolve_partition(&partition, &base_map).unwrap();
+
+            // Now try with AST merge enabled.
+            let ast_config = AstMergeConfig::all_languages();
+            let ast_result =
+                resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+
+            if !plain_result.is_clean() {
+                // diff3 conflicted — AST merge should resolve it.
+                assert!(
+                    ast_result.is_clean(),
+                    "AST merge should resolve what diff3 could not: conflicts={:?}",
+                    ast_result.conflicts
+                );
+                let merged = match &ast_result.resolved[0] {
+                    ResolvedChange::Upsert { content, .. } => content,
+                    _ => panic!("expected upsert"),
+                };
+                let merged_str = std::str::from_utf8(merged).unwrap();
+                assert!(
+                    merged_str.contains("new_a"),
+                    "merged should contain ws-a's foo change"
+                );
+                assert!(
+                    merged_str.contains("new_b"),
+                    "merged should contain ws-b's bar change"
+                );
+            }
+            // If diff3 resolved cleanly (enough context), AST merge should also resolve cleanly.
+        }
+
+        /// AST merge produces conflict atoms with AstNode regions when same function is modified.
+        #[test]
+        fn ast_conflict_has_ast_node_regions() {
+            let base = b"fn process() {\n    step_1();\n    step_2();\n}\n";
+            let ws_a = b"fn process() {\n    step_1_v1();\n    step_2();\n}\n";
+            let ws_b = b"fn process() {\n    step_1();\n    step_2_v2();\n}\n";
+
+            let partition = shared_rs(
+                "src/processor.rs",
+                vec![
+                    entry("ws-a", ChangeKind::Modified, Some(ws_a)),
+                    entry("ws-b", ChangeKind::Modified, Some(ws_b)),
+                ],
+            );
+            let mut base_map = BTreeMap::new();
+            base_map.insert(PathBuf::from("src/processor.rs"), base.to_vec());
+
+            let ast_config = AstMergeConfig::all_languages();
+            let result =
+                resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+
+            // Both ws-a and ws-b modify the same function — should conflict.
+            assert_eq!(result.conflicts.len(), 1);
+            let record = &result.conflicts[0];
+            // Should have AST-level atoms.
+            assert!(
+                !record.atoms.is_empty(),
+                "conflict should have atoms from AST merge"
+            );
+            let atom = &record.atoms[0];
+            assert!(
+                matches!(&atom.base_region, Region::AstNode { node_kind, name, .. }
+                    if node_kind == "function_item" && name.as_deref() == Some("process")),
+                "atom should reference function_item `process`, got: {:?}",
+                atom.base_region
+            );
+        }
+
+        /// AST merge is not used when disabled in config.
+        #[test]
+        fn ast_merge_disabled_falls_through_to_diff3() {
+            let base = b"fn foo() {\n    old_a();\n}\nfn bar() {\n    old_b();\n}\n";
+            let ws_a = b"fn foo() {\n    new_a();\n}\nfn bar() {\n    old_b();\n}\n";
+            let ws_b = b"fn foo() {\n    old_a();\n}\nfn bar() {\n    new_b();\n}\n";
+
+            let partition = shared_rs(
+                "src/lib.rs",
+                vec![
+                    entry("ws-a", ChangeKind::Modified, Some(ws_a)),
+                    entry("ws-b", ChangeKind::Modified, Some(ws_b)),
+                ],
+            );
+            let mut base_map = BTreeMap::new();
+            base_map.insert(PathBuf::from("src/lib.rs"), base.to_vec());
+
+            // With no languages enabled, AST merge should not be tried.
+            let no_ast_config = AstMergeConfig::default();
+            let result =
+                resolve_partition_with_ast(&partition, &base_map, &no_ast_config).unwrap();
+
+            // Should get the same result as plain resolve_partition.
+            let plain_result = resolve_partition(&partition, &base_map).unwrap();
+            assert_eq!(result.is_clean(), plain_result.is_clean());
+        }
+
+        /// AST merge is not used for unsupported file extensions.
+        #[test]
+        fn ast_merge_skipped_for_unsupported_extension() {
+            let base = b"line1\nline2\nline3\n";
+            let ws_a = b"LINE1\nline2\nline3\n";
+            let ws_b = b"line1\nline2\nLINE3\n";
+
+            let partition = shared_rs(
+                "data.json",
+                vec![
+                    entry("ws-a", ChangeKind::Modified, Some(ws_a)),
+                    entry("ws-b", ChangeKind::Modified, Some(ws_b)),
+                ],
+            );
+            let mut base_map = BTreeMap::new();
+            base_map.insert(PathBuf::from("data.json"), base.to_vec());
+
+            let ast_config = AstMergeConfig::all_languages();
+            let result =
+                resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+            let plain_result = resolve_partition(&partition, &base_map).unwrap();
+            assert_eq!(result.is_clean(), plain_result.is_clean());
+        }
     }
 }

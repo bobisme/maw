@@ -1,9 +1,9 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use crate::workspace::{jj_cwd, repo_root, MawConfig};
+use crate::workspace::{MawConfig, jj_cwd, repo_root};
 
 #[derive(Args)]
 pub struct ReleaseArgs {
@@ -54,7 +54,9 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         );
     }
 
-    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout).trim().to_string();
+    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout)
+        .trim()
+        .to_string();
 
     // Read current branch position
     let branch_ref = format!("refs/heads/{branch}");
@@ -160,12 +162,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 /// Get a short commit info line for a commit hash.
 fn get_commit_info(root: &std::path::Path, oid: &str) -> Result<String> {
     let output = Command::new("git")
-        .args([
-            "log",
-            "--format=%h %s",
-            "-1",
-            oid,
-        ])
+        .args(["log", "--format=%h %s", "-1", oid])
         .current_dir(root)
         .output()
         .context("Failed to get commit info")?;

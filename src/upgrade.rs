@@ -2,9 +2,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::init::{clean_root_source_files, ensure_workspaces_gitignored, fix_git_head, set_conflict_marker_style};
+use crate::init::{
+    clean_root_source_files, ensure_workspaces_gitignored, fix_git_head, set_conflict_marker_style,
+};
 
 /// Upgrade a v1 repo (.workspaces/) to v2 bare model (ws/).
 ///
@@ -273,9 +275,7 @@ fn relocate_default_workspace() -> Result<()> {
 
 /// Set git core.bare = true.
 fn set_git_bare() -> Result<()> {
-    let check = Command::new("git")
-        .args(["config", "core.bare"])
-        .output();
+    let check = Command::new("git").args(["config", "core.bare"]).output();
 
     if let Ok(out) = &check {
         let val = String::from_utf8_lossy(&out.stdout);

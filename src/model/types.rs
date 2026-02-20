@@ -42,7 +42,10 @@ impl GitOid {
                 reason: format!("expected 40 hex characters, got {}", s.len()),
             });
         }
-        if !s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
             return Err(ValidationError {
                 kind: ErrorKind::GitOid,
                 value: s.to_owned(),
@@ -668,8 +671,7 @@ mod tests {
         let json = serde_json::to_string(&WorkspaceState::Active).unwrap();
         assert!(json.contains("\"state\":\"active\""));
 
-        let json =
-            serde_json::to_string(&WorkspaceState::Stale { behind_epochs: 1 }).unwrap();
+        let json = serde_json::to_string(&WorkspaceState::Stale { behind_epochs: 1 }).unwrap();
         assert!(json.contains("\"state\":\"stale\""));
         assert!(json.contains("\"behind_epochs\":1"));
     }

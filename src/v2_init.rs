@@ -126,11 +126,7 @@ impl fmt::Display for InitResult {
         writeln!(f, "  Epoch₀:    {}", &self.epoch0.as_str()[..12])?;
         writeln!(f)?;
         writeln!(f, "Next steps:")?;
-        writeln!(
-            f,
-            "  cd {}",
-            self.default_workspace.display()
-        )?;
+        writeln!(f, "  cd {}", self.default_workspace.display())?;
         writeln!(f, "  # Add your files, then:")?;
         writeln!(
             f,
@@ -291,7 +287,10 @@ fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
         .current_dir(root)
         .output()?;
 
-    if !name_check.status.success() || String::from_utf8_lossy(&name_check.stdout).trim().is_empty()
+    if !name_check.status.success()
+        || String::from_utf8_lossy(&name_check.stdout)
+            .trim()
+            .is_empty()
     {
         run_git(root, &["config", "user.name", "Manifold"])?;
     }
@@ -302,7 +301,9 @@ fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
         .output()?;
 
     if !email_check.status.success()
-        || String::from_utf8_lossy(&email_check.stdout).trim().is_empty()
+        || String::from_utf8_lossy(&email_check.stdout)
+            .trim()
+            .is_empty()
     {
         run_git(root, &["config", "user.email", "manifold@localhost"])?;
     }
@@ -334,11 +335,9 @@ fn clean_root_worktree(root: &Path) -> Result<(), InitError> {
 /// Delegates to the shared [`crate::refs`] module.
 fn set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), InitError> {
     let ref_name = manifold_refs::EPOCH_CURRENT;
-    manifold_refs::write_ref(root, ref_name, epoch.oid()).map_err(|e| {
-        InitError::RefSet {
-            ref_name: ref_name.to_owned(),
-            message: e.to_string(),
-        }
+    manifold_refs::write_ref(root, ref_name, epoch.oid()).map_err(|e| InitError::RefSet {
+        ref_name: ref_name.to_owned(),
+        message: e.to_string(),
     })
 }
 
@@ -610,7 +609,13 @@ mod tests {
 
         // EpochId validates as a proper 40-char hex OID
         assert_eq!(result.epoch0.as_str().len(), 40);
-        assert!(result.epoch0.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            result
+                .epoch0
+                .as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        );
     }
 
     #[test]
@@ -927,12 +932,8 @@ pub fn brownfield_init(
         for f in &dirty_files {
             eprintln!("  M  {}", f.display());
         }
-        eprintln!(
-            "  Uncommitted changes are kept at root. The committed versions will"
-        );
-        eprintln!(
-            "  appear in ws/default/. Commit your changes to include them in epoch₀."
-        );
+        eprintln!("  Uncommitted changes are kept at root. The committed versions will");
+        eprintln!("  appear in ws/default/. Commit your changes to include them in epoch₀.");
     }
 
     // 5. Get current HEAD as epoch₀
@@ -945,9 +946,7 @@ pub fn brownfield_init(
             "WARNING: HEAD is detached. Epoch₀ set to the current detached HEAD ({}).",
             &epoch0.as_str()[..12]
         );
-        eprintln!(
-            "  To attach HEAD to a branch after init, run inside ws/default/:"
-        );
+        eprintln!("  To attach HEAD to a branch after init, run inside ws/default/:");
         eprintln!("    git checkout -b <branch-name>");
     }
 
@@ -1015,12 +1014,10 @@ fn bf_verify_git_repo(root: &Path) -> Result<(), BrownfieldInitError> {
 /// the ref has not been set yet.
 fn bf_read_epoch_ref(root: &Path) -> Result<EpochId, BrownfieldInitError> {
     match manifold_refs::read_epoch_current(root) {
-        Ok(Some(oid)) => EpochId::new(oid.as_str()).map_err(|e| {
-            BrownfieldInitError::GitCommand {
-                command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
-                stderr: format!("invalid OID: {e}"),
-                exit_code: None,
-            }
+        Ok(Some(oid)) => EpochId::new(oid.as_str()).map_err(|e| BrownfieldInitError::GitCommand {
+            command: format!("git rev-parse {}", manifold_refs::EPOCH_CURRENT),
+            stderr: format!("invalid OID: {e}"),
+            exit_code: None,
         }),
         Ok(None) => {
             // Ref doesn't exist yet — fall back to HEAD
@@ -1160,11 +1157,9 @@ fn bf_clean_root_index(root: &Path) -> Result<(), BrownfieldInitError> {
 /// Delegates to the shared [`crate::refs`] module.
 fn bf_set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), BrownfieldInitError> {
     let ref_name = manifold_refs::EPOCH_CURRENT;
-    manifold_refs::write_ref(root, ref_name, epoch.oid()).map_err(|e| {
-        BrownfieldInitError::RefSet {
-            ref_name: ref_name.to_owned(),
-            message: e.to_string(),
-        }
+    manifold_refs::write_ref(root, ref_name, epoch.oid()).map_err(|e| BrownfieldInitError::RefSet {
+        ref_name: ref_name.to_owned(),
+        message: e.to_string(),
     })
 }
 
@@ -1232,10 +1227,7 @@ fn bf_clean_root_tracked_files(
         }
 
         // Skip Manifold-owned paths (they belong at root)
-        if name.starts_with("ws/")
-            || name.starts_with(".manifold/")
-            || name == ".gitignore"
-        {
+        if name.starts_with("ws/") || name.starts_with(".manifold/") || name == ".gitignore" {
             continue;
         }
 
@@ -1575,7 +1567,10 @@ mod brownfield_tests {
         assert!(!result1.already_initialized);
 
         let result2 = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
-        assert!(result2.already_initialized, "second call should be idempotent");
+        assert!(
+            result2.already_initialized,
+            "second call should be idempotent"
+        );
         assert_eq!(result2.epoch0, result1.epoch0);
     }
 
@@ -1589,7 +1584,11 @@ mod brownfield_tests {
 
         // HEAD should still point to the initial commit
         let head_oid = read_ref(root, "HEAD").unwrap();
-        assert_eq!(head_oid, initial_head.as_str(), "git history must be preserved");
+        assert_eq!(
+            head_oid,
+            initial_head.as_str(),
+            "git history must be preserved"
+        );
     }
 
     #[test]
@@ -1657,7 +1656,10 @@ mod brownfield_tests {
         setup_existing_repo(root);
 
         // Before init: index should exist
-        assert!(root.join(".git/index").exists(), "index should exist before init");
+        assert!(
+            root.join(".git/index").exists(),
+            "index should exist before init"
+        );
 
         brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
 

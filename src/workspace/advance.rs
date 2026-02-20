@@ -17,14 +17,14 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceMode;
 use crate::refs as manifold_refs;
 
-use super::{metadata, repo_root, workspace_path, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
 
 // ---------------------------------------------------------------------------
 // Conflict info
@@ -103,8 +103,8 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         .with_context(|| format!("Failed to get HEAD of workspace '{name}'"))?;
 
     // Get the current epoch from refs/manifold/epoch/current.
-    let current_epoch = manifold_refs::read_epoch_current(&root)
-        .with_context(|| "Failed to read current epoch")?;
+    let current_epoch =
+        manifold_refs::read_epoch_current(&root).with_context(|| "Failed to read current epoch")?;
 
     let Some(current_epoch) = current_epoch else {
         bail!(
@@ -277,7 +277,10 @@ fn pop_stash_and_detect_conflicts(ws_path: &Path) -> Result<Vec<AdvanceConflict>
     if conflicts.is_empty() {
         // Something else failed.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git stash pop failed (no conflicts detected): {}", stderr.trim());
+        bail!(
+            "git stash pop failed (no conflicts detected): {}",
+            stderr.trim()
+        );
     }
     Ok(conflicts)
 }
@@ -351,19 +354,17 @@ fn print_advance_text(result: &AdvanceResult) {
 }
 
 fn print_advance_pretty(result: &AdvanceResult) {
-    let (green, yellow, bold, gray, reset) = (
-        "\x1b[32m",
-        "\x1b[33m",
-        "\x1b[1m",
-        "\x1b[90m",
-        "\x1b[0m",
-    );
+    let (green, yellow, bold, gray, reset) =
+        ("\x1b[32m", "\x1b[33m", "\x1b[1m", "\x1b[90m", "\x1b[0m");
 
     if result.success {
         println!("{green}✓{reset} {bold}Advance complete{reset}");
         println!("{}", result.message);
         println!();
-        println!("{gray}Next: maw exec {} -- <command>{reset}", result.workspace);
+        println!(
+            "{gray}Next: maw exec {} -- <command>{reset}",
+            result.workspace
+        );
     } else {
         println!("{yellow}⚠ Advance completed with conflicts{reset}");
         println!("{}", result.message);
@@ -373,7 +374,10 @@ fn print_advance_pretty(result: &AdvanceResult) {
             println!("  {yellow}[{:>20}]{reset} {}", c.conflict_type, c.path);
         }
         println!();
-        println!("Resolve conflicts manually in {bold}{}{reset}", result.workspace);
+        println!(
+            "Resolve conflicts manually in {bold}{}{reset}",
+            result.workspace
+        );
     }
 }
 

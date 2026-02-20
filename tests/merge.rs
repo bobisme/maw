@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::{default_ws, maw_fails, maw_in, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws};
+use common::{
+    default_ws, maw_fails, maw_in, maw_ok, read_from_ws, run_jj, setup_bare_repo, write_in_ws,
+};
 
 #[test]
 #[ignore = "requires jj - being replaced by git-native tests (bd-2hw9.4)"]
@@ -26,10 +28,7 @@ fn basic_merge() {
     run_jj(&bob_ws, &["describe", "-m", "feat: bob's changes"]);
 
     // Merge both workspaces and destroy them
-    maw_ok(
-        repo.path(),
-        &["ws", "merge", "alice", "bob", "--destroy"],
-    );
+    maw_ok(repo.path(), &["ws", "merge", "alice", "bob", "--destroy"]);
 
     // Verify both files are present in default workspace
     let alice_content = read_from_ws(repo.path(), "default", "alice.txt");
@@ -141,10 +140,7 @@ fn merge_with_conflict() {
         println!("Test verified: conflict was detected, workspaces preserved, exit non-zero");
     } else {
         // Workspaces were destroyed - jj merged cleanly
-        assert!(
-            out.status.success(),
-            "Clean merge should exit zero"
-        );
+        assert!(out.status.success(), "Clean merge should exit zero");
         println!("Test verified: no conflict detected, workspaces were destroyed");
     }
 }
@@ -156,7 +152,12 @@ fn merge_conflict_shows_details_and_guidance() {
 
     // Create a base file in main that both workspaces will modify
     let dws = repo.path().join("ws").join("default");
-    write_in_ws(repo.path(), "default", "shared.txt", "line 1\nline 2\nline 3\n");
+    write_in_ws(
+        repo.path(),
+        "default",
+        "shared.txt",
+        "line 1\nline 2\nline 3\n",
+    );
     run_jj(&dws, &["commit", "-m", "add shared file"]);
     run_jj(&dws, &["bookmark", "set", "main", "-r", "@-"]);
 
@@ -184,10 +185,7 @@ fn merge_conflict_shows_details_and_guidance() {
 
     // Merge with --destroy so we can distinguish conflict (workspaces preserved)
     // from clean merge (workspaces destroyed)
-    let out = maw_in(
-        repo.path(),
-        &["ws", "merge", "alice", "bob", "--destroy"],
-    );
+    let out = maw_in(repo.path(), &["ws", "merge", "alice", "bob", "--destroy"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     // Detect conflict from the merge output (not from workspace list)
@@ -195,12 +193,7 @@ fn merge_conflict_shows_details_and_guidance() {
 
     if has_conflict {
         // Conflict was detected — verify detailed output
-        let ws_path = repo
-            .path()
-            .join("ws")
-            .join("default")
-            .display()
-            .to_string();
+        let ws_path = repo.path().join("ws").join("default").display().to_string();
 
         // Should include the "Conflicts:" header
         assert!(
@@ -274,7 +267,15 @@ fn dirty_default_auto_snapshots_before_merge() {
 
     // Verify the uncommitted file was preserved in a snapshot commit
     let dws = default_ws(repo.path());
-    let log = run_jj(&dws, &["log", "--no-graph", "-T", r#"description.first_line() ++ "\n""#]);
+    let log = run_jj(
+        &dws,
+        &[
+            "log",
+            "--no-graph",
+            "-T",
+            r#"description.first_line() ++ "\n""#,
+        ],
+    );
     assert!(
         log.contains("wip: auto-snapshot before merge"),
         "Snapshot commit should exist in log, got: {log}"
@@ -295,10 +296,7 @@ fn merge_snapshots_source_workspace_without_jj() {
     // Intentionally no jj describe/status — on-disk only
 
     // Merge should capture the on-disk edits via pre-merge snapshot
-    maw_ok(
-        repo.path(),
-        &["ws", "merge", "worker", "--destroy"],
-    );
+    maw_ok(repo.path(), &["ws", "merge", "worker", "--destroy"]);
 
     // Verify the file made it into default workspace
     let content = read_from_ws(repo.path(), "default", "result.txt");
@@ -342,10 +340,7 @@ fn merge_preserves_committed_work_in_default() {
     run_jj(&agent_ws, &["describe", "-m", "feat: agent work"]);
 
     // Merge agent workspace
-    maw_ok(
-        repo.path(),
-        &["ws", "merge", "agent-1", "--destroy"],
-    );
+    maw_ok(repo.path(), &["ws", "merge", "agent-1", "--destroy"]);
 
     // The committed work (saved.txt) must still be reachable in default workspace
     let saved = read_from_ws(repo.path(), "default", "saved.txt");

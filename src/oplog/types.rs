@@ -177,9 +177,7 @@ mod tests {
             parent_ids: vec![],
             workspace_id: ws("agent-1"),
             timestamp: timestamp(),
-            payload: OpPayload::Create {
-                epoch: epoch('a'),
-            },
+            payload: OpPayload::Create { epoch: epoch('a') },
         };
         let json = op.to_canonical_json().unwrap();
         let parsed = Operation::from_json(&json).unwrap();
@@ -361,9 +359,7 @@ mod tests {
             parent_ids: vec![],
             workspace_id: ws("w"),
             timestamp: timestamp(),
-            payload: OpPayload::Create {
-                epoch: epoch('a'),
-            },
+            payload: OpPayload::Create { epoch: epoch('a') },
         };
         let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
         assert!(
@@ -486,9 +482,7 @@ mod tests {
             parent_ids: vec![],
             workspace_id: ws("first"),
             timestamp: timestamp(),
-            payload: OpPayload::Create {
-                epoch: epoch('a'),
-            },
+            payload: OpPayload::Create { epoch: epoch('a') },
         };
         let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
         assert!(json.contains("\"parent_ids\":[]"));

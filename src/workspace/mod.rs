@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde::Deserialize;
 
-use crate::backend::git::GitWorktreeBackend;
 use crate::backend::WorkspaceBackend;
+use crate::backend::git::GitWorktreeBackend;
 use crate::format::OutputFormat;
 
 mod advance;
@@ -20,6 +20,8 @@ mod prune;
 mod restore;
 mod status;
 pub mod sync;
+mod overlap;
+mod touched;
 
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;
@@ -233,6 +235,52 @@ pub enum WorkspaceCommands {
         ///
         /// If not specified, auto-detects: pretty for TTY, text for pipes.
         /// Can also be set via FORMAT env var.
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
+
+    /// List paths touched by a workspace's local changes
+    ///
+    /// Uses PatchSet diffing against the workspace's base epoch and returns
+    /// a conservative set of touched paths for conflict prediction.
+    /// For renames, both source and destination paths are included.
+    ///
+    /// Examples:
+    ///   maw ws touched alice
+    ///   maw ws touched alice --format json
+    Touched {
+        /// Workspace name
+        workspace: String,
+
+        /// Output format: text, json, or pretty
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
+
+    /// Predict overlap risk between two workspaces
+    ///
+    /// Computes touched-path sets for each workspace and reports the
+    /// path intersection as a conservative conflict-risk signal.
+    ///
+    /// Examples:
+    ///   maw ws overlap alice bob
+    ///   maw ws overlap alice bob --format json
+    Overlap {
+        /// First workspace name
+        ws1: String,
+
+        /// Second workspace name
+        ws2: String,
+
+        /// Output format: text, json, or pretty
         #[arg(long)]
         format: Option<OutputFormat>,
 
@@ -494,8 +542,34 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         }
         WorkspaceCommands::Destroy { name, confirm } => create::destroy(&name, confirm),
         WorkspaceCommands::Restore { name } => restore::restore(&name),
-        WorkspaceCommands::List { verbose, format, json } => list::list(verbose, OutputFormat::resolve(OutputFormat::with_json_flag(format, json))),
-        WorkspaceCommands::Status { format, json } => status::status(OutputFormat::resolve(OutputFormat::with_json_flag(format, json))),
+        WorkspaceCommands::List {
+            verbose,
+            format,
+            json,
+        } => list::list(
+            verbose,
+            OutputFormat::resolve(OutputFormat::with_json_flag(format, json)),
+        ),
+        WorkspaceCommands::Status { format, json } => status::status(OutputFormat::resolve(
+            OutputFormat::with_json_flag(format, json),
+        )),
+        WorkspaceCommands::Touched {
+            workspace,
+            format,
+            json,
+        } => {
+            let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+            touched::touched(&workspace, fmt)
+        }
+        WorkspaceCommands::Overlap {
+            ws1,
+            ws2,
+            format,
+            json,
+        } => {
+            let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+            overlap::overlap(&ws1, &ws2, fmt)
+        }
         WorkspaceCommands::Sync { all } => sync::sync(all),
         WorkspaceCommands::Jj { name, args } => {
             let args_str = args.join(" ");
@@ -504,7 +578,12 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                  Use: maw exec {name} -- {args_str}"
             );
         }
-        WorkspaceCommands::History { name, limit, format, json } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
+        WorkspaceCommands::History {
+            name,
+            limit,
+            format,
+            json,
+        } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
         WorkspaceCommands::Advance { name, format, json } => {
@@ -530,13 +609,16 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             if plan {
                 return merge::plan_merge(&workspaces, fmt);
             }
-            merge::merge(&workspaces, &merge::MergeOptions {
-                destroy_after: destroy,
-                confirm,
-                message: message.as_deref(),
-                dry_run,
-                format: fmt,
-            })
+            merge::merge(
+                &workspaces,
+                &merge::MergeOptions {
+                    destroy_after: destroy,
+                    confirm,
+                    message: message.as_deref(),
+                    dry_run,
+                    format: fmt,
+                },
+            )
         }
         WorkspaceCommands::Conflicts {
             workspaces,
@@ -579,7 +661,8 @@ pub fn repo_root() -> Result<PathBuf> {
     // The repo root is the parent of .git/ (or the directory containing .git/).
     let root = if git_dir.is_dir() {
         // Standard .git/ directory — parent is repo root
-        git_dir.parent()
+        git_dir
+            .parent()
             .context("Cannot determine repo root from .git dir")?
             .to_path_buf()
     } else {
@@ -595,7 +678,8 @@ pub fn repo_root() -> Result<PathBuf> {
             );
         }
         let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim());
-        common_dir.parent()
+        common_dir
+            .parent()
             .context("Cannot determine repo root from git common dir")?
             .to_path_buf()
     };

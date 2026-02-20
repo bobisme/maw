@@ -91,7 +91,10 @@ fn generate_ops(rng: &mut StdRng, agent_id: usize, op_count: usize) -> Vec<Agent
     // Always start with an AddFile so the agent has at least one owned file.
     {
         let path = next_path(&mut file_ctr);
-        let content = format!("agent={agent_id} idx=0 data={:#010x}\n", rng.random::<u32>());
+        let content = format!(
+            "agent={agent_id} idx=0 data={:#010x}\n",
+            rng.random::<u32>()
+        );
         owned.push(path.clone());
         ops.push(AgentOp::AddFile { path, content });
     }
@@ -445,8 +448,8 @@ fn run_scenario(seed: u64) -> ScenarioRun {
             );
 
             // Content must match.
-            let actual_content =
-                read_tree_file(repo.root(), &candidate_oid, rel_path).unwrap_or_else(|| {
+            let actual_content = read_tree_file(repo.root(), &candidate_oid, rel_path)
+                .unwrap_or_else(|| {
                     panic!(
                         "seed={seed}: could not read '{rel_path}' from candidate {candidate_oid}"
                     )
@@ -469,8 +472,7 @@ fn run_scenario(seed: u64) -> ScenarioRun {
             candidate_files.contains(shared_path),
             "seed={seed}: shared seed file '{shared_path}' missing from candidate",
         );
-        let actual =
-            read_tree_file(repo.root(), &candidate_oid, shared_path).unwrap_or_default();
+        let actual = read_tree_file(repo.root(), &candidate_oid, shared_path).unwrap_or_default();
         assert_eq!(
             actual, *shared_content,
             "seed={seed}: shared seed file '{shared_path}' content changed unexpectedly\n  \
@@ -595,7 +597,11 @@ fn concurrent_status_reads_do_not_corrupt() {
 
     // Make each workspace dirty in a different way.
     for (i, name) in ws_names.iter().enumerate() {
-        repo.add_file(name, &format!("agent_{i}/work.txt"), &format!("work from {name}\n"));
+        repo.add_file(
+            name,
+            &format!("agent_{i}/work.txt"),
+            &format!("work from {name}\n"),
+        );
     }
 
     // Spawn threads that all run `git status` simultaneously.
@@ -697,10 +703,7 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
             .unwrap_or_else(|_| panic!("heavy-{i} agent panicked"));
     }
 
-    let all_expected = Arc::try_unwrap(expected)
-        .unwrap()
-        .into_inner()
-        .unwrap();
+    let all_expected = Arc::try_unwrap(expected).unwrap().into_inner().unwrap();
 
     // Every agent wrote FILES_PER_AGENT files → total should be 100.
     assert_eq!(
@@ -748,7 +751,9 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
             lost.push(path.clone());
         } else if let Some(actual) = read_tree_file(repo.root(), candidate_oid, path) {
             if actual != *expected_content {
-                corrupted.push(format!("path={path}\n  expected={expected_content:?}\n  actual={actual:?}"));
+                corrupted.push(format!(
+                    "path={path}\n  expected={expected_content:?}\n  actual={actual:?}"
+                ));
             }
         }
     }
@@ -785,8 +790,10 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
             )
         })
         .collect();
-    let base_refs: Vec<(&str, &str)> =
-        base_files.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let base_refs: Vec<(&str, &str)> = base_files
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     repo.seed_files(&base_refs);
 
     // Agent roles:

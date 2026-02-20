@@ -50,7 +50,10 @@ fn git_log_grep_and_diff_work_across_epochs() {
     assert!(log.contains("feat: bump value to 2"));
 
     // git grep should find current content.
-    let grep = git_ok_in(&ws_default, &["grep", "-F", "value() -> i32 { 2 }", "--", "src/lib.rs"]);
+    let grep = git_ok_in(
+        &ws_default,
+        &["grep", "-F", "value() -> i32 { 2 }", "--", "src/lib.rs"],
+    );
     assert!(grep.contains("src/lib.rs"));
 
     // git diff across epochs should show expected file changes.
@@ -67,10 +70,7 @@ fn git_blame_and_bisect_work_with_manifold_refs_present() {
     let repo = TestRepo::new();
 
     // Seed file (epoch 1)
-    let epoch1 = repo.seed_files(&[(
-        "src/main.rs",
-        "fn score() -> i32 {\n    1\n}\n",
-    )]);
+    let epoch1 = repo.seed_files(&[("src/main.rs", "fn score() -> i32 {\n    1\n}\n")]);
 
     // Introduce a bad value in epoch 2.
     repo.modify_file(
@@ -81,11 +81,7 @@ fn git_blame_and_bisect_work_with_manifold_refs_present() {
     repo.advance_epoch("feat: introduce regression");
 
     // Fix in epoch 3.
-    repo.modify_file(
-        "default",
-        "src/main.rs",
-        "fn score() -> i32 {\n    2\n}\n",
-    );
+    repo.modify_file("default", "src/main.rs", "fn score() -> i32 {\n    2\n}\n");
     let epoch3 = repo.advance_epoch("fix: restore sane score");
 
     // Add an extra manifold metadata ref to prove refs/manifold/* doesn't interfere.
@@ -95,7 +91,10 @@ fn git_blame_and_bisect_work_with_manifold_refs_present() {
 
     // git blame should still attribute line origins.
     let blame = git_ok_in(&ws_default, &["blame", "-L", "2,2", "src/main.rs"]);
-    assert!(blame.contains("2"), "blame should include current line content: {blame}");
+    assert!(
+        blame.contains("2"),
+        "blame should include current line content: {blame}"
+    );
 
     // git bisect should run through commit graph with manifold refs present.
     git_ok_in(&ws_default, &["bisect", "start"]);

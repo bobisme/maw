@@ -10,10 +10,7 @@ use tempfile::TempDir;
 
 /// Disable git commit/tag signing in a repo. Call after git/jj init.
 fn disable_signing(dir: &Path) {
-    for (key, val) in [
-        ("commit.gpgsign", "false"),
-        ("tag.gpgsign", "false"),
-    ] {
+    for (key, val) in [("commit.gpgsign", "false"), ("tag.gpgsign", "false")] {
         Command::new("git")
             .args(["config", key, val])
             .current_dir(dir)

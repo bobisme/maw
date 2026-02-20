@@ -234,9 +234,7 @@ impl FileIdMap {
 
     /// Iterate over all `(path, FileId)` entries in sorted path order.
     pub fn iter(&self) -> impl Iterator<Item = (&Path, FileId)> {
-        self.path_to_id
-            .iter()
-            .map(|(p, &id)| (p.as_path(), id))
+        self.path_to_id.iter().map(|(p, &id)| (p.as_path(), id))
     }
 
     // -----------------------------------------------------------------------
@@ -287,8 +285,7 @@ impl FileIdMap {
             })
             .collect();
 
-        let json =
-            serde_json::to_string_pretty(&records).map_err(FileIdMapError::Json)?;
+        let json = serde_json::to_string_pretty(&records).map_err(FileIdMapError::Json)?;
 
         // Atomic write: write to tmp, then rename.
         let tmp_path = path.with_extension("tmp");
@@ -363,11 +360,7 @@ impl fmt::Display for FileIdMapError {
                 write!(f, "path not tracked: {}", p.display())
             }
             Self::DuplicatePath(p) => {
-                write!(
-                    f,
-                    "corrupt fileids: duplicate path entry: {}",
-                    p.display()
-                )
+                write!(f, "corrupt fileids: duplicate path entry: {}", p.display())
             }
             Self::DuplicateFileId(id) => {
                 write!(f, "corrupt fileids: duplicate FileId: {id}")

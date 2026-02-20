@@ -154,9 +154,7 @@ impl From<std::io::Error> for OpLogWriteError {
 /// or if git fails to write the blob.
 pub fn write_operation_blob(root: &Path, op: &Operation) -> Result<GitOid, OpLogWriteError> {
     // 1. Serialize to canonical JSON.
-    let json = op
-        .to_canonical_json()
-        .map_err(OpLogWriteError::Serialize)?;
+    let json = op.to_canonical_json().map_err(OpLogWriteError::Serialize)?;
 
     // 2. Spawn `git hash-object -w --stdin` and pipe JSON in.
     let mut child = Command::new("git")
@@ -369,10 +367,11 @@ mod tests {
         let oid = write_operation_blob(root, &op).unwrap();
         // OID should be a valid 40-char hex string
         assert_eq!(oid.as_str().len(), 40);
-        assert!(oid
-            .as_str()
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            oid.as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]
@@ -615,8 +614,8 @@ mod tests {
 
         // Content should be valid JSON
         let json_bytes = out.stdout.clone();
-        let value: serde_json::Value = serde_json::from_slice(&json_bytes)
-            .expect("blob content should be valid JSON");
+        let value: serde_json::Value =
+            serde_json::from_slice(&json_bytes).expect("blob content should be valid JSON");
 
         // Should have the expected top-level keys
         assert!(value.get("workspace_id").is_some());

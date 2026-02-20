@@ -387,7 +387,12 @@ mod tests {
         )
     }
 
-    fn modify_patch(path: &str, base_char: char, new_char: char, file_id: u128) -> (PathBuf, PatchValue) {
+    fn modify_patch(
+        path: &str,
+        base_char: char,
+        new_char: char,
+        file_id: u128,
+    ) -> (PathBuf, PatchValue) {
         (
             PathBuf::from(path),
             PatchValue::Modify {
@@ -617,14 +622,8 @@ mod tests {
 
     #[test]
     fn cache_key_validation() {
-        let key1 = vec![
-            ("ws-1".into(), "aaa".into()),
-            ("ws-2".into(), "bbb".into()),
-        ];
-        let key2 = vec![
-            ("ws-1".into(), "aaa".into()),
-            ("ws-2".into(), "bbb".into()),
-        ];
+        let key1 = vec![("ws-1".into(), "aaa".into()), ("ws-2".into(), "bbb".into())];
+        let key2 = vec![("ws-1".into(), "aaa".into()), ("ws-2".into(), "bbb".into())];
         let key3 = vec![
             ("ws-1".into(), "aaa".into()),
             ("ws-2".into(), "ccc".into()), // different head
@@ -753,10 +752,8 @@ mod tests {
         );
 
         // (view1, view2, view3) all at once
-        let gv_all = compute_global_view_from_views(
-            &[view1.clone(), view2.clone(), view3.clone()],
-            vec![],
-        );
+        let gv_all =
+            compute_global_view_from_views(&[view1.clone(), view2.clone(), view3.clone()], vec![]);
 
         // The merged patch set should have all 3 paths
         assert_eq!(gv_all.total_patches(), 3);
@@ -773,7 +770,7 @@ mod tests {
             "ws-1",
             Some('a'),
             [
-                add_patch("src/a.rs", 'a', 1),    // unique to ws-1
+                add_patch("src/a.rs", 'a', 1),      // unique to ws-1
                 add_patch("src/shared.rs", 'c', 3), // conflicts with ws-2 (different blob)
             ]
             .into_iter()
@@ -784,7 +781,7 @@ mod tests {
             "ws-2",
             Some('a'),
             [
-                add_patch("src/b.rs", 'b', 2),    // unique to ws-2
+                add_patch("src/b.rs", 'b', 2),      // unique to ws-2
                 add_patch("src/shared.rs", 'd', 4), // conflicts with ws-1 (different blob)
             ]
             .into_iter()
@@ -796,7 +793,11 @@ mod tests {
         assert_eq!(gv.workspace_count(), 2);
         assert!(!gv.is_clean());
         // Should have conflict on src/shared.rs
-        assert!(gv.conflicts.iter().any(|c| c.path == PathBuf::from("src/shared.rs")));
+        assert!(
+            gv.conflicts
+                .iter()
+                .any(|c| c.path == PathBuf::from("src/shared.rs"))
+        );
     }
 
     // -----------------------------------------------------------------------

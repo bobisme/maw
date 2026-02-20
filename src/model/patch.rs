@@ -66,7 +66,10 @@ impl FileId {
                 reason: format!("expected 32 hex characters, got {}", s.len()),
             });
         }
-        if !s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
             return Err(FileIdError {
                 value: s.to_owned(),
                 reason: "must contain only lowercase hex characters (0-9, a-f)".to_owned(),
@@ -490,10 +493,7 @@ mod tests {
 
         for pv in variants {
             let json = serde_json::to_string(pv).unwrap();
-            assert!(
-                json.contains("\"op\":"),
-                "Missing 'op' tag in: {json}"
-            );
+            assert!(json.contains("\"op\":"), "Missing 'op' tag in: {json}");
             let decoded: PatchValue = serde_json::from_str(&json).unwrap();
             assert_eq!(&decoded, pv);
         }

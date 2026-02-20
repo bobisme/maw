@@ -163,7 +163,10 @@ impl From<refs::RefError> for OpLogReadError {
 ///
 /// # Errors
 /// Returns an error if the ref read itself fails (I/O, git error).
-pub fn read_head(root: &Path, workspace_id: &WorkspaceId) -> Result<Option<GitOid>, OpLogReadError> {
+pub fn read_head(
+    root: &Path,
+    workspace_id: &WorkspaceId,
+) -> Result<Option<GitOid>, OpLogReadError> {
     let ref_name = refs::workspace_head_ref(workspace_id.as_str());
     let oid = refs::read_ref(root, &ref_name)?;
     Ok(oid)
@@ -235,10 +238,9 @@ pub fn walk_chain(
     max_depth: Option<usize>,
     stop_at: Option<&dyn Fn(&Operation) -> bool>,
 ) -> Result<Vec<(GitOid, Operation)>, OpLogReadError> {
-    let head = read_head(root, workspace_id)?
-        .ok_or_else(|| OpLogReadError::NoHead {
-            workspace_id: workspace_id.clone(),
-        })?;
+    let head = read_head(root, workspace_id)?.ok_or_else(|| OpLogReadError::NoHead {
+        workspace_id: workspace_id.clone(),
+    })?;
 
     let mut result = Vec::new();
     let mut visited = HashSet::new();
@@ -262,10 +264,7 @@ pub fn walk_chain(
         let op = read_operation(root, &oid)?;
 
         // Check stop predicate: include this op but don't explore its parents.
-        let should_stop = stop_at
-            .as_ref()
-            .map(|pred| pred(&op))
-            .unwrap_or(false);
+        let should_stop = stop_at.as_ref().map(|pred| pred(&op)).unwrap_or(false);
 
         result.push((oid, op.clone()));
 
@@ -394,11 +393,7 @@ mod tests {
     }
 
     /// Write a chain of N operations and return (oid, op) pairs in order.
-    fn write_chain(
-        root: &Path,
-        ws_id: &WorkspaceId,
-        count: usize,
-    ) -> Vec<(GitOid, Operation)> {
+    fn write_chain(root: &Path, ws_id: &WorkspaceId, count: usize) -> Vec<(GitOid, Operation)> {
         let mut chain = Vec::new();
 
         // First op: Create (no parent)
@@ -533,7 +528,10 @@ mod tests {
         assert_eq!(walked.len(), 5);
 
         // All operations from the chain should be present (possibly reordered).
-        let walked_oids: HashSet<_> = walked.iter().map(|(oid, _)| oid.as_str().to_owned()).collect();
+        let walked_oids: HashSet<_> = walked
+            .iter()
+            .map(|(oid, _)| oid.as_str().to_owned())
+            .collect();
         for (oid, _) in &chain {
             assert!(
                 walked_oids.contains(oid.as_str()),
@@ -696,7 +694,10 @@ mod tests {
         assert_eq!(walked[0].0, merge_oid);
 
         // The other two should be oid1 and oid2 in some BFS order.
-        let walked_oids: HashSet<_> = walked.iter().map(|(oid, _)| oid.as_str().to_owned()).collect();
+        let walked_oids: HashSet<_> = walked
+            .iter()
+            .map(|(oid, _)| oid.as_str().to_owned())
+            .collect();
         assert!(walked_oids.contains(oid1.as_str()));
         assert!(walked_oids.contains(oid2.as_str()));
     }
@@ -754,10 +755,17 @@ mod tests {
 
         // Walk: should find exactly 4 operations (no duplicates for root_op).
         let walked = walk_all(root, &ws_id).unwrap();
-        assert_eq!(walked.len(), 4, "diamond DAG should yield 4 unique operations");
+        assert_eq!(
+            walked.len(),
+            4,
+            "diamond DAG should yield 4 unique operations"
+        );
 
         // Verify no duplicate OIDs.
-        let oids: Vec<_> = walked.iter().map(|(oid, _)| oid.as_str().to_owned()).collect();
+        let oids: Vec<_> = walked
+            .iter()
+            .map(|(oid, _)| oid.as_str().to_owned())
+            .collect();
         let unique: HashSet<_> = oids.iter().cloned().collect();
         assert_eq!(oids.len(), unique.len(), "no duplicate OIDs in walk result");
     }

@@ -7,15 +7,15 @@
 //! "block-quarantine"`. See [`crate::merge::quarantine`] for the quarantine
 //! model.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
 use crate::config::ManifoldConfig;
 use crate::merge::quarantine::{
-    abandon_quarantine, list_quarantines, promote_quarantine, quarantine_workspace_path,
-    PromoteResult, QuarantineError,
+    PromoteResult, QuarantineError, abandon_quarantine, list_quarantines, promote_quarantine,
+    quarantine_workspace_path,
 };
-use crate::workspace::{get_backend, repo_root, MawConfig};
+use crate::workspace::{MawConfig, get_backend, repo_root};
 
 /// `maw merge` subcommands.
 #[derive(Subcommand)]
@@ -94,7 +94,15 @@ fn promote(merge_id: &str) -> Result<()> {
 
     println!("Promoting quarantine '{merge_id}'...");
     println!();
-    println!("  Sources:  {}", state.sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+    println!(
+        "  Sources:  {}",
+        state
+            .sources
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("  Branch:   {}", state.branch);
     println!("  Epoch:    {}", &state.epoch_before.as_str()[..12]);
     println!("  Worktree: {}", ws_path.display());
@@ -126,7 +134,9 @@ fn promote(merge_id: &str) -> Result<()> {
                 print_promote_success(merge_id, &new_epoch.as_str()[..12], &state.branch);
                 return Ok(());
             }
-            Ok(PromoteResult::ValidationFailed { validation_result: _ }) => {
+            Ok(PromoteResult::ValidationFailed {
+                validation_result: _,
+            }) => {
                 unreachable!("no-op validation should always pass");
             }
             Err(e) => bail!("Promote failed: {e}"),
@@ -138,11 +148,12 @@ fn promote(merge_id: &str) -> Result<()> {
             print_promote_success(merge_id, &new_epoch.as_str()[..12], &state.branch);
             Ok(())
         }
-        Ok(PromoteResult::ValidationFailed { validation_result: r }) => {
+        Ok(PromoteResult::ValidationFailed {
+            validation_result: r,
+        }) => {
             println!(
                 "  Validation STILL FAILING ({}ms, exit {:?})",
-                r.duration_ms,
-                r.exit_code
+                r.duration_ms, r.exit_code
             );
             if !r.stderr.is_empty() {
                 println!();
@@ -192,7 +203,12 @@ fn abandon(merge_id: &str) -> Result<()> {
         Ok(state) => {
             println!(
                 "  Sources: {}",
-                state.sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                state
+                    .sources
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         Err(QuarantineError::NotFound { .. }) => {
@@ -207,8 +223,7 @@ fn abandon(merge_id: &str) -> Result<()> {
         }
     }
 
-    abandon_quarantine(&root, &manifold_dir, merge_id)
-        .context("Failed to abandon quarantine")?;
+    abandon_quarantine(&root, &manifold_dir, merge_id).context("Failed to abandon quarantine")?;
 
     println!("[OK] Quarantine '{merge_id}' abandoned.");
     println!();
@@ -247,11 +262,19 @@ fn list() -> Result<()> {
         println!("  ID:       {}", q.merge_id);
         println!(
             "  Sources:  {}",
-            q.sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            q.sources
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         println!("  Branch:   {}", q.branch);
         println!("  Epoch:    {}", &q.epoch_before.as_str()[..12]);
-        println!("  Worktree: {} ({})", ws_path.display(), if ws_exists { "present" } else { "missing" });
+        println!(
+            "  Worktree: {} ({})",
+            ws_path.display(),
+            if ws_exists { "present" } else { "missing" }
+        );
         println!(
             "  Failure:  exit {:?}, {}ms",
             q.validation_result.exit_code, q.validation_result.duration_ms

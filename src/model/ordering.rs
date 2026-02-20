@@ -219,7 +219,10 @@ mod tests {
     fn ordering_key_display() {
         let k = key('a', "agent-1", 5, 0);
         let display = format!("{k}");
-        assert!(display.starts_with("aaaaaaaa"), "should start with epoch prefix");
+        assert!(
+            display.starts_with("aaaaaaaa"),
+            "should start with epoch prefix"
+        );
         assert!(display.contains("agent-1"), "should contain workspace id");
         assert!(display.ends_with(":5"), "should end with seq number");
     }
@@ -239,7 +242,10 @@ mod tests {
     fn ordering_same_epoch_different_ws() {
         let k1 = key('a', "agent-1", 1, 100);
         let k2 = key('a', "agent-2", 1, 100);
-        assert!(k1 < k2, "same epoch+seq: should order by workspace_id lexicographic");
+        assert!(
+            k1 < k2,
+            "same epoch+seq: should order by workspace_id lexicographic"
+        );
     }
 
     #[test]
@@ -253,7 +259,11 @@ mod tests {
     fn ordering_wall_clock_does_not_affect_ordering() {
         let k1 = key('a', "w1", 1, 9999);
         let k2 = key('a', "w1", 1, 1);
-        assert_eq!(k1.cmp(&k2), Ordering::Equal, "wall_clock must not affect ordering");
+        assert_eq!(
+            k1.cmp(&k2),
+            Ordering::Equal,
+            "wall_clock must not affect ordering"
+        );
     }
 
     #[test]

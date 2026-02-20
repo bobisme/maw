@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
 
-use super::{create::create, get_backend, repo_root, workspace_path, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, create::create, get_backend, repo_root, workspace_path};
 
 /// Restore a previously destroyed workspace.
 ///
@@ -23,8 +23,8 @@ pub fn restore(name: &str) -> Result<()> {
 
     if path.exists() {
         let backend = get_backend()?;
-        let ws_id = WorkspaceId::new(name)
-            .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+        let ws_id =
+            WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
         if backend.exists(&ws_id) {
             bail!(

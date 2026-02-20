@@ -277,8 +277,7 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
             let mut destinations: Vec<(WorkspaceId, PathBuf)> = add_paths
                 .iter()
                 .flat_map(|(path, occs)| {
-                    occs.iter()
-                        .map(|o| (o.workspace_id.clone(), path.clone()))
+                    occs.iter().map(|o| (o.workspace_id.clone(), path.clone()))
                 })
                 .collect();
             destinations.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
@@ -302,15 +301,12 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
 
             // Check for rename + delete: another workspace deleted the file
             // at a different path (and didn't add it elsewhere).
-            let dest_workspaces: std::collections::BTreeSet<&str> = dest_occs
-                .iter()
-                .map(|o| o.workspace_id.as_str())
-                .collect();
+            let dest_workspaces: std::collections::BTreeSet<&str> =
+                dest_occs.iter().map(|o| o.workspace_id.as_str()).collect();
             let pure_deleters: Vec<&FileIdOccurrence> = delete_occurrences
                 .iter()
                 .filter(|o| {
-                    !dest_workspaces.contains(o.workspace_id.as_str())
-                        && o.path != *dest_path
+                    !dest_workspaces.contains(o.workspace_id.as_str()) && o.path != *dest_path
                 })
                 .copied()
                 .collect();
@@ -336,10 +332,7 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
                 rename_conflicts.push(RenameConflict::RenameDelete {
                     file_id: *file_id,
                     original_path: deleter_occ.path.clone(),
-                    renamer: (
-                        renamer_occ.workspace_id.clone(),
-                        dest_path.clone(),
-                    ),
+                    renamer: (renamer_occ.workspace_id.clone(), dest_path.clone()),
                     deleter: deleter_occ.workspace_id.clone(),
                 });
 
@@ -360,12 +353,10 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
                     if occ.entry.is_deletion() {
                         // Deletions at the old path are expected side effects
                         // of a rename — consume them (don't propagate).
-                        consumed_paths
-                            .insert((occ.path.clone(), occ.workspace_id.clone()));
+                        consumed_paths.insert((occ.path.clone(), occ.workspace_id.clone()));
                     } else {
                         // Non-deletion at old path → reroute to dest path.
-                        consumed_paths
-                            .insert((occ.path.clone(), occ.workspace_id.clone()));
+                        consumed_paths.insert((occ.path.clone(), occ.workspace_id.clone()));
                         rerouted_entries
                             .entry(dest_path.clone())
                             .or_default()
@@ -569,7 +560,12 @@ mod tests {
                 ),
                 (
                     PathBuf::from("foo.rs"),
-                    entry_with_fid("ws-b", ChangeKind::Modified, Some(b"edited content"), fid(1)),
+                    entry_with_fid(
+                        "ws-b",
+                        ChangeKind::Modified,
+                        Some(b"edited content"),
+                        fid(1),
+                    ),
                 ),
             ],
             shared: vec![],
@@ -600,12 +596,10 @@ mod tests {
         // The delete at foo.rs by ws-a should be consumed (it's part of rename).
         // ws-b's edit should reroute to bar.rs.
         let partition = PartitionResult {
-            unique: vec![
-                (
-                    PathBuf::from("bar.rs"),
-                    entry_with_fid("ws-a", ChangeKind::Added, Some(b"new content"), fid(1)),
-                ),
-            ],
+            unique: vec![(
+                PathBuf::from("bar.rs"),
+                entry_with_fid("ws-a", ChangeKind::Added, Some(b"new content"), fid(1)),
+            )],
             shared: vec![(
                 PathBuf::from("foo.rs"),
                 vec![
@@ -624,7 +618,11 @@ mod tests {
         assert_eq!(entries.len(), 2);
         // foo.rs should be gone (consumed).
         assert!(
-            result.partition.unique.iter().all(|(p, _)| p != &PathBuf::from("foo.rs")),
+            result
+                .partition
+                .unique
+                .iter()
+                .all(|(p, _)| p != &PathBuf::from("foo.rs")),
             "foo.rs should not remain in unique"
         );
     }
@@ -752,11 +750,13 @@ mod tests {
         let result = apply_rename_awareness(partition);
         assert!(!result.has_rename_conflicts());
         // unrelated.rs should still be unique.
-        assert!(result
-            .partition
-            .unique
-            .iter()
-            .any(|(p, _)| p == &PathBuf::from("unrelated.rs")));
+        assert!(
+            result
+                .partition
+                .unique
+                .iter()
+                .any(|(p, _)| p == &PathBuf::from("unrelated.rs"))
+        );
         // bar.rs should be shared (ws-a + ws-b rerouted).
         assert_eq!(result.partition.shared.len(), 1);
         assert_eq!(result.partition.shared[0].0, PathBuf::from("bar.rs"));

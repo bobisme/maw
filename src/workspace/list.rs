@@ -7,7 +7,7 @@ use crate::model::types::{WorkspaceMode, WorkspaceState};
 
 use crate::merge::quarantine::QUARANTINE_NAME_PREFIX;
 
-use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
 
 #[derive(Serialize)]
 pub struct WorkspaceInfo {
@@ -133,9 +133,28 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         .collect();
 
     match format {
-        OutputFormat::Text => print_list_text(&workspaces, &stale_workspaces, &stale_persistent, &stale_ephemeral, verbose),
-        OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, &stale_persistent, &stale_ephemeral, format, verbose),
-        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, stale_persistent, stale_ephemeral, format),
+        OutputFormat::Text => print_list_text(
+            &workspaces,
+            &stale_workspaces,
+            &stale_persistent,
+            &stale_ephemeral,
+            verbose,
+        ),
+        OutputFormat::Pretty => print_list_pretty(
+            &workspaces,
+            &stale_workspaces,
+            &stale_persistent,
+            &stale_ephemeral,
+            format,
+            verbose,
+        ),
+        OutputFormat::Json => print_list_json(
+            workspaces,
+            stale_workspaces,
+            stale_persistent,
+            stale_ephemeral,
+            format,
+        ),
     }
 
     Ok(())
@@ -192,13 +211,13 @@ fn print_list_pretty(
         let is_persistent = ws.mode == "persistent";
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
-                ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for default
+                ("\u{25cf}", "\x1b[1;32m", "\x1b[0m") // Green bold for default
             } else if ws.state == "quarantine" {
-                ("\u{26a0}", "\x1b[1;31m", "\x1b[0m")  // Red bold for quarantine
+                ("\u{26a0}", "\x1b[1;31m", "\x1b[0m") // Red bold for quarantine
             } else if is_stale {
-                ("\u{25b2}", "\x1b[1;33m", "\x1b[0m")  // Yellow for stale
+                ("\u{25b2}", "\x1b[1;33m", "\x1b[0m") // Yellow for stale
             } else {
-                ("\u{25cc}", "\x1b[90m", "\x1b[0m")    // Gray for others
+                ("\u{25cc}", "\x1b[90m", "\x1b[0m") // Gray for others
             }
         } else if ws.is_default {
             ("\u{25cf}", "", "")
@@ -228,10 +247,15 @@ fn print_list_pretty(
     if !stale_persistent.is_empty() {
         println!();
         if use_color {
-            println!("\x1b[1;33m\u{25b2} STALE persistent workspace(s):\x1b[0m {}",
-                stale_persistent.join(", "));
+            println!(
+                "\x1b[1;33m\u{25b2} STALE persistent workspace(s):\x1b[0m {}",
+                stale_persistent.join(", ")
+            );
         } else {
-            println!("\u{25b2} STALE persistent workspace(s): {}", stale_persistent.join(", "));
+            println!(
+                "\u{25b2} STALE persistent workspace(s): {}",
+                stale_persistent.join(", ")
+            );
         }
         for ws in stale_persistent {
             println!("  Fix: maw ws advance {ws}");
@@ -240,13 +264,22 @@ fn print_list_pretty(
     if !stale_ephemeral.is_empty() {
         println!();
         if use_color {
-            println!("\x1b[1;33m\u{25b2} WARNING: stale ephemeral workspace(s):\x1b[0m {}",
-                stale_ephemeral.join(", "));
+            println!(
+                "\x1b[1;33m\u{25b2} WARNING: stale ephemeral workspace(s):\x1b[0m {}",
+                stale_ephemeral.join(", ")
+            );
         } else {
-            println!("\u{25b2} WARNING: stale ephemeral workspace(s): {}", stale_ephemeral.join(", "));
+            println!(
+                "\u{25b2} WARNING: stale ephemeral workspace(s): {}",
+                stale_ephemeral.join(", ")
+            );
         }
-        println!("  Ephemeral workspaces should be merged or destroyed — they survived an epoch advance.");
-        println!("  Fix: maw ws sync --all  (to sync) or maw ws merge <name> (to merge and destroy)");
+        println!(
+            "  Ephemeral workspaces should be merged or destroyed — they survived an epoch advance."
+        );
+        println!(
+            "  Fix: maw ws sync --all  (to sync) or maw ws merge <name> (to merge and destroy)"
+        );
     }
 
     // Legacy: combined stale notice if nothing split above.
@@ -256,10 +289,17 @@ fn print_list_pretty(
         // Fallback for workspaces with unknown mode.
         println!();
         if use_color {
-            println!("\x1b[1;33m\u{25b2} WARNING:\x1b[0m {} stale workspace(s): {}",
-                stale.len(), stale.join(", "));
+            println!(
+                "\x1b[1;33m\u{25b2} WARNING:\x1b[0m {} stale workspace(s): {}",
+                stale.len(),
+                stale.join(", ")
+            );
         } else {
-            println!("\u{25b2} WARNING: {} stale workspace(s): {}", stale.len(), stale.join(", "));
+            println!(
+                "\u{25b2} WARNING: {} stale workspace(s): {}",
+                stale.len(),
+                stale.join(", ")
+            );
         }
         println!("  Fix: maw ws sync --all");
     }
@@ -318,7 +358,11 @@ fn print_list_json(
     if advice.is_empty() && !stale_workspaces.is_empty() {
         advice.push(Advice {
             level: "warn",
-            message: format!("{} workspace(s) stale: {}", stale_workspaces.len(), stale_workspaces.join(", ")),
+            message: format!(
+                "{} workspace(s) stale: {}",
+                stale_workspaces.len(),
+                stale_workspaces.join(", ")
+            ),
             details: Some(AdviceDetails {
                 workspaces: stale_workspaces,
                 fix: "maw ws sync --all".to_string(),
@@ -326,10 +370,7 @@ fn print_list_json(
         });
     }
 
-    let envelope = WorkspaceListEnvelope {
-        workspaces,
-        advice,
-    };
+    let envelope = WorkspaceListEnvelope { workspaces, advice };
 
     match format.serialize(&envelope) {
         Ok(output) => println!("{output}"),
@@ -367,7 +408,11 @@ fn print_stale_warning_text(
     // Fallback for workspaces with unknown mode.
     if stale_persistent.is_empty() && stale_ephemeral.is_empty() && !stale.is_empty() {
         println!();
-        println!("WARNING: {} stale workspace(s): {}", stale.len(), stale.join(", "));
+        println!(
+            "WARNING: {} stale workspace(s): {}",
+            stale.len(),
+            stale.join(", ")
+        );
         println!("  Fix: maw ws sync --all");
     }
 }

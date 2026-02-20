@@ -747,7 +747,10 @@ mod tests {
             matches!(change.kind, ChangeKind::Deleted),
             "kind should be Deleted"
         );
-        assert!(change.blob.is_none(), "deleted file should have no blob OID");
+        assert!(
+            change.blob.is_none(),
+            "deleted file should have no blob OID"
+        );
     }
 
     /// Two different workspaces adding a file with identical content should
@@ -767,10 +770,8 @@ mod tests {
         let info_b = backend.create(&ws_b, &epoch).unwrap();
         fs::write(info_b.path.join("shared.rs"), content).unwrap();
 
-        let results_a =
-            collect_snapshots(temp_dir.path(), &backend, &[ws_a]).unwrap();
-        let results_b =
-            collect_snapshots(temp_dir.path(), &backend, &[ws_b]).unwrap();
+        let results_a = collect_snapshots(temp_dir.path(), &backend, &[ws_a]).unwrap();
+        let results_b = collect_snapshots(temp_dir.path(), &backend, &[ws_b]).unwrap();
 
         let blob_a = results_a[0].changes[0].blob.as_ref();
         let blob_b = results_b[0].changes[0].blob.as_ref();
@@ -802,10 +803,7 @@ mod tests {
         let mut map2 = FileIdMap::new();
         // Manually insert: we use a workaround since track_new is random.
         // Build the map via save+reload with a known value.
-        let json = format!(
-            r#"[{{"path":"README.md","file_id":"{}"}}]"#,
-            known_id
-        );
+        let json = format!(r#"[{{"path":"README.md","file_id":"{}"}}]"#, known_id);
         fs::create_dir_all(fileids_path.parent().unwrap()).unwrap();
         fs::write(&fileids_path, &json).unwrap();
         let _ = map2; // unused

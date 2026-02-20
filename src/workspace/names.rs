@@ -8,10 +8,9 @@ pub const ADJECTIVES: &[&str] = &[
 ];
 
 pub const NOUNS: &[&str] = &[
-    "castle", "forest", "river", "mountain", "eagle", "wolf", "phoenix", "falcon", "hawk",
-    "raven", "tiger", "bear", "beacon", "forge", "gateway", "kernel", "oracle", "sentinel",
-    "tower", "fox", "owl", "panther", "viper", "crane", "otter", "lynx", "cedar", "oak", "pine",
-    "reef",
+    "castle", "forest", "river", "mountain", "eagle", "wolf", "phoenix", "falcon", "hawk", "raven",
+    "tiger", "bear", "beacon", "forge", "gateway", "kernel", "oracle", "sentinel", "tower", "fox",
+    "owl", "panther", "viper", "crane", "otter", "lynx", "cedar", "oak", "pine", "reef",
 ];
 
 pub fn generate_workspace_name() -> String {

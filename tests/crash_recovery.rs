@@ -48,8 +48,10 @@ fn write_merge_state(root: &Path, phase: &str, sources: &[&str], epoch: &str) {
     let manifold_dir = root.join(".manifold");
     fs::create_dir_all(&manifold_dir).expect("create .manifold");
 
-    let sources_json: Vec<serde_json::Value> =
-        sources.iter().map(|s| serde_json::Value::String((*s).to_owned())).collect();
+    let sources_json: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|s| serde_json::Value::String((*s).to_owned()))
+        .collect();
 
     let state = serde_json::json!({
         "phase": phase,
@@ -69,8 +71,10 @@ fn write_merge_state_build(root: &Path, sources: &[&str], epoch: &str, candidate
     let manifold_dir = root.join(".manifold");
     fs::create_dir_all(&manifold_dir).expect("create .manifold");
 
-    let sources_json: Vec<serde_json::Value> =
-        sources.iter().map(|s| serde_json::Value::String((*s).to_owned())).collect();
+    let sources_json: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|s| serde_json::Value::String((*s).to_owned()))
+        .collect();
 
     let state = serde_json::json!({
         "phase": "build",
@@ -91,8 +95,10 @@ fn write_merge_state_validate(root: &Path, sources: &[&str], epoch: &str, candid
     let manifold_dir = root.join(".manifold");
     fs::create_dir_all(&manifold_dir).expect("create .manifold");
 
-    let sources_json: Vec<serde_json::Value> =
-        sources.iter().map(|s| serde_json::Value::String((*s).to_owned())).collect();
+    let sources_json: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|s| serde_json::Value::String((*s).to_owned()))
+        .collect();
 
     let state = serde_json::json!({
         "phase": "validate",
@@ -113,8 +119,10 @@ fn write_merge_state_commit(root: &Path, sources: &[&str], epoch: &str, candidat
     let manifold_dir = root.join(".manifold");
     fs::create_dir_all(&manifold_dir).expect("create .manifold");
 
-    let sources_json: Vec<serde_json::Value> =
-        sources.iter().map(|s| serde_json::Value::String((*s).to_owned())).collect();
+    let sources_json: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|s| serde_json::Value::String((*s).to_owned()))
+        .collect();
 
     let state = serde_json::json!({
         "phase": "commit",
@@ -135,8 +143,10 @@ fn write_merge_state_cleanup(root: &Path, sources: &[&str], epoch: &str, candida
     let manifold_dir = root.join(".manifold");
     fs::create_dir_all(&manifold_dir).expect("create .manifold");
 
-    let sources_json: Vec<serde_json::Value> =
-        sources.iter().map(|s| serde_json::Value::String((*s).to_owned())).collect();
+    let sources_json: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|s| serde_json::Value::String((*s).to_owned()))
+        .collect();
 
     let state = serde_json::json!({
         "phase": "cleanup",
@@ -865,13 +875,21 @@ fn crash_at_end_of_prepare_no_side_effects() {
     write_merge_state(repo.root(), "prepare", &["solver"], &epoch_after_seed);
 
     // Epoch ref must still be the same (PREPARE doesn't advance it)
-    assert_eq!(repo.current_epoch(), epoch_after_seed, "PREPARE must not advance epoch");
+    assert_eq!(
+        repo.current_epoch(),
+        epoch_after_seed,
+        "PREPARE must not advance epoch"
+    );
 
     let outcome = simulate_recovery(repo.root());
     assert_eq!(outcome, "aborted_pre_commit");
 
     // Epoch still unchanged after recovery
-    assert_eq!(repo.current_epoch(), epoch_after_seed, "epoch must be unchanged after PREPARE recovery");
+    assert_eq!(
+        repo.current_epoch(),
+        epoch_after_seed,
+        "epoch must be unchanged after PREPARE recovery"
+    );
 
     // Workspace data intact
     assert_eq!(

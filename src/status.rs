@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -14,7 +14,7 @@ use crate::backend::WorkspaceBackend;
 use crate::doctor;
 use crate::format::OutputFormat;
 use crate::push::{SyncStatus, main_sync_status_inner};
-use crate::workspace::{self, get_backend, MawConfig};
+use crate::workspace::{self, MawConfig, get_backend};
 use serde::Serialize;
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -58,12 +58,15 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     // Special modes take precedence over format
     if args.status_bar || args.oneline {
         let summary = collect_status()?;
-        render(&summary, &RenderOptions {
-            oneline: args.oneline,
-            status_bar: args.status_bar,
-            mouth: args.mouth,
-            watching: false,
-        });
+        render(
+            &summary,
+            &RenderOptions {
+                oneline: args.oneline,
+                status_bar: args.status_bar,
+                mouth: args.mouth,
+                watching: false,
+            },
+        );
         return Ok(());
     }
 
@@ -124,15 +127,16 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
                 break;
             }
             if event::poll(remaining.min(Duration::from_millis(100)))?
-                && let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            return Ok(());
-                        }
-                        _ => {}
+                && let Event::Key(key) = event::read()?
+            {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(());
                     }
+                    _ => {}
                 }
+            }
         }
     }
 }
@@ -191,10 +195,28 @@ impl StatusSummary {
             parts.push(format!("ROOT-NOT-BARE={stray}{warn}"));
         }
         parts.push(format!("ws={ws}{}", if ws == 0 { &check } else { &warn }));
-        parts.push(format!("changes={changes}{}", if changes == 0 { &check } else { &warn }));
-        parts.push(format!("untracked={untracked}{}", if untracked == 0 { &check } else { &warn }));
-        parts.push(format!("main={}{}", self.main_sync.oneline(), if matches!(self.main_sync, SyncStatus::UpToDate) { &check } else { &warn }));
-        parts.push(format!("default={}{}", if self.is_stale { "stale" } else { "fresh" }, if self.is_stale { &warn } else { &check }));
+        parts.push(format!(
+            "changes={changes}{}",
+            if changes == 0 { &check } else { &warn }
+        ));
+        parts.push(format!(
+            "untracked={untracked}{}",
+            if untracked == 0 { &check } else { &warn }
+        ));
+        parts.push(format!(
+            "main={}{}",
+            self.main_sync.oneline(),
+            if matches!(self.main_sync, SyncStatus::UpToDate) {
+                &check
+            } else {
+                &warn
+            }
+        ));
+        parts.push(format!(
+            "default={}{}",
+            if self.is_stale { "stale" } else { "fresh" },
+            if self.is_stale { &warn } else { &check }
+        ));
 
         format!("{}\n", parts.join(" "))
     }
@@ -218,7 +240,11 @@ impl StatusSummary {
         let ws_count = self.workspace_names.len();
         out.push_str(&text_status_line(
             "Non-default workspaces",
-            &if ws_count == 0 { "none".to_string() } else { ws_count.to_string() },
+            &if ws_count == 0 {
+                "none".to_string()
+            } else {
+                ws_count.to_string()
+            },
             ws_count == 0,
         ));
         for name in &self.workspace_names {
@@ -242,7 +268,11 @@ impl StatusSummary {
         let untracked_count = self.untracked_files.len();
         out.push_str(&text_status_line(
             "Untracked files",
-            &if untracked_count == 0 { "none".to_string() } else { untracked_count.to_string() },
+            &if untracked_count == 0 {
+                "none".to_string()
+            } else {
+                untracked_count.to_string()
+            },
             untracked_count == 0,
         ));
         for file in &self.untracked_files {
@@ -257,7 +287,11 @@ impl StatusSummary {
 
         out.push_str(&text_status_line(
             "Default workspace",
-            &if self.is_stale { "stale (run: maw ws sync)".to_string() } else { "fresh".to_string() },
+            &if self.is_stale {
+                "stale (run: maw ws sync)".to_string()
+            } else {
+                "fresh".to_string()
+            },
             !self.is_stale,
         ));
 
@@ -332,7 +366,11 @@ impl StatusSummary {
         let ws_count = self.workspace_names.len();
         out.push_str(&status_line(
             "Non-default workspaces",
-            &if ws_count == 0 { "none".to_string() } else { ws_count.to_string() },
+            &if ws_count == 0 {
+                "none".to_string()
+            } else {
+                ws_count.to_string()
+            },
             ws_count == 0,
         ));
         for name in &self.workspace_names {
@@ -356,7 +394,11 @@ impl StatusSummary {
         let untracked_count = self.untracked_files.len();
         out.push_str(&status_line(
             "Untracked files",
-            &if untracked_count == 0 { "none".to_string() } else { untracked_count.to_string() },
+            &if untracked_count == 0 {
+                "none".to_string()
+            } else {
+                untracked_count.to_string()
+            },
             untracked_count == 0,
         ));
         for file in &self.untracked_files {
@@ -371,7 +413,11 @@ impl StatusSummary {
 
         out.push_str(&status_line(
             "Default workspace",
-            &if self.is_stale { "stale (run: maw ws sync)".to_string() } else { "fresh".to_string() },
+            &if self.is_stale {
+                "stale (run: maw ws sync)".to_string()
+            } else {
+                "fresh".to_string()
+            },
             !self.is_stale,
         ));
 
@@ -422,11 +468,7 @@ fn status_line(label: &str, value: &str, ok: bool) -> String {
     }
 }
 
-fn render_with_format(
-    summary: &StatusSummary,
-    format: OutputFormat,
-    watching: bool,
-) -> Result<()> {
+fn render_with_format(summary: &StatusSummary, format: OutputFormat, watching: bool) -> Result<()> {
     if watching {
         print!("\u{1b}[2J\u{1b}[H");
     }
@@ -502,16 +544,14 @@ fn collect_status() -> Result<StatusSummary> {
 
     // Get non-default workspace names from backend
     let workspace_names = match get_backend() {
-        Ok(backend) => {
-            match backend.list() {
-                Ok(infos) => infos
-                    .into_iter()
-                    .filter(|ws| ws.id.as_str() != default_ws_name)
-                    .map(|ws| ws.id.as_str().to_string())
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
-        }
+        Ok(backend) => match backend.list() {
+            Ok(infos) => infos
+                .into_iter()
+                .filter(|ws| ws.id.as_str() != default_ws_name)
+                .map(|ws| ws.id.as_str().to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        },
         Err(_) => Vec::new(),
     };
 
@@ -592,9 +632,7 @@ fn check_default_stale(root: &Path, default_ws_path: &Path) -> bool {
         .output();
 
     let epoch_oid = match epoch_output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return false, // No epoch ref = can't be stale
     };
 
@@ -605,9 +643,7 @@ fn check_default_stale(root: &Path, default_ws_path: &Path) -> bool {
         .output();
 
     let ws_oid = match ws_head {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return false,
     };
 

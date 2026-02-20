@@ -7,10 +7,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::ManifoldConfig;
-use crate::model::types::{EpochId, GitOid, WorkspaceId, WorkspaceInfo, WorkspaceMode, WorkspaceState};
-use crate::refs as manifold_refs;
 use super::{SnapshotResult, WorkspaceBackend, WorkspaceStatus};
+use crate::config::ManifoldConfig;
+use crate::model::types::{
+    EpochId, GitOid, WorkspaceId, WorkspaceInfo, WorkspaceMode, WorkspaceState,
+};
+use crate::refs as manifold_refs;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -113,7 +115,11 @@ impl GitWorktreeBackend {
     }
 
     /// Run a git command in a specific directory and return stdout.
-    fn git_stdout_in(&self, dir: &std::path::Path, args: &[&str]) -> Result<String, GitBackendError> {
+    fn git_stdout_in(
+        &self,
+        dir: &std::path::Path,
+        args: &[&str],
+    ) -> Result<String, GitBackendError> {
         let output = Command::new("git")
             .args(args)
             .current_dir(dir)
@@ -215,10 +221,12 @@ impl GitWorktreeBackend {
             exit_code: None,
         })?;
 
-        manifold_refs::write_ref(&self.root, &ref_name, &oid).map_err(|e| GitBackendError::GitCommand {
-            command: format!("git update-ref {ref_name} {}", oid.as_str()),
-            stderr: e.to_string(),
-            exit_code: None,
+        manifold_refs::write_ref(&self.root, &ref_name, &oid).map_err(|e| {
+            GitBackendError::GitCommand {
+                command: format!("git update-ref {ref_name} {}", oid.as_str()),
+                stderr: e.to_string(),
+                exit_code: None,
+            }
         })
     }
 }
@@ -226,11 +234,7 @@ impl GitWorktreeBackend {
 impl WorkspaceBackend for GitWorktreeBackend {
     type Error = GitBackendError;
 
-    fn create(
-        &self,
-        name: &WorkspaceId,
-        epoch: &EpochId,
-    ) -> Result<WorkspaceInfo, Self::Error> {
+    fn create(&self, name: &WorkspaceId, epoch: &EpochId) -> Result<WorkspaceInfo, Self::Error> {
         let path = self.workspace_path(name);
 
         // Idempotency: if valid workspace exists, return it
@@ -262,13 +266,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // Create the worktree: git worktree add --detach <path> <commit>
         let path_str = path.to_str().unwrap();
         let output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "--detach",
-                path_str,
-                epoch.as_str(),
-            ])
+            .args(["worktree", "add", "--detach", path_str, epoch.as_str()])
             .current_dir(&self.root)
             .output()
             .map_err(|e| GitBackendError::Io(e))?;
@@ -426,13 +424,21 @@ impl WorkspaceBackend for GitWorktreeBackend {
                     let behind = self
                         .count_commits_between(epoch.as_str(), current.as_str())
                         .unwrap_or(1);
-                    WorkspaceState::Stale { behind_epochs: behind }
+                    WorkspaceState::Stale {
+                        behind_epochs: behind,
+                    }
                 }
                 // No epoch ref: can't determine staleness, assume active.
                 None => WorkspaceState::Active,
             };
 
-            infos.push(WorkspaceInfo { id, path, epoch, state, mode: WorkspaceMode::default() });
+            infos.push(WorkspaceInfo {
+                id,
+                path,
+                epoch,
+                state,
+                mode: WorkspaceMode::default(),
+            });
         }
 
         Ok(infos)
@@ -457,13 +463,12 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // The workspace HEAD is the epoch commit it was created at.
         // Agents make working-tree changes only (no commits), so HEAD is stable.
         let head_str = self.git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
-        let base_epoch = EpochId::new(head_str.trim()).map_err(|e| {
-            GitBackendError::GitCommand {
+        let base_epoch =
+            EpochId::new(head_str.trim()).map_err(|e| GitBackendError::GitCommand {
                 command: "git rev-parse HEAD".to_owned(),
                 stderr: format!("invalid OID from HEAD: {e}"),
                 exit_code: None,
-            }
-        })?;
+            })?;
 
         // Collect dirty files: tracked modifications + untracked files.
         let status_output = self.git_stdout_in(&ws_path, &["status", "--porcelain"])?;
@@ -501,8 +506,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
 
         // Read the base epoch from the worktree's HEAD
         // (worktree HEAD is set to the epoch commit on creation)
-        let head_oid = self
-            .git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
+        let head_oid = self.git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
         let head_oid = head_oid.trim();
 
         let mut added = Vec::new();
@@ -510,26 +514,19 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let mut deleted = Vec::new();
 
         // 1. Uncommitted changes relative to HEAD (working tree vs index+HEAD)
-        let diff_output = self.git_stdout_in(
-            &ws_path,
-            &["diff", "--name-status", head_oid],
-        )?;
+        let diff_output = self.git_stdout_in(&ws_path, &["diff", "--name-status", head_oid])?;
 
         parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
 
         // 2. Staged changes not yet reflected (index vs HEAD)
-        let staged_output = self.git_stdout_in(
-            &ws_path,
-            &["diff", "--name-status", "--cached", head_oid],
-        )?;
+        let staged_output =
+            self.git_stdout_in(&ws_path, &["diff", "--name-status", "--cached", head_oid])?;
 
         parse_name_status(&staged_output, &mut added, &mut modified, &mut deleted);
 
         // 3. Untracked files (not in .gitignore)
-        let untracked_output = self.git_stdout_in(
-            &ws_path,
-            &["ls-files", "--others", "--exclude-standard"],
-        )?;
+        let untracked_output =
+            self.git_stdout_in(&ws_path, &["ls-files", "--others", "--exclude-standard"])?;
 
         for line in untracked_output.lines() {
             let path = line.trim();
@@ -694,7 +691,9 @@ fn parse_name_status(
             continue;
         }
         // Format: "X\tpath" or "X path"
-        let (status, path) = if let Some(rest) = line.strip_prefix("A\t").or_else(|| line.strip_prefix("A ")) {
+        let (status, path) = if let Some(rest) =
+            line.strip_prefix("A\t").or_else(|| line.strip_prefix("A "))
+        {
             ('A', rest.trim())
         } else if let Some(rest) = line.strip_prefix("M\t").or_else(|| line.strip_prefix("M ")) {
             ('M', rest.trim())
@@ -775,10 +774,7 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
-        let oid_str = String::from_utf8(output.stdout)
-            .unwrap()
-            .trim()
-            .to_string();
+        let oid_str = String::from_utf8(output.stdout).unwrap().trim().to_string();
         let epoch = EpochId::new(&oid_str).unwrap();
 
         (temp_dir, epoch)
@@ -996,8 +992,14 @@ mod tests {
             .current_dir(&root)
             .output()
             .unwrap();
-        let head_oid = String::from_utf8(head_oid.stdout).unwrap().trim().to_owned();
-        assert_ne!(ref_oid, head_oid, "dirty workspace should materialize non-HEAD commit");
+        let head_oid = String::from_utf8(head_oid.stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_ne!(
+            ref_oid, head_oid,
+            "dirty workspace should materialize non-HEAD commit"
+        );
 
         let ref_name = manifold_refs::workspace_state_ref(ws_name.as_str());
         let diff_out = Command::new("git")
@@ -1006,7 +1008,10 @@ mod tests {
             .output()
             .unwrap();
         let diff = String::from_utf8(diff_out.stdout).unwrap();
-        assert!(diff.lines().any(|l| l.trim() == "README.md"), "diff should include README.md: {diff}");
+        assert!(
+            diff.lines().any(|l| l.trim() == "README.md"),
+            "diff should include README.md: {diff}"
+        );
     }
 
     #[test]
@@ -1024,7 +1029,11 @@ mod tests {
         let ws_name = WorkspaceId::new("snap-no-ref").unwrap();
         let info = backend.create(&ws_name, &epoch).unwrap();
 
-        fs::write(info.path.join("README.md"), "# changed with compat disabled").unwrap();
+        fs::write(
+            info.path.join("README.md"),
+            "# changed with compat disabled",
+        )
+        .unwrap();
         let _snap = backend.snapshot(&ws_name).unwrap();
 
         assert!(
@@ -1289,7 +1298,10 @@ mod tests {
         backend.destroy(&ws_name).unwrap();
 
         let infos = backend.list().unwrap();
-        assert!(infos.is_empty(), "destroyed workspace should not appear: {infos:?}");
+        assert!(
+            infos.is_empty(),
+            "destroyed workspace should not appear: {infos:?}"
+        );
     }
 
     #[test]
@@ -1311,7 +1323,8 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].state.is_active(),
-            "workspace at current epoch should be active: {:?}", infos[0].state
+            "workspace at current epoch should be active: {:?}",
+            infos[0].state
         );
     }
 
@@ -1341,7 +1354,10 @@ mod tests {
             .current_dir(&root)
             .output()
             .unwrap();
-        let epoch1_str = String::from_utf8(head_out.stdout).unwrap().trim().to_string();
+        let epoch1_str = String::from_utf8(head_out.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
 
         // Update epoch ref to epoch1
         Command::new("git")
@@ -1354,7 +1370,8 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].state.is_stale(),
-            "workspace at old epoch should be stale: {:?}", infos[0].state
+            "workspace at old epoch should be stale: {:?}",
+            infos[0].state
         );
         // Should be 1 epoch behind (one commit separates them)
         if let WorkspaceState::Stale { behind_epochs } = infos[0].state {
@@ -1385,8 +1402,15 @@ mod tests {
         backend.create(&ws_name, &epoch).unwrap();
 
         let status = backend.status(&ws_name).unwrap();
-        assert_eq!(status.base_epoch, epoch, "base epoch should match creation epoch");
-        assert!(status.is_clean(), "no changes expected: {:?}", status.dirty_files);
+        assert_eq!(
+            status.base_epoch, epoch,
+            "base epoch should match creation epoch"
+        );
+        assert!(
+            status.is_clean(),
+            "no changes expected: {:?}",
+            status.dirty_files
+        );
         assert!(!status.is_stale, "no epoch ref yet → not stale");
     }
 
@@ -1400,10 +1424,19 @@ mod tests {
         fs::write(info.path.join("README.md"), "# Changed").unwrap();
 
         let status = backend.status(&ws_name).unwrap();
-        assert_eq!(status.dirty_count(), 1, "expected 1 dirty file: {:?}", status.dirty_files);
+        assert_eq!(
+            status.dirty_count(),
+            1,
+            "expected 1 dirty file: {:?}",
+            status.dirty_files
+        );
         assert!(
-            status.dirty_files.iter().any(|p| p == &PathBuf::from("README.md")),
-            "README.md should be dirty: {:?}", status.dirty_files
+            status
+                .dirty_files
+                .iter()
+                .any(|p| p == &PathBuf::from("README.md")),
+            "README.md should be dirty: {:?}",
+            status.dirty_files
         );
     }
 
@@ -1419,8 +1452,12 @@ mod tests {
         let status = backend.status(&ws_name).unwrap();
         assert_eq!(status.dirty_count(), 1);
         assert!(
-            status.dirty_files.iter().any(|p| p == &PathBuf::from("new_file.txt")),
-            "new_file.txt should be dirty: {:?}", status.dirty_files
+            status
+                .dirty_files
+                .iter()
+                .any(|p| p == &PathBuf::from("new_file.txt")),
+            "new_file.txt should be dirty: {:?}",
+            status.dirty_files
         );
     }
 
@@ -1440,7 +1477,10 @@ mod tests {
             .unwrap();
 
         let status = backend.status(&ws_name).unwrap();
-        assert!(!status.is_stale, "workspace should not be stale when epoch matches");
+        assert!(
+            !status.is_stale,
+            "workspace should not be stale when epoch matches"
+        );
     }
 
     #[test]
@@ -1468,7 +1508,10 @@ mod tests {
             .current_dir(&root)
             .output()
             .unwrap();
-        let epoch1_str = String::from_utf8(head_out.stdout).unwrap().trim().to_string();
+        let epoch1_str = String::from_utf8(head_out.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
 
         Command::new("git")
             .args(["update-ref", "refs/manifold/epoch/current", &epoch1_str])
@@ -1477,12 +1520,14 @@ mod tests {
             .unwrap();
 
         let status = backend.status(&ws_name).unwrap();
-        assert!(status.is_stale, "workspace should be stale after epoch advance");
+        assert!(
+            status.is_stale,
+            "workspace should be stale after epoch advance"
+        );
         assert_eq!(status.base_epoch, epoch0, "base epoch unchanged");
     }
 
     // -- parse_worktree_porcelain tests --
-
 
     #[test]
     fn test_parse_worktree_porcelain_single() {
@@ -1494,10 +1539,7 @@ mod tests {
             entries[0].head.as_deref(),
             Some("aabbccdd00112233aabbccdd00112233aabbccdd")
         );
-        assert_eq!(
-            entries[0].branch.as_deref(),
-            Some("refs/heads/main")
-        );
+        assert_eq!(entries[0].branch.as_deref(), Some("refs/heads/main"));
     }
 
     #[test]
@@ -1507,7 +1549,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "/repo");
         assert_eq!(entries[1].path, "/repo/ws/agent-1");
-        assert!(entries[1].branch.is_none(), "detached worktree should have no branch");
+        assert!(
+            entries[1].branch.is_none(),
+            "detached worktree should have no branch"
+        );
     }
     // -- error display tests --
 

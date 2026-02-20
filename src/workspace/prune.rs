@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
 
-use super::{get_backend, validate_workspace_name, workspaces_dir, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, get_backend, validate_workspace_name, workspaces_dir};
 
 /// Result of analyzing workspaces for pruning
 #[derive(Debug)]
@@ -20,8 +20,7 @@ pub fn prune(force: bool, include_empty: bool) -> Result<()> {
     let backend = get_backend()?;
     let ws_dir = workspaces_dir()?;
 
-    let tracked_workspaces = backend.list()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let tracked_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
     let tracked_names: std::collections::HashSet<String> = tracked_workspaces
         .iter()
         .map(|ws| ws.id.as_str().to_string())
@@ -29,12 +28,7 @@ pub fn prune(force: bool, include_empty: bool) -> Result<()> {
 
     let dir_workspaces = get_directory_workspaces(&ws_dir)?;
 
-    let mut analysis = analyze_workspaces(
-        &tracked_names,
-        &dir_workspaces,
-        include_empty,
-        &backend,
-    );
+    let mut analysis = analyze_workspaces(&tracked_names, &dir_workspaces, include_empty, &backend);
 
     // Sort for consistent output
     analysis.orphaned.sort();
@@ -68,9 +62,7 @@ pub fn prune(force: bool, include_empty: bool) -> Result<()> {
 }
 
 /// Get the set of workspace directory names present in ws/.
-fn get_directory_workspaces(
-    ws_dir: &std::path::Path,
-) -> Result<std::collections::HashSet<String>> {
+fn get_directory_workspaces(ws_dir: &std::path::Path) -> Result<std::collections::HashSet<String>> {
     if !ws_dir.exists() {
         return Ok(std::collections::HashSet::new());
     }
@@ -189,10 +181,7 @@ fn prune_empty(empty: &[String], backend: &impl WorkspaceBackend, force: bool) {
     if empty.is_empty() {
         return;
     }
-    println!(
-        "Empty ({} workspaces with no changes):",
-        empty.len()
-    );
+    println!("Empty ({} workspaces with no changes):", empty.len());
     for name in empty {
         if force {
             if let Ok(ws_id) = WorkspaceId::new(name) {
@@ -218,9 +207,7 @@ fn print_prune_summary(
     if force {
         let deleted = analysis.orphaned.len() + analysis.empty.len();
         let forgotten = analysis.missing.len();
-        println!(
-            "Pruned: {deleted} deleted, {forgotten} removed from tracking"
-        );
+        println!("Pruned: {deleted} deleted, {forgotten} removed from tracking");
     } else {
         println!("=== Summary ===");
         println!(

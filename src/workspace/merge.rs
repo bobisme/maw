@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
@@ -11,24 +11,24 @@ use crate::config::{ManifoldConfig, MergeDriverKind};
 use crate::format::OutputFormat;
 use crate::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use crate::merge::collect::collect_snapshots;
-use crate::merge::commit::{CommitRecovery, CommitResult, run_commit_phase, recover_partial_commit};
-use crate::merge::prepare::run_prepare_phase;
+use crate::merge::commit::{
+    CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase,
+};
 use crate::merge::partition::partition_by_path;
 use crate::merge::plan::{
     DriverInfo, MergePlan, PredictedConflict, ValidationInfo, WorkspaceChange, WorkspaceReport,
     compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
-use crate::merge::resolve::{ConflictReason, ConflictRecord};
-use crate::model::conflict::Region;
-use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
+use crate::merge::prepare::run_prepare_phase;
 use crate::merge::quarantine::create_quarantine_workspace;
-use crate::merge_state::{
-    MergePhase, MergeStateFile, run_cleanup_phase,
-};
+use crate::merge::resolve::{ConflictReason, ConflictRecord};
+use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
+use crate::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
 use crate::model::conflict::ConflictAtom;
+use crate::model::conflict::Region;
 use crate::model::types::WorkspaceId;
 
-use super::{get_backend, repo_root, MawConfig, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, repo_root};
 
 // ---------------------------------------------------------------------------
 // JSON output types for agent-friendly conflict presentation
@@ -223,10 +223,7 @@ pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
             ConflictReason::ModifyDelete => (
                 "modify_delete",
                 "modify_delete",
-                vec![
-                    "keep_modified".to_string(),
-                    "accept_deletion".to_string(),
-                ],
+                vec!["keep_modified".to_string(), "accept_deletion".to_string()],
                 "Decide whether to keep the modified version or accept the deletion. \
                  One workspace modified this file while another deleted it — \
                  choose which intent should win."
@@ -376,22 +373,12 @@ fn print_conflict_report(
     let ws_display = default_ws_path.display();
     println!();
     println!("To resolve:");
-    println!(
-        "  1. Examine the conflict details above and determine the correct content"
-    );
-    println!(
-        "  2. Edit the conflicted files in {ws_display}/"
-    );
-    println!(
-        "  3. Re-run the merge: maw ws merge <workspace names>"
-    );
+    println!("  1. Examine the conflict details above and determine the correct content");
+    println!("  2. Edit the conflicted files in {ws_display}/");
+    println!("  3. Re-run the merge: maw ws merge <workspace names>");
     println!();
-    println!(
-        "  Conflicts are reported by the merge engine, not as markers in files."
-    );
-    println!(
-        "  Each conflict has a reason (divergent edits, add/add, etc.) to guide resolution."
-    );
+    println!("  Conflicts are reported by the merge engine, not as markers in files.");
+    println!("  Each conflict has a reason (divergent edits, add/add, etc.) to guide resolution.");
     let _ = default_ws_name; // used in the path above
 }
 
@@ -487,10 +474,7 @@ pub struct CheckWorkspaceInfo {
 ///
 /// Runs PREPARE + BUILD without COMMIT to detect conflicts.
 /// Returns a `CheckResult` with structured info.
-pub fn check_merge(
-    workspaces: &[String],
-    format: OutputFormat,
-) -> Result<()> {
+pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --check");
     }
@@ -502,9 +486,7 @@ pub fn check_merge(
 
     // Reject merging the default workspace
     if workspaces.iter().any(|ws| ws == default_ws) {
-        bail!(
-            "Cannot merge the default workspace — it is the merge target, not a source."
-        );
+        bail!("Cannot merge the default workspace — it is the merge target, not a source.");
     }
 
     // Check staleness
@@ -532,8 +514,7 @@ pub fn check_merge(
     let manifold_dir = root.join(".manifold");
     let check_dir = manifold_dir.join("check-tmp");
     let _ = std::fs::remove_dir_all(&check_dir);
-    std::fs::create_dir_all(&check_dir)
-        .context("Failed to create temp dir for merge check")?;
+    std::fs::create_dir_all(&check_dir).context("Failed to create temp dir for merge check")?;
 
     let sources: Vec<WorkspaceId> = workspaces
         .iter()
@@ -634,7 +615,10 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
             } else if result.conflicts.is_empty() {
                 println!("[BLOCKED] Merge check failed");
             } else {
-                println!("[BLOCKED] Merge would produce {} conflict(s):", result.conflicts.len());
+                println!(
+                    "[BLOCKED] Merge would produce {} conflict(s):",
+                    result.conflicts.len()
+                );
                 for c in &result.conflicts {
                     if c.path.is_empty() {
                         println!("  E {}", c.reason);
@@ -661,7 +645,6 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
         bail!("merge check: not ready")
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Plan merge (--plan [--json])
@@ -695,8 +678,13 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     validate_workspace_dirs(&sources, &backend)?;
 
     // PREPARE → COLLECT → PARTITION → BUILD
-    let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs_map(&sources, &backend))
-        .map_err(|e| anyhow::anyhow!("PREPARE failed: {e}"))?;
+    let frozen = run_prepare_phase(
+        &root,
+        &manifold_dir,
+        &sources,
+        &workspace_dirs_map(&sources, &backend),
+    )
+    .map_err(|e| anyhow::anyhow!("PREPARE failed: {e}"))?;
     let patch_sets = collect_snapshots(&root, &backend, &sources)
         .map_err(|e| anyhow::anyhow!("COLLECT failed: {e}"))?;
     let partition = partition_by_path(&patch_sets);
@@ -716,7 +704,13 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     let validation_info = build_validation_info(&manifold_config);
 
     // VALIDATE (optional): run and write artifact, but don't block
-    plan_run_validation(&root, &manifold_dir, &merge_id, &build_output, &manifold_config);
+    plan_run_validation(
+        &root,
+        &manifold_dir,
+        &merge_id,
+        &build_output,
+        &manifold_config,
+    );
 
     // Clean up merge-state (plan-only: no COMMIT)
     cleanup_plan_merge_state(&manifold_dir)?;
@@ -758,7 +752,9 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
 fn parse_workspace_ids(workspaces: &[String]) -> Result<Vec<WorkspaceId>> {
     workspaces
         .iter()
-        .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}")))
+        .map(|ws| {
+            WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}"))
+        })
         .collect()
 }
 
@@ -793,7 +789,9 @@ fn workspace_dirs_map<B: WorkspaceBackend>(
 }
 
 /// Extract sorted touched paths and overlaps from a partition.
-fn paths_from_partition(partition: &crate::merge::partition::PartitionResult) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn paths_from_partition(
+    partition: &crate::merge::partition::PartitionResult,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut touched: Vec<PathBuf> = partition
         .unique
         .iter()
@@ -868,7 +866,11 @@ fn build_validation_info(config: &ManifoldConfig) -> Option<ValidationInfo> {
         return None;
     }
     Some(ValidationInfo {
-        commands: vc.effective_commands().iter().map(|s| (*s).to_owned()).collect(),
+        commands: vc
+            .effective_commands()
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
         timeout_seconds: vc.timeout_seconds,
         policy: vc.on_failure.to_string(),
     })
@@ -990,7 +992,12 @@ fn print_plan_text(plan: &MergePlan) {
         println!("Merge drivers:");
         for driver in &plan.drivers {
             if let Some(cmd) = &driver.command {
-                println!("  {} — {} (command: {})", driver.path.display(), driver.kind, cmd);
+                println!(
+                    "  {} — {} (command: {})",
+                    driver.path.display(),
+                    driver.kind,
+                    cmd
+                );
             } else {
                 println!("  {} — {}", driver.path.display(), driver.kind);
             }
@@ -1003,7 +1010,10 @@ fn print_plan_text(plan: &MergePlan) {
         for cmd in &val.commands {
             println!("  $ {cmd}");
         }
-        println!("  Timeout: {}s, Policy: {}", val.timeout_seconds, val.policy);
+        println!(
+            "  Timeout: {}s, Policy: {}",
+            val.timeout_seconds, val.policy
+        );
     }
 
     println!();
@@ -1024,9 +1034,8 @@ fn print_plan_text(plan: &MergePlan) {
 fn cleanup_plan_merge_state(manifold_dir: &Path) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
     if state_path.exists() {
-        std::fs::remove_file(&state_path).map_err(|e| {
-            anyhow::anyhow!("failed to remove plan merge-state: {e}")
-        })?;
+        std::fs::remove_file(&state_path)
+            .map_err(|e| anyhow::anyhow!("failed to remove plan merge-state: {e}"))?;
     }
     Ok(())
 }
@@ -1064,8 +1073,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     let manifold_dir = root.join(".manifold");
     let check_dir = manifold_dir.join("conflicts-tmp");
     let _ = std::fs::remove_dir_all(&check_dir);
-    std::fs::create_dir_all(&check_dir)
-        .context("Failed to create temp dir for conflict check")?;
+    std::fs::create_dir_all(&check_dir).context("Failed to create temp dir for conflict check")?;
 
     let sources: Vec<WorkspaceId> = workspaces
         .iter()
@@ -1198,7 +1206,10 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
                 println!();
             }
             println!("To merge: maw ws merge {}", workspaces.join(" "));
-            println!("For JSON: maw ws conflicts {} --format json", workspaces.join(" "));
+            println!(
+                "For JSON: maw ws conflicts {} --format json",
+                workspaces.join(" ")
+            );
         } else {
             println!("No conflicts found.");
             println!(
@@ -1281,11 +1292,7 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
         for ws_name in workspaces {
             if let Ok(ws_id) = WorkspaceId::new(ws_name) {
                 if let Ok(snapshot) = backend.snapshot(&ws_id) {
-                    let files: Vec<PathBuf> = snapshot
-                        .all_changed()
-                        .into_iter()
-                        .cloned()
-                        .collect();
+                    let files: Vec<PathBuf> = snapshot.all_changed().into_iter().cloned().collect();
                     workspace_files.push((ws_name.clone(), files));
                 }
             }
@@ -1353,10 +1360,7 @@ pub struct MergeOptions<'a> {
 /// Run the merge state machine: PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP.
 ///
 /// This replaces the old jj-based merge with the Manifold merge engine.
-pub fn merge(
-    workspaces: &[String],
-    opts: &MergeOptions<'_>,
-) -> Result<()> {
+pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let MergeOptions {
         destroy_after,
         confirm,
@@ -1408,8 +1412,7 @@ pub fn merge(
     let sources: Vec<WorkspaceId> = ws_to_merge
         .iter()
         .map(|ws| {
-            WorkspaceId::new(ws)
-                .map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}"))
+            WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}"))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -1434,16 +1437,9 @@ pub fn merge(
     println!("PREPARE: Freezing merge inputs...");
     let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!(
-        "  Epoch: {}",
-        &frozen.epoch.as_str()[..12]
-    );
+    println!("  Epoch: {}", &frozen.epoch.as_str()[..12]);
     for (ws_id, head) in &frozen.heads {
-        println!(
-            "  {}: {}",
-            ws_id,
-            &head.as_str()[..12]
-        );
+        println!("  {}: {}", ws_id, &head.as_str()[..12]);
     }
 
     // -----------------------------------------------------------------------
@@ -1464,10 +1460,7 @@ pub fn merge(
         "  {} unique path(s), {} shared path(s), {} resolved",
         build_output.unique_count, build_output.shared_count, build_output.resolved_count
     );
-    println!(
-        "  Candidate: {}",
-        &build_output.candidate.as_str()[..12]
-    );
+    println!("  Candidate: {}", &build_output.candidate.as_str()[..12]);
 
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
@@ -1495,10 +1488,7 @@ pub fn merge(
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
-            println!(
-                "  {} unresolved conflict(s)",
-                build_output.conflicts.len()
-            );
+            println!("  {} unresolved conflict(s)", build_output.conflicts.len());
             print_conflict_report(&build_output.conflicts, &default_ws_path, default_ws);
 
             if destroy_after {
@@ -1529,17 +1519,14 @@ pub fn merge(
         // Advance merge-state to Validate phase
         advance_merge_state(&manifold_dir, MergePhase::Validate)?;
 
-        let validate_outcome = match run_validate_phase(
-            &root,
-            &build_output.candidate,
-            validation_config,
-        ) {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                abort_merge(&manifold_dir, &format!("VALIDATE error: {e}"))?;
-                bail!("Merge VALIDATE phase failed: {e}");
-            }
-        };
+        let validate_outcome =
+            match run_validate_phase(&root, &build_output.candidate, validation_config) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    abort_merge(&manifold_dir, &format!("VALIDATE error: {e}"))?;
+                    bail!("Merge VALIDATE phase failed: {e}");
+                }
+            };
 
         // Write validation artifact for diagnostics
         if let Some(result) = validate_outcome.result() {
@@ -1557,10 +1544,7 @@ pub fn merge(
                 println!("  Validation skipped (no commands configured).");
             }
             ValidateOutcome::Passed(r) => {
-                println!(
-                    "  Validation passed ({}ms).",
-                    r.duration_ms
-                );
+                println!("  Validation passed ({}ms).", r.duration_ms);
             }
             ValidateOutcome::PassedWithWarnings(r) => {
                 println!(
@@ -1595,7 +1579,11 @@ pub fn merge(
                 // merge tree into a quarantine workspace so the agent can fix forward.
                 let merge_id = &build_output.candidate.as_str()[..12];
                 let is_blocked = !validate_outcome.may_proceed();
-                let policy_name = if is_blocked { "block+quarantine" } else { "quarantine" };
+                let policy_name = if is_blocked {
+                    "block+quarantine"
+                } else {
+                    "quarantine"
+                };
 
                 println!(
                     "  Validation FAILED ({}ms) — policy '{policy_name}', creating quarantine workspace...",
@@ -1603,7 +1591,10 @@ pub fn merge(
                 );
 
                 // Abort merge-state (quarantine is the fix-forward path, not epoch advance)
-                abort_merge(&manifold_dir, &format!("validation failed (policy: {policy_name})"))?;
+                abort_merge(
+                    &manifold_dir,
+                    &format!("validation failed (policy: {policy_name})"),
+                )?;
 
                 match create_quarantine_workspace(
                     &root,
@@ -1684,7 +1675,8 @@ pub fn merge(
         Err(crate::merge::commit::CommitError::PartialCommit) => {
             // Epoch ref moved but branch ref didn't — attempt recovery
             println!("  WARNING: Partial commit — attempting recovery...");
-            match recover_partial_commit(&root, branch, &epoch_before_oid, &build_output.candidate) {
+            match recover_partial_commit(&root, branch, &epoch_before_oid, &build_output.candidate)
+            {
                 Ok(CommitRecovery::FinalizedMainRef) => {
                     println!("  Recovery succeeded: branch ref finalized.");
                 }
@@ -1733,9 +1725,8 @@ pub fn merge(
 
     // Remove merge-state file
     let merge_state_path = MergeStateFile::default_path(&manifold_dir);
-    let state = MergeStateFile::read(&merge_state_path).unwrap_or_else(|_| {
-        MergeStateFile::new(sources, frozen.epoch, now_secs())
-    });
+    let state = MergeStateFile::read(&merge_state_path)
+        .unwrap_or_else(|_| MergeStateFile::new(sources, frozen.epoch, now_secs()));
     run_cleanup_phase(&state, &merge_state_path, false, |_ws| Ok(()))
         .map_err(|e| anyhow::anyhow!("cleanup failed: {e}"))?;
 
@@ -1767,10 +1758,7 @@ pub fn merge(
             resolved_count: build_output.resolved_count,
             conflict_count: 0,
             conflicts: vec![],
-            message: format!(
-                "Merged to {branch}: {msg} from {}",
-                ws_to_merge.join(", ")
-            ),
+            message: format!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", ")),
             next: "maw push".to_string(),
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
@@ -1792,8 +1780,8 @@ pub fn merge(
 /// Advance the merge-state file to the next phase.
 fn advance_merge_state(manifold_dir: &Path, next_phase: MergePhase) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
-    let mut state = MergeStateFile::read(&state_path)
-        .map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    let mut state =
+        MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
     state
         .advance(next_phase, now_secs())
         .map_err(|e| anyhow::anyhow!("advance merge-state: {e}"))?;
@@ -1809,8 +1797,8 @@ fn record_validation_result(
     result: &crate::merge_state::ValidationResult,
 ) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
-    let mut state = MergeStateFile::read(&state_path)
-        .map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    let mut state =
+        MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
     state.validation_result = Some(result.clone());
     state.updated_at = now_secs();
     state
@@ -1822,11 +1810,11 @@ fn record_validation_result(
 /// Record the epoch_after in the merge-state file.
 fn record_epoch_after(manifold_dir: &Path, candidate: &crate::model::types::GitOid) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
-    let mut state = MergeStateFile::read(&state_path)
-        .map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    let mut state =
+        MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
     state.epoch_after = Some(
         crate::model::types::EpochId::new(candidate.as_str())
-            .map_err(|e| anyhow::anyhow!("invalid candidate OID: {e}"))?
+            .map_err(|e| anyhow::anyhow!("invalid candidate OID: {e}"))?,
     );
     state.updated_at = now_secs();
     state
@@ -1973,17 +1961,31 @@ mod tests {
         }
     }
 
-    fn content_record(path: &str, base: &str, alice_content: &str, bob_content: &str) -> ConflictRecord {
+    fn content_record(
+        path: &str,
+        base: &str,
+        alice_content: &str,
+        bob_content: &str,
+    ) -> ConflictRecord {
         ConflictRecord {
             path: PathBuf::from(path),
             base: Some(base.as_bytes().to_vec()),
             sides: vec![
-                make_side("alice", ChangeKind::Modified, Some(alice_content.as_bytes().to_vec())),
-                make_side("bob", ChangeKind::Modified, Some(bob_content.as_bytes().to_vec())),
+                make_side(
+                    "alice",
+                    ChangeKind::Modified,
+                    Some(alice_content.as_bytes().to_vec()),
+                ),
+                make_side(
+                    "bob",
+                    ChangeKind::Modified,
+                    Some(bob_content.as_bytes().to_vec()),
+                ),
             ],
             reason: ConflictReason::Diff3Conflict,
             atoms: vec![ConflictAtom::line_overlap(
-                10, 15,
+                10,
+                15,
                 vec![
                     AtomEdit::new("alice", Region::lines(10, 13), "alice's lines"),
                     AtomEdit::new("bob", Region::lines(12, 15), "bob's lines"),
@@ -1998,7 +2000,11 @@ mod tests {
             path: PathBuf::from(path),
             base: None,
             sides: vec![
-                make_side("alice", ChangeKind::Added, Some(b"alice's version".to_vec())),
+                make_side(
+                    "alice",
+                    ChangeKind::Added,
+                    Some(b"alice's version".to_vec()),
+                ),
                 make_side("bob", ChangeKind::Added, Some(b"bob's version".to_vec())),
             ],
             reason: ConflictReason::AddAddDifferent,
@@ -2011,7 +2017,11 @@ mod tests {
             path: PathBuf::from(path),
             base: Some(b"original content".to_vec()),
             sides: vec![
-                make_side("alice", ChangeKind::Modified, Some(b"modified content".to_vec())),
+                make_side(
+                    "alice",
+                    ChangeKind::Modified,
+                    Some(b"modified content".to_vec()),
+                ),
                 make_side("bob", ChangeKind::Deleted, None),
             ],
             reason: ConflictReason::ModifyDelete,
@@ -2024,7 +2034,11 @@ mod tests {
             path: PathBuf::from(path),
             base: None,
             sides: vec![
-                make_side("alice", ChangeKind::Modified, Some(b"alice content".to_vec())),
+                make_side(
+                    "alice",
+                    ChangeKind::Modified,
+                    Some(b"alice content".to_vec()),
+                ),
                 make_side("bob", ChangeKind::Modified, Some(b"bob content".to_vec())),
             ],
             reason: ConflictReason::MissingBase,
@@ -2098,7 +2112,10 @@ mod tests {
 
         // Resolution strategies help agents decide what to do
         assert!(!json.resolution_strategies.is_empty());
-        assert!(json.resolution_strategies.contains(&"edit_file_manually".to_string()));
+        assert!(
+            json.resolution_strategies
+                .contains(&"edit_file_manually".to_string())
+        );
         assert!(!json.suggested_resolution.is_empty());
     }
 
@@ -2146,8 +2163,14 @@ mod tests {
         let record = add_add_record("new.rs");
         let json = conflict_record_to_json(&record);
 
-        assert!(json.resolution_strategies.contains(&"keep_one_side".to_string()));
-        assert!(json.resolution_strategies.contains(&"merge_content_manually".to_string()));
+        assert!(
+            json.resolution_strategies
+                .contains(&"keep_one_side".to_string())
+        );
+        assert!(
+            json.resolution_strategies
+                .contains(&"merge_content_manually".to_string())
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2179,8 +2202,14 @@ mod tests {
         let record = modify_delete_record("old.rs");
         let json = conflict_record_to_json(&record);
 
-        assert!(json.resolution_strategies.contains(&"keep_modified".to_string()));
-        assert!(json.resolution_strategies.contains(&"accept_deletion".to_string()));
+        assert!(
+            json.resolution_strategies
+                .contains(&"keep_modified".to_string())
+        );
+        assert!(
+            json.resolution_strategies
+                .contains(&"accept_deletion".to_string())
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2198,7 +2227,10 @@ mod tests {
 
         let alice_side = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
         assert!(alice_side.is_binary, "binary content should be flagged");
-        assert!(alice_side.content.is_none(), "binary content should not be included as text");
+        assert!(
+            alice_side.content.is_none(),
+            "binary content should not be included as text"
+        );
 
         // Base content should also be marked binary
         assert!(json.base_is_binary);
@@ -2221,14 +2253,38 @@ mod tests {
         // Verify key fields are present in the JSON string
         assert!(json_str.contains("\"type\""), "type field must be present");
         assert!(json_str.contains("\"path\""), "path field must be present");
-        assert!(json_str.contains("\"reason\""), "reason field must be present");
-        assert!(json_str.contains("\"workspaces\""), "workspaces field must be present");
-        assert!(json_str.contains("\"sides\""), "sides field must be present");
-        assert!(json_str.contains("\"atoms\""), "atoms field must be present");
-        assert!(json_str.contains("\"resolution_strategies\""), "resolution_strategies must be present");
-        assert!(json_str.contains("\"suggested_resolution\""), "suggested_resolution must be present");
-        assert!(json_str.contains("\"base_content\""), "base_content must be present");
-        assert!(json_str.contains("\"workspace\""), "workspace attribution in sides");
+        assert!(
+            json_str.contains("\"reason\""),
+            "reason field must be present"
+        );
+        assert!(
+            json_str.contains("\"workspaces\""),
+            "workspaces field must be present"
+        );
+        assert!(
+            json_str.contains("\"sides\""),
+            "sides field must be present"
+        );
+        assert!(
+            json_str.contains("\"atoms\""),
+            "atoms field must be present"
+        );
+        assert!(
+            json_str.contains("\"resolution_strategies\""),
+            "resolution_strategies must be present"
+        );
+        assert!(
+            json_str.contains("\"suggested_resolution\""),
+            "suggested_resolution must be present"
+        );
+        assert!(
+            json_str.contains("\"base_content\""),
+            "base_content must be present"
+        );
+        assert!(
+            json_str.contains("\"workspace\""),
+            "workspace attribution in sides"
+        );
 
         // Can parse it back as a generic JSON value (roundtrip)
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -2373,7 +2429,8 @@ mod tests {
 
         // Agent can identify: WHO made each change
         let sides = parsed["sides"].as_array().unwrap();
-        let workspaces_in_sides: Vec<&str> = sides.iter()
+        let workspaces_in_sides: Vec<&str> = sides
+            .iter()
             .map(|s| s["workspace"].as_str().unwrap())
             .collect();
         assert!(workspaces_in_sides.contains(&"alice"));
@@ -2391,7 +2448,10 @@ mod tests {
 
         // Agent has: LOCALIZED conflict regions (atoms)
         let atoms = parsed["atoms"].as_array().unwrap();
-        assert!(!atoms.is_empty(), "atoms should pinpoint the conflict region");
+        assert!(
+            !atoms.is_empty(),
+            "atoms should pinpoint the conflict region"
+        );
         let atom = &atoms[0];
         assert!(atom["base_region"].is_object());
         assert!(atom["edits"].is_array());
@@ -2412,7 +2472,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(parsed["reason"], "missing_base");
-        assert!(parsed["base_content"].is_null(), "no base content for missing_base");
+        assert!(
+            parsed["base_content"].is_null(),
+            "no base content for missing_base"
+        );
         assert!(!parsed["sides"].as_array().unwrap().is_empty());
         assert!(!parsed["suggested_resolution"].as_str().unwrap().is_empty());
     }

@@ -349,7 +349,10 @@ mod tests {
         // Sources are sorted internally, so order doesn't matter
         let id_ab = compute_merge_id(&epoch, &sources_ab, &heads);
         let id_ba = compute_merge_id(&epoch, &sources_ba, &heads);
-        assert_eq!(id_ab, id_ba, "merge_id must be stable regardless of source order");
+        assert_eq!(
+            id_ab, id_ba,
+            "merge_id must be stable regardless of source order"
+        );
     }
 
     #[test]
@@ -362,7 +365,10 @@ mod tests {
 
         let id1 = compute_merge_id(&epoch1, &sources, &heads);
         let id2 = compute_merge_id(&epoch2, &sources, &heads);
-        assert_ne!(id1, id2, "different epochs must produce different merge_ids");
+        assert_ne!(
+            id1, id2,
+            "different epochs must produce different merge_ids"
+        );
     }
 
     #[test]
@@ -538,10 +544,7 @@ mod tests {
 
         let path = write_workspace_report_artifact(&manifold_dir, &report).unwrap();
         assert!(path.exists());
-        assert_eq!(
-            path,
-            manifold_dir.join("artifacts/ws/agent-1/report.json")
-        );
+        assert_eq!(path, manifold_dir.join("artifacts/ws/agent-1/report.json"));
 
         let contents = std::fs::read_to_string(&path).unwrap();
         let decoded: WorkspaceReport = serde_json::from_str(&contents).unwrap();

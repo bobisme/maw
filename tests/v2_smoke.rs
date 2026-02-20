@@ -14,7 +14,10 @@ fn smoke_basic_lifecycle() {
     // Seed some initial files
     repo.seed_files(&[
         ("README.md", "# Test Project\n"),
-        ("src/lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"),
+        (
+            "src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        ),
     ]);
 
     // Create agent workspaces
@@ -39,8 +42,14 @@ fn smoke_basic_lifecycle() {
     repo.add_file("bob", "src/main.rs", "fn main() { println!(\"hello\"); }\n");
 
     // Verify isolation
-    assert!(!repo.file_exists("bob", "alice.txt"), "bob shouldn't see alice's file");
-    assert!(!repo.file_exists("alice", "bob.txt"), "alice shouldn't see bob's file");
+    assert!(
+        !repo.file_exists("bob", "alice.txt"),
+        "bob shouldn't see alice's file"
+    );
+    assert!(
+        !repo.file_exists("alice", "bob.txt"),
+        "alice shouldn't see bob's file"
+    );
 
     // Both workspaces should show dirty files
     let alice_dirty = repo.dirty_files("alice");
@@ -103,7 +112,10 @@ fn smoke_git_operations_in_workspace() {
 
     // git diff in workspace should show the change
     let diff = repo.git_in_workspace("agent", &["diff", "--stat"]);
-    assert!(diff.contains("existing.txt"), "diff should show existing.txt");
+    assert!(
+        diff.contains("existing.txt"),
+        "diff should show existing.txt"
+    );
 
     // Add new file and check untracked
     repo.add_file("agent", "new.txt", "brand new");

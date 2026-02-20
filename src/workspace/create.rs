@@ -1,15 +1,15 @@
 use std::io::{self, Write};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::{EpochId, WorkspaceId, WorkspaceMode};
 use crate::refs as manifold_refs;
 
 use super::{
-    ensure_repo_root, get_backend, metadata, repo_root, workspace_path, workspaces_dir,
-    MawConfig, DEFAULT_WORKSPACE,
+    DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata, repo_root,
+    workspace_path, workspaces_dir,
 };
 
 pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()> {
@@ -34,7 +34,9 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
 
     println!("Creating workspace '{name}' at ws/{name} ...");
     if persistent {
-        println!("  Mode: persistent (survives epoch advances; use `maw ws advance {name}` to rebase)");
+        println!(
+            "  Mode: persistent (survives epoch advances; use `maw ws advance {name}` to rebase)"
+        );
     }
 
     // Determine base epoch.
@@ -43,8 +45,8 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
     let epoch = resolve_epoch(&root, revision)?;
 
     // Create workspace ID
-    let ws_id = WorkspaceId::new(name)
-        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    let ws_id =
+        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
     // Create the workspace via backend
     let info = backend.create(&ws_id, &epoch)
@@ -67,7 +69,14 @@ pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()
     println!();
     println!("Workspace '{name}' ready!");
     println!();
-    println!("  Mode:   {}", if persistent { "persistent" } else { "ephemeral" });
+    println!(
+        "  Mode:   {}",
+        if persistent {
+            "persistent"
+        } else {
+            "ephemeral"
+        }
+    );
     println!("  Epoch:  {short_oid} (base commit for this workspace)");
     println!("  Path:   {}/", info.path.display());
     println!();
@@ -113,14 +122,12 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
             bail!("Cannot resolve revision '{rev}': {}", stderr.trim());
         }
         let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return EpochId::new(&oid)
-            .map_err(|e| anyhow::anyhow!("Invalid commit OID: {e}"));
+        return EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid commit OID: {e}"));
     }
 
     // Try refs/manifold/epoch/current first
     if let Ok(Some(oid)) = manifold_refs::read_epoch_current(root) {
-        return EpochId::new(oid.as_str())
-            .map_err(|e| anyhow::anyhow!("Invalid epoch OID: {e}"));
+        return EpochId::new(oid.as_str()).map_err(|e| anyhow::anyhow!("Invalid epoch OID: {e}"));
     }
 
     // Fall back to configured branch HEAD
@@ -142,14 +149,14 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
         if !head_output.status.success() {
             bail!("No commits found. Run `maw init` first, or specify --revision.");
         }
-        let oid = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
-        return EpochId::new(&oid)
-            .map_err(|e| anyhow::anyhow!("Invalid HEAD OID: {e}"));
+        let oid = String::from_utf8_lossy(&head_output.stdout)
+            .trim()
+            .to_string();
+        return EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid HEAD OID: {e}"));
     }
 
     let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    EpochId::new(&oid)
-        .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
+    EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
 }
 
 pub fn destroy(name: &str, confirm: bool) -> Result<()> {
@@ -159,15 +166,19 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
     // Also check config in case default_workspace is customized
     if let Ok(root) = repo_root()
         && let Ok(config) = MawConfig::load(&root)
-            && name == config.default_workspace() {
-                bail!("Cannot destroy the default workspace");
-            }
+        && name == config.default_workspace()
+    {
+        bail!("Cannot destroy the default workspace");
+    }
 
     let root = ensure_repo_root()?;
     let path = workspace_path(name)?;
 
     if !path.exists() {
-        println!("Workspace '{name}' is already absent at {}.", path.display());
+        println!(
+            "Workspace '{name}' is already absent at {}.",
+            path.display()
+        );
         println!("No action needed.");
         return Ok(());
     }
@@ -190,10 +201,11 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
     println!("Destroying workspace '{name}'...");
 
     let backend = get_backend()?;
-    let ws_id = WorkspaceId::new(name)
-        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    let ws_id =
+        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
-    backend.destroy(&ws_id)
+    backend
+        .destroy(&ws_id)
         .map_err(|e| anyhow::anyhow!("Failed to destroy workspace: {e}"))?;
 
     // Clean up workspace metadata (best-effort; don't fail destroy if missing).
@@ -228,8 +240,8 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 
     // Check if workspace is already tracked by git worktree
     let backend = get_backend()?;
-    let ws_id = WorkspaceId::new(name)
-        .map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    let ws_id =
+        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
 
     if backend.exists(&ws_id) {
         bail!(
@@ -241,7 +253,10 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     // Resolve epoch
     let epoch = resolve_epoch(&root, revision)?;
 
-    println!("Attaching workspace '{name}' at epoch {}...", &epoch.as_str()[..12]);
+    println!(
+        "Attaching workspace '{name}' at epoch {}...",
+        &epoch.as_str()[..12]
+    );
 
     // Move existing contents to a temp location
     let temp_backup = root.join("ws").join(format!(".{name}-attach-backup"));
@@ -282,10 +297,7 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
 
 /// Move all workspace contents (except `.git`) into a backup directory,
 /// then remove any stale `.git` file/directory so the workspace dir is empty.
-fn backup_workspace_contents(
-    workspace: &std::path::Path,
-    backup: &std::path::Path,
-) -> Result<()> {
+fn backup_workspace_contents(workspace: &std::path::Path, backup: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(backup)
         .with_context(|| format!("Failed to create backup directory: {}", backup.display()))?;
 
@@ -310,7 +322,8 @@ fn backup_workspace_contents(
     let git_entry = workspace.join(".git");
     if git_entry.exists() {
         if git_entry.is_dir() {
-            std::fs::remove_dir_all(&git_entry).with_context(|| "Failed to remove stale .git directory")?;
+            std::fs::remove_dir_all(&git_entry)
+                .with_context(|| "Failed to remove stale .git directory")?;
         } else {
             std::fs::remove_file(&git_entry).with_context(|| "Failed to remove stale .git file")?;
         }
@@ -340,10 +353,7 @@ fn restore_backup_best_effort(backup: &std::path::Path, workspace: &std::path::P
 }
 
 /// Restore backup contents into workspace, overwriting git-populated files.
-fn restore_backup_overwrite(
-    backup: &std::path::Path,
-    workspace: &std::path::Path,
-) -> Result<()> {
+fn restore_backup_overwrite(backup: &std::path::Path, workspace: &std::path::Path) -> Result<()> {
     for entry in std::fs::read_dir(backup)
         .with_context(|| "Failed to read backup directory")?
         .filter_map(std::result::Result::ok)

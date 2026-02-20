@@ -28,6 +28,8 @@ pub mod plan;
 pub mod prepare;
 pub mod quarantine;
 pub mod rename;
+#[cfg(feature = "ast-merge")]
+pub mod ast_merge;
 pub mod resolve;
 pub mod types;
 pub mod validate;
@@ -36,13 +38,20 @@ pub use build::{BuildError, ResolvedChange, build_merge_commit};
 pub use build_phase::{
     BuildPhaseError, BuildPhaseOutput, run_build_phase, run_build_phase_with_inputs,
 };
+pub use collect::{CollectError, collect_snapshots};
+pub use partition::{PartitionResult, PathEntry, partition_by_path};
 pub use plan::{
     DriverInfo, MergePlan, PlanArtifactError, PredictedConflict, ValidationInfo, WorkspaceChange,
     WorkspaceReport, compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
-pub use collect::{CollectError, collect_snapshots};
-pub use partition::{PartitionResult, PathEntry, partition_by_path};
 pub use prepare::{FrozenInputs, PrepareError, run_prepare_phase, run_prepare_phase_with_epoch};
+pub use quarantine::{
+    PromoteResult, QUARANTINE_NAME_PREFIX, QuarantineError, QuarantineState, abandon_quarantine,
+    create_quarantine_workspace, list_quarantines, merge_id_from_name, promote_quarantine,
+    quarantine_workspace_name, quarantine_workspace_path,
+};
+#[cfg(feature = "ast-merge")]
+pub use ast_merge::{AstLanguage, AstMergeConfig, AstMergeResult, try_ast_merge};
 pub use rename::{RenameAwareResult, RenameConflict, apply_rename_awareness};
 pub use resolve::{
     ConflictReason, ConflictRecord, ConflictSide, ResolveError, ResolveResult, parse_diff3_atoms,
@@ -52,12 +61,6 @@ pub use types::{ChangeKind, FileChange, PatchSet};
 pub use validate::{
     ValidateError, ValidateOutcome, run_validate_in_dir, run_validate_phase,
     run_validate_pipeline_in_dir, write_validation_artifact,
-};
-pub use quarantine::{
-    QuarantineError, QuarantineState, PromoteResult, QUARANTINE_NAME_PREFIX,
-    abandon_quarantine, create_quarantine_workspace, list_quarantines,
-    merge_id_from_name, promote_quarantine, quarantine_workspace_name,
-    quarantine_workspace_path,
 };
 
 #[cfg(test)]

@@ -144,6 +144,10 @@ pub struct MergeConfig {
     /// Custom merge drivers.
     #[serde(default)]
     pub drivers: Vec<MergeDriver>,
+
+    /// AST-aware merge settings (opt-in per language via tree-sitter).
+    #[serde(default)]
+    pub ast: AstConfig,
 }
 
 impl Default for MergeConfig {
@@ -152,8 +156,54 @@ impl Default for MergeConfig {
             validation: ValidationConfig::default(),
             // Empty means "use built-in defaults" via `effective_drivers()`.
             drivers: Vec::new(),
+            ast: AstConfig::default(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AstConfig — AST-aware merge settings
+// ---------------------------------------------------------------------------
+
+/// Configuration for AST-aware merge via tree-sitter (§6.2).
+///
+/// Controls which languages use AST-level merge as a fallback when diff3 fails.
+/// Disabled by default — must be explicitly enabled per language.
+///
+/// ```toml
+/// [merge.ast]
+/// languages = ["rust", "python", "typescript"]
+/// ```
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AstConfig {
+    /// Languages for which AST merge is enabled.
+    ///
+    /// Supported values: `"rust"`, `"python"`, `"typescript"`.
+    /// Empty (default) means AST merge is disabled for all languages.
+    #[serde(default)]
+    pub languages: Vec<AstConfigLanguage>,
+}
+
+impl Default for AstConfig {
+    fn default() -> Self {
+        Self {
+            languages: Vec::new(),
+        }
+    }
+}
+
+/// A language supported by the AST merge layer.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AstConfigLanguage {
+    /// Rust (.rs files).
+    Rust,
+    /// Python (.py files).
+    Python,
+    /// TypeScript (.ts, .tsx files).
+    #[serde(alias = "ts")]
+    TypeScript,
 }
 
 impl MergeConfig {
@@ -896,8 +946,7 @@ branch = "release"
 
     #[test]
     fn validation_config_has_any_validation_with_command() {
-        let cfg =
-            ManifoldConfig::parse("[merge.validation]\ncommand = \"cargo test\"").unwrap();
+        let cfg = ManifoldConfig::parse("[merge.validation]\ncommand = \"cargo test\"").unwrap();
         assert!(cfg.merge.validation.has_any_validation());
         assert!(cfg.merge.validation.has_commands());
     }
@@ -935,6 +984,75 @@ on_failure = "block"
     #[test]
     fn parse_rejects_invalid_language_preset() {
         let toml = "[merge.validation]\npreset = \"cobol\"";
+        let err = ManifoldConfig::parse(toml).unwrap_err();
+        assert!(
+            err.message.contains("unknown variant"),
+            "expected 'unknown variant' but got: {}",
+            err.message
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AST merge config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ast_config_defaults_to_disabled() {
+        let cfg = ManifoldConfig::default();
+        assert!(cfg.merge.ast.languages.is_empty(), "AST merge should be disabled by default");
+    }
+
+    #[test]
+    fn parse_ast_config_all_languages() {
+        let toml = r#"
+[merge.ast]
+languages = ["rust", "python", "typescript"]
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(cfg.merge.ast.languages.len(), 3);
+        assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Rust));
+        assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Python));
+        assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::TypeScript));
+    }
+
+    #[test]
+    fn parse_ast_config_single_language() {
+        let toml = r#"
+[merge.ast]
+languages = ["rust"]
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(cfg.merge.ast.languages.len(), 1);
+        assert_eq!(cfg.merge.ast.languages[0], AstConfigLanguage::Rust);
+    }
+
+    #[test]
+    fn parse_ast_config_ts_alias() {
+        let toml = r#"
+[merge.ast]
+languages = ["ts"]
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert_eq!(cfg.merge.ast.languages.len(), 1);
+        assert_eq!(cfg.merge.ast.languages[0], AstConfigLanguage::TypeScript);
+    }
+
+    #[test]
+    fn parse_ast_config_empty_languages() {
+        let toml = r#"
+[merge.ast]
+languages = []
+"#;
+        let cfg = ManifoldConfig::parse(toml).unwrap();
+        assert!(cfg.merge.ast.languages.is_empty());
+    }
+
+    #[test]
+    fn parse_ast_config_rejects_unknown_language() {
+        let toml = r#"
+[merge.ast]
+languages = ["cobol"]
+"#;
         let err = ManifoldConfig::parse(toml).unwrap_err();
         assert!(
             err.message.contains("unknown variant"),

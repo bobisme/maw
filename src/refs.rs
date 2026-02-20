@@ -445,26 +445,14 @@ mod tests {
 
     #[test]
     fn workspace_head_ref_format() {
-        assert_eq!(
-            workspace_head_ref("default"),
-            "refs/manifold/head/default"
-        );
-        assert_eq!(
-            workspace_head_ref("agent-1"),
-            "refs/manifold/head/agent-1"
-        );
+        assert_eq!(workspace_head_ref("default"), "refs/manifold/head/default");
+        assert_eq!(workspace_head_ref("agent-1"), "refs/manifold/head/agent-1");
     }
 
     #[test]
     fn workspace_state_ref_format() {
-        assert_eq!(
-            workspace_state_ref("default"),
-            "refs/manifold/ws/default"
-        );
-        assert_eq!(
-            workspace_state_ref("agent-1"),
-            "refs/manifold/ws/agent-1"
-        );
+        assert_eq!(workspace_state_ref("default"), "refs/manifold/ws/default");
+        assert_eq!(workspace_state_ref("agent-1"), "refs/manifold/ws/agent-1");
     }
 
     // -----------------------------------------------------------------------

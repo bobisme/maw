@@ -663,8 +663,14 @@ mod tests {
         assert_eq!(entries.len(), 2);
 
         // Find ws-a and ws-b entries.
-        let entry_a = entries.iter().find(|e| e.workspace_id.as_str() == "ws-a").unwrap();
-        let entry_b = entries.iter().find(|e| e.workspace_id.as_str() == "ws-b").unwrap();
+        let entry_a = entries
+            .iter()
+            .find(|e| e.workspace_id.as_str() == "ws-a")
+            .unwrap();
+        let entry_b = entries
+            .iter()
+            .find(|e| e.workspace_id.as_str() == "ws-b")
+            .unwrap();
 
         assert_eq!(entry_a.file_id, Some(fid_a));
         assert_eq!(entry_b.file_id, Some(fid_b));

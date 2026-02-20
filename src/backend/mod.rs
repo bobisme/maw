@@ -46,11 +46,7 @@ pub trait WorkspaceBackend {
     /// - The workspace directory exists and is ready for use
     /// - No workspace with the same name exists before the call
     /// - The workspace is isolated from all other workspaces
-    fn create(
-        &self,
-        name: &WorkspaceId,
-        epoch: &EpochId,
-    ) -> Result<WorkspaceInfo, Self::Error>;
+    fn create(&self, name: &WorkspaceId, epoch: &EpochId) -> Result<WorkspaceInfo, Self::Error>;
 
     /// Destroy a workspace.
     ///
@@ -247,11 +243,7 @@ mod tests {
 
     #[test]
     fn workspace_status_is_clean() {
-        let status = WorkspaceStatus::new(
-            EpochId::new(&"a".repeat(40)).unwrap(),
-            vec![],
-            false,
-        );
+        let status = WorkspaceStatus::new(EpochId::new(&"a".repeat(40)).unwrap(), vec![], false);
         assert!(status.is_clean());
         assert_eq!(status.dirty_count(), 0);
     }
@@ -271,11 +263,7 @@ mod tests {
 
     #[test]
     fn workspace_status_stale() {
-        let status = WorkspaceStatus::new(
-            EpochId::new(&"c".repeat(40)).unwrap(),
-            vec![],
-            true,
-        );
+        let status = WorkspaceStatus::new(EpochId::new(&"c".repeat(40)).unwrap(), vec![], true);
         assert!(status.is_stale);
         assert!(status.is_clean());
     }
@@ -333,3 +321,4 @@ mod tests {
         assert!(all.contains(&&PathBuf::from("deprecated.rs")));
     }
 }
+pub mod platform;

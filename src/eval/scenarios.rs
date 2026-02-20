@@ -688,15 +688,27 @@ mod tests {
         let original_len = names.len();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), original_len, "duplicate scenario names detected");
+        assert_eq!(
+            names.len(),
+            original_len,
+            "duplicate scenario names detected"
+        );
     }
 
     #[test]
     fn each_scenario_has_nonempty_fields() {
         for s in &all_scenarios() {
             assert!(!s.name.is_empty(), "{:?} has empty name", s.id);
-            assert!(!s.tests.is_empty(), "{:?} has empty tests description", s.id);
-            assert!(!s.task_prompt.is_empty(), "{:?} has empty task_prompt", s.id);
+            assert!(
+                !s.tests.is_empty(),
+                "{:?} has empty tests description",
+                s.id
+            );
+            assert!(
+                !s.task_prompt.is_empty(),
+                "{:?} has empty task_prompt",
+                s.id
+            );
             assert!(
                 !s.expected_outcomes.is_empty(),
                 "{:?} has no expected outcomes",

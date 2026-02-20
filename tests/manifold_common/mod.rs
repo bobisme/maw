@@ -120,11 +120,7 @@ impl TestRepo {
         // 5. Set refs/manifold/epoch/current → epoch₀
         git_ok(
             &root,
-            &[
-                "update-ref",
-                "refs/manifold/epoch/current",
-                &epoch0,
-            ],
+            &["update-ref", "refs/manifold/epoch/current", &epoch0],
         );
 
         // 6. Create ws/default/ worktree
@@ -417,8 +413,9 @@ impl TestRepo {
 
         let file_path = ws_path.join(rel_path);
         if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .unwrap_or_else(|e| panic!("failed to create dirs for {}: {e}", file_path.display()));
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!("failed to create dirs for {}: {e}", file_path.display())
+            });
         }
         std::fs::write(&file_path, content)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", file_path.display()));
@@ -560,10 +557,7 @@ impl TestRepo {
         // Keep refs/heads/main in sync with the epoch ref.
         // The merge COMMIT phase CAS uses: main (epoch_before) → candidate.
         // Without this, the CAS fails because main lags behind the epoch.
-        git_ok(
-            &self.root,
-            &["update-ref", "refs/heads/main", &new_oid],
-        );
+        git_ok(&self.root, &["update-ref", "refs/heads/main", &new_oid]);
 
         new_oid
     }
@@ -826,7 +820,12 @@ mod tests {
         repo.create_workspace("agent");
         repo.add_file("agent", "src/main.rs", "fn main() {}");
 
-        assert!(repo.workspace_path("agent").join("src").join("main.rs").is_file());
+        assert!(
+            repo.workspace_path("agent")
+                .join("src")
+                .join("main.rs")
+                .is_file()
+        );
     }
 
     #[test]
@@ -873,7 +872,10 @@ mod tests {
         repo.create_workspace("agent");
         repo.add_file("agent", "readme.md", "# Hello");
 
-        assert_eq!(repo.read_file("agent", "readme.md"), Some("# Hello".to_owned()));
+        assert_eq!(
+            repo.read_file("agent", "readme.md"),
+            Some("# Hello".to_owned())
+        );
         assert_eq!(repo.read_file("agent", "missing.txt"), None);
     }
 
@@ -997,7 +999,10 @@ mod tests {
 
         // Agent's HEAD should still be the old epoch
         let ws_head_after = repo.workspace_head("agent");
-        assert_eq!(ws_head_before, ws_head_after, "workspace HEAD should not change");
+        assert_eq!(
+            ws_head_before, ws_head_after,
+            "workspace HEAD should not change"
+        );
         assert_ne!(
             ws_head_after, new_epoch,
             "workspace should be stale (behind current epoch)"

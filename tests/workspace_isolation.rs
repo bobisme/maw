@@ -162,20 +162,16 @@ fn modify_file_in_workspace_a_original_in_workspace_b() {
     repo.modify_file("ws-mod-a", "config.toml", "[modified]\nversion = 2\n");
 
     // B should have original content.
-    let b_content = std::fs::read_to_string(
-        repo.workspace_path("ws-mod-b").join("config.toml"),
-    )
-    .unwrap();
+    let b_content =
+        std::fs::read_to_string(repo.workspace_path("ws-mod-b").join("config.toml")).unwrap();
     assert_eq!(
         b_content, "[original]\nversion = 1\n",
         "ws-mod-b must have original content"
     );
 
     // A should have modified content.
-    let a_content = std::fs::read_to_string(
-        repo.workspace_path("ws-mod-a").join("config.toml"),
-    )
-    .unwrap();
+    let a_content =
+        std::fs::read_to_string(repo.workspace_path("ws-mod-a").join("config.toml")).unwrap();
     assert_eq!(
         a_content, "[modified]\nversion = 2\n",
         "ws-mod-a should have modified content"
@@ -203,16 +199,18 @@ fn five_workspaces_concurrent_edits_no_cross_contamination() {
 
     // Each workspace creates a unique file AND modifies base.txt differently.
     for (i, name) in ws_names.iter().enumerate() {
-        repo.add_file(name, &format!("unique_{i}.txt"), &format!("content from {name}"));
+        repo.add_file(
+            name,
+            &format!("unique_{i}.txt"),
+            &format!("content from {name}"),
+        );
         repo.modify_file(name, "base.txt", &format!("modified by {name}\n"));
     }
 
     // Verify: each workspace has ONLY its own unique file
     for (i, name) in ws_names.iter().enumerate() {
         // Should have its own unique file.
-        let own_file = repo
-            .workspace_path(name)
-            .join(format!("unique_{i}.txt"));
+        let own_file = repo.workspace_path(name).join(format!("unique_{i}.txt"));
         assert!(
             own_file.exists(),
             "{name} should have its own unique_{i}.txt"
@@ -223,9 +221,7 @@ fn five_workspaces_concurrent_edits_no_cross_contamination() {
             if i == j {
                 continue;
             }
-            let other_file = repo
-                .workspace_path(name)
-                .join(format!("unique_{j}.txt"));
+            let other_file = repo.workspace_path(name).join(format!("unique_{j}.txt"));
             assert!(
                 !other_file.exists(),
                 "{name} should NOT have {other_name}'s unique_{j}.txt"
@@ -233,10 +229,8 @@ fn five_workspaces_concurrent_edits_no_cross_contamination() {
         }
 
         // base.txt should show THIS workspace's modification only.
-        let base_content = std::fs::read_to_string(
-            repo.workspace_path(name).join("base.txt"),
-        )
-        .unwrap();
+        let base_content =
+            std::fs::read_to_string(repo.workspace_path(name).join("base.txt")).unwrap();
         assert_eq!(
             base_content,
             format!("modified by {name}\n"),
@@ -245,10 +239,8 @@ fn five_workspaces_concurrent_edits_no_cross_contamination() {
     }
 
     // Default workspace should still have original base.txt.
-    let default_base = std::fs::read_to_string(
-        repo.workspace_path("default").join("base.txt"),
-    )
-    .unwrap();
+    let default_base =
+        std::fs::read_to_string(repo.workspace_path("default").join("base.txt")).unwrap();
     assert_eq!(
         default_base, "base content\n",
         "default workspace base.txt should be untouched"
@@ -316,7 +308,10 @@ fn destroying_workspace_does_not_affect_sibling_files() {
 
     // ws-alive should still have its file.
     let survivor = repo.workspace_path("ws-alive").join("survivor.txt");
-    assert!(survivor.exists(), "ws-alive's file should survive sibling destruction");
+    assert!(
+        survivor.exists(),
+        "ws-alive's file should survive sibling destruction"
+    );
     let content = std::fs::read_to_string(&survivor).unwrap();
     assert_eq!(content, "I persist");
 }
@@ -339,7 +334,10 @@ fn binary_file_isolation() {
 
     // B should not have it.
     let b_file = repo.workspace_path("ws-bin-b").join("data.bin");
-    assert!(!b_file.exists(), "Binary file in ws-bin-a should not appear in ws-bin-b");
+    assert!(
+        !b_file.exists(),
+        "Binary file in ws-bin-a should not appear in ws-bin-b"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +369,10 @@ fn concurrent_create_and_delete_across_workspaces() {
 
     // Deleter should NOT have new_feature.rs (unaffected by creator).
     assert!(
-        !repo.workspace_path("ws-deleter").join("new_feature.rs").exists(),
+        !repo
+            .workspace_path("ws-deleter")
+            .join("new_feature.rs")
+            .exists(),
         "ws-deleter should NOT have new_feature.rs"
     );
 

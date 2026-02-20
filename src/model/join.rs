@@ -345,8 +345,18 @@ mod tests {
         let result = join(&a, &b).unwrap();
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 2);
-        assert!(result.merged.patches.contains_key(&PathBuf::from("src/foo.rs")));
-        assert!(result.merged.patches.contains_key(&PathBuf::from("src/bar.rs")));
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("src/foo.rs"))
+        );
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("src/bar.rs"))
+        );
     }
 
     #[test]
@@ -480,7 +490,12 @@ mod tests {
         assert_eq!(result.conflicts[0].path, PathBuf::from("file.rs"));
         assert_eq!(result.conflicts[0].reason, ConflictReason::DivergentAdd);
         // Conflicted path should NOT be in merged.
-        assert!(!result.merged.patches.contains_key(&PathBuf::from("file.rs")));
+        assert!(
+            !result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("file.rs"))
+        );
     }
 
     #[test]
@@ -694,10 +709,30 @@ mod tests {
         let result = join(&a, &b).unwrap();
         // 3 paths merged (only_a, only_b, shared), 1 conflict
         assert_eq!(result.merged.len(), 3);
-        assert!(result.merged.patches.contains_key(&PathBuf::from("only_a.rs")));
-        assert!(result.merged.patches.contains_key(&PathBuf::from("only_b.rs")));
-        assert!(result.merged.patches.contains_key(&PathBuf::from("shared.rs")));
-        assert!(!result.merged.patches.contains_key(&PathBuf::from("conflict.rs")));
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("only_a.rs"))
+        );
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("only_b.rs"))
+        );
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("shared.rs"))
+        );
+        assert!(
+            !result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("conflict.rs"))
+        );
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].path, PathBuf::from("conflict.rs"));
     }
@@ -929,15 +964,14 @@ mod proptests {
 
     fn arb_patch_value() -> impl Strategy<Value = PatchValue> {
         prop_oneof![
-            (arb_git_oid(), arb_file_id()).prop_map(|(blob, file_id)| PatchValue::Add {
-                blob,
-                file_id
-            }),
             (arb_git_oid(), arb_file_id())
-                .prop_map(|(previous_blob, file_id)| PatchValue::Delete {
+                .prop_map(|(blob, file_id)| PatchValue::Add { blob, file_id }),
+            (arb_git_oid(), arb_file_id()).prop_map(|(previous_blob, file_id)| {
+                PatchValue::Delete {
                     previous_blob,
-                    file_id
-                }),
+                    file_id,
+                }
+            }),
             (arb_git_oid(), arb_git_oid(), arb_file_id()).prop_map(
                 |(base_blob, new_blob, file_id)| PatchValue::Modify {
                     base_blob,
@@ -964,12 +998,12 @@ mod proptests {
     fn arb_patchset() -> impl Strategy<Value = PatchSet> {
         // Fixed epoch for join compatibility.
         let epoch = EpochId::new(&"a".repeat(40)).unwrap();
-        prop::collection::btree_map(arb_path(), arb_patch_value(), 0..5).prop_map(
-            move |patches| PatchSet {
+        prop::collection::btree_map(arb_path(), arb_patch_value(), 0..5).prop_map(move |patches| {
+            PatchSet {
                 base_epoch: epoch.clone(),
                 patches,
-            },
-        )
+            }
+        })
     }
 
     proptest! {

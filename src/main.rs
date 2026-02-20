@@ -6,6 +6,7 @@ mod agents;
 mod backend;
 mod config;
 mod doctor;
+mod epoch_gc;
 mod error;
 mod exec;
 mod format;
@@ -13,7 +14,6 @@ mod init;
 mod merge;
 mod merge_cmd;
 mod merge_state;
-mod epoch_gc;
 mod model;
 mod push;
 mod refs;
@@ -223,7 +223,9 @@ fn main() {
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Init => init::run(),
         Commands::Upgrade => upgrade::run(),
-        Commands::Doctor { format, json } => doctor::run(format::OutputFormat::with_json_flag(format, json)),
+        Commands::Doctor { format, json } => {
+            doctor::run(format::OutputFormat::with_json_flag(format, json))
+        }
         Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),

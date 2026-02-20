@@ -1,9 +1,9 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use crate::workspace::{jj_cwd, repo_root, MawConfig};
+use crate::workspace::{MawConfig, jj_cwd, repo_root};
 
 #[derive(Args)]
 pub struct PushArgs {
@@ -168,7 +168,9 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         );
     }
 
-    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout).trim().to_string();
+    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout)
+        .trim()
+        .to_string();
 
     // Read the current branch position
     let branch_ref = format!("refs/heads/{branch}");
@@ -179,7 +181,9 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         .context("Failed to read branch ref")?;
 
     let branch_oid = if branch_output.status.success() {
-        String::from_utf8_lossy(&branch_output.stdout).trim().to_string()
+        String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string()
     } else {
         String::new()
     };
@@ -386,9 +390,7 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
         .output();
 
     let local_oid = match local {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return SyncStatus::NoLocal,
     };
 
@@ -399,9 +401,7 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
         .output();
 
     let remote_oid = match remote {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return SyncStatus::NoRemote,
     };
 
