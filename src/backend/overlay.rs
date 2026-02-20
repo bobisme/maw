@@ -175,10 +175,12 @@ impl OverlayBackend {
         if !is_linux() {
             return Err(OverlayBackendError::NotLinux);
         }
-        let strategy = MountStrategy::detect().ok_or_else(|| OverlayBackendError::NotSupported {
-            reason: "no fuse-overlayfs binary found and kernel user-namespace overlay unavailable"
-                .to_owned(),
-        })?;
+        let strategy =
+            MountStrategy::detect().ok_or_else(|| OverlayBackendError::NotSupported {
+                reason:
+                    "no fuse-overlayfs binary found and kernel user-namespace overlay unavailable"
+                        .to_owned(),
+            })?;
         Ok(Self { root, strategy })
     }
 
@@ -331,6 +333,21 @@ impl OverlayBackend {
             }
         }
         Ok(())
+    }
+
+    /// Best-effort cleanup for a partially-created workspace.
+    fn cleanup_partial_workspace(&self, name: &WorkspaceId) {
+        let _ = self.unmount_overlay(name);
+
+        let mount_point = self.mount_point(name);
+        if mount_point.exists() {
+            let _ = fs::remove_dir_all(&mount_point);
+        }
+
+        let cow_dir = self.root.join(".manifold").join("cow").join(name.as_str());
+        if cow_dir.exists() {
+            let _ = fs::remove_dir_all(&cow_dir);
+        }
     }
 
     // --- overlay mount operations ------------------------------------------
@@ -508,10 +525,7 @@ impl OverlayBackend {
     }
 
     /// Read the epoch OID from the workspace's epoch file.
-    fn read_workspace_epoch(
-        &self,
-        name: &WorkspaceId,
-    ) -> Result<EpochId, OverlayBackendError> {
+    fn read_workspace_epoch(&self, name: &WorkspaceId) -> Result<EpochId, OverlayBackendError> {
         let epoch_file = self.workspace_epoch_file(name);
         let content = fs::read_to_string(&epoch_file)?;
         let oid = content.trim();
@@ -535,7 +549,9 @@ impl WorkspaceBackend for OverlayBackend {
 
         // Idempotent: if already mounted, return info.
         if is_overlay_mounted(&mount_point) {
-            let stored_epoch = self.read_workspace_epoch(name).unwrap_or_else(|_| epoch.clone());
+            let stored_epoch = self
+                .read_workspace_epoch(name)
+                .unwrap_or_else(|_| epoch.clone());
             return Ok(WorkspaceInfo {
                 id: name.clone(),
                 path: mount_point,
@@ -552,13 +568,20 @@ impl WorkspaceBackend for OverlayBackend {
         // Record which epoch this workspace is anchored to.
         self.write_workspace_epoch(name, epoch)?;
 
-        // Increment epoch snapshot ref-count before ensuring it exists,
-        // so concurrent workers see it as referenced.
+        // Ensure the immutable epoch snapshot exists before mount.
         self.ensure_epoch_snapshot(epoch)?;
-        self.epoch_refcount_inc(epoch)?;
 
-        // Mount the overlay.
-        self.mount_overlay(name, epoch)?;
+        // Mount the overlay. If this fails, remove partial workspace state.
+        if let Err(err) = self.mount_overlay(name, epoch) {
+            self.cleanup_partial_workspace(name);
+            return Err(err);
+        }
+
+        // Count the mounted workspace as an epoch snapshot reference.
+        if let Err(err) = self.epoch_refcount_inc(epoch) {
+            self.cleanup_partial_workspace(name);
+            return Err(err);
+        }
 
         Ok(WorkspaceInfo {
             id: name.clone(),
@@ -583,11 +606,7 @@ impl WorkspaceBackend for OverlayBackend {
         }
 
         // Remove CoW directories (upper + work).
-        let cow_dir = self
-            .root
-            .join(".manifold")
-            .join("cow")
-            .join(name.as_str());
+        let cow_dir = self.root.join(".manifold").join("cow").join(name.as_str());
         if cow_dir.exists() {
             fs::remove_dir_all(&cow_dir)?;
         }
@@ -814,9 +833,7 @@ pub fn is_overlay_mounted(path: &Path) -> bool {
             None => continue,
         };
 
-        if (fstype == "overlay" || fstype == "fuse.fuse-overlayfs")
-            && mountpoint == path_str
-        {
+        if (fstype == "overlay" || fstype == "fuse.fuse-overlayfs") && mountpoint == path_str {
             return true;
         }
     }
@@ -894,10 +911,7 @@ fn is_whiteout_file(path: &Path) -> bool {
 /// - **Deleted**: path is a whiteout file in `upper` (deletion marker).
 ///
 /// All returned paths are relative to `upper` (== relative to the workspace root).
-fn diff_upper_vs_lower(
-    upper: &Path,
-    lower: &Path,
-) -> Result<SnapshotResult, OverlayBackendError> {
+fn diff_upper_vs_lower(upper: &Path, lower: &Path) -> Result<SnapshotResult, OverlayBackendError> {
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
@@ -1201,13 +1215,37 @@ mod tests {
         let root = dir.path().to_path_buf();
 
         // Init a small git repo with one commit.
-        Cmd::new("git").args(["init"]).current_dir(&root).output().unwrap();
-        Cmd::new("git").args(["config", "user.name", "Test"]).current_dir(&root).output().unwrap();
-        Cmd::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&root).output().unwrap();
-        Cmd::new("git").args(["config", "commit.gpgsign", "false"]).current_dir(&root).output().unwrap();
+        Cmd::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
         fs::write(root.join("hello.txt"), b"hello world").unwrap();
-        Cmd::new("git").args(["add", "hello.txt"]).current_dir(&root).output().unwrap();
-        Cmd::new("git").args(["commit", "-m", "init"]).current_dir(&root).output().unwrap();
+        Cmd::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
 
         let head = Cmd::new("git")
             .args(["rev-parse", "HEAD"])

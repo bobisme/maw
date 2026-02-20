@@ -199,7 +199,7 @@ crit reviews merge <review_id>
 
 jj describe -m "chore: bump version to X.Y.Z
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Co-Authored-By: <model-name> <model-email>"
 ```
 
 ### 4. Push to Remote
@@ -288,7 +288,7 @@ br create --title="..." --type=task --priority=2
 ## Conventions
 
 - **Commit messages**: Use conventional commits (`feat:`, `fix:`, `docs:`, etc.)
-- **Co-author**: Include `Co-Authored-By: Claude <noreply@anthropic.com>` in commits
+- **Co-author**: Include a model-specific `Co-Authored-By` trailer in commits (`Claude <noreply@anthropic.com>` for Claude models, `Codex <codex@openai.com>` for Codex/OpenAI models)
 - **Workspace names**: Lowercase alphanumeric with hyphens/underscores (`agent-1`, `feature-x`)
 - **Versioning**: Use semantic versioning. Tag releases with `v` prefix (`v0.1.0`). Update Cargo.toml version and README install command before tagging.
 - **Agent identity**: When announcing releases or responding on botbus, use `--agent maw-dev` and post to `#maw` channel.

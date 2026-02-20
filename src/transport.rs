@@ -50,11 +50,11 @@
 //! `pull_manifold_refs` on a second repo produces equivalent local state:
 //! the epoch ref and all head refs match, and the op log DAGs are isomorphic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use crate::model::types::{GitOid, WorkspaceId};
@@ -374,7 +374,10 @@ fn merge_epoch_ref(root: &Path, dry_run: bool) -> Result<RefMergeResult> {
         (None, Some(remote)) => {
             // No local epoch: set from remote.
             if dry_run {
-                println!("[dry-run] epoch: would fast-forward to {}", &remote.as_str()[..12]);
+                println!(
+                    "[dry-run] epoch: would fast-forward to {}",
+                    &remote.as_str()[..12]
+                );
             } else {
                 refs::write_ref(root, local_ref, &remote).context("Writing epoch from remote")?;
             }
@@ -483,7 +486,7 @@ fn merge_head_refs(root: &Path, dry_run: bool) -> Result<Vec<(String, RefMergeRe
             Some(ref local) if *local == remote_oid => RefMergeResult::UpToDate,
 
             Some(local) => {
-                let relation = git_ancestry_relation(root, &local, &remote_oid)?;
+                let relation = oplog_ancestry_relation(root, &local, &remote_oid)?;
                 match relation {
                     AncestryRelation::LocalAheadOrEqual => RefMergeResult::LocalAhead,
 
@@ -496,9 +499,8 @@ fn merge_head_refs(root: &Path, dry_run: bool) -> Result<Vec<(String, RefMergeRe
                                 &remote_oid.as_str()[..12]
                             );
                         } else {
-                            refs::write_ref(root, &local_ref, &remote_oid).with_context(
-                                || format!("Fast-forwarding head for {ws_name}"),
-                            )?;
+                            refs::write_ref(root, &local_ref, &remote_oid)
+                                .with_context(|| format!("Fast-forwarding head for {ws_name}"))?;
                         }
                         RefMergeResult::FastForward
                     }
@@ -516,7 +518,13 @@ fn merge_head_refs(root: &Path, dry_run: bool) -> Result<Vec<(String, RefMergeRe
                             let ws_id = WorkspaceId::new(ws_name).map_err(|e| {
                                 anyhow::anyhow!("Invalid workspace id {ws_name}: {e}")
                             })?;
-                            create_transport_merge_op(root, &ws_id, &local, &remote_oid, &local_ref)?;
+                            create_transport_merge_op(
+                                root,
+                                &ws_id,
+                                &local,
+                                &remote_oid,
+                                &local_ref,
+                            )?;
                         }
                         RefMergeResult::Merged
                     }
@@ -649,9 +657,9 @@ fn merge_ws_refs(root: &Path, dry_run: bool) -> Result<Vec<(String, RefMergeResu
                         if dry_run {
                             println!("[dry-run] ws/{ws_name}: would fast-forward");
                         } else {
-                            refs::write_ref(root, &local_ref, &remote_oid).with_context(
-                                || format!("Fast-forwarding ws state for {ws_name}"),
-                            )?;
+                            refs::write_ref(root, &local_ref, &remote_oid).with_context(|| {
+                                format!("Fast-forwarding ws state for {ws_name}")
+                            })?;
                         }
                         RefMergeResult::FastForward
                     }
@@ -710,9 +718,7 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
         return Err("workspace name is empty".to_string());
     }
     if name.contains('/') || name.contains('\\') {
-        return Err(format!(
-            "workspace name contains path separator: {name:?}"
-        ));
+        return Err(format!("workspace name contains path separator: {name:?}"));
     }
     if name.contains('\0') {
         return Err("workspace name contains null byte".to_string());
@@ -784,6 +790,52 @@ pub fn validate_remote_op_blob(root: &Path, oid: &GitOid) -> Result<(), String> 
 // Git ancestry helpers
 // ---------------------------------------------------------------------------
 
+/// Determine ancestry relation between two op-log heads.
+///
+/// Unlike Git commit refs, `refs/manifold/head/<ws>` point to operation blobs.
+/// We determine ancestry by walking `parent_ids` in the operation DAG.
+fn oplog_ancestry_relation(
+    root: &Path,
+    local: &GitOid,
+    remote: &GitOid,
+) -> Result<AncestryRelation> {
+    if oplog_is_ancestor(root, local, remote)? {
+        return Ok(AncestryRelation::RemoteAhead);
+    }
+    if oplog_is_ancestor(root, remote, local)? {
+        return Ok(AncestryRelation::LocalAheadOrEqual);
+    }
+    Ok(AncestryRelation::Diverged)
+}
+
+/// Returns true if `ancestor` is reachable from `descendant` by following
+/// operation `parent_ids`.
+fn oplog_is_ancestor(root: &Path, ancestor: &GitOid, descendant: &GitOid) -> Result<bool> {
+    let mut stack = vec![descendant.clone()];
+    let mut visited = HashSet::<GitOid>::new();
+
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+
+        if &current == ancestor {
+            return Ok(true);
+        }
+
+        let op = crate::oplog::read::read_operation(root, &current)
+            .with_context(|| format!("Reading op {} while checking ancestry", current.as_str()))?;
+
+        for parent in op.parent_ids {
+            if !visited.contains(&parent) {
+                stack.push(parent);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 /// Relationship between local and remote OIDs in the git DAG.
 #[derive(Debug, PartialEq, Eq)]
 enum AncestryRelation {
@@ -801,7 +853,12 @@ enum AncestryRelation {
 fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result<AncestryRelation> {
     // Check: is local an ancestor of remote? (i.e., remote is ahead or equal)
     let local_is_ancestor = Command::new("git")
-        .args(["merge-base", "--is-ancestor", local.as_str(), remote.as_str()])
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            local.as_str(),
+            remote.as_str(),
+        ])
         .current_dir(root)
         .status()
         .context("Failed to check git ancestry (local→remote)")?;
@@ -812,7 +869,12 @@ fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result
 
     // Check: is remote an ancestor of local? (i.e., local is ahead or equal)
     let remote_is_ancestor = Command::new("git")
-        .args(["merge-base", "--is-ancestor", remote.as_str(), local.as_str()])
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            remote.as_str(),
+            local.as_str(),
+        ])
         .current_dir(root)
         .status()
         .context("Failed to check git ancestry (remote→local)")?;
@@ -946,23 +1008,39 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
 
-        StdCommand::new("git").args(["init"]).current_dir(root).output().unwrap();
+        StdCommand::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         StdCommand::new("git")
             .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         // Need at least one commit for git merge-base to work.
         fs::write(root.join("README.md"), "# Test\n").unwrap();
-        StdCommand::new("git").args(["add", "README.md"]).current_dir(root).output().unwrap();
+        StdCommand::new("git")
+            .args(["add", "README.md"])
+            .current_dir(root)
+            .output()
+            .unwrap();
         StdCommand::new("git")
             .args(["commit", "-m", "initial"])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         dir
     }
@@ -972,13 +1050,19 @@ mod tests {
         fs::write(&file, content).unwrap();
         StdCommand::new("git")
             .args(["add", file.to_str().unwrap()])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         StdCommand::new("git")
             .args(["commit", "-m", content])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         let out = StdCommand::new("git")
             .args(["rev-parse", "HEAD"])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
     }
 
@@ -989,7 +1073,8 @@ mod tests {
             .current_dir(root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         child.stdin.as_mut().unwrap().write_all(content).unwrap();
         let out = child.wait_with_output().unwrap();
         GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
@@ -1139,16 +1224,93 @@ mod tests {
         // Create branch A
         StdCommand::new("git")
             .args(["checkout", "-b", "branch-a"])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         let c_a = make_commit(root, "branch-a-commit");
 
         // Go back to base and create branch B
         StdCommand::new("git")
             .args(["checkout", base.as_str()])
-            .current_dir(root).output().unwrap();
+            .current_dir(root)
+            .output()
+            .unwrap();
         let c_b = make_commit(root, "branch-b-commit");
 
         let rel = git_ancestry_relation(root, &c_a, &c_b).unwrap();
+        assert_eq!(rel, AncestryRelation::Diverged);
+    }
+
+    #[test]
+    fn oplog_ancestry_remote_ahead_linear_chain() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let ws_id = WorkspaceId::new("agent-1").unwrap();
+
+        let op1 = Operation {
+            parent_ids: vec![],
+            workspace_id: ws_id.clone(),
+            timestamp: "2026-02-19T10:00:00Z".to_string(),
+            payload: OpPayload::Create {
+                epoch: crate::model::types::EpochId::new(&"a".repeat(40)).unwrap(),
+            },
+        };
+        let oid1 = write_operation_blob(root, &op1).unwrap();
+
+        let op2 = Operation {
+            parent_ids: vec![oid1.clone()],
+            workspace_id: ws_id,
+            timestamp: "2026-02-19T10:05:00Z".to_string(),
+            payload: OpPayload::Describe {
+                message: "next".to_string(),
+            },
+        };
+        let oid2 = write_operation_blob(root, &op2).unwrap();
+
+        let rel = oplog_ancestry_relation(root, &oid1, &oid2).unwrap();
+        assert_eq!(rel, AncestryRelation::RemoteAhead);
+
+        let rel = oplog_ancestry_relation(root, &oid2, &oid1).unwrap();
+        assert_eq!(rel, AncestryRelation::LocalAheadOrEqual);
+    }
+
+    #[test]
+    fn oplog_ancestry_diverged() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let ws_id = WorkspaceId::new("agent-1").unwrap();
+
+        let base = Operation {
+            parent_ids: vec![],
+            workspace_id: ws_id.clone(),
+            timestamp: "2026-02-19T09:00:00Z".to_string(),
+            payload: OpPayload::Create {
+                epoch: crate::model::types::EpochId::new(&"a".repeat(40)).unwrap(),
+            },
+        };
+        let base_oid = write_operation_blob(root, &base).unwrap();
+
+        let left = Operation {
+            parent_ids: vec![base_oid.clone()],
+            workspace_id: ws_id.clone(),
+            timestamp: "2026-02-19T09:05:00Z".to_string(),
+            payload: OpPayload::Describe {
+                message: "left".to_string(),
+            },
+        };
+        let right = Operation {
+            parent_ids: vec![base_oid],
+            workspace_id: ws_id,
+            timestamp: "2026-02-19T09:06:00Z".to_string(),
+            payload: OpPayload::Describe {
+                message: "right".to_string(),
+            },
+        };
+
+        let left_oid = write_operation_blob(root, &left).unwrap();
+        let right_oid = write_operation_blob(root, &right).unwrap();
+
+        let rel = oplog_ancestry_relation(root, &left_oid, &right_oid).unwrap();
         assert_eq!(rel, AncestryRelation::Diverged);
     }
 
