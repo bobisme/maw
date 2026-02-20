@@ -520,12 +520,18 @@ impl TestRepo {
     // -----------------------------------------------------------------------
 
     /// Advance the epoch: commit changes from the default workspace and
-    /// update `refs/manifold/epoch/current`.
+    /// update `refs/manifold/epoch/current` AND `refs/heads/main`.
     ///
     /// This simulates a merged result being promoted to a new epoch:
     /// 1. Stages all changes in `ws/default/`
-    /// 2. Creates a commit
+    /// 2. Creates a commit (in detached HEAD mode)
     /// 3. Updates `refs/manifold/epoch/current` to the new commit
+    /// 4. Updates `refs/heads/main` to the new commit
+    ///
+    /// Both refs are kept in sync because the maw merge COMMIT phase uses a
+    /// CAS on `refs/heads/main` from `epoch_before` → `epoch_candidate`,
+    /// where `epoch_before` is the current epoch. If `main` drifts from the
+    /// epoch ref, the CAS fails and the merge cannot complete.
     ///
     /// Returns the new epoch OID.
     ///
@@ -537,7 +543,7 @@ impl TestRepo {
         // Stage all changes
         git_ok(&ws_default, &["add", "-A"]);
 
-        // Commit
+        // Commit (in detached HEAD — does not update any branch ref)
         git_ok(&ws_default, &["commit", "-m", message]);
 
         // Read the new commit OID
@@ -545,10 +551,18 @@ impl TestRepo {
             .trim()
             .to_owned();
 
-        // Update epoch ref
+        // Update epoch ref (Manifold's canonical epoch pointer)
         git_ok(
             &self.root,
             &["update-ref", "refs/manifold/epoch/current", &new_oid],
+        );
+
+        // Keep refs/heads/main in sync with the epoch ref.
+        // The merge COMMIT phase CAS uses: main (epoch_before) → candidate.
+        // Without this, the CAS fails because main lags behind the epoch.
+        git_ok(
+            &self.root,
+            &["update-ref", "refs/heads/main", &new_oid],
         );
 
         new_oid

@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.41.0
+
+- Feat: View checkpoints and log compaction — `src/oplog/checkpoint.rs` with `CheckpointData`/`CheckpointView` serialization, configurable checkpoint intervals, `materialize_from_checkpoint()` for fast replay from latest checkpoint, `compact()` to replace pre-checkpoint chain with synthetic root. 29 tests. (bd-28np.3)
+- Feat: ConflictAtoms in merge engine — ConflictRecord now carries `Vec<ConflictAtom>` with line-level conflict localization. `parse_diff3_atoms()` extracts ConflictAtoms from diff3 marker output. Workspace-labeled conflict sides. 8 tests. (bd-15yn.3)
+- Feat: Workspace isolation integration tests — 12 tests verifying edit/create/delete/status isolation, 5-workspace concurrent edits, directory isolation, sibling destruction safety, binary files, concurrent create+delete, 50-file bulk test. (bd-2hw9.3)
+- Feat: Eval 3-agent parallel disjoint files test + TestRepo::advance_epoch fix to keep refs/heads/main in sync with epoch ref. (bd-21sm.2)
+- Closed parent beads: bd-15yn (Conflict model, all 3 children), bd-28np (view materialization, all 3 children). Unblocks merge engine chain (bd-1mjz), conflict presentation (bd-20kb).
+
 ## v0.40.0
 
 - Feat: ConflictAtom localization types — replace placeholder with full `Region` enum (Lines, AstNode, WholeFile), `ConflictReason` enum (OverlappingLineEdits, SameAstNodeModified, NonCommutativeEdits, Custom), `AtomEdit` struct (workspace + region + content), and expanded `ConflictAtom` (base_region + edits + reason). Tagged JSON serde. 44 tests. (bd-15yn.2)

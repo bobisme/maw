@@ -927,3 +927,196 @@ fn add_add_identical_content_resolves_cleanly() {
         .expect("new.txt should exist");
     assert_eq!(candidate_content, content);
 }
+
+// ==========================================================================
+// Eval: multi-agent parallel edit + merge (bd-21sm.2)
+//
+// 3 agents work in parallel on different files, then merge.
+// This validates the N-way merge path through the full maw CLI:
+//   1. maw ws create agent-1, agent-2, agent-3
+//   2. agent-1 creates src/auth.rs
+//   3. agent-2 creates src/api.rs
+//   4. agent-3 creates src/db.rs
+//   5. maw ws merge agent-1 agent-2 agent-3 --destroy
+//   6. All 3 files present in ws/default/
+//   7. All 3 workspaces destroyed
+// ==========================================================================
+
+#[test]
+fn eval_three_agent_parallel_disjoint_files() {
+    let repo = TestRepo::new();
+
+    // Seed a baseline project (matches the bead preconditions)
+    repo.seed_files(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"agent-eval\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+        ),
+        ("src/main.rs", "fn main() {}\n"),
+    ]);
+
+    // Step 1: Create 3 workspaces via maw CLI
+    let out1 = repo.maw_ok(&["ws", "create", "agent-1"]);
+    assert!(
+        out1.contains("agent-1"),
+        "agent-1 workspace should be created: {out1}"
+    );
+
+    let out2 = repo.maw_ok(&["ws", "create", "agent-2"]);
+    assert!(
+        out2.contains("agent-2"),
+        "agent-2 workspace should be created: {out2}"
+    );
+
+    let out3 = repo.maw_ok(&["ws", "create", "agent-3"]);
+    assert!(
+        out3.contains("agent-3"),
+        "agent-3 workspace should be created: {out3}"
+    );
+
+    // Verify list shows all workspaces before merge
+    let ws_list_before = repo.maw_ok(&["ws", "list"]);
+    assert!(ws_list_before.contains("agent-1"), "agent-1 should be listed");
+    assert!(ws_list_before.contains("agent-2"), "agent-2 should be listed");
+    assert!(ws_list_before.contains("agent-3"), "agent-3 should be listed");
+
+    // Step 2-4: Each agent creates a different file (non-overlapping edits)
+    repo.add_file(
+        "agent-1",
+        "src/auth.rs",
+        concat!(
+            "pub fn authenticate(user: &str) -> bool {\n",
+            "    user == \"admin\" || user == \"root\"\n",
+            "}\n",
+            "\n",
+            "pub fn is_admin(user: &str) -> bool {\n",
+            "    user == \"admin\"\n",
+            "}\n",
+        ),
+    );
+
+    repo.add_file(
+        "agent-2",
+        "src/api.rs",
+        concat!(
+            "pub fn handle_request(path: &str) -> String {\n",
+            "    format!(\"OK: {path}\")\n",
+            "}\n",
+            "\n",
+            "pub fn handle_error(code: u16) -> String {\n",
+            "    format!(\"Error: {code}\")\n",
+            "}\n",
+        ),
+    );
+
+    repo.add_file(
+        "agent-3",
+        "src/db.rs",
+        concat!(
+            "pub fn connect(url: &str) -> Result<(), String> {\n",
+            "    if url.is_empty() {\n",
+            "        Err(\"empty URL\".to_owned())\n",
+            "    } else {\n",
+            "        Ok(())\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    // Verify workspace isolation: each agent sees only its own changes
+    assert!(
+        !repo.file_exists("agent-1", "src/api.rs"),
+        "agent-1 should not see agent-2's api.rs"
+    );
+    assert!(
+        !repo.file_exists("agent-1", "src/db.rs"),
+        "agent-1 should not see agent-3's db.rs"
+    );
+    assert!(
+        !repo.file_exists("agent-2", "src/auth.rs"),
+        "agent-2 should not see agent-1's auth.rs"
+    );
+    assert!(
+        !repo.file_exists("agent-3", "src/auth.rs"),
+        "agent-3 should not see agent-1's auth.rs"
+    );
+
+    // Step 5: Merge all 3 workspaces with --destroy via maw CLI
+    let merge_out = repo.maw_ok(&["ws", "merge", "agent-1", "agent-2", "agent-3", "--destroy"]);
+
+    // Merge should report success
+    assert!(
+        merge_out.contains("Merged") || merge_out.contains("merge") || merge_out.contains("adopt"),
+        "merge output should confirm success: {merge_out}"
+    );
+
+    // Step 6: Verify all 3 files exist in ws/default/
+    assert!(
+        repo.file_exists("default", "src/auth.rs"),
+        "src/auth.rs should exist in ws/default/ after merge"
+    );
+    assert!(
+        repo.file_exists("default", "src/api.rs"),
+        "src/api.rs should exist in ws/default/ after merge"
+    );
+    assert!(
+        repo.file_exists("default", "src/db.rs"),
+        "src/db.rs should exist in ws/default/ after merge"
+    );
+
+    // Verify file contents are correct
+    let auth_content = repo
+        .read_file("default", "src/auth.rs")
+        .expect("auth.rs should be readable");
+    assert!(
+        auth_content.contains("is_admin"),
+        "auth.rs should contain is_admin function: {auth_content}"
+    );
+
+    let api_content = repo
+        .read_file("default", "src/api.rs")
+        .expect("api.rs should be readable");
+    assert!(
+        api_content.contains("handle_error"),
+        "api.rs should contain handle_error function: {api_content}"
+    );
+
+    let db_content = repo
+        .read_file("default", "src/db.rs")
+        .expect("db.rs should be readable");
+    assert!(
+        db_content.contains("connect"),
+        "db.rs should contain connect function: {db_content}"
+    );
+
+    // Also verify baseline files still exist (no regressions)
+    assert!(
+        repo.file_exists("default", "Cargo.toml"),
+        "Cargo.toml should still exist after merge"
+    );
+    assert!(
+        repo.file_exists("default", "src/main.rs"),
+        "src/main.rs should still exist after merge"
+    );
+
+    // Step 7: Verify all 3 workspaces are destroyed
+    let ws_list_after = repo.maw_ok(&["ws", "list"]);
+    assert!(
+        !ws_list_after.contains("agent-1"),
+        "agent-1 should be destroyed: {ws_list_after}"
+    );
+    assert!(
+        !ws_list_after.contains("agent-2"),
+        "agent-2 should be destroyed: {ws_list_after}"
+    );
+    assert!(
+        !ws_list_after.contains("agent-3"),
+        "agent-3 should be destroyed: {ws_list_after}"
+    );
+
+    // Default workspace should still exist
+    assert!(
+        ws_list_after.contains("default"),
+        "default workspace should remain: {ws_list_after}"
+    );
+}

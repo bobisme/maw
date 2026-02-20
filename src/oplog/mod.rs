@@ -11,7 +11,9 @@
 //! - [`write`] — write operations as git blobs and advance head refs
 //! - [`read`] — walk the causal chain from head backwards
 //! - [`view`] — per-workspace view materialization from op log replay
+//! - [`checkpoint`] — view checkpoints and log compaction
 
+pub mod checkpoint;
 pub mod global_view;
 pub mod read;
 pub mod types;
