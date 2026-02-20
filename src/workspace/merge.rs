@@ -9,21 +9,349 @@ use serde::Serialize;
 use crate::backend::WorkspaceBackend;
 use crate::config::ManifoldConfig;
 use crate::format::OutputFormat;
-use crate::merge::build_phase::{BuildPhaseOutput, run_build_phase};
+use crate::merge::build_phase::run_build_phase;
 use crate::merge::commit::{CommitRecovery, CommitResult, run_commit_phase, recover_partial_commit};
 use crate::merge::prepare::run_prepare_phase;
-use crate::merge::resolve::ConflictRecord;
+use crate::merge::resolve::{ConflictReason, ConflictRecord};
+use crate::model::conflict::Region;
 use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
 use crate::merge_state::{
     MergePhase, MergeStateFile, run_cleanup_phase,
 };
+use crate::model::conflict::ConflictAtom;
 use crate::model::types::WorkspaceId;
 
 use super::{get_backend, repo_root, MawConfig, DEFAULT_WORKSPACE};
 
 // ---------------------------------------------------------------------------
+// JSON output types for agent-friendly conflict presentation
+// ---------------------------------------------------------------------------
+
+/// One side of a conflict — which workspace contributed what content.
+///
+/// Agents use this to understand who made what change and what the content
+/// looks like before deciding on a resolution strategy.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictSideJson {
+    /// Workspace that produced this side.
+    pub workspace: String,
+    /// Change kind: "added", "modified", or "deleted".
+    pub change: String,
+    /// File content from this workspace as a UTF-8 string.
+    ///
+    /// `None` for deletions or binary files. Check `is_binary` to
+    /// distinguish between a deletion and a binary file.
+    pub content: Option<String>,
+    /// `true` if the content could not be decoded as UTF-8 (binary file).
+    pub is_binary: bool,
+}
+
+/// Structured conflict information for one file — agent-parseable.
+///
+/// Each field gives an agent the information needed to understand and resolve
+/// the conflict without prior context. The `suggested_resolution` field
+/// provides a plain-language description of the recommended approach.
+///
+/// # Example JSON
+///
+/// ```json
+/// {
+///   "type": "content",
+///   "path": "src/main.rs",
+///   "reason": "content",
+///   "reason_description": "overlapping edits (diff3 conflict)",
+///   "workspaces": ["alice", "bob"],
+///   "base_content": "original content...",
+///   "base_is_binary": false,
+///   "sides": [
+///     { "workspace": "alice", "change": "modified", "content": "...", "is_binary": false },
+///     { "workspace": "bob",   "change": "modified", "content": "...", "is_binary": false }
+///   ],
+///   "atoms": [
+///     { "base_region": {"kind": "lines", "start": 10, "end": 20}, "edits": [...], "reason": {...} }
+///   ],
+///   "resolution_strategies": ["edit_file_manually", "keep_one_side", "combine_changes"],
+///   "suggested_resolution": "Edit the file to resolve overlapping changes from each workspace"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictJson {
+    /// Conflict type tag: "content", "add_add", "modify_delete", or "missing_base".
+    #[serde(rename = "type")]
+    pub conflict_type: String,
+
+    /// Path to the conflicted file (relative to repo root).
+    pub path: String,
+
+    /// Conflict reason variant name (snake_case).
+    ///
+    /// One of: "content", "add_add", "modify_delete", "missing_base", "missing_content".
+    pub reason: String,
+
+    /// Human-readable description of why this conflict occurred.
+    pub reason_description: String,
+
+    /// All workspace names involved in this conflict.
+    pub workspaces: Vec<String>,
+
+    /// The common ancestor (base) content as a UTF-8 string.
+    ///
+    /// `None` when there is no common base (add/add conflicts) or when the
+    /// base content is binary. Check `base_is_binary` to distinguish.
+    pub base_content: Option<String>,
+
+    /// `true` if the base content is binary (not representable as UTF-8).
+    pub base_is_binary: bool,
+
+    /// Each workspace's contribution to the conflict.
+    pub sides: Vec<ConflictSideJson>,
+
+    /// Localized conflict regions within the file.
+    ///
+    /// Non-empty for content conflicts where region-level analysis was
+    /// possible. Each atom identifies the exact region and the divergent edits.
+    /// Empty for add/add and modify/delete conflicts.
+    pub atoms: Vec<ConflictAtom>,
+
+    /// Suggested resolution strategies for this conflict type.
+    ///
+    /// Ordered from most to least recommended. Agents should try the first
+    /// strategy unless they have specific context suggesting another.
+    pub resolution_strategies: Vec<String>,
+
+    /// Plain-language description of the recommended resolution approach.
+    pub suggested_resolution: String,
+}
+
+/// JSON output when `maw ws merge` succeeds.
+#[derive(Debug, Serialize)]
+pub struct MergeSuccessOutput {
+    /// Always "success".
+    pub status: String,
+    /// Workspaces that were merged.
+    pub workspaces: Vec<String>,
+    /// Branch that was updated.
+    pub branch: String,
+    /// New epoch OID (git commit hash) after the merge.
+    pub epoch: String,
+    /// Number of unique (non-conflicting) changes applied.
+    pub unique_count: usize,
+    /// Number of shared paths that were resolved.
+    pub shared_count: usize,
+    /// Number of shared paths that were auto-resolved.
+    pub resolved_count: usize,
+    /// Always 0 for a successful merge.
+    pub conflict_count: usize,
+    /// Always empty for a successful merge.
+    pub conflicts: Vec<ConflictJson>,
+    /// Human-readable summary.
+    pub message: String,
+    /// What to do next.
+    pub next: String,
+}
+
+/// JSON output when `maw ws merge` is blocked by conflicts.
+#[derive(Debug, Serialize)]
+pub struct MergeConflictOutput {
+    /// Always "conflict".
+    pub status: String,
+    /// Workspaces involved in the failed merge.
+    pub workspaces: Vec<String>,
+    /// Number of conflicts found.
+    pub conflict_count: usize,
+    /// Structured conflict details — one entry per conflicted file.
+    pub conflicts: Vec<ConflictJson>,
+    /// Human-readable error message.
+    pub message: String,
+    /// Exact command to retry once conflicts are resolved.
+    pub to_fix: String,
+}
+
+/// JSON output for `maw ws conflicts <workspaces>`.
+#[derive(Debug, Serialize)]
+pub struct ConflictsOutput {
+    /// "conflict" if conflicts found, "clean" if no conflicts.
+    pub status: String,
+    /// Workspaces checked.
+    pub workspaces: Vec<String>,
+    /// `true` if any conflicts were found.
+    pub has_conflicts: bool,
+    /// Number of conflicting files found.
+    pub conflict_count: usize,
+    /// Structured conflict details — one entry per conflicted file.
+    ///
+    /// Empty when `has_conflicts` is false.
+    pub conflicts: Vec<ConflictJson>,
+    /// Human-readable summary.
+    pub message: String,
+    /// What to do next (only meaningful when `has_conflicts` is true).
+    pub to_fix: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// ConflictRecord → ConflictJson conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a `ConflictRecord` from the merge engine into a `ConflictJson`
+/// suitable for structured JSON output.
+///
+/// This bridges the internal merge engine representation to the agent-facing
+/// JSON format defined in §6.4 of the design doc.
+pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
+    // Map reason to type tag and description
+    let (conflict_type, reason_key, resolution_strategies, suggested_resolution) =
+        match &record.reason {
+            ConflictReason::AddAddDifferent => (
+                "add_add",
+                "add_add",
+                vec![
+                    "keep_one_side".to_string(),
+                    "merge_content_manually".to_string(),
+                ],
+                "Review both versions and choose one, or manually combine them into the file. \
+                 Both workspaces independently created this file — pick the canonical version \
+                 or merge both contributions."
+                    .to_string(),
+            ),
+            ConflictReason::ModifyDelete => (
+                "modify_delete",
+                "modify_delete",
+                vec![
+                    "keep_modified".to_string(),
+                    "accept_deletion".to_string(),
+                ],
+                "Decide whether to keep the modified version or accept the deletion. \
+                 One workspace modified this file while another deleted it — \
+                 choose which intent should win."
+                    .to_string(),
+            ),
+            ConflictReason::Diff3Conflict => (
+                "content",
+                "content",
+                vec![
+                    "edit_file_manually".to_string(),
+                    "keep_one_side".to_string(),
+                    "combine_changes".to_string(),
+                ],
+                "Edit the file to resolve overlapping changes from each workspace. \
+                 The `atoms` field identifies the exact lines/regions that conflict — \
+                 review each atom and decide how to combine the edits."
+                    .to_string(),
+            ),
+            ConflictReason::MissingBase => (
+                "content",
+                "missing_base",
+                vec!["manual_resolution".to_string(), "keep_one_side".to_string()],
+                "Base content is unavailable — inspect each workspace's version and \
+                 manually combine them into the desired result."
+                    .to_string(),
+            ),
+            ConflictReason::MissingContent => (
+                "content",
+                "missing_content",
+                vec!["manual_resolution".to_string()],
+                "File content is missing from one or more sides — inspect each \
+                 workspace's version and manually produce the correct result."
+                    .to_string(),
+            ),
+        };
+
+    // Extract workspace names from sides
+    let workspaces: Vec<String> = record
+        .sides
+        .iter()
+        .map(|s| s.workspace_id.as_str().to_string())
+        .collect();
+
+    // Convert sides to JSON-friendly form
+    let sides: Vec<ConflictSideJson> = record
+        .sides
+        .iter()
+        .map(|s| {
+            let (content, is_binary) = match &s.content {
+                Some(bytes) => match std::str::from_utf8(bytes) {
+                    Ok(text) => (Some(text.to_string()), false),
+                    Err(_) => (None, true),
+                },
+                None => (None, false),
+            };
+            ConflictSideJson {
+                workspace: s.workspace_id.as_str().to_string(),
+                change: s.kind.to_string(),
+                content,
+                is_binary,
+            }
+        })
+        .collect();
+
+    // Convert base content
+    let (base_content, base_is_binary) = match &record.base {
+        Some(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => (Some(text.to_string()), false),
+            Err(_) => (None, true),
+        },
+        None => (None, false),
+    };
+
+    ConflictJson {
+        conflict_type: conflict_type.to_string(),
+        path: record.path.display().to_string(),
+        reason: reason_key.to_string(),
+        reason_description: record.reason.to_string(),
+        workspaces,
+        base_content,
+        base_is_binary,
+        sides,
+        atoms: record.atoms.clone(),
+        resolution_strategies,
+        suggested_resolution,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Conflict reporting
 // ---------------------------------------------------------------------------
+
+/// Convert a [`ConflictRecord`] from the merge engine into a [`ConflictInfo`]
+/// suitable for JSON output in [`CheckResult`].
+///
+/// Extracts:
+/// - `path`: the conflicting file path.
+/// - `reason`: human-readable conflict classification.
+/// - `sides`: sorted list of workspace IDs that contributed conflicting edits.
+/// - `line_start`/`line_end`: line range from the first diff3 atom, if available.
+fn conflict_record_to_info(record: &ConflictRecord) -> ConflictInfo {
+    let path = record.path.display().to_string();
+    let reason = format!("{}", record.reason);
+
+    let mut sides: Vec<String> = record
+        .sides
+        .iter()
+        .map(|s| s.workspace_id.as_str().to_owned())
+        .collect();
+    sides.sort();
+
+    // Extract line range from the first ConflictAtom if the base_region is Lines.
+    let (line_start, line_end) = record
+        .atoms
+        .first()
+        .and_then(|atom| {
+            if let Region::Lines { start, end } = atom.base_region {
+                Some((Some(start), Some(end)))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((None, None));
+
+    ConflictInfo {
+        path,
+        reason,
+        sides,
+        line_start,
+        line_end,
+    }
+}
 
 /// Print detailed conflict information from the merge engine's conflict records.
 fn print_conflict_report(
@@ -110,11 +438,32 @@ fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: b
 // Merge check (pre-flight)
 // ---------------------------------------------------------------------------
 
+/// Structured information about one conflict detected during a merge check.
+///
+/// Included in [`CheckResult::conflicts`] for JSON output. Each record
+/// identifies the conflicting file, the reason, and the workspace sides
+/// that produced incompatible edits. When diff3 atom data is available,
+/// `line_start` and `line_end` narrow the conflict to a line range.
+#[derive(Debug, Serialize)]
+pub struct ConflictInfo {
+    /// Path of the conflicting file, relative to the repo root.
+    pub path: String,
+    /// Human-readable conflict reason (e.g. "overlapping edits (diff3 conflict)").
+    pub reason: String,
+    /// Workspace IDs that contributed conflicting edits, sorted alphabetically.
+    pub sides: Vec<String>,
+    /// First line of the conflict region (1-indexed, inclusive), if known.
+    pub line_start: Option<u32>,
+    /// One past the last line of the conflict region (exclusive), if known.
+    pub line_end: Option<u32>,
+}
+
 /// Result of a merge check — structured for JSON output.
 #[derive(Debug, Serialize)]
 pub struct CheckResult {
     pub ready: bool,
-    pub conflicts: Vec<String>,
+    /// Structured conflict records. One entry per conflicting path.
+    pub conflicts: Vec<ConflictInfo>,
     pub stale: bool,
     pub workspace: CheckWorkspaceInfo,
     pub description: String,
@@ -207,10 +556,10 @@ pub fn check_merge(
 
             match build_result {
                 Ok(output) => {
-                    let conflicts: Vec<String> = output
+                    let conflicts: Vec<ConflictInfo> = output
                         .conflicts
                         .iter()
-                        .map(|c| format!("{}: {}", c.path.display(), c.reason))
+                        .map(|c| conflict_record_to_info(c))
                         .collect();
                     let ready = conflicts.is_empty();
                     let result = CheckResult {
@@ -225,7 +574,13 @@ pub fn check_merge(
                 Err(e) => {
                     let result = CheckResult {
                         ready: false,
-                        conflicts: vec![format!("build failed: {e}")],
+                        conflicts: vec![ConflictInfo {
+                            path: String::new(),
+                            reason: format!("build failed: {e}"),
+                            sides: Vec::new(),
+                            line_start: None,
+                            line_end: None,
+                        }],
                         stale: false,
                         workspace: ws_info,
                         description: String::new(),
@@ -237,7 +592,13 @@ pub fn check_merge(
         Err(e) => {
             let result = CheckResult {
                 ready: false,
-                conflicts: vec![format!("prepare failed: {e}")],
+                conflicts: vec![ConflictInfo {
+                    path: String::new(),
+                    reason: format!("prepare failed: {e}"),
+                    sides: Vec::new(),
+                    line_start: None,
+                    line_end: None,
+                }],
                 stale: false,
                 workspace: ws_info,
                 description: String::new(),
@@ -267,8 +628,21 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                 println!("[BLOCKED] Merge check failed");
             } else {
                 println!("[BLOCKED] Merge would produce {} conflict(s):", result.conflicts.len());
-                for file in &result.conflicts {
-                    println!("  C {file}");
+                for c in &result.conflicts {
+                    if c.path.is_empty() {
+                        println!("  E {}", c.reason);
+                    } else {
+                        let sides = if c.sides.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", c.sides.join(", "))
+                        };
+                        let loc = match (c.line_start, c.line_end) {
+                            (Some(s), Some(e)) => format!(" lines {s}..{e}"),
+                            _ => String::new(),
+                        };
+                        println!("  C {}{loc}{sides}: {}", c.path, c.reason);
+                    }
                 }
             }
         }
@@ -279,6 +653,188 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
     } else {
         bail!("merge check: not ready")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Conflict inspection (maw ws conflicts)
+// ---------------------------------------------------------------------------
+
+/// Show detailed conflict information for the given workspaces.
+///
+/// Runs PREPARE + BUILD to detect conflicts and outputs structured data.
+/// Unlike `check_merge`, this always shows rich conflict details (not just
+/// file names) and targets JSON output for agents.
+///
+/// Text output lists each conflict with its reason and per-workspace sides.
+/// JSON output is a [`ConflictsOutput`] value — fully parseable by agents.
+pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()> {
+    if workspaces.is_empty() {
+        bail!("No workspaces specified");
+    }
+
+    let root = repo_root()?;
+    let maw_config = MawConfig::load(&root)?;
+    let default_ws = maw_config.default_workspace();
+    let backend = get_backend()?;
+
+    if workspaces.iter().any(|ws| ws == default_ws) {
+        bail!(
+            "Cannot inspect conflicts for the default workspace — \
+             specify source workspace names instead."
+        );
+    }
+
+    // Run PREPARE + BUILD in a temp dir to detect conflicts without committing
+    let manifold_dir = root.join(".manifold");
+    let check_dir = manifold_dir.join("conflicts-tmp");
+    let _ = std::fs::remove_dir_all(&check_dir);
+    std::fs::create_dir_all(&check_dir)
+        .context("Failed to create temp dir for conflict check")?;
+
+    let sources: Vec<WorkspaceId> = workspaces
+        .iter()
+        .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("{e}")))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut workspace_dirs = BTreeMap::new();
+    for ws_id in &sources {
+        workspace_dirs.insert(ws_id.clone(), backend.workspace_path(ws_id));
+    }
+
+    // PREPARE
+    let prepare_result = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
+    let _ = std::fs::remove_dir_all(&check_dir);
+
+    let build_output = match prepare_result {
+        Err(e) => {
+            // Output the error in the requested format
+            let msg = format!("prepare phase failed: {e}");
+            if format == OutputFormat::Json {
+                let out = ConflictsOutput {
+                    status: "error".to_string(),
+                    workspaces: workspaces.to_vec(),
+                    has_conflicts: false,
+                    conflict_count: 0,
+                    conflicts: vec![],
+                    message: msg.clone(),
+                    to_fix: None,
+                };
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                eprintln!("Error: {msg}");
+            }
+            bail!("{msg}");
+        }
+        Ok(_frozen) => {
+            // Re-run PREPARE + BUILD
+            std::fs::create_dir_all(&check_dir)
+                .context("Failed to create temp dir for build phase")?;
+            let _ = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
+            let result = run_build_phase(&root, &check_dir, &backend);
+            let _ = std::fs::remove_dir_all(&check_dir);
+            match result {
+                Ok(out) => out,
+                Err(e) => {
+                    let msg = format!("build phase failed: {e}");
+                    if format == OutputFormat::Json {
+                        let out = ConflictsOutput {
+                            status: "error".to_string(),
+                            workspaces: workspaces.to_vec(),
+                            has_conflicts: false,
+                            conflict_count: 0,
+                            conflicts: vec![],
+                            message: msg.clone(),
+                            to_fix: None,
+                        };
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    } else {
+                        eprintln!("Error: {msg}");
+                    }
+                    bail!("{msg}");
+                }
+            }
+        }
+    };
+
+    let conflict_jsons: Vec<ConflictJson> = build_output
+        .conflicts
+        .iter()
+        .map(conflict_record_to_json)
+        .collect();
+
+    let has_conflicts = !conflict_jsons.is_empty();
+    let to_fix = if has_conflicts {
+        Some(format!("maw ws merge {}", workspaces.join(" ")))
+    } else {
+        None
+    };
+
+    if format == OutputFormat::Json {
+        let status = if has_conflicts { "conflict" } else { "clean" }.to_string();
+        let message = if has_conflicts {
+            format!(
+                "{} conflict(s) found in {} workspace(s). Resolve them before merging.",
+                conflict_jsons.len(),
+                workspaces.len()
+            )
+        } else {
+            format!(
+                "No conflicts found. {} workspace(s) can be merged cleanly.",
+                workspaces.len()
+            )
+        };
+        let out = ConflictsOutput {
+            status,
+            workspaces: workspaces.to_vec(),
+            has_conflicts,
+            conflict_count: conflict_jsons.len(),
+            conflicts: conflict_jsons,
+            message,
+            to_fix,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        // Text / pretty output
+        if has_conflicts {
+            println!(
+                "{} conflict(s) found across {} workspace(s):",
+                conflict_jsons.len(),
+                workspaces.len()
+            );
+            println!();
+            for (i, c) in conflict_jsons.iter().enumerate() {
+                println!(
+                    "  [{}/{}] {} ({}: {})",
+                    i + 1,
+                    conflict_jsons.len(),
+                    c.path,
+                    c.reason,
+                    c.reason_description
+                );
+                println!("    Workspaces: {}", c.workspaces.join(", "));
+                if !c.atoms.is_empty() {
+                    println!("    Conflict regions ({} atom(s)):", c.atoms.len());
+                    for atom in &c.atoms {
+                        println!("      {}", atom.summary());
+                    }
+                }
+                println!("    Resolution: {}", c.suggested_resolution);
+                println!();
+            }
+            println!("To merge: maw ws merge {}", workspaces.join(" "));
+            println!("For JSON: maw ws conflicts {} --format json", workspaces.join(" "));
+        } else {
+            println!("No conflicts found.");
+            println!(
+                "{} workspace(s) can be merged cleanly: {}",
+                workspaces.len(),
+                workspaces.join(", ")
+            );
+            println!("To merge: maw ws merge {}", workspaces.join(" "));
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +965,9 @@ pub struct MergeOptions<'a> {
     pub message: Option<&'a str>,
     /// Preview the merge without creating any commits.
     pub dry_run: bool,
+    /// Output format. `OutputFormat::Json` emits structured JSON for the
+    /// conflict report and success summary.
+    pub format: OutputFormat,
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +986,7 @@ pub fn merge(
         confirm,
         message,
         dry_run,
+        format,
     } = *opts;
     let ws_to_merge = workspaces.to_vec();
 
@@ -535,20 +1095,42 @@ pub fn merge(
 
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
-        println!(
-            "  {} unresolved conflict(s)",
-            build_output.conflicts.len()
-        );
-        print_conflict_report(&build_output.conflicts, &default_ws_path, default_ws);
-
         // Abort the merge — conflicts must be resolved first
         abort_merge(&manifold_dir, "unresolved conflicts")?;
 
-        if destroy_after {
-            println!();
-            println!("NOT destroying workspaces due to conflicts.");
-            println!("Resolve conflicts in the source workspaces, then retry:");
-            println!("  maw ws merge {}", ws_to_merge.join(" "));
+        if format == OutputFormat::Json {
+            // Emit structured JSON conflict output for agents
+            let conflict_jsons: Vec<ConflictJson> = build_output
+                .conflicts
+                .iter()
+                .map(conflict_record_to_json)
+                .collect();
+            let to_fix = format!("maw ws merge {}", ws_to_merge.join(" "));
+            let output = MergeConflictOutput {
+                status: "conflict".to_string(),
+                workspaces: ws_to_merge.clone(),
+                conflict_count: conflict_jsons.len(),
+                conflicts: conflict_jsons,
+                message: format!(
+                    "Merge has {} unresolved conflict(s). Resolve them and retry.",
+                    build_output.conflicts.len()
+                ),
+                to_fix,
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            println!(
+                "  {} unresolved conflict(s)",
+                build_output.conflicts.len()
+            );
+            print_conflict_report(&build_output.conflicts, &default_ws_path, default_ws);
+
+            if destroy_after {
+                println!();
+                println!("NOT destroying workspaces due to conflicts.");
+                println!("Resolve conflicts in the source workspaces, then retry:");
+                println!("  maw ws merge {}", ws_to_merge.join(" "));
+            }
         }
 
         bail!(
@@ -756,11 +1338,31 @@ pub fn merge(
         }
     });
 
-    println!();
-    println!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
-    println!();
-    println!("Next: push to remote:");
-    println!("  maw push");
+    if format == OutputFormat::Json {
+        let success = MergeSuccessOutput {
+            status: "success".to_string(),
+            workspaces: ws_to_merge.clone(),
+            branch: branch.to_string(),
+            epoch: build_output.candidate.as_str().to_string(),
+            unique_count: build_output.unique_count,
+            shared_count: build_output.shared_count,
+            resolved_count: build_output.resolved_count,
+            conflict_count: 0,
+            conflicts: vec![],
+            message: format!(
+                "Merged to {branch}: {msg} from {}",
+                ws_to_merge.join(", ")
+            ),
+            next: "maw push".to_string(),
+        };
+        println!("{}", serde_json::to_string_pretty(&success)?);
+    } else {
+        println!();
+        println!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
+        println!();
+        println!("Next: push to remote:");
+        println!("  maw push");
+    }
 
     Ok(())
 }
@@ -920,4 +1522,480 @@ fn handle_post_merge_destroy(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests — JSON conflict output
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::merge::resolve::{ConflictReason, ConflictRecord, ConflictSide as ResolveSide};
+    use crate::merge::types::ChangeKind;
+    use crate::model::conflict::{AtomEdit, ConflictAtom, Region};
+    use crate::model::types::WorkspaceId;
+
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn ws_id(name: &str) -> WorkspaceId {
+        WorkspaceId::new(name).unwrap()
+    }
+
+    fn make_side(workspace: &str, kind: ChangeKind, content: Option<Vec<u8>>) -> ResolveSide {
+        ResolveSide {
+            workspace_id: ws_id(workspace),
+            kind,
+            content,
+        }
+    }
+
+    fn content_record(path: &str, base: &str, alice_content: &str, bob_content: &str) -> ConflictRecord {
+        ConflictRecord {
+            path: PathBuf::from(path),
+            base: Some(base.as_bytes().to_vec()),
+            sides: vec![
+                make_side("alice", ChangeKind::Modified, Some(alice_content.as_bytes().to_vec())),
+                make_side("bob", ChangeKind::Modified, Some(bob_content.as_bytes().to_vec())),
+            ],
+            reason: ConflictReason::Diff3Conflict,
+            atoms: vec![ConflictAtom::line_overlap(
+                10, 15,
+                vec![
+                    AtomEdit::new("alice", Region::lines(10, 13), "alice's lines"),
+                    AtomEdit::new("bob", Region::lines(12, 15), "bob's lines"),
+                ],
+                "lines 10-15 overlap",
+            )],
+        }
+    }
+
+    fn add_add_record(path: &str) -> ConflictRecord {
+        ConflictRecord {
+            path: PathBuf::from(path),
+            base: None,
+            sides: vec![
+                make_side("alice", ChangeKind::Added, Some(b"alice's version".to_vec())),
+                make_side("bob", ChangeKind::Added, Some(b"bob's version".to_vec())),
+            ],
+            reason: ConflictReason::AddAddDifferent,
+            atoms: vec![],
+        }
+    }
+
+    fn modify_delete_record(path: &str) -> ConflictRecord {
+        ConflictRecord {
+            path: PathBuf::from(path),
+            base: Some(b"original content".to_vec()),
+            sides: vec![
+                make_side("alice", ChangeKind::Modified, Some(b"modified content".to_vec())),
+                make_side("bob", ChangeKind::Deleted, None),
+            ],
+            reason: ConflictReason::ModifyDelete,
+            atoms: vec![],
+        }
+    }
+
+    fn missing_base_record(path: &str) -> ConflictRecord {
+        ConflictRecord {
+            path: PathBuf::from(path),
+            base: None,
+            sides: vec![
+                make_side("alice", ChangeKind::Modified, Some(b"alice content".to_vec())),
+                make_side("bob", ChangeKind::Modified, Some(b"bob content".to_vec())),
+            ],
+            reason: ConflictReason::MissingBase,
+            atoms: vec![],
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // conflict_record_to_json: content conflict (Diff3Conflict)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn content_conflict_json_has_correct_type_and_reason() {
+        let record = content_record("src/main.rs", "base", "alice version", "bob version");
+        let json = conflict_record_to_json(&record);
+
+        assert_eq!(json.conflict_type, "content");
+        assert_eq!(json.reason, "content");
+        assert!(!json.reason_description.is_empty());
+        assert_eq!(json.path, "src/main.rs");
+    }
+
+    #[test]
+    fn content_conflict_json_workspace_attribution() {
+        let record = content_record("main.rs", "base", "alice version", "bob version");
+        let json = conflict_record_to_json(&record);
+
+        // Workspaces should be attributed clearly
+        assert_eq!(json.workspaces, vec!["alice", "bob"]);
+
+        // Each side should carry workspace name and change kind
+        assert_eq!(json.sides.len(), 2);
+        let alice_side = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
+        let bob_side = json.sides.iter().find(|s| s.workspace == "bob").unwrap();
+
+        assert_eq!(alice_side.change, "modified");
+        assert_eq!(alice_side.content.as_deref(), Some("alice version"));
+        assert!(!alice_side.is_binary);
+
+        assert_eq!(bob_side.change, "modified");
+        assert_eq!(bob_side.content.as_deref(), Some("bob version"));
+        assert!(!bob_side.is_binary);
+    }
+
+    #[test]
+    fn content_conflict_json_base_content() {
+        let record = content_record("lib.rs", "original content here", "alice", "bob");
+        let json = conflict_record_to_json(&record);
+
+        // Base content should be included for context
+        assert_eq!(json.base_content.as_deref(), Some("original content here"));
+        assert!(!json.base_is_binary);
+    }
+
+    #[test]
+    fn content_conflict_json_has_atoms() {
+        let record = content_record("src/lib.rs", "base", "alice", "bob");
+        let json = conflict_record_to_json(&record);
+
+        // Atoms localize the conflict to specific regions
+        assert!(!json.atoms.is_empty(), "content conflict should have atoms");
+        let atom = &json.atoms[0];
+        assert_eq!(atom.base_region, Region::lines(10, 15));
+        assert_eq!(atom.edits.len(), 2);
+    }
+
+    #[test]
+    fn content_conflict_json_has_resolution_strategies() {
+        let record = content_record("src/lib.rs", "base", "alice", "bob");
+        let json = conflict_record_to_json(&record);
+
+        // Resolution strategies help agents decide what to do
+        assert!(!json.resolution_strategies.is_empty());
+        assert!(json.resolution_strategies.contains(&"edit_file_manually".to_string()));
+        assert!(!json.suggested_resolution.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // conflict_record_to_json: add/add conflict
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn add_add_conflict_json_has_correct_type() {
+        let record = add_add_record("src/new.rs");
+        let json = conflict_record_to_json(&record);
+
+        assert_eq!(json.conflict_type, "add_add");
+        assert_eq!(json.reason, "add_add");
+        assert_eq!(json.path, "src/new.rs");
+    }
+
+    #[test]
+    fn add_add_conflict_json_no_base() {
+        let record = add_add_record("new.rs");
+        let json = conflict_record_to_json(&record);
+
+        // No base content for add/add (file didn't exist before)
+        assert!(json.base_content.is_none());
+        assert!(!json.base_is_binary);
+    }
+
+    #[test]
+    fn add_add_conflict_json_both_sides_present() {
+        let record = add_add_record("util.rs");
+        let json = conflict_record_to_json(&record);
+
+        assert_eq!(json.sides.len(), 2);
+        let alice = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
+        let bob = json.sides.iter().find(|s| s.workspace == "bob").unwrap();
+
+        assert_eq!(alice.change, "added");
+        assert_eq!(alice.content.as_deref(), Some("alice's version"));
+        assert_eq!(bob.change, "added");
+        assert_eq!(bob.content.as_deref(), Some("bob's version"));
+    }
+
+    #[test]
+    fn add_add_conflict_json_resolution_strategies() {
+        let record = add_add_record("new.rs");
+        let json = conflict_record_to_json(&record);
+
+        assert!(json.resolution_strategies.contains(&"keep_one_side".to_string()));
+        assert!(json.resolution_strategies.contains(&"merge_content_manually".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // conflict_record_to_json: modify/delete conflict
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn modify_delete_conflict_json_has_correct_type() {
+        let record = modify_delete_record("src/old.rs");
+        let json = conflict_record_to_json(&record);
+
+        assert_eq!(json.conflict_type, "modify_delete");
+        assert_eq!(json.reason, "modify_delete");
+    }
+
+    #[test]
+    fn modify_delete_conflict_json_deletion_side_has_no_content() {
+        let record = modify_delete_record("old.rs");
+        let json = conflict_record_to_json(&record);
+
+        let bob_side = json.sides.iter().find(|s| s.workspace == "bob").unwrap();
+        assert_eq!(bob_side.change, "deleted");
+        assert!(bob_side.content.is_none());
+        assert!(!bob_side.is_binary);
+    }
+
+    #[test]
+    fn modify_delete_conflict_json_resolution_strategies() {
+        let record = modify_delete_record("old.rs");
+        let json = conflict_record_to_json(&record);
+
+        assert!(json.resolution_strategies.contains(&"keep_modified".to_string()));
+        assert!(json.resolution_strategies.contains(&"accept_deletion".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // conflict_record_to_json: binary content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn binary_content_side_is_flagged() {
+        let mut record = content_record("image.png", "base", "alice", "bob");
+        // Replace alice's content with non-UTF-8 bytes
+        record.sides[0].content = Some(vec![0xFF, 0xFE, 0x00, 0x01]);
+        record.base = Some(vec![0xFF, 0xD8, 0xFF, 0xE0]); // JPEG magic bytes
+
+        let json = conflict_record_to_json(&record);
+
+        let alice_side = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
+        assert!(alice_side.is_binary, "binary content should be flagged");
+        assert!(alice_side.content.is_none(), "binary content should not be included as text");
+
+        // Base content should also be marked binary
+        assert!(json.base_is_binary);
+        assert!(json.base_content.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON roundtrip: agent can parse the output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conflict_json_roundtrip() {
+        let record = content_record("src/lib.rs", "base content", "alice edit", "bob edit");
+        let conflict_json = conflict_record_to_json(&record);
+
+        // Serialize to JSON
+        let json_str = serde_json::to_string_pretty(&conflict_json).unwrap();
+        assert!(!json_str.is_empty());
+
+        // Verify key fields are present in the JSON string
+        assert!(json_str.contains("\"type\""), "type field must be present");
+        assert!(json_str.contains("\"path\""), "path field must be present");
+        assert!(json_str.contains("\"reason\""), "reason field must be present");
+        assert!(json_str.contains("\"workspaces\""), "workspaces field must be present");
+        assert!(json_str.contains("\"sides\""), "sides field must be present");
+        assert!(json_str.contains("\"atoms\""), "atoms field must be present");
+        assert!(json_str.contains("\"resolution_strategies\""), "resolution_strategies must be present");
+        assert!(json_str.contains("\"suggested_resolution\""), "suggested_resolution must be present");
+        assert!(json_str.contains("\"base_content\""), "base_content must be present");
+        assert!(json_str.contains("\"workspace\""), "workspace attribution in sides");
+
+        // Can parse it back as a generic JSON value (roundtrip)
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["type"], "content");
+        assert_eq!(parsed["path"], "src/lib.rs");
+        assert!(parsed["workspaces"].is_array());
+        assert!(parsed["sides"].is_array());
+        assert!(parsed["atoms"].is_array());
+        assert!(parsed["resolution_strategies"].is_array());
+        assert!(parsed["base_content"].is_string());
+    }
+
+    #[test]
+    fn merge_conflict_output_roundtrip() {
+        let records = vec![
+            content_record("src/lib.rs", "base", "alice", "bob"),
+            add_add_record("src/new.rs"),
+        ];
+        let conflicts: Vec<ConflictJson> = records.iter().map(conflict_record_to_json).collect();
+        let output = MergeConflictOutput {
+            status: "conflict".to_string(),
+            workspaces: vec!["alice".to_string(), "bob".to_string()],
+            conflict_count: conflicts.len(),
+            conflicts,
+            message: "Merge has 2 unresolved conflict(s). Resolve them and retry.".to_string(),
+            to_fix: "maw ws merge alice bob".to_string(),
+        };
+
+        let json_str = serde_json::to_string_pretty(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["status"], "conflict");
+        assert_eq!(parsed["conflict_count"], 2);
+        assert!(parsed["conflicts"].is_array());
+        assert_eq!(parsed["conflicts"].as_array().unwrap().len(), 2);
+        assert!(parsed["to_fix"].is_string());
+
+        // Verify the conflicts array has the expected structure
+        let first = &parsed["conflicts"][0];
+        assert_eq!(first["type"], "content");
+        assert!(first["sides"].is_array());
+        assert!(first["atoms"].is_array());
+        assert!(first["resolution_strategies"].is_array());
+    }
+
+    #[test]
+    fn merge_success_output_roundtrip() {
+        let output = MergeSuccessOutput {
+            status: "success".to_string(),
+            workspaces: vec!["alice".to_string()],
+            branch: "manifold".to_string(),
+            epoch: "a".repeat(40),
+            unique_count: 3,
+            shared_count: 1,
+            resolved_count: 1,
+            conflict_count: 0,
+            conflicts: vec![],
+            message: "Merged to manifold: adopt work from alice".to_string(),
+            next: "maw push".to_string(),
+        };
+
+        let json_str = serde_json::to_string_pretty(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["conflict_count"], 0);
+        assert!(parsed["conflicts"].as_array().unwrap().is_empty());
+        assert_eq!(parsed["branch"], "manifold");
+        assert_eq!(parsed["next"], "maw push");
+        assert_eq!(parsed["unique_count"], 3);
+    }
+
+    #[test]
+    fn conflicts_output_roundtrip() {
+        let records = vec![content_record("main.rs", "base", "alice", "bob")];
+        let conflicts: Vec<ConflictJson> = records.iter().map(conflict_record_to_json).collect();
+        let output = ConflictsOutput {
+            status: "conflict".to_string(),
+            workspaces: vec!["alice".to_string()],
+            has_conflicts: true,
+            conflict_count: 1,
+            conflicts,
+            message: "1 conflict(s) found. Resolve them before merging.".to_string(),
+            to_fix: Some("maw ws merge alice".to_string()),
+        };
+
+        let json_str = serde_json::to_string_pretty(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["status"], "conflict");
+        assert_eq!(parsed["has_conflicts"], true);
+        assert_eq!(parsed["conflict_count"], 1);
+        assert!(parsed["to_fix"].is_string());
+    }
+
+    #[test]
+    fn conflicts_output_clean_roundtrip() {
+        let output = ConflictsOutput {
+            status: "clean".to_string(),
+            workspaces: vec!["alice".to_string()],
+            has_conflicts: false,
+            conflict_count: 0,
+            conflicts: vec![],
+            message: "No conflicts found.".to_string(),
+            to_fix: None,
+        };
+
+        let json_str = serde_json::to_string_pretty(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["status"], "clean");
+        assert_eq!(parsed["has_conflicts"], false);
+        assert_eq!(parsed["conflict_count"], 0);
+        assert!(parsed["to_fix"].is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent usability: confirm JSON contains all info to resolve
+    // -----------------------------------------------------------------------
+
+    /// This test verifies that an agent receiving only the JSON output can
+    /// understand the conflict and determine how to resolve it.
+    #[test]
+    fn agent_can_understand_conflict_from_json_alone() {
+        // Scenario: alice modified src/main.rs, bob modified the same overlapping lines
+        let record = content_record(
+            "src/main.rs",
+            "fn process_order(id: u64) -> Result<Order> {\n    // original implementation\n}",
+            "fn process_order(id: u64) -> Result<Order, Error> {\n    // alice's version\n}",
+            "fn process_order(id: u64, opts: Options) -> Result<Order> {\n    // bob's version\n}",
+        );
+        let conflict_json = conflict_record_to_json(&record);
+        let json_str = serde_json::to_string_pretty(&conflict_json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // Agent can identify: WHICH file has a conflict
+        assert_eq!(parsed["path"], "src/main.rs");
+
+        // Agent can identify: WHY there is a conflict
+        assert!(!parsed["reason"].as_str().unwrap().is_empty());
+        assert!(!parsed["reason_description"].as_str().unwrap().is_empty());
+
+        // Agent can identify: WHO made each change
+        let sides = parsed["sides"].as_array().unwrap();
+        let workspaces_in_sides: Vec<&str> = sides.iter()
+            .map(|s| s["workspace"].as_str().unwrap())
+            .collect();
+        assert!(workspaces_in_sides.contains(&"alice"));
+        assert!(workspaces_in_sides.contains(&"bob"));
+
+        // Agent can read: WHAT each side contains
+        for side in sides {
+            assert!(side["content"].is_string() || side["is_binary"].as_bool().unwrap_or(false));
+            assert!(!side["workspace"].as_str().unwrap().is_empty());
+            assert!(!side["change"].as_str().unwrap().is_empty());
+        }
+
+        // Agent has: BASE content for reference
+        assert!(parsed["base_content"].is_string());
+
+        // Agent has: LOCALIZED conflict regions (atoms)
+        let atoms = parsed["atoms"].as_array().unwrap();
+        assert!(!atoms.is_empty(), "atoms should pinpoint the conflict region");
+        let atom = &atoms[0];
+        assert!(atom["base_region"].is_object());
+        assert!(atom["edits"].is_array());
+        assert!(atom["reason"].is_object());
+
+        // Agent has: HOW to resolve it
+        let strategies = parsed["resolution_strategies"].as_array().unwrap();
+        assert!(!strategies.is_empty());
+        assert!(!parsed["suggested_resolution"].as_str().unwrap().is_empty());
+    }
+
+    /// Verify that missing_base conflicts are also fully parseable.
+    #[test]
+    fn missing_base_conflict_json_is_parseable() {
+        let record = missing_base_record("src/shared.rs");
+        let conflict_json = conflict_record_to_json(&record);
+        let json_str = serde_json::to_string_pretty(&conflict_json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["reason"], "missing_base");
+        assert!(parsed["base_content"].is_null(), "no base content for missing_base");
+        assert!(!parsed["sides"].as_array().unwrap().is_empty());
+        assert!(!parsed["suggested_resolution"].as_str().unwrap().is_empty());
+    }
 }

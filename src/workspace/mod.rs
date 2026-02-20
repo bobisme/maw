@@ -326,13 +326,18 @@ pub enum WorkspaceCommands {
     ///   exit 0 = safe to merge, non-zero = blocked (conflicts/stale).
     ///   Combine with --format json for structured output.
     ///
+    /// Use --format json to receive structured output for success and conflict
+    /// cases. On conflict, the JSON includes per-file conflict details with
+    /// workspace attribution, base content, and resolution strategies.
+    ///
     /// Examples:
-    ///   maw ws merge alice                 # adopt alice's work
-    ///   maw ws merge alice bob             # merge alice and bob's work
-    ///   maw ws merge alice bob --destroy   # merge and clean up (non-interactive)
-    ///   maw ws merge alice bob --dry-run   # preview merge without committing
-    ///   maw ws merge alice --check         # pre-flight: can we merge cleanly?
-    ///   maw ws merge alice --check --format json  # structured check result
+    ///   maw ws merge alice                       # adopt alice's work
+    ///   maw ws merge alice bob                   # merge alice and bob's work
+    ///   maw ws merge alice bob --destroy         # merge and clean up (non-interactive)
+    ///   maw ws merge alice bob --dry-run         # preview merge without committing
+    ///   maw ws merge alice --check               # pre-flight: can we merge cleanly?
+    ///   maw ws merge alice --check --format json # structured check result
+    ///   maw ws merge alice --format json         # structured merge result (success or conflict)
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -363,11 +368,47 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         check: bool,
 
-        /// Output format for --check: text, json, or pretty
+        /// Output format: text, json, or pretty.
+        ///
+        /// With --json / --format json: emits structured JSON for both success
+        /// and conflict cases. Conflict output includes per-file details with
+        /// workspace attribution, base content, sides, localized atoms, and
+        /// resolution strategies.
         #[arg(long)]
         format: Option<OutputFormat>,
 
-        /// Shorthand for --format json (use with --check)
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
+
+    /// Show detailed conflict information for workspace(s)
+    ///
+    /// Runs the merge engine's PREPARE + BUILD phases to detect conflicts
+    /// and outputs structured data — without committing anything.
+    ///
+    /// Useful for agents to inspect conflicts before deciding how to resolve
+    /// them. Each conflict includes:
+    ///   - File path and conflict type (content, add/add, modify/delete)
+    ///   - Each workspace's contribution (change kind + content)
+    ///   - Base (common ancestor) content for reference
+    ///   - Localized conflict atoms (exact line ranges / AST regions)
+    ///   - Suggested resolution strategies
+    ///
+    /// Examples:
+    ///   maw ws conflicts alice                  # show conflicts for alice workspace
+    ///   maw ws conflicts alice bob              # show conflicts across both workspaces
+    ///   maw ws conflicts alice --format json    # machine-parseable output for agents
+    Conflicts {
+        /// Workspace names to check for conflicts
+        #[arg(required = true)]
+        workspaces: Vec<String>,
+
+        /// Output format: text, json, or pretty
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
     },
@@ -413,8 +454,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             format,
             json,
         } => {
+            let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             if check {
-                let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
                 return merge::check_merge(&workspaces, fmt);
             }
             merge::merge(&workspaces, &merge::MergeOptions {
@@ -422,7 +463,16 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 confirm,
                 message: message.as_deref(),
                 dry_run,
+                format: fmt,
             })
+        }
+        WorkspaceCommands::Conflicts {
+            workspaces,
+            format,
+            json,
+        } => {
+            let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+            merge::show_conflicts(&workspaces, fmt)
         }
     }
 }

@@ -1120,3 +1120,241 @@ fn eval_three_agent_parallel_disjoint_files() {
         "default workspace should remain: {ws_list_after}"
     );
 }
+
+// ==========================================================================
+// Eval: conflict detection and resolution (bd-21sm.3)
+//
+// Two agents edit the same file at the same function, producing a conflict.
+// This validates the conflict detection, structured JSON output, and the
+// full resolution flow:
+//
+//   1. maw ws create agent-1, agent-2
+//   2. Both modify src/lib.rs at the same function body → diff3 conflict
+//   3. maw ws merge agent-1 agent-2 --check --format json
+//      → JSON is machine-parseable
+//      → conflict identifies file, reason, sides
+//      → line range reported if atoms available
+//   4. maw ws merge agent-1 agent-2 → fails (conflict reported, exit non-zero)
+//   5. Agent resolves conflict (edits agent-1 to agreed-upon content)
+//   6. maw ws merge agent-1 agent-2 --destroy → succeeds
+//   7. ws/default/src/lib.rs contains the resolved content
+// ==========================================================================
+
+#[test]
+fn eval_conflict_detection_and_resolution() {
+    let repo = TestRepo::new();
+
+    // Seed a project with a src/lib.rs that has a function both agents will modify.
+    // Use a multi-line function so diff3 can localize the conflict.
+    let base_lib_rs = concat!(
+        "/// Process an order and return the total price.\n",
+        "pub fn process_order(qty: u32, price: f64) -> f64 {\n",
+        "    let total = (qty as f64) * price;\n",
+        "    total\n",
+        "}\n",
+    );
+    repo.seed_files(&[
+        ("src/lib.rs", base_lib_rs),
+        ("Cargo.toml", "[package]\nname = \"eval\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"eval\"\npath = \"src/lib.rs\"\n"),
+    ]);
+
+    // Step 1: Create two agent workspaces.
+    let out1 = repo.maw_ok(&["ws", "create", "agent-1"]);
+    assert!(out1.contains("agent-1"), "agent-1 workspace created: {out1}");
+
+    let out2 = repo.maw_ok(&["ws", "create", "agent-2"]);
+    assert!(out2.contains("agent-2"), "agent-2 workspace created: {out2}");
+
+    // Step 2: Both agents modify src/lib.rs at the same function body — same
+    // region, different edits → diff3 will detect the conflict.
+    let agent1_lib_rs = concat!(
+        "/// Process an order and return the total price.\n",
+        "pub fn process_order(qty: u32, price: f64) -> f64 {\n",
+        "    // agent-1: apply 10% discount\n",
+        "    let total = (qty as f64) * price * 0.90;\n",
+        "    total\n",
+        "}\n",
+    );
+    let agent2_lib_rs = concat!(
+        "/// Process an order and return the total price.\n",
+        "pub fn process_order(qty: u32, price: f64) -> f64 {\n",
+        "    // agent-2: apply sales tax\n",
+        "    let total = (qty as f64) * price * 1.08;\n",
+        "    total\n",
+        "}\n",
+    );
+    repo.modify_file("agent-1", "src/lib.rs", agent1_lib_rs);
+    repo.modify_file("agent-2", "src/lib.rs", agent2_lib_rs);
+
+    // Step 3: Run --check --format json and verify structured JSON output.
+    let check_out = repo.maw_raw(&["ws", "merge", "agent-1", "agent-2", "--check", "--format", "json"]);
+    let check_stdout = String::from_utf8_lossy(&check_out.stdout).to_string();
+    let check_stderr = String::from_utf8_lossy(&check_out.stderr).to_string();
+
+    // The check should detect a conflict (exit non-zero) and produce JSON.
+    assert!(
+        !check_out.status.success(),
+        "check should fail (conflict detected): stdout={check_stdout}\nstderr={check_stderr}"
+    );
+
+    // Parse the JSON output.
+    let json: serde_json::Value = serde_json::from_str(&check_stdout)
+        .unwrap_or_else(|e| panic!("check --format json output is not valid JSON: {e}\nstdout: {check_stdout}"));
+
+    // Verify: ready is false (conflict present).
+    assert_eq!(
+        json["ready"],
+        serde_json::Value::Bool(false),
+        "check result should not be ready: {json}"
+    );
+
+    // Verify: conflicts array is non-empty.
+    let conflicts = json["conflicts"].as_array()
+        .expect("conflicts should be an array");
+    assert!(
+        !conflicts.is_empty(),
+        "conflicts array should be non-empty: {json}"
+    );
+
+    // Verify: first conflict identifies the file (src/lib.rs).
+    let first = &conflicts[0];
+    assert_eq!(
+        first["path"].as_str().unwrap_or(""),
+        "src/lib.rs",
+        "conflict should identify src/lib.rs: {first}"
+    );
+
+    // Verify: conflict reason is present and non-empty.
+    let reason = first["reason"].as_str().unwrap_or("");
+    assert!(
+        !reason.is_empty(),
+        "conflict reason should be non-empty: {first}"
+    );
+
+    // Verify: sides array identifies both workspaces.
+    let sides = first["sides"].as_array()
+        .expect("conflict.sides should be an array");
+    assert!(
+        sides.len() >= 2,
+        "conflict should list at least 2 sides: {first}"
+    );
+    let side_names: Vec<&str> = sides
+        .iter()
+        .filter_map(|s| s.as_str())
+        .collect();
+    assert!(
+        side_names.contains(&"agent-1"),
+        "agent-1 should be listed as a conflict side: {first}"
+    );
+    assert!(
+        side_names.contains(&"agent-2"),
+        "agent-2 should be listed as a conflict side: {first}"
+    );
+
+    // Verify: line_start / line_end are present for diff3 conflicts (optional
+    // but expected when atom extraction succeeds for a text file).
+    // We log a note if absent, but don't fail — atom extraction is best-effort.
+    if first["line_start"].is_null() || first["line_end"].is_null() {
+        eprintln!(
+            "NOTE: line_start/line_end not present in conflict JSON (atom extraction may not have run): {first}"
+        );
+    } else {
+        let line_start = first["line_start"].as_u64().expect("line_start should be a number");
+        let line_end   = first["line_end"].as_u64().expect("line_end should be a number");
+        assert!(
+            line_start >= 1,
+            "line_start should be ≥ 1 (1-indexed): {line_start}"
+        );
+        assert!(
+            line_end > line_start,
+            "line_end should be > line_start: start={line_start} end={line_end}"
+        );
+    }
+
+    // Step 4: Full merge should fail with a conflict error.
+    let merge_out = repo.maw_raw(&["ws", "merge", "agent-1", "agent-2"]);
+    assert!(
+        !merge_out.status.success(),
+        "merge should fail due to unresolved conflict"
+    );
+    let merge_stderr = String::from_utf8_lossy(&merge_out.stderr).to_string();
+    let merge_stdout = String::from_utf8_lossy(&merge_out.stdout).to_string();
+    let combined_output = format!("{merge_stdout}\n{merge_stderr}");
+    assert!(
+        combined_output.to_lowercase().contains("conflict"),
+        "merge failure output should mention 'conflict': {combined_output}"
+    );
+
+    // Step 5: Agent resolves the conflict.
+    // Strategy: edit agent-1 to agree with agent-2 (hash equality → clean merge).
+    // In practice, an agent would produce a true manual merge; here we simulate
+    // resolution by adopting agent-2's version.
+    let resolved_lib_rs = concat!(
+        "/// Process an order and return the total price.\n",
+        "pub fn process_order(qty: u32, price: f64) -> f64 {\n",
+        "    // resolved: apply sales tax (team decision)\n",
+        "    let total = (qty as f64) * price * 1.08;\n",
+        "    total\n",
+        "}\n",
+    );
+    // Update agent-1 to the resolved content.
+    repo.modify_file("agent-1", "src/lib.rs", resolved_lib_rs);
+    // Update agent-2 to the same resolved content (required for hash equality).
+    repo.modify_file("agent-2", "src/lib.rs", resolved_lib_rs);
+
+    // Verify --check now says ready.
+    let recheck_out = repo.maw_raw(&["ws", "merge", "agent-1", "agent-2", "--check", "--format", "json"]);
+    let recheck_stdout = String::from_utf8_lossy(&recheck_out.stdout).to_string();
+
+    let recheck_json: serde_json::Value = serde_json::from_str(&recheck_stdout)
+        .unwrap_or_else(|e| panic!("re-check JSON not valid: {e}\nstdout: {recheck_stdout}"));
+    assert_eq!(
+        recheck_json["ready"],
+        serde_json::Value::Bool(true),
+        "after resolution, check should be ready: {recheck_json}"
+    );
+    let recheck_conflicts = recheck_json["conflicts"].as_array().expect("conflicts should be an array");
+    assert!(
+        recheck_conflicts.is_empty(),
+        "after resolution, conflicts should be empty: {recheck_json}"
+    );
+
+    // Step 6: Re-merge after resolution — should succeed.
+    let final_merge = repo.maw_ok(&["ws", "merge", "agent-1", "agent-2", "--destroy"]);
+    assert!(
+        final_merge.contains("Merged") || final_merge.contains("merge") || final_merge.contains("adopt"),
+        "final merge should confirm success: {final_merge}"
+    );
+
+    // Step 7: Verify resolved content is present in ws/default/.
+    let default_content = repo
+        .read_file("default", "src/lib.rs")
+        .expect("src/lib.rs should exist in ws/default/ after merge");
+    assert!(
+        default_content.contains("resolved: apply sales tax"),
+        "ws/default/src/lib.rs should contain the resolved content: {default_content}"
+    );
+    assert!(
+        default_content.contains("1.08"),
+        "ws/default/src/lib.rs should contain the resolved tax rate: {default_content}"
+    );
+    assert!(
+        !default_content.contains("0.90"),
+        "ws/default/src/lib.rs should NOT contain agent-1's original discount: {default_content}"
+    );
+
+    // Verify workspaces were destroyed.
+    let ws_list = repo.maw_ok(&["ws", "list"]);
+    assert!(
+        !ws_list.contains("agent-1"),
+        "agent-1 should be destroyed after --destroy: {ws_list}"
+    );
+    assert!(
+        !ws_list.contains("agent-2"),
+        "agent-2 should be destroyed after --destroy: {ws_list}"
+    );
+    assert!(
+        ws_list.contains("default"),
+        "default workspace should remain: {ws_list}"
+    );
+}
