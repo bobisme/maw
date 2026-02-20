@@ -335,6 +335,7 @@ where
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::patch::{FileId, PatchValue};
@@ -413,7 +414,7 @@ mod tests {
     #[test]
     fn single_workspace_view() {
         let patches: BTreeMap<_, _> = [add_patch("src/main.rs", 'a', 1)].into_iter().collect();
-        let view = make_view("ws-1", Some('a'), patches.clone(), 3);
+        let view = make_view("ws-1", Some('a'), patches, 3);
 
         let gv = compute_global_view_from_views(&[view], vec![]);
         assert_eq!(gv.epoch, Some(test_epoch('a')));
@@ -619,7 +620,7 @@ mod tests {
         ];
 
         let view = make_view("ws-1", Some('a'), BTreeMap::new(), 0);
-        let gv = compute_global_view_from_views(&[view], key1.clone());
+        let gv = compute_global_view_from_views(&[view], key1);
 
         assert!(gv.cache_valid(&key2));
         assert!(!gv.cache_valid(&key3));
@@ -741,8 +742,7 @@ mod tests {
         );
 
         // (view1, view2, view3) all at once
-        let gv_all =
-            compute_global_view_from_views(&[view1.clone(), view2.clone(), view3.clone()], vec![]);
+        let gv_all = compute_global_view_from_views(&[view1, view2, view3], vec![]);
 
         // The merged patch set should have all 3 paths
         assert_eq!(gv_all.total_patches(), 3);

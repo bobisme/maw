@@ -665,6 +665,7 @@ pub const fn scenario_read_only_inspection() -> Scenario {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
 
@@ -687,7 +688,7 @@ mod tests {
         let scenarios = all_scenarios();
         let mut names: Vec<_> = scenarios.iter().map(|s| s.name).collect();
         let original_len = names.len();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         assert_eq!(
             names.len(),

@@ -114,10 +114,10 @@ fn status_reports_clean_dirty_and_stale_states() {
         .find(|w| w["name"].as_str() == Some("agent-a"))
         .expect("agent-a should appear in workspaces list");
 
-    let state = agent["state"].as_str().unwrap_or_default();
+    let agent_state = agent["state"].as_str().unwrap_or_default();
     assert!(
-        state.contains("stale"),
-        "agent-a state should be stale after epoch advance, got: {state}"
+        agent_state.contains("stale"),
+        "agent-a state should be stale after epoch advance, got: {agent_state}"
     );
 }
 

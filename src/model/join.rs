@@ -278,6 +278,7 @@ fn sorted_sides(left: &PatchValue, right: &PatchValue) -> [PatchValue; 2] {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::patch::{FileId, PatchSet, PatchValue};
@@ -416,7 +417,7 @@ mod tests {
         a.patches.insert("file.rs".into(), pv.clone());
 
         let mut b = empty_ps('a');
-        b.patches.insert("file.rs".into(), pv.clone());
+        b.patches.insert("file.rs".into(), pv);
 
         let result = join(&a, &b).unwrap();
         assert!(result.is_clean());
@@ -433,7 +434,7 @@ mod tests {
         a.patches.insert("file.rs".into(), pv.clone());
 
         let mut b = empty_ps('a');
-        b.patches.insert("file.rs".into(), pv.clone());
+        b.patches.insert("file.rs".into(), pv);
 
         let result = join(&a, &b).unwrap();
         assert!(result.is_clean());
@@ -451,7 +452,7 @@ mod tests {
         a.patches.insert("new.rs".into(), pv.clone());
 
         let mut b = empty_ps('a');
-        b.patches.insert("new.rs".into(), pv.clone());
+        b.patches.insert("new.rs".into(), pv);
 
         let result = join(&a, &b).unwrap();
         assert!(result.is_clean());
@@ -935,6 +936,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod proptests {
     use super::*;
     use crate::model::patch::{FileId, PatchSet, PatchValue};

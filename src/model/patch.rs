@@ -222,6 +222,7 @@ pub enum PatchValue {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
 
@@ -260,7 +261,7 @@ mod tests {
 
     #[test]
     fn file_id_to_hex_round_trip() {
-        for n in [0_u128, 1, u64::MAX as u128, u128::MAX] {
+        for n in [0_u128, 1, u128::from(u64::MAX), u128::MAX] {
             let id = FileId::new(n);
             let hex = id.to_hex();
             let decoded = FileId::from_hex(&hex).unwrap();

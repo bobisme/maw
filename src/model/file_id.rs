@@ -385,6 +385,7 @@ impl std::error::Error for FileIdMapError {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
 
@@ -690,13 +691,13 @@ mod tests {
     /// Verifies the design doc's core claim (§5.8):
     ///
     /// "If workspace A renames foo.rs → bar.rs and workspace B modifies
-    /// foo.rs, Manifold sees: same FileId, one workspace changed the path,
+    /// foo.rs, Manifold sees: same `FileId`, one workspace changed the path,
     /// one changed the content. Clean merge to bar.rs with B's edits.
-    /// Without FileId, this is a delete+add+modify mess."
+    /// Without `FileId`, this is a delete+add+modify mess."
     ///
     /// This test demonstrates that:
-    /// 1. Both patch-sets carry the same FileId.
-    /// 2. The FileIdMap confirms the rename.
+    /// 1. Both patch-sets carry the same `FileId`.
+    /// 2. The `FileIdMap` confirms the rename.
     /// 3. A merge engine can identify the correct resolution.
     #[test]
     fn concurrent_rename_and_edit_same_file_id() {
@@ -733,8 +734,8 @@ mod tests {
         assert_eq!(rename_id, modify_id, "Same FileId seen in both workspaces");
     }
 
-    /// Test that copies get a NEW FileId, not the source's FileId.
-    /// (§5.8: "Copy = new FileId with same initial blob. Explicit, not inferred.")
+    /// Test that copies get a NEW `FileId`, not the source's `FileId`.
+    /// (§5.8: "Copy = new `FileId` with same initial blob. Explicit, not inferred.")
     #[test]
     fn copy_gets_new_file_id() {
         let mut map = FileIdMap::new();

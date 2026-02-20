@@ -303,6 +303,7 @@ pub fn run_prepare_phase_with_epoch(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::merge_state::{recover_from_merge_state, MergePhase, RecoveryOutcome};
@@ -554,7 +555,7 @@ mod tests {
         let mut heads = BTreeMap::new();
         heads.insert(ws.clone(), test_oid('e'));
 
-        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws.clone()], heads).unwrap();
+        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads).unwrap();
 
         // Read raw JSON and verify frozen_heads is present
         let state_path = MergeStateFile::default_path(&manifold_dir);

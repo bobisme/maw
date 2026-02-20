@@ -968,6 +968,7 @@ fn diff_upper_vs_lower(upper: &Path, lower: &Path) -> Result<SnapshotResult, Ove
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
 
@@ -1158,7 +1159,7 @@ mod tests {
 
         // Build a minimal backend (strategy doesn't matter for refcount ops).
         let backend = OverlayBackend {
-            root: root.clone(),
+            root,
             strategy: MountStrategy::FuseOverlayfs,
         };
 
@@ -1241,7 +1242,7 @@ mod tests {
         let epoch = EpochId::new(&oid_str).unwrap();
 
         let backend = OverlayBackend {
-            root: root.clone(),
+            root,
             strategy: MountStrategy::FuseOverlayfs,
         };
 

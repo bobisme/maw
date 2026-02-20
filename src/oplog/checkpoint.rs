@@ -647,6 +647,7 @@ pub fn compact(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::patch::{FileId, PatchSet, PatchValue};
@@ -944,7 +945,7 @@ mod tests {
         let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone())).unwrap();
 
         assert_eq!(view.epoch, Some(test_epoch('a')));
-        assert_eq!(view.patch_set, Some(ps.clone()));
+        assert_eq!(view.patch_set, Some(ps));
         assert_eq!(view.op_count, 2);
     }
 
@@ -1049,7 +1050,7 @@ mod tests {
     #[test]
     fn checkpoint_view_invalid_workspace_id() {
         let cp_view = CheckpointView {
-            workspace_id: "".into(),
+            workspace_id: String::new(),
             epoch: None,
             patch_set: None,
             patch_set_oid: None,
@@ -1200,11 +1201,7 @@ mod tests {
 
         // Materialize the view at this point
         let ps = test_patch_set('a');
-        let ops = vec![
-            (oid1.clone(), op1.clone()),
-            (oid2.clone(), op2.clone()),
-            (oid3.clone(), op3.clone()),
-        ];
+        let ops = vec![(oid1, op1), (oid2, op2), (oid3.clone(), op3)];
         let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
         assert_eq!(view.op_count, 3);
 
@@ -1250,8 +1247,7 @@ mod tests {
         // The view from compacted chain should match
         let mut chain_causal: Vec<_> = chain;
         chain_causal.reverse();
-        let compacted_view =
-            materialize_from_ops(ws_id.clone(), &chain_causal, mock_reader(ps.clone())).unwrap();
+        let compacted_view = materialize_from_ops(ws_id, &chain_causal, mock_reader(ps)).unwrap();
 
         assert_eq!(compacted_view.description, Some("step 5".into()));
         assert_eq!(compacted_view.epoch, Some(test_epoch('a')));
@@ -1295,11 +1291,7 @@ mod tests {
 
         // Materialize view at step 3 and write checkpoint
         let ps = test_patch_set('a');
-        let ops = vec![
-            (oid1.clone(), op1.clone()),
-            (oid2.clone(), op2.clone()),
-            (oid3.clone(), op3.clone()),
-        ];
+        let ops = vec![(oid1, op1), (oid2, op2), (oid3.clone(), op3)];
         let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
 
         let cp_oid = maybe_write_checkpoint(&root, &ws_id, &view, &oid3, &oid3, 3)
@@ -1318,7 +1310,7 @@ mod tests {
         let _oid4 = append_operation(&root, &ws_id, &op4, Some(&cp_oid)).unwrap();
 
         // Materialize from checkpoint
-        let cp_view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps.clone())).unwrap();
+        let cp_view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps)).unwrap();
 
         // Should have the latest description
         assert_eq!(cp_view.description, Some("step 4 after checkpoint".into()));

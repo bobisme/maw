@@ -1,4 +1,5 @@
 //! Manifold v2 test infrastructure — fully git-native.
+#![allow(dead_code)]
 //!
 //! Provides [`TestRepo`], a self-contained Manifold repository in a temporary
 //! directory for integration tests. Each `TestRepo` gets a unique `/tmp` dir,

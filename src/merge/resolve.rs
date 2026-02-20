@@ -980,6 +980,7 @@ pub fn parse_diff3_atoms(
 }
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1351,7 +1352,7 @@ mod tests {
     // ConflictAtom extraction tests (bd-15yn.3 acceptance criteria)
     // -----------------------------------------------------------------------
 
-    /// Overlapping edits on the same line produce a ConflictRecord with ≥1 atoms.
+    /// Overlapping edits on the same line produce a `ConflictRecord` with ≥1 atoms.
     #[test]
     fn overlapping_edits_produce_conflict_with_atoms() {
         // Base: "a\nb\nc\n" (3 lines). ws-a changes line 2 to B1, ws-b to B2.
@@ -1409,7 +1410,7 @@ mod tests {
         assert_eq!(content_b.content, "B2");
     }
 
-    /// ConflictAtoms match the actual conflicting line region in the base file.
+    /// `ConflictAtoms` match the actual conflicting line region in the base file.
     #[test]
     fn diff3_atoms_have_correct_line_ranges() {
         // Base: 5 lines. Lines 3-4 are the conflict zone.
@@ -1878,7 +1879,7 @@ mod tests {
         /// AST merge resolves overlapping-line edits in different functions.
         ///
         /// diff3 reports a conflict because lines overlap (adjacent changes),
-        /// but AST merge sees the edits are in different function_items.
+        /// but AST merge sees the edits are in different `function_items`.
         #[test]
         fn ast_resolves_different_functions_where_diff3_fails() {
             // Two functions back-to-back with no separating context.
@@ -1929,7 +1930,7 @@ mod tests {
             // If diff3 resolved cleanly (enough context), AST merge should also resolve cleanly.
         }
 
-        /// AST merge produces conflict atoms with AstNode regions when same function is modified.
+        /// AST merge produces conflict atoms with `AstNode` regions when same function is modified.
         #[test]
         fn ast_conflict_has_ast_node_regions() {
             let base = b"fn process() {\n    step_1();\n    step_2();\n}\n";

@@ -192,6 +192,7 @@ fn current_time_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::types::EpochId;
@@ -484,10 +485,10 @@ mod tests {
             OrderingKey::new(e.clone(), ws("alpha"), 1, 100),
             OrderingKey::new(e.clone(), ws("alpha"), 2, 200),
             OrderingKey::new(e.clone(), ws("beta"), 1, 150),
-            OrderingKey::new(e.clone(), ws("beta"), 2, 250),
+            OrderingKey::new(e, ws("beta"), 2, 250),
         ];
 
-        let mut sorted = keys.clone();
+        let mut sorted = keys;
         sorted.sort();
 
         // Expected: alpha:1, alpha:2, beta:1, beta:2

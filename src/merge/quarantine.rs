@@ -659,7 +659,7 @@ fn now_secs() -> u64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::similar_names)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use std::process::Command as StdCmd;
@@ -719,7 +719,7 @@ mod tests {
     fn dummy_validation_result(passed: bool) -> ValidationResult {
         ValidationResult {
             passed,
-            exit_code: Some(if passed { 0 } else { 1 }),
+            exit_code: Some(i32::from(!passed)),
             stdout: String::new(),
             stderr: if passed {
                 String::new()
@@ -905,7 +905,7 @@ mod tests {
             &epoch_id,
             candidate.clone(),
             "main",
-            vr.clone(),
+            vr,
         )
         .unwrap();
 
@@ -1043,7 +1043,7 @@ mod tests {
         // Recreate state for id1 without the worktree (test list with state-only)
         let state1 = QuarantineState {
             merge_id: id1.clone(),
-            epoch_before: epoch_oid.clone(),
+            epoch_before: epoch_oid,
             candidate: c1,
             sources: vec![WorkspaceId::new("ws-1").unwrap()],
             branch: "main".to_owned(),

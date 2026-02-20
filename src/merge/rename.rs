@@ -462,6 +462,7 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::merge::partition::{PartitionResult, PathEntry};
@@ -486,14 +487,14 @@ mod tests {
         PathEntry::with_identity(
             ws(name),
             kind,
-            content.map(|c| c.to_vec()),
+            content.map(<[u8]>::to_vec),
             Some(file_id),
             None,
         )
     }
 
     fn entry_no_fid(name: &str, kind: ChangeKind, content: Option<&[u8]>) -> PathEntry {
-        PathEntry::new(ws(name), kind, content.map(|c| c.to_vec()))
+        PathEntry::new(ws(name), kind, content.map(<[u8]>::to_vec))
     }
 
     // -----------------------------------------------------------------------

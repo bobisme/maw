@@ -300,6 +300,7 @@ pub fn walk_all(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::types::{EpochId, WorkspaceId};
@@ -726,7 +727,7 @@ mod tests {
         let oid_a = write_operation_blob(root, &op_a).unwrap();
 
         let op_b = Operation {
-            parent_ids: vec![root_oid.clone()],
+            parent_ids: vec![root_oid],
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T13:30:00Z".to_owned(),
             payload: OpPayload::Describe {
@@ -736,7 +737,7 @@ mod tests {
         let oid_b = write_operation_blob(root, &op_b).unwrap();
 
         let merge_op = Operation {
-            parent_ids: vec![oid_a.clone(), oid_b.clone()],
+            parent_ids: vec![oid_a, oid_b],
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T14:00:00Z".to_owned(),
             payload: OpPayload::Merge {
@@ -783,7 +784,7 @@ mod tests {
                 GitOid::new(&"a".repeat(40)).unwrap(),
                 GitOid::new(&"b".repeat(40)).unwrap(),
             ],
-            workspace_id: ws_id.clone(),
+            workspace_id: ws_id,
             timestamp: "2026-02-19T15:30:00Z".to_owned(),
             payload: OpPayload::Compensate {
                 target_op: GitOid::new(&"c".repeat(40)).unwrap(),

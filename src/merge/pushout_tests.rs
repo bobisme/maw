@@ -18,6 +18,8 @@
 //! - Change types: disjoint adds, identical modifications, non-overlapping edits,
 //!   overlapping edits (conflicts), deletions, modify/delete, add/add
 //! - Failure produces minimal reproducing case via proptest shrinking
+
+#![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 //!
 //! # Pushout diagram
 //!
@@ -68,7 +70,7 @@ struct TestWorkspace {
     changes: Vec<FileChange>,
 }
 
-/// Convert test workspaces to PatchSets.
+/// Convert test workspaces to `PatchSets`.
 fn to_patch_sets(workspaces: &[TestWorkspace]) -> Vec<PatchSet> {
     workspaces
         .iter()
@@ -148,7 +150,7 @@ fn arb_content() -> impl Strategy<Value = Vec<u8>> {
         .prop_map(|lines| lines.join("").into_bytes())
 }
 
-/// Generate a ChangeKind.
+/// Generate a `ChangeKind`.
 fn arb_change_kind() -> impl Strategy<Value = ChangeKind> {
     prop_oneof![
         2 => Just(ChangeKind::Added),
@@ -157,7 +159,7 @@ fn arb_change_kind() -> impl Strategy<Value = ChangeKind> {
     ]
 }
 
-/// Generate a single FileChange.
+/// Generate a single `FileChange`.
 fn arb_file_change() -> impl Strategy<Value = FileChange> {
     (arb_path(), arb_change_kind(), arb_content()).prop_map(|(path, kind, content)| {
         let content = if matches!(kind, ChangeKind::Deleted) {
@@ -650,7 +652,7 @@ fn verify_minimality(
 // distinct categorical property (pushout uniqueness).
 // ---------------------------------------------------------------------------
 
-/// Compare two ResolveResults for structural equality.
+/// Compare two `ResolveResults` for structural equality.
 fn results_equal(a: &ResolveResult, b: &ResolveResult) -> bool {
     if a.resolved.len() != b.resolved.len() || a.conflicts.len() != b.conflicts.len() {
         return false;
@@ -817,7 +819,7 @@ proptest! {
             .collect();
 
         let mut base = BTreeMap::new();
-        base.insert(path.clone(), b"original content\n".to_vec());
+        base.insert(path, b"original content\n".to_vec());
 
         let result = run_merge(&workspaces, &base);
 
@@ -1197,7 +1199,7 @@ proptest! {
                                  Content len: {}, Possible lens: {:?}",
                                 path,
                                 content.len(),
-                                possible_contents.iter().map(|c| c.len()).collect::<Vec<_>>(),
+                                possible_contents.iter().map(std::vec::Vec::len).collect::<Vec<_>>(),
                             );
                         }
                         // For shared paths, the merged content is a combination of
@@ -1206,7 +1208,7 @@ proptest! {
                         if ws_touching.len() > 1 && !possible_contents.is_empty() {
                             // Merged content should not be empty if inputs have content.
                             let all_inputs_empty =
-                                possible_contents.iter().all(|c| c.is_empty());
+                                possible_contents.iter().all(std::vec::Vec::is_empty);
                             if !all_inputs_empty {
                                 prop_assert!(
                                     !content.is_empty(),

@@ -800,6 +800,7 @@ fn now_secs() -> u64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::backend::{SnapshotResult, WorkspaceStatus};
@@ -829,7 +830,7 @@ mod tests {
     }
 
     /// Create a test git repo with initial epoch commit.
-    /// Returns (TempDir, epoch_oid).
+    /// Returns (`TempDir`, `epoch_oid`).
     /// Epoch tree contains: README.md, lib.rs, src/main.rs.
     fn setup_epoch_repo() -> (TempDir, EpochId) {
         let dir = TempDir::new().unwrap();
@@ -880,7 +881,7 @@ mod tests {
 
     /// A mock workspace backend that returns pre-configured snapshots.
     /// Files must actually exist on disk at the workspace path for
-    /// collect_one to read their content.
+    /// `collect_one` to read their content.
     struct MockBackend {
         snapshots: BTreeMap<String, SnapshotResult>,
         statuses: BTreeMap<String, WorkspaceStatus>,
@@ -898,7 +899,7 @@ mod tests {
 
         /// Register a workspace with a snapshot and status.
         /// The caller must create the workspace directory and populate
-        /// files before calling collect_snapshots.
+        /// files before calling `collect_snapshots`.
         fn add_workspace(
             &mut self,
             name: &str,
@@ -947,21 +948,21 @@ mod tests {
             self.statuses
                 .get(name.as_str())
                 .cloned()
-                .ok_or_else(|| MockError(format!("workspace {} not found", name)))
+                .ok_or_else(|| MockError(format!("workspace {name} not found")))
         }
 
         fn snapshot(&self, name: &WorkspaceId) -> Result<SnapshotResult, Self::Error> {
             self.snapshots
                 .get(name.as_str())
                 .cloned()
-                .ok_or_else(|| MockError(format!("workspace {} not found", name)))
+                .ok_or_else(|| MockError(format!("workspace {name} not found")))
         }
 
         fn workspace_path(&self, name: &WorkspaceId) -> PathBuf {
             self.paths
                 .get(name.as_str())
                 .cloned()
-                .unwrap_or_else(|| PathBuf::from(format!("/tmp/ws/{}", name)))
+                .unwrap_or_else(|| PathBuf::from(format!("/tmp/ws/{name}")))
         }
 
         fn exists(&self, name: &WorkspaceId) -> bool {
@@ -970,7 +971,7 @@ mod tests {
     }
 
     /// Helper: create a workspace directory with files and return the
-    /// appropriate SnapshotResult.
+    /// appropriate `SnapshotResult`.
     fn make_workspace_with_added_file(
         base: &Path,
         ws_name: &str,
@@ -1094,7 +1095,7 @@ mod tests {
 
         let patch_sets = vec![
             PatchSet::new(
-                ws_a.clone(),
+                ws_a,
                 epoch.clone(),
                 vec![FileChange::new(
                     PathBuf::from("README.md"),
@@ -1103,7 +1104,7 @@ mod tests {
                 )],
             ),
             PatchSet::new(
-                ws_b.clone(),
+                ws_b,
                 epoch.clone(),
                 vec![FileChange::new(
                     PathBuf::from("README.md"),
@@ -1202,7 +1203,7 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        let state_path = write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        let state_path = write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         // Empty workspace — no changes
         let ws_path = dir.path().join("ws/ws-1");
@@ -1210,7 +1211,7 @@ mod tests {
         let mut backend = MockBackend::new();
         backend.add_workspace(
             "ws-1",
-            epoch.clone(),
+            epoch,
             SnapshotResult::new(vec![], vec![], vec![]),
             ws_path,
         );
@@ -1220,7 +1221,7 @@ mod tests {
         // Merge-state advanced to Build with candidate OID recorded
         let final_state = MergeStateFile::read(&state_path).unwrap();
         assert_eq!(final_state.phase, MergePhase::Build);
-        assert_eq!(final_state.epoch_candidate, Some(output.candidate.clone()));
+        assert_eq!(final_state.epoch_candidate, Some(output.candidate));
     }
 
     #[test]
@@ -1228,7 +1229,7 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        let state_path = write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        let state_path = write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) = make_workspace_with_added_file(
             dir.path(),
@@ -1237,7 +1238,7 @@ mod tests {
             b"pub fn feature() {}\n",
         );
         let mut backend = MockBackend::new();
-        backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path.clone());
+        backend.add_workspace("ws-1", epoch, snapshot, ws_path.clone());
 
         let head_before = run_git(dir.path(), &["rev-parse", "HEAD"]);
         let epoch_before = run_git(dir.path(), &["rev-parse", "refs/manifold/epoch/current"]);
@@ -1284,14 +1285,14 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let ws_path = dir.path().join("ws/ws-1");
         fs::create_dir_all(&ws_path).unwrap();
         let mut backend = MockBackend::new();
         backend.add_workspace(
             "ws-1",
-            epoch.clone(),
+            epoch,
             SnapshotResult::new(vec![], vec![], vec![]),
             ws_path,
         );
@@ -1310,7 +1311,7 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) = make_workspace_with_added_file(
             dir.path(),
@@ -1319,7 +1320,7 @@ mod tests {
             b"pub fn feature() {}\n",
         );
         let mut backend = MockBackend::new();
-        backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
+        backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
 
@@ -1345,7 +1346,7 @@ mod tests {
         let manifold_dir = dir.path().join(".manifold");
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
-        write_prepare_state(&manifold_dir, &[ws_a.clone(), ws_b.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         let (path_a, snap_a) =
             make_workspace_with_added_file(dir.path(), "ws-a", "feature_a.rs", b"pub fn a() {}\n");
@@ -1354,7 +1355,7 @@ mod tests {
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
-        backend.add_workspace("ws-b", epoch.clone(), snap_b, path_b);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
 
@@ -1378,7 +1379,7 @@ mod tests {
         let manifold_dir = dir.path().join(".manifold");
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
-        write_prepare_state(&manifold_dir, &[ws_a.clone(), ws_b.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         let new_content = b"# Updated README\n";
         let (path_a, snap_a) =
@@ -1388,7 +1389,7 @@ mod tests {
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
-        backend.add_workspace("ws-b", epoch.clone(), snap_b, path_b);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
 
@@ -1410,12 +1411,12 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) = make_workspace_with_deleted_file(dir.path(), "ws-1", "lib.rs");
 
         let mut backend = MockBackend::new();
-        backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
+        backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
 
@@ -1434,7 +1435,7 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) =
             make_workspace_with_added_file(dir.path(), "ws-1", "test.txt", b"test content\n");
@@ -1498,11 +1499,7 @@ mod tests {
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
         let ws_c = WorkspaceId::new("ws-c").unwrap();
-        write_prepare_state(
-            &manifold_dir,
-            &[ws_a.clone(), ws_b.clone(), ws_c.clone()],
-            &epoch,
-        );
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b, ws_c], &epoch);
 
         let (pa, sa) = make_workspace_with_added_file(dir.path(), "ws-a", "a.txt", b"aaa\n");
         let (pb, sb) = make_workspace_with_added_file(dir.path(), "ws-b", "b.txt", b"bbb\n");
@@ -1511,7 +1508,7 @@ mod tests {
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), sa, pa);
         backend.add_workspace("ws-b", epoch.clone(), sb, pb);
-        backend.add_workspace("ws-c", epoch.clone(), sc, pc);
+        backend.add_workspace("ws-c", epoch, sc, pc);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
 
@@ -1571,7 +1568,7 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
         let ws = WorkspaceId::new("ws-1").unwrap();
-        write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         // Create workspace with all three change types
         let ws_path = dir.path().join("ws/ws-1");
@@ -1590,7 +1587,7 @@ mod tests {
         );
 
         let mut backend = MockBackend::new();
-        backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
+        backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
 
@@ -1632,7 +1629,7 @@ mod tests {
         let manifold_dir = dir.path().join(".manifold");
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
-        write_prepare_state(&manifold_dir, &[ws_a.clone(), ws_b.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
             &manifold_dir,
@@ -1650,7 +1647,7 @@ command = "printf 're-generated lockfile\n' > Cargo.lock"
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
-        backend.add_workspace("ws-b", epoch.clone(), snap_b, path_b);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
         assert!(output.conflicts.is_empty());
@@ -1675,7 +1672,7 @@ command = "printf 're-generated lockfile\n' > Cargo.lock"
         let manifold_dir = dir.path().join(".manifold");
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
-        write_prepare_state(&manifold_dir, &[ws_a.clone(), ws_b.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
             &manifold_dir,
@@ -1701,7 +1698,7 @@ command = "mkdir -p src/gen && printf '{\"version\":42}\n' > src/gen/schema.json
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
-        backend.add_workspace("ws-b", epoch.clone(), snap_b, path_b);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
         assert!(output.conflicts.is_empty());
@@ -1722,7 +1719,7 @@ command = "mkdir -p src/gen && printf '{\"version\":42}\n' > src/gen/schema.json
         let manifold_dir = dir.path().join(".manifold");
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
-        write_prepare_state(&manifold_dir, &[ws_a.clone(), ws_b.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
             &manifold_dir,
@@ -1739,7 +1736,7 @@ kind = "ours"
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
-        backend.add_workspace("ws-b", epoch.clone(), snap_b, path_b);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
         let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
         assert!(output.conflicts.is_empty());
@@ -1757,7 +1754,7 @@ kind = "ours"
         let manifold_dir = dir.path().join(".manifold");
         let ws_a = WorkspaceId::new("ws-a").unwrap();
         let ws_b = WorkspaceId::new("ws-b").unwrap();
-        write_prepare_state(&manifold_dir, &[ws_a.clone(), ws_b.clone()], &epoch);
+        write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
             &manifold_dir,
@@ -1774,7 +1771,7 @@ kind = "theirs"
 
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
-        backend.add_workspace("ws-b", epoch.clone(), snap_b, path_b);
+        backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
         let err = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap_err();
         let msg = format!("{err}");
@@ -1808,7 +1805,7 @@ command = "exit 19"
             make_workspace_with_modified_file(dir.path(), "ws-1", "Cargo.lock", b"changed\n");
 
         let mut backend = MockBackend::new();
-        backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
+        backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
         let err = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap_err();
         let msg = format!("{err}");

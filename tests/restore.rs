@@ -80,11 +80,11 @@ fn history_includes_workspace_lifecycle_events_after_restore() {
         .collect();
 
     assert!(
-        op_types.iter().any(|t| *t == "create"),
+        op_types.contains(&"create"),
         "history should include at least one create operation"
     );
     assert!(
-        op_types.iter().any(|t| *t == "destroy"),
+        op_types.contains(&"destroy"),
         "history should include destroy operation"
     );
 }

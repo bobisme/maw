@@ -158,6 +158,7 @@ fn is_hex_oid(s: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use std::fs;
     use std::process::Command;
@@ -256,15 +257,15 @@ mod tests {
             .output()
             .unwrap();
 
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{}", epoch0))).unwrap();
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{}", epoch1))).unwrap();
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch0}"))).unwrap();
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch1}"))).unwrap();
         let orphan = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         fs::create_dir_all(root.join(format!(".manifold/epochs/e-{orphan}"))).unwrap();
 
         let report = gc_unreferenced_epochs(root, false).unwrap();
         assert_eq!(report.removed, vec![orphan.to_string()]);
-        assert!(root.join(format!(".manifold/epochs/e-{}", epoch0)).exists());
-        assert!(root.join(format!(".manifold/epochs/e-{}", epoch1)).exists());
+        assert!(root.join(format!(".manifold/epochs/e-{epoch0}")).exists());
+        assert!(root.join(format!(".manifold/epochs/e-{epoch1}")).exists());
         assert!(!root.join(format!(".manifold/epochs/e-{orphan}")).exists());
     }
 
@@ -278,7 +279,7 @@ mod tests {
         backend
             .create(&ws, &EpochId::new(&epoch0).unwrap())
             .unwrap();
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{}", epoch0))).unwrap();
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch0}"))).unwrap();
 
         // Keep current epoch elsewhere so epoch0 is not retained by epoch/current.
         let epoch1 = commit(root, "later.txt");
@@ -295,7 +296,7 @@ mod tests {
         let report = gc_unreferenced_epochs(root, false).unwrap();
         assert_eq!(report.removed, vec![epoch0.clone()]);
         assert!(
-            !root.join(format!(".manifold/epochs/e-{}", epoch0)).exists(),
+            !root.join(format!(".manifold/epochs/e-{epoch0}")).exists(),
             "epoch snapshot should be GC'd after destroying last referencing workspace"
         );
     }

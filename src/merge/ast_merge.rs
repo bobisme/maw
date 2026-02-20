@@ -951,6 +951,7 @@ fn skip_trailing_whitespace(source: &[u8], from: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::types::WorkspaceId;

@@ -294,6 +294,7 @@ fn git_hash_object(repo_root: &Path, content: &[u8]) -> Option<GitOid> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::backend::git::GitWorktreeBackend;
@@ -436,7 +437,7 @@ mod tests {
 
         fs::write(info.path.join("new.rs"), "fn main() {}").unwrap();
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -459,7 +460,7 @@ mod tests {
 
         fs::write(info.path.join("README.md"), "# Modified").unwrap();
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -482,7 +483,7 @@ mod tests {
 
         fs::remove_file(info.path.join("README.md")).unwrap();
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -492,7 +493,7 @@ mod tests {
         assert!(change.content.is_none(), "deletions have no content");
     }
 
-    /// Deletion-only workspace: PatchSet reports all deletions, none are filtered.
+    /// Deletion-only workspace: `PatchSet` reports all deletions, none are filtered.
     #[test]
     fn collect_deletion_only_workspace() {
         let (temp_dir, _epoch) = setup_git_repo();
@@ -520,7 +521,7 @@ mod tests {
         fs::remove_file(info.path.join("README.md")).unwrap();
         fs::remove_file(info.path.join("lib.rs")).unwrap();
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
         let ps = &results[0];
 
         assert!(
@@ -664,7 +665,7 @@ mod tests {
     // Phase 3: FileId + blob OID enrichment
     // -----------------------------------------------------------------------
 
-    /// Added files should receive a fresh (non-None) FileId.
+    /// Added files should receive a fresh (non-None) `FileId`.
     #[test]
     fn collect_added_file_has_file_id() {
         let (temp_dir, epoch) = setup_git_repo();
@@ -783,7 +784,7 @@ mod tests {
         );
     }
 
-    /// Modified files look up FileId from the epoch FileIdMap when available.
+    /// Modified files look up `FileId` from the epoch `FileIdMap` when available.
     #[test]
     fn collect_modified_file_uses_file_id_from_map() {
         use crate::model::patch::FileId;
@@ -797,7 +798,7 @@ mod tests {
         // Replace the random id with our known id by rebuilding.
         // Manually insert: we use a workaround since track_new is random.
         // Build the map via save+reload with a known value.
-        let json = format!(r#"[{{"path":"README.md","file_id":"{}"}}]"#, known_id);
+        let json = format!(r#"[{{"path":"README.md","file_id":"{known_id}"}}]"#);
         fs::create_dir_all(fileids_path.parent().unwrap()).unwrap();
         fs::write(&fileids_path, &json).unwrap();
 

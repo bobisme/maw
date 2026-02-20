@@ -1,4 +1,5 @@
 //! Integration tests for merge scenarios: disjoint, conflicting, and N-way.
+#![allow(clippy::too_many_lines)]
 //!
 //! Uses the git-native `TestRepo` infrastructure.
 //! Tests exercise the full collect → partition → resolve → build merge pipeline

@@ -476,6 +476,7 @@ impl std::error::Error for MergeStateError {}
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
 

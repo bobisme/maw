@@ -225,6 +225,7 @@ pub fn partition_by_path(patch_sets: &[PatchSet]) -> PartitionResult {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::merge::types::{ChangeKind, FileChange, PatchSet};
@@ -239,7 +240,7 @@ mod tests {
     }
 
     fn make_change(path: &str, kind: ChangeKind, content: Option<&[u8]>) -> FileChange {
-        FileChange::new(PathBuf::from(path), kind, content.map(|c| c.to_vec()))
+        FileChange::new(PathBuf::from(path), kind, content.map(<[u8]>::to_vec))
     }
 
     // -- Empty inputs --
@@ -406,7 +407,7 @@ mod tests {
                     make_change(
                         &format!("unique-{i}.rs"),
                         ChangeKind::Added,
-                        Some(format!("fn ws_{i}() {{}}", i = i).as_bytes()),
+                        Some(format!("fn ws_{i}() {{}}").as_bytes()),
                     ),
                 ];
                 // All workspaces modify the shared file.
@@ -564,7 +565,7 @@ mod tests {
         let (_, entries) = &result.shared[0];
         assert_eq!(entries.len(), 2);
         // Both deletions.
-        assert!(entries.iter().all(|e| e.is_deletion()));
+        assert!(entries.iter().all(super::PathEntry::is_deletion));
     }
 
     // -- PathEntry --
@@ -582,7 +583,7 @@ mod tests {
     // Phase 3: FileId + blob OID propagation through partition
     // -----------------------------------------------------------------------
 
-    /// Helper: build a `FileChange` with identity metadata (FileId + blob OID).
+    /// Helper: build a `FileChange` with identity metadata (`FileId` + blob OID).
     fn make_change_with_identity(
         path: &str,
         kind: ChangeKind,
@@ -594,14 +595,14 @@ mod tests {
         FileChange::with_identity(
             PathBuf::from(path),
             kind,
-            content.map(|c| c.to_vec()),
+            content.map(<[u8]>::to_vec),
             Some(file_id),
             blob,
         )
     }
 
-    /// FileId and blob OID on a FileChange should be propagated into the
-    /// PathEntry that appears in the partition result.
+    /// `FileId` and blob OID on a `FileChange` should be propagated into the
+    /// `PathEntry` that appears in the partition result.
     #[test]
     fn partition_propagates_file_id_and_blob_to_path_entry() {
         use crate::model::patch::FileId;
@@ -635,7 +636,7 @@ mod tests {
         );
     }
 
-    /// FileId and blob OID propagate correctly into shared (multi-workspace) entries.
+    /// `FileId` and blob OID propagate correctly into shared (multi-workspace) entries.
     #[test]
     fn partition_propagates_identity_into_shared_entries() {
         use crate::model::patch::FileId;
@@ -687,7 +688,7 @@ mod tests {
         assert_ne!(entry_a.blob, entry_b.blob);
     }
 
-    /// FileChange without identity (Phase 1 compat) results in None fields in PathEntry.
+    /// `FileChange` without identity (Phase 1 compat) results in None fields in `PathEntry`.
     #[test]
     fn partition_phase1_change_has_no_identity_in_path_entry() {
         let change = make_change("old_style.rs", ChangeKind::Added, Some(b"fn old() {}"));

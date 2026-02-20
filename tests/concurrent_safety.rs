@@ -1,4 +1,5 @@
 //! Concurrent agent safety eval — adversarial interleaving stress test.
+#![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 //!
 //! Implements bd-1784: "Eval: concurrent agent safety (adversarial interleavings)"
 //!

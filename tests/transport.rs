@@ -56,6 +56,7 @@ fn create_test_blob(repo: &Path, content: &str) -> String {
 
 /// Create a git commit (not a blob) and return its OID.
 /// Used for epoch and ws refs which must be commits for merge-base to work.
+#[allow(dead_code)]
 fn create_test_commit(repo: &Path, message: &str) -> String {
     let out = Command::new("git")
         .args(["commit", "--allow-empty", "-m", message])

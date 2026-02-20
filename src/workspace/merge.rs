@@ -1958,6 +1958,7 @@ fn handle_post_merge_destroy(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use std::path::PathBuf;
 

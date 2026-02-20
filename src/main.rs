@@ -271,6 +271,7 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_pass_by_value)]
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;

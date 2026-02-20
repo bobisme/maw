@@ -327,7 +327,7 @@ fn binary_file_isolation() {
     repo.create_workspace("ws-bin-b");
 
     // Write binary content in A.
-    let binary_content: Vec<u8> = (0..256).map(|i| i as u8).collect();
+    let binary_content: Vec<u8> = (u8::MIN..=u8::MAX).collect();
     let file_path = repo.workspace_path("ws-bin-a").join("data.bin");
     std::fs::write(&file_path, &binary_content).unwrap();
 

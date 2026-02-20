@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn from_io_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let io_err = std::io::Error::other("disk full");
         let err: ManifoldError = io_err.into();
         assert!(matches!(err, ManifoldError::Io(_)));
     }

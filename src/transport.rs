@@ -984,6 +984,7 @@ pub fn run_pull(args: &PullArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use std::fs;

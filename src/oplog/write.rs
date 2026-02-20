@@ -263,6 +263,7 @@ pub fn append_operation(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
     use crate::model::types::{EpochId, WorkspaceId};
@@ -424,7 +425,7 @@ mod tests {
         let op1 = make_create_op(&ws_id);
         let op2 = Operation {
             parent_ids: vec![],
-            workspace_id: ws_id.clone(),
+            workspace_id: ws_id,
             timestamp: "2026-02-19T12:00:00Z".to_owned(),
             payload: OpPayload::Create { epoch: epoch('b') },
         };
@@ -612,7 +613,7 @@ mod tests {
         assert!(out.status.success());
 
         // Content should be valid JSON
-        let json_bytes = out.stdout.clone();
+        let json_bytes = out.stdout;
         let value: serde_json::Value =
             serde_json::from_slice(&json_bytes).expect("blob content should be valid JSON");
 
@@ -635,7 +636,7 @@ mod tests {
                 GitOid::new(&"a".repeat(40)).unwrap(),
                 GitOid::new(&"b".repeat(40)).unwrap(),
             ],
-            workspace_id: ws_id.clone(),
+            workspace_id: ws_id,
             timestamp: "2026-02-19T15:30:00Z".to_owned(),
             payload: OpPayload::Describe {
                 message: "implementing the feature\nwith a multiline description".to_owned(),

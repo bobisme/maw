@@ -18,6 +18,8 @@
 //!   repos in /tmp, verifying identical commit OIDs across orderings
 //! - **100+ random scenarios**: via proptest with `ProptestConfig::with_cases(100)`
 
+#![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,7 +37,7 @@ use crate::model::types::{EpochId, GitOid, WorkspaceId};
 // ---------------------------------------------------------------------------
 
 /// Fixed epoch OID for all tests (content doesn't matter for partition/resolve
-/// at the unit level — resolve just needs base_contents map).
+/// at the unit level — resolve just needs `base_contents` map).
 fn epoch() -> EpochId {
     EpochId::new(&"a".repeat(40)).unwrap()
 }
@@ -44,7 +46,7 @@ fn ws(name: &str) -> WorkspaceId {
     WorkspaceId::new(name).unwrap()
 }
 
-/// Canonical representation of a ResolvedChange for comparison.
+/// Canonical representation of a `ResolvedChange` for comparison.
 fn canon_resolved(r: &ResolvedChange) -> (PathBuf, bool, Option<Vec<u8>>) {
     match r {
         ResolvedChange::Upsert { path, content } => (path.clone(), true, Some(content.clone())),
@@ -56,7 +58,7 @@ fn canon_conflict(c: &ConflictRecord) -> (PathBuf, String, usize) {
     (c.path.clone(), format!("{}", c.reason), c.sides.len())
 }
 
-/// Compare two ResolveResults for equality.
+/// Compare two `ResolveResults` for equality.
 /// Both resolved and conflicts vectors are already sorted by path in the
 /// implementation, so direct comparison works.
 fn results_equal(a: &ResolveResult, b: &ResolveResult) -> bool {
@@ -94,7 +96,7 @@ fn arb_content() -> impl Strategy<Value = Vec<u8>> {
         .prop_map(|lines| lines.join("").into_bytes())
 }
 
-/// Generate a ChangeKind.
+/// Generate a `ChangeKind`.
 fn arb_change_kind() -> impl Strategy<Value = ChangeKind> {
     prop_oneof![
         Just(ChangeKind::Added),
@@ -103,7 +105,7 @@ fn arb_change_kind() -> impl Strategy<Value = ChangeKind> {
     ]
 }
 
-/// Generate a single FileChange.
+/// Generate a single `FileChange`.
 fn arb_file_change() -> impl Strategy<Value = FileChange> {
     (arb_path(), arb_change_kind(), arb_content()).prop_map(|(path, kind, content)| {
         let content = if matches!(kind, ChangeKind::Deleted) {
@@ -155,7 +157,7 @@ fn make_base_contents(scenarios: &[WorkspaceScenario]) -> BTreeMap<PathBuf, Vec<
     base
 }
 
-/// Convert scenarios to PatchSets in the given order.
+/// Convert scenarios to `PatchSets` in the given order.
 fn to_patch_sets(scenarios: &[WorkspaceScenario]) -> Vec<PatchSet> {
     scenarios
         .iter()
@@ -313,7 +315,7 @@ fn git_tree_oid(root: &Path, commit: &str) -> GitOid {
 }
 
 /// Set up a fresh git repo with identity configured and an initial commit.
-/// Returns (TempDir, EpochId).
+/// Returns (`TempDir`, `EpochId`).
 fn setup_git_repo() -> (tempfile::TempDir, EpochId) {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
@@ -496,7 +498,7 @@ proptest! {
             .expect("resolve should not error");
 
         // Resolved paths sorted.
-        let res_paths: Vec<_> = result.resolved.iter().map(|r| r.path()).collect();
+        let res_paths: Vec<_> = result.resolved.iter().map(super::build::ResolvedChange::path).collect();
         for w in res_paths.windows(2) {
             prop_assert!(
                 w[0] <= w[1],
@@ -896,7 +898,10 @@ fn e2e_determinism_3_workspaces_shared_file() {
     // Each workspace modifies a different region.
     let mut scenarios = Vec::new();
     for i in 0..3 {
-        let mut lines: Vec<String> = base_lines.iter().map(|l| l.to_string()).collect();
+        let mut lines: Vec<String> = base_lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let region_start = i * 5;
         lines[region_start] = format!("EDITED-BY-WS-{i}");
         let content = lines.join("\n") + "\n";
@@ -956,8 +961,10 @@ fn e2e_determinism_5_workspaces_mixed() {
                 path0.clone(),
                 ChangeKind::Modified,
                 Some({
-                    let mut lines: Vec<String> =
-                        base0_lines.iter().map(|l| l.to_string()).collect();
+                    let mut lines: Vec<String> = base0_lines
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect();
                     lines[0] = "MODIFIED-BY-WS-01".to_string();
                     (lines.join("\n") + "\n").into_bytes()
                 }),
@@ -970,8 +977,10 @@ fn e2e_determinism_5_workspaces_mixed() {
                 path0.clone(),
                 ChangeKind::Modified,
                 Some({
-                    let mut lines: Vec<String> =
-                        base0_lines.iter().map(|l| l.to_string()).collect();
+                    let mut lines: Vec<String> = base0_lines
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect();
                     lines[10] = "MODIFIED-BY-WS-02".to_string();
                     (lines.join("\n") + "\n").into_bytes()
                 }),
@@ -1026,7 +1035,10 @@ fn e2e_determinism_10_workspaces_same_file() {
     // Each of 10 workspaces modifies a different region.
     let mut scenarios = Vec::new();
     for i in 0..10 {
-        let mut lines: Vec<String> = base_lines.iter().map(|l| l.to_string()).collect();
+        let mut lines: Vec<String> = base_lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let region_start = i * 5;
         lines[region_start] = format!("EDITED-BY-WS-{i:02}");
         let content = lines.join("\n") + "\n";
@@ -1168,7 +1180,7 @@ fn e2e_conflicts_deterministic_across_orderings() {
 
     // 3 workspaces: ws-00 modifies, ws-01 deletes, ws-02 modifies differently.
     // This produces modify/delete conflict for ws-00 vs ws-01.
-    let scenarios = vec![
+    let scenarios = [
         WorkspaceScenario {
             name: "ws-00".to_string(),
             changes: vec![FileChange::new(
