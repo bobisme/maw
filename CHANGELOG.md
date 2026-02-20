@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.42.0
+
+- Feat: Agent-friendly conflict presentation (JSON structured output) — `ConflictJson` struct with path/reason/workspaces/base_content/sides/atoms/resolution_strategies, `conflict_record_to_json()` conversion, `maw ws merge --format json` structured output for success and conflict cases. 20 tests. (bd-20kb)
+- Feat: Upgrade merge engine input from snapshots to PatchSets — FileId and blob OID fields on FileChange/PathEntry, git hash-object enrichment in collect phase, blob-OID equality in resolve phase. 16 new tests. (bd-1mjz.1)
+- Feat: Merge preview (`--plan --json`) and derived artifacts — `MergePlan` JSON with deterministic merge_id (SHA-256), `plan_merge()` runs PREPARE+BUILD+VALIDATE without COMMIT, artifacts written to `.manifold/artifacts/`, `--plan` flag on `maw ws merge`. 15 new tests. (bd-1q3f)
+- Closed: bd-2hw9 (Phase 1 integration tests, all children done), bd-21sm.3 (eval: conflict detection)
+- sha2 dependency added for deterministic merge identifiers
+
 ## v0.41.0
 
 - Feat: View checkpoints and log compaction — `src/oplog/checkpoint.rs` with `CheckpointData`/`CheckpointView` serialization, configurable checkpoint intervals, `materialize_from_checkpoint()` for fast replay from latest checkpoint, `compact()` to replace pre-checkpoint chain with synthetic root. 29 tests. (bd-28np.3)
