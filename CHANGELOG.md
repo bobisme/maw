@@ -2,6 +2,20 @@
 
 All notable changes to maw.
 
+## v0.44.0
+
+### Added
+- **AST-aware merge** via tree-sitter for Rust, Python, TypeScript (bd-1g5h). Feature-gated `ast-merge` (default on). Falls back from diff3 to AST-level edit scripts for +5-10% merge success.
+- **Shifted-code alignment** merge layer (bd-233b). Detects moved code blocks, normalizes positions, retries diff3.
+- **Platform CoW detection** (bd-3gzh). Runtime detection of reflink, overlayfs, userns, fuse-overlayfs with auto-selection.
+- `maw ws touched` and `maw ws overlap` commands for conflict prediction (bd-3cie). JSON output for orchestrators.
+
+### Closed (housekeeping)
+- bd-2yxa (P1 Epic: Phase 1 — Git Worktree Backend) — all 11 blockers completed
+- bd-2qfp (P2 Epic: Phase 2 — Patch-Set Model + Git-Native Op Log) — all blockers completed
+- bd-18py (Track 1: Phase 1 foundation), bd-e5ej (Track 2: merge safety), bd-3jt0 (Track 3: patch-set model) — all closed
+- bd-21sm, bd-29e3, bd-1mjz parent beads and remaining children — all closed
+
 ## v0.43.0
 
 ### Features
