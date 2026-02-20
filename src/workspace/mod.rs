@@ -9,10 +9,12 @@ use crate::backend::git::GitWorktreeBackend;
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 
+mod advance;
 mod create;
 mod history;
 mod list;
 mod merge;
+mod metadata;
 mod names;
 mod prune;
 mod restore;
@@ -135,6 +137,14 @@ pub enum WorkspaceCommands {
     ///   1. Edit files under ws/<name>/ (use absolute paths)
     ///   2. Run commands: maw exec <name> -- <command>
     ///   3. Changes are captured automatically during merge
+    ///
+    /// WORKSPACE MODES:
+    ///   Ephemeral (default): created from current epoch; must be merged or
+    ///   destroyed before the next epoch advance. Common for short-lived tasks.
+    ///
+    ///   Persistent (--persistent): can survive across epoch advances. Use
+    ///   `maw ws advance <name>` to rebase onto the latest epoch when stale.
+    ///   Suitable for long-running agent tasks that span multiple epochs.
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -147,6 +157,14 @@ pub enum WorkspaceCommands {
         /// Base revision to start from (default: main or @)
         #[arg(short, long)]
         revision: Option<String>,
+
+        /// Create a persistent workspace that can survive across epoch advances.
+        ///
+        /// Persistent workspaces are not destroyed by epoch advancement and
+        /// support `maw ws advance <name>` to rebase onto newer epochs.
+        /// Staleness is shown in `maw ws list` and `maw ws status`.
+        #[arg(long)]
+        persistent: bool,
     },
 
     /// Remove a workspace
@@ -315,6 +333,43 @@ pub enum WorkspaceCommands {
         revision: Option<String>,
     },
 
+    /// Rebase a persistent workspace onto the latest epoch
+    ///
+    /// When the mainline epoch advances (a merge is committed), persistent
+    /// workspaces become stale. Use this command to rebase the workspace's
+    /// uncommitted changes onto the new epoch.
+    ///
+    /// Only works for workspaces created with `--persistent`. Ephemeral
+    /// workspaces should be merged or destroyed instead.
+    ///
+    /// The advance operation:
+    ///   1. Stashes any uncommitted changes in the workspace
+    ///   2. Updates the workspace HEAD to the new epoch
+    ///   3. Re-applies the stashed changes
+    ///   4. Reports any conflicts as structured data
+    ///
+    /// Examples:
+    ///   maw ws advance my-agent              # advance to latest epoch
+    ///   maw ws advance my-agent --format json  # machine-parseable output
+    ///
+    /// On conflict, the workspace is left with conflict markers for manual
+    /// resolution. Resolve conflicts in the workspace files, then continue.
+    Advance {
+        /// Name of the persistent workspace to advance
+        name: String,
+
+        /// Output format: text, json, or pretty
+        ///
+        /// With --format json, emits structured JSON including conflict details
+        /// (file paths, conflict types) for automated conflict handling.
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
+
     /// Merge work from workspaces into default
     ///
     /// Creates a merge commit combining work from the specified workspaces.
@@ -428,13 +483,14 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             name,
             random,
             revision,
+            persistent,
         } => {
             let name = if random {
                 names::generate_workspace_name()
             } else {
                 name.expect("name is required unless --random is set")
             };
-            create::create(&name, revision.as_deref())
+            create::create(&name, revision.as_deref(), persistent)
         }
         WorkspaceCommands::Destroy { name, confirm } => create::destroy(&name, confirm),
         WorkspaceCommands::Restore { name } => restore::restore(&name),
@@ -451,6 +507,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::History { name, limit, format, json } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
+        WorkspaceCommands::Advance { name, format, json } => {
+            let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+            advance::advance(&name, fmt)
+        }
         WorkspaceCommands::Merge {
             workspaces,
             destroy,

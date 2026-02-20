@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::ManifoldConfig;
-use crate::model::types::{EpochId, GitOid, WorkspaceId, WorkspaceInfo, WorkspaceState};
+use crate::model::types::{EpochId, GitOid, WorkspaceId, WorkspaceInfo, WorkspaceMode, WorkspaceState};
 use crate::refs as manifold_refs;
 use super::{SnapshotResult, WorkspaceBackend, WorkspaceStatus};
 
@@ -240,6 +240,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 path,
                 epoch: epoch.clone(),
                 state: WorkspaceState::Active,
+                mode: WorkspaceMode::default(),
             });
         }
 
@@ -292,6 +293,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             path,
             epoch: epoch.clone(),
             state: WorkspaceState::Active,
+            mode: WorkspaceMode::default(),
         })
     }
 
@@ -430,7 +432,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 None => WorkspaceState::Active,
             };
 
-            infos.push(WorkspaceInfo { id, path, epoch, state });
+            infos.push(WorkspaceInfo { id, path, epoch, state, mode: WorkspaceMode::default() });
         }
 
         Ok(infos)

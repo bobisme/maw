@@ -3,11 +3,11 @@ use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
-use crate::model::types::WorkspaceState;
+use crate::model::types::{WorkspaceMode, WorkspaceState};
 
 use crate::merge::quarantine::QUARANTINE_NAME_PREFIX;
 
-use super::{get_backend, DEFAULT_WORKSPACE};
+use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
 pub struct WorkspaceInfo {
@@ -15,6 +15,7 @@ pub struct WorkspaceInfo {
     pub(crate) is_default: bool,
     pub(crate) epoch: String,
     pub(crate) state: String,
+    pub(crate) mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +63,9 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         return Ok(());
     }
 
+    // Read metadata for all workspaces to get mode (ephemeral/persistent).
+    let root = repo_root().unwrap_or_default();
+
     // Convert backend workspace info to display structs
     let workspaces: Vec<WorkspaceInfo> = backend_workspaces
         .iter()
@@ -72,6 +76,10 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                 WorkspaceState::Stale { behind_epochs } => Some(*behind_epochs),
                 _ => None,
             };
+            // Read metadata for this workspace (defaults to ephemeral on error/missing).
+            let ws_mode = metadata::read(&root, ws.id.as_str())
+                .map(|m| m.mode)
+                .unwrap_or(WorkspaceMode::Ephemeral);
             WorkspaceInfo {
                 is_default: name == DEFAULT_WORKSPACE,
                 epoch: ws.epoch.as_str()[..12].to_string(),
@@ -82,6 +90,7 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                 } else {
                     format!("{}", ws.state)
                 },
+                mode: format!("{ws_mode}"),
                 path: if verbose {
                     Some(ws.path.display().to_string())
                 } else {
@@ -93,7 +102,30 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         })
         .collect();
 
-    // Collect stale workspace warnings (exclude quarantine workspaces)
+    // Collect stale workspace warnings, split by mode (exclude quarantine workspaces).
+    let stale_persistent: Vec<String> = backend_workspaces
+        .iter()
+        .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
+        .filter(|ws| {
+            metadata::read(&root, ws.id.as_str())
+                .map(|m| m.mode.is_persistent())
+                .unwrap_or(false)
+        })
+        .map(|ws| ws.id.as_str().to_string())
+        .collect();
+
+    let stale_ephemeral: Vec<String> = backend_workspaces
+        .iter()
+        .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
+        .filter(|ws| {
+            metadata::read(&root, ws.id.as_str())
+                .map(|m| m.mode.is_ephemeral())
+                .unwrap_or(true)
+        })
+        .map(|ws| ws.id.as_str().to_string())
+        .collect();
+
+    // Combined stale list (exclude quarantine, for backwards compatibility)
     let stale_workspaces: Vec<String> = backend_workspaces
         .iter()
         .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
@@ -101,38 +133,44 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         .collect();
 
     match format {
-        OutputFormat::Text => print_list_text(&workspaces, &stale_workspaces, verbose),
-        OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, format, verbose),
-        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, format),
+        OutputFormat::Text => print_list_text(&workspaces, &stale_workspaces, &stale_persistent, &stale_ephemeral, verbose),
+        OutputFormat::Pretty => print_list_pretty(&workspaces, &stale_workspaces, &stale_persistent, &stale_ephemeral, format, verbose),
+        OutputFormat::Json => print_list_json(workspaces, stale_workspaces, stale_persistent, stale_ephemeral, format),
     }
 
     Ok(())
 }
 
 /// Print workspace list in tab-separated text format (agent-friendly).
-fn print_list_text(workspaces: &[WorkspaceInfo], stale: &[String], verbose: bool) {
+fn print_list_text(
+    workspaces: &[WorkspaceInfo],
+    stale: &[String],
+    stale_persistent: &[String],
+    stale_ephemeral: &[String],
+    verbose: bool,
+) {
     if verbose {
-        println!("NAME\tEPOCH\tSTATE\tDEFAULT\tPATH");
+        println!("NAME\tEPOCH\tSTATE\tMODE\tDEFAULT\tPATH");
     } else {
-        println!("NAME\tEPOCH\tSTATE\tDEFAULT");
+        println!("NAME\tEPOCH\tSTATE\tMODE\tDEFAULT");
     }
     for ws in workspaces {
         let default_marker = if ws.is_default { "true" } else { "false" };
         if verbose {
             let path = ws.path.as_deref().unwrap_or("");
             println!(
-                "{}\t{}\t{}\t{}\t{}",
-                ws.name, ws.epoch, ws.state, default_marker, path
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                ws.name, ws.epoch, ws.state, ws.mode, default_marker, path
             );
         } else {
             println!(
-                "{}\t{}\t{}\t{}",
-                ws.name, ws.epoch, ws.state, default_marker
+                "{}\t{}\t{}\t{}\t{}",
+                ws.name, ws.epoch, ws.state, ws.mode, default_marker
             );
         }
     }
 
-    print_stale_warning_text(stale);
+    print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
 
     println!();
     println!("Next: maw exec <name> -- <command>");
@@ -142,18 +180,22 @@ fn print_list_text(workspaces: &[WorkspaceInfo], stale: &[String], verbose: bool
 fn print_list_pretty(
     workspaces: &[WorkspaceInfo],
     stale: &[String],
+    stale_persistent: &[String],
+    stale_ephemeral: &[String],
     format: OutputFormat,
     verbose: bool,
 ) {
     let use_color = format.should_use_color();
 
     for ws in workspaces {
+        let is_stale = ws.state.contains("stale");
+        let is_persistent = ws.mode == "persistent";
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
                 ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for default
             } else if ws.state == "quarantine" {
                 ("\u{26a0}", "\x1b[1;31m", "\x1b[0m")  // Red bold for quarantine
-            } else if ws.state.contains("stale") {
+            } else if is_stale {
                 ("\u{25b2}", "\x1b[1;33m", "\x1b[0m")  // Yellow for stale
             } else {
                 ("\u{25cc}", "\x1b[90m", "\x1b[0m")    // Gray for others
@@ -166,9 +208,10 @@ fn print_list_pretty(
             ("\u{25cc}", "", "")
         };
 
+        let mode_tag = if is_persistent { " [persistent]" } else { "" };
         println!(
-            "{} {}{}{} {} {}",
-            glyph, name_style, ws.name, reset, ws.epoch, ws.state
+            "{} {}{}{} {} {}{}",
+            glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag
         );
 
         if verbose {
@@ -181,18 +224,42 @@ fn print_list_pretty(
         }
     }
 
-    if !stale.is_empty() {
+    // Stale warnings with mode-specific guidance.
+    if !stale_persistent.is_empty() {
+        println!();
+        if use_color {
+            println!("\x1b[1;33m\u{25b2} STALE persistent workspace(s):\x1b[0m {}",
+                stale_persistent.join(", "));
+        } else {
+            println!("\u{25b2} STALE persistent workspace(s): {}", stale_persistent.join(", "));
+        }
+        for ws in stale_persistent {
+            println!("  Fix: maw ws advance {ws}");
+        }
+    }
+    if !stale_ephemeral.is_empty() {
+        println!();
+        if use_color {
+            println!("\x1b[1;33m\u{25b2} WARNING: stale ephemeral workspace(s):\x1b[0m {}",
+                stale_ephemeral.join(", "));
+        } else {
+            println!("\u{25b2} WARNING: stale ephemeral workspace(s): {}", stale_ephemeral.join(", "));
+        }
+        println!("  Ephemeral workspaces should be merged or destroyed — they survived an epoch advance.");
+        println!("  Fix: maw ws sync --all  (to sync) or maw ws merge <name> (to merge and destroy)");
+    }
+
+    // Legacy: combined stale notice if nothing split above.
+    if stale.is_empty() && !workspaces.is_empty() {
+        // Nothing stale.
+    } else if stale_persistent.is_empty() && stale_ephemeral.is_empty() && !stale.is_empty() {
+        // Fallback for workspaces with unknown mode.
         println!();
         if use_color {
             println!("\x1b[1;33m\u{25b2} WARNING:\x1b[0m {} stale workspace(s): {}",
-                stale.len(),
-                stale.join(", ")
-            );
+                stale.len(), stale.join(", "));
         } else {
-            println!("\u{25b2} WARNING: {} stale workspace(s): {}",
-                stale.len(),
-                stale.join(", ")
-            );
+            println!("\u{25b2} WARNING: {} stale workspace(s): {}", stale.len(), stale.join(", "));
         }
         println!("  Fix: maw ws sync --all");
     }
@@ -211,20 +278,53 @@ fn print_list_pretty(
 fn print_list_json(
     workspaces: Vec<WorkspaceInfo>,
     stale_workspaces: Vec<String>,
+    stale_persistent: Vec<String>,
+    stale_ephemeral: Vec<String>,
     format: OutputFormat,
 ) {
-    let advice = if stale_workspaces.is_empty() {
-        vec![]
-    } else {
-        vec![Advice {
+    let mut advice = vec![];
+
+    if !stale_persistent.is_empty() {
+        advice.push(Advice {
+            level: "warn",
+            message: format!(
+                "{} stale persistent workspace(s): {} — run maw ws advance <name>",
+                stale_persistent.len(),
+                stale_persistent.join(", ")
+            ),
+            details: Some(AdviceDetails {
+                workspaces: stale_persistent,
+                fix: "maw ws advance <name>".to_string(),
+            }),
+        });
+    }
+
+    if !stale_ephemeral.is_empty() {
+        advice.push(Advice {
+            level: "warn",
+            message: format!(
+                "{} stale ephemeral workspace(s): {} — survived epoch advance; merge or destroy",
+                stale_ephemeral.len(),
+                stale_ephemeral.join(", ")
+            ),
+            details: Some(AdviceDetails {
+                workspaces: stale_ephemeral,
+                fix: "maw ws sync --all".to_string(),
+            }),
+        });
+    }
+
+    // Fallback advice if stale workspaces exist but weren't categorized.
+    if advice.is_empty() && !stale_workspaces.is_empty() {
+        advice.push(Advice {
             level: "warn",
             message: format!("{} workspace(s) stale: {}", stale_workspaces.len(), stale_workspaces.join(", ")),
             details: Some(AdviceDetails {
                 workspaces: stale_workspaces,
                 fix: "maw ws sync --all".to_string(),
             }),
-        }]
-    };
+        });
+    }
 
     let envelope = WorkspaceListEnvelope {
         workspaces,
@@ -240,15 +340,34 @@ fn print_list_json(
 }
 
 /// Print stale workspace warnings for text output mode.
-fn print_stale_warning_text(stale: &[String]) {
-    if !stale.is_empty() {
+fn print_stale_warning_text(
+    stale: &[String],
+    stale_persistent: &[String],
+    stale_ephemeral: &[String],
+) {
+    if !stale_persistent.is_empty() {
         println!();
-        println!("WARNING: {} stale workspace(s): {}",
-            stale.len(),
-            stale.join(", ")
+        println!(
+            "STALE persistent workspace(s): {}",
+            stale_persistent.join(", ")
         );
+        for ws in stale_persistent {
+            println!("  Fix: maw ws advance {ws}");
+        }
+    }
+    if !stale_ephemeral.is_empty() {
+        println!();
+        println!(
+            "WARNING: stale ephemeral workspace(s): {}",
+            stale_ephemeral.join(", ")
+        );
+        println!("  Survived epoch advance — merge or destroy:");
+        println!("  Fix: maw ws sync --all");
+    }
+    // Fallback for workspaces with unknown mode.
+    if stale_persistent.is_empty() && stale_ephemeral.is_empty() && !stale.is_empty() {
+        println!();
+        println!("WARNING: {} stale workspace(s): {}", stale.len(), stale.join(", "));
         println!("  Fix: maw ws sync --all");
     }
 }
-
-

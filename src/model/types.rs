@@ -303,6 +303,49 @@ impl fmt::Display for WorkspaceState {
 }
 
 // ---------------------------------------------------------------------------
+// WorkspaceMode
+// ---------------------------------------------------------------------------
+
+/// The lifetime mode of a workspace.
+///
+/// - **Ephemeral** (default): Created from the current epoch, must be merged
+///   or destroyed before the next epoch advance. Warns if it survives epochs.
+/// - **Persistent** (opt-in): Can survive across epochs. Supports explicit
+///   `maw ws advance <name>` to rebase onto the latest epoch.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    /// Default: workspace should be merged or destroyed before epoch advances.
+    #[default]
+    Ephemeral,
+    /// Opt-in: workspace can survive across epochs; advance explicitly.
+    Persistent,
+}
+
+impl WorkspaceMode {
+    /// Returns `true` if this is a persistent workspace.
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent)
+    }
+
+    /// Returns `true` if this is an ephemeral workspace.
+    #[must_use]
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self, Self::Ephemeral)
+    }
+}
+
+impl fmt::Display for WorkspaceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ephemeral => write!(f, "ephemeral"),
+            Self::Persistent => write!(f, "persistent"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceInfo
 // ---------------------------------------------------------------------------
 
@@ -317,6 +360,9 @@ pub struct WorkspaceInfo {
     pub epoch: EpochId,
     /// Current state of the workspace.
     pub state: WorkspaceState,
+    /// Lifetime mode: ephemeral (default) or persistent.
+    #[serde(default)]
+    pub mode: WorkspaceMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +674,39 @@ mod tests {
         assert!(json.contains("\"behind_epochs\":1"));
     }
 
+    // -- WorkspaceMode --
+
+    #[test]
+    fn workspace_mode_ephemeral() {
+        let mode = WorkspaceMode::Ephemeral;
+        assert!(mode.is_ephemeral());
+        assert!(!mode.is_persistent());
+        assert_eq!(format!("{mode}"), "ephemeral");
+    }
+
+    #[test]
+    fn workspace_mode_persistent() {
+        let mode = WorkspaceMode::Persistent;
+        assert!(mode.is_persistent());
+        assert!(!mode.is_ephemeral());
+        assert_eq!(format!("{mode}"), "persistent");
+    }
+
+    #[test]
+    fn workspace_mode_default_is_ephemeral() {
+        let mode = WorkspaceMode::default();
+        assert!(mode.is_ephemeral());
+    }
+
+    #[test]
+    fn workspace_mode_serde_roundtrip() {
+        for mode in [WorkspaceMode::Ephemeral, WorkspaceMode::Persistent] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let decoded: WorkspaceMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, mode);
+        }
+    }
+
     // -- WorkspaceInfo --
 
     #[test]
@@ -637,10 +716,24 @@ mod tests {
             path: PathBuf::from("/tmp/ws/test"),
             epoch: EpochId::new(&"a".repeat(40)).unwrap(),
             state: WorkspaceState::Active,
+            mode: WorkspaceMode::Ephemeral,
         };
         assert_eq!(info.id.as_str(), "test");
         assert_eq!(info.path, PathBuf::from("/tmp/ws/test"));
         assert!(info.state.is_active());
+        assert!(info.mode.is_ephemeral());
+    }
+
+    #[test]
+    fn workspace_info_persistent_mode() {
+        let info = WorkspaceInfo {
+            id: WorkspaceId::new("agent-1").unwrap(),
+            path: PathBuf::from("/repo/ws/agent-1"),
+            epoch: EpochId::new(&"f".repeat(40)).unwrap(),
+            state: WorkspaceState::Active,
+            mode: WorkspaceMode::Persistent,
+        };
+        assert!(info.mode.is_persistent());
     }
 
     #[test]
@@ -650,10 +743,19 @@ mod tests {
             path: PathBuf::from("/repo/ws/agent-1"),
             epoch: EpochId::new(&"f".repeat(40)).unwrap(),
             state: WorkspaceState::Stale { behind_epochs: 2 },
+            mode: WorkspaceMode::Persistent,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: WorkspaceInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn workspace_info_serde_default_mode() {
+        // mode field has default, so old JSON without it deserializes to Ephemeral
+        let json = r#"{"id":"test","path":"/tmp/ws/test","epoch":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":{"state":"active"}}"#;
+        let info: WorkspaceInfo = serde_json::from_str(json).unwrap();
+        assert!(info.mode.is_ephemeral());
     }
 
     // -- ValidationError --

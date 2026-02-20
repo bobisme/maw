@@ -3,8 +3,9 @@ use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
+use crate::model::types::WorkspaceMode;
 
-use super::{get_backend, DEFAULT_WORKSPACE};
+use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
 pub struct WorkspaceStatus {
@@ -28,6 +29,7 @@ pub struct WorkspaceEntry {
     pub(crate) is_default: bool,
     pub(crate) epoch: String,
     pub(crate) state: String,
+    pub(crate) mode: String,
 }
 
 pub fn status(format: OutputFormat) -> Result<()> {
@@ -65,14 +67,23 @@ pub fn status(format: OutputFormat) -> Result<()> {
         (false, false, None)
     };
 
+    // Read metadata for mode information.
+    let root = repo_root().unwrap_or_default();
+
     // Build workspace entries
     let workspace_entries: Vec<WorkspaceEntry> = all_workspaces
         .iter()
-        .map(|ws| WorkspaceEntry {
-            name: ws.id.as_str().to_string(),
-            is_default: ws.id.as_str() == default_ws_name,
-            epoch: ws.epoch.as_str()[..12].to_string(),
-            state: format!("{}", ws.state),
+        .map(|ws| {
+            let ws_mode = metadata::read(&root, ws.id.as_str())
+                .map(|m| m.mode)
+                .unwrap_or(WorkspaceMode::Ephemeral);
+            WorkspaceEntry {
+                name: ws.id.as_str().to_string(),
+                is_default: ws.id.as_str() == default_ws_name,
+                epoch: ws.epoch.as_str()[..12].to_string(),
+                state: format!("{}", ws.state),
+                mode: format!("{ws_mode}"),
+            }
         })
         .collect();
 
@@ -146,7 +157,37 @@ fn print_status_text(
     for ws in workspaces {
         let default_marker = if ws.is_default { "  (default)" } else { "" };
         let stale_marker = if ws.state.contains("stale") { " [stale]" } else { "" };
-        println!("  {}  epoch:{}{}{}", ws.name, ws.epoch, stale_marker, default_marker);
+        let mode_marker = if ws.mode == "persistent" { " [persistent]" } else { "" };
+        println!(
+            "  {}  epoch:{}{}{}{}",
+            ws.name, ws.epoch, stale_marker, mode_marker, default_marker
+        );
+    }
+
+    // Stale workspace hints
+    let stale_persistent: Vec<&str> = workspaces
+        .iter()
+        .filter(|ws| ws.state.contains("stale") && ws.mode == "persistent")
+        .map(|ws| ws.name.as_str())
+        .collect();
+    let stale_ephemeral: Vec<&str> = workspaces
+        .iter()
+        .filter(|ws| ws.state.contains("stale") && ws.mode != "persistent")
+        .map(|ws| ws.name.as_str())
+        .collect();
+
+    if !stale_persistent.is_empty() {
+        println!();
+        println!("STALE persistent workspace(s): {}", stale_persistent.join(", "));
+        for ws in &stale_persistent {
+            println!("  Fix: maw ws advance {ws}");
+        }
+    }
+    if !stale_ephemeral.is_empty() {
+        println!();
+        println!("WARNING: stale ephemeral workspace(s): {}", stale_ephemeral.join(", "));
+        println!("  Survived epoch advance — merge or destroy:");
+        println!("  Fix: maw ws sync --all");
     }
 
     // Next command
@@ -195,13 +236,40 @@ fn print_status_pretty(
     // All workspaces
     println!("{bold}All Workspaces{reset}");
     for ws in workspaces {
+        let mode_tag = if ws.mode == "persistent" { " [persistent]" } else { "" };
         if ws.is_default {
-            println!("  {green}\u{25cf} {}{reset} epoch:{} {}", ws.name, ws.epoch, ws.state);
+            println!("  {green}\u{25cf} {}{reset} epoch:{} {}{}", ws.name, ws.epoch, ws.state, mode_tag);
         } else if ws.state.contains("stale") {
-            println!("  {yellow}\u{25b2} {}{reset} epoch:{} {}", ws.name, ws.epoch, ws.state);
+            println!("  {yellow}\u{25b2} {}{reset} epoch:{} {}{}", ws.name, ws.epoch, ws.state, mode_tag);
         } else {
-            println!("  {gray}\u{25cc} {}{reset} epoch:{} {}", ws.name, ws.epoch, ws.state);
+            println!("  {gray}\u{25cc} {}{reset} epoch:{} {}{}", ws.name, ws.epoch, ws.state, mode_tag);
         }
+    }
+
+    // Stale workspace hints
+    let stale_persistent: Vec<&str> = workspaces
+        .iter()
+        .filter(|ws| ws.state.contains("stale") && ws.mode == "persistent")
+        .map(|ws| ws.name.as_str())
+        .collect();
+    let stale_ephemeral: Vec<&str> = workspaces
+        .iter()
+        .filter(|ws| ws.state.contains("stale") && ws.mode != "persistent")
+        .map(|ws| ws.name.as_str())
+        .collect();
+
+    if !stale_persistent.is_empty() {
+        println!();
+        println!("{yellow}STALE persistent workspace(s):{reset} {}", stale_persistent.join(", "));
+        for ws in &stale_persistent {
+            println!("  {gray}Fix: maw ws advance {ws}{reset}");
+        }
+    }
+    if !stale_ephemeral.is_empty() {
+        println!();
+        println!("{yellow}WARNING: stale ephemeral workspace(s):{reset} {}", stale_ephemeral.join(", "));
+        println!("  {gray}Survived epoch advance — merge or destroy:{reset}");
+        println!("  {gray}Fix: maw ws sync --all{reset}");
     }
 
     // Next command

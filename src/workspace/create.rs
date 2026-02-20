@@ -4,15 +4,15 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::backend::WorkspaceBackend;
-use crate::model::types::{EpochId, WorkspaceId};
+use crate::model::types::{EpochId, WorkspaceId, WorkspaceMode};
 use crate::refs as manifold_refs;
 
 use super::{
-    ensure_repo_root, get_backend, repo_root, workspace_path, workspaces_dir,
+    ensure_repo_root, get_backend, metadata, repo_root, workspace_path, workspaces_dir,
     MawConfig, DEFAULT_WORKSPACE,
 };
 
-pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
+pub fn create(name: &str, revision: Option<&str>, persistent: bool) -> Result<()> {
     let root = ensure_repo_root()?;
     let backend = get_backend()?;
     let path = workspace_path(name)?;
@@ -26,7 +26,16 @@ pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(&ws_dir)
         .with_context(|| format!("Failed to create {}", ws_dir.display()))?;
 
+    let mode = if persistent {
+        WorkspaceMode::Persistent
+    } else {
+        WorkspaceMode::Ephemeral
+    };
+
     println!("Creating workspace '{name}' at ws/{name} ...");
+    if persistent {
+        println!("  Mode: persistent (survives epoch advances; use `maw ws advance {name}` to rebase)");
+    }
 
     // Determine base epoch.
     // Use the provided revision, or fall back to refs/manifold/epoch/current,
@@ -43,12 +52,22 @@ pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
             "Failed to create workspace: {e}\n  Check: maw doctor\n  Verify name is not already used: maw ws list"
         ))?;
 
+    // Write workspace metadata (mode: ephemeral | persistent).
+    // Only write metadata for non-default values (persistent) to keep the
+    // common case (ephemeral) lean — missing metadata => ephemeral.
+    if persistent {
+        let meta = metadata::WorkspaceMetadata { mode };
+        metadata::write(&root, name, &meta)
+            .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;
+    }
+
     // Get short commit ID for display
     let short_oid = &epoch.as_str()[..12];
 
     println!();
     println!("Workspace '{name}' ready!");
     println!();
+    println!("  Mode:   {}", if persistent { "persistent" } else { "ephemeral" });
     println!("  Epoch:  {short_oid} (base commit for this workspace)");
     println!("  Path:   {}/", info.path.display());
     println!();
@@ -63,8 +82,14 @@ pub fn create(name: &str, revision: Option<&str>) -> Result<()> {
     println!("  # Run commands in the workspace:");
     println!("  maw exec {name} -- cargo test");
     println!();
-    println!("Note: All edits in the workspace are tracked automatically.");
-    println!("The merge engine captures changes when merging.");
+    if persistent {
+        println!("Note: This is a PERSISTENT workspace. When the epoch advances:");
+        println!("  maw ws advance {name}   # rebase onto latest epoch");
+        println!("  maw ws status           # check staleness");
+    } else {
+        println!("Note: All edits in the workspace are tracked automatically.");
+        println!("The merge engine captures changes when merging.");
+    }
 
     Ok(())
 }
@@ -138,7 +163,7 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
                 bail!("Cannot destroy the default workspace");
             }
 
-    ensure_repo_root()?;
+    let root = ensure_repo_root()?;
     let path = workspace_path(name)?;
 
     if !path.exists() {
@@ -170,6 +195,9 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
 
     backend.destroy(&ws_id)
         .map_err(|e| anyhow::anyhow!("Failed to destroy workspace: {e}"))?;
+
+    // Clean up workspace metadata (best-effort; don't fail destroy if missing).
+    let _ = metadata::delete(&root, name);
 
     println!("Workspace '{name}' destroyed.");
     Ok(())
