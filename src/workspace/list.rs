@@ -5,6 +5,8 @@ use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceState;
 
+use crate::merge::quarantine::QUARANTINE_NAME_PREFIX;
+
 use super::{get_backend, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
@@ -64,29 +66,37 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     let workspaces: Vec<WorkspaceInfo> = backend_workspaces
         .iter()
         .map(|ws| {
+            let name = ws.id.as_str().to_string();
+            let is_quarantine = name.starts_with(QUARANTINE_NAME_PREFIX);
             let behind = match &ws.state {
                 WorkspaceState::Stale { behind_epochs } => Some(*behind_epochs),
                 _ => None,
             };
             WorkspaceInfo {
-                name: ws.id.as_str().to_string(),
-                is_default: ws.id.as_str() == DEFAULT_WORKSPACE,
+                is_default: name == DEFAULT_WORKSPACE,
                 epoch: ws.epoch.as_str()[..12].to_string(),
-                state: format!("{}", ws.state),
+                // Quarantine workspaces show as "quarantine" regardless of
+                // their staleness state — they are a special class of workspace.
+                state: if is_quarantine {
+                    "quarantine".to_owned()
+                } else {
+                    format!("{}", ws.state)
+                },
                 path: if verbose {
                     Some(ws.path.display().to_string())
                 } else {
                     None
                 },
                 behind_epochs: behind,
+                name,
             }
         })
         .collect();
 
-    // Collect stale workspace warnings
+    // Collect stale workspace warnings (exclude quarantine workspaces)
     let stale_workspaces: Vec<String> = backend_workspaces
         .iter()
-        .filter(|ws| ws.state.is_stale())
+        .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
         .map(|ws| ws.id.as_str().to_string())
         .collect();
 
@@ -141,6 +151,8 @@ fn print_list_pretty(
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
                 ("\u{25cf}", "\x1b[1;32m", "\x1b[0m")  // Green bold for default
+            } else if ws.state == "quarantine" {
+                ("\u{26a0}", "\x1b[1;31m", "\x1b[0m")  // Red bold for quarantine
             } else if ws.state.contains("stale") {
                 ("\u{25b2}", "\x1b[1;33m", "\x1b[0m")  // Yellow for stale
             } else {
@@ -148,6 +160,8 @@ fn print_list_pretty(
             }
         } else if ws.is_default {
             ("\u{25cf}", "", "")
+        } else if ws.state == "quarantine" {
+            ("\u{26a0}", "", "")
         } else {
             ("\u{25cc}", "", "")
         };

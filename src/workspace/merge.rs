@@ -21,6 +21,7 @@ use crate::merge::plan::{
 use crate::merge::resolve::{ConflictReason, ConflictRecord};
 use crate::model::conflict::Region;
 use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
+use crate::merge::quarantine::create_quarantine_workspace;
 use crate::merge_state::{
     MergePhase, MergeStateFile, run_cleanup_phase,
 };
@@ -1589,28 +1590,70 @@ pub fn merge(
                     &build_output.candidate.as_str()[..12]
                 );
             }
-            ValidateOutcome::Quarantine(r) => {
+            ValidateOutcome::Quarantine(r) | ValidateOutcome::BlockedAndQuarantine(r) => {
+                // Validation failed with quarantine policy — materialize the candidate
+                // merge tree into a quarantine workspace so the agent can fix forward.
+                let merge_id = &build_output.candidate.as_str()[..12];
+                let is_blocked = !validate_outcome.may_proceed();
+                let policy_name = if is_blocked { "block+quarantine" } else { "quarantine" };
+
                 println!(
-                    "  WARNING: Validation failed ({}ms) — quarantine created, proceeding.",
+                    "  Validation FAILED ({}ms) — policy '{policy_name}', creating quarantine workspace...",
                     r.duration_ms
                 );
-            }
-            ValidateOutcome::BlockedAndQuarantine(r) => {
-                println!(
-                    "  Validation FAILED ({}ms) — merge blocked, quarantine created.",
-                    r.duration_ms
-                );
-                abort_merge(&manifold_dir, "validation failed (policy: block+quarantine)")?;
-                bail!(
-                    "Merge validation failed. Fix issues and retry.\n  \
-                     Diagnostics: .manifold/artifacts/merge/{}/validation.json",
-                    &build_output.candidate.as_str()[..12]
-                );
+
+                // Abort merge-state (quarantine is the fix-forward path, not epoch advance)
+                abort_merge(&manifold_dir, &format!("validation failed (policy: {policy_name})"))?;
+
+                match create_quarantine_workspace(
+                    &root,
+                    &manifold_dir,
+                    merge_id,
+                    sources.clone(),
+                    frozen.epoch.clone(),
+                    build_output.candidate.clone(),
+                    branch,
+                    r.clone(),
+                ) {
+                    Ok(qws_path) => {
+                        println!("  Quarantine workspace created: {}", qws_path.display());
+                        println!();
+                        if !r.stderr.is_empty() {
+                            println!("  Validation output:");
+                            for line in r.stderr.lines().take(10) {
+                                eprintln!("    {line}");
+                            }
+                        }
+                        println!();
+                        println!("Fix the issues in the quarantine workspace:");
+                        println!("  Edit files: {}/", qws_path.display());
+                        println!("  Re-validate and commit: maw merge promote {merge_id}");
+                        println!("  Discard quarantine:     maw merge abandon {merge_id}");
+                        println!();
+                        println!("Source workspaces are preserved (not destroyed).");
+                        bail!(
+                            "Merge validation failed (policy: {policy_name}).\n  \
+                             Quarantine workspace: {}\n  \
+                             Diagnostics: .manifold/quarantine/{merge_id}/validation.json\n  \
+                             To promote: maw merge promote {merge_id}\n  \
+                             To abandon: maw merge abandon {merge_id}",
+                            qws_path.display()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("  WARNING: Failed to create quarantine workspace: {e}");
+                        bail!(
+                            "Merge validation failed (policy: {policy_name}) and quarantine creation failed: {e}\n  \
+                             Diagnostics: .manifold/artifacts/merge/{merge_id}/validation.json"
+                        );
+                    }
+                }
             }
         }
 
         if !validate_outcome.may_proceed() {
-            // Already bailed above, but just in case
+            // Already bailed above for Blocked/BlockedAndQuarantine/Quarantine,
+            // but kept as a safety net.
             bail!("Merge validation blocked the merge.");
         }
     } else {

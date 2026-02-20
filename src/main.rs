@@ -11,6 +11,7 @@ mod exec;
 mod format;
 mod init;
 mod merge;
+mod merge_cmd;
 mod merge_state;
 mod epoch_gc;
 mod model;
@@ -177,6 +178,20 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Manage merge quarantine workspaces
+    ///
+    /// When post-merge validation fails with `on_failure = "quarantine"` or
+    /// `on_failure = "block-quarantine"`, a quarantine workspace is created
+    /// containing the candidate merge result. These commands let you promote
+    /// (fix-forward) or abandon (discard) the quarantine.
+    ///
+    /// Examples:
+    ///   maw merge list               # list active quarantines
+    ///   maw merge promote abc123     # re-validate and commit if green
+    ///   maw merge abandon abc123     # discard quarantine workspace
+    #[command(subcommand)]
+    Merge(merge_cmd::MergeCommands),
 }
 
 fn should_emit_migration_notice(repo_root: &Path) -> bool {
@@ -215,6 +230,7 @@ fn main() {
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
         Commands::Gc { dry_run } => epoch_gc::run_cli(dry_run),
+        Commands::Merge(ref cmd) => merge_cmd::run(cmd),
     };
 
     if let Err(e) = result {

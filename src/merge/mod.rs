@@ -26,6 +26,7 @@ pub mod commit;
 pub mod partition;
 pub mod plan;
 pub mod prepare;
+pub mod quarantine;
 pub mod rename;
 pub mod resolve;
 pub mod types;
@@ -51,6 +52,12 @@ pub use types::{ChangeKind, FileChange, PatchSet};
 pub use validate::{
     ValidateError, ValidateOutcome, run_validate_in_dir, run_validate_phase,
     run_validate_pipeline_in_dir, write_validation_artifact,
+};
+pub use quarantine::{
+    QuarantineError, QuarantineState, PromoteResult, QUARANTINE_NAME_PREFIX,
+    abandon_quarantine, create_quarantine_workspace, list_quarantines,
+    merge_id_from_name, promote_quarantine, quarantine_workspace_name,
+    quarantine_workspace_path,
 };
 
 #[cfg(test)]
