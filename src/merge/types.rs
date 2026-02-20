@@ -5,7 +5,8 @@
 
 use std::path::PathBuf;
 
-use crate::model::types::{EpochId, WorkspaceId};
+use crate::model::patch::FileId;
+use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
 // ---------------------------------------------------------------------------
 // ChangeKind
@@ -40,6 +41,15 @@ impl std::fmt::Display for ChangeKind {
 ///
 /// For `Added` and `Modified` changes, `content` holds the new file bytes.
 /// For `Deleted` changes, `content` is `None`.
+///
+/// `file_id` is the stable [`FileId`] assigned when the file was created. It
+/// survives renames and modifications, enabling rename-aware merge (§5.8).
+/// `None` if FileId tracking was not available at collect time.
+///
+/// `blob` is the git blob OID for the new content (computed via
+/// `git hash-object`). Present for `Added` and `Modified` changes when the
+/// collect step had access to the git repo. Enables O(1) hash-equality checks
+/// in the resolve step without comparing raw bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChange {
     /// Path relative to the workspace root (and to the repo root).
@@ -48,15 +58,54 @@ pub struct FileChange {
     pub kind: ChangeKind,
     /// New file content (`None` for deletions).
     pub content: Option<Vec<u8>>,
+    /// Stable file identity that persists across renames (§5.8).
+    ///
+    /// `None` when FileId tracking is unavailable (e.g., legacy workspaces
+    /// that predate FileId introduction, or tests that don't supply one).
+    pub file_id: Option<FileId>,
+    /// Git blob OID for the new content (present for Add/Modify; `None` for
+    /// Delete and for changes collected without git access).
+    ///
+    /// When populated, the resolve step uses OID equality instead of byte
+    /// comparison for hash-equality checks, which is both faster and avoids
+    /// loading content into memory.
+    pub blob: Option<GitOid>,
 }
 
 impl FileChange {
-    /// Create a new `FileChange`.
+    /// Create a new `FileChange` without FileId or blob OID metadata.
+    ///
+    /// Suitable for Phase 1 tests and code paths that don't yet track
+    /// stable file identity. Use [`FileChange::with_identity`] when those
+    /// fields are available.
     pub fn new(path: PathBuf, kind: ChangeKind, content: Option<Vec<u8>>) -> Self {
         Self {
             path,
             kind,
             content,
+            file_id: None,
+            blob: None,
+        }
+    }
+
+    /// Create a new `FileChange` with full identity metadata.
+    ///
+    /// Preferred constructor for Phase 3+ code paths where `file_id` and
+    /// `blob` OID are available from the workspace's FileId map and git
+    /// object store.
+    pub fn with_identity(
+        path: PathBuf,
+        kind: ChangeKind,
+        content: Option<Vec<u8>>,
+        file_id: Option<FileId>,
+        blob: Option<GitOid>,
+    ) -> Self {
+        Self {
+            path,
+            kind,
+            content,
+            file_id,
+            blob,
         }
     }
 

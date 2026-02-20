@@ -10,12 +10,28 @@
 //!   including empty workspaces. The caller decides how to handle empties.
 //! - **Isolation**: Each workspace is snapshotted independently. A failure in
 //!   one workspace returns `Err` immediately (fail-fast).
+//!
+//! # FileId and blob OID enrichment (Phase 3+)
+//!
+//! When `repo_root` is provided, `collect_snapshots` enriches each
+//! [`FileChange`] with:
+//!
+//! - `file_id`: looked up from `.manifold/fileids` for Modified/Deleted files
+//!   (files that existed in the epoch). Added files receive a fresh random
+//!   [`FileId`]. If the fileids file is absent, FileIds are omitted.
+//! - `blob`: the git blob OID for the new content, computed via
+//!   `git hash-object -w --stdin`. Enables O(1) hash-equality checks in the
+//!   resolve step.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::backend::WorkspaceBackend;
-use crate::model::types::WorkspaceId;
+use crate::model::file_id::FileIdMap;
+use crate::model::patch::FileId;
+use crate::model::types::{GitOid, WorkspaceId};
 
 use super::types::{ChangeKind, FileChange, PatchSet};
 
@@ -103,10 +119,18 @@ impl std::error::Error for CollectError {}
 /// 1. Calls `backend.snapshot()` to enumerate added, modified, and deleted paths.
 /// 2. Calls `backend.status()` to determine the workspace's base epoch.
 /// 3. Reads file content for added/modified files from the workspace directory.
+/// 4. Enriches each [`FileChange`] with a git blob OID (via `git hash-object`)
+///    and a stable [`FileId`] (from `.manifold/fileids` or freshly generated).
 ///
 /// Returns one `PatchSet` per workspace in the same order as `workspace_ids`.
 /// Empty workspaces (no changes) produce an empty `PatchSet` — they are **not**
 /// filtered out, so the caller receives a complete picture.
+///
+/// # Arguments
+///
+/// * `repo_root` — Path to the git repository root, used to:
+///   - Write blobs via `git hash-object -w --stdin`.
+///   - Load the epoch FileId map from `<repo_root>/.manifold/fileids`.
 ///
 /// # Errors
 ///
@@ -115,13 +139,18 @@ impl std::error::Error for CollectError {}
 /// - I/O errors reading file content
 /// - Backend errors querying status
 pub fn collect_snapshots<B: WorkspaceBackend>(
+    repo_root: &Path,
     backend: &B,
     workspace_ids: &[WorkspaceId],
 ) -> Result<Vec<PatchSet>, CollectError> {
-    let mut patch_sets = Vec::with_capacity(workspace_ids.len());
+    // Load the epoch FileId map once; shared across all workspaces.
+    // If the file doesn't exist yet (new repo), use an empty map.
+    let fileids_path = repo_root.join(".manifold").join("fileids");
+    let file_id_map = FileIdMap::load(&fileids_path).unwrap_or_default();
 
+    let mut patch_sets = Vec::with_capacity(workspace_ids.len());
     for ws_id in workspace_ids {
-        let patch_set = collect_one(backend, ws_id)?;
+        let patch_set = collect_one(repo_root, &file_id_map, backend, ws_id)?;
         patch_sets.push(patch_set);
     }
 
@@ -133,7 +162,13 @@ pub fn collect_snapshots<B: WorkspaceBackend>(
 // ---------------------------------------------------------------------------
 
 /// Collect a single workspace's changes into a `PatchSet`.
+///
+/// Enriches each [`FileChange`] with:
+/// - `file_id`: from `file_id_map` (Modified/Deleted) or freshly generated (Added).
+/// - `blob`: computed via `git hash-object -w --stdin` for Added/Modified content.
 fn collect_one<B: WorkspaceBackend>(
+    repo_root: &Path,
+    file_id_map: &FileIdMap,
     backend: &B,
     ws_id: &WorkspaceId,
 ) -> Result<PatchSet, CollectError> {
@@ -146,8 +181,6 @@ fn collect_one<B: WorkspaceBackend>(
         })?;
 
     // Step 2: Determine the workspace's base epoch.
-    // We call status() which reads the HEAD OID. If this fails (e.g., workspace
-    // was destroyed after snapshot), propagate as EpochFailed.
     let status = backend
         .status(ws_id)
         .map_err(|e| CollectError::EpochFailed {
@@ -157,7 +190,6 @@ fn collect_one<B: WorkspaceBackend>(
     let epoch = status.base_epoch;
 
     // Step 3: Short-circuit for empty workspaces.
-    // An empty PatchSet is a valid result — the caller decides how to use it.
     if snapshot.is_empty() {
         return Ok(PatchSet::new(ws_id.clone(), epoch, vec![]));
     }
@@ -167,32 +199,50 @@ fn collect_one<B: WorkspaceBackend>(
     let capacity = snapshot.change_count();
     let mut changes = Vec::with_capacity(capacity);
 
-    // Added files: read from the workspace working tree.
+    // Added files: read content, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
         let content = read_workspace_file(&ws_path, path, ws_id)?;
-        changes.push(FileChange::new(
+        let blob = git_hash_object(repo_root, &content);
+        // Assign a fresh FileId for new files. The FileIdMap for the epoch
+        // won't have an entry yet; the FileId is minted here and would be
+        // persisted by the workspace's oplog in a full implementation.
+        let file_id = Some(FileId::random());
+        changes.push(FileChange::with_identity(
             path.clone(),
             ChangeKind::Added,
             Some(content),
+            file_id,
+            blob,
         ));
     }
 
-    // Modified files: read current content from workspace.
+    // Modified files: read current content, look up existing FileId, compute blob OID.
     for path in &snapshot.modified {
         let content = read_workspace_file(&ws_path, path, ws_id)?;
-        changes.push(FileChange::new(
+        let blob = git_hash_object(repo_root, &content);
+        // Modified files existed in the epoch, so their FileId is in the map.
+        let file_id = file_id_map.id_for_path(path);
+        changes.push(FileChange::with_identity(
             path.clone(),
             ChangeKind::Modified,
             Some(content),
+            file_id,
+            blob,
         ));
     }
 
-    // Deleted files: no content to read.
+    // Deleted files: no content; look up FileId from epoch map.
     for path in &snapshot.deleted {
-        changes.push(FileChange::new(path.clone(), ChangeKind::Deleted, None));
+        let file_id = file_id_map.id_for_path(path);
+        changes.push(FileChange::with_identity(
+            path.clone(),
+            ChangeKind::Deleted,
+            None,
+            file_id,
+            None, // no blob for deletions
+        ));
     }
 
-    // PatchSet::new sorts changes by path for determinism.
     Ok(PatchSet::new(ws_id.clone(), epoch, changes))
 }
 
@@ -208,6 +258,36 @@ fn read_workspace_file(
         path: rel_path.clone(),
         reason: e.to_string(),
     })
+}
+
+/// Write `content` to the git object store and return its blob OID.
+///
+/// Runs `git hash-object -w --stdin` in `repo_root`. Returns `None` on any
+/// failure (git unavailable, I/O error, invalid OID output) — callers treat
+/// a missing blob OID as a degraded-mode fallback, not a hard error.
+fn git_hash_object(repo_root: &Path, content: &[u8]) -> Option<GitOid> {
+    let mut child = Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(repo_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Write content to stdin; ignore broken-pipe errors.
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(content);
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let hex = String::from_utf8(output.stdout).ok()?;
+    GitOid::new(hex.trim()).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +415,7 @@ mod tests {
         let ws_id = WorkspaceId::new("empty-ws").unwrap();
         backend.create(&ws_id, &epoch).unwrap();
 
-        let results = collect_snapshots(&backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
 
         assert_eq!(results.len(), 1, "should have one PatchSet");
         let ps = &results[0];
@@ -357,7 +437,7 @@ mod tests {
 
         fs::write(info.path.join("new.rs"), "fn main() {}").unwrap();
 
-        let results = collect_snapshots(&backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -380,7 +460,7 @@ mod tests {
 
         fs::write(info.path.join("README.md"), "# Modified").unwrap();
 
-        let results = collect_snapshots(&backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -403,7 +483,7 @@ mod tests {
 
         fs::remove_file(info.path.join("README.md")).unwrap();
 
-        let results = collect_snapshots(&backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -441,7 +521,7 @@ mod tests {
         fs::remove_file(info.path.join("README.md")).unwrap();
         fs::remove_file(info.path.join("lib.rs")).unwrap();
 
-        let results = collect_snapshots(&backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
         let ps = &results[0];
 
         assert!(
@@ -483,7 +563,7 @@ mod tests {
         backend.create(&ws_c, &epoch).unwrap();
 
         let ids = vec![ws_a.clone(), ws_b.clone(), ws_c.clone()];
-        let results = collect_snapshots(&backend, &ids).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &ids).unwrap();
 
         assert_eq!(results.len(), 3, "should have one PatchSet per workspace");
 
@@ -527,7 +607,7 @@ mod tests {
             backend.create(ws_id, &epoch).unwrap();
         }
 
-        let results = collect_snapshots(&backend, &ids).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &ids).unwrap();
 
         assert_eq!(results.len(), 3);
         for (i, ws_id) in ids.iter().enumerate() {
@@ -552,7 +632,7 @@ mod tests {
         let expected = b"hello world\n";
         fs::write(info.path.join("hello.txt"), expected).unwrap();
 
-        let results = collect_snapshots(&backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
         let change = &results[0].changes[0];
 
         assert_eq!(
@@ -572,12 +652,175 @@ mod tests {
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
         let ws_id = WorkspaceId::new("no-such").unwrap();
 
-        let err = collect_snapshots(&backend, &[ws_id]).unwrap_err();
+        let err = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap_err();
         match err {
             CollectError::SnapshotFailed { workspace_id, .. } => {
                 assert_eq!(workspace_id.as_str(), "no-such");
             }
             other => panic!("expected SnapshotFailed, got {other}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: FileId + blob OID enrichment
+    // -----------------------------------------------------------------------
+
+    /// Added files should receive a fresh (non-None) FileId.
+    #[test]
+    fn collect_added_file_has_file_id() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("fileid-add").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+
+        fs::write(info.path.join("brand_new.rs"), "pub fn new() {}").unwrap();
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let change = &results[0].changes[0];
+
+        assert!(
+            change.file_id.is_some(),
+            "added file should receive a fresh FileId"
+        );
+        assert!(
+            matches!(change.kind, ChangeKind::Added),
+            "kind should be Added"
+        );
+    }
+
+    /// Added files should have a blob OID computed via git hash-object.
+    #[test]
+    fn collect_added_file_has_blob_oid() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("blob-add").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+
+        fs::write(info.path.join("blob_test.rs"), "pub fn blob() {}").unwrap();
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let change = &results[0].changes[0];
+
+        assert!(
+            change.blob.is_some(),
+            "added file should have a blob OID from git hash-object"
+        );
+    }
+
+    /// Modified files should have a blob OID that reflects the new content.
+    #[test]
+    fn collect_modified_file_has_blob_oid() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("blob-mod").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+
+        fs::write(info.path.join("README.md"), "# Modified content").unwrap();
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let change = &results[0].changes[0];
+
+        assert!(
+            matches!(change.kind, ChangeKind::Modified),
+            "kind should be Modified"
+        );
+        assert!(
+            change.blob.is_some(),
+            "modified file should have a blob OID"
+        );
+    }
+
+    /// Deleted files should NOT have a blob OID (no content was written).
+    #[test]
+    fn collect_deleted_file_has_no_blob_oid() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("blob-del").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+
+        fs::remove_file(info.path.join("README.md")).unwrap();
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let change = &results[0].changes[0];
+
+        assert!(
+            matches!(change.kind, ChangeKind::Deleted),
+            "kind should be Deleted"
+        );
+        assert!(change.blob.is_none(), "deleted file should have no blob OID");
+    }
+
+    /// Two different workspaces adding a file with identical content should
+    /// produce the same blob OID — demonstrating content-addressable identity.
+    #[test]
+    fn collect_same_content_produces_same_blob_oid() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+
+        let content = b"pub fn shared() {}\n";
+
+        let ws_a = WorkspaceId::new("same-blob-a").unwrap();
+        let info_a = backend.create(&ws_a, &epoch).unwrap();
+        fs::write(info_a.path.join("shared.rs"), content).unwrap();
+
+        let ws_b = WorkspaceId::new("same-blob-b").unwrap();
+        let info_b = backend.create(&ws_b, &epoch).unwrap();
+        fs::write(info_b.path.join("shared.rs"), content).unwrap();
+
+        let results_a =
+            collect_snapshots(temp_dir.path(), &backend, &[ws_a]).unwrap();
+        let results_b =
+            collect_snapshots(temp_dir.path(), &backend, &[ws_b]).unwrap();
+
+        let blob_a = results_a[0].changes[0].blob.as_ref();
+        let blob_b = results_b[0].changes[0].blob.as_ref();
+
+        assert!(blob_a.is_some(), "ws_a should have a blob OID");
+        assert!(blob_b.is_some(), "ws_b should have a blob OID");
+        assert_eq!(
+            blob_a, blob_b,
+            "same content should produce the same blob OID (content-addressable)"
+        );
+    }
+
+    /// Modified files look up FileId from the epoch FileIdMap when available.
+    #[test]
+    fn collect_modified_file_uses_file_id_from_map() {
+        use crate::model::file_id::FileIdMap;
+        use crate::model::patch::FileId;
+        use std::path::Path;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+
+        // Pre-populate .manifold/fileids with a known FileId for README.md.
+        let known_id = FileId::new(0xdead_beef_cafe_babe_1234_5678_9abc_def0);
+        let fileids_path = temp_dir.path().join(".manifold").join("fileids");
+        let mut map = FileIdMap::new();
+        map.track_new("README.md".into()).unwrap();
+        // Replace the random id with our known id by rebuilding.
+        let mut map2 = FileIdMap::new();
+        // Manually insert: we use a workaround since track_new is random.
+        // Build the map via save+reload with a known value.
+        let json = format!(
+            r#"[{{"path":"README.md","file_id":"{}"}}]"#,
+            known_id
+        );
+        fs::create_dir_all(fileids_path.parent().unwrap()).unwrap();
+        fs::write(&fileids_path, &json).unwrap();
+        let _ = map2; // unused
+
+        let ws_id = WorkspaceId::new("fileid-mod").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+        fs::write(info.path.join("README.md"), "# Updated").unwrap();
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let change = &results[0].changes[0];
+
+        assert_eq!(
+            change.file_id,
+            Some(known_id),
+            "modified file should inherit FileId from epoch FileIdMap"
+        );
     }
 }

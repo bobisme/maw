@@ -270,7 +270,11 @@ fn resolve_shared_path(
     }
 
     // Hash equality short-circuit.
-    if all_equal(&variants) {
+    //
+    // Prefer blob OID comparison when all entries carry one: O(1) per entry
+    // instead of O(file size). Fall back to byte equality when OIDs are
+    // absent (Phase 1 paths, tests, legacy workspaces).
+    if all_blobs_equal(entries) || all_equal(&variants) {
         return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
             path: path.to_path_buf(),
             content: variants[0].clone(),
@@ -333,6 +337,21 @@ fn all_equal(contents: &[Vec<u8>]) -> bool {
     contents
         .split_first()
         .is_none_or(|(first, rest)| rest.iter().all(|c| c == first))
+}
+
+/// Returns `true` if **all** entries carry a blob OID and all OIDs are equal.
+///
+/// When this function returns `true`, all entries have identical content by
+/// git's content-addressed guarantee — no byte comparison is needed. If any
+/// entry is missing a blob OID, returns `false` and the caller falls back to
+/// [`all_equal`] (byte comparison).
+fn all_blobs_equal(entries: &[PathEntry]) -> bool {
+    let mut iter = entries.iter();
+    let Some(first) = iter.next() else { return true };
+    let Some(ref first_blob) = first.blob else {
+        return false;
+    };
+    iter.all(|e| e.blob.as_ref() == Some(first_blob))
 }
 
 fn conflict_record(
@@ -1074,5 +1093,148 @@ mod tests {
             edit_ws.contains(&"bob"),
             "bob should appear as an edit workspace; got {edit_ws:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: blob OID equality short-circuit
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a `PathEntry` with a blob OID for hash-equality tests.
+    fn entry_with_blob(
+        name: &str,
+        kind: ChangeKind,
+        content: Option<&[u8]>,
+        blob_hex: &str,
+    ) -> PathEntry {
+        let blob = crate::model::types::GitOid::new(blob_hex).ok();
+        PathEntry::with_identity(
+            ws(name),
+            kind,
+            content.map(std::borrow::ToOwned::to_owned),
+            None,
+            blob,
+        )
+    }
+
+    /// When all entries share the same blob OID, the resolve should short-circuit
+    /// immediately (no byte comparison or diff3 needed).
+    #[test]
+    fn blob_oid_equality_short_circuits_without_byte_compare() {
+        let same_blob = "a".repeat(40);
+        let partition = shared_only(
+            "file.txt",
+            vec![
+                entry_with_blob("ws-a", ChangeKind::Modified, Some(b"content\n"), &same_blob),
+                entry_with_blob("ws-b", ChangeKind::Modified, Some(b"content\n"), &same_blob),
+            ],
+        );
+
+        let mut base = BTreeMap::new();
+        base.insert(PathBuf::from("file.txt"), b"old\n".to_vec());
+
+        let result = resolve_partition(&partition, &base).unwrap();
+        assert!(result.is_clean(), "same blob OID should resolve cleanly");
+        assert_eq!(result.resolved.len(), 1);
+        assert_eq!(upsert_content(&result), b"content\n");
+    }
+
+    /// Blob OID equality works for K=3 (all three have the same blob).
+    #[test]
+    fn blob_oid_equality_k3_all_same() {
+        let same_blob = "b".repeat(40);
+        let partition = shared_only(
+            "shared.rs",
+            vec![
+                entry_with_blob("ws-a", ChangeKind::Modified, Some(b"fn f() {}\n"), &same_blob),
+                entry_with_blob("ws-b", ChangeKind::Modified, Some(b"fn f() {}\n"), &same_blob),
+                entry_with_blob("ws-c", ChangeKind::Modified, Some(b"fn f() {}\n"), &same_blob),
+            ],
+        );
+
+        let base = BTreeMap::new();
+        let result = resolve_partition(&partition, &base).unwrap();
+        assert!(result.is_clean());
+        assert_eq!(upsert_content(&result), b"fn f() {}\n");
+    }
+
+    /// If blob OIDs differ, fall through to byte comparison / diff3.
+    #[test]
+    fn different_blob_oids_fall_through_to_diff3() {
+        let partition = shared_only(
+            "diff.txt",
+            vec![
+                entry_with_blob("ws-a", ChangeKind::Modified, Some(b"A\nb\nc\n"), &"a".repeat(40)),
+                entry_with_blob("ws-b", ChangeKind::Modified, Some(b"a\nb\nC\n"), &"b".repeat(40)),
+            ],
+        );
+
+        let mut base = BTreeMap::new();
+        base.insert(PathBuf::from("diff.txt"), b"a\nb\nc\n".to_vec());
+
+        let result = resolve_partition(&partition, &base).unwrap();
+        // Non-overlapping edits should still auto-resolve via diff3.
+        assert!(result.is_clean(), "non-overlapping edits should auto-resolve");
+    }
+
+    /// If one entry is missing a blob OID, fall back to byte comparison.
+    #[test]
+    fn missing_blob_oid_falls_back_to_byte_equality() {
+        // ws-a has a blob OID, ws-b does not — same content.
+        let partition = shared_only(
+            "mixed.txt",
+            vec![
+                entry_with_blob(
+                    "ws-a",
+                    ChangeKind::Modified,
+                    Some(b"same content\n"),
+                    &"c".repeat(40),
+                ),
+                // No blob OID — falls back to byte comparison.
+                entry("ws-b", ChangeKind::Modified, Some(b"same content\n")),
+            ],
+        );
+
+        let base = BTreeMap::new();
+        let result = resolve_partition(&partition, &base).unwrap();
+        // Byte equality still resolves cleanly.
+        assert!(
+            result.is_clean(),
+            "byte equality should resolve cleanly when blob OID missing"
+        );
+        assert_eq!(upsert_content(&result), b"same content\n");
+    }
+
+    /// `all_blobs_equal` returns `true` for a single-entry slice.
+    #[test]
+    fn all_blobs_equal_single_entry() {
+        let entries = vec![entry_with_blob(
+            "ws-a",
+            ChangeKind::Modified,
+            Some(b"x\n"),
+            &"d".repeat(40),
+        )];
+        // Single-entry shared path: should be caught earlier by partition,
+        // but verify the helper handles edge case gracefully.
+        assert!(all_blobs_equal(&entries));
+    }
+
+    /// `all_blobs_equal` returns `false` when any entry has no blob OID.
+    #[test]
+    fn all_blobs_equal_missing_one_blob_returns_false() {
+        let entries = vec![
+            entry_with_blob("ws-a", ChangeKind::Modified, Some(b"x\n"), &"e".repeat(40)),
+            entry("ws-b", ChangeKind::Modified, Some(b"x\n")), // no blob
+        ];
+        assert!(!all_blobs_equal(&entries));
+    }
+
+    /// `all_blobs_equal` returns `false` when OIDs differ.
+    #[test]
+    fn all_blobs_equal_different_blobs_returns_false() {
+        let entries = vec![
+            entry_with_blob("ws-a", ChangeKind::Modified, Some(b"x\n"), &"f".repeat(40)),
+            entry_with_blob("ws-b", ChangeKind::Modified, Some(b"y\n"), &"0".repeat(40)),
+        ];
+        assert!(!all_blobs_equal(&entries));
     }
 }

@@ -250,8 +250,8 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     epoch: &EpochId,
     sources: &[WorkspaceId],
 ) -> Result<BuildPhaseOutput, BuildPhaseError> {
-    // 1. Collect snapshots
-    let patch_sets = collect_snapshots(backend, sources)?;
+    // 1. Collect snapshots (enriched with FileId + blob OID)
+    let patch_sets = collect_snapshots(repo_root, backend, sources)?;
 
     // 2. Partition
     let partition = partition_by_path(&patch_sets);
@@ -300,8 +300,8 @@ fn run_pipeline<B: WorkspaceBackend>(
     state: &MergeStateFile,
     merge_config: &MergeConfig,
 ) -> Result<BuildPhaseOutput, BuildPhaseError> {
-    // Collect snapshots from all source workspaces
-    let patch_sets = collect_snapshots(backend, &state.sources)?;
+    // Collect snapshots from all source workspaces (enriched with FileId + blob OID)
+    let patch_sets = collect_snapshots(repo_root, backend, &state.sources)?;
 
     // Partition changed paths into unique vs shared
     let partition = partition_by_path(&patch_sets);

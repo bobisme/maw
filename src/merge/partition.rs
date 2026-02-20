@@ -27,9 +27,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::model::types::WorkspaceId;
+use crate::model::patch::FileId;
+use crate::model::types::{GitOid, WorkspaceId};
 
-use super::types::{ChangeKind, FileChange, PatchSet};
+use super::types::{ChangeKind, PatchSet};
 
 // ---------------------------------------------------------------------------
 // PathEntry
@@ -39,6 +40,14 @@ use super::types::{ChangeKind, FileChange, PatchSet};
 ///
 /// Stored as entries in the inverted index. For non-deletions, `content`
 /// holds the new file content. For deletions, `content` is `None`.
+///
+/// `file_id` carries the stable [`FileId`] from the collect step (§5.8).
+/// When populated, the resolve step can group renames correctly — two entries
+/// with the same `FileId` but different paths represent a rename + content
+/// change rather than an independent add/delete pair.
+///
+/// `blob` is the git blob OID for the new content. The resolve step prefers
+/// OID equality (`blob == blob`) over byte-level content comparison.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathEntry {
     /// The workspace that made this change.
@@ -47,15 +56,39 @@ pub struct PathEntry {
     pub kind: ChangeKind,
     /// New file content (`None` for deletions).
     pub content: Option<Vec<u8>>,
+    /// Stable file identity (§5.8). `None` for legacy/test paths without tracking.
+    pub file_id: Option<FileId>,
+    /// Git blob OID for the new content (Add/Modify only; `None` for Delete
+    /// and paths collected without git access).
+    pub blob: Option<GitOid>,
 }
 
 impl PathEntry {
-    /// Create a new `PathEntry`.
+    /// Create a `PathEntry` without identity metadata (Phase 1 compat).
     pub fn new(workspace_id: WorkspaceId, kind: ChangeKind, content: Option<Vec<u8>>) -> Self {
         Self {
             workspace_id,
             kind,
             content,
+            file_id: None,
+            blob: None,
+        }
+    }
+
+    /// Create a `PathEntry` with full identity metadata (Phase 3+).
+    pub fn with_identity(
+        workspace_id: WorkspaceId,
+        kind: ChangeKind,
+        content: Option<Vec<u8>>,
+        file_id: Option<FileId>,
+        blob: Option<GitOid>,
+    ) -> Self {
+        Self {
+            workspace_id,
+            kind,
+            content,
+            file_id,
+            blob,
         }
     }
 
@@ -145,10 +178,15 @@ pub fn partition_by_path(patch_sets: &[PatchSet]) -> PartitionResult {
 
     for ps in patch_sets {
         for change in &ps.changes {
-            let entry = PathEntry::new(
+            // Propagate FileId and blob OID from FileChange so that the
+            // resolve step can use OID equality and FileId-based rename
+            // tracking (§5.8).
+            let entry = PathEntry::with_identity(
                 ps.workspace_id.clone(),
                 change.kind.clone(),
                 change.content.clone(),
+                change.file_id,
+                change.blob.clone(),
             );
             index.entry(change.path.clone()).or_default().push(entry);
         }
@@ -531,5 +569,126 @@ mod tests {
 
         let add = PathEntry::new(make_ws("ws"), ChangeKind::Added, Some(vec![]));
         assert!(!add.is_deletion());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: FileId + blob OID propagation through partition
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a `FileChange` with identity metadata (FileId + blob OID).
+    fn make_change_with_identity(
+        path: &str,
+        kind: ChangeKind,
+        content: Option<&[u8]>,
+        file_id: crate::model::patch::FileId,
+        blob_hex: Option<&str>,
+    ) -> FileChange {
+        let blob = blob_hex.and_then(|h| crate::model::types::GitOid::new(h).ok());
+        FileChange::with_identity(
+            PathBuf::from(path),
+            kind,
+            content.map(|c| c.to_vec()),
+            Some(file_id),
+            blob,
+        )
+    }
+
+    /// FileId and blob OID on a FileChange should be propagated into the
+    /// PathEntry that appears in the partition result.
+    #[test]
+    fn partition_propagates_file_id_and_blob_to_path_entry() {
+        use crate::model::patch::FileId;
+
+        let fid = FileId::new(0xdeadbeef_cafebabe_12345678_9abcdef0);
+        let blob_hex = "a".repeat(40);
+
+        let change = make_change_with_identity(
+            "src/lib.rs",
+            ChangeKind::Modified,
+            Some(b"fn lib() {}"),
+            fid,
+            Some(&blob_hex),
+        );
+        let ps = PatchSet::new(make_ws("ws-a"), make_epoch(), vec![change]);
+
+        let result = partition_by_path(&[ps]);
+
+        // The file was only modified by one workspace → it's a unique path.
+        assert_eq!(result.unique_count(), 1);
+        let (path, entry) = &result.unique[0];
+        assert_eq!(path, &PathBuf::from("src/lib.rs"));
+        assert_eq!(
+            entry.file_id,
+            Some(fid),
+            "FileId should propagate from FileChange to PathEntry"
+        );
+        assert!(
+            entry.blob.is_some(),
+            "blob OID should propagate from FileChange to PathEntry"
+        );
+    }
+
+    /// FileId and blob OID propagate correctly into shared (multi-workspace) entries.
+    #[test]
+    fn partition_propagates_identity_into_shared_entries() {
+        use crate::model::patch::FileId;
+
+        let fid_a = FileId::new(1);
+        let fid_b = FileId::new(2);
+        let blob_a = "a".repeat(40);
+        let blob_b = "b".repeat(40);
+
+        let change_a = make_change_with_identity(
+            "shared.rs",
+            ChangeKind::Modified,
+            Some(b"version A"),
+            fid_a,
+            Some(&blob_a),
+        );
+        let change_b = make_change_with_identity(
+            "shared.rs",
+            ChangeKind::Modified,
+            Some(b"version B"),
+            fid_b,
+            Some(&blob_b),
+        );
+
+        let ps_a = PatchSet::new(make_ws("ws-a"), make_epoch(), vec![change_a]);
+        let ps_b = PatchSet::new(make_ws("ws-b"), make_epoch(), vec![change_b]);
+
+        let result = partition_by_path(&[ps_a, ps_b]);
+        assert_eq!(result.shared_count(), 1);
+
+        let (_, entries) = &result.shared[0];
+        assert_eq!(entries.len(), 2);
+
+        // Find ws-a and ws-b entries.
+        let entry_a = entries.iter().find(|e| e.workspace_id.as_str() == "ws-a").unwrap();
+        let entry_b = entries.iter().find(|e| e.workspace_id.as_str() == "ws-b").unwrap();
+
+        assert_eq!(entry_a.file_id, Some(fid_a));
+        assert_eq!(entry_b.file_id, Some(fid_b));
+        assert!(entry_a.blob.is_some());
+        assert!(entry_b.blob.is_some());
+        // Blobs should differ (different content).
+        assert_ne!(entry_a.blob, entry_b.blob);
+    }
+
+    /// FileChange without identity (Phase 1 compat) results in None fields in PathEntry.
+    #[test]
+    fn partition_phase1_change_has_no_identity_in_path_entry() {
+        let change = make_change("old_style.rs", ChangeKind::Added, Some(b"fn old() {}"));
+        let ps = PatchSet::new(make_ws("ws-legacy"), make_epoch(), vec![change]);
+        let result = partition_by_path(&[ps]);
+
+        let (_, entry) = &result.unique[0];
+        assert!(
+            entry.file_id.is_none(),
+            "Phase 1 FileChange should produce PathEntry with no FileId"
+        );
+        assert!(
+            entry.blob.is_none(),
+            "Phase 1 FileChange should produce PathEntry with no blob OID"
+        );
     }
 }
