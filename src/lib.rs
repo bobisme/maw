@@ -15,5 +15,5 @@ pub mod oplog;
 pub mod refs;
 
 // Private modules only used by the binary — not re-exported.
-// agents, doctor, error, exec, format, init, jj, jj_intro,
-// push, release, status, tui, upgrade, v2_init, workspace
+// agents, doctor, error, exec, format, init, push, release,
+// status, transport, tui, upgrade, v2_init, workspace

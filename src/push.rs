@@ -3,6 +3,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
+use crate::transport::ManifoldPushArgs;
 use crate::workspace::{MawConfig, jj_cwd, repo_root};
 
 #[derive(Args)]
@@ -21,6 +22,9 @@ pub struct PushArgs {
     /// Use this flag to push only the branch.
     #[arg(long)]
     no_tags: bool,
+
+    #[command(flatten)]
+    manifold: ManifoldPushArgs,
 }
 
 /// Push the configured branch to its remote using git directly.
@@ -53,14 +57,11 @@ pub fn run(args: &PushArgs) -> Result<()> {
 
     // Step 2: Check if there's something to push
     let sync = main_sync_status_inner(&root, branch);
-    match &sync {
+    let branch_needs_push = match &sync {
         SyncStatus::UpToDate => {
             println!("{branch} is up to date with origin.");
             suggest_advance(&root, branch);
-            if !args.no_tags {
-                push_tags(&root)?;
-            }
-            return Ok(());
+            false
         }
         SyncStatus::Behind(n) => {
             bail!(
@@ -83,9 +84,11 @@ pub fn run(args: &PushArgs) -> Result<()> {
         }
         SyncStatus::Ahead(n) => {
             println!("Pushing {branch} to origin ({n} commit(s))...");
+            true
         }
         SyncStatus::NoRemote => {
             println!("Pushing {branch} to origin (new branch)...");
+            true
         }
         SyncStatus::NoLocal => {
             bail!(
@@ -97,43 +100,47 @@ pub fn run(args: &PushArgs) -> Result<()> {
         }
         SyncStatus::Unknown(reason) => {
             println!("Push status unknown ({reason}), attempting push...");
+            true
         }
-    }
+    };
 
     // Step 3: Push the branch
-    let push = Command::new("git")
-        .args(["push", "origin", branch])
-        .current_dir(&root)
-        .output()
-        .context("Failed to run git push")?;
+    // Step 3: Push the branch (only if needed)
+    if branch_needs_push {
+        let push = Command::new("git")
+            .args(["push", "origin", branch])
+            .current_dir(&root)
+            .output()
+            .context("Failed to run git push")?;
 
-    if !push.status.success() {
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        let stderr_trimmed = stderr.trim();
+        if !push.status.success() {
+            let stderr = String::from_utf8_lossy(&push.stderr);
+            let stderr_trimmed = stderr.trim();
 
-        if stderr_trimmed.contains("rejected") || stderr_trimmed.contains("non-fast-forward") {
-            bail!(
-                "Push rejected (non-fast-forward).\n  \
-                 Someone else pushed. Fetch and rebase first:\n    \
-                 git -C {} fetch origin && git -C {} rebase origin/{branch} {branch}",
-                root.display(),
-                root.display()
-            );
+            if stderr_trimmed.contains("rejected") || stderr_trimmed.contains("non-fast-forward") {
+                bail!(
+                    "Push rejected (non-fast-forward).\n  \
+                     Someone else pushed. Fetch and rebase first:\n    \
+                     git -C {} fetch origin && git -C {} rebase origin/{branch} {branch}",
+                    root.display(),
+                    root.display()
+                );
+            }
+
+            bail!("git push failed: {stderr_trimmed}");
         }
 
-        bail!("git push failed: {stderr_trimmed}");
-    }
-
-    // Print what was pushed
-    let push_stderr = String::from_utf8_lossy(&push.stderr);
-    if push_stderr.contains("Everything up-to-date") {
-        println!("{branch} was already up to date.");
-    } else {
-        // Show the push summary from git
-        println!("Changes pushed to origin:");
-        for line in push_stderr.lines() {
-            if !line.trim().is_empty() {
-                println!("  {line}");
+        // Print what was pushed
+        let push_stderr = String::from_utf8_lossy(&push.stderr);
+        if push_stderr.contains("Everything up-to-date") {
+            println!("{branch} was already up to date.");
+        } else {
+            // Show the push summary from git
+            println!("Changes pushed to origin:");
+            for line in push_stderr.lines() {
+                if !line.trim().is_empty() {
+                    println!("  {line}");
+                }
             }
         }
     }
@@ -141,6 +148,11 @@ pub fn run(args: &PushArgs) -> Result<()> {
     // Step 4: Push tags (unless --no-tags)
     if !args.no_tags {
         push_tags(&root)?;
+    }
+
+    // Step 5: Push Manifold refs (--manifold)
+    if args.manifold.manifold {
+        crate::transport::push_manifold_refs(&root, "origin", /*dry_run=*/ false)?;
     }
 
     let _ = cwd; // used for validation above

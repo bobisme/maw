@@ -8,6 +8,7 @@ mod config;
 mod doctor;
 mod epoch_gc;
 mod error;
+mod eval;
 mod exec;
 mod format;
 mod init;
@@ -15,10 +16,12 @@ mod merge;
 mod merge_cmd;
 mod merge_state;
 mod model;
+mod oplog;
 mod push;
 mod refs;
 mod release;
 mod status;
+mod transport;
 mod tui;
 mod upgrade;
 mod v2_init;
@@ -140,20 +143,41 @@ enum Commands {
     /// Push the main branch to remote
     ///
     /// Pushes the configured branch (default: main) to origin using
-    /// `jj git push --bookmark <branch>`. Uses --bookmark explicitly so
-    /// the push works from any workspace (including the default workspace
-    /// where @ is not an ancestor of the branch).
-    ///
-    /// Checks sync status first and provides clear error messages if the
-    /// branch is behind or doesn't exist.
+    /// `git push origin <branch>`. Checks sync status first and provides
+    /// clear error messages if the branch is behind or doesn't exist.
     ///
     /// If your working copy parent (@-) has unpushed work but the branch
-    /// bookmark hasn't been moved yet, use --advance to move it first.
+    /// hasn't been moved yet, use --advance to move it first.
+    ///
+    /// Use --manifold to also push Manifold metadata (op logs, workspace
+    /// heads, epoch pointer) to refs/manifold/* on the remote. This enables
+    /// multi-machine Manifold collaboration (Level 2 Git transport, §8).
     ///
     /// Configure the branch name in .maw.toml:
     ///   [repo]
     ///   branch = "main"
     Push(push::PushArgs),
+
+    /// Fetch Manifold state from remote (Level 2 Git transport)
+    ///
+    /// Fetches all Manifold metadata (op logs, workspace heads, epoch pointer)
+    /// from the remote under refs/manifold/* and merges remote op log heads
+    /// into the local op log DAG.
+    ///
+    /// Divergent workspace heads are resolved by creating a synthetic merge
+    /// operation that includes both chains as parents, preserving the full
+    /// causal history.
+    ///
+    /// Epoch divergence (two machines with conflicting epoch pointers) is
+    /// detected and reported but not auto-resolved — manual recovery required.
+    ///
+    /// Use --dry-run to preview what would be merged without changing refs.
+    ///
+    /// Examples:
+    ///   maw pull --manifold              # pull from origin
+    ///   maw pull --manifold upstream     # pull from a named remote
+    ///   maw pull --manifold --dry-run    # preview only
+    Pull(transport::PullArgs),
 
     /// Tag and push a release
     ///
@@ -229,6 +253,7 @@ fn main() {
         Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
+        Commands::Pull(ref args) => transport::run_pull(args),
         Commands::Release(args) => release::run(&args),
         Commands::Exec(args) => exec::run(&args),
         Commands::Gc { dry_run } => epoch_gc::run_cli(dry_run),
