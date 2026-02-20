@@ -322,4 +322,5 @@ mod tests {
         assert!(all.contains(&&PathBuf::from("deprecated.rs")));
     }
 }
+pub mod overlay;
 pub mod platform;
