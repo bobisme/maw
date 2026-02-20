@@ -11,7 +11,7 @@ fn restore_recreates_destroyed_workspace_at_current_epoch() {
     repo.maw_ok(&["ws", "create", "alice"]);
     repo.add_file("alice", "feature.txt", "Alice's important work\n");
 
-    let destroy_output = repo.maw_ok(&["ws", "destroy", "alice"]);
+    let destroy_output = repo.maw_ok(&["ws", "destroy", "alice", "--force"]);
     assert!(destroy_output.contains("destroyed"));
     assert!(!repo.workspace_exists("alice"));
 
@@ -57,4 +57,34 @@ fn destroy_output_confirms_workspace_removed() {
 
     let output = repo.maw_ok(&["ws", "destroy", "carol"]);
     assert!(output.contains("Workspace 'carol' destroyed."), "Got: {output}");
+}
+
+#[test]
+fn history_includes_workspace_lifecycle_events_after_restore() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "hist-a"]);
+    repo.maw_ok(&["ws", "destroy", "hist-a"]);
+    repo.maw_ok(&["ws", "restore", "hist-a"]);
+
+    let raw = repo.maw_ok(&["ws", "history", "hist-a", "--format", "json", "--limit", "20"]);
+    let history_json: serde_json::Value =
+        serde_json::from_str(&raw).expect("ws history --format json should be valid JSON");
+
+    let operations = history_json["operations"]
+        .as_array()
+        .expect("operations should be present in history output");
+    let op_types: Vec<&str> = operations
+        .iter()
+        .filter_map(|op| op["op_type"].as_str())
+        .collect();
+
+    assert!(
+        op_types.iter().any(|t| *t == "create"),
+        "history should include at least one create operation"
+    );
+    assert!(
+        op_types.iter().any(|t| *t == "destroy"),
+        "history should include destroy operation"
+    );
 }

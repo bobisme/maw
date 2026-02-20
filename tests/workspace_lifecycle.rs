@@ -4,6 +4,8 @@
 
 mod manifold_common;
 
+use std::process::Command;
+
 use manifold_common::TestRepo;
 
 #[test]
@@ -157,4 +159,51 @@ fn workspace_create_template_emits_metadata_and_artifact() {
         artifact_json["merge_policy"].as_str(),
         Some("fast-track-if-clean")
     );
+}
+
+#[test]
+fn ws_commands_work_from_inside_workspace_directory() {
+    let repo = TestRepo::new();
+    repo.maw_ok(&["ws", "create", "agent-a"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_maw"))
+        .args(["ws", "list", "--format", "json"])
+        .current_dir(repo.workspace_path("agent-a"))
+        .output()
+        .expect("failed to execute maw ws list from workspace directory");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "ws list should work from workspace dir\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let listed_json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("ws list --format json should produce valid JSON");
+    let names: Vec<String> = listed_json["workspaces"]
+        .as_array()
+        .expect("workspaces should be an array")
+        .iter()
+        .filter_map(|w| w["name"].as_str().map(ToOwned::to_owned))
+        .collect();
+
+    assert!(names.contains(&"default".to_owned()));
+    assert!(names.contains(&"agent-a".to_owned()));
+}
+
+#[test]
+fn destroy_dirty_workspace_requires_force() {
+    let repo = TestRepo::new();
+    repo.maw_ok(&["ws", "create", "agent-a"]);
+    repo.add_file("agent-a", "dirty.txt", "keep me\n");
+
+    let err = repo.maw_fails(&["ws", "destroy", "agent-a"]);
+    assert!(
+        err.contains("unmerged") || err.contains("--force"),
+        "destroy without --force should be blocked for dirty workspace, got: {err}"
+    );
+
+    repo.maw_ok(&["ws", "destroy", "agent-a", "--force"]);
+    assert!(!repo.workspace_exists("agent-a"));
 }

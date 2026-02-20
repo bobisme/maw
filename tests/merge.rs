@@ -101,3 +101,45 @@ fn reject_merge_default_workspace() {
     let stderr = repo.maw_fails(&["ws", "merge", "default"]);
     assert!(stderr.contains("default") || stderr.contains("reserved"), "Got: {stderr}");
 }
+
+#[test]
+fn merge_json_success_stdout_is_pure_json() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "json-a"]);
+    repo.maw_ok(&["ws", "create", "json-b"]);
+    repo.add_file("json-a", "a.txt", "a\n");
+    repo.add_file("json-b", "b.txt", "b\n");
+
+    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "merge should succeed\nstderr: {stderr}");
+    assert!(stdout.starts_with('{'), "stdout should be pure JSON, got: {stdout}");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("merge --format json output should be valid JSON");
+    assert_eq!(payload["status"].as_str(), Some("success"));
+}
+
+#[test]
+fn merge_json_conflict_stdout_is_pure_json() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("shared.txt", "base\n")]);
+    repo.maw_ok(&["ws", "create", "json-a"]);
+    repo.maw_ok(&["ws", "create", "json-b"]);
+    repo.modify_file("json-a", "shared.txt", "alpha\n");
+    repo.modify_file("json-b", "shared.txt", "beta\n");
+
+    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    assert!(!out.status.success(), "conflicting merge should fail");
+    assert!(stdout.starts_with('{'), "stdout should be pure JSON, got: {stdout}");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("merge conflict output should be valid JSON");
+    assert_eq!(payload["status"].as_str(), Some("conflict"));
+}

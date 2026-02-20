@@ -1,11 +1,16 @@
 use std::io::{self, Write};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
+use crate::model::diff::compute_patchset;
 use crate::model::types::{EpochId, WorkspaceId, WorkspaceMode};
+use crate::oplog::read::read_head;
+use crate::oplog::types::{OpPayload, Operation};
+use crate::oplog::write::append_operation;
 use crate::refs as manifold_refs;
 
 use super::{
@@ -60,6 +65,10 @@ pub fn create(
         .map_err(|e| anyhow::anyhow!(
             "Failed to create workspace: {e}\n  Check: maw doctor\n  Verify name is not already used: maw ws list"
         ))?;
+
+    if let Err(e) = record_workspace_create_op(&root, &ws_id, &epoch) {
+        eprintln!("WARNING: Failed to record workspace create in history: {e}");
+    }
 
     // Write workspace metadata (mode + optional template defaults).
     // Keep the common case lean: if mode is ephemeral and no template is set,
@@ -213,7 +222,7 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
 }
 
-pub fn destroy(name: &str, confirm: bool) -> Result<()> {
+pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot destroy the default workspace");
     }
@@ -237,9 +246,35 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
         return Ok(());
     }
 
+    let backend = get_backend()?;
+    let ws_id =
+        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    let status = backend
+        .status(&ws_id)
+        .map_err(|e| anyhow::anyhow!("Failed to inspect workspace state: {e}"))?;
+    let touched_count = compute_patchset(&path, &status.base_epoch)
+        .map(|patch_set| patch_set.len())
+        .map_err(|e| anyhow::anyhow!("Failed to inspect local changes before destroy: {e}"))?;
+
+    if touched_count > 0 && !force {
+        bail!(
+            "Workspace '{name}' has {touched_count} unmerged change(s). Refusing destroy to avoid data loss.\n  \
+             Review changes: maw ws touched {name} --format json\n  \
+             Destroy anyway: maw ws destroy {name} --force"
+        );
+    }
+    if touched_count > 0 {
+        eprintln!(
+            "WARNING: Destroying workspace '{name}' with {touched_count} unmerged change(s) (--force)."
+        );
+    }
+
     if confirm {
         println!("About to destroy workspace '{name}' at {}", path.display());
         println!("This will remove the workspace and delete the directory.");
+        if touched_count > 0 {
+            println!("WARNING: {touched_count} unmerged change(s) will be lost.");
+        }
         println!();
         print!("Continue? [y/N] ");
         io::stdout().flush()?;
@@ -254,9 +289,9 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
 
     println!("Destroying workspace '{name}'...");
 
-    let backend = get_backend()?;
-    let ws_id =
-        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
+    if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &status.base_epoch) {
+        eprintln!("WARNING: Failed to record workspace destroy in history: {e}");
+    }
 
     backend
         .destroy(&ws_id)
@@ -267,6 +302,97 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
 
     println!("Workspace '{name}' destroyed.");
     Ok(())
+}
+
+fn record_workspace_create_op(root: &std::path::Path, ws_id: &WorkspaceId, epoch: &EpochId) -> Result<()> {
+    let previous_head = read_head(root, ws_id)
+        .map_err(|e| anyhow::anyhow!("read workspace history head: {e}"))?;
+    let parent_ids = previous_head.iter().cloned().collect();
+
+    let op = Operation {
+        parent_ids,
+        workspace_id: ws_id.clone(),
+        timestamp: now_timestamp_iso8601(),
+        payload: OpPayload::Create {
+            epoch: epoch.clone(),
+        },
+    };
+
+    append_operation(root, ws_id, &op, previous_head.as_ref())
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("append create op: {e}"))
+}
+
+fn record_workspace_destroy_op(
+    root: &std::path::Path,
+    ws_id: &WorkspaceId,
+    base_epoch: &EpochId,
+) -> Result<()> {
+    let head = ensure_workspace_oplog_head(root, ws_id, base_epoch)?;
+
+    let op = Operation {
+        parent_ids: vec![head.clone()],
+        workspace_id: ws_id.clone(),
+        timestamp: now_timestamp_iso8601(),
+        payload: OpPayload::Destroy,
+    };
+
+    append_operation(root, ws_id, &op, Some(&head))
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("append destroy op: {e}"))
+}
+
+fn ensure_workspace_oplog_head(
+    root: &std::path::Path,
+    ws_id: &WorkspaceId,
+    base_epoch: &EpochId,
+) -> Result<crate::model::types::GitOid> {
+    if let Some(head) = read_head(root, ws_id)
+        .map_err(|e| anyhow::anyhow!("read workspace history head: {e}"))?
+    {
+        return Ok(head);
+    }
+
+    let create_op = Operation {
+        parent_ids: vec![],
+        workspace_id: ws_id.clone(),
+        timestamp: now_timestamp_iso8601(),
+        payload: OpPayload::Create {
+            epoch: base_epoch.clone(),
+        },
+    };
+
+    append_operation(root, ws_id, &create_op, None)
+        .map_err(|e| anyhow::anyhow!("bootstrap workspace history: {e}"))
+}
+
+fn now_timestamp_iso8601() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3_600) % 24;
+    let days = secs / 86_400;
+
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 /// Attach (reconnect) an orphaned workspace directory.

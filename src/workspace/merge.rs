@@ -1363,9 +1363,18 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         format,
     } = *opts;
     let ws_to_merge = workspaces.to_vec();
+    let text_mode = format != OutputFormat::Json;
+
+    macro_rules! textln {
+        ($($arg:tt)*) => {
+            if text_mode {
+                println!($($arg)*);
+            }
+        };
+    }
 
     if ws_to_merge.is_empty() {
-        println!("No workspaces to merge.");
+        textln!("No workspaces to merge.");
         return Ok(());
     }
 
@@ -1380,7 +1389,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             "Cannot merge the default workspace \u{2014} it is the merge target, not a source.\n\
              \n  To advance {branch} to include your edits in {default_ws}:\n\
              \n    maw push --advance\n\
-             \n  This moves the {branch} bookmark to your latest commit and pushes."
+             \n  This updates refs/heads/{branch} to the current epoch and pushes."
         );
     }
 
@@ -1391,11 +1400,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     run_hooks(&maw_config.hooks.pre_merge, "pre-merge", &root, true)?;
 
     if ws_to_merge.len() == 1 {
-        println!("Adopting workspace: {}", ws_to_merge[0]);
+        textln!("Adopting workspace: {}", ws_to_merge[0]);
     } else {
-        println!("Merging workspaces: {}", ws_to_merge.join(", "));
+        textln!("Merging workspaces: {}", ws_to_merge.join(", "));
     }
-    println!();
+    textln!();
 
     // Set up paths
     let manifold_dir = root.join(".manifold");
@@ -1428,19 +1437,19 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // -----------------------------------------------------------------------
     // Phase 1: PREPARE — freeze inputs
     // -----------------------------------------------------------------------
-    println!("PREPARE: Freezing merge inputs...");
+    textln!("PREPARE: Freezing merge inputs...");
     let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("  Epoch: {}", &frozen.epoch.as_str()[..12]);
+    textln!("  Epoch: {}", &frozen.epoch.as_str()[..12]);
     for (ws_id, head) in &frozen.heads {
-        println!("  {}: {}", ws_id, &head.as_str()[..12]);
+        textln!("  {}: {}", ws_id, &head.as_str()[..12]);
     }
 
     // -----------------------------------------------------------------------
     // Phase 2: BUILD — collect, partition, resolve, build candidate
     // -----------------------------------------------------------------------
-    println!();
-    println!("BUILD: Running merge engine...");
+    textln!();
+    textln!("BUILD: Running merge engine...");
     let build_output = match run_build_phase(&root, &manifold_dir, &backend) {
         Ok(output) => output,
         Err(e) => {
@@ -1450,11 +1459,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         }
     };
 
-    println!(
+    textln!(
         "  {} unique path(s), {} shared path(s), {} resolved",
         build_output.unique_count, build_output.shared_count, build_output.resolved_count
     );
-    println!("  Candidate: {}", &build_output.candidate.as_str()[..12]);
+    textln!("  Candidate: {}", &build_output.candidate.as_str()[..12]);
 
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
@@ -1482,14 +1491,14 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
-            println!("  {} unresolved conflict(s)", build_output.conflicts.len());
+            textln!("  {} unresolved conflict(s)", build_output.conflicts.len());
             print_conflict_report(&build_output.conflicts, &default_ws_path, default_ws);
 
             if destroy_after {
-                println!();
-                println!("NOT destroying workspaces due to conflicts.");
-                println!("Resolve conflicts in the source workspaces, then retry:");
-                println!("  maw ws merge {}", ws_to_merge.join(" "));
+                textln!();
+                textln!("NOT destroying workspaces due to conflicts.");
+                textln!("Resolve conflicts in the source workspaces, then retry:");
+                textln!("  maw ws merge {}", ws_to_merge.join(" "));
             }
         }
 
@@ -1506,9 +1515,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let validation_config = &manifold_config.merge.validation;
 
-    println!();
+    textln!();
     if validation_config.has_commands() {
-        println!("VALIDATE: Running post-merge validation...");
+        textln!("VALIDATE: Running post-merge validation...");
 
         // Advance merge-state to Validate phase
         advance_merge_state(&manifold_dir, MergePhase::Validate)?;
@@ -1535,13 +1544,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
         match &validate_outcome {
             ValidateOutcome::Skipped => {
-                println!("  Validation skipped (no commands configured).");
+                textln!("  Validation skipped (no commands configured).");
             }
             ValidateOutcome::Passed(r) => {
-                println!("  Validation passed ({}ms).", r.duration_ms);
+                textln!("  Validation passed ({}ms).", r.duration_ms);
             }
             ValidateOutcome::PassedWithWarnings(r) => {
-                println!(
+                textln!(
                     "  WARNING: Validation failed ({}ms) but policy is 'warn' — proceeding.",
                     r.duration_ms
                 );
@@ -1552,7 +1561,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 }
             }
             ValidateOutcome::Blocked(r) => {
-                println!(
+                textln!(
                     "  Validation FAILED ({}ms) — merge blocked by policy.",
                     r.duration_ms
                 );
@@ -1579,7 +1588,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     "quarantine"
                 };
 
-                println!(
+                textln!(
                     "  Validation FAILED ({}ms) — policy '{policy_name}', creating quarantine workspace...",
                     r.duration_ms
                 );
@@ -1601,21 +1610,21 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     r.clone(),
                 ) {
                     Ok(qws_path) => {
-                        println!("  Quarantine workspace created: {}", qws_path.display());
-                        println!();
+                        textln!("  Quarantine workspace created: {}", qws_path.display());
+                        textln!();
                         if !r.stderr.is_empty() {
-                            println!("  Validation output:");
+                            textln!("  Validation output:");
                             for line in r.stderr.lines().take(10) {
                                 eprintln!("    {line}");
                             }
                         }
-                        println!();
-                        println!("Fix the issues in the quarantine workspace:");
-                        println!("  Edit files: {}/", qws_path.display());
-                        println!("  Re-validate and commit: maw merge promote {merge_id}");
-                        println!("  Discard quarantine:     maw merge abandon {merge_id}");
-                        println!();
-                        println!("Source workspaces are preserved (not destroyed).");
+                        textln!();
+                        textln!("Fix the issues in the quarantine workspace:");
+                        textln!("  Edit files: {}/", qws_path.display());
+                        textln!("  Re-validate and commit: maw merge promote {merge_id}");
+                        textln!("  Discard quarantine:     maw merge abandon {merge_id}");
+                        textln!();
+                        textln!("Source workspaces are preserved (not destroyed).");
                         bail!(
                             "Merge validation failed (policy: {policy_name}).\n  \
                              Quarantine workspace: {}\n  \
@@ -1642,16 +1651,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             bail!("Merge validation blocked the merge.");
         }
     } else {
-        println!();
-        println!("VALIDATE: No validation commands configured — skipping.");
+        textln!();
+        textln!("VALIDATE: No validation commands configured — skipping.");
         advance_merge_state(&manifold_dir, MergePhase::Validate)?;
     }
 
     // -----------------------------------------------------------------------
     // Phase 4: COMMIT — atomically update refs (point of no return)
     // -----------------------------------------------------------------------
-    println!();
-    println!("COMMIT: Advancing epoch...");
+    textln!();
+    textln!("COMMIT: Advancing epoch...");
 
     // Advance merge-state to Commit phase
     advance_merge_state(&manifold_dir, MergePhase::Commit)?;
@@ -1659,23 +1668,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let epoch_before_oid = frozen.epoch.oid().clone();
     match run_commit_phase(&root, branch, &epoch_before_oid, &build_output.candidate) {
         Ok(CommitResult::Committed) => {
-            println!(
+            textln!(
                 "  Epoch advanced: {} → {}",
                 &epoch_before_oid.as_str()[..12],
                 &build_output.candidate.as_str()[..12]
             );
-            println!("  Branch '{branch}' updated.");
+            textln!("  Branch '{branch}' updated.");
         }
         Err(crate::merge::commit::CommitError::PartialCommit) => {
             // Epoch ref moved but branch ref didn't — attempt recovery
-            println!("  WARNING: Partial commit — attempting recovery...");
+            textln!("  WARNING: Partial commit — attempting recovery...");
             match recover_partial_commit(&root, branch, &epoch_before_oid, &build_output.candidate)
             {
                 Ok(CommitRecovery::FinalizedMainRef) => {
-                    println!("  Recovery succeeded: branch ref finalized.");
+                    textln!("  Recovery succeeded: branch ref finalized.");
                 }
                 Ok(CommitRecovery::AlreadyCommitted) => {
-                    println!("  Recovery: both refs already updated.");
+                    textln!("  Recovery: both refs already updated.");
                 }
                 Ok(CommitRecovery::NotCommitted) => {
                     abort_merge(&manifold_dir, "commit phase failed: neither ref updated");
@@ -1701,20 +1710,20 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // -----------------------------------------------------------------------
     // Phase 5: CLEANUP — destroy workspaces (if requested), remove merge-state
     // -----------------------------------------------------------------------
-    println!();
-    println!("CLEANUP...");
+    textln!();
+    textln!("CLEANUP...");
 
     // Advance merge-state to Cleanup phase
     advance_merge_state(&manifold_dir, MergePhase::Cleanup)?;
 
     // Update the default workspace to point to the new epoch
     if default_ws_path.exists() {
-        update_default_workspace(&default_ws_path, &build_output.candidate)?;
+        update_default_workspace(&default_ws_path, &build_output.candidate, text_mode)?;
     }
 
     // Destroy source workspaces if requested
     if destroy_after {
-        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend)?;
+        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, text_mode)?;
     }
 
     // Remove merge-state file
@@ -1762,11 +1771,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
-        println!();
-        println!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
-        println!();
-        println!("Next: push to remote:");
-        println!("  maw push");
+        textln!();
+        textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
+        textln!();
+        textln!("Next: push to remote:");
+        textln!("  maw push");
     }
 
     Ok(())
@@ -1854,6 +1863,7 @@ fn now_secs() -> u64 {
 fn update_default_workspace(
     default_ws_path: &Path,
     new_epoch: &crate::model::types::GitOid,
+    text_mode: bool,
 ) -> Result<()> {
     // Reset the worktree to the new epoch
     let output = std::process::Command::new("git")
@@ -1863,7 +1873,9 @@ fn update_default_workspace(
         .context("Failed to update default workspace")?;
 
     if output.status.success() {
-        println!("  Default workspace updated to new epoch.");
+        if text_mode {
+            println!("  Default workspace updated to new epoch.");
+        }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!(
@@ -1886,6 +1898,7 @@ fn handle_post_merge_destroy(
     default_ws: &str,
     confirm: bool,
     backend: &impl WorkspaceBackend<Error: std::fmt::Display>,
+    text_mode: bool,
 ) -> Result<()> {
     let ws_to_destroy: Vec<String> = ws_to_merge
         .iter()
@@ -1894,32 +1907,44 @@ fn handle_post_merge_destroy(
         .collect();
 
     if confirm {
-        println!();
-        println!("Will destroy {} workspace(s):", ws_to_destroy.len());
-        for ws in &ws_to_destroy {
-            println!("  - {ws}");
+        if text_mode {
+            println!();
+            println!("Will destroy {} workspace(s):", ws_to_destroy.len());
+            for ws in &ws_to_destroy {
+                println!("  - {ws}");
+            }
+            println!();
         }
-        println!();
         print!("Continue? [y/N] ");
         io::stdout().flush()?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted. Workspaces kept. Merge commit still exists.");
+            if text_mode {
+                println!("Aborted. Workspaces kept. Merge commit still exists.");
+            }
             return Ok(());
         }
     }
 
-    println!("  Cleaning up workspaces...");
+    if text_mode {
+        println!("  Cleaning up workspaces...");
+    }
     for ws_name in &ws_to_destroy {
         if ws_name == DEFAULT_WORKSPACE {
-            println!("    Skipping default workspace");
+            if text_mode {
+                println!("    Skipping default workspace");
+            }
             continue;
         }
         if let Ok(ws_id) = WorkspaceId::new(ws_name) {
             match backend.destroy(&ws_id) {
-                Ok(()) => println!("    Destroyed: {ws_name}"),
+                Ok(()) => {
+                    if text_mode {
+                        println!("    Destroyed: {ws_name}");
+                    }
+                }
                 Err(e) => eprintln!("    WARNING: Failed to destroy {ws_name}: {e}"),
             }
         }

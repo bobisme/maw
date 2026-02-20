@@ -189,6 +189,9 @@ pub enum WorkspaceCommands {
     /// Non-interactive by default (agents can't respond to prompts).
     /// Use --confirm for interactive confirmation.
     ///
+    /// If the workspace has unmerged changes, destroy is refused by default.
+    /// Use --force to discard those changes.
+    ///
     /// To undo: maw ws restore <name>
     Destroy {
         /// Name of the workspace to destroy
@@ -197,6 +200,10 @@ pub enum WorkspaceCommands {
         /// Prompt for confirmation before destroying
         #[arg(short, long)]
         confirm: bool,
+
+        /// Force destroy even if workspace has unmerged local changes
+        #[arg(long)]
+        force: bool,
     },
 
     /// Restore a previously destroyed workspace
@@ -539,6 +546,7 @@ pub enum WorkspaceCommands {
     },
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn run(cmd: WorkspaceCommands) -> Result<()> {
     match cmd {
         WorkspaceCommands::Create {
@@ -555,7 +563,11 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             };
             create::create(&name, revision.as_deref(), persistent, template)
         }
-        WorkspaceCommands::Destroy { name, confirm } => create::destroy(&name, confirm),
+        WorkspaceCommands::Destroy {
+            name,
+            confirm,
+            force,
+        } => create::destroy(&name, confirm, force),
         WorkspaceCommands::Restore { name } => restore::restore(&name),
         WorkspaceCommands::List {
             verbose,
@@ -641,59 +653,25 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 }
 
 pub fn repo_root() -> Result<PathBuf> {
-    // Use git to find the repo root. In Manifold's bare repo model,
-    // GIT_DIR is at the repo root. We may be running from ws/<name>/
-    // or from the root itself.
+    // Always resolve via git-common-dir so this works from both:
+    // - repo root (bare/manifold metadata root)
+    // - workspace directories (ws/<name>/)
     let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
-        .context("Failed to run git rev-parse --git-dir")?;
+        .context("Failed to run git rev-parse --git-common-dir")?;
     if !output.status.success() {
         bail!(
             "Not in a git repository: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
 
-    // Resolve to absolute path
-    let git_dir = if git_dir.is_absolute() {
-        git_dir
-    } else {
-        std::env::current_dir()
-            .context("Could not determine current directory")?
-            .join(&git_dir)
-    };
-
-    // In a bare repo, .git dir IS the repo root's .git/.
-    // In a worktree, .git is a file pointing to the main repo.
-    // The repo root is the parent of .git/ (or the directory containing .git/).
-    let root = if git_dir.is_dir() {
-        // Standard .git/ directory — parent is repo root
-        git_dir
-            .parent()
-            .context("Cannot determine repo root from .git dir")?
-            .to_path_buf()
-    } else {
-        // Worktree: .git is a file. Use git to find the common dir.
-        let common_output = Command::new("git")
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .output()
-            .context("Failed to run git rev-parse --git-common-dir")?;
-        if !common_output.status.success() {
-            bail!(
-                "Failed to find git common dir: {}",
-                String::from_utf8_lossy(&common_output.stderr)
-            );
-        }
-        let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim());
-        common_dir
-            .parent()
-            .context("Cannot determine repo root from git common dir")?
-            .to_path_buf()
-    };
-
-    Ok(root)
+    let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    common_dir
+        .parent()
+        .context("Cannot determine repo root from git common dir")
+        .map(std::path::Path::to_path_buf)
 }
 
 /// Return the best directory for running git commands.
