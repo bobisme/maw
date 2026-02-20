@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.43.0
+
+### Features
+- **Rename-aware merge**: FileId-based rename detection in partition pipeline — reroutes edits to renamed paths, detects divergent renames and rename/delete conflicts (14 tests)
+- **Quarantine workspaces**: Failed merge validation creates quarantine workspace for fix-forward; `maw merge promote` and `maw merge abandon` commands (19 tests)
+- **Persistent workspace mode**: `--persistent` flag on `maw ws create`, `maw ws advance` rebases onto latest epoch, mode-aware staleness in `maw ws list/status`
+- **Concurrent safety eval**: Adversarial interleaving test harness with 5 agents, 100 random scenarios, git fsck integrity checks, determinism validation (29 tests)
+
 ## v0.42.0
 
 - Feat: Agent-friendly conflict presentation (JSON structured output) — `ConflictJson` struct with path/reason/workspaces/base_content/sides/atoms/resolution_strategies, `conflict_record_to_json()` conversion, `maw ws merge --format json` structured output for success and conflict cases. 20 tests. (bd-20kb)
