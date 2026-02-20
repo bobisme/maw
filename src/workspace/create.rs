@@ -142,7 +142,9 @@ pub fn destroy(name: &str, confirm: bool) -> Result<()> {
     let path = workspace_path(name)?;
 
     if !path.exists() {
-        bail!("Workspace does not exist at {}", path.display());
+        println!("Workspace '{name}' is already absent at {}.", path.display());
+        println!("No action needed.");
+        return Ok(());
     }
 
     if confirm {
