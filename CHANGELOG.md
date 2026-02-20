@@ -2,6 +2,18 @@
 
 All notable changes to maw.
 
+## v0.45.0
+
+### Added
+- **Reflink workspace backend** (bd-1rum). `RefLinkBackend` in `src/backend/reflink.rs` — CoW workspace creation via `cp --reflink=auto` from immutable epoch snapshots, with fallback to recursive copy. Full `WorkspaceBackend` trait implementation. 34 tests.
+- **OverlayFS workspace backend** (bd-lm5y). `OverlayBackend` in `src/backend/overlay.rs` — zero-copy workspaces via fuse-overlayfs or kernel overlay with user namespaces, immutable epoch lowerdir, per-workspace upper/work dirs, ref-counting for epoch snapshot retention, whiteout detection. 16 tests.
+- **Property-testing merge correctness** (bd-1szh). Pushout contract verification in `src/merge/pushout_tests.rs` — 16 property tests covering embedding, minimality, and commutativity with 14,500+ random scenarios per CI run.
+- **Expanded tree-sitter semantic conflict detection** (bd-3l3o). Language pack architecture for incremental grammar enablement, semantic conflict rules for symbol lifecycle and signature drift, confidence scoring, machine-readable semantic rationale in conflict output.
+- **Workspace templates** (bd-1bei). Template system for bead archetypes with `--template` flag on `maw ws create`.
+
+### Closed (housekeeping)
+- bd-3rdu (P2 Epic: Phase 3 — Advanced Merge + Conflict Model) — all 7 blockers completed
+
 ## v0.44.0
 
 ### Added
