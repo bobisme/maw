@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.46.3
+
+### Fixed
+- **False stale warning in `maw status`**. Top-level status now treats `ws/default` as the persistent branch workspace and no longer reports stale/sync advice when epoch refs lag while branch state is correct.
+
+### Added
+- Regression test for default-workspace stale reporting in branch-ahead/stale-epoch scenarios.
+
 ## v0.46.2
 
 ### Fixed
