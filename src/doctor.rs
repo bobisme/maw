@@ -161,6 +161,16 @@ fn check_default_workspace(root: Option<&Path>) -> DoctorCheck {
         };
     }
 
+    if !is_valid_default_worktree(root, &default_ws) {
+        return DoctorCheck {
+            name: "default workspace".to_string(),
+            status: "fail".to_string(),
+            message: "default workspace: ws/default/ exists but is not a registered git worktree"
+                .to_string(),
+            fix: Some("Fix: maw init (repairs default workspace registration)".to_string()),
+        };
+    }
+
     let has_files = std::fs::read_dir(&default_ws)
         .map(|entries| {
             entries
@@ -184,6 +194,57 @@ fn check_default_workspace(root: Option<&Path>) -> DoctorCheck {
             fix: Some("Run: maw init".to_string()),
         }
     }
+}
+
+fn is_valid_default_worktree(root: &Path, default_ws: &Path) -> bool {
+    if !is_inside_worktree(default_ws) {
+        return false;
+    }
+
+    is_registered_worktree(root, default_ws)
+}
+
+fn is_inside_worktree(path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output();
+
+    let Ok(output) = output else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
+fn is_registered_worktree(root: &Path, ws_path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(root)
+        .output();
+
+    let Ok(output) = output else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    let ws_path = std::fs::canonicalize(ws_path).unwrap_or_else(|_| ws_path.to_path_buf());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            return false;
+        };
+        let listed = Path::new(path.trim());
+        let listed = std::fs::canonicalize(listed).unwrap_or_else(|_| listed.to_path_buf());
+        listed == ws_path
+    })
 }
 
 fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
