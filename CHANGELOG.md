@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.46.5
+
+### Fixed
+- **Init default-branch alignment**. `maw init` now reattaches `ws/default` to the configured branch when possible instead of leaving it detached on stale epoch commits, preventing large false dirty states after migration.
+- **Workspace-state ref refresh on idempotent init**. Brownfield init now refreshes `refs/manifold/ws/default` from the actual `ws/default` HEAD after repair/alignment.
+
+### Added
+- Regression test for stale-epoch detached default workspace recovery during idempotent init.
+
 ## v0.46.4
 
 ### Fixed
