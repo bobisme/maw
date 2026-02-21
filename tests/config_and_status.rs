@@ -7,8 +7,11 @@ use manifold_common::TestRepo;
 fn config_fallback_to_default_workspace_git_native() {
     let repo = TestRepo::new();
 
-    std::fs::write(repo.root().join(".maw.toml"), "[repo]\nbranch = \"develop\"\n")
-        .expect("failed to write .maw.toml");
+    std::fs::write(
+        repo.root().join(".maw.toml"),
+        "[repo]\nbranch = \"develop\"\n",
+    )
+    .expect("failed to write .maw.toml");
 
     let epoch = repo.current_epoch();
     repo.git(&["update-ref", "refs/heads/develop", &epoch]);

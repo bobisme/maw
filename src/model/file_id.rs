@@ -135,11 +135,12 @@ impl FileIdMap {
 
         // Check destination is free.
         if let Some(&existing_id) = self.path_to_id.get(&new_path)
-            && existing_id != id {
-                // Restore old mapping before returning the error.
-                self.path_to_id.insert(old_path.to_path_buf(), id);
-                return Err(FileIdMapError::PathAlreadyTracked(new_path));
-            }
+            && existing_id != id
+        {
+            // Restore old mapping before returning the error.
+            self.path_to_id.insert(old_path.to_path_buf(), id);
+            return Err(FileIdMapError::PathAlreadyTracked(new_path));
+        }
 
         self.id_to_path.insert(id, new_path.clone());
         self.path_to_id.insert(new_path, id);

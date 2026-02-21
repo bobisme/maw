@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::model::types::{GitOid, WorkspaceId};
@@ -1357,9 +1357,11 @@ mod tests {
 
         let summary = pull_manifold_refs(root, "origin", false).unwrap();
         assert_eq!(summary.epoch, RefMergeResult::NoRemote);
-        assert!(refs::read_ref(root, "refs/manifold/remote/epoch/current")
-            .unwrap()
-            .is_none());
+        assert!(
+            refs::read_ref(root, "refs/manifold/remote/epoch/current")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // -----------------------------------------------------------------------

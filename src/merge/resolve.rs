@@ -39,7 +39,7 @@ use crate::model::conflict::{
 use crate::model::types::WorkspaceId;
 
 #[cfg(feature = "ast-merge")]
-use super::ast_merge::{try_ast_merge_with_config, AstMergeConfig, AstMergeResult};
+use super::ast_merge::{AstMergeConfig, AstMergeResult, try_ast_merge_with_config};
 
 use super::build::ResolvedChange;
 use super::partition::{PartitionResult, PathEntry};

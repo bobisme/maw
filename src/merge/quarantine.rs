@@ -45,7 +45,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ValidationConfig;
-use crate::merge::validate::{run_validate_config_in_dir, ValidateOutcome};
+use crate::merge::validate::{ValidateOutcome, run_validate_config_in_dir};
 use crate::merge_state::ValidationResult;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 

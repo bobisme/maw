@@ -131,7 +131,7 @@ pub struct CopyBackend {
 
 impl CopyBackend {
     /// Create a new `CopyBackend` rooted at `root`.
-    #[must_use] 
+    #[must_use]
     pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -229,15 +229,16 @@ impl WorkspaceBackend for CopyBackend {
         // Idempotency: workspace with correct epoch already exists.
         if ws_path.exists() {
             if let Ok(existing_epoch) = Self::read_epoch_file(&ws_path, name.as_str())
-                && existing_epoch == *epoch {
-                    return Ok(WorkspaceInfo {
-                        id: name.clone(),
-                        path: ws_path,
-                        epoch: epoch.clone(),
-                        state: WorkspaceState::Active,
-                        mode: WorkspaceMode::default(),
-                    });
-                }
+                && existing_epoch == *epoch
+            {
+                return Ok(WorkspaceInfo {
+                    id: name.clone(),
+                    path: ws_path,
+                    epoch: epoch.clone(),
+                    state: WorkspaceState::Active,
+                    mode: WorkspaceMode::default(),
+                });
+            }
             // Partial or mismatched workspace — remove and recreate.
             std::fs::remove_dir_all(&ws_path)?;
         }
@@ -406,10 +407,11 @@ impl CopyBackend {
             .output();
 
         if let Ok(out) = output
-            && out.status.success() {
-                let current = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-                return current != base_epoch.as_str();
-            }
+            && out.status.success()
+        {
+            let current = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            return current != base_epoch.as_str();
+        }
         false
     }
 

@@ -28,8 +28,14 @@ fn basic_merge_destroy_two_workspaces() {
 
     repo.maw_ok(&["ws", "merge", "alice", "bob", "--destroy"]);
 
-    assert_eq!(repo.read_file("default", "alice.txt").as_deref(), Some("Alice's work\n"));
-    assert_eq!(repo.read_file("default", "bob.txt").as_deref(), Some("Bob's work\n"));
+    assert_eq!(
+        repo.read_file("default", "alice.txt").as_deref(),
+        Some("Alice's work\n")
+    );
+    assert_eq!(
+        repo.read_file("default", "bob.txt").as_deref(),
+        Some("Bob's work\n")
+    );
 
     let names = workspace_names(&repo);
     assert!(names.contains(&"default".to_owned()));
@@ -54,7 +60,10 @@ fn merge_conflict_preserves_source_workspaces() {
     let combined = format!("{stdout}\n{stderr}").to_lowercase();
 
     assert!(!out.status.success(), "conflicting merge should fail");
-    assert!(combined.contains("conflict"), "expected conflict output, got:\n{combined}");
+    assert!(
+        combined.contains("conflict"),
+        "expected conflict output, got:\n{combined}"
+    );
 
     let names = workspace_names(&repo);
     assert!(names.contains(&"alice".to_owned()));
@@ -72,7 +81,10 @@ fn merge_preserves_dirty_default_changes() {
 
     repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
 
-    assert_eq!(repo.read_file("default", "agent.txt").as_deref(), Some("agent work\n"));
+    assert_eq!(
+        repo.read_file("default", "agent.txt").as_deref(),
+        Some("agent work\n")
+    );
     assert_eq!(
         repo.read_file("default", "local.txt").as_deref(),
         Some("local default edits\n")
@@ -129,7 +141,10 @@ fn reject_merge_default_workspace() {
     let repo = TestRepo::new();
 
     let stderr = repo.maw_fails(&["ws", "merge", "default"]);
-    assert!(stderr.contains("default") || stderr.contains("reserved"), "Got: {stderr}");
+    assert!(
+        stderr.contains("default") || stderr.contains("reserved"),
+        "Got: {stderr}"
+    );
 }
 
 #[test]
@@ -145,8 +160,14 @@ fn merge_json_success_stdout_is_pure_json() {
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    assert!(out.status.success(), "merge should succeed\nstderr: {stderr}");
-    assert!(stdout.starts_with('{'), "stdout should be pure JSON, got: {stdout}");
+    assert!(
+        out.status.success(),
+        "merge should succeed\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.starts_with('{'),
+        "stdout should be pure JSON, got: {stdout}"
+    );
 
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("merge --format json output should be valid JSON");
@@ -167,7 +188,10 @@ fn merge_json_conflict_stdout_is_pure_json() {
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     assert!(!out.status.success(), "conflicting merge should fail");
-    assert!(stdout.starts_with('{'), "stdout should be pure JSON, got: {stdout}");
+    assert!(
+        stdout.starts_with('{'),
+        "stdout should be pure JSON, got: {stdout}"
+    );
 
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("merge conflict output should be valid JSON");

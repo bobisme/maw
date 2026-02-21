@@ -147,7 +147,7 @@ impl RefLinkBackend {
     ///
     /// `root` must be the repository root — the directory that contains `.git/`
     /// and `.manifold/`.
-    #[must_use] 
+    #[must_use]
     pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -238,7 +238,11 @@ impl RefLinkBackend {
                 // systems), fall through to the portable recursive copy below.
                 if !stderr.contains("invalid option") && !stderr.contains("unrecognized option") {
                     return Err(ReflinkBackendError::Command {
-                        command: format!("cp -r --reflink=auto {} {}", src.display(), dst.display()),
+                        command: format!(
+                            "cp -r --reflink=auto {} {}",
+                            src.display(),
+                            dst.display()
+                        ),
                         stderr,
                         exit_code: o.status.code(),
                     });
@@ -299,15 +303,16 @@ impl WorkspaceBackend for RefLinkBackend {
         // Idempotency: if workspace already exists with correct epoch, return it.
         if ws_path.exists() {
             if let Ok(existing_epoch) = Self::read_epoch_file(&ws_path, name.as_str())
-                && existing_epoch == *epoch {
-                    return Ok(WorkspaceInfo {
-                        id: name.clone(),
-                        path: ws_path,
-                        epoch: epoch.clone(),
-                        state: WorkspaceState::Active,
-                        mode: WorkspaceMode::default(),
-                    });
-                }
+                && existing_epoch == *epoch
+            {
+                return Ok(WorkspaceInfo {
+                    id: name.clone(),
+                    path: ws_path,
+                    epoch: epoch.clone(),
+                    state: WorkspaceState::Active,
+                    mode: WorkspaceMode::default(),
+                });
+            }
             // Partial/mismatched workspace: remove and recreate.
             std::fs::remove_dir_all(&ws_path)?;
         }
@@ -484,17 +489,13 @@ const EXCLUDED_NAMES: &[&str] = &[EPOCH_FILE];
 fn diff_dirs(base_dir: &Path, ws_dir: &Path) -> SnapshotResult {
     // Collect all files in the base snapshot (relative paths).
     let base_files: HashSet<PathBuf> = if base_dir.exists() {
-        collect_files(base_dir, &[])
-            .into_iter()
-            .collect()
+        collect_files(base_dir, &[]).into_iter().collect()
     } else {
         HashSet::new()
     };
 
     // Collect all files in the workspace (relative paths), excluding metadata.
-    let ws_files: HashSet<PathBuf> = collect_files(ws_dir, EXCLUDED_NAMES)
-        .into_iter()
-        .collect();
+    let ws_files: HashSet<PathBuf> = collect_files(ws_dir, EXCLUDED_NAMES).into_iter().collect();
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
@@ -538,12 +539,7 @@ fn collect_files(root: &Path, exclude_names: &[&str]) -> Vec<PathBuf> {
     files
 }
 
-fn collect_files_inner(
-    root: &Path,
-    dir: &Path,
-    exclude_names: &[&str],
-    files: &mut Vec<PathBuf>,
-) {
+fn collect_files_inner(root: &Path, dir: &Path, exclude_names: &[&str], files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -816,7 +812,10 @@ mod tests {
         backend.destroy(&ws_name).unwrap();
 
         let infos = backend.list().unwrap();
-        assert!(infos.is_empty(), "destroyed workspace must not appear: {infos:?}");
+        assert!(
+            infos.is_empty(),
+            "destroyed workspace must not appear: {infos:?}"
+        );
     }
 
     #[test]
@@ -831,7 +830,11 @@ mod tests {
         fs::create_dir_all(root.join("ws").join("not-a-ws")).unwrap();
 
         let infos = backend.list().unwrap();
-        assert_eq!(infos.len(), 1, "should skip dirs without epoch file: {infos:?}");
+        assert_eq!(
+            infos.len(),
+            1,
+            "should skip dirs without epoch file: {infos:?}"
+        );
         assert_eq!(infos[0].id, ws_name);
     }
 
@@ -954,7 +957,11 @@ mod tests {
 
         let status = backend.status(&ws_name).unwrap();
         assert_eq!(status.base_epoch, epoch);
-        assert!(status.is_clean(), "expected clean: {:?}", status.dirty_files);
+        assert!(
+            status.is_clean(),
+            "expected clean: {:?}",
+            status.dirty_files
+        );
         assert!(!status.is_stale);
     }
 
@@ -970,7 +977,10 @@ mod tests {
         let status = backend.status(&ws_name).unwrap();
         assert_eq!(status.dirty_count(), 1);
         assert!(
-            status.dirty_files.iter().any(|p| p == &PathBuf::from("README.md")),
+            status
+                .dirty_files
+                .iter()
+                .any(|p| p == &PathBuf::from("README.md")),
             "expected README.md dirty: {:?}",
             status.dirty_files
         );

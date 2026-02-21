@@ -136,7 +136,10 @@ fn status_json_includes_global_view_summary_when_oplogs_exist() {
         "expected global_view summary when workspace op logs exist: {payload}"
     );
     assert!(
-        payload["global_view"]["workspace_count"].as_u64().unwrap_or(0) >= 1,
+        payload["global_view"]["workspace_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
         "global_view should include at least one workspace snapshot"
     );
 }

@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde::Deserialize;
 
-use crate::backend::{AnyBackend, WorkspaceBackend};
 use crate::backend::platform;
+use crate::backend::{AnyBackend, WorkspaceBackend};
 use crate::config::{BackendKind, ManifoldConfig};
 use crate::format::OutputFormat;
 
@@ -17,14 +17,14 @@ mod list;
 mod merge;
 mod metadata;
 mod names;
-mod overlap;
 mod oplog_runtime;
+mod overlap;
 mod prune;
 mod restore;
 mod status;
 pub mod sync;
-mod touched;
 mod templates;
+mod touched;
 mod undo;
 
 // Re-export public API used by other modules
@@ -728,15 +728,12 @@ pub fn get_backend() -> Result<AnyBackend> {
     let resolved = platform::resolve_backend_kind(configured_kind, file_count, &caps);
 
     // Construct and return the backend.
-    AnyBackend::from_kind(resolved, root)
-        .or_else(|e| {
-            // If the resolved backend fails to initialize (e.g., overlay not
-            // available despite detection), fall back to git-worktree and warn.
-            eprintln!(
-                "WARNING: Backend init failed ({e}), falling back to git-worktree"
-            );
-            AnyBackend::from_kind(BackendKind::GitWorktree, repo_root()?)
-        })
+    AnyBackend::from_kind(resolved, root).or_else(|e| {
+        // If the resolved backend fails to initialize (e.g., overlay not
+        // available despite detection), fall back to git-worktree and warn.
+        eprintln!("WARNING: Backend init failed ({e}), falling back to git-worktree");
+        AnyBackend::from_kind(BackendKind::GitWorktree, repo_root()?)
+    })
 }
 
 /// Ensure CWD is the repo root. Mutation commands must run from root

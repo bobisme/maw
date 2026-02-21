@@ -750,11 +750,12 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
         if !candidate_files.contains(path) {
             lost.push(path.clone());
         } else if let Some(actual) = read_tree_file(repo.root(), candidate_oid, path)
-            && actual != *expected_content {
-                corrupted.push(format!(
-                    "path={path}\n  expected={expected_content:?}\n  actual={actual:?}"
-                ));
-            }
+            && actual != *expected_content
+        {
+            corrupted.push(format!(
+                "path={path}\n  expected={expected_content:?}\n  actual={actual:?}"
+            ));
+        }
     }
 
     assert!(

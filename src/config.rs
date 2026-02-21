@@ -33,7 +33,6 @@ pub struct ManifoldConfig {
     pub merge: MergeConfig,
 }
 
-
 // ---------------------------------------------------------------------------
 // RepoConfig
 // ---------------------------------------------------------------------------
@@ -142,7 +141,6 @@ pub struct MergeConfig {
     #[serde(default)]
     pub ast: AstConfig,
 }
-
 
 // ---------------------------------------------------------------------------
 // AstConfig — AST-aware merge settings
@@ -399,9 +397,10 @@ impl ValidationConfig {
     pub fn effective_commands(&self) -> Vec<&str> {
         let mut result = Vec::new();
         if let Some(cmd) = &self.command
-            && !cmd.is_empty() {
-                result.push(cmd.as_str());
-            }
+            && !cmd.is_empty()
+        {
+            result.push(cmd.as_str());
+        }
         for cmd in &self.commands {
             if !cmd.is_empty() {
                 result.push(cmd.as_str());

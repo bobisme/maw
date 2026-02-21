@@ -63,7 +63,8 @@ fn create_test_commit(repo: &Path, message: &str) -> String {
         .current_dir(repo)
         .output()
         .expect("failed to create commit");
-    assert!(out.status.success(), 
+    assert!(
+        out.status.success(),
         "Failed to create commit: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -72,10 +73,7 @@ fn create_test_commit(repo: &Path, message: &str) -> String {
 
 /// Set up a second Manifold repo by cloning the bare remote.
 /// Returns (`local_root`, _`temp_dir_holder`).
-fn clone_from_bare(
-    bare_remote: &Path,
-    ws_name: &str,
-) -> (std::path::PathBuf, tempfile::TempDir) {
+fn clone_from_bare(bare_remote: &Path, ws_name: &str) -> (std::path::PathBuf, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().expect("failed to create temp dir for clone");
     let root = dir.path().to_path_buf();
 
@@ -133,8 +131,14 @@ fn push_manifold_refs_sends_all_manifold_refs_to_remote() {
     let root = repo_a.root();
 
     // Set up some manifold refs in repo A.
-    let blob1 = create_test_blob(root, r#"{"parent_ids":[],"workspace_id":"ws-a","timestamp":"2026-02-19T12:00:00Z","payload":{"type":"destroy"}}"#);
-    let blob2 = create_test_blob(root, r#"{"parent_ids":[],"workspace_id":"ws-b","timestamp":"2026-02-19T12:00:00Z","payload":{"type":"destroy"}}"#);
+    let blob1 = create_test_blob(
+        root,
+        r#"{"parent_ids":[],"workspace_id":"ws-a","timestamp":"2026-02-19T12:00:00Z","payload":{"type":"destroy"}}"#,
+    );
+    let blob2 = create_test_blob(
+        root,
+        r#"{"parent_ids":[],"workspace_id":"ws-b","timestamp":"2026-02-19T12:00:00Z","payload":{"type":"destroy"}}"#,
+    );
 
     write_ref(root, "refs/manifold/head/ws-a", &blob1);
     write_ref(root, "refs/manifold/head/ws-b", &blob2);
@@ -156,7 +160,8 @@ fn push_manifold_refs_sends_all_manifold_refs_to_remote() {
         .output()
         .expect("failed to run maw push --manifold");
 
-    assert!(out.status.success(), 
+    assert!(
+        out.status.success(),
         "maw push --manifold failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -195,7 +200,10 @@ fn pull_manifold_refs_fast_forwards_workspace_head() {
     let root_a = repo_a.root();
 
     // Set up a manifold head ref on remote directly (simulating machine A pushed it).
-    let blob = create_test_blob(root_a, r#"{"parent_ids":[],"workspace_id":"agent-1","timestamp":"2026-02-19T12:00:00Z","payload":{"type":"destroy"}}"#);
+    let blob = create_test_blob(
+        root_a,
+        r#"{"parent_ids":[],"workspace_id":"agent-1","timestamp":"2026-02-19T12:00:00Z","payload":{"type":"destroy"}}"#,
+    );
 
     // Push the blob object to the bare remote so it exists there.
     // We push the refs/manifold/* from repo A which has the blob.
@@ -228,7 +236,8 @@ fn pull_manifold_refs_fast_forwards_workspace_head() {
         .output()
         .expect("failed to run maw pull --manifold");
 
-    assert!(out.status.success(), 
+    assert!(
+        out.status.success(),
         "maw pull --manifold failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -387,11 +396,7 @@ fn pull_creates_merge_op_for_divergent_heads() {
             r#"{{"parent_ids":["{initial_blob}"],"workspace_id":"agent-x","timestamp":"2026-02-19T11:30:00Z","payload":{{"type":"destroy"}}}}"#
         ),
     );
-    write_ref(
-        &root_b,
-        "refs/manifold/head/agent-x",
-        &local_advance_blob,
-    );
+    write_ref(&root_b, "refs/manifold/head/agent-x", &local_advance_blob);
 
     // Now machine B pulls: local and remote have diverged from initial_blob.
     // pull should create a merge op with both as parents.
@@ -408,8 +413,8 @@ fn pull_creates_merge_op_for_divergent_heads() {
 
     // After diverged pull: the head should have moved to a NEW merge op,
     // not be either of the diverged heads.
-    let merged_head = read_ref(&root_b, "refs/manifold/head/agent-x")
-        .expect("head should exist after merge");
+    let merged_head =
+        read_ref(&root_b, "refs/manifold/head/agent-x").expect("head should exist after merge");
 
     assert_ne!(
         merged_head, local_advance_blob,

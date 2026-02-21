@@ -2,11 +2,11 @@ use std::path::Path;
 
 use crate::model::types::{GitOid, WorkspaceId};
 use crate::oplog::checkpoint::{
-    materialize_from_checkpoint, maybe_write_checkpoint, DEFAULT_CHECKPOINT_INTERVAL,
+    DEFAULT_CHECKPOINT_INTERVAL, materialize_from_checkpoint, maybe_write_checkpoint,
 };
 use crate::oplog::types::Operation;
 use crate::oplog::view::read_patch_set_blob;
-use crate::oplog::write::{append_operation, OpLogWriteError};
+use crate::oplog::write::{OpLogWriteError, append_operation};
 
 pub(crate) fn append_operation_with_runtime_checkpoint(
     root: &Path,

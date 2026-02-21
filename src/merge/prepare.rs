@@ -306,7 +306,7 @@ pub fn run_prepare_phase_with_epoch(
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::merge_state::{recover_from_merge_state, MergePhase, RecoveryOutcome};
+    use crate::merge_state::{MergePhase, RecoveryOutcome, recover_from_merge_state};
 
     fn test_epoch() -> EpochId {
         EpochId::new(&"a".repeat(40)).unwrap()

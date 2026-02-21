@@ -39,9 +39,9 @@ use glob::Pattern;
 
 use crate::backend::WorkspaceBackend;
 use crate::config::{ConfigError, ManifoldConfig, MergeConfig, MergeDriver, MergeDriverKind};
-use crate::merge::build::{build_merge_commit, BuildError, ResolvedChange};
-use crate::merge::collect::{collect_snapshots, CollectError};
-use crate::merge::partition::{partition_by_path, PartitionResult, PathEntry};
+use crate::merge::build::{BuildError, ResolvedChange, build_merge_commit};
+use crate::merge::collect::{CollectError, collect_snapshots};
+use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
 #[cfg(not(feature = "ast-merge"))]
 use crate::merge::resolve::resolve_partition;
 #[cfg(feature = "ast-merge")]
@@ -804,7 +804,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::backend::{SnapshotResult, WorkspaceStatus};
-    use crate::merge_state::{recover_from_merge_state, RecoveryOutcome};
+    use crate::merge_state::{RecoveryOutcome, recover_from_merge_state};
     use crate::model::types::WorkspaceInfo;
     use std::fs;
     use std::process::Command as StdCommand;

@@ -17,14 +17,14 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceMode;
 use crate::refs as manifold_refs;
 
-use super::{metadata, repo_root, workspace_path, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
 
 // ---------------------------------------------------------------------------
 // Conflict info

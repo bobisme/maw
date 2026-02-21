@@ -26,9 +26,9 @@ use std::process::Command;
 
 use proptest::prelude::*;
 
-use crate::merge::build::{build_merge_commit, ResolvedChange};
+use crate::merge::build::{ResolvedChange, build_merge_commit};
 use crate::merge::partition::partition_by_path;
-use crate::merge::resolve::{resolve_partition, ConflictRecord, ResolveResult};
+use crate::merge::resolve::{ConflictRecord, ResolveResult, resolve_partition};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 

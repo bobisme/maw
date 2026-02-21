@@ -33,10 +33,10 @@ use std::process::Command;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use maw::backend::{WorkspaceBackend, git::GitWorktreeBackend};
 use maw::backend::platform::{
     PlatformCapabilities, auto_select_backend, detect_or_load, estimate_repo_file_count,
 };
+use maw::backend::{WorkspaceBackend, git::GitWorktreeBackend};
 use maw::merge::partition::partition_by_path;
 use maw::merge::types::{ChangeKind, FileChange, PatchSet};
 use maw::model::types::{EpochId, WorkspaceId};
@@ -172,12 +172,15 @@ fn du_bytes(path: &Path) -> u64 {
     let output = Command::new("du")
         .args(["-sb", path.to_str().unwrap_or(".")])
         .output();
-    output.ok().and_then(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-    }).unwrap_or(0)
+    output
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +208,9 @@ fn bench_auto_select(c: &mut Criterion) {
     };
 
     let cases: &[(&str, usize, &PlatformCapabilities)] = &[
-        ("small_no_cow",    1_000, &caps_none),
-        ("medium_reflink",  50_000, &caps_reflink),
-        ("large_overlay",   150_000, &caps_all),
+        ("small_no_cow", 1_000, &caps_none),
+        ("medium_reflink", 50_000, &caps_reflink),
+        ("large_overlay", 150_000, &caps_all),
     ];
 
     for (label, size, caps) in cases {
@@ -295,7 +298,9 @@ fn bench_snapshot_scaling(c: &mut Criterion) {
         // Create one workspace, modify `changed_n` files in it, then snapshot repeatedly.
         let ws_name = format!("snap-{repo_n}-{changed_n}");
         let ws_id = WorkspaceId::new(&ws_name).unwrap();
-        let ws_info = backend.create(&ws_id, &epoch).expect("create snapshot workspace");
+        let ws_info = backend
+            .create(&ws_id, &epoch)
+            .expect("create snapshot workspace");
         let ws_path = &ws_info.path;
 
         // Modify `changed_n` files (touch files that already exist in the workspace).

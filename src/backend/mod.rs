@@ -167,7 +167,7 @@ impl WorkspaceStatus {
     /// * `base_epoch` - The epoch this workspace is based on
     /// * `dirty_files` - List of modified file paths (relative to workspace root)
     /// * `is_stale` - Whether the workspace is behind the current epoch
-    #[must_use] 
+    #[must_use]
     pub const fn new(base_epoch: EpochId, dirty_files: Vec<PathBuf>, is_stale: bool) -> Self {
         Self {
             base_epoch,
@@ -212,7 +212,7 @@ impl SnapshotResult {
     /// * `added` - Paths to files that were added
     /// * `modified` - Paths to files that were modified
     /// * `deleted` - Paths to files that were deleted
-    #[must_use] 
+    #[must_use]
     pub const fn new(added: Vec<PathBuf>, modified: Vec<PathBuf>, deleted: Vec<PathBuf>) -> Self {
         Self {
             added,
@@ -404,7 +404,6 @@ impl AnyBackend {
             BackendKind::Copy => Ok(Self::Copy(CopyBackend::new(root))),
         }
     }
-
 }
 
 /// Helper: convert a backend-specific error into [`AnyBackendError`].

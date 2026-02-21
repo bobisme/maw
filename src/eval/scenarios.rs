@@ -229,8 +229,7 @@ pub const fn scenario_basic_lifecycle() -> Scenario {
         name: "basic-lifecycle",
         tests: "Minimal lifecycle: create workspace, add file, merge, verify",
         preconditions: Preconditions {
-            repo_state:
-                "Fresh maw repo with a seed Rust project (Cargo.toml, src/main.rs, src/lib.rs)",
+            repo_state: "Fresh maw repo with a seed Rust project (Cargo.toml, src/main.rs, src/lib.rs)",
             seed_files: &[
                 SeedFile {
                     path: "Cargo.toml",

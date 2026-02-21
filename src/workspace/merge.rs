@@ -13,7 +13,6 @@ use crate::config::{ManifoldConfig, MergeDriverKind};
 use crate::format::OutputFormat;
 use crate::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use crate::merge::collect::collect_snapshots;
-use crate::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
 use crate::merge::commit::{
     CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase,
 };
@@ -25,6 +24,7 @@ use crate::merge::plan::{
 use crate::merge::prepare::run_prepare_phase;
 use crate::merge::quarantine::create_quarantine_workspace;
 use crate::merge::resolve::{ConflictReason, ConflictRecord};
+use crate::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
 use crate::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
 use crate::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
 use crate::model::conflict::ConflictAtom;
@@ -1294,10 +1294,11 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
 
         for ws_name in workspaces {
             if let Ok(ws_id) = WorkspaceId::new(ws_name)
-                && let Ok(snapshot) = backend.snapshot(&ws_id) {
-                    let files: Vec<PathBuf> = snapshot.all_changed().into_iter().cloned().collect();
-                    workspace_files.push((ws_name.clone(), files));
-                }
+                && let Ok(snapshot) = backend.snapshot(&ws_id)
+            {
+                let files: Vec<PathBuf> = snapshot.all_changed().into_iter().cloned().collect();
+                workspace_files.push((ws_name.clone(), files));
+            }
         }
 
         let mut conflict_files: Vec<PathBuf> = Vec::new();
@@ -1475,7 +1476,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     textln!(
         "  {} unique path(s), {} shared path(s), {} resolved",
-        build_output.unique_count, build_output.shared_count, build_output.resolved_count
+        build_output.unique_count,
+        build_output.shared_count,
+        build_output.resolved_count
     );
     textln!("  Candidate: {}", &build_output.candidate.as_str()[..12]);
 
@@ -1722,7 +1725,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     record_epoch_after(&manifold_dir, &build_output.candidate)?;
 
     // Record merge operations in source workspace histories.
-    for warning in record_merge_operations(&root, &sources, &frozen.epoch, &build_output.candidate) {
+    for warning in record_merge_operations(&root, &sources, &frozen.epoch, &build_output.candidate)
+    {
         eprintln!("WARNING: {warning}");
     }
 
@@ -1882,14 +1886,20 @@ fn record_merge_operations(
         };
 
         if let Err(e) = append_operation_with_runtime_checkpoint(root, ws_id, &op, Some(&head)) {
-            warnings.push(format!("Could not append merge op for workspace '{ws_id}': {e}"));
+            warnings.push(format!(
+                "Could not append merge op for workspace '{ws_id}': {e}"
+            ));
         }
     }
 
     warnings
 }
 
-fn ensure_workspace_oplog_head(root: &Path, ws_id: &WorkspaceId, epoch: &EpochId) -> Result<GitOid> {
+fn ensure_workspace_oplog_head(
+    root: &Path,
+    ws_id: &WorkspaceId,
+    epoch: &EpochId,
+) -> Result<GitOid> {
     if let Some(head) = read_head(root, ws_id).map_err(|e| anyhow::anyhow!("read head: {e}"))? {
         return Ok(head);
     }
@@ -1916,7 +1926,12 @@ fn to_model_patch_set(root: &Path, patch_set: &CollectedPatchSet) -> Result<Mode
                 let blob = change
                     .blob
                     .clone()
-                    .or_else(|| change.content.as_deref().and_then(|bytes| git_hash_object(root, bytes)))
+                    .or_else(|| {
+                        change
+                            .content
+                            .as_deref()
+                            .and_then(|bytes| git_hash_object(root, bytes))
+                    })
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "could not compute blob for added path '{}'",
@@ -1933,7 +1948,12 @@ fn to_model_patch_set(root: &Path, patch_set: &CollectedPatchSet) -> Result<Mode
                 let new_blob = change
                     .blob
                     .clone()
-                    .or_else(|| change.content.as_deref().and_then(|bytes| git_hash_object(root, bytes)))
+                    .or_else(|| {
+                        change
+                            .content
+                            .as_deref()
+                            .and_then(|bytes| git_hash_object(root, bytes))
+                    })
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "could not compute blob for modified path '{}'",
@@ -1988,9 +2008,9 @@ fn write_patch_set_blob(root: &Path, patch_set: &ModelPatchSet) -> Result<GitOid
         .map_err(|e| anyhow::anyhow!("spawn git hash-object: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .map_err(|e| anyhow::anyhow!("write patch-set payload to git hash-object stdin: {e}"))?;
+        stdin.write_all(&payload).map_err(|e| {
+            anyhow::anyhow!("write patch-set payload to git hash-object stdin: {e}")
+        })?;
     }
 
     let output = child
@@ -2047,7 +2067,8 @@ fn epoch_blob_oid(root: &Path, epoch: &EpochId, path: &Path) -> Result<GitOid> {
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    GitOid::new(&raw).map_err(|e| anyhow::anyhow!("invalid blob OID '{raw}' for '{}': {e}", path.display()))
+    GitOid::new(&raw)
+        .map_err(|e| anyhow::anyhow!("invalid blob OID '{raw}' for '{}': {e}", path.display()))
 }
 
 fn file_id_from_path(path: &Path) -> FileId {

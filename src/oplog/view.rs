@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::patch::PatchSet;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
-use crate::oplog::read::{walk_chain, OpLogReadError};
+use crate::oplog::read::{OpLogReadError, walk_chain};
 use crate::oplog::types::{OpPayload, Operation};
 
 // ---------------------------------------------------------------------------

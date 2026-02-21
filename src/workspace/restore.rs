@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
 
-use super::{create::create, get_backend, repo_root, workspace_path, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, create::create, get_backend, repo_root, workspace_path};
 
 /// Restore a previously destroyed workspace.
 ///

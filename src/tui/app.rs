@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::{layout::Rect, prelude::CrosstermBackend, Terminal};
+use ratatui::{Terminal, layout::Rect, prelude::CrosstermBackend};
 
 use super::event::{self, AppEvent};
 use super::ui;

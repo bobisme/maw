@@ -348,14 +348,18 @@ mod tests {
         let result = join(&a, &b).unwrap();
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 2);
-        assert!(result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("src/foo.rs")));
-        assert!(result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("src/bar.rs")));
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("src/foo.rs"))
+        );
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("src/bar.rs"))
+        );
     }
 
     #[test]
@@ -489,10 +493,12 @@ mod tests {
         assert_eq!(result.conflicts[0].path, PathBuf::from("file.rs"));
         assert_eq!(result.conflicts[0].reason, ConflictReason::DivergentAdd);
         // Conflicted path should NOT be in merged.
-        assert!(!result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("file.rs")));
+        assert!(
+            !result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("file.rs"))
+        );
     }
 
     #[test]
@@ -706,22 +712,30 @@ mod tests {
         let result = join(&a, &b).unwrap();
         // 3 paths merged (only_a, only_b, shared), 1 conflict
         assert_eq!(result.merged.len(), 3);
-        assert!(result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("only_a.rs")));
-        assert!(result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("only_b.rs")));
-        assert!(result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("shared.rs")));
-        assert!(!result
-            .merged
-            .patches
-            .contains_key(&PathBuf::from("conflict.rs")));
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("only_a.rs"))
+        );
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("only_b.rs"))
+        );
+        assert!(
+            result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("shared.rs"))
+        );
+        assert!(
+            !result
+                .merged
+                .patches
+                .contains_key(&PathBuf::from("conflict.rs"))
+        );
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].path, PathBuf::from("conflict.rs"));
     }

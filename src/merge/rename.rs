@@ -752,11 +752,13 @@ mod tests {
         let result = apply_rename_awareness(partition);
         assert!(!result.has_rename_conflicts());
         // unrelated.rs should still be unique.
-        assert!(result
-            .partition
-            .unique
-            .iter()
-            .any(|(p, _)| p == &PathBuf::from("unrelated.rs")));
+        assert!(
+            result
+                .partition
+                .unique
+                .iter()
+                .any(|(p, _)| p == &PathBuf::from("unrelated.rs"))
+        );
         // bar.rs should be shared (ws-a + ws-b rerouted).
         assert_eq!(result.partition.shared.len(), 1);
         assert_eq!(result.partition.shared[0].0, PathBuf::from("bar.rs"));

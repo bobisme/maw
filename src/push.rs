@@ -249,31 +249,33 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
         .output();
 
     if let (Ok(e), Ok(b)) = (epoch, branch_pos)
-        && e.status.success() && b.status.success() {
-            let epoch_oid = String::from_utf8_lossy(&e.stdout).trim().to_string();
-            let branch_oid = String::from_utf8_lossy(&b.stdout).trim().to_string();
+        && e.status.success()
+        && b.status.success()
+    {
+        let epoch_oid = String::from_utf8_lossy(&e.stdout).trim().to_string();
+        let branch_oid = String::from_utf8_lossy(&b.stdout).trim().to_string();
 
-            if epoch_oid != branch_oid {
-                // Check if epoch is ahead of branch
-                let count = Command::new("git")
-                    .args(["rev-list", "--count", &format!("{branch_oid}..{epoch_oid}")])
-                    .current_dir(root)
-                    .output();
-                if let Ok(c) = count {
-                    let n: usize = String::from_utf8_lossy(&c.stdout)
-                        .trim()
-                        .parse()
-                        .unwrap_or(0);
-                    if n > 0 {
-                        println!();
-                        println!(
-                            "Hint: epoch is {n} commit(s) ahead of {branch}.\n  \
+        if epoch_oid != branch_oid {
+            // Check if epoch is ahead of branch
+            let count = Command::new("git")
+                .args(["rev-list", "--count", &format!("{branch_oid}..{epoch_oid}")])
+                .current_dir(root)
+                .output();
+            if let Ok(c) = count {
+                let n: usize = String::from_utf8_lossy(&c.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+                if n > 0 {
+                    println!();
+                    println!(
+                        "Hint: epoch is {n} commit(s) ahead of {branch}.\n  \
                              To push latest work: maw push --advance"
-                        );
-                    }
+                    );
                 }
             }
         }
+    }
 }
 
 /// Push unpushed git tags to origin.

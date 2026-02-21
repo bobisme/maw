@@ -47,7 +47,7 @@ use proptest::prelude::*;
 
 use crate::merge::build::ResolvedChange;
 use crate::merge::partition::partition_by_path;
-use crate::merge::resolve::{resolve_partition, ConflictReason, ConflictRecord, ResolveResult};
+use crate::merge::resolve::{ConflictReason, ConflictRecord, ResolveResult, resolve_partition};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::model::types::{EpochId, WorkspaceId};
 
@@ -264,8 +264,8 @@ fn arb_add_add_workspaces() -> impl Strategy<Value = Vec<TestWorkspace>> {
 /// Generate non-overlapping edits to a shared file (should merge cleanly).
 /// Creates a base with N regions separated by spacers, and N workspaces
 /// each editing a different region.
-fn arb_non_overlapping_workspaces(
-) -> impl Strategy<Value = (Vec<TestWorkspace>, BTreeMap<PathBuf, Vec<u8>>)> {
+fn arb_non_overlapping_workspaces()
+-> impl Strategy<Value = (Vec<TestWorkspace>, BTreeMap<PathBuf, Vec<u8>>)> {
     (2..=6usize).prop_flat_map(|n_workspaces| {
         let path = PathBuf::from("shared.txt");
 

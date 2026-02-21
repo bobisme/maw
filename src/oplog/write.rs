@@ -368,10 +368,11 @@ mod tests {
         let oid = write_operation_blob(root, &op).unwrap();
         // OID should be a valid 40-char hex string
         assert_eq!(oid.as_str().len(), 40);
-        assert!(oid
-            .as_str()
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            oid.as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]

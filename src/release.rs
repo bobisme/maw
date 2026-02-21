@@ -1,9 +1,9 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use crate::workspace::{git_cwd, repo_root, MawConfig};
+use crate::workspace::{MawConfig, git_cwd, repo_root};
 
 #[derive(Args)]
 pub struct ReleaseArgs {

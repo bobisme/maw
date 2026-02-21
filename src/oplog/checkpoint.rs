@@ -33,10 +33,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::patch::PatchSet;
 use crate::model::types::{GitOid, WorkspaceId};
-use crate::oplog::read::{walk_chain, OpLogReadError};
+use crate::oplog::read::{OpLogReadError, walk_chain};
 use crate::oplog::types::{OpPayload, Operation};
-use crate::oplog::view::{materialize_from_ops, MaterializedView, ViewError};
-use crate::oplog::write::{append_operation, OpLogWriteError};
+use crate::oplog::view::{MaterializedView, ViewError, materialize_from_ops};
+use crate::oplog::write::{OpLogWriteError, append_operation};
 
 // ---------------------------------------------------------------------------
 // Constants

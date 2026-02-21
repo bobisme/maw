@@ -56,7 +56,10 @@ fn destroy_output_confirms_workspace_removed() {
     repo.maw_ok(&["ws", "create", "carol"]);
 
     let output = repo.maw_ok(&["ws", "destroy", "carol"]);
-    assert!(output.contains("Workspace 'carol' destroyed."), "Got: {output}");
+    assert!(
+        output.contains("Workspace 'carol' destroyed."),
+        "Got: {output}"
+    );
 }
 
 #[test]
@@ -67,7 +70,9 @@ fn history_includes_workspace_lifecycle_events_after_restore() {
     repo.maw_ok(&["ws", "destroy", "hist-a"]);
     repo.maw_ok(&["ws", "restore", "hist-a"]);
 
-    let raw = repo.maw_ok(&["ws", "history", "hist-a", "--format", "json", "--limit", "20"]);
+    let raw = repo.maw_ok(&[
+        "ws", "history", "hist-a", "--format", "json", "--limit", "20",
+    ]);
     let history_json: serde_json::Value =
         serde_json::from_str(&raw).expect("ws history --format json should be valid JSON");
 

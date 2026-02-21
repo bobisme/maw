@@ -783,10 +783,11 @@ mod tests {
         assert_eq!(gv.workspace_count(), 2);
         assert!(!gv.is_clean());
         // Should have conflict on src/shared.rs
-        assert!(gv
-            .conflicts
-            .iter()
-            .any(|c| c.path == PathBuf::from("src/shared.rs")));
+        assert!(
+            gv.conflicts
+                .iter()
+                .any(|c| c.path == PathBuf::from("src/shared.rs"))
+        );
     }
 
     // -----------------------------------------------------------------------

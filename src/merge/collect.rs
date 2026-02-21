@@ -297,8 +297,8 @@ fn git_hash_object(repo_root: &Path, content: &[u8]) -> Option<GitOid> {
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::backend::git::GitWorktreeBackend;
     use crate::backend::WorkspaceBackend;
+    use crate::backend::git::GitWorktreeBackend;
     use crate::model::types::{EpochId, WorkspaceId};
     use std::fs;
     use std::process::Command;

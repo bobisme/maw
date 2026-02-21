@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
 use crate::model::types::WorkspaceId;
-use crate::oplog::read::{walk_chain, OpLogReadError};
+use crate::oplog::read::{OpLogReadError, walk_chain};
 use crate::oplog::types::OpPayload;
 
 use super::{get_backend, repo_root, validate_workspace_name};

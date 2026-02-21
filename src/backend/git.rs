@@ -87,7 +87,7 @@ pub struct GitWorktreeBackend {
 
 impl GitWorktreeBackend {
     /// Create a new `GitWorktreeBackend`.
-    #[must_use] 
+    #[must_use]
     pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -562,9 +562,10 @@ impl WorkspaceBackend for GitWorktreeBackend {
             let path_str = path.to_str().unwrap_or_default();
             for line in stdout.lines() {
                 if let Some(wt_path) = line.strip_prefix("worktree ")
-                    && wt_path == path_str {
-                        return true;
-                    }
+                    && wt_path == path_str
+                {
+                    return true;
+                }
             }
         }
 

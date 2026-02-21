@@ -248,12 +248,7 @@ impl OverlayBackend {
         // Already populated: snapshot dir exists and has content (not just .refcount).
         if snapshot_dir.exists() {
             let has_content = fs::read_dir(&snapshot_dir)
-                .map(|mut rd| {
-                    rd.any(|e| {
-                        e.ok()
-                            .is_some_and(|e| e.file_name() != ".refcount")
-                    })
-                })
+                .map(|mut rd| rd.any(|e| e.ok().is_some_and(|e| e.file_name() != ".refcount")))
                 .unwrap_or(false);
             if has_content {
                 return Ok(snapshot_dir);
@@ -473,9 +468,10 @@ impl OverlayBackend {
                 .status();
 
             if let Ok(s) = status
-                && s.success() {
-                    return Ok(());
-                }
+                && s.success()
+            {
+                return Ok(());
+            }
         }
 
         // Last resort: unshare umount

@@ -370,13 +370,15 @@ impl TestRepo {
             }
 
             if let Some(path) = wt_path
-                && let Ok(rel) = path.strip_prefix(&ws_dir) {
-                    let components: Vec<_> = rel.components().collect();
-                    if components.len() == 1
-                        && let Some(name) = components[0].as_os_str().to_str() {
-                            names.push(name.to_owned());
-                        }
+                && let Ok(rel) = path.strip_prefix(&ws_dir)
+            {
+                let components: Vec<_> = rel.components().collect();
+                if components.len() == 1
+                    && let Some(name) = components[0].as_os_str().to_str()
+                {
+                    names.push(name.to_owned());
                 }
+            }
         }
 
         names.sort();

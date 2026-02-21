@@ -377,9 +377,9 @@ fn ensure_workspaces_gitignored() -> Result<()> {
         String::new()
     };
 
-    let has_ws = content.lines().any(|line| {
-        matches!(line.trim(), "ws" | "ws/" | "/ws" | "/ws/")
-    });
+    let has_ws = content
+        .lines()
+        .any(|line| matches!(line.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
 
     if has_ws {
         println!("[OK] .gitignore already excludes ws/");

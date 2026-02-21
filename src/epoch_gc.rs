@@ -4,8 +4,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::backend::git::GitWorktreeBackend;
 use crate::backend::WorkspaceBackend;
+use crate::backend::git::GitWorktreeBackend;
 use crate::refs;
 
 /// Result of an epoch GC pass.

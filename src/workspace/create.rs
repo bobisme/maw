@@ -13,9 +13,9 @@ use crate::oplog::types::{OpPayload, Operation};
 use crate::refs as manifold_refs;
 
 use super::{
-    DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata, repo_root,
-    oplog_runtime::append_operation_with_runtime_checkpoint, templates::WorkspaceTemplate,
-    workspace_path, workspaces_dir,
+    DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata,
+    oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
+    templates::WorkspaceTemplate, workspace_path, workspaces_dir,
 };
 
 pub fn create(
@@ -145,7 +145,9 @@ fn write_template_artifact(
     workspace_path: &std::path::Path,
     profile: &super::templates::TemplateProfile,
 ) -> Result<()> {
-    let artifact_path = workspace_path.join(".manifold").join("workspace-template.json");
+    let artifact_path = workspace_path
+        .join(".manifold")
+        .join("workspace-template.json");
     if let Some(parent) = artifact_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
@@ -304,9 +306,13 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn record_workspace_create_op(root: &std::path::Path, ws_id: &WorkspaceId, epoch: &EpochId) -> Result<()> {
-    let previous_head = read_head(root, ws_id)
-        .map_err(|e| anyhow::anyhow!("read workspace history head: {e}"))?;
+fn record_workspace_create_op(
+    root: &std::path::Path,
+    ws_id: &WorkspaceId,
+    epoch: &EpochId,
+) -> Result<()> {
+    let previous_head =
+        read_head(root, ws_id).map_err(|e| anyhow::anyhow!("read workspace history head: {e}"))?;
     let parent_ids = previous_head.iter().cloned().collect();
 
     let op = Operation {
@@ -347,8 +353,8 @@ fn ensure_workspace_oplog_head(
     ws_id: &WorkspaceId,
     base_epoch: &EpochId,
 ) -> Result<crate::model::types::GitOid> {
-    if let Some(head) = read_head(root, ws_id)
-        .map_err(|e| anyhow::anyhow!("read workspace history head: {e}"))?
+    if let Some(head) =
+        read_head(root, ws_id).map_err(|e| anyhow::anyhow!("read workspace history head: {e}"))?
     {
         return Ok(head);
     }

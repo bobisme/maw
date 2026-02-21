@@ -250,9 +250,10 @@ pub fn walk_chain(
     while let Some(oid) = queue.pop_front() {
         // Check depth limit.
         if let Some(max) = max_depth
-            && result.len() >= max {
-                break;
-            }
+            && result.len() >= max
+        {
+            break;
+        }
 
         // Skip already-visited OIDs (prevents duplicates in DAGs).
         if !visited.insert(oid.as_str().to_owned()) {

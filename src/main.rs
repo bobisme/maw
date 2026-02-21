@@ -281,7 +281,7 @@ mod tests {
     use clap::CommandFactory;
     use tempfile::tempdir;
 
-    use super::{should_emit_migration_notice, Cli};
+    use super::{Cli, should_emit_migration_notice};
 
     #[test]
     fn emits_notice_for_jj_only_repo() {
@@ -436,14 +436,9 @@ mod tests {
         let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let files = collect_rs_files(&src_root);
 
-        let allowed: BTreeSet<&str> = [
-            "main.rs",
-            "upgrade.rs",
-            "doctor.rs",
-            "workspace/create.rs",
-        ]
-        .into_iter()
-        .collect();
+        let allowed: BTreeSet<&str> = ["main.rs", "upgrade.rs", "doctor.rs", "workspace/create.rs"]
+            .into_iter()
+            .collect();
 
         let mut offenders = Vec::new();
         for file in files {
