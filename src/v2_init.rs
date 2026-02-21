@@ -28,6 +28,7 @@ use std::process::Command;
 use crate::model::layout;
 use crate::model::types::EpochId;
 use crate::refs as manifold_refs;
+use crate::workspace::MawConfig;
 
 const REPO_GIT_DIR: &str = "repo.git";
 
@@ -1038,12 +1039,12 @@ pub fn brownfield_init(
         // longer a registered git worktree (missing .git link/admin record).
         bf_ensure_default_workspace_registered(&root, &ws_default, &epoch0)?;
 
-        if matches!(
-            manifold_refs::read_ref(&root, &manifold_refs::workspace_state_ref("default")),
-            Ok(None)
-        ) {
-            bf_set_default_workspace_ref(&root, &bf_get_workspace_head_oid(&ws_default)?)?;
-        }
+        // Keep default branch workspace attached to configured branch, even if
+        // epoch refs are stale and the worktree was detached.
+        bf_align_default_workspace_to_configured_branch(&root, &ws_default)?;
+
+        // Keep workspace state ref aligned with current ws/default HEAD.
+        bf_set_default_workspace_ref(&root, &bf_get_workspace_head_oid(&ws_default)?)?;
 
         let head_branch = bf_detect_head_branch(&root);
         return Ok(BrownfieldInitResult {
@@ -1105,6 +1106,7 @@ pub fn brownfield_init(
     let ws_dir = root.join("ws");
     std::fs::create_dir_all(&ws_dir)?;
     bf_create_default_workspace(&root, &epoch0, &ws_default)?;
+    bf_align_default_workspace_to_configured_branch(&root, &ws_default)?;
 
     // 12. Remove tracked source files from root (skip dirty ones)
     let cleaned_count = if opts.clean_root_tracked_files {
@@ -1354,6 +1356,61 @@ fn bf_workspace_git_usable(ws_path: &Path) -> bool {
     }
 
     String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
+fn bf_configured_branch(root: &Path) -> String {
+    MawConfig::load(root)
+        .map(|cfg| cfg.branch().to_string())
+        .unwrap_or_else(|_| "main".to_string())
+}
+
+fn bf_ref_exists(root: &Path, ref_name: &str) -> bool {
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", ref_name])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn bf_workspace_branch(ws_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(ws_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+fn bf_align_default_workspace_to_configured_branch(
+    root: &Path,
+    ws_path: &Path,
+) -> Result<(), BrownfieldInitError> {
+    let branch = bf_configured_branch(root);
+    let branch_ref = format!("refs/heads/{branch}");
+    if !bf_ref_exists(root, &branch_ref) {
+        return Ok(());
+    }
+
+    if bf_workspace_branch(ws_path).as_deref() == Some(branch.as_str()) {
+        return Ok(());
+    }
+
+    if bf_workspace_branch(ws_path).is_none() {
+        // Detached default workspace: move detached HEAD/index to the
+        // configured branch tip without touching worktree files, then attach.
+        bf_run_git(ws_path, &["reset", "--mixed", &branch_ref])?;
+    }
+
+    bf_run_git(ws_path, &["switch", &branch])
 }
 
 fn bf_ensure_default_workspace_registered(
@@ -2321,6 +2378,87 @@ mod brownfield_tests {
             .unwrap();
         let ws_oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         assert_eq!(ws_oid, initial_head.as_str());
+    }
+
+    #[test]
+    fn brownfield_idempotent_attaches_default_to_configured_branch_when_detached() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap_err();
+
+        setup_existing_repo(root);
+        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+
+        let ws_default = root.join("ws/default");
+        let epoch_before = read_ref(root, manifold_refs::EPOCH_CURRENT).unwrap();
+
+        // Create a commit and advance main while keeping epoch/current stale.
+        fs::write(ws_default.join("branch-tip.txt"), "hello\n").unwrap();
+        Command::new("git")
+            .args(["add", "branch-tip.txt"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "feat: branch tip"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        let branch_tip = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        let branch_tip = String::from_utf8_lossy(&branch_tip.stdout)
+            .trim()
+            .to_owned();
+        Command::new("git")
+            .args(["update-ref", "refs/heads/main", &branch_tip])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        // Rewind ws/default back to stale epoch and keep it detached.
+        Command::new("git")
+            .args(["switch", "--detach", &epoch_before])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        let detached = Command::new("git")
+            .args(["symbolic-ref", "--quiet", "HEAD"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        assert!(
+            !detached.status.success(),
+            "ws/default should be detached pre-fix"
+        );
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        assert!(result.already_initialized);
+
+        let branch = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        assert!(
+            branch.status.success(),
+            "ws/default should be branch-attached"
+        );
+        assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "main");
+
+        let ws_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        let ws_head = String::from_utf8_lossy(&ws_head.stdout).trim().to_owned();
+        let main_head = read_ref(root, "refs/heads/main").unwrap();
+        assert_eq!(
+            ws_head, main_head,
+            "ws/default should be aligned to main tip"
+        );
     }
 
     #[test]
