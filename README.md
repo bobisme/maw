@@ -47,7 +47,7 @@ The practical effect: merge cost and conflict analysis scale with touched paths/
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.46.5
+cargo install --git https://github.com/bobisme/maw --tag v0.46.6
 ```
 
 Requires Git. No jj dependency is required for Manifold workflows.

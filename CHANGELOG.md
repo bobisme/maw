@@ -2,6 +2,16 @@
 
 All notable changes to maw.
 
+## v0.46.6
+
+### Added
+- **Workspace diff command family**. Added `maw ws diff` with deterministic comparison semantics against default/epoch/branch/oid targets.
+- **Agent-safe output modes**. `maw ws diff` now supports summary, patch, and machine-readable JSON output plus `--name-only` and `--paths` filters.
+- **Diff contract and tests**. Published `notes/ws-diff-contract.md` and added integration/unit coverage for output contract stability and migration-era execution contexts.
+
+### Changed
+- README command table now documents `maw ws diff` as a first-class workflow command.
+
 ## v0.46.5
 
 ### Fixed
