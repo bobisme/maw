@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.46.1
+
+### Fixed
+- **Default workspace sync semantics**. `maw ws sync` now treats `ws/default` as a persistent branch workspace and skips detached-epoch sync behavior, preventing unwanted HEAD detaches.
+- **Brownfield init self-heal for migrated repos**. Idempotent `maw init` now prunes stale git worktree registrations and repairs orphaned `ws/default` worktree linkage when metadata exists but registration is broken.
+
+### Changed
+- Ran `rustfmt` across touched Manifold files to keep formatting consistent and reduce future diff noise.
+
 ## v0.46.0
 
 ### Added

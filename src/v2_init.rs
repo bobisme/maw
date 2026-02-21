@@ -1430,7 +1430,7 @@ fn bf_restore_workspace_backup_overwrite(
     for entry in std::fs::read_dir(backup)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == ".git" || name == ".jj" {
+        if name == ".git" {
             continue;
         }
 
