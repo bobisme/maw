@@ -1,12 +1,48 @@
-# maw - multi-agent workspaces
+# maw: Multi-Agent Workspaces
 
-![maw](images/maw.webp)
+![Fractured Colossus](images/fractured-colussus.webp)
 
-Tooling for coordinating multiple AI coding agents working on the same codebase.
+`maw` is a coordination layer for teams running many coding agents in parallel on one repo.
+It gives each agent an isolated workspace, tracks agent lifecycle in Manifold metadata, and merges work back deterministically.
 
-**The problem**: When you spawn multiple AI agents to work on a codebase simultaneously, they step on each other - editing the same files, creating conflicts, losing work.
+## Why maw is awesome
 
-**The solution**: maw uses jj (Jujutsu) workspaces to give each agent an isolated working copy. Agents work independently without blocking each other. Conflicts are recorded in commits (not blocking) and resolved when merging.
+- **Agent-native UX**: agents get directories, files, and JSON output - not VCS ceremony.
+- **Parallel by default**: each agent works in `ws/<name>/` without stepping on others.
+- **Deterministic merge flow**: merge outcomes are based on epoch + workspace patch sets, with predictable conflict surfaces.
+- **Operational safety**: repairable repo state, health checks (`maw doctor`), and explicit recovery paths.
+- **Git-compatible mainline**: normal `git log`, `git bisect`, and remote workflows still work.
+
+## Why better than raw git worktrees
+
+Git worktrees are a strong primitive; `maw` adds the missing orchestration layer:
+
+- **Workspace lifecycle**: create/list/status/merge/destroy/restore/undo with consistent semantics.
+- **Staleness and sync model**: clear stale detection and workspace sync behavior tuned for multi-agent runs.
+- **Structured merge diagnostics**: conflict reporting and machine-readable merge/status output.
+- **Policy and guardrails**: safer defaults around merge/destroy/push/release workflows.
+- **Automation hooks**: `maw exec`, AGENTS scaffolding, and workflow commands designed for agent toolchains.
+
+## Why better than jj workspaces (for this use-case)
+
+`maw` moved to Manifold + git worktrees because agent concurrency needs isolation more than shared global state:
+
+- **No shared op-log contention**: one agent's status/metadata update does not fork global workspace state.
+- **Reduced opfork/divergence failure modes**: far fewer global consistency edge cases under high parallelism.
+- **Simpler mental model for agents**: workspace directories with git semantics, no jj-specific recovery knowledge required.
+- **Migration and repair tooling**: idempotent `maw init` plus `maw doctor` checks for broken/stale workspace registration states.
+
+## The math and algorithms behind Manifold
+
+Manifold's design (see `notes/manifold-v2.md`) treats workspace state as algebraic data, not ad-hoc shell state:
+
+- **Workspace state model**: `WorkspaceState = base_epoch + PatchSet`.
+- **PatchSet join semantics**: patch sets over a shared epoch form a deterministic merge reduction by path.
+- **Epoch advancement transaction**: merge computes a candidate result, validates it, then advances `refs/manifold/epoch/current` atomically.
+- **Per-workspace operation logs**: single-writer causal histories instead of a single shared mutable op DAG.
+- **Structured conflicts**: conflict records are data (with optional AST/semantic metadata), not only text markers.
+
+The practical effect: merge cost and conflict analysis scale with touched paths/conflict set, not the entire repo size or total workspace count.
 
 ## Install
 
@@ -14,113 +50,81 @@ Tooling for coordinating multiple AI coding agents working on the same codebase.
 cargo install --git https://github.com/bobisme/maw --tag v0.46.5
 ```
 
-Requires [jj (Jujutsu)](https://martinvonz.github.io/jj/) to be installed.
+Requires Git. No jj dependency is required for Manifold workflows.
 
 ## Quick Start
 
 ```bash
-# Add maw instructions to your project's AGENTS.md
+# In your repo root
+maw init
+maw doctor
+
+# Optional: scaffold AGENTS guidance
 maw agents init
 
-# Verify setup
-maw doctor
+# Create one workspace per agent
+maw ws create agent-1
+maw ws create agent-2
+
+# Run commands in each workspace
+maw exec agent-1 -- cargo test
+maw exec agent-2 -- git status
+
+# Inspect and merge when ready
+maw ws status
+maw ws merge agent-1 agent-2 --destroy
+maw push
 ```
 
-That's it. Agents reading AGENTS.md will know how to create workspaces and coordinate.
+## Typical multi-agent workflow
 
-## Commands
+1. Lead initializes/validates repo with `maw init` + `maw doctor`.
+2. Lead creates workspaces for each agent (`maw ws create <name>`).
+3. Agents edit files only inside their workspace paths.
+4. Agents run tools via `maw exec <name> -- <cmd>`.
+5. Lead monitors progress with `maw ws status` / `maw status`.
+6. Lead merges completed workspaces with `maw ws merge ... --destroy`.
+7. Lead pushes with `maw push` (or `maw push --advance` when needed).
+8. Lead tags release with `maw release vX.Y.Z`.
+
+## Core commands
 
 | Command | Description |
 |---------|-------------|
 | `maw ws create <name>` | Create isolated workspace for an agent |
-| `maw ws create <name> --template <archetype>` | Create workspace with archetype defaults (`feature`, `bugfix`, `refactor`, `eval`, `release`) |
 | `maw ws list` | List all workspaces |
-| `maw status` | Brief repo/workspace status summary |
-| `maw ws status` | Show all agent work, conflicts, stale warnings |
-| `maw ws sync` | Handle stale workspace |
-| `maw ws jj <name> <args>` | Run jj in a workspace (for sandboxed agents) |
-| `maw exec <name> -- <cmd>` | Run any command in a workspace |
-| `maw ws merge <a> <b>` | Merge named agent workspaces |
+| `maw ws status` | Show workspace health, staleness, and conflicts |
+| `maw exec <name> -- <cmd>` | Run any command inside a workspace |
+| `maw ws merge <a> <b> [--destroy]` | Merge one or more workspaces into default |
 | `maw ws destroy <name>` | Remove a workspace |
-| `maw push [--advance]` | Push to remote (`--advance` moves branch to @- first) |
-| `maw init` | Initialize maw (jj + .gitignore) |
-| `maw doctor` | Check system requirements |
-| `maw agents init` | Add maw section to AGENTS.md |
-
-## How It Works
-
-Each agent gets an isolated jj workspace in `ws/<name>/`. The default workspace at `ws/default/` handles merge and push coordination. The repo root is metadata-only (no source files). Workspaces share the repository's backing store (no disk duplication) but have separate working copies.
-
-Agents can edit files concurrently without blocking each other. jj records conflicts in commits rather than preventing work - resolve them when merging.
-
-```
-ws/
-  default/     # Default workspace (merge/push)
-  agent-1/     # First agent's workspace
-  agent-2/     # Second agent's workspace
-  feature-x/   # Task-based workspace
-```
-
-## Agent Naming Conventions
-
-Workspace names should be:
-- **Lowercase alphanumeric** with hyphens or underscores (`agent-1`, `feature_auth`)
-- **Short and descriptive** - either agent identity or task focus
-- **Created by the coordinator** (human or orchestrating agent), not self-named
-
-Common patterns:
-- `agent-1`, `agent-2`, ... - numbered agents for parallel work
-- `feature-auth`, `bugfix-123` - task-focused workspaces
-- `claude-1`, `claude-2` - model-specific naming
-
-Agents should check `maw ws list` before creating to avoid duplicates.
-
-## Why jj?
-
-- **Lock-free**: Multiple agents edit simultaneously, no locks
-- **Instant workspaces**: Shared storage, separate working copies
-- **Conflict recording**: Conflicts are recorded in commits, not blocking
-- **Operation log**: Full history of what each agent did
+| `maw ws restore <name>` | Restore a previously destroyed workspace |
+| `maw ws sync` | Sync stale workspace state |
+| `maw init` | Initialize/repair Manifold repo state |
+| `maw doctor` | Validate repo/tool health and migration state |
+| `maw status` | Quick repo + workspace summary |
+| `maw push [--advance]` | Push configured branch to remote |
+| `maw release <tag>` | Push and tag a release |
+| `maw agents init` | Add maw instructions to AGENTS.md |
 
 ## Configuration
 
-Create a `.maw.toml` file in your repo root to customize behavior.
+Create `.maw.toml` in repo root (or `ws/default/.maw.toml`) to customize behavior.
 
-### Auto-resolve conflicts during merge
-
-Paths like `.beads/` change frequently on main while agent workspaces are active. This causes merge conflicts in files that are workspace-independent state and shouldn't block merges.
-
-Configure patterns to auto-resolve from main during `maw ws merge`:
+### Auto-resolve conflict-prone paths from main
 
 ```toml
 [merge]
-# Paths matching these globs will auto-resolve from main during merge
 auto_resolve_from_main = [
-    ".beads/**",
+  ".beads/**",
 ]
 ```
 
-Matching files with conflicts are restored from `main`, while other conflicts still require manual resolution.
-
-**Note on `.crit/`**: Crit v2 uses per-review event logs (`.crit/reviews/<id>/events.jsonl`) instead of a single file. This structure rarely conflicts across workspaces, so auto_resolve is typically not needed.
-
-### AST-aware semantic conflict detection (tree-sitter)
-
-You can opt-in per language (or by pack) for AST-aware conflict diagnostics:
+### AST-aware semantic conflict diagnostics (tree-sitter)
 
 ```toml
 [merge.ast]
 languages = ["rust", "python", "typescript", "javascript", "go"]
-packs = ["core"] # core = rust/python/typescript; also: web, backend
+packs = ["core"]
 semantic_false_positive_budget_pct = 5
 semantic_min_confidence = 70
 ```
-
-- `languages` and `packs` are additive and deduplicated.
-- If semantic confidence falls below the configured threshold/budget gate, Manifold falls back to generic `same_ast_node_modified` reasons to reduce false positives.
-- Conflict artifacts include optional machine-readable semantic metadata (`rule`, `confidence`, `rationale`, `evidence`) for downstream automation.
-
-## Optional Integrations
-
-- **[botbus](https://github.com/anthropics/botbus)**: Agent coordination and claims
-- **[beads](https://github.com/Dicklesworthstone/beads_rust)**: Issue tracking
