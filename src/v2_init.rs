@@ -352,7 +352,10 @@ fn clean_root_worktree(root: &Path) -> Result<(), InitError> {
 }
 
 fn git_common_dir(root: &Path) -> Result<PathBuf, InitError> {
-    let path = run_git_stdout(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let path = run_git_stdout(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
     Ok(PathBuf::from(path.trim()))
 }
 
@@ -635,7 +638,10 @@ mod tests {
 
         assert!(result.repo_root.join(".git").is_file());
         assert!(result.repo_root.join(REPO_GIT_DIR).is_dir());
-        assert_eq!(git_common_dir(&result.repo_root), result.repo_root.join(REPO_GIT_DIR));
+        assert_eq!(
+            git_common_dir(&result.repo_root),
+            result.repo_root.join(REPO_GIT_DIR)
+        );
     }
 
     #[test]
@@ -666,11 +672,13 @@ mod tests {
 
         // EpochId validates as a proper 40-char hex OID
         assert_eq!(result.epoch0.as_str().len(), 40);
-        assert!(result
-            .epoch0
-            .as_str()
-            .chars()
-            .all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            result
+                .epoch0
+                .as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        );
     }
 
     #[test]
@@ -938,8 +946,8 @@ pub fn run() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("{result}");
     } else {
-        let result = greenfield_init(&root, &InitOptions::default())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let result =
+            greenfield_init(&root, &InitOptions::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("{result}");
     }
 
@@ -1000,6 +1008,9 @@ pub fn brownfield_init(
     let ws_default = root.join("ws").join("default");
     if ws_default.exists() {
         layout::init_manifold_dir(&root).map_err(BrownfieldInitError::Layout)?;
+        // Clean up stale worktree registrations so list/status don't report
+        // ghost workspaces from deleted directories.
+        let _ = bf_prune_worktrees(&root);
 
         let epoch0 = match manifold_refs::read_epoch_current(&root) {
             Ok(Some(oid)) => {
@@ -1022,6 +1033,10 @@ pub fn brownfield_init(
                 });
             }
         };
+
+        // Self-heal legacy/broken states where ws/default exists but is no
+        // longer a registered git worktree (missing .git link/admin record).
+        bf_ensure_default_workspace_registered(&root, &ws_default, &epoch0)?;
 
         if matches!(
             manifold_refs::read_ref(&root, &manifold_refs::workspace_state_ref("default")),
@@ -1277,10 +1292,161 @@ fn bf_maybe_migrate_legacy_common_dir(root: &Path) -> Result<bool, BrownfieldIni
             .strip_prefix(&dot_git)
             .map_or_else(|_| old_admin_path.clone(), |suffix| repo_git.join(suffix));
 
-        std::fs::write(ws_path.join(".git"), format!("gitdir: {}\n", new_admin_path.display()))?;
+        std::fs::write(
+            ws_path.join(".git"),
+            format!("gitdir: {}\n", new_admin_path.display()),
+        )?;
     }
 
     Ok(true)
+}
+
+fn bf_prune_worktrees(root: &Path) -> Result<(), BrownfieldInitError> {
+    bf_run_git(root, &["worktree", "prune"])
+}
+
+fn bf_is_registered_worktree(root: &Path, ws_path: &Path) -> Result<bool, BrownfieldInitError> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: "git worktree list --porcelain".to_owned(),
+            stderr: format!("failed to spawn: {e}"),
+            exit_code: None,
+        })?;
+
+    if !output.status.success() {
+        return Err(BrownfieldInitError::GitCommand {
+            command: "git worktree list --porcelain".to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            exit_code: output.status.code(),
+        });
+    }
+
+    let ws_path = std::fs::canonicalize(ws_path).unwrap_or_else(|_| ws_path.to_path_buf());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            let listed = PathBuf::from(path.trim());
+            let listed = std::fs::canonicalize(&listed).unwrap_or(listed);
+            if listed == ws_path {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn bf_workspace_git_usable(ws_path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(ws_path)
+        .output();
+
+    let Ok(output) = output else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
+fn bf_ensure_default_workspace_registered(
+    root: &Path,
+    ws_path: &Path,
+    epoch: &EpochId,
+) -> Result<(), BrownfieldInitError> {
+    if bf_workspace_git_usable(ws_path) && bf_is_registered_worktree(root, ws_path)? {
+        return Ok(());
+    }
+
+    bf_repair_default_workspace_registration(root, ws_path, epoch)
+}
+
+fn bf_repair_default_workspace_registration(
+    root: &Path,
+    ws_path: &Path,
+    epoch: &EpochId,
+) -> Result<(), BrownfieldInitError> {
+    let ws_parent = ws_path.parent().ok_or_else(|| {
+        BrownfieldInitError::Io(io::Error::other(
+            "default workspace path has no parent directory",
+        ))
+    })?;
+    let backup_path = ws_parent.join(".default-init-repair-backup");
+
+    if backup_path.exists() {
+        return Err(BrownfieldInitError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "cannot repair default workspace: backup path already exists at {}",
+                backup_path.display()
+            ),
+        )));
+    }
+
+    std::fs::rename(ws_path, &backup_path)?;
+
+    // Prune stale registration from the moved workspace before re-attaching.
+    let _ = bf_prune_worktrees(root);
+
+    let add_result = bf_run_git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            ws_path.to_str().unwrap_or("ws/default"),
+            epoch.as_str(),
+        ],
+    );
+
+    if let Err(err) = add_result {
+        // Best effort rollback: restore the original directory.
+        let _ = std::fs::rename(&backup_path, ws_path);
+        return Err(err);
+    }
+
+    if let Err(err) = bf_restore_workspace_backup_overwrite(&backup_path, ws_path) {
+        return Err(BrownfieldInitError::Io(io::Error::other(format!(
+            "default workspace was reattached but restoring files failed: {err}; backup retained at {}",
+            backup_path.display()
+        ))));
+    }
+
+    std::fs::remove_dir_all(&backup_path)?;
+    Ok(())
+}
+
+fn bf_restore_workspace_backup_overwrite(
+    backup: &Path,
+    workspace: &Path,
+) -> Result<(), BrownfieldInitError> {
+    for entry in std::fs::read_dir(backup)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" || name == ".jj" {
+            continue;
+        }
+
+        let src = entry.path();
+        let dst = workspace.join(&name);
+        if dst.exists() {
+            if dst.is_dir() {
+                std::fs::remove_dir_all(&dst)?;
+            } else {
+                std::fs::remove_file(&dst)?;
+            }
+        }
+        std::fs::rename(src, dst)?;
+    }
+
+    Ok(())
 }
 
 fn bf_collect_workspace_admin_paths(
@@ -1374,9 +1540,11 @@ fn bf_set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), BrownfieldInitEr
 
 fn bf_set_default_workspace_ref(root: &Path, epoch: &EpochId) -> Result<(), BrownfieldInitError> {
     let ref_name = manifold_refs::workspace_state_ref("default");
-    manifold_refs::write_ref(root, &ref_name, epoch.oid()).map_err(|e| BrownfieldInitError::RefSet {
-        ref_name,
-        message: e.to_string(),
+    manifold_refs::write_ref(root, &ref_name, epoch.oid()).map_err(|e| {
+        BrownfieldInitError::RefSet {
+            ref_name,
+            message: e.to_string(),
+        }
     })
 }
 
@@ -1476,18 +1644,18 @@ fn bf_clean_root_tracked_files(
         }
 
         let abs = root.join(&rel);
-        if abs.exists() && abs.is_file()
-            && std::fs::remove_file(&abs).is_ok() {
-                removed += 1;
-                // Track parent directory for cleanup
-                if let Some(parent) = rel.parent()
-                    && parent != Path::new("") {
-                        let abs_parent = root.join(parent);
-                        if !dirs_to_check.contains(&abs_parent) {
-                            dirs_to_check.push(abs_parent);
-                        }
-                    }
+        if abs.exists() && abs.is_file() && std::fs::remove_file(&abs).is_ok() {
+            removed += 1;
+            // Track parent directory for cleanup
+            if let Some(parent) = rel.parent()
+                && parent != Path::new("")
+            {
+                let abs_parent = root.join(parent);
+                if !dirs_to_check.contains(&abs_parent) {
+                    dirs_to_check.push(abs_parent);
+                }
             }
+        }
     }
 
     // Remove empty directories (deepest first)
@@ -1598,8 +1766,12 @@ mod brownfield_tests {
 
         layout::init_manifold_dir(dir).unwrap();
         manifold_refs::write_ref(dir, manifold_refs::EPOCH_CURRENT, head.oid()).unwrap();
-        manifold_refs::write_ref(dir, &manifold_refs::workspace_state_ref("default"), head.oid())
-            .unwrap();
+        manifold_refs::write_ref(
+            dir,
+            &manifold_refs::workspace_state_ref("default"),
+            head.oid(),
+        )
+        .unwrap();
 
         fs::create_dir_all(dir.join("ws")).unwrap();
         Command::new("git")
@@ -1633,6 +1805,19 @@ mod brownfield_tests {
             .expect("git rev-parse --git-common-dir should succeed");
         assert!(output.status.success());
         PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    }
+
+    fn worktree_paths(root: &Path) -> Vec<String> {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(root)
+            .output()
+            .expect("git worktree list --porcelain should succeed");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree ").map(|p| p.to_owned()))
+            .collect()
     }
 
     #[test]
@@ -1738,8 +1923,14 @@ mod brownfield_tests {
             .unwrap();
         let val = String::from_utf8_lossy(&out.stdout);
         assert_eq!(val.trim(), "true", "core.bare should be true");
-        assert!(root.join(".git").is_file(), ".git should be gitfile after init");
-        assert!(root.join(REPO_GIT_DIR).is_dir(), "repo.git should exist after init");
+        assert!(
+            root.join(".git").is_file(),
+            ".git should be gitfile after init"
+        );
+        assert!(
+            root.join(REPO_GIT_DIR).is_dir(),
+            "repo.git should exist after init"
+        );
     }
 
     #[test]
@@ -1879,14 +2070,23 @@ mod brownfield_tests {
         let root = dir.path();
         let head = setup_legacy_initialized_repo(root);
 
-        assert!(root.join(".git").is_dir(), "legacy repo should start with .git dir");
+        assert!(
+            root.join(".git").is_dir(),
+            "legacy repo should start with .git dir"
+        );
         assert!(!root.join(REPO_GIT_DIR).exists());
 
         let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
         assert!(result.already_initialized);
 
-        assert!(root.join(".git").is_file(), ".git should be a gitfile after migration");
-        assert!(root.join(REPO_GIT_DIR).is_dir(), "repo.git should exist after migration");
+        assert!(
+            root.join(".git").is_file(),
+            ".git should be a gitfile after migration"
+        );
+        assert!(
+            root.join(REPO_GIT_DIR).is_dir(),
+            "repo.git should exist after migration"
+        );
         assert_eq!(git_common_dir(root), root.join(REPO_GIT_DIR));
 
         let out = Command::new("git")
@@ -1894,7 +2094,10 @@ mod brownfield_tests {
             .current_dir(root.join("ws/default"))
             .output()
             .unwrap();
-        assert!(out.status.success(), "default worktree should remain usable after migration");
+        assert!(
+            out.status.success(),
+            "default worktree should remain usable after migration"
+        );
         let ws_head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         assert_eq!(ws_head, head.as_str());
     }
@@ -2021,6 +2224,85 @@ mod brownfield_tests {
 
         assert!(read_ref(root, manifold_refs::EPOCH_CURRENT).is_some());
         assert!(read_ref(root, &manifold_refs::workspace_state_ref("default")).is_some());
+    }
+
+    #[test]
+    fn brownfield_repairs_orphaned_default_workspace_registration() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        setup_existing_repo(root);
+        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+
+        let ws_default = root.join("ws/default");
+        fs::write(ws_default.join("LOCAL_NOTE.txt"), "keep this file\n").unwrap();
+
+        fs::remove_file(ws_default.join(".git")).unwrap();
+        Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let broken = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        assert!(
+            !broken.status.success(),
+            "workspace should be broken before repair"
+        );
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        assert!(result.already_initialized);
+
+        let repaired = Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&ws_default)
+            .output()
+            .unwrap();
+        assert!(repaired.status.success(), "workspace should be repaired");
+        assert_eq!(String::from_utf8_lossy(&repaired.stdout).trim(), "true");
+        assert!(ws_default.join("LOCAL_NOTE.txt").exists());
+    }
+
+    #[test]
+    fn brownfield_prunes_stale_worktree_registrations_on_idempotent_run() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        setup_existing_repo(root);
+        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+
+        let ghost_path = root.join("ws/ghost");
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                ghost_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        fs::remove_dir_all(&ghost_path).unwrap();
+
+        let before = worktree_paths(root);
+        assert!(
+            before
+                .iter()
+                .any(|p| p == &ghost_path.display().to_string()),
+            "ghost registration should exist before prune"
+        );
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        assert!(result.already_initialized);
+
+        let after = worktree_paths(root);
+        assert!(
+            after.iter().all(|p| p != &ghost_path.display().to_string()),
+            "ghost registration should be pruned"
+        );
     }
 
     #[test]

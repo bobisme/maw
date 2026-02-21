@@ -10,7 +10,7 @@ use crate::oplog::global_view::compute_global_view;
 use crate::oplog::read::read_head;
 use crate::oplog::view::read_patch_set_blob;
 
-use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
 
 #[derive(Serialize)]
 pub struct WorkspaceStatus {
@@ -81,7 +81,10 @@ pub fn status(format: OutputFormat) -> Result<()> {
         } else {
             None
         };
-        (ws_status.is_stale, has, changes)
+        // The default workspace tracks the configured branch and should not be
+        // auto-treated as an ephemeral stale workspace.
+        let _ = ws_status;
+        (false, has, changes)
     } else {
         (false, false, None)
     };
@@ -97,14 +100,23 @@ pub fn status(format: OutputFormat) -> Result<()> {
     let workspace_entries: Vec<WorkspaceEntry> = all_workspaces
         .iter()
         .map(|ws| {
-            let ws_mode = metadata::read(&root, ws.id.as_str())
-                .map(|m| m.mode)
-                .unwrap_or(WorkspaceMode::Ephemeral);
+            let is_default = ws.id.as_str() == default_ws_name;
+            let ws_mode = if is_default {
+                WorkspaceMode::Persistent
+            } else {
+                metadata::read(&root, ws.id.as_str())
+                    .map(|m| m.mode)
+                    .unwrap_or(WorkspaceMode::Ephemeral)
+            };
             WorkspaceEntry {
                 name: ws.id.as_str().to_string(),
-                is_default: ws.id.as_str() == default_ws_name,
+                is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),
-                state: format!("{}", ws.state),
+                state: if is_default {
+                    "active".to_owned()
+                } else {
+                    format!("{}", ws.state)
+                },
                 mode: format!("{ws_mode}"),
             }
         })

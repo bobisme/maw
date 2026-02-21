@@ -1,13 +1,17 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::types::WorkspaceId;
 use crate::refs as manifold_refs;
 
-use super::{get_backend, repo_root, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, repo_root};
+
+fn is_default_workspace(name: &str) -> bool {
+    name == DEFAULT_WORKSPACE
+}
 
 fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
     let ws_root = root.join("ws");
@@ -54,6 +58,17 @@ pub fn sync(all: bool) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
     let workspace_name = workspace_name_from_cwd(&root, &cwd);
     let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if is_default_workspace(&workspace_name) {
+        let branch = MawConfig::load(&root)
+            .map(|cfg| cfg.branch().to_string())
+            .unwrap_or_else(|_| "main".to_string());
+        println!(
+            "Workspace '{workspace_name}' is the default branch workspace (tracks '{branch}')."
+        );
+        println!("Skipping detached-epoch sync for default workspace.");
+        return Ok(());
+    }
 
     if !backend.exists(&ws_id) {
         println!("Workspace '{workspace_name}' not found.");
@@ -137,7 +152,10 @@ fn sync_all() -> Result<()> {
         return Ok(());
     }
 
-    let stale_count = workspaces.iter().filter(|ws| ws.state.is_stale()).count();
+    let stale_count = workspaces
+        .iter()
+        .filter(|ws| ws.state.is_stale() && !is_default_workspace(ws.id.as_str()))
+        .count();
 
     if stale_count == 0 {
         println!("All {} workspace(s) are up to date.", workspaces.len());
@@ -155,7 +173,7 @@ fn sync_all() -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
     for ws in &workspaces {
-        if !ws.state.is_stale() {
+        if !ws.state.is_stale() || is_default_workspace(ws.id.as_str()) {
             continue;
         }
 
@@ -189,6 +207,10 @@ fn sync_all() -> Result<()> {
 /// In the git worktree model, this updates the worktree HEAD to the current epoch.
 /// Returns Ok(()) whether or not it was stale (idempotent).
 pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
+    if is_default_workspace(name) {
+        return Ok(());
+    }
+
     let root = repo_root()?;
     let backend = get_backend()?;
 
@@ -243,6 +265,10 @@ pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Re
     let mut synced_count = 0;
 
     for ws_name in workspaces {
+        if is_default_workspace(ws_name) {
+            continue;
+        }
+
         let Ok(ws_id) = WorkspaceId::new(ws_name) else {
             continue;
         };
@@ -294,5 +320,11 @@ mod tests {
         let root = Path::new("/repo");
         let cwd = Path::new("/repo/ws/not_valid");
         assert_eq!(workspace_name_from_cwd(root, cwd), "default");
+    }
+
+    #[test]
+    fn detects_default_workspace_name() {
+        assert!(super::is_default_workspace("default"));
+        assert!(!super::is_default_workspace("agent-1"));
     }
 }

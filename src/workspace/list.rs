@@ -76,21 +76,28 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
         .iter()
         .map(|ws| {
             let name = ws.id.as_str().to_string();
+            let is_default = name == DEFAULT_WORKSPACE;
             let is_quarantine = name.starts_with(QUARANTINE_NAME_PREFIX);
             let behind = match &ws.state {
-                WorkspaceState::Stale { behind_epochs } => Some(*behind_epochs),
+                WorkspaceState::Stale { behind_epochs } if !is_default => Some(*behind_epochs),
                 _ => None,
             };
             // Read metadata for this workspace (defaults to ephemeral on error/missing).
             let ws_meta = metadata::read(&root, ws.id.as_str()).unwrap_or_default();
-            let ws_mode = ws_meta.mode;
+            let ws_mode = if is_default {
+                crate::model::types::WorkspaceMode::Persistent
+            } else {
+                ws_meta.mode
+            };
             WorkspaceInfo {
-                is_default: name == DEFAULT_WORKSPACE,
+                is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),
                 // Quarantine workspaces show as "quarantine" regardless of
                 // their staleness state — they are a special class of workspace.
                 state: if is_quarantine {
                     "quarantine".to_owned()
+                } else if is_default {
+                    "active".to_owned()
                 } else {
                     format!("{}", ws.state)
                 },
@@ -111,7 +118,11 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     // Collect stale workspace warnings, split by mode (exclude quarantine workspaces).
     let stale_persistent: Vec<String> = backend_workspaces
         .iter()
-        .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
+        .filter(|ws| {
+            ws.state.is_stale()
+                && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX)
+                && ws.id.as_str() != DEFAULT_WORKSPACE
+        })
         .filter(|ws| {
             metadata::read(&root, ws.id.as_str())
                 .map(|m| m.mode.is_persistent())
@@ -122,7 +133,11 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
 
     let stale_ephemeral: Vec<String> = backend_workspaces
         .iter()
-        .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
+        .filter(|ws| {
+            ws.state.is_stale()
+                && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX)
+                && ws.id.as_str() != DEFAULT_WORKSPACE
+        })
         .filter(|ws| {
             metadata::read(&root, ws.id.as_str())
                 .map(|m| m.mode.is_ephemeral())
@@ -134,7 +149,11 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     // Combined stale list (exclude quarantine, for backwards compatibility)
     let stale_workspaces: Vec<String> = backend_workspaces
         .iter()
-        .filter(|ws| ws.state.is_stale() && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX))
+        .filter(|ws| {
+            ws.state.is_stale()
+                && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX)
+                && ws.id.as_str() != DEFAULT_WORKSPACE
+        })
         .map(|ws| ws.id.as_str().to_string())
         .collect();
 
