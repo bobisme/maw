@@ -205,6 +205,30 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         return Ok(());
     }
 
+    if !branch_oid.is_empty() {
+        if git_is_ancestor(root, &branch_oid, &epoch_oid)? {
+            // branch is behind epoch, safe fast-forward
+        } else if git_is_ancestor(root, &epoch_oid, &branch_oid)? {
+            println!(
+                "{branch} is ahead of current epoch ({} > {}). Leaving branch unchanged.",
+                &branch_oid[..12.min(branch_oid.len())],
+                &epoch_oid[..12]
+            );
+            println!(
+                "  Hint: epoch is stale for this branch tip. Merge through maw ws merge to advance refs/manifold/epoch/current."
+            );
+            return Ok(());
+        } else {
+            bail!(
+                "Ref divergence detected: {branch} and refs/manifold/epoch/current do not have an ancestor relationship.\n  \
+                 Refusing to move {branch} to avoid data loss.\n  \
+                 To inspect:\n    \
+                 git -C {} log --oneline --graph --decorate --max-count=30 {branch} refs/manifold/epoch/current",
+                root.display()
+            );
+        }
+    }
+
     // Move the branch to the epoch commit
     println!(
         "Advancing {branch} to current epoch ({})...",
@@ -233,6 +257,23 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git merge-base --is-ancestor")?;
+
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
+        }
+    }
 }
 
 /// Suggest --advance if the epoch is ahead of the branch.

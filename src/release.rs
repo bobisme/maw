@@ -40,7 +40,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     let config = MawConfig::load(&root)?;
     let branch = config.branch();
 
-    // Step 1: Ensure branch is at current epoch
+    // Step 1: Ensure branch is aligned safely with the current epoch
     println!("Ensuring {branch} is at current epoch...");
     let epoch_output = Command::new("git")
         .args(["rev-parse", "refs/manifold/epoch/current"])
@@ -72,10 +72,23 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    // Advance branch if it's behind the epoch
-    if branch_oid == epoch_oid {
+    let release_oid = if branch_oid == epoch_oid {
         println!("  {branch} already at current epoch.");
-    } else {
+        epoch_oid.clone()
+    } else if branch_oid.is_empty() {
+        println!("  Creating {branch} at epoch ({})...", &epoch_oid[..12]);
+        let update = Command::new("git")
+            .args(["update-ref", &branch_ref, &epoch_oid])
+            .current_dir(&root)
+            .output()
+            .context("Failed to update branch ref")?;
+
+        if !update.status.success() {
+            let stderr = String::from_utf8_lossy(&update.stderr);
+            bail!("Failed to set {branch}: {}", stderr.trim());
+        }
+        epoch_oid.clone()
+    } else if git_is_ancestor(&root, &branch_oid, &epoch_oid)? {
         println!("  Advancing {branch} to epoch ({})...", &epoch_oid[..12]);
         let update = Command::new("git")
             .args(["update-ref", &branch_ref, &epoch_oid])
@@ -87,10 +100,29 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
             let stderr = String::from_utf8_lossy(&update.stderr);
             bail!("Failed to advance {branch}: {}", stderr.trim());
         }
-    }
+        epoch_oid.clone()
+    } else if git_is_ancestor(&root, &epoch_oid, &branch_oid)? {
+        println!(
+            "  {branch} is ahead of current epoch ({} > {}). Not rewinding.",
+            &branch_oid[..12.min(branch_oid.len())],
+            &epoch_oid[..12]
+        );
+        println!(
+            "  WARNING: refs/manifold/epoch/current is stale for this branch tip; releasing from {branch}."
+        );
+        branch_oid.clone()
+    } else {
+        bail!(
+            "Ref divergence detected: {branch} and refs/manifold/epoch/current do not have an ancestor relationship.\n  \
+             Refusing to release to avoid tagging an ambiguous history.\n  \
+             To inspect:\n    \
+             git -C {} log --oneline --graph --decorate --max-count=30 {branch} refs/manifold/epoch/current",
+            root.display()
+        );
+    };
 
     // Get commit info for reporting
-    let commit_info = get_commit_info(&root, &epoch_oid)?;
+    let commit_info = get_commit_info(&root, &release_oid)?;
     println!("  {branch} -> {commit_info}");
 
     // Step 2: Push branch to origin
@@ -121,7 +153,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     // Step 3: Create git tag at the branch tip
     println!("Creating tag {tag}...");
     let git_tag = Command::new("git")
-        .args(["tag", tag, &epoch_oid])
+        .args(["tag", tag, &release_oid])
         .current_dir(&root)
         .output()
         .context("Failed to create git tag")?;
@@ -158,6 +190,23 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     println!("  Tag:    {tag} pushed to origin");
 
     Ok(())
+}
+
+fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git merge-base --is-ancestor")?;
+
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
+        }
+    }
 }
 
 /// Get a short commit info line for a commit hash.

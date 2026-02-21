@@ -65,3 +65,33 @@ fn push_advance_moves_branch_to_current_epoch() {
     let content = std::fs::read_to_string(&hotfix).unwrap();
     assert_eq!(content, "urgent fix\n");
 }
+
+#[test]
+fn push_advance_does_not_rewind_when_branch_is_ahead_of_epoch() {
+    let (repo, remote) = TestRepo::with_remote();
+
+    repo.add_file("default", "branch-only.txt", "keep branch tip\n");
+    repo.git_in_workspace("default", &["add", "branch-only.txt"]);
+    repo.git_in_workspace("default", &["commit", "-m", "feat: branch-only commit"]);
+
+    let branch_tip = repo.workspace_head("default");
+    repo.git(&["update-ref", "refs/heads/main", branch_tip.as_str()]);
+    // Leave refs/manifold/epoch/current at epoch0 to simulate stale epoch.
+
+    let output = repo.maw_ok(&["push", "--advance"]);
+    assert!(
+        output.contains("ahead of current epoch") || output.contains("Leaving branch unchanged")
+    );
+
+    let main_after = repo
+        .git(&["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
+    assert_eq!(main_after, branch_tip, "main should not be rewound");
+
+    let verify_dir = clone_remote(remote.path());
+    let pushed = verify_dir.path().join("branch-only.txt");
+    assert!(pushed.exists(), "branch tip commit should be pushed");
+    let content = std::fs::read_to_string(&pushed).unwrap();
+    assert_eq!(content, "keep branch tip\n");
+}
