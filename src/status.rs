@@ -533,7 +533,6 @@ fn render(summary: &StatusSummary, opts: &RenderOptions) {
 /// Gathers:
 /// - Non-default workspace names (via git worktree backend)
 /// - Changed/untracked files in the default workspace (via git status)
-/// - Whether the default workspace is stale (behind current epoch)
 /// - Branch sync status vs origin (via git rev-list)
 /// - Stray files at repo root
 fn collect_status() -> Result<StatusSummary> {
@@ -562,8 +561,9 @@ fn collect_status() -> Result<StatusSummary> {
         (Vec::new(), Vec::new())
     };
 
-    // Check if default workspace is stale (behind current epoch)
-    let is_stale = check_default_stale(&root, &default_ws_path);
+    // The default workspace tracks the configured branch and should not be
+    // treated as an ephemeral stale workspace.
+    let is_stale = false;
 
     // Check main branch sync status vs origin
     let main_sync = main_sync_status_inner(&root, branch);
@@ -616,35 +616,4 @@ fn collect_git_status(ws_path: &Path) -> Result<(Vec<String>, Vec<String>)> {
     }
 
     Ok((changed, untracked))
-}
-
-/// Check if the default workspace is stale (its HEAD differs from the current epoch).
-fn check_default_stale(root: &Path, default_ws_path: &Path) -> bool {
-    if !default_ws_path.exists() {
-        return false;
-    }
-
-    // Read current epoch
-    let epoch_output = Command::new("git")
-        .args(["rev-parse", "refs/manifold/epoch/current"])
-        .current_dir(root)
-        .output();
-
-    let epoch_oid = match epoch_output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return false, // No epoch ref = can't be stale
-    };
-
-    // Read default workspace HEAD
-    let ws_head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(default_ws_path)
-        .output();
-
-    let ws_oid = match ws_head {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return false,
-    };
-
-    epoch_oid != ws_oid
 }

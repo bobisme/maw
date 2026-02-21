@@ -59,3 +59,26 @@ fn status_text_format() {
     );
     assert!(!stdout.trim_start().starts_with('{'));
 }
+
+#[test]
+fn status_does_not_flag_default_stale_when_branch_ahead_of_epoch() {
+    let repo = TestRepo::new();
+
+    repo.add_file("default", "hotfix.txt", "urgent fix\n");
+    repo.git_in_workspace("default", &["add", "hotfix.txt"]);
+    repo.git_in_workspace("default", &["commit", "-m", "fix: hotfix"]);
+
+    let branch_tip = repo.workspace_head("default");
+    repo.git(&["update-ref", "refs/heads/main", branch_tip.as_str()]);
+    // Leave refs/manifold/epoch/current at epoch0 to simulate stale epoch.
+
+    let stdout = repo.maw_ok(&["status", "--format=json"]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status --format=json should produce valid JSON");
+
+    assert_eq!(
+        parsed.get("is_stale").and_then(|v| v.as_bool()),
+        Some(false),
+        "default branch workspace should not be reported stale when epoch lags branch"
+    );
+}
