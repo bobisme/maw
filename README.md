@@ -94,6 +94,7 @@ maw push
 | `maw ws create <name>` | Create isolated workspace for an agent |
 | `maw ws list` | List all workspaces |
 | `maw ws status` | Show workspace health, staleness, and conflicts |
+| `maw ws diff <name> [--against ...]` | Compare workspace changes (summary/patch/json) |
 | `maw exec <name> -- <cmd>` | Run any command inside a workspace |
 | `maw ws merge <a> <b> [--destroy]` | Merge one or more workspaces into default |
 | `maw ws destroy <name>` | Remove a workspace |

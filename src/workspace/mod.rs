@@ -12,6 +12,7 @@ use crate::format::OutputFormat;
 
 mod advance;
 mod create;
+mod diff;
 mod history;
 mod list;
 mod merge;
@@ -283,6 +284,46 @@ pub enum WorkspaceCommands {
         /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+    },
+
+    /// Show differences for a workspace against default/epoch/branch/revision
+    ///
+    /// By default compares `<workspace>` against the default workspace state.
+    /// Use `--against` to compare against:
+    /// - `default` (default behavior)
+    /// - `epoch` (refs/manifold/epoch/current)
+    /// - `branch:<name>` (e.g., branch:main)
+    /// - `oid:<sha>` (or bare sha)
+    ///
+    /// Formats:
+    /// - summary: concise file/status list with counts (default)
+    /// - patch: unified diff output
+    /// - json: machine-readable metadata + file-level stats
+    ///
+    /// Examples:
+    ///   maw ws diff alice
+    ///   maw ws diff alice --against epoch --format json
+    ///   maw ws diff alice --against branch:main --format patch
+    ///   maw ws diff alice --name-only
+    Diff {
+        /// Workspace to inspect
+        workspace: String,
+
+        /// Compare target: default, epoch, branch:<name>, oid:<sha>, or bare <sha>
+        #[arg(long)]
+        against: Option<String>,
+
+        /// Output format: summary, patch, or json
+        #[arg(long, value_enum, default_value = "summary")]
+        format: diff::DiffFormat,
+
+        /// Show changed paths only (one path per line)
+        #[arg(long)]
+        name_only: bool,
+
+        /// Comma-separated glob filters (e.g., src/**,README*)
+        #[arg(long, value_delimiter = ',')]
+        paths: Vec<String>,
     },
 
     /// Predict overlap risk between two workspaces
@@ -589,6 +630,13 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             touched::touched(&workspace, fmt)
         }
+        WorkspaceCommands::Diff {
+            workspace,
+            against,
+            format,
+            name_only,
+            paths,
+        } => diff::diff(&workspace, against.as_deref(), format, name_only, &paths),
         WorkspaceCommands::Overlap {
             ws1,
             ws2,
