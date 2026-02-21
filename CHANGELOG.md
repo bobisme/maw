@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.46.2
+
+### Fixed
+- **Release and push safety for stale epoch refs**. `maw release` and `maw push --advance` now use ancestry checks and refuse unsafe rewinds when `refs/manifold/epoch/current` lags behind the configured branch.
+- **Safer release tagging behavior**. Releases now tag the resolved safe release commit (branch tip when epoch is stale but branch is ahead) and error clearly on divergent ref graphs.
+
+### Added
+- Regression tests covering branch-ahead/stale-epoch scenarios for both `push --advance` and `release`.
+
 ## v0.46.1
 
 ### Fixed
