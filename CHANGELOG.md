@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.46.4
+
+### Fixed
+- **Doctor worktree validation**. `maw doctor` now fails when `ws/default` exists but is not a valid registered git worktree, with explicit guidance to run `maw init` for repair.
+
+### Added
+- Integration tests for doctor default-workspace validation (healthy registration and orphaned-worktree failure cases).
+
 ## v0.46.3
 
 ### Fixed
