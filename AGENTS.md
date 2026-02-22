@@ -9,11 +9,11 @@ Reviewer roles: security
 This repo is a clone of maw on the **`manifold`** branch. It is where we build the next generation of maw — replacing jj with git worktrees and implementing the Manifold architecture described in `notes/manifold-v2.md`.
 
 **Branch rules:**
-- All work here targets the **`manifold`** branch, NOT `main`.
+- Normal development in this repo targets the **`manifold`** branch.
 - The `.maw.toml` is configured with `branch = "manifold"`. Use `maw push` and `maw ws merge` normally — they target `manifold` automatically.
-- **NEVER push to `main`** from this repo. `main` is maintained in `~/src/maw` for bugfixes to current maw (v0.34.x).
-- **NEVER use raw `jj git push`** — it pushes ALL changed bookmarks including `main`. Only use `maw push` / `maw push --advance` which respect the `.maw.toml` branch config.
-- **NEVER use `jj bookmark set main`** or `jj git push --bookmark main`.
+- Final cutover is allowed: merge `manifold` into `main`, then retire `~/src/manifold` and continue in `~/src/maw`.
+- Avoid raw `jj git push` here — it can push all changed bookmarks, including `main`. Prefer `maw push` / `maw push --advance` while this repo is still active.
+- Avoid `jj bookmark set main` / `jj git push --bookmark main` during normal manifold development to prevent accidental main movement.
 - **NEVER run `maw release`, `cargo install`, `just install`, or `cargo install --path .`** from this repo. Manifold is in active development and installing it replaces the stable maw binary that other projects depend on. Releases and installs happen from `~/src/maw` on the `main` branch only.
 
 **Repo layout:**
