@@ -22,21 +22,12 @@ pub const MERGE_ARTIFACTS_DIR: &str = "merge";
 /// Config file name.
 pub const CONFIG_FILE: &str = "config.toml";
 
-/// Patterns to add to .gitignore.
-pub const GITIGNORE_PATTERNS: &[&str] = &[
-    "ws/",
-    ".manifold/epochs/",
-    ".manifold/cow/",
-    ".manifold/artifacts/",
-];
-
-/// Initialize the .manifold directory structure and update .gitignore.
+/// Initialize the .manifold directory structure.
 ///
 /// This function is idempotent:
 /// - Missing directories are created.
 /// - Existing directories are left alone.
 /// - `config.toml` is created with defaults if missing.
-/// - `.gitignore` is updated with necessary patterns if missing.
 #[allow(clippy::missing_errors_doc)]
 pub fn init_manifold_dir(root: &Path) -> io::Result<()> {
     let manifold_path = root.join(MANIFOLD_DIR);
@@ -52,9 +43,6 @@ pub fn init_manifold_dir(root: &Path) -> io::Result<()> {
 
     // Initialize default config if missing
     init_config_if_missing(&manifold_path.join(CONFIG_FILE))?;
-
-    // Update .gitignore
-    update_gitignore(root)?;
 
     Ok(())
 }
@@ -81,37 +69,6 @@ fn init_config_if_missing(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn update_gitignore(root: &Path) -> io::Result<()> {
-    let gitignore_path = root.join(".gitignore");
-    let mut content = if gitignore_path.exists() {
-        fs::read_to_string(&gitignore_path)?
-    } else {
-        String::new()
-    };
-
-    let existing_patterns: std::collections::HashSet<_> = content.lines().map(str::trim).collect();
-
-    let mut patterns_to_add = Vec::new();
-    for p in GITIGNORE_PATTERNS {
-        if !existing_patterns.contains(p) {
-            patterns_to_add.push(*p);
-        }
-    }
-
-    if !patterns_to_add.is_empty() {
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str("\n# Manifold\n");
-        for p in patterns_to_add {
-            content.push_str(p);
-            content.push('\n');
-        }
-        fs::write(gitignore_path, content)?;
-    }
-
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -131,12 +88,7 @@ mod tests {
         assert!(root.join(".manifold/artifacts/ws").is_dir());
         assert!(root.join(".manifold/artifacts/merge").is_dir());
         assert!(root.join(".manifold/config.toml").is_file());
-        assert!(root.join(".gitignore").is_file());
-
-        let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
-        for pattern in GITIGNORE_PATTERNS {
-            assert!(gitignore.contains(pattern));
-        }
+        assert!(!root.join(".gitignore").exists());
     }
 
     #[test]
@@ -146,13 +98,10 @@ mod tests {
 
         init_manifold_dir(root).unwrap();
         let config_first = fs::read_to_string(root.join(".manifold/config.toml")).unwrap();
-        let gitignore_first = fs::read_to_string(root.join(".gitignore")).unwrap();
 
         init_manifold_dir(root).unwrap();
         let config_second = fs::read_to_string(root.join(".manifold/config.toml")).unwrap();
-        let gitignore_second = fs::read_to_string(root.join(".gitignore")).unwrap();
 
         assert_eq!(config_first, config_second);
-        assert_eq!(gitignore_first, gitignore_second);
     }
 }

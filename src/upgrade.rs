@@ -50,9 +50,6 @@ pub fn run() -> Result<()> {
     // Step 8: Remove old .workspaces/ directory
     remove_old_workspaces_dir()?;
 
-    // Step 9: Update .gitignore
-    update_gitignore()?;
-
     // Print verification instructions
     let cwd = std::env::current_dir().context("Could not determine current directory")?;
     let default_path = cwd.join("ws").join("default");
@@ -310,87 +307,6 @@ fn remove_old_workspaces_dir() -> Result<()> {
 
     fs::remove_dir_all(old_dir).context("Failed to remove .workspaces/ directory")?;
     println!("[OK] Removed .workspaces/ directory");
-
-    Ok(())
-}
-
-/// Update .gitignore: replace .workspaces/ with ws/ if needed.
-fn update_gitignore() -> Result<()> {
-    let gitignore_path = Path::new(".gitignore");
-
-    if !gitignore_path.exists() {
-        // Just ensure ws/ is gitignored using the shared function
-        return ensure_workspaces_gitignored();
-    }
-
-    let content = fs::read_to_string(gitignore_path).context("Failed to read .gitignore")?;
-
-    // Replace .workspaces/ references with ws/
-    let has_old = content.lines().any(|line| {
-        let line = line.trim();
-        line == ".workspaces"
-            || line == ".workspaces/"
-            || line == "/.workspaces"
-            || line == "/.workspaces/"
-    });
-
-    if has_old {
-        let new_content: String = content
-            .lines()
-            .map(|line| {
-                let trimmed = line.trim();
-                if trimmed == ".workspaces"
-                    || trimmed == ".workspaces/"
-                    || trimmed == "/.workspaces"
-                    || trimmed == "/.workspaces/"
-                {
-                    "ws/"
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Ensure trailing newline
-        let new_content = if new_content.ends_with('\n') {
-            new_content
-        } else {
-            format!("{new_content}\n")
-        };
-
-        fs::write(gitignore_path, new_content).context("Failed to update .gitignore")?;
-        println!("[OK] Updated .gitignore: .workspaces/ -> ws/");
-    } else {
-        // Just ensure ws/ is in there
-        ensure_workspaces_gitignored()?;
-    }
-
-    Ok(())
-}
-
-fn ensure_workspaces_gitignored() -> Result<()> {
-    let path = Path::new(".gitignore");
-    let mut content = if path.exists() {
-        fs::read_to_string(path).context("Failed to read .gitignore")?
-    } else {
-        String::new()
-    };
-
-    let has_ws = content
-        .lines()
-        .any(|line| matches!(line.trim(), "ws" | "ws/" | "/ws" | "/ws/"));
-
-    if has_ws {
-        println!("[OK] .gitignore already excludes ws/");
-    } else {
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str("ws/\n");
-        fs::write(path, content).context("Failed to write .gitignore")?;
-        println!("[OK] Added ws/ to .gitignore");
-    }
 
     Ok(())
 }

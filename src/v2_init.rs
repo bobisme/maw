@@ -180,7 +180,6 @@ impl Default for InitOptions {
 /// 7. Create `.manifold/` directory structure
 /// 8. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
 /// 9. `git worktree add --detach ws/default <commit>` — default workspace
-/// 10. Configure `.gitignore` in the default workspace
 ///
 /// # Errors
 /// Returns [`InitError`] if any step fails. Partial state may remain
@@ -225,9 +224,6 @@ pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, In
 
     // 9. Create ws/default/ workspace
     let ws_default = create_default_workspace(&root, &epoch0_oid)?;
-
-    // 10. Configure .gitignore in the workspace
-    setup_workspace_gitignore(&ws_default)?;
 
     Ok(InitResult {
         repo_root: root,
@@ -401,26 +397,6 @@ fn create_default_workspace(root: &Path, epoch: &EpochId) -> Result<PathBuf, Ini
     Ok(ws_path)
 }
 
-/// Set up `.gitignore` in the default workspace.
-///
-/// The workspace needs its own `.gitignore` to exclude `ws/` and
-/// `.manifold/` ephemeral directories from version control.
-fn setup_workspace_gitignore(ws_path: &Path) -> Result<(), InitError> {
-    let gitignore_path = ws_path.join(".gitignore");
-
-    let content = "\
-# Manifold workspaces (each agent gets their own worktree)
-ws/
-
-# Manifold ephemeral data
-.manifold/epochs/
-.manifold/cow/
-.manifold/artifacts/
-";
-
-    std::fs::write(&gitignore_path, content)?;
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Git command helpers
@@ -581,23 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn greenfield_workspace_has_gitignore() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
-
-        let gitignore = std::fs::read_to_string(result.default_workspace.join(".gitignore"))
-            .expect(".gitignore should exist in workspace");
-        assert!(gitignore.contains("ws/"), ".gitignore should exclude ws/");
-        assert!(
-            gitignore.contains(".manifold/"),
-            ".gitignore should exclude .manifold/ dirs"
-        );
-    }
-
-    #[test]
     fn greenfield_rejects_existing_git() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -714,19 +673,6 @@ mod tests {
             .unwrap();
         let ws_oid = String::from_utf8_lossy(&ws_head.stdout).trim().to_owned();
         assert_eq!(ws_oid, result.epoch0.as_str());
-    }
-
-    #[test]
-    fn greenfield_gitignore_at_root() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
-
-        greenfield_init(&root, &InitOptions::default()).unwrap();
-
-        // layout::init_manifold_dir creates .gitignore at root
-        let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains("ws/"), "root .gitignore should have ws/");
     }
 
     #[test]
@@ -977,7 +923,6 @@ pub fn run() -> anyhow::Result<()> {
 /// 10. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
 /// 11. Create `ws/default/` via `git worktree add --detach`
 /// 12. Remove tracked source files from root (dirty files are kept with warning)
-/// 13. Update root `.gitignore`
 ///
 /// # Errors
 /// Returns [`BrownfieldInitError`] if any step fails. Partial state may remain
@@ -2054,55 +1999,6 @@ mod brownfield_tests {
         );
     }
 
-    #[test]
-    fn brownfield_preserves_gitignore_entries() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-
-        // Set up repo with existing .gitignore
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-
-        fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
-        fs::write(root.join("README.md"), "hello\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
-
-        // .gitignore at root should still have original entries
-        let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains("target/"), "target/ should be preserved");
-        assert!(gitignore.contains("*.log"), "*.log should be preserved");
-        // Manifold entries should also be present
-        assert!(gitignore.contains("ws/"), "ws/ should be added");
-    }
 
     #[test]
     fn brownfield_is_idempotent() {
@@ -2476,51 +2372,4 @@ mod brownfield_tests {
         );
     }
 
-    #[test]
-    fn brownfield_gitignore_updated() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-
-        // Set up repo WITHOUT an existing .gitignore
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        fs::write(root.join("README.md"), "hi\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
-
-        let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains("ws/"), ".gitignore should include ws/");
-        assert!(
-            gitignore.contains(".manifold/"),
-            ".gitignore should include .manifold/ patterns"
-        );
-    }
 }

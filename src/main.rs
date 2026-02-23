@@ -89,7 +89,7 @@ enum Commands {
 
     /// Initialize maw in the current repository
     ///
-    /// Ensures .manifold/ is initialized and ws/ is gitignored.
+    /// Ensures .manifold/ directory structure is initialized.
     /// Safe to run multiple times.
     Init,
 
