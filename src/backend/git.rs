@@ -654,12 +654,20 @@ fn parse_porcelain_status(output: &str) -> Vec<PathBuf> {
         // Path starts at byte offset 3 (after "XY ").
         let path_str = &line[3..];
         if !path_str.is_empty() {
+            // Handle renames/copies: "old -> new". We want the 'new' part.
+            // Git status porcelain v1 format: R  ORIG -> NEW
+            let path_part = if line.starts_with('R') || line.starts_with('C') {
+                path_str.split(" -> ").last().unwrap_or(path_str)
+            } else {
+                path_str
+            };
+
             // Strip quotes if present (git quotes paths with special chars).
-            let path_str = path_str
+            let path_part = path_part
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or(path_str);
-            paths.push(PathBuf::from(path_str));
+                .unwrap_or(path_part);
+            paths.push(PathBuf::from(path_part));
         }
     }
     paths
@@ -685,10 +693,12 @@ fn parse_name_status(
             ('M', rest.trim())
         } else if let Some(rest) = line.strip_prefix("D\t").or_else(|| line.strip_prefix("D ")) {
             ('D', rest.trim())
-        } else if let Some(rest) = line.strip_prefix("R\t").or_else(|| line.strip_prefix("R ")) {
+        } else if line.starts_with('R') {
             // Rename: "R100\told\tnew" — treat old as deleted, new as added
-            if let Some((_, new)) = rest.split_once('\t') {
-                added.push(PathBuf::from(new.trim()));
+            // Split into [status, old, new]
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                added.push(PathBuf::from(parts[2].trim()));
             }
             continue;
         } else {
@@ -1142,6 +1152,30 @@ mod tests {
         assert_eq!(added, vec![PathBuf::from("src/new.rs")]);
         assert_eq!(modified, vec![PathBuf::from("src/main.rs")]);
         assert_eq!(deleted, vec![PathBuf::from("old.rs")]);
+    }
+
+    #[test]
+    fn test_parse_name_status_rename() {
+        let mut added = Vec::new();
+        let mut modified = Vec::new();
+        let mut deleted = Vec::new();
+
+        // git diff --name-status output for rename: R100\told\tnew
+        let output = "R100\told_name.rs\tnew_name.rs\n";
+        parse_name_status(output, &mut added, &mut modified, &mut deleted);
+
+        // Should interpret as: added "new_name.rs"
+        assert_eq!(added, vec![PathBuf::from("new_name.rs")]);
+    }
+
+    #[test]
+    fn test_parse_porcelain_status_rename() {
+        // git status --porcelain v1 output for rename: R  old -> new
+        let output = "R  old.rs -> new.rs\n";
+        let paths = parse_porcelain_status(output);
+
+        // Should return only the new path "new.rs"
+        assert_eq!(paths, vec![PathBuf::from("new.rs")]);
     }
 
     #[test]
