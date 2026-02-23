@@ -274,12 +274,12 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
                 stray.len(),
                 stray.join(", ")
             ),
-            fix: Some("Fix: maw init (moves files into ws/default/)".to_string()),
+            fix: Some("Fix: maw init (moves tracked files) or move/remove manually".to_string()),
         }
     }
 }
 
-const BARE_ROOT_ALLOWED: &[&str] = &["ws", "repo.git", "AGENTS.md", "CLAUDE.md"];
+const BARE_ROOT_ALLOWED: &[&str] = &["ws", "repo.git", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
 
 fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
     let Some(root) = root else {
