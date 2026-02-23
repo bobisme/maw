@@ -36,6 +36,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glob::Pattern;
+use tempfile::Builder;
 
 use crate::backend::WorkspaceBackend;
 use crate::config::{ConfigError, ManifoldConfig, MergeConfig, MergeDriver, MergeDriverKind};
@@ -569,10 +570,13 @@ fn run_regenerate_drivers(
     compiled: &[CompiledDriver],
     regenerate_by_driver: &BTreeMap<usize, BTreeSet<PathBuf>>,
 ) -> Result<Vec<ResolvedChange>, BuildPhaseError> {
-    let nonce: u64 = rand::random();
-    let worktree_path = std::env::temp_dir().join(format!("maw-build-regenerate-{nonce}"));
+    let tmp_dir = Builder::new()
+        .prefix("maw-build-regenerate")
+        .tempdir()
+        .map_err(|e| BuildPhaseError::Driver(format!("failed to create temp dir: {e}")))?;
+    let worktree_path = tmp_dir.path();
 
-    create_temp_worktree(repo_root, candidate, &worktree_path)?;
+    create_temp_worktree(repo_root, candidate, worktree_path)?;
 
     let result = (|| -> Result<Vec<ResolvedChange>, BuildPhaseError> {
         for (index, paths) in regenerate_by_driver {
@@ -597,7 +601,7 @@ fn run_regenerate_drivers(
 
             let output = Command::new("sh")
                 .args(["-c", command])
-                .current_dir(&worktree_path)
+                .current_dir(worktree_path)
                 .output()
                 .map_err(|e| {
                     BuildPhaseError::Driver(format!(
@@ -650,8 +654,7 @@ fn run_regenerate_drivers(
         Ok(regenerated)
     })();
 
-    let cleanup_result = remove_temp_worktree(repo_root, &worktree_path);
-    let _ = fs::remove_dir_all(&worktree_path);
+    let cleanup_result = remove_temp_worktree(repo_root, worktree_path);
 
     match (result, cleanup_result) {
         (Err(e), _) | (Ok(_), Err(e)) => Err(e),

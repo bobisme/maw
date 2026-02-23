@@ -33,6 +33,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use tempfile::Builder;
+
 use crate::model::conflict::{
     AtomEdit, ConflictAtom, ConflictReason as ModelConflictReason, Region,
 };
@@ -633,13 +635,11 @@ fn diff3_merge_bytes(
     // We intentionally use temp files + git merge-file instead of adding a new
     // diff3 crate dependency. BUILD/COMMIT already shell out to git, and this
     // keeps behavior aligned with git's merge semantics.
-    let nonce: u64 = rand::random();
-    let tmp_dir = std::env::temp_dir().join(format!("maw-resolve-diff3-{nonce}"));
-    fs::create_dir_all(&tmp_dir)?;
+    let tmp_dir = Builder::new().prefix("maw-resolve-diff3").tempdir()?;
 
-    let ours_path = tmp_dir.join("ours.tmp");
-    let base_path = tmp_dir.join("base.tmp");
-    let theirs_path = tmp_dir.join("theirs.tmp");
+    let ours_path = tmp_dir.path().join("ours.tmp");
+    let base_path = tmp_dir.path().join("base.tmp");
+    let theirs_path = tmp_dir.path().join("theirs.tmp");
 
     fs::write(&ours_path, ours)?;
     fs::write(&base_path, base)?;
@@ -654,8 +654,7 @@ fn diff3_merge_bytes(
         .arg(&theirs_path)
         .output()?;
 
-    // Best-effort cleanup.
-    let _ = fs::remove_dir_all(&tmp_dir);
+    // TempDir is dropped automatically here, cleaning up the directory.
 
     match output.status.code() {
         Some(0) => Ok(Diff3Outcome::Clean(output.stdout)),
