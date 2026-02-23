@@ -1,15 +1,3 @@
-# BotBus index (generated)
-.botbus/index.sqlite
-
-# Agent workspaces (each has own .jj, don't track)
-ws/
-.workspaces/
-
-# bv (beads viewer) local config and caches
-.bones/
-
-
 # Added by cargo
-
 /target
 opencode.json
