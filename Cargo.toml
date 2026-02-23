@@ -8,12 +8,12 @@ license = "MIT"
 [features]
 default = ["ast-merge"]
 ast-merge = [
-    "dep:tree-sitter",
-    "dep:tree-sitter-rust",
-    "dep:tree-sitter-python",
-    "dep:tree-sitter-typescript",
-    "dep:tree-sitter-javascript",
-    "dep:tree-sitter-go",
+  "dep:tree-sitter",
+  "dep:tree-sitter-rust",
+  "dep:tree-sitter-python",
+  "dep:tree-sitter-typescript",
+  "dep:tree-sitter-javascript",
+  "dep:tree-sitter-go",
 ]
 
 [dependencies]
