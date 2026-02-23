@@ -5,11 +5,11 @@ version = "1.0.13"
 push_main = true
 
 [project]
-name = "manifold"
+name = "maw"
 type = ["cli"]
 languages = []
-default_agent = "manifold-dev"
-channel = "manifold"
+default_agent = "maw-dev"
+channel = "maw"
 install_command = "maw exec default -- just install"
 
 # Companion tools to enable

@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run check-bus-inbox --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run check-bus-inbox --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -13,7 +13,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run claim-agent --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run claim-agent --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -24,7 +24,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run init-agent --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run init-agent --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -33,7 +33,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run check-jj --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run check-jj --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -44,7 +44,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run claim-agent --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run claim-agent --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -55,7 +55,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run init-agent --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run init-agent --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -64,7 +64,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run check-jj --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run check-jj --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
@@ -73,7 +73,7 @@
       {
         "hooks": [
           {
-            "command": "botbox hooks run claim-agent --project-root /home/bob/src/manifold",
+            "command": "botbox hooks run claim-agent --project-root /home/bob/src/maw",
             "type": "command"
           }
         ],
