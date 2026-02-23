@@ -6,7 +6,7 @@ ws/
 .workspaces/
 
 # bv (beads viewer) local config and caches
-.bv/
+.bones/
 
 
 # Added by cargo
