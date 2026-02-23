@@ -2,6 +2,17 @@
 
 All notable changes to maw.
 
+## v0.46.7
+
+### Fixed
+- **Rename handling in git status/diff parsing**. Porcelain status and name-status parsers now correctly extract the new path from renames and copies instead of including the full "old -> new" string.
+- **Doctor bare-root check**. `GEMINI.md` is now allowed at the bare repo root alongside `AGENTS.md` and `CLAUDE.md`.
+
+### Changed
+- **Removed inert .gitignore writing**. `maw init` and `maw upgrade` no longer write a root `.gitignore` or workspace `.gitignore` — these were no-ops in a bare repo.
+- **Temp dir cleanup in merge**. Build-phase and resolve now use `tempfile::Builder` for automatic cleanup instead of manual nonce-based temp dirs.
+- **Project config renamed**. Botbox and Claude hook paths updated from `manifold` to `maw`.
+
 ## v0.46.6
 
 ### Added
