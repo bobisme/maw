@@ -1683,6 +1683,32 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     advance_merge_state(&manifold_dir, MergePhase::Commit)?;
 
     let epoch_before_oid = frozen.epoch.oid().clone();
+    let branch_ref = format!("refs/heads/{branch}");
+
+    // Pre-flight: verify the branch hasn't diverged from the epoch since
+    // PREPARE. If direct commits were made to the branch outside of maw
+    // between PREPARE and COMMIT, the branch CAS will fail after the epoch
+    // ref has already moved, leaving epoch and branch permanently diverged.
+    // Detect and abort cleanly before touching any refs.
+    if let Ok(Some(current_branch)) = crate::refs::read_ref(&root, &branch_ref) {
+        if current_branch != epoch_before_oid {
+            abort_merge(
+                &manifold_dir,
+                "branch diverged from epoch since PREPARE (direct commits detected)",
+            );
+            bail!(
+                "Merge COMMIT aborted: branch '{branch}' has diverged from epoch since PREPARE.\n  \
+                 Expected: {}\n  \
+                 Actual:   {}\n  \
+                 Cause: commits were made directly to '{branch}' outside of maw.\n  \
+                 Fix: run `maw init` to resync the epoch ref to the current branch HEAD,\n  \
+                 then retry the merge.",
+                &epoch_before_oid.as_str()[..12],
+                &current_branch.as_str()[..12],
+            );
+        }
+    }
+
     match run_commit_phase(&root, branch, &epoch_before_oid, &build_output.candidate) {
         Ok(CommitResult::Committed) => {
             textln!(
@@ -1708,9 +1734,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     bail!("Merge COMMIT phase failed: could not update refs.");
                 }
                 Err(e) => {
+                    // Epoch moved but branch is at an unexpected value —
+                    // abort so the merge-state doesn't stay stuck at "commit".
+                    abort_merge(
+                        &manifold_dir,
+                        &format!("partial commit recovery failed: {e}"),
+                    );
                     bail!(
                         "Merge COMMIT phase partially applied and recovery failed: {e}\n  \
-                         Manual recovery: check refs/manifold/epoch/current and refs/heads/{branch}"
+                         The merge-state has been aborted. Check refs manually:\n  \
+                         refs/manifold/epoch/current and refs/heads/{branch}"
                     );
                 }
             }
