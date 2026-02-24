@@ -885,7 +885,14 @@ impl Default for BrownfieldInitOptions {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    let root = std::env::current_dir()?;
+    // If we're inside an existing git repo (including inside a workspace
+    // worktree), resolve the actual repo root rather than using CWD directly.
+    // Running `maw init` from inside ws/alice/ should initialize the repo at
+    // its real root, not the workspace directory.
+    let root = crate::workspace::repo_root().unwrap_or_else(|_| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+
     let git_dir = root.join(".git");
 
     if git_dir.exists() {

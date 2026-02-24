@@ -702,8 +702,41 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 }
 
 pub fn repo_root() -> Result<PathBuf> {
-    // First preference: find an ancestor with Manifold markers.
-    // This is robust for both legacy and repo.git common-dir layouts.
+    // First preference: ask git for its common-dir. This is the authoritative
+    // answer from any worktree context — git always knows its own common-dir,
+    // whether we're at the repo root, inside ws/alice/, or deep in a subtree.
+    // The ancestor walk is tried second because it can be fooled: ws/<name>/
+    // has a .git gitfile, so if .manifold/ was accidentally created inside a
+    // workspace (e.g. by running `maw init` from inside one), the walk would
+    // incorrectly return the workspace directory as the repo root.
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let mut root = common_dir
+                .parent()
+                .context("Cannot determine repo root from git common dir")?
+                .to_path_buf();
+
+            // Support nested common-dir layouts like <root>/.manifold/git.
+            if root.file_name().is_some_and(|name| name == ".manifold") {
+                root = root
+                    .parent()
+                    .context("Cannot determine repo root from nested common dir")?
+                    .to_path_buf();
+            }
+
+            // repo.git layout: common-dir is <root>/repo.git, so parent is <root>.
+            // Standard layout: common-dir is <root>/.git, so parent is <root>.
+            // Both cases give us the correct root directly.
+            return Ok(root);
+        }
+    }
+
+    // Fallback: ancestor walk for Manifold markers. Used when git is not
+    // available or not in a git repo at all.
     let cwd = std::env::current_dir().context("Could not determine current directory")?;
     if let Some(root) = cwd.ancestors().find(|dir| {
         dir.join(".manifold").is_dir() && (dir.join("ws").is_dir() || dir.join(".git").exists())
@@ -711,33 +744,11 @@ pub fn repo_root() -> Result<PathBuf> {
         return Ok(root.to_path_buf());
     }
 
-    // Fallback: derive from git common-dir.
-    let output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .context("Failed to run git rev-parse --git-common-dir")?;
-    if !output.status.success() {
-        bail!(
-            "Not in a git repository: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let mut root = common_dir
-        .parent()
-        .context("Cannot determine repo root from git common dir")?
-        .to_path_buf();
-
-    // Support nested common-dir layouts like <root>/.manifold/git.
-    if root.file_name().is_some_and(|name| name == ".manifold") {
-        root = root
-            .parent()
-            .context("Cannot determine repo root from nested common dir")?
-            .to_path_buf();
-    }
-
-    Ok(root)
+    bail!(
+        "Not in a Manifold repository. Run `maw init` to initialize one.\n  \
+         Current directory: {}",
+        cwd.display()
+    )
 }
 
 /// Return the best directory for running git commands.
