@@ -286,6 +286,12 @@ fn merge_patch_sets(
     all_conflicts.sort_by(|a, b| a.path.cmp(&b.path));
     all_conflicts.dedup_by(|a, b| a.path == b.path);
 
+    // Remove conflicting paths from the merged patch set so they don't
+    // erroneously get included due to successive joins.
+    for conflict in &all_conflicts {
+        accumulated.patches.remove(&conflict.path);
+    }
+
     (Some(accumulated), all_conflicts)
 }
 
@@ -513,6 +519,37 @@ mod tests {
         assert!(!gv.is_clean());
         assert!(!gv.conflicts.is_empty());
         assert_eq!(gv.conflicts[0].path, PathBuf::from("src/main.rs"));
+    }
+
+    #[test]
+    fn three_workspaces_conflicting_patches() {
+        // 3 workspaces adding different content to the same path
+        let view1 = make_view(
+            "ws-1",
+            Some('a'),
+            [add_patch("src/main.rs", 'a', 1)].into_iter().collect(),
+            2,
+        );
+        let view2 = make_view(
+            "ws-2",
+            Some('a'),
+            [add_patch("src/main.rs", 'b', 2)].into_iter().collect(),
+            2,
+        );
+        let view3 = make_view(
+            "ws-3",
+            Some('a'),
+            [add_patch("src/main.rs", 'c', 3)].into_iter().collect(),
+            2,
+        );
+
+        let gv = compute_global_view_from_views(&[view1, view2, view3], vec![]);
+        assert_eq!(gv.workspace_count(), 3);
+        assert!(!gv.is_clean());
+        assert!(!gv.conflicts.is_empty());
+        assert_eq!(gv.conflicts[0].path, PathBuf::from("src/main.rs"));
+        // The conflict path must NOT be present in the merged set
+        assert!(!gv.merged_patch_set.as_ref().unwrap().patches.contains_key(&PathBuf::from("src/main.rs")));
     }
 
     // -----------------------------------------------------------------------
