@@ -44,6 +44,8 @@ pub fn overlap(ws1: &str, ws2: &str, format: OutputFormat) -> Result<()> {
         .map(|p| p.display().to_string())
         .collect();
 
+    let risk = if overlap_paths.is_empty() { "low" } else { "high" };
+
     let output = OverlapOutput {
         workspace_a: touched_a.workspace.clone(),
         workspace_b: touched_b.workspace.clone(),
@@ -51,12 +53,7 @@ pub fn overlap(ws1: &str, ws2: &str, format: OutputFormat) -> Result<()> {
         touched_b_count: touched_b.touched_paths.len(),
         overlap_count: overlap_paths.len(),
         overlap_paths,
-        risk: if set_a.is_empty() || set_b.is_empty() || set_a.intersection(&set_b).next().is_none()
-        {
-            "low"
-        } else {
-            "high"
-        },
+        risk,
     };
 
     match format {
