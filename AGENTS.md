@@ -1,55 +1,22 @@
-# Manifold (next-gen maw)
+# maw
 
 Project type: cli
 Tools: `beads`, `maw`, `crit`, `botbus`, `botty`
 Reviewer roles: security
 
-## IMPORTANT: This is the Manifold development repo
-
-This repo is a clone of maw on the **`manifold`** branch. It is where we build the next generation of maw — replacing jj with git worktrees and implementing the Manifold architecture described in `notes/manifold-v2.md`.
-
-**Branch rules:**
-
-- Normal development in this repo targets the **`manifold`** branch.
-- The `.maw.toml` is configured with `branch = "manifold"`. Use `maw push` and `maw ws merge` normally — they target `manifold` automatically.
-- Final cutover is allowed: merge `manifold` into `main`, then retire `~/src/manifold` and continue in `~/src/maw`.
-- Avoid raw `jj git push` here — it can push all changed bookmarks, including `main`. Prefer `maw push` / `maw push --advance` while this repo is still active.
-- Avoid `jj bookmark set main` / `jj git push --bookmark main` during normal manifold development to prevent accidental main movement.
-- **NEVER run `maw release`, `cargo install`, `just install`, or `cargo install --path .`** from this repo. Manifold is in active development and installing it replaces the stable maw binary that other projects depend on. Releases and installs happen from `~/src/maw` on the `main` branch only.
-
-**Repo layout:**
-
-- `~/src/maw` — current maw, ships bugfixes on `main`
-- `~/src/manifold` (this repo) — Manifold development on `manifold` branch
-- Both repos share the same GitHub remote (`bobisme/maw`)
-
-**Design doc:** `notes/manifold-v2.md` — full architecture, data model, implementation phases.
-
-## Repo model terminology (important)
-
-Use these terms precisely when discussing migration work:
-
-- **v1 model (legacy):** `.workspaces/` layout with jj-centric workspace handling.
-- **v2 bare model (legacy transition):** `ws/<name>/` layout with bare-root workflow. This model predates full Manifold metadata adoption.
-- **Manifold model (target):** Manifold metadata and transport (`.manifold/`, `refs/manifold/*`) replacing jj-specific coordination paths.
-
-Current repo state is a **hybrid transition**: some commands and docs are still jj-based while Manifold pieces are being integrated. Do not assume "v2" means "fully Manifold".
-
----
-
-This project uses **maw** for workspace management, **jj** (Jujutsu) for version control, and **beads** for issue tracking.
+This project uses **maw** for workspace management, **git** for version control, and **beads** for issue tracking.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Create your workspace (automatically creates a commit you own)
+# Create your workspace (isolated git worktree)
 maw ws create <your-name>
 
-# Work - jj tracks changes automatically (use the absolute path shown by create)
+# Work in your workspace
 # ... edit files in ws/<your-name>/ ...
-maw exec <your-name> -- jj describe -m "feat: what you're implementing"
+maw exec <your-name> -- git add -A && maw exec <your-name> -- git commit -m "feat: what you're implementing"
 
 # Check status (see all agent work, conflicts, stale warnings)
 maw ws status
@@ -58,9 +25,7 @@ maw ws status
 maw ws merge alice bob --destroy
 ```
 
-**Key concept:** Each workspace gets its own commit. You own your commit - no other agent will modify it. This prevents conflicts during concurrent work.
-
-**Note:** Your workspace starts with an empty "wip" commit - this is intentional. The empty commit gives you ownership immediately, preventing divergent commits when multiple agents work concurrently. Just describe or commit your changes as you work; empty commits are naturally handled during merge.
+**Key concept:** Each workspace is an isolated git worktree. You own your workspace - no other agent will modify it. This prevents conflicts during concurrent work.
 
 ---
 
@@ -113,58 +78,36 @@ maw exec alice -- ls -la src/
 
 ### Making Changes
 
-jj automatically tracks changes - no `git add` needed.
-
 ```bash
 # See what you've changed
-jj diff
-jj status
+maw exec <your-name> -- git status
+maw exec <your-name> -- git diff
 
-# Describe your work (saves to current commit)
-jj describe -m "feat: description of changes"
-
-# Or commit and start fresh
-jj commit -m "feat: completed feature"
+# Commit your work
+maw exec <your-name> -- git add -A
+maw exec <your-name> -- git commit -m "feat: description of changes"
 ```
 
 ### Staying in Sync
 
 ```bash
-# See commits (includes all workspaces by default)
-jj log
-
-# See only workspace working copies
-jj log -r 'working_copies()'
-
-# If workspace is stale (another workspace modified shared history)
+# If workspace is stale (epoch has advanced since workspace creation)
 maw ws sync
 ```
 
-**Important**: Unlike git worktrees, jj workspaces share the entire repo state. If another workspace modifies a commit in your ancestry, your workspace becomes "stale". Always run `maw ws sync` at the start of a session.
+**Important**: When the epoch advances (another workspace is merged), your workspace becomes "stale". Run `maw ws sync` to update it to the latest epoch. For persistent workspaces, use `maw ws advance <name>` instead.
 
 ### Handling Conflicts
 
-jj records conflicts in commits rather than blocking. If you see conflicts:
+Conflicts are detected during `maw ws merge`. If conflicts occur:
 
 ```bash
-jj status  # shows conflicted files
-# Edit files to resolve (remove conflict markers)
-jj describe -m "resolve: merge conflicts"
+# Check for conflicts before merging
+maw ws merge <name> --check
+
+# If conflicts exist, resolve them in the workspace then retry
+maw ws conflicts <name>
 ```
-
-### Handling Divergent Commits
-
-Divergent commits are rare with maw because each agent gets their own commit. But if `maw ws status` shows "Divergent Commits":
-
-```bash
-# View divergent commits
-jj log  # look for (divergent) markers
-
-# Fix by abandoning unwanted versions
-jj abandon <change-id>/0   # keep /1, abandon /0
-```
-
-**Important**: Only modify your own commits. Don't run `jj describe main` or modify other shared commits - this can cause divergence if another agent does the same concurrently.
 
 ---
 
@@ -209,27 +152,21 @@ crit reviews merge <review_id>
 
 ```bash
 # Edit Cargo.toml version (e.g., 0.1.0 → 0.2.0)
-# Also update the install command version tag in README.md
-
-jj describe -m "chore: bump version to X.Y.Z
-
-Co-Authored-By: <model-name> <model-email>"
+# Commit the version bump
+git commit -am "chore: bump version to X.Y.Z"
 ```
 
 ### 4. Push to Remote
 
 ```bash
-# If bookmark is already set (e.g., after maw ws merge):
+# After maw ws merge (branch is already set):
 maw push
 
-# If you committed directly and need to advance the branch bookmark:
+# After committing directly (need to advance branch to latest commit):
 maw push --advance
 ```
 
 `maw push` pushes the configured branch to origin with sync checks and clear error messages.
-`--advance` moves the branch bookmark to `@-` (parent of working copy) before pushing — use this after committing work directly (not via `maw ws merge`, which sets the bookmark automatically).
-
-**Understanding push output**: When the output says `Changes to push to origin:` followed by branch/bookmark info, **the push has already completed**. This is a confirmation, not a preview.
 
 ### 5. Tag the Release
 
@@ -238,23 +175,15 @@ maw push --advance
 maw release vX.Y.Z
 
 # Install locally and verify
-cargo install --path .
+just install
 maw --version
-```
-
-### First-time Setup (colocated repos)
-
-If `main` bookmark doesn't exist or isn't tracking remote:
-
-```bash
-jj bookmark track main@origin  # Track remote main
 ```
 
 ### Troubleshooting
 
-**Push issues**: `maw push` handles bookmark management automatically. If it fails, it will tell you why and how to fix it. For manual recovery: `jj bookmark set main -r @-` then `jj git push`.
+**Push issues**: `maw push` handles branch management automatically. If it fails, it will tell you why and how to fix it.
 
-**"Bookmark is behind remote"** - Someone else pushed. Pull first: `jj git fetch && jj rebase -d main@origin`.
+**"Branch is behind remote"** - Someone else pushed. Pull first: `git pull --rebase`.
 
 ### Quick Reference
 
@@ -263,7 +192,7 @@ jj bookmark track main@origin  # Track remote main
 | Merge work                 | `maw ws merge <a> <b> --destroy`                       |
 | Create review              | `crit reviews create --title "..."`                    |
 | Approve/merge review       | `crit reviews approve <id> && crit reviews merge <id>` |
-| Bump version               | Edit `Cargo.toml` + `README.md`, then `jj describe`    |
+| Bump version               | Edit `Cargo.toml`, then `git commit`                   |
 | Push (after merge)         | `maw push`                                             |
 | Push (after direct commit) | `maw push --advance`                                   |
 | Tag release                | `maw release vX.Y.Z`                                   |
@@ -282,15 +211,15 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 
 **Errors** must include:
 
-- What failed (include stderr from jj when available)
+- What failed (include stderr when available)
 - How to fix it (exact command to run)
-- Example: `"jj workspace add failed: {stderr}\n  Check: maw doctor"`
+- Example: `"Workspace create failed: {stderr}\n  Check: maw doctor"`
 
 **Success output** must include:
 
 - What happened
 - What to do next (exact commands)
-- Example: `"Workspace 'agent-a' ready!\n  Path: /abs/path\n  maw exec agent-a -- jj describe -m \"feat: ...\""`
+- Example: `"Workspace 'agent-a' ready!\n  Path: /abs/path\n  Next: edit files, then maw ws merge agent-a --destroy"`
 
 **Principles**:
 
@@ -298,7 +227,6 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 - Include copy-pasteable commands, not just descriptions
 - Keep it brief — agents are token-conscious
 - Use structured prefixes where appropriate: `WARNING:`, `IMPORTANT:`, `To fix:`, `Next:`
-- Assume agents have **zero jj knowledge** — maw is their first contact with jj. Every jj concept (describe, working copy, stale, bookmarks, @- syntax) needs a one-line explanation the first time it appears in a given output context
 - All --help text and runtime output must work in **sandboxed environments** where `cd` doesn't persist between tool calls. Never instruct agents to `cd` into a workspace — use `maw exec <name> -- <cmd>` for all commands in workspaces
 - All file operation instructions must reference **absolute workspace paths**, not relative ones. Agents use Read/Write/Edit tools with absolute paths, not just bash
 
@@ -306,13 +234,13 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 
 ## Architecture
 
-- **v2 bare repo model**: Workspaces live in `ws/<name>/`
+- **Bare repo model**: Workspaces live in `ws/<name>/` as git worktrees
 - `ws/default/` is the default workspace (merge target, push source)
-- No default workspace — repo root is metadata only (`.git/`, `.jj/`, `ws/`, config files)
+- Repo root is metadata only (`.git/`, `.manifold/`, `ws/`, config files) — no source files at root
 - `ws/` is gitignored
-- Each workspace is a separate working copy sharing the single `.jj/` backing store
-- `jj log` shows commits across all workspaces by default
-- Agents never block each other - conflicts are recorded, not blocking
+- Each workspace is an isolated git worktree with its own working copy
+- Manifold metadata lives in `.manifold/` and `refs/manifold/*`
+- Agents never block each other - conflicts are detected at merge time
 
 <!-- botbox:managed-start -->
 ## Botbox Workflow
