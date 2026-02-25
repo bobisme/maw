@@ -529,9 +529,15 @@ impl WorkspaceBackend for GitWorktreeBackend {
     /// as additions.
     ///
     /// # Implementation
-    /// 1. `git diff --name-status <epoch> HEAD` — committed changes
-    /// 2. `git diff --name-status HEAD` — uncommitted tracked changes
-    /// 3. `git ls-files --others --exclude-standard` — untracked files
+    ///
+    /// The diff base is the **epoch** (from `refs/manifold/epoch/current`), NOT
+    /// the workspace's HEAD. Agents may commit changes inside a workspace,
+    /// which advances HEAD beyond the epoch. If we diffed against HEAD, those
+    /// committed changes would be invisible and the merge engine would see an
+    /// empty workspace.
+    ///
+    /// 1. `git diff --name-status <epoch>` — all changes (committed + uncommitted)
+    /// 2. `git ls-files --others --exclude-standard` — untracked files
     fn snapshot(&self, name: &WorkspaceId) -> Result<SnapshotResult, Self::Error> {
         let ws_path = self.workspace_path(name);
         if !ws_path.exists() {
@@ -540,27 +546,29 @@ impl WorkspaceBackend for GitWorktreeBackend {
             });
         }
 
-        // Read the base epoch from the worktree's HEAD
-        // (worktree HEAD is set to the epoch commit on creation)
-        let head_oid = Self::git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
-        let head_oid = head_oid.trim();
+        // Use the epoch as the diff base, not HEAD.
+        // If the epoch ref is missing, fall back to HEAD (pre-Manifold compat).
+        let base_oid = match self.current_epoch_opt() {
+            Some(epoch) => epoch.as_str().to_owned(),
+            None => {
+                let head = Self::git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
+                head.trim().to_owned()
+            }
+        };
 
         let mut added = Vec::new();
         let mut modified = Vec::new();
         let mut deleted = Vec::new();
 
-        // 1. Uncommitted changes relative to HEAD (working tree vs index+HEAD)
-        let diff_output = Self::git_stdout_in(&ws_path, &["diff", "--name-status", head_oid])?;
+        // 1. All changes (committed + working tree) relative to the epoch.
+        // `git diff <epoch>` compares the epoch tree against the current working
+        // tree, capturing both committed and uncommitted modifications.
+        let diff_output =
+            Self::git_stdout_in(&ws_path, &["diff", "--name-status", &base_oid])?;
 
         parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
 
-        // 2. Staged changes not yet reflected (index vs HEAD)
-        let staged_output =
-            Self::git_stdout_in(&ws_path, &["diff", "--name-status", "--cached", head_oid])?;
-
-        parse_name_status(&staged_output, &mut added, &mut modified, &mut deleted);
-
-        // 3. Untracked files (not in .gitignore)
+        // 2. Untracked files (not in .gitignore)
         let untracked_output =
             Self::git_stdout_in(&ws_path, &["ls-files", "--others", "--exclude-standard"])?;
 
@@ -574,7 +582,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             }
         }
 
-        // Deduplicate (a file might appear in both staged and unstaged)
+        // Deduplicate
         added.sort();
         added.dedup();
         modified.sort();
