@@ -315,10 +315,17 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 - Agents never block each other - conflicts are recorded, not blocking
 
 <!-- botbox:managed-start -->
-
 ## Botbox Workflow
 
-**New here?** Read [worker-loop.md](.agents/botbox/worker-loop.md) first — it covers the complete triage → start → work → finish cycle.
+### How to Make Changes
+
+1. **Create a bone** to track your work: `maw exec default -- bn create --title "..." --description "..."`
+2. **Create a workspace** for your changes: `maw ws create --random` — this gives you `ws/<name>/`
+3. **Edit files in your workspace** (`ws/<name>/`), never in `ws/default/`
+4. **Merge when done**: `maw ws merge <name> --destroy`
+5. **Close the bone**: `maw exec default -- bn done <id>`
+
+Do not create git branches manually — `maw ws create` handles branching for you. See [worker-loop.md](.agents/botbox/worker-loop.md) for the full triage → start → work → finish cycle.
 
 **All tools have `--help`** with usage examples. When unsure, run `<tool> --help` or `<tool> <command> --help`.
 
@@ -339,7 +346,6 @@ project-root/          ← bare repo (no source files here)
 ```
 
 **Key rules:**
-
 - `ws/default/` is the main workspace — bones, config, and project files live here
 - **Never merge or destroy the default workspace.** It is where other branches merge INTO, not something you merge.
 - Agent workspaces (`ws/<name>/`) are isolated Git worktrees managed by maw
@@ -351,73 +357,67 @@ project-root/          ← bare repo (no source files here)
 
 ### Bones Quick Reference
 
-| Operation       | Command                                                              |
-| --------------- | -------------------------------------------------------------------- |
-| View next work  | `maw exec default -- bn next`                                        |
-| Show bone       | `maw exec default -- bn show <id>`                                   |
-| Create          | `maw exec default -- bn create --title "..." --kind task`            |
-| Start work      | `maw exec default -- bn do <id>`                                     |
-| Add comment     | `maw exec default -- bn bone comment add <id> "message"`             |
-| Close           | `maw exec default -- bn done <id>`                                   |
-| Add dependency  | `maw exec default -- bn triage dep add <blocker> --blocks <blocked>` |
-| Triage (scores) | `maw exec default -- bn triage`                                      |
-| Next bone       | `maw exec default -- bn next`                                        |
-| Search          | `maw exec default -- bn search <query>`                              |
+| Operation | Command |
+|-----------|---------|
+| Triage (scores) | `maw exec default -- bn triage` |
+| Next bone | `maw exec default -- bn next` |
+| Next N bones | `maw exec default -- bn next N` (e.g., `bn next 4` for dispatch) |
+| Show bone | `maw exec default -- bn show <id>` |
+| Create | `maw exec default -- bn create --title "..." --description "..."` |
+| Start work | `maw exec default -- bn do <id>` |
+| Add comment | `maw exec default -- bn bone comment add <id> "message"` |
+| Close | `maw exec default -- bn done <id>` |
+| Add dependency | `maw exec default -- bn triage dep add <blocker> --blocks <blocked>` |
+| Search | `maw exec default -- bn search <query>` |
 
 Identity resolved from `$AGENT` env. No flags needed in agent loops.
 
 ### Workspace Quick Reference
 
-| Operation                    | Command                         |
-| ---------------------------- | ------------------------------- |
-| Create workspace             | `maw ws create <name>`          |
-| List workspaces (+ merge status) | `maw ws list`              |
-| Merge to main                | `maw ws merge <name> --destroy` |
-| Check merge before merging   | `maw ws merge <name> --check`   |
-| Destroy (no merge)           | `maw ws destroy <name>`         |
-| Run command in workspace     | `maw exec <name> -- <command>`  |
-| View workspace history       | `maw ws history <name>`         |
-| Diff workspace vs epoch      | `maw ws diff <name>`            |
-| Check workspace overlap      | `maw ws overlap <name> <name>`  |
-| Sync stale workspace         | `maw ws sync <name>`            |
-| Inspect merge conflicts      | `maw ws conflicts <name>`       |
-| Undo local workspace changes | `maw ws undo <name>`            |
+| Operation | Command |
+|-----------|---------|
+| Create workspace | `maw ws create <name>` |
+| List workspaces | `maw ws list` |
+| Check merge readiness | `maw ws merge <name> --check` |
+| Merge to main | `maw ws merge <name> --destroy` |
+| Destroy (no merge) | `maw ws destroy <name>` |
+| Run command in workspace | `maw exec <name> -- <command>` |
+| Diff workspace vs epoch | `maw ws diff <name>` |
+| Check workspace overlap | `maw ws overlap <name1> <name2>` |
+| View workspace history | `maw ws history <name>` |
+| Sync stale workspace | `maw ws sync <name>` |
+| Inspect merge conflicts | `maw ws conflicts <name>` |
+| Undo local workspace changes | `maw ws undo <name>` |
 
-**Inspecting a workspace (git worktree model — use git, not jj):**
-
+**Inspecting a workspace (use git, not jj):**
 ```bash
-maw exec <name> -- git status          # what changed (unstaged)
-maw exec <name> -- git log --oneline -5  # recent commits
-maw exec <name> -- git diff HEAD~1     # last commit diff
-maw ws diff <name>                     # diff vs epoch (maw-native)
-maw ws list                            # see which workspaces have commits to merge
+maw exec <name> -- git status             # what changed (unstaged)
+maw exec <name> -- git log --oneline -5   # recent commits
+maw ws diff <name>                        # diff vs epoch (maw-native)
 ```
 
-**Lead agent workflow — after a worker finishes a bone:**
-
+**Lead agent merge workflow** — after a worker finishes a bone:
 1. `maw ws list` — look for `active (+N to merge)` entries
 2. `maw ws merge <name> --check` — verify no conflicts
 3. `maw ws merge <name> --destroy` — merge and clean up
 
-Do NOT use `maw exec <name>` just to inspect workspace state — use `maw ws list`, `maw ws diff`, and `maw ws history` instead. `maw exec` can trigger auto-sync side effects.
-
 **Workspace safety:**
-
 - Never merge or destroy `default`.
-- Commit workspace changes with `maw exec <name> -- git add -A` and `maw exec <name> -- git commit -m "..."`.
+- Always `maw ws merge <name> --check` before `--destroy`.
+- Commit workspace changes with `maw exec <name> -- git add -A && maw exec <name> -- git commit -m "..."`.
 
 ### Protocol Quick Reference
 
 Use these commands at protocol transitions to check state and get exact guidance. Each command outputs instructions for the next steps.
 
-| Step    | Command                                            | Who    | Purpose                                                |
-| ------- | -------------------------------------------------- | ------ | ------------------------------------------------------ |
-| Resume  | `botbox protocol resume --agent $AGENT`            | Worker | Detect in-progress work from previous session          |
-| Start   | `botbox protocol start <bone-id> --agent $AGENT`   | Worker | Verify bone is ready, get start commands               |
-| Review  | `botbox protocol review <bone-id> --agent $AGENT`  | Worker | Verify work is complete, get review commands           |
-| Finish  | `botbox protocol finish <bone-id> --agent $AGENT`  | Worker | Verify review approved, get close/cleanup commands     |
-| Merge   | `botbox protocol merge <workspace> --agent $AGENT` | Lead   | Check preconditions, detect conflicts, get merge steps |
-| Cleanup | `botbox protocol cleanup --agent $AGENT`           | Worker | Check for held resources to release                    |
+| Step | Command | Who | Purpose |
+|------|---------|-----|---------|
+| Resume | `botbox protocol resume --agent $AGENT` | Worker | Detect in-progress work from previous session |
+| Start | `botbox protocol start <bone-id> --agent $AGENT` | Worker | Verify bone is ready, get start commands |
+| Review | `botbox protocol review <bone-id> --agent $AGENT` | Worker | Verify work is complete, get review commands |
+| Finish | `botbox protocol finish <bone-id> --agent $AGENT` | Worker | Verify review approved, get close/cleanup commands |
+| Merge | `botbox protocol merge <workspace> --agent $AGENT` | Lead | Check preconditions, detect conflicts, get merge steps |
+| Cleanup | `botbox protocol cleanup --agent $AGENT` | Worker | Check for held resources to release |
 
 All commands support JSON output with `--format json` for parsing. If a command is unavailable or fails (exit code 1), fall back to manual steps documented in [start](.agents/botbox/start.md), [review-request](.agents/botbox/review-request.md), and [finish](.agents/botbox/finish.md).
 
@@ -459,13 +459,13 @@ The @mention triggers the auto-spawn hook for the reviewer.
 
 Agents communicate via bus channels. You don't need to be expert on everything — ask the right project.
 
-| Operation       | Command                                                  |
-| --------------- | -------------------------------------------------------- |
-| Send message    | `bus send --agent $AGENT <channel> "message" [-L label]` |
-| Check inbox     | `bus inbox --agent $AGENT --channels <ch> [--mark-read]` |
-| Wait for reply  | `bus wait -c <channel> --mention -t 120`                 |
-| Browse history  | `bus history <channel> -n 20`                            |
-| Search messages | `bus search "query" -c <channel>`                        |
+| Operation | Command |
+|-----------|---------|
+| Send message | `bus send --agent $AGENT <channel> "message" [-L label]` |
+| Check inbox | `bus inbox --agent $AGENT --channels <ch> [--mark-read]` |
+| Wait for reply | `bus wait -c <channel> --mention -t 120` |
+| Browse history | `bus history <channel> -n 20` |
+| Search messages | `bus search "query" -c <channel>` |
 
 **Conversations**: After sending a question, use `bus wait -c <channel> --mention -t <seconds>` to block until the other agent replies. This enables back-and-forth conversations across channels.
 
@@ -479,7 +479,6 @@ Agents communicate via bus channels. You don't need to be expert on everything �
 2. Post question or feedback: `bus send --agent $AGENT <project> "..." -L feedback`
 3. For bugs, create bones in their repo first
 4. **Always create a local tracking bone** so you check back later:
-
    ```bash
    maw exec default -- bn create --title "[tracking] <summary>" --tag tracking --kind task
    ```
@@ -490,11 +489,16 @@ See [cross-channel.md](.agents/botbox/cross-channel.md) for the full workflow.
 
 Use `cass search "error or problem"` to find how similar issues were solved in past sessions.
 
+
 ### Design Guidelines
+
 
 - [CLI tool design for humans, agents, and machines](.agents/botbox/design/cli-conventions.md)
 
+
+
 ### Workflow Docs
+
 
 - [Find work from inbox and bones](.agents/botbox/triage.md)
 
