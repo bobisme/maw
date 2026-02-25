@@ -149,8 +149,16 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
     let had_stash = stash_changes(&ws_path)?;
 
     // Step 2: Reset HEAD to the new epoch.
-    checkout_epoch(&ws_path, &new_epoch)
-        .with_context(|| format!("Failed to checkout new epoch in workspace '{name}'"))?;
+    // IMPORTANT: if checkout fails, restore the stash first so changes are not
+    // orphaned. Without this, the user's work would be stranded in the stash
+    // stack with no recovery path.
+    if let Err(e) = checkout_epoch(&ws_path, &new_epoch) {
+        if had_stash {
+            // Best-effort restore — ignore errors so the original error surfaces.
+            let _ = pop_stash_and_detect_conflicts(&ws_path);
+        }
+        return Err(e.context(format!("Failed to checkout new epoch in workspace '{name}'")));
+    }
 
     // Step 3: Pop the stash if there was one.
     let conflicts = if had_stash {
