@@ -472,44 +472,60 @@ fn resolve_file_content(
 }
 
 /// Resolve individual atoms within a file, reconstructing the complete content.
-///
+/// Extract byte range from a Region, converting line-based regions to byte offsets.
+fn region_byte_range(region: &Region, content: &[u8]) -> (u32, u32) {
+    match region {
+        Region::AstNode {
+            start_byte,
+            end_byte,
+            ..
+        } => (*start_byte, *end_byte),
+        Region::Lines { start, end } => {
+            // Convert 1-indexed line numbers to byte offsets
+            let text = std::str::from_utf8(content).unwrap_or("");
+            let mut line_starts: Vec<usize> = vec![0];
+            for (i, b) in text.bytes().enumerate() {
+                if b == b'\n' {
+                    line_starts.push(i + 1);
+                }
+            }
+            let s = if *start > 0 {
+                line_starts
+                    .get((*start - 1) as usize)
+                    .copied()
+                    .unwrap_or(content.len())
+            } else {
+                0
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let e = line_starts
+                .get((*end - 1) as usize)
+                .copied()
+                .unwrap_or(content.len());
+            (s as u32, e as u32)
+        }
+        Region::WholeFile => (0, content.len() as u32),
+    }
+}
+
 /// For each atom, picks ours or theirs content based on the resolution.
 /// Only ours/theirs supported at atom level (content/ws require whole-file).
 fn resolve_atoms(
     record: &ConflictRecord,
     atom_resolutions: &[Option<&Resolution>],
 ) -> Result<Vec<u8>> {
-    // For atom-level resolution we need the base content and the side contents
-    // as line arrays. We walk through the base, replacing conflict regions
-    // with the chosen side's content.
+    // For atom-level resolution we reconstruct the file by walking the base
+    // content in bytes, substituting conflict regions with the chosen side's
+    // edit content. Works with both Line and AstNode regions (byte offsets).
     let base = record.base.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "Atom-level resolution requires base content for {}. Use file-level ID instead.",
             record.path.display()
         )
     })?;
-    let base_text = std::str::from_utf8(base).map_err(|_| {
-        anyhow::anyhow!(
-            "Atom-level resolution not supported for binary file {}. Use file-level ID instead.",
-            record.path.display()
-        )
-    })?;
-    let base_lines: Vec<&str> = base_text.lines().collect();
 
-    let ours_content = record.sides.first().and_then(|s| s.content.as_ref());
-    let theirs_content = record.sides.get(1).and_then(|s| s.content.as_ref());
-
-    let ours_text = ours_content
-        .and_then(|c| std::str::from_utf8(c).ok())
-        .unwrap_or("");
-    let theirs_text = theirs_content
-        .and_then(|c| std::str::from_utf8(c).ok())
-        .unwrap_or("");
-    let ours_lines: Vec<&str> = ours_text.lines().collect();
-    let theirs_lines: Vec<&str> = theirs_text.lines().collect();
-
-    // Collect atom regions sorted by start line
-    let mut atoms_sorted: Vec<(usize, &crate::model::conflict::ConflictAtom, &Resolution)> =
+    // Validate resolutions and collect sorted atoms
+    let mut atoms_sorted: Vec<(u32, u32, &crate::model::conflict::ConflictAtom, &Resolution)> =
         Vec::new();
     for (i, atom) in record.atoms.iter().enumerate() {
         let res = atom_resolutions[i].ok_or_else(|| {
@@ -522,79 +538,50 @@ fn resolve_atoms(
                  For other strategies, use the file-level ID."
             ),
         }
-        let start = match atom.base_region {
-            Region::Lines { start, .. } => start as usize,
-            _ => 0,
-        };
-        atoms_sorted.push((start, atom, res));
+        let (start_byte, end_byte) = region_byte_range(&atom.base_region, base);
+        atoms_sorted.push((start_byte, end_byte, atom, res));
     }
-    atoms_sorted.sort_by_key(|(start, _, _)| *start);
+    atoms_sorted.sort_by_key(|(start, _, _, _)| *start);
 
-    // Reconstruct: walk base lines, substituting conflict regions
-    let mut result = Vec::new();
-    let mut pos = 0usize; // current line in base (0-indexed)
+    // Reconstruct: walk base bytes, substituting conflict regions
+    let mut result: Vec<u8> = Vec::with_capacity(base.len());
+    let mut pos: u32 = 0; // current byte position in base
 
-    for (_, atom, resolution) in &atoms_sorted {
-        let (region_start, region_end) = match atom.base_region {
-            Region::Lines { start, end } => (start as usize, end as usize),
-            _ => continue, // skip non-line regions
-        };
-        // Convert to 0-indexed
-        let start_0 = if region_start > 0 { region_start - 1 } else { 0 };
-        let end_0 = if region_end > 0 { region_end - 1 } else { 0 };
+    for (base_start, base_end, atom, resolution) in &atoms_sorted {
+        // Copy base bytes before this region
+        let s = pos.min(*base_start) as usize;
+        let e = (*base_start as usize).min(base.len());
+        result.extend_from_slice(&base[s..e]);
 
-        // Copy base lines before this region
-        for line in &base_lines[pos..start_0.min(base_lines.len())] {
-            result.push(*line);
-        }
-
-        // Insert the chosen side's version of this region
-        let chosen_lines = match resolution {
-            Resolution::Ours => &ours_lines,
-            Resolution::Theirs => &theirs_lines,
-            _ => unreachable!(),
-        };
-        // Use the atom's edit region from the chosen side
-        let edit = atom.edits.iter().find(|e| match resolution {
+        // Find the matching edit from the chosen side and use its content
+        let edit = atom.edits.iter().find(|ed| match resolution {
             Resolution::Ours => {
-                record.sides.first().is_some_and(|s| s.workspace_id.as_str() == e.workspace)
+                record.sides.first().is_some_and(|s| s.workspace_id.as_str() == ed.workspace)
             }
             Resolution::Theirs => {
-                record.sides.get(1).is_some_and(|s| s.workspace_id.as_str() == e.workspace)
+                record.sides.get(1).is_some_and(|s| s.workspace_id.as_str() == ed.workspace)
             }
             _ => false,
         });
         if let Some(edit) = edit {
-            if let Region::Lines { start, end } = edit.region {
-                let es = if start > 0 { (start - 1) as usize } else { 0 };
-                let ee = if end > 0 { (end - 1) as usize } else { 0 };
-                for line in &chosen_lines[es..ee.min(chosen_lines.len())] {
-                    result.push(line);
-                }
-            } else {
-                // Fallback: use the edit's content snippet
-                result.push(&edit.content);
-            }
+            // Use the edit's content string (the actual replacement text)
+            result.extend_from_slice(edit.content.as_bytes());
         } else {
-            // No matching edit found — keep base region as-is
-            for line in &base_lines[start_0..end_0.min(base_lines.len())] {
-                result.push(*line);
-            }
+            // No matching edit — keep the base region as-is
+            let rs = (*base_start as usize).min(base.len());
+            let re = (*base_end as usize).min(base.len());
+            result.extend_from_slice(&base[rs..re]);
         }
 
-        pos = end_0.min(base_lines.len());
+        pos = *base_end;
     }
 
-    // Copy remaining base lines after the last atom
-    for line in &base_lines[pos..] {
-        result.push(*line);
+    // Copy remaining base bytes after the last atom
+    if (pos as usize) < base.len() {
+        result.extend_from_slice(&base[pos as usize..]);
     }
 
-    let mut output = result.join("\n");
-    if base_text.ends_with('\n') {
-        output.push('\n');
-    }
-    Ok(output.into_bytes())
+    Ok(result)
 }
 
 /// Patch the candidate tree with resolved file contents, producing a new commit OID.
