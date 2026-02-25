@@ -86,19 +86,30 @@ pub fn sync(all: bool) -> Result<()> {
     // yet in epoch (diverged after a concurrent merge), syncing would wipe them.
     // The lead agent must merge the workspace first.
     let ws_path = root.join("ws").join(&workspace_name);
-    let ahead = committed_ahead_of_epoch(&ws_path, current_epoch.as_str());
-    if ahead > 0 {
-        println!(
-            "Workspace '{workspace_name}' is stale but has {ahead} committed commit(s) not yet \
-             merged into epoch."
-        );
-        println!(
-            "  Merge the workspace first: maw ws merge {workspace_name}"
-        );
-        println!(
-            "  Then sync: maw ws sync {workspace_name}"
-        );
-        return Ok(());
+    match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
+        None => {
+            // Could not determine commit count — refuse to sync to prevent data loss.
+            println!(
+                "WARNING: Could not determine committed work for '{workspace_name}' \
+                 (git failed). Refusing to sync to avoid data loss."
+            );
+            println!("  Check workspace state manually, then retry.");
+            return Ok(());
+        }
+        Some(ahead) if ahead > 0 => {
+            println!(
+                "Workspace '{workspace_name}' is stale but has {ahead} committed commit(s) not yet \
+                 merged into epoch."
+            );
+            println!(
+                "  Merge the workspace first: maw ws merge {workspace_name}"
+            );
+            println!(
+                "  Then sync: maw ws sync {workspace_name}"
+            );
+            return Ok(());
+        }
+        Some(_) => {}
     }
 
     println!("Workspace '{workspace_name}' is stale (behind current epoch), syncing...");
@@ -119,16 +130,23 @@ pub fn sync(all: bool) -> Result<()> {
 /// Returns the number of committed-but-not-yet-merged commits in the workspace.
 /// A result > 0 means the workspace has committed work that should be merged
 /// before syncing; syncing over it would wipe those commits.
-fn committed_ahead_of_epoch(ws_path: &Path, epoch_oid: &str) -> u32 {
+///
+/// Returns `None` if git fails for any reason (invalid repo, unknown OID, etc.).
+/// Callers MUST treat `None` as "has committed work" (i.e. refuse to sync) to
+/// prevent data loss when the workspace state cannot be determined.
+fn committed_ahead_of_epoch(ws_path: &Path, epoch_oid: &str) -> Option<u32> {
     let range = format!("{epoch_oid}..HEAD");
-    Command::new("git")
+    let output = Command::new("git")
         .args(["rev-list", "--count", &range])
         .current_dir(ws_path)
         .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 /// Sync a single worktree to the given epoch commit.
@@ -218,11 +236,20 @@ fn sync_all() -> Result<()> {
 
         // Safety: skip workspaces with committed work not yet in epoch.
         // Syncing over them would wipe those commits.
+        // If git fails (None), treat as "has work" to prevent data loss.
         let ws_path = root.join("ws").join(name);
-        let ahead = committed_ahead_of_epoch(&ws_path, current_epoch.as_str());
-        if ahead > 0 {
-            skipped_with_work.push(format!("{name} ({ahead} commit(s) ahead)"));
-            continue;
+        match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
+            None => {
+                skipped_with_work.push(format!(
+                    "{name} (could not determine commit count — skipped for safety)"
+                ));
+                continue;
+            }
+            Some(ahead) if ahead > 0 => {
+                skipped_with_work.push(format!("{name} ({ahead} commit(s) ahead)"));
+                continue;
+            }
+            Some(_) => {}
         }
 
         match sync_worktree_to_epoch(&root, name, current_epoch.as_str()) {
@@ -295,15 +322,25 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     // stale AND has diverged commits. Syncing would wipe those commits.
     // The lead agent must merge this workspace first.
     let ws_path = root.join("ws").join(name);
-    let ahead = committed_ahead_of_epoch(&ws_path, current_epoch.as_str());
-    if ahead > 0 {
-        eprintln!(
-            "WARNING: Workspace '{name}' is stale relative to current epoch, but has \
-             {ahead} committed commit(s) not yet merged into epoch."
-        );
-        eprintln!("  Skipping auto-sync to preserve committed work.");
-        eprintln!("  The lead agent should merge this workspace: maw ws merge {name}");
-        return Ok(());
+    match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
+        None => {
+            eprintln!(
+                "WARNING: Workspace '{name}' is stale but git could not determine commit count. \
+                 Skipping auto-sync to preserve committed work."
+            );
+            eprintln!("  The lead agent should merge this workspace: maw ws merge {name}");
+            return Ok(());
+        }
+        Some(ahead) if ahead > 0 => {
+            eprintln!(
+                "WARNING: Workspace '{name}' is stale relative to current epoch, but has \
+                 {ahead} committed commit(s) not yet merged into epoch."
+            );
+            eprintln!("  Skipping auto-sync to preserve committed work.");
+            eprintln!("  The lead agent should merge this workspace: maw ws merge {name}");
+            return Ok(());
+        }
+        Some(_) => {}
     }
 
     eprintln!("Workspace '{name}' is stale — auto-syncing before running command...");
