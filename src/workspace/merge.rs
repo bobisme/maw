@@ -94,7 +94,7 @@ pub struct ConflictSideJson {
 pub struct ConflictJson {
     /// Short deterministic conflict ID, e.g. "cf-k7mx".
     ///
-    /// Use this ID with `--resolve cf-k7mx=ours` to resolve the conflict inline.
+    /// Use this ID with `--resolve cf-k7mx=WORKSPACE` to resolve the conflict inline.
     /// Atom-level IDs (e.g. "cf-k7mx.0") are listed in the `atom_ids` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -138,8 +138,8 @@ pub struct ConflictJson {
 
     /// Atom-level conflict IDs, one per entry in `atoms`.
     ///
-    /// Use these with `--resolve cf-k7mx.0=ours` for per-region resolution.
-    /// Only ours/theirs strategies are supported at atom level.
+    /// Use these with `--resolve cf-k7mx.0=WORKSPACE` for per-region resolution.
+    /// Only workspace name strategies are supported at atom level (not content:).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub atom_ids: Vec<String>,
 
@@ -195,7 +195,7 @@ pub struct MergeConflictOutput {
     pub message: String,
     /// Exact command to retry once conflicts are resolved.
     pub to_fix: String,
-    /// Template resolve command with all conflict IDs defaulting to ours.
+    /// Template resolve command with all conflict IDs defaulting to the first workspace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolve_command: Option<String>,
 }
@@ -250,11 +250,7 @@ fn assign_conflict_ids(conflicts: &[ConflictRecord]) -> Vec<ConflictWithId> {
 /// A resolution strategy for a conflict.
 #[derive(Debug, Clone)]
 enum Resolution {
-    /// Keep the first workspace's version.
-    Ours,
-    /// Keep the second workspace's version.
-    Theirs,
-    /// Keep a specific workspace's version.
+    /// Keep a specific workspace's version (by name).
     Workspace(String),
     /// Use file content from the given path.
     Content(PathBuf),
@@ -263,19 +259,20 @@ enum Resolution {
 /// Parse `--resolve ID=STRATEGY` strings into a map.
 ///
 /// Valid formats:
-/// - `cf-k7mx=ours`
-/// - `cf-k7mx=theirs`
-/// - `cf-k7mx=ws:alice`
-/// - `cf-k7mx=content:/path/to/file`
-/// - `cf-k7mx.0=ours` (atom-level)
+/// - `cf-k7mx=alice` (use alice's version)
+/// - `cf-k7mx=content:/path/to/file` (use file content)
+/// - `cf-k7mx.0=alice` (atom-level: use alice's version for this region)
+///
+/// Any value that doesn't start with `content:` is treated as a workspace name.
+/// Workspace name validation happens later in `apply_resolutions`.
 fn parse_resolutions(raw: &[String]) -> Result<BTreeMap<String, Resolution>> {
     let mut map = BTreeMap::new();
     for entry in raw {
         let (id, strategy) = entry.split_once('=').ok_or_else(|| {
             anyhow::anyhow!(
                 "Invalid --resolve format: '{entry}'\n  \
-                 Expected: ID=STRATEGY (e.g., cf-k7mx=ours)\n  \
-                 Strategies: ours, theirs, ws:NAME, content:PATH"
+                 Expected: ID=WORKSPACE or ID=content:PATH\n  \
+                 Examples: cf-k7mx=alice, cf-k7mx=content:/path/to/file"
             )
         })?;
 
@@ -289,19 +286,17 @@ fn parse_resolutions(raw: &[String]) -> Result<BTreeMap<String, Resolution>> {
             );
         }
 
-        let resolution = if strategy.eq_ignore_ascii_case("ours") {
-            Resolution::Ours
-        } else if strategy.eq_ignore_ascii_case("theirs") {
-            Resolution::Theirs
-        } else if let Some(ws_name) = strategy.strip_prefix("ws:") {
-            Resolution::Workspace(ws_name.to_string())
-        } else if let Some(path) = strategy.strip_prefix("content:") {
+        if strategy.is_empty() {
+            bail!(
+                "Empty resolution for '{id}'\n  \
+                 Expected: ID=WORKSPACE or ID=content:PATH"
+            );
+        }
+
+        let resolution = if let Some(path) = strategy.strip_prefix("content:") {
             Resolution::Content(PathBuf::from(path))
         } else {
-            bail!(
-                "Unknown resolution strategy: '{strategy}'\n  \
-                 Valid strategies: ours, theirs, ws:NAME, content:PATH"
-            );
+            Resolution::Workspace(strategy.to_string())
         };
 
         map.insert(id.to_string(), resolution);
@@ -399,32 +394,9 @@ fn resolve_file_content(
     workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
 ) -> Result<Vec<u8>> {
     match resolution {
-        Resolution::Ours => {
-            let side = record.sides.first().ok_or_else(|| {
-                anyhow::anyhow!("No 'ours' side for {}", record.path.display())
-            })?;
-            side.content.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "'ours' side ({}) has no content (deleted). Use 'theirs' or 'content:PATH'.",
-                    side.workspace_id
-                )
-            })
-        }
-        Resolution::Theirs => {
-            let side = record.sides.get(1).ok_or_else(|| {
-                anyhow::anyhow!("No 'theirs' side for {}", record.path.display())
-            })?;
-            side.content.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "'theirs' side ({}) has no content (deleted). Use 'ours' or 'content:PATH'.",
-                    side.workspace_id
-                )
-            })
-        }
         Resolution::Workspace(name) => {
             let ws_id = WorkspaceId::new(name)
                 .map_err(|e| anyhow::anyhow!("Invalid workspace name '{name}': {e}"))?;
-            // Find the side matching this workspace
             let side = record
                 .sides
                 .iter()
@@ -438,9 +410,15 @@ fn resolve_file_content(
                     )
                 })?;
             side.content.clone().ok_or_else(|| {
+                let others: Vec<_> = record.sides.iter()
+                    .filter(|s| s.workspace_id != ws_id)
+                    .map(|s| s.workspace_id.to_string())
+                    .collect();
                 anyhow::anyhow!(
-                    "Workspace '{name}' has no content (deleted) for {}.",
-                    record.path.display()
+                    "Workspace '{name}' has no content (deleted) for {}.\n  \
+                     Try: {} or content:PATH",
+                    record.path.display(),
+                    others.join(", ")
                 )
             })
         }
@@ -508,8 +486,8 @@ fn region_byte_range(region: &Region, content: &[u8]) -> (u32, u32) {
     }
 }
 
-/// For each atom, picks ours or theirs content based on the resolution.
-/// Only ours/theirs supported at atom level (content/ws require whole-file).
+/// For each atom, picks a workspace's content based on the resolution.
+/// Only workspace name strategies are supported at atom level (content: requires whole-file).
 fn resolve_atoms(
     record: &ConflictRecord,
     atom_resolutions: &[Option<&Resolution>],
@@ -532,10 +510,10 @@ fn resolve_atoms(
             anyhow::anyhow!("Missing resolution for atom {i} of {}", record.path.display())
         })?;
         match res {
-            Resolution::Ours | Resolution::Theirs => {}
-            _ => bail!(
-                "Atom-level resolution only supports 'ours' or 'theirs'.\n  \
-                 For other strategies, use the file-level ID."
+            Resolution::Workspace(_) => {}
+            Resolution::Content(_) => bail!(
+                "Atom-level resolution only supports workspace names, not content:PATH.\n  \
+                 For content: strategy, use the file-level ID."
             ),
         }
         let (start_byte, end_byte) = region_byte_range(&atom.base_region, base);
@@ -553,18 +531,13 @@ fn resolve_atoms(
         let e = (*base_start as usize).min(base.len());
         result.extend_from_slice(&base[s..e]);
 
-        // Find the matching edit from the chosen side and use its content
-        let edit = atom.edits.iter().find(|ed| match resolution {
-            Resolution::Ours => {
-                record.sides.first().is_some_and(|s| s.workspace_id.as_str() == ed.workspace)
-            }
-            Resolution::Theirs => {
-                record.sides.get(1).is_some_and(|s| s.workspace_id.as_str() == ed.workspace)
-            }
-            _ => false,
-        });
+        // Find the matching edit from the chosen workspace
+        let ws_name = match resolution {
+            Resolution::Workspace(name) => name.as_str(),
+            _ => unreachable!(),
+        };
+        let edit = atom.edits.iter().find(|ed| ed.workspace == ws_name);
         if let Some(edit) = edit {
-            // Use the edit's content string (the actual replacement text)
             result.extend_from_slice(edit.content.as_bytes());
         } else {
             // No matching edit — keep the base region as-is
@@ -932,11 +905,12 @@ fn print_conflict_report(
         println!();
     }
 
-    // Build the resolve command template
+    // Build the resolve command template using first workspace name as default
     let ws_args = ws_names.join(" ");
+    let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
     let resolve_args: Vec<String> = conflicts_with_ids
         .iter()
-        .map(|c| format!("--resolve {}=ours", c.id))
+        .map(|c| format!("--resolve {}={default_ws}", c.id))
         .collect();
     println!("To resolve, re-run with --resolve:");
     println!(
@@ -945,7 +919,7 @@ fn print_conflict_report(
         resolve_args.join(" ")
     );
     println!();
-    println!("Options:  ID=ours | ID=theirs | ID=ws:NAME | ID=content:PATH");
+    println!("Options:  ID=WORKSPACE | ID=content:PATH");
     println!();
     println!(
         "To inspect full content:  maw ws conflicts {} --format json",
@@ -2112,9 +2086,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 // Some conflicts remain unresolved — report them with IDs
                 abort_merge(&manifold_dir, "partially resolved conflicts");
                 let ws_args = ws_to_merge.join(" ");
+                let default_ws = ws_to_merge.first().map_or("WORKSPACE", |s| s.as_str());
                 let resolve_args: Vec<String> = remaining
                     .iter()
-                    .map(|c| format!("--resolve {}=ours", c.id))
+                    .map(|c| format!("--resolve {}={default_ws}", c.id))
                     .collect();
 
                 if format == OutputFormat::Json {
@@ -2158,9 +2133,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             abort_merge(&manifold_dir, "unresolved conflicts");
 
             let ws_args = ws_to_merge.join(" ");
+            let default_ws = ws_to_merge.first().map_or("WORKSPACE", |s| s.as_str());
             let resolve_args: Vec<String> = conflicts_with_ids
                 .iter()
-                .map(|c| format!("--resolve {}=ours", c.id))
+                .map(|c| format!("--resolve {}={default_ws}", c.id))
                 .collect();
 
             if format == OutputFormat::Json {
@@ -3590,28 +3566,20 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn parse_resolutions_ours() {
-        let raw = vec!["cf-abcd=ours".to_string()];
+    fn parse_resolutions_workspace_name() {
+        let raw = vec!["cf-abcd=alice".to_string()];
         let parsed = parse_resolutions(&raw).unwrap();
 
         assert_eq!(parsed.len(), 1);
-        assert!(matches!(parsed["cf-abcd"], Resolution::Ours));
-    }
-
-    #[test]
-    fn parse_resolutions_theirs() {
-        let raw = vec!["cf-abcd=theirs".to_string()];
-        let parsed = parse_resolutions(&raw).unwrap();
-
-        assert!(matches!(parsed["cf-abcd"], Resolution::Theirs));
-    }
-
-    #[test]
-    fn parse_resolutions_workspace() {
-        let raw = vec!["cf-abcd=ws:alice".to_string()];
-        let parsed = parse_resolutions(&raw).unwrap();
-
         assert!(matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "alice"));
+    }
+
+    #[test]
+    fn parse_resolutions_workspace_name_with_hyphens() {
+        let raw = vec!["cf-abcd=my-workspace".to_string()];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert!(matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "my-workspace"));
     }
 
     #[test]
@@ -3624,12 +3592,12 @@ mod tests {
 
     #[test]
     fn parse_resolutions_atom_level() {
-        let raw = vec!["cf-abcd.0=ours".to_string(), "cf-abcd.1=theirs".to_string()];
+        let raw = vec!["cf-abcd.0=alice".to_string(), "cf-abcd.1=bob".to_string()];
         let parsed = parse_resolutions(&raw).unwrap();
 
         assert_eq!(parsed.len(), 2);
-        assert!(matches!(parsed["cf-abcd.0"], Resolution::Ours));
-        assert!(matches!(parsed["cf-abcd.1"], Resolution::Theirs));
+        assert!(matches!(&parsed["cf-abcd.0"], Resolution::Workspace(n) if n == "alice"));
+        assert!(matches!(&parsed["cf-abcd.1"], Resolution::Workspace(n) if n == "bob"));
     }
 
     #[test]
@@ -3645,21 +3613,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_resolutions_invalid_strategy() {
-        let raw = vec!["cf-abcd=invalid".to_string()];
-        assert!(parse_resolutions(&raw).is_err());
-    }
-
-    #[test]
     fn parse_resolutions_multiple() {
         let raw = vec![
-            "cf-aaaa=ours".to_string(),
-            "cf-bbbb=theirs".to_string(),
-            "cf-cccc=ws:bob".to_string(),
+            "cf-aaaa=alice".to_string(),
+            "cf-bbbb=bob".to_string(),
+            "cf-cccc=content:/tmp/resolved.rs".to_string(),
         ];
         let parsed = parse_resolutions(&raw).unwrap();
 
         assert_eq!(parsed.len(), 3);
+        assert!(matches!(&parsed["cf-aaaa"], Resolution::Workspace(n) if n == "alice"));
+        assert!(matches!(&parsed["cf-bbbb"], Resolution::Workspace(n) if n == "bob"));
+        assert!(matches!(&parsed["cf-cccc"], Resolution::Content(_)));
     }
 
     // -----------------------------------------------------------------------
@@ -3667,12 +3632,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn apply_resolutions_ours_returns_first_side() {
+    fn apply_resolutions_first_workspace() {
         let records = vec![add_add_record("new.rs")];
         let conflicts = assign_conflict_ids(&records);
         let id = conflicts[0].id.clone();
         let mut resolutions = BTreeMap::new();
-        resolutions.insert(id, Resolution::Ours);
+        resolutions.insert(id, Resolution::Workspace("alice".to_string()));
 
         let ws_dirs = BTreeMap::new();
         let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
@@ -3686,12 +3651,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_resolutions_theirs_returns_second_side() {
+    fn apply_resolutions_second_workspace() {
         let records = vec![add_add_record("new.rs")];
         let conflicts = assign_conflict_ids(&records);
         let id = conflicts[0].id.clone();
         let mut resolutions = BTreeMap::new();
-        resolutions.insert(id, Resolution::Theirs);
+        resolutions.insert(id, Resolution::Workspace("bob".to_string()));
 
         let ws_dirs = BTreeMap::new();
         let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
@@ -3712,7 +3677,7 @@ mod tests {
         let conflicts = assign_conflict_ids(&records);
         let id_a = conflicts[0].id.clone();
         let mut resolutions = BTreeMap::new();
-        resolutions.insert(id_a, Resolution::Ours);
+        resolutions.insert(id_a, Resolution::Workspace("alice".to_string()));
 
         let ws_dirs = BTreeMap::new();
         let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
@@ -3727,7 +3692,7 @@ mod tests {
         let records = vec![add_add_record("a.rs")];
         let conflicts = assign_conflict_ids(&records);
         let mut resolutions = BTreeMap::new();
-        resolutions.insert("cf-zzzz".to_string(), Resolution::Ours);
+        resolutions.insert("cf-zzzz".to_string(), Resolution::Workspace("alice".to_string()));
 
         let ws_dirs = BTreeMap::new();
         let result = apply_resolutions(&conflicts, &resolutions, &ws_dirs);
