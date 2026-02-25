@@ -183,6 +183,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout)
         .trim()
         .to_string();
+    let epoch_short = &epoch_oid[..12.min(epoch_oid.len())];
 
     // Read the current branch position
     let branch_ref = format!("refs/heads/{branch}");
@@ -201,7 +202,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     };
 
     if branch_oid == epoch_oid {
-        println!("{branch} already at current epoch ({}).", &epoch_oid[..12]);
+        println!("{branch} already at current epoch ({}).", epoch_short);
         return Ok(());
     }
 
@@ -212,7 +213,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
             println!(
                 "{branch} is ahead of current epoch ({} > {}). Leaving branch unchanged.",
                 &branch_oid[..12.min(branch_oid.len())],
-                &epoch_oid[..12]
+                epoch_short
             );
             println!(
                 "  Hint: epoch is stale for this branch tip. Merge through maw ws merge to advance refs/manifold/epoch/current."
@@ -232,7 +233,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     // Move the branch to the epoch commit
     println!(
         "Advancing {branch} to current epoch ({})...",
-        &epoch_oid[..12]
+        epoch_short
     );
 
     let update = Command::new("git")
@@ -247,12 +248,12 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     }
 
     if branch_oid.is_empty() {
-        println!("  Created {branch} at {}", &epoch_oid[..12]);
+        println!("  Created {branch} at {}", epoch_short);
     } else {
         println!(
             "  {branch}: {} → {}",
             &branch_oid[..12.min(branch_oid.len())],
-            &epoch_oid[..12]
+            epoch_short
         );
     }
 
