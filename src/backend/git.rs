@@ -249,6 +249,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 epoch: epoch.clone(),
                 state: WorkspaceState::Active,
                 mode: WorkspaceMode::default(),
+            commits_ahead: 0,
             });
         }
 
@@ -296,6 +297,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             epoch: epoch.clone(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::default(),
+        commits_ahead: 0,
         })
     }
 
@@ -417,29 +419,29 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 continue;
             };
 
-            let state = match &current_epoch {
-                Some(current) if epoch == *current => WorkspaceState::Active,
+            // Use ancestry to distinguish cases:
+            //   1. Workspace HEAD == epoch                  → Active, 0 commits ahead
+            //   2. Epoch IS ancestor of HEAD (ahead)        → Active, N commits ahead (has work)
+            //   3. Epoch NOT ancestor of HEAD (behind/diverged) → Stale, M commits behind
+            //
+            // The old equality check treated case 2 as Stale {behind_epochs: 0},
+            // causing maw ws sync --all to wipe committed work.
+            let (state, commits_ahead) = match &current_epoch {
+                Some(current) if epoch == *current => (WorkspaceState::Active, 0),
                 Some(current) => {
-                    // Use ancestry to distinguish two cases:
-                    //   1. Workspace HEAD is ahead of epoch (has committed work):
-                    //      epoch IS ancestor of HEAD → Active (don't mark stale)
-                    //   2. Workspace HEAD is behind (or diverged from) epoch:
-                    //      epoch is NOT ancestor of HEAD → Stale
-                    //
-                    // The old equality check incorrectly showed workspaces with
-                    // committed work as "stale (behind by 0)", which caused
-                    // `maw ws sync --all` to wipe those commits.
                     if self.is_ancestor(current.as_str(), epoch.as_str()) {
-                        WorkspaceState::Active
+                        let ahead = self
+                            .count_commits_between(current.as_str(), epoch.as_str())
+                            .unwrap_or(1);
+                        (WorkspaceState::Active, ahead)
                     } else {
                         let behind = self
                             .count_commits_between(epoch.as_str(), current.as_str())
                             .unwrap_or(1);
-                        WorkspaceState::Stale { behind_epochs: behind }
+                        (WorkspaceState::Stale { behind_epochs: behind }, 0)
                     }
                 }
-                // No epoch ref: can't determine staleness, assume active.
-                None => WorkspaceState::Active,
+                None => (WorkspaceState::Active, 0),
             };
 
             infos.push(WorkspaceInfo {
@@ -448,6 +450,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 epoch,
                 state,
                 mode: WorkspaceMode::default(),
+                commits_ahead,
             });
         }
 

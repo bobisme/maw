@@ -371,19 +371,39 @@ Identity resolved from `$AGENT` env. No flags needed in agent loops.
 | Operation                    | Command                         |
 | ---------------------------- | ------------------------------- |
 | Create workspace             | `maw ws create <name>`          |
-| List workspaces              | `maw ws list`                   |
+| List workspaces (+ merge status) | `maw ws list`              |
 | Merge to main                | `maw ws merge <name> --destroy` |
+| Check merge before merging   | `maw ws merge <name> --check`   |
 | Destroy (no merge)           | `maw ws destroy <name>`         |
 | Run command in workspace     | `maw exec <name> -- <command>`  |
 | View workspace history       | `maw ws history <name>`         |
+| Diff workspace vs epoch      | `maw ws diff <name>`            |
+| Check workspace overlap      | `maw ws overlap <name> <name>`  |
 | Sync stale workspace         | `maw ws sync <name>`            |
 | Inspect merge conflicts      | `maw ws conflicts <name>`       |
 | Undo local workspace changes | `maw ws undo <name>`            |
 
+**Inspecting a workspace (git worktree model — use git, not jj):**
+
+```bash
+maw exec <name> -- git status          # what changed (unstaged)
+maw exec <name> -- git log --oneline -5  # recent commits
+maw exec <name> -- git diff HEAD~1     # last commit diff
+maw ws diff <name>                     # diff vs epoch (maw-native)
+maw ws list                            # see which workspaces have commits to merge
+```
+
+**Lead agent workflow — after a worker finishes a bone:**
+
+1. `maw ws list` — look for `active (+N to merge)` entries
+2. `maw ws merge <name> --check` — verify no conflicts
+3. `maw ws merge <name> --destroy` — merge and clean up
+
+Do NOT use `maw exec <name>` just to inspect workspace state — use `maw ws list`, `maw ws diff`, and `maw ws history` instead. `maw exec` can trigger auto-sync side effects.
+
 **Workspace safety:**
 
 - Never merge or destroy `default`.
-- Prefer `maw ws merge <name> --check` before `maw ws merge <name> --destroy`.
 - Commit workspace changes with `maw exec <name> -- git add -A` and `maw exec <name> -- git commit -m "..."`.
 
 ### Protocol Quick Reference

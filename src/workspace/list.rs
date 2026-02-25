@@ -21,10 +21,18 @@ pub struct WorkspaceInfo {
     pub(crate) path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) behind_epochs: Option<u32>,
+    /// Commits in the workspace HEAD that haven't been merged into the epoch yet.
+    /// Non-zero means "this workspace has work to merge".
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) commits_ahead: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) template_defaults: Option<TemplateDefaults>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Envelope for `maw ws list --format json` output.
@@ -98,6 +106,8 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                     "quarantine".to_owned()
                 } else if is_default {
                     "active".to_owned()
+                } else if ws.commits_ahead > 0 {
+                    format!("active (+{} to merge)", ws.commits_ahead)
                 } else {
                     format!("{}", ws.state)
                 },
@@ -108,6 +118,7 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                     None
                 },
                 behind_epochs: behind,
+                commits_ahead: ws.commits_ahead,
                 template: ws_meta.template.map(|t| t.to_string()),
                 template_defaults: ws_meta.template_defaults,
                 name,
@@ -216,6 +227,19 @@ fn print_list_text(
 
     print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
 
+    // Surface actionable merge hints for workspaces with committed work.
+    let mergeable: Vec<&str> = workspaces
+        .iter()
+        .filter(|ws| ws.commits_ahead > 0)
+        .map(|ws| ws.name.as_str())
+        .collect();
+    if !mergeable.is_empty() {
+        println!();
+        for name in &mergeable {
+            println!("Merge ready: maw ws merge {name} --destroy");
+        }
+    }
+
     println!();
     println!("Next: maw exec <name> -- <command>");
 }
@@ -234,6 +258,7 @@ fn print_list_pretty(
     for ws in workspaces {
         let is_stale = ws.state.contains("stale");
         let is_persistent = ws.mode == "persistent";
+        let has_work = ws.commits_ahead > 0;
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
                 ("\u{25cf}", "\x1b[1;32m", "\x1b[0m") // Green bold for default
@@ -241,13 +266,17 @@ fn print_list_pretty(
                 ("\u{26a0}", "\x1b[1;31m", "\x1b[0m") // Red bold for quarantine
             } else if is_stale {
                 ("\u{25b2}", "\x1b[1;33m", "\x1b[0m") // Yellow for stale
+            } else if has_work {
+                ("\u{25b6}", "\x1b[1;36m", "\x1b[0m") // Cyan for ready-to-merge
             } else {
-                ("\u{25cc}", "\x1b[90m", "\x1b[0m") // Gray for others
+                ("\u{25cc}", "\x1b[90m", "\x1b[0m") // Gray for idle
             }
         } else if ws.is_default {
             ("\u{25cf}", "", "")
         } else if ws.state == "quarantine" {
             ("\u{26a0}", "", "")
+        } else if has_work {
+            ("\u{25b6}", "", "")
         } else {
             ("\u{25cc}", "", "")
         };

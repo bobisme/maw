@@ -359,13 +359,17 @@ pub struct WorkspaceInfo {
     pub id: WorkspaceId,
     /// Absolute path to the workspace root directory.
     pub path: PathBuf,
-    /// The epoch this workspace is based on.
+    /// The epoch this workspace is based on (or the workspace HEAD if ahead of epoch).
     pub epoch: EpochId,
     /// Current state of the workspace.
     pub state: WorkspaceState,
     /// Lifetime mode: ephemeral (default) or persistent.
     #[serde(default)]
     pub mode: WorkspaceMode,
+    /// Number of commits in the workspace that are ahead of the current epoch.
+    /// Non-zero means the workspace has committed work that hasn't been merged yet.
+    #[serde(default)]
+    pub commits_ahead: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +723,7 @@ mod tests {
             epoch: EpochId::new(&"a".repeat(40)).unwrap(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::Ephemeral,
+            commits_ahead: 0,
         };
         assert_eq!(info.id.as_str(), "test");
         assert_eq!(info.path, PathBuf::from("/tmp/ws/test"));
@@ -734,6 +739,7 @@ mod tests {
             epoch: EpochId::new(&"f".repeat(40)).unwrap(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::Persistent,
+            commits_ahead: 0,
         };
         assert!(info.mode.is_persistent());
     }
@@ -746,6 +752,7 @@ mod tests {
             epoch: EpochId::new(&"f".repeat(40)).unwrap(),
             state: WorkspaceState::Stale { behind_epochs: 2 },
             mode: WorkspaceMode::Persistent,
+            commits_ahead: 0,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: WorkspaceInfo = serde_json::from_str(&json).unwrap();

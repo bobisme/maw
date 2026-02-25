@@ -311,6 +311,7 @@ impl WorkspaceBackend for RefLinkBackend {
                     epoch: epoch.clone(),
                     state: WorkspaceState::Active,
                     mode: WorkspaceMode::default(),
+                commits_ahead: 0,
                 });
             }
             // Partial/mismatched workspace: remove and recreate.
@@ -341,6 +342,7 @@ impl WorkspaceBackend for RefLinkBackend {
             epoch: epoch.clone(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::default(),
+        commits_ahead: 0,
         })
     }
 
@@ -399,6 +401,7 @@ impl WorkspaceBackend for RefLinkBackend {
                 epoch,
                 state,
                 mode: WorkspaceMode::default(),
+            commits_ahead: 0,
             });
         }
 

@@ -545,6 +545,7 @@ impl WorkspaceBackend for OverlayBackend {
                 epoch: stored_epoch,
                 state: WorkspaceState::Active,
                 mode: WorkspaceMode::default(),
+            commits_ahead: 0,
             });
         }
 
@@ -576,6 +577,7 @@ impl WorkspaceBackend for OverlayBackend {
             epoch: epoch.clone(),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::default(),
+        commits_ahead: 0,
         })
     }
 
@@ -655,6 +657,7 @@ impl WorkspaceBackend for OverlayBackend {
                 epoch,
                 state,
                 mode: WorkspaceMode::default(),
+            commits_ahead: 0,
             });
         }
 
