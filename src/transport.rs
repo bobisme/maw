@@ -120,14 +120,30 @@ pub struct ManifoldPushArgs {
 /// # Errors
 /// Returns an error if `git push` fails.
 pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()> {
-    let refspec = "refs/manifold/*:refs/manifold/*";
+    // Targeted refspecs that exclude the local-only staging area
+    // (refs/manifold/remote/*) and separate epoch from force-push logic.
+    //
+    // The epoch ref is a git commit pointer — force-pushing it could regress
+    // the remote epoch if the local repo hasn't pulled recent advances.
+    // Push it without --force so the remote rejects a regression.
+    //
+    // Op log head refs (refs/manifold/head/*) and workspace state refs
+    // (refs/manifold/ws/*) point to blob OIDs; git has no ancestry concept
+    // for blobs, so --force is required for updates.
+    let epoch_refspec = "refs/manifold/epoch/current:refs/manifold/epoch/current";
+    let head_refspec = "refs/manifold/head/*:refs/manifold/head/*";
+    let ws_refspec = "refs/manifold/ws/*:refs/manifold/ws/*";
 
     if dry_run {
-        println!("[dry-run] git push {remote} '{refspec}'");
+        println!("[dry-run] git push {remote} '{epoch_refspec}' (no --force)");
+        println!("[dry-run] git push --force {remote} '{head_refspec}' '{ws_refspec}'");
         return Ok(());
     }
 
     println!("Pushing refs/manifold/* to {remote}...");
+
+    // Clean up any leftover staging refs before checking/pushing.
+    cleanup_staging(root);
 
     // Check whether there are any refs/manifold/* refs to push.
     let refs_exist = Command::new("git")
@@ -142,14 +158,15 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
         return Ok(());
     }
 
-    let push = Command::new("git")
-        .args(["push", "--force", remote, refspec])
+    // Step 1: Push epoch ref without --force to prevent remote regression.
+    let epoch_push = Command::new("git")
+        .args(["push", remote, epoch_refspec])
         .current_dir(root)
         .output()
-        .context("Failed to run git push for manifold refs")?;
+        .context("Failed to run git push for epoch ref")?;
 
-    if !push.status.success() {
-        let stderr = String::from_utf8_lossy(&push.stderr);
+    if !epoch_push.status.success() {
+        let stderr = String::from_utf8_lossy(&epoch_push.stderr);
         let stderr_trimmed = stderr.trim();
 
         if stderr_trimmed.contains("rejected")
@@ -157,32 +174,57 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
             || stderr_trimmed.contains("fetch first")
         {
             bail!(
-                "Manifold push rejected (non-fast-forward).\n  \
-                 Remote has state the local repo doesn't have. Pull first:\n    \
+                "Manifold epoch push rejected (non-fast-forward).\n  \
+                 Remote epoch is ahead of local — pull first:\n    \
                  maw pull --manifold {remote}\n  \
                  Then retry: maw push --manifold"
             );
         }
 
-        bail!("git push refs/manifold/* failed: {stderr_trimmed}");
+        // "does not match any" means the local epoch ref doesn't exist yet — OK.
+        if !stderr_trimmed.contains("does not match any")
+            && !stderr_trimmed.contains("src refspec")
+        {
+            bail!("git push epoch ref failed: {stderr_trimmed}");
+        }
     }
 
-    // Parse and print what was pushed.
-    let stderr_out = String::from_utf8_lossy(&push.stderr);
-    let pushed_count = stderr_out
-        .lines()
-        .filter(|l| l.contains("refs/manifold/"))
-        .count();
+    // Step 2: Push op log heads and workspace state refs with --force.
+    // These refs point to blob OIDs where ancestry checks don't apply.
+    let force_push = Command::new("git")
+        .args(["push", "--force", remote, head_refspec, ws_refspec])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git push for manifold head/ws refs")?;
+
+    if !force_push.status.success() {
+        let stderr = String::from_utf8_lossy(&force_push.stderr);
+        let stderr_trimmed = stderr.trim();
+
+        // "does not match any" is OK — means no head/* or ws/* refs exist yet.
+        if !stderr_trimmed.contains("does not match any")
+            && !stderr_trimmed.contains("src refspec")
+        {
+            bail!("git push refs/manifold/head/* refs/manifold/ws/* failed: {stderr_trimmed}");
+        }
+    }
+
+    // Parse and print what was pushed from both operations.
+    let mut pushed_count = 0;
+    for output in [&epoch_push, &force_push] {
+        let stderr_out = String::from_utf8_lossy(&output.stderr);
+        for line in stderr_out.lines() {
+            if line.contains("refs/manifold/") {
+                pushed_count += 1;
+                println!("    {}", line.trim());
+            }
+        }
+    }
 
     if pushed_count == 0 {
         println!("  refs/manifold/* already up to date on {remote}.");
     } else {
-        println!("  Pushed {pushed_count} ref(s) to {remote}:");
-        for line in stderr_out.lines() {
-            if line.contains("refs/manifold/") {
-                println!("    {}", line.trim());
-            }
-        }
+        println!("  Pushed {pushed_count} ref(s) to {remote}.");
     }
 
     Ok(())
