@@ -575,7 +575,7 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice --check               # pre-flight: can we merge cleanly?
     ///   maw ws merge alice --check --format json # structured check result
     ///   maw ws merge alice --format json         # structured merge result (success or conflict)
-    ///   maw ws merge alice bob --interactive      # interactively resolve conflicts
+    ///   maw ws merge alice bob --resolve cf-k7mx=ours --resolve cf-r3np=theirs
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -625,13 +625,23 @@ pub enum WorkspaceCommands {
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
 
-        /// Interactively resolve conflicts instead of aborting.
+        /// Resolve conflicts inline. Format: ID=STRATEGY
         ///
-        /// When conflicts are detected, presents each conflict with base/ours/theirs
-        /// content and prompts for resolution: keep ours, keep theirs, edit, or skip.
-        /// Requires a TTY. Not compatible with --format json.
-        #[arg(long, conflicts_with = "check", conflicts_with = "plan")]
-        interactive: bool,
+        /// When a merge produces conflicts, each conflict is assigned a short ID
+        /// (e.g., cf-k7mx). Re-run the merge with --resolve flags to resolve them:
+        ///
+        ///   maw ws merge ws-a ws-b --resolve cf-k7mx=ours --resolve cf-r3np=theirs
+        ///
+        /// Strategies:
+        ///   ours     — keep first workspace's version
+        ///   theirs   — keep second workspace's version
+        ///   ws:NAME  — keep named workspace's version
+        ///   content:PATH — use file at PATH as resolution
+        ///
+        /// File-level IDs (cf-k7mx) resolve the whole file.
+        /// Atom-level IDs (cf-k7mx.0) resolve a specific conflict region (ours/theirs only).
+        #[arg(long = "resolve", value_name = "ID=STRATEGY", conflicts_with = "check", conflicts_with = "plan")]
+        resolve: Vec<String>,
     },
 
     /// Show detailed conflict information for workspace(s)
@@ -756,7 +766,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             check,
             format,
             json,
-            interactive,
+            resolve,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             if check {
@@ -773,7 +783,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     message: message.as_deref(),
                     dry_run,
                     format: fmt,
-                    interactive,
+                    resolve,
                 },
             )
         }

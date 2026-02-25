@@ -92,6 +92,13 @@ pub struct ConflictSideJson {
 /// ```
 #[derive(Debug, Clone, Serialize)]
 pub struct ConflictJson {
+    /// Short deterministic conflict ID, e.g. "cf-k7mx".
+    ///
+    /// Use this ID with `--resolve cf-k7mx=ours` to resolve the conflict inline.
+    /// Atom-level IDs (e.g. "cf-k7mx.0") are listed in the `atom_ids` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Conflict type tag: "content", "`add_add`", "`modify_delete`", or "`missing_base`".
     #[serde(rename = "type")]
     pub conflict_type: String,
@@ -128,6 +135,13 @@ pub struct ConflictJson {
     /// possible. Each atom identifies the exact region and the divergent edits.
     /// Empty for add/add and modify/delete conflicts.
     pub atoms: Vec<ConflictAtom>,
+
+    /// Atom-level conflict IDs, one per entry in `atoms`.
+    ///
+    /// Use these with `--resolve cf-k7mx.0=ours` for per-region resolution.
+    /// Only ours/theirs strategies are supported at atom level.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub atom_ids: Vec<String>,
 
     /// Suggested resolution strategies for this conflict type.
     ///
@@ -181,6 +195,526 @@ pub struct MergeConflictOutput {
     pub message: String,
     /// Exact command to retry once conflicts are resolved.
     pub to_fix: String,
+    /// Template resolve command with all conflict IDs defaulting to ours.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolve_command: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Conflict IDs (terseid-based, stateless)
+// ---------------------------------------------------------------------------
+
+/// A conflict record annotated with a deterministic short ID.
+#[derive(Debug)]
+struct ConflictWithId {
+    /// File-level conflict ID, e.g. "cf-k7mx".
+    id: String,
+    /// The underlying conflict record from the merge engine.
+    record: ConflictRecord,
+    /// Atom-level IDs, e.g. ["cf-k7mx.0", "cf-k7mx.1"].
+    atom_ids: Vec<String>,
+}
+
+/// Assign deterministic terseid-based IDs to each conflict.
+///
+/// File-level ID: `cf-{hash(path, 4)}`.
+/// Atom-level ID: `cf-{hash}.{index}`.
+///
+/// Same path always produces the same ID within a merge attempt.
+fn assign_conflict_ids(conflicts: &[ConflictRecord]) -> Vec<ConflictWithId> {
+    conflicts
+        .iter()
+        .map(|record| {
+            let path_str = record.path.to_string_lossy();
+            let hash = terseid::hash(path_str.as_bytes(), 4);
+            let file_id = format!("cf-{hash}");
+            let atom_ids: Vec<String> = (0..record.atoms.len())
+                .map(|i| {
+                    let idx = u32::try_from(i).unwrap_or(u32::MAX);
+                    terseid::child_id(&file_id, idx)
+                })
+                .collect();
+            ConflictWithId {
+                id: file_id,
+                record: record.clone(),
+                atom_ids,
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Resolution parsing and application
+// ---------------------------------------------------------------------------
+
+/// A resolution strategy for a conflict.
+#[derive(Debug, Clone)]
+enum Resolution {
+    /// Keep the first workspace's version.
+    Ours,
+    /// Keep the second workspace's version.
+    Theirs,
+    /// Keep a specific workspace's version.
+    Workspace(String),
+    /// Use file content from the given path.
+    Content(PathBuf),
+}
+
+/// Parse `--resolve ID=STRATEGY` strings into a map.
+///
+/// Valid formats:
+/// - `cf-k7mx=ours`
+/// - `cf-k7mx=theirs`
+/// - `cf-k7mx=ws:alice`
+/// - `cf-k7mx=content:/path/to/file`
+/// - `cf-k7mx.0=ours` (atom-level)
+fn parse_resolutions(raw: &[String]) -> Result<BTreeMap<String, Resolution>> {
+    let mut map = BTreeMap::new();
+    for entry in raw {
+        let (id, strategy) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid --resolve format: '{entry}'\n  \
+                 Expected: ID=STRATEGY (e.g., cf-k7mx=ours)\n  \
+                 Strategies: ours, theirs, ws:NAME, content:PATH"
+            )
+        })?;
+
+        let id = id.trim();
+        let strategy = strategy.trim();
+
+        if !id.starts_with("cf-") {
+            bail!(
+                "Invalid conflict ID: '{id}'\n  \
+                 Conflict IDs start with 'cf-' (e.g., cf-k7mx)"
+            );
+        }
+
+        let resolution = if strategy.eq_ignore_ascii_case("ours") {
+            Resolution::Ours
+        } else if strategy.eq_ignore_ascii_case("theirs") {
+            Resolution::Theirs
+        } else if let Some(ws_name) = strategy.strip_prefix("ws:") {
+            Resolution::Workspace(ws_name.to_string())
+        } else if let Some(path) = strategy.strip_prefix("content:") {
+            Resolution::Content(PathBuf::from(path))
+        } else {
+            bail!(
+                "Unknown resolution strategy: '{strategy}'\n  \
+                 Valid strategies: ours, theirs, ws:NAME, content:PATH"
+            );
+        };
+
+        map.insert(id.to_string(), resolution);
+    }
+    Ok(map)
+}
+
+/// Apply resolutions to conflicts, returning resolved file contents and remaining unresolved conflicts.
+///
+/// For file-level IDs: resolves the entire file.
+/// For atom-level IDs: only ours/theirs supported — splices resolved atoms into the file.
+#[allow(clippy::type_complexity)]
+fn apply_resolutions(
+    conflicts: &[ConflictWithId],
+    resolutions: &BTreeMap<String, Resolution>,
+    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
+) -> Result<(BTreeMap<PathBuf, Vec<u8>>, Vec<ConflictWithId>)> {
+    let mut resolved_contents: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
+    let mut remaining: Vec<ConflictWithId> = Vec::new();
+
+    for conflict in conflicts {
+        // Check for file-level resolution first
+        if let Some(resolution) = resolutions.get(&conflict.id) {
+            let content = resolve_file_content(
+                resolution,
+                &conflict.record,
+                workspace_dirs,
+            )?;
+            resolved_contents.insert(conflict.record.path.clone(), content);
+            continue;
+        }
+
+        // Check for atom-level resolutions (all atoms must be resolved for the file to count)
+        if !conflict.atom_ids.is_empty() {
+            let mut all_atoms_resolved = true;
+            let mut atom_resolutions: Vec<Option<&Resolution>> = Vec::new();
+            for atom_id in &conflict.atom_ids {
+                if let Some(res) = resolutions.get(atom_id) {
+                    atom_resolutions.push(Some(res));
+                } else {
+                    all_atoms_resolved = false;
+                    atom_resolutions.push(None);
+                }
+            }
+
+            if all_atoms_resolved {
+                let content = resolve_atoms(
+                    &conflict.record,
+                    &atom_resolutions,
+                )?;
+                resolved_contents.insert(conflict.record.path.clone(), content);
+                continue;
+            }
+
+            // Partial atom resolution: check if *any* atoms were targeted
+            if atom_resolutions.iter().any(Option::is_some) {
+                bail!(
+                    "Partial atom resolution for {}: all atoms must be resolved together.\n  \
+                     Atoms: {}",
+                    conflict.id,
+                    conflict.atom_ids.join(", ")
+                );
+            }
+        }
+
+        // No resolution for this conflict — it remains unresolved
+        remaining.push(ConflictWithId {
+            id: conflict.id.clone(),
+            record: conflict.record.clone(),
+            atom_ids: conflict.atom_ids.clone(),
+        });
+    }
+
+    // Check for resolution IDs that don't match any conflict
+    for res_id in resolutions.keys() {
+        let matches_any = conflicts.iter().any(|c| {
+            c.id == *res_id || c.atom_ids.iter().any(|a| a == res_id)
+        });
+        if !matches_any {
+            bail!(
+                "Unknown conflict ID in --resolve: '{res_id}'\n  \
+                 Valid IDs for this merge: {}",
+                conflicts.iter().map(|c| c.id.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+
+    Ok((resolved_contents, remaining))
+}
+
+/// Resolve a whole file using the given strategy.
+fn resolve_file_content(
+    resolution: &Resolution,
+    record: &ConflictRecord,
+    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
+) -> Result<Vec<u8>> {
+    match resolution {
+        Resolution::Ours => {
+            let side = record.sides.first().ok_or_else(|| {
+                anyhow::anyhow!("No 'ours' side for {}", record.path.display())
+            })?;
+            side.content.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'ours' side ({}) has no content (deleted). Use 'theirs' or 'content:PATH'.",
+                    side.workspace_id
+                )
+            })
+        }
+        Resolution::Theirs => {
+            let side = record.sides.get(1).ok_or_else(|| {
+                anyhow::anyhow!("No 'theirs' side for {}", record.path.display())
+            })?;
+            side.content.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'theirs' side ({}) has no content (deleted). Use 'ours' or 'content:PATH'.",
+                    side.workspace_id
+                )
+            })
+        }
+        Resolution::Workspace(name) => {
+            let ws_id = WorkspaceId::new(name)
+                .map_err(|e| anyhow::anyhow!("Invalid workspace name '{name}': {e}"))?;
+            // Find the side matching this workspace
+            let side = record
+                .sides
+                .iter()
+                .find(|s| s.workspace_id == ws_id)
+                .ok_or_else(|| {
+                    let available: Vec<_> = record.sides.iter().map(|s| s.workspace_id.to_string()).collect();
+                    anyhow::anyhow!(
+                        "Workspace '{name}' is not a side in this conflict.\n  \
+                         Available: {}",
+                        available.join(", ")
+                    )
+                })?;
+            side.content.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Workspace '{name}' has no content (deleted) for {}.",
+                    record.path.display()
+                )
+            })
+        }
+        Resolution::Content(path) => {
+            // If path is relative, try resolving against each workspace dir
+            let abs_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                // Try workspace dirs
+                let mut found = None;
+                for ws_dir in workspace_dirs.values() {
+                    let candidate = ws_dir.join(path);
+                    if candidate.exists() {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| path.clone())
+            };
+            std::fs::read(&abs_path).with_context(|| {
+                format!(
+                    "Could not read resolution file: {}\n  \
+                     For content: strategy, provide an absolute path or a path relative to a workspace.",
+                    abs_path.display()
+                )
+            })
+        }
+    }
+}
+
+/// Resolve individual atoms within a file, reconstructing the complete content.
+///
+/// For each atom, picks ours or theirs content based on the resolution.
+/// Only ours/theirs supported at atom level (content/ws require whole-file).
+fn resolve_atoms(
+    record: &ConflictRecord,
+    atom_resolutions: &[Option<&Resolution>],
+) -> Result<Vec<u8>> {
+    // For atom-level resolution we need the base content and the side contents
+    // as line arrays. We walk through the base, replacing conflict regions
+    // with the chosen side's content.
+    let base = record.base.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Atom-level resolution requires base content for {}. Use file-level ID instead.",
+            record.path.display()
+        )
+    })?;
+    let base_text = std::str::from_utf8(base).map_err(|_| {
+        anyhow::anyhow!(
+            "Atom-level resolution not supported for binary file {}. Use file-level ID instead.",
+            record.path.display()
+        )
+    })?;
+    let base_lines: Vec<&str> = base_text.lines().collect();
+
+    let ours_content = record.sides.first().and_then(|s| s.content.as_ref());
+    let theirs_content = record.sides.get(1).and_then(|s| s.content.as_ref());
+
+    let ours_text = ours_content
+        .and_then(|c| std::str::from_utf8(c).ok())
+        .unwrap_or("");
+    let theirs_text = theirs_content
+        .and_then(|c| std::str::from_utf8(c).ok())
+        .unwrap_or("");
+    let ours_lines: Vec<&str> = ours_text.lines().collect();
+    let theirs_lines: Vec<&str> = theirs_text.lines().collect();
+
+    // Collect atom regions sorted by start line
+    let mut atoms_sorted: Vec<(usize, &crate::model::conflict::ConflictAtom, &Resolution)> =
+        Vec::new();
+    for (i, atom) in record.atoms.iter().enumerate() {
+        let res = atom_resolutions[i].ok_or_else(|| {
+            anyhow::anyhow!("Missing resolution for atom {i} of {}", record.path.display())
+        })?;
+        match res {
+            Resolution::Ours | Resolution::Theirs => {}
+            _ => bail!(
+                "Atom-level resolution only supports 'ours' or 'theirs'.\n  \
+                 For other strategies, use the file-level ID."
+            ),
+        }
+        let start = match atom.base_region {
+            Region::Lines { start, .. } => start as usize,
+            _ => 0,
+        };
+        atoms_sorted.push((start, atom, res));
+    }
+    atoms_sorted.sort_by_key(|(start, _, _)| *start);
+
+    // Reconstruct: walk base lines, substituting conflict regions
+    let mut result = Vec::new();
+    let mut pos = 0usize; // current line in base (0-indexed)
+
+    for (_, atom, resolution) in &atoms_sorted {
+        let (region_start, region_end) = match atom.base_region {
+            Region::Lines { start, end } => (start as usize, end as usize),
+            _ => continue, // skip non-line regions
+        };
+        // Convert to 0-indexed
+        let start_0 = if region_start > 0 { region_start - 1 } else { 0 };
+        let end_0 = if region_end > 0 { region_end - 1 } else { 0 };
+
+        // Copy base lines before this region
+        for line in &base_lines[pos..start_0.min(base_lines.len())] {
+            result.push(*line);
+        }
+
+        // Insert the chosen side's version of this region
+        let chosen_lines = match resolution {
+            Resolution::Ours => &ours_lines,
+            Resolution::Theirs => &theirs_lines,
+            _ => unreachable!(),
+        };
+        // Use the atom's edit region from the chosen side
+        let edit = atom.edits.iter().find(|e| match resolution {
+            Resolution::Ours => {
+                record.sides.first().is_some_and(|s| s.workspace_id.as_str() == e.workspace)
+            }
+            Resolution::Theirs => {
+                record.sides.get(1).is_some_and(|s| s.workspace_id.as_str() == e.workspace)
+            }
+            _ => false,
+        });
+        if let Some(edit) = edit {
+            if let Region::Lines { start, end } = edit.region {
+                let es = if start > 0 { (start - 1) as usize } else { 0 };
+                let ee = if end > 0 { (end - 1) as usize } else { 0 };
+                for line in &chosen_lines[es..ee.min(chosen_lines.len())] {
+                    result.push(line);
+                }
+            } else {
+                // Fallback: use the edit's content snippet
+                result.push(&edit.content);
+            }
+        } else {
+            // No matching edit found — keep base region as-is
+            for line in &base_lines[start_0..end_0.min(base_lines.len())] {
+                result.push(*line);
+            }
+        }
+
+        pos = end_0.min(base_lines.len());
+    }
+
+    // Copy remaining base lines after the last atom
+    for line in &base_lines[pos..] {
+        result.push(*line);
+    }
+
+    let mut output = result.join("\n");
+    if base_text.ends_with('\n') {
+        output.push('\n');
+    }
+    Ok(output.into_bytes())
+}
+
+/// Patch the candidate tree with resolved file contents, producing a new commit OID.
+///
+/// For each resolved path:
+/// 1. `git hash-object -w --stdin` → new blob OID
+/// 2. Read candidate tree with `git ls-tree -r`
+/// 3. Replace blob OIDs for resolved paths
+/// 4. `git mktree` → new tree
+/// 5. `git commit-tree` → new commit (same parent as candidate)
+fn patch_candidate_tree(
+    root: &Path,
+    candidate: &GitOid,
+    resolved: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<GitOid> {
+    if resolved.is_empty() {
+        return Ok(candidate.clone());
+    }
+
+    // 1. Hash resolved contents as blobs
+    let mut new_blobs: BTreeMap<String, String> = BTreeMap::new();
+    for (path, content) in resolved {
+        let blob_oid = git_hash_object(root, content).ok_or_else(|| {
+            anyhow::anyhow!("Failed to hash resolved content for {}", path.display())
+        })?;
+        new_blobs.insert(path.to_string_lossy().to_string(), blob_oid.as_str().to_string());
+    }
+
+    // 2. Read the candidate tree
+    let ls_output = Command::new("git")
+        .args(["ls-tree", "-r", candidate.as_str()])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git ls-tree")?;
+    if !ls_output.status.success() {
+        bail!(
+            "git ls-tree failed: {}",
+            String::from_utf8_lossy(&ls_output.stderr).trim()
+        );
+    }
+
+    // 3. Replace blob OIDs for resolved paths
+    let tree_text = String::from_utf8_lossy(&ls_output.stdout);
+    let mut new_tree_lines: Vec<String> = Vec::new();
+    for line in tree_text.lines() {
+        // Format: "mode type oid\tpath"
+        let parts: Vec<&str> = line.splitn(2, '\t').collect();
+        if parts.len() != 2 {
+            new_tree_lines.push(line.to_string());
+            continue;
+        }
+        let path = parts[1];
+        let meta: Vec<&str> = parts[0].splitn(3, ' ').collect();
+        if meta.len() != 3 {
+            new_tree_lines.push(line.to_string());
+            continue;
+        }
+        let (mode, obj_type, _old_oid) = (meta[0], meta[1], meta[2]);
+        if let Some(new_oid) = new_blobs.get(path) {
+            new_tree_lines.push(format!("{mode} {obj_type} {new_oid}\t{path}"));
+        } else {
+            new_tree_lines.push(line.to_string());
+        }
+    }
+
+    // 4. mktree
+    let tree_input = new_tree_lines.join("\n");
+    let mut mktree = Command::new("git")
+        .arg("mktree")
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn git mktree")?;
+    if let Some(mut stdin) = mktree.stdin.take() {
+        stdin
+            .write_all(tree_input.as_bytes())
+            .context("Failed to write to git mktree stdin")?;
+    }
+    let mktree_out = mktree.wait_with_output().context("Failed to wait for git mktree")?;
+    if !mktree_out.status.success() {
+        bail!(
+            "git mktree failed: {}",
+            String::from_utf8_lossy(&mktree_out.stderr).trim()
+        );
+    }
+    let new_tree_oid = String::from_utf8_lossy(&mktree_out.stdout).trim().to_string();
+
+    // 5. commit-tree with the same parent as the candidate
+    let parent_output = Command::new("git")
+        .args(["rev-parse", &format!("{candidate}^")])
+        .current_dir(root)
+        .output()
+        .context("Failed to get candidate parent")?;
+    let parent_oid = String::from_utf8_lossy(&parent_output.stdout).trim().to_string();
+
+    let commit_output = Command::new("git")
+        .args([
+            "commit-tree",
+            &new_tree_oid,
+            "-p",
+            &parent_oid,
+            "-m",
+            "epoch: merge with conflict resolutions",
+        ])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git commit-tree")?;
+    if !commit_output.status.success() {
+        bail!(
+            "git commit-tree failed: {}",
+            String::from_utf8_lossy(&commit_output.stderr).trim()
+        );
+    }
+    let new_commit_oid = String::from_utf8_lossy(&commit_output.stdout)
+        .trim()
+        .to_string();
+    GitOid::new(&new_commit_oid)
+        .map_err(|e| anyhow::anyhow!("Invalid patched commit OID '{new_commit_oid}': {e}"))
 }
 
 /// JSON output for `maw ws conflicts <workspaces>`.
@@ -213,7 +747,19 @@ pub struct ConflictsOutput {
 ///
 /// This bridges the internal merge engine representation to the agent-facing
 /// JSON format defined in §6.4 of the design doc.
+///
+/// When `id_info` is provided, the JSON includes conflict and atom IDs for
+/// use with `--resolve`.
 pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
+    conflict_record_to_json_with_id(record, None, &[])
+}
+
+/// Convert with optional conflict ID and atom IDs.
+fn conflict_record_to_json_with_id(
+    record: &ConflictRecord,
+    id: Option<&str>,
+    atom_ids: &[String],
+) -> ConflictJson {
     // Map reason to type tag and description
     let (conflict_type, reason_key, resolution_strategies, suggested_resolution) =
         match &record.reason {
@@ -300,6 +846,7 @@ pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
     });
 
     ConflictJson {
+        id: id.map(String::from),
         conflict_type: conflict_type.to_string(),
         path: record.path.display().to_string(),
         reason: reason_key.to_string(),
@@ -309,6 +856,7 @@ pub fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
         base_is_binary,
         sides,
         atoms: record.atoms.clone(),
+        atom_ids: atom_ids.to_vec(),
         resolution_strategies,
         suggested_resolution,
     }
@@ -359,29 +907,74 @@ fn conflict_record_to_info(record: &ConflictRecord) -> ConflictInfo {
     }
 }
 
-/// Print detailed conflict information from the merge engine's conflict records.
+/// Print detailed conflict information with terseid IDs and resolve commands.
 fn print_conflict_report(
-    conflicts: &[ConflictRecord],
-    default_ws_path: &Path,
-    default_ws_name: &str,
+    conflicts_with_ids: &[ConflictWithId],
+    ws_names: &[String],
 ) {
     println!();
-    println!("Conflicts:");
-    for conflict in conflicts {
-        let reason = format!("{}", conflict.reason);
-        println!("  {:<40} {reason}", conflict.path.display());
+    println!(
+        "BUILD: {} conflict(s) detected.",
+        conflicts_with_ids.len()
+    );
+    println!();
+
+    for c in conflicts_with_ids {
+        let reason = format!("{}", c.record.reason);
+        let ws_list: Vec<String> = c
+            .record
+            .sides
+            .iter()
+            .map(|s| s.workspace_id.as_str().to_string())
+            .collect();
+        println!(
+            "  {:<10} {:<40} {}",
+            c.id,
+            c.record.path.display(),
+            reason
+        );
+        println!(
+            "           Workspaces: {}",
+            ws_list.join(", ")
+        );
+        if !c.atom_ids.is_empty() {
+            println!("           Atoms:");
+            for (i, atom) in c.record.atoms.iter().enumerate() {
+                let atom_id = &c.atom_ids[i];
+                let region_desc = match atom.base_region {
+                    Region::Lines { start, end } => format!("lines {start}-{end}"),
+                    _ => "region".to_string(),
+                };
+                let reason_desc = atom.reason.description();
+                println!(
+                    "             {:<14} {:<16} {}",
+                    atom_id, region_desc, reason_desc
+                );
+            }
+        }
+        println!();
     }
 
-    let ws_display = default_ws_path.display();
+    // Build the resolve command template
+    let ws_args = ws_names.join(" ");
+    let resolve_args: Vec<String> = conflicts_with_ids
+        .iter()
+        .map(|c| format!("--resolve {}=ours", c.id))
+        .collect();
+    println!("To resolve, re-run with --resolve:");
+    println!(
+        "  maw ws merge {} {}",
+        ws_args,
+        resolve_args.join(" ")
+    );
     println!();
-    println!("To resolve:");
-    println!("  1. Examine the conflict details above and determine the correct content");
-    println!("  2. Edit the conflicted files in {ws_display}/");
-    println!("  3. Re-run the merge: maw ws merge <workspace names>");
+    println!("Options:  ID=ours | ID=theirs | ID=ws:NAME | ID=content:PATH");
     println!();
-    println!("  Conflicts are reported by the merge engine, not as markers in files.");
-    println!("  Each conflict has a reason (divergent edits, add/add, etc.) to guide resolution.");
-    let _ = default_ws_name; // used in the path above
+    println!(
+        "To inspect full content:  maw ws conflicts {} --format json",
+        ws_args
+    );
+    println!("Or edit files in a workspace, commit, and re-merge.");
 }
 
 /// Run pre-merge or post-merge hook commands from .maw.toml.
@@ -1354,8 +1947,8 @@ pub struct MergeOptions<'a> {
     /// Output format. `OutputFormat::Json` emits structured JSON for the
     /// conflict report and success summary.
     pub format: OutputFormat,
-    /// Interactively resolve conflicts instead of aborting.
-    pub interactive: bool,
+    /// Inline conflict resolutions. Each entry is `ID=STRATEGY`.
+    pub resolve: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,7 +1966,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         message,
         dry_run,
         format,
-        interactive,
+        ref resolve,
     } = *opts;
     let ws_to_merge = workspaces.to_vec();
     let text_mode = format != OutputFormat::Json;
@@ -1468,7 +2061,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // -----------------------------------------------------------------------
     textln!();
     textln!("BUILD: Running merge engine...");
-    let build_output = match run_build_phase(&root, &manifold_dir, &backend) {
+    let mut build_output = match run_build_phase(&root, &manifold_dir, &backend) {
         Ok(output) => output,
         Err(e) => {
             // Abort: clean up merge-state
@@ -1487,80 +2080,127 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
-        if interactive {
-            // Interactive mode: prompt user to resolve each conflict
-            textln!(
-                "  {} conflict(s) detected — entering interactive resolution...",
+        let conflicts_with_ids = assign_conflict_ids(&build_output.conflicts);
+
+        if !resolve.is_empty() {
+            // --resolve mode: apply stateless resolutions
+            let parsed = parse_resolutions(resolve)?;
+            let (resolved_contents, remaining) =
+                apply_resolutions(&conflicts_with_ids, &parsed, &workspace_dirs)?;
+
+            if remaining.is_empty() {
+                // All conflicts resolved — patch the candidate tree
+                textln!(
+                    "  {} conflict(s) resolved via --resolve.",
+                    conflicts_with_ids.len()
+                );
+                let patched =
+                    patch_candidate_tree(&root, &build_output.candidate, &resolved_contents)?;
+                textln!("  Patched candidate: {}", &patched.as_str()[..12]);
+
+                // Replace build_output with patched candidate and zero conflicts.
+                // Falls through to VALIDATE → COMMIT → CLEANUP below.
+                build_output = BuildPhaseOutput {
+                    candidate: patched,
+                    unique_count: build_output.unique_count,
+                    shared_count: build_output.shared_count,
+                    resolved_count: build_output.resolved_count + conflicts_with_ids.len(),
+                    conflicts: vec![],
+                };
+            } else {
+                // Some conflicts remain unresolved — report them with IDs
+                abort_merge(&manifold_dir, "partially resolved conflicts");
+                let ws_args = ws_to_merge.join(" ");
+                let resolve_args: Vec<String> = remaining
+                    .iter()
+                    .map(|c| format!("--resolve {}=ours", c.id))
+                    .collect();
+
+                if format == OutputFormat::Json {
+                    let conflict_jsons: Vec<ConflictJson> = remaining
+                        .iter()
+                        .map(|c| {
+                            conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids)
+                        })
+                        .collect();
+                    let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
+                    let output = MergeConflictOutput {
+                        status: "conflict".to_string(),
+                        workspaces: ws_to_merge,
+                        conflict_count: conflict_jsons.len(),
+                        conflicts: conflict_jsons,
+                        message: format!(
+                            "{} conflict(s) remain after partial resolution. Add more --resolve flags.",
+                            remaining.len()
+                        ),
+                        to_fix: to_fix.clone(),
+                        resolve_command: Some(to_fix),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    textln!(
+                        "  {} of {} conflict(s) resolved, {} remaining:",
+                        conflicts_with_ids.len() - remaining.len(),
+                        conflicts_with_ids.len(),
+                        remaining.len()
+                    );
+                    print_conflict_report(&remaining, &ws_to_merge);
+                }
+
+                bail!(
+                    "{} conflict(s) remain after partial resolution.",
+                    remaining.len()
+                );
+            }
+        } else {
+            // No --resolve flags: abort with conflict report including IDs
+            abort_merge(&manifold_dir, "unresolved conflicts");
+
+            let ws_args = ws_to_merge.join(" ");
+            let resolve_args: Vec<String> = conflicts_with_ids
+                .iter()
+                .map(|c| format!("--resolve {}=ours", c.id))
+                .collect();
+
+            if format == OutputFormat::Json {
+                let conflict_jsons: Vec<ConflictJson> = conflicts_with_ids
+                    .iter()
+                    .map(|c| {
+                        conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids)
+                    })
+                    .collect();
+                let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
+                let output = MergeConflictOutput {
+                    status: "conflict".to_string(),
+                    workspaces: ws_to_merge,
+                    conflict_count: conflict_jsons.len(),
+                    conflicts: conflict_jsons,
+                    message: format!(
+                        "Merge has {} unresolved conflict(s). Resolve them and retry.",
+                        build_output.conflicts.len()
+                    ),
+                    to_fix: to_fix.clone(),
+                    resolve_command: Some(to_fix),
+                };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                textln!(
+                    "  {} unresolved conflict(s)",
+                    build_output.conflicts.len()
+                );
+                print_conflict_report(&conflicts_with_ids, &ws_to_merge);
+
+                if destroy_after {
+                    textln!();
+                    textln!("NOT destroying workspaces due to conflicts.");
+                }
+            }
+
+            bail!(
+                "Merge has {} unresolved conflict(s). Resolve them and retry.",
                 build_output.conflicts.len()
             );
-
-            let (resolved, skipped) =
-                interactive_resolve(&build_output.conflicts, &workspace_dirs)?;
-
-            if skipped > 0 {
-                abort_merge(&manifold_dir, "unresolved conflicts (interactive)");
-                bail!(
-                    "{skipped} conflict(s) were skipped. \
-                     Resolve them and re-run: maw ws merge {}",
-                    ws_to_merge.join(" ")
-                );
-            }
-
-            textln!("  All {resolved} conflict(s) resolved interactively.");
-            textln!("  Commit resolutions and re-run the merge:");
-            for ws_name in &ws_to_merge {
-                textln!(
-                    "    maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve merge conflicts\""
-                );
-            }
-            textln!("    maw ws merge {}", ws_to_merge.join(" "));
-
-            abort_merge(&manifold_dir, "interactive resolution applied — re-run needed");
-            bail!(
-                "Interactive resolution applied to workspace files. \
-                 Commit the changes and re-run the merge."
-            );
         }
-
-        // Non-interactive: abort with conflict report
-        abort_merge(&manifold_dir, "unresolved conflicts");
-
-        if format == OutputFormat::Json {
-            // Emit structured JSON conflict output for agents
-            let conflict_jsons: Vec<ConflictJson> = build_output
-                .conflicts
-                .iter()
-                .map(conflict_record_to_json)
-                .collect();
-            let to_fix = format!("maw ws merge {}", ws_to_merge.join(" "));
-            let output = MergeConflictOutput {
-                status: "conflict".to_string(),
-                workspaces: ws_to_merge,
-                conflict_count: conflict_jsons.len(),
-                conflicts: conflict_jsons,
-                message: format!(
-                    "Merge has {} unresolved conflict(s). Resolve them and retry.",
-                    build_output.conflicts.len()
-                ),
-                to_fix,
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            textln!("  {} unresolved conflict(s)", build_output.conflicts.len());
-            print_conflict_report(&build_output.conflicts, &default_ws_path, default_ws);
-
-            if destroy_after {
-                textln!();
-                textln!("NOT destroying workspaces due to conflicts.");
-                textln!("Resolve conflicts in the source workspaces, then retry:");
-                textln!("  maw ws merge {}", ws_to_merge.join(" "));
-            }
-        }
-
-        bail!(
-            "Merge has {} unresolved conflict(s). Resolve them and retry.",
-            build_output.conflicts.len()
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -2215,222 +2855,6 @@ fn record_epoch_after(manifold_dir: &Path, candidate: &crate::model::types::GitO
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Interactive conflict resolution
-// ---------------------------------------------------------------------------
-
-/// Resolution choice for a single conflicted file.
-enum InteractiveChoice {
-    /// Keep the first workspace's version.
-    Ours,
-    /// Keep the second workspace's version.
-    Theirs,
-    /// Edit in $EDITOR.
-    Edit,
-    /// Skip — leave unresolved.
-    Skip,
-}
-
-/// Interactively resolve conflicts by prompting the user for each conflicted file.
-///
-/// For each conflict, displays the file path, conflict reason, and available sides,
-/// then prompts the user to choose a resolution. Resolved files are written to the
-/// first workspace so a re-run of `maw ws merge` will succeed.
-///
-/// Returns the number of resolved conflicts and the number skipped.
-fn interactive_resolve(
-    conflicts: &[ConflictRecord],
-    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
-) -> Result<(usize, usize)> {
-    use std::io::{BufRead, IsTerminal, stdin, stdout};
-
-    if !stdin().is_terminal() || !stdout().is_terminal() {
-        bail!(
-            "--interactive requires a TTY. For non-interactive use, \
-             use --format json and resolve conflicts programmatically."
-        );
-    }
-
-    let mut resolved = 0usize;
-    let mut skipped = 0usize;
-    let total = conflicts.len();
-
-    for (i, conflict) in conflicts.iter().enumerate() {
-        println!();
-        println!(
-            "=== Conflict {}/{}: {} ===",
-            i + 1,
-            total,
-            conflict.path.display()
-        );
-        println!("  Reason: {}", conflict.reason);
-
-        // Show sides
-        for side in &conflict.sides {
-            let preview = side.content.as_ref().map_or_else(
-                || "(deleted)".to_string(),
-                |c| {
-                    let text = String::from_utf8_lossy(c);
-                    let lines: Vec<&str> = text.lines().take(8).collect();
-                    if text.lines().count() > 8 {
-                        format!("{}\n    ... ({} more lines)", lines.join("\n    "), text.lines().count() - 8)
-                    } else {
-                        lines.join("\n    ")
-                    }
-                },
-            );
-            println!("  [{}] ({:?}):", side.workspace_id, side.kind);
-            println!("    {preview}");
-        }
-
-        // Prompt
-        loop {
-            print!("\n  Resolution [(o)urs / (t)heirs / (e)dit / (s)kip]: ");
-            stdout().flush()?;
-
-            let mut input = String::new();
-            stdin().lock().read_line(&mut input)?;
-            let choice = input.trim().to_lowercase();
-
-            let resolution = match choice.as_str() {
-                "o" | "ours" => InteractiveChoice::Ours,
-                "t" | "theirs" => InteractiveChoice::Theirs,
-                "e" | "edit" => InteractiveChoice::Edit,
-                "s" | "skip" => InteractiveChoice::Skip,
-                _ => {
-                    println!("  Invalid choice. Enter o/t/e/s.");
-                    continue;
-                }
-            };
-
-            match resolution {
-                InteractiveChoice::Skip => {
-                    skipped += 1;
-                    println!("  Skipped.");
-                    break;
-                }
-                InteractiveChoice::Ours => {
-                    if let Some(side) = conflict.sides.first() {
-                        apply_resolution(
-                            &conflict.path,
-                            side.content.as_deref(),
-                            &side.workspace_id,
-                            workspace_dirs,
-                        )?;
-                        resolved += 1;
-                        println!("  Resolved: keeping {} version.", side.workspace_id);
-                    } else {
-                        println!("  No 'ours' side available.");
-                        skipped += 1;
-                    }
-                    break;
-                }
-                InteractiveChoice::Theirs => {
-                    if let Some(side) = conflict.sides.get(1) {
-                        apply_resolution(
-                            &conflict.path,
-                            side.content.as_deref(),
-                            // Apply theirs content to the first workspace so the
-                            // re-run picks it up as the resolved version.
-                            &conflict.sides[0].workspace_id,
-                            workspace_dirs,
-                        )?;
-                        resolved += 1;
-                        println!("  Resolved: keeping {} version.", side.workspace_id);
-                    } else {
-                        println!("  No 'theirs' side available.");
-                        skipped += 1;
-                    }
-                    break;
-                }
-                InteractiveChoice::Edit => {
-                    let editor =
-                        std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-
-                    // Write a temp file with the first side's content for editing
-                    let content = conflict
-                        .sides
-                        .first()
-                        .and_then(|s| s.content.as_ref())
-                        .cloned()
-                        .unwrap_or_default();
-
-                    let tmp_dir = std::env::temp_dir();
-                    let filename = conflict
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
-                    let tmp_path = tmp_dir.join(format!("maw-resolve-{filename}"));
-                    std::fs::write(&tmp_path, &content)?;
-
-                    let status = Command::new(&editor)
-                        .arg(&tmp_path)
-                        .stdin(Stdio::inherit())
-                        .stdout(Stdio::inherit())
-                        .stderr(Stdio::inherit())
-                        .status();
-
-                    match status {
-                        Ok(s) if s.success() => {
-                            let edited = std::fs::read(&tmp_path)?;
-                            let _ = std::fs::remove_file(&tmp_path);
-                            let ws_id = &conflict.sides[0].workspace_id;
-                            apply_resolution(
-                                &conflict.path,
-                                Some(&edited),
-                                ws_id,
-                                workspace_dirs,
-                            )?;
-                            resolved += 1;
-                            println!("  Resolved: edited version applied.");
-                        }
-                        _ => {
-                            let _ = std::fs::remove_file(&tmp_path);
-                            println!("  Editor failed or was cancelled. Skipping.");
-                            skipped += 1;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    Ok((resolved, skipped))
-}
-
-/// Apply a resolution by writing content to the workspace's copy of the file.
-fn apply_resolution(
-    path: &Path,
-    content: Option<&[u8]>,
-    target_ws: &WorkspaceId,
-    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
-) -> Result<()> {
-    let ws_path = workspace_dirs
-        .get(target_ws)
-        .ok_or_else(|| anyhow::anyhow!("workspace '{}' not found in dirs map", target_ws))?;
-    let file_path = ws_path.join(path);
-
-    match content {
-        Some(data) => {
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&file_path, data)
-                .with_context(|| format!("writing resolution to {}", file_path.display()))?;
-        }
-        None => {
-            // Deletion resolution
-            if file_path.exists() {
-                std::fs::remove_file(&file_path)
-                    .with_context(|| format!("removing {}", file_path.display()))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Abort the merge by writing abort reason and removing merge-state.
 fn abort_merge(manifold_dir: &Path, reason: &str) {
     let state_path = MergeStateFile::default_path(manifold_dir);
@@ -2935,6 +3359,7 @@ mod tests {
             conflicts,
             message: "Merge has 2 unresolved conflict(s). Resolve them and retry.".to_string(),
             to_fix: "maw ws merge alice bob".to_string(),
+            resolve_command: None,
         };
 
         let json_str = serde_json::to_string_pretty(&output).unwrap();
@@ -3102,5 +3527,255 @@ mod tests {
         );
         assert!(!parsed["sides"].as_array().unwrap().is_empty());
         assert!(!parsed["suggested_resolution"].as_str().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // assign_conflict_ids: determinism and structure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assign_conflict_ids_deterministic() {
+        let records = vec![
+            content_record("src/lib.rs", "base", "alice", "bob"),
+            add_add_record("src/new.rs"),
+        ];
+        let ids1 = assign_conflict_ids(&records);
+        let ids2 = assign_conflict_ids(&records);
+
+        assert_eq!(ids1.len(), 2);
+        assert_eq!(ids2.len(), 2);
+        assert_eq!(ids1[0].id, ids2[0].id);
+        assert_eq!(ids1[1].id, ids2[1].id);
+    }
+
+    #[test]
+    fn assign_conflict_ids_have_cf_prefix() {
+        let records = vec![content_record("src/lib.rs", "base", "a", "b")];
+        let ids = assign_conflict_ids(&records);
+
+        assert!(ids[0].id.starts_with("cf-"), "id should start with cf-");
+    }
+
+    #[test]
+    fn assign_conflict_ids_atoms_indexed() {
+        let records = vec![content_record("src/lib.rs", "base", "a", "b")];
+        let ids = assign_conflict_ids(&records);
+
+        // content_record creates 1 atom
+        assert_eq!(ids[0].atom_ids.len(), 1);
+        assert!(
+            ids[0].atom_ids[0].starts_with(&ids[0].id),
+            "atom ID should start with file ID"
+        );
+        assert!(
+            ids[0].atom_ids[0].ends_with(".0"),
+            "first atom should end with .0"
+        );
+    }
+
+    #[test]
+    fn assign_conflict_ids_different_paths_different_ids() {
+        let records = vec![
+            content_record("src/lib.rs", "base", "a", "b"),
+            content_record("src/main.rs", "base", "a", "b"),
+        ];
+        let ids = assign_conflict_ids(&records);
+
+        assert_ne!(ids[0].id, ids[1].id, "different paths should get different IDs");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_resolutions: valid and invalid inputs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_resolutions_ours() {
+        let raw = vec!["cf-abcd=ours".to_string()];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(parsed["cf-abcd"], Resolution::Ours));
+    }
+
+    #[test]
+    fn parse_resolutions_theirs() {
+        let raw = vec!["cf-abcd=theirs".to_string()];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert!(matches!(parsed["cf-abcd"], Resolution::Theirs));
+    }
+
+    #[test]
+    fn parse_resolutions_workspace() {
+        let raw = vec!["cf-abcd=ws:alice".to_string()];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert!(matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "alice"));
+    }
+
+    #[test]
+    fn parse_resolutions_content_path() {
+        let raw = vec!["cf-abcd=content:/tmp/resolved.rs".to_string()];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert!(matches!(&parsed["cf-abcd"], Resolution::Content(p) if p == Path::new("/tmp/resolved.rs")));
+    }
+
+    #[test]
+    fn parse_resolutions_atom_level() {
+        let raw = vec!["cf-abcd.0=ours".to_string(), "cf-abcd.1=theirs".to_string()];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed["cf-abcd.0"], Resolution::Ours));
+        assert!(matches!(parsed["cf-abcd.1"], Resolution::Theirs));
+    }
+
+    #[test]
+    fn parse_resolutions_invalid_no_equals() {
+        let raw = vec!["cf-abcd".to_string()];
+        assert!(parse_resolutions(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_resolutions_invalid_no_prefix() {
+        let raw = vec!["abcd=ours".to_string()];
+        assert!(parse_resolutions(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_resolutions_invalid_strategy() {
+        let raw = vec!["cf-abcd=invalid".to_string()];
+        assert!(parse_resolutions(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_resolutions_multiple() {
+        let raw = vec![
+            "cf-aaaa=ours".to_string(),
+            "cf-bbbb=theirs".to_string(),
+            "cf-cccc=ws:bob".to_string(),
+        ];
+        let parsed = parse_resolutions(&raw).unwrap();
+
+        assert_eq!(parsed.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_resolutions: strategy application
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_resolutions_ours_returns_first_side() {
+        let records = vec![add_add_record("new.rs")];
+        let conflicts = assign_conflict_ids(&records);
+        let id = conflicts[0].id.clone();
+        let mut resolutions = BTreeMap::new();
+        resolutions.insert(id, Resolution::Ours);
+
+        let ws_dirs = BTreeMap::new();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+
+        assert!(remaining.is_empty());
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[&PathBuf::from("new.rs")],
+            b"alice's version"
+        );
+    }
+
+    #[test]
+    fn apply_resolutions_theirs_returns_second_side() {
+        let records = vec![add_add_record("new.rs")];
+        let conflicts = assign_conflict_ids(&records);
+        let id = conflicts[0].id.clone();
+        let mut resolutions = BTreeMap::new();
+        resolutions.insert(id, Resolution::Theirs);
+
+        let ws_dirs = BTreeMap::new();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+
+        assert!(remaining.is_empty());
+        assert_eq!(
+            resolved[&PathBuf::from("new.rs")],
+            b"bob's version"
+        );
+    }
+
+    #[test]
+    fn apply_resolutions_unresolved_remains() {
+        let records = vec![
+            add_add_record("a.rs"),
+            add_add_record("b.rs"),
+        ];
+        let conflicts = assign_conflict_ids(&records);
+        let id_a = conflicts[0].id.clone();
+        let mut resolutions = BTreeMap::new();
+        resolutions.insert(id_a, Resolution::Ours);
+
+        let ws_dirs = BTreeMap::new();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].record.path, PathBuf::from("b.rs"));
+    }
+
+    #[test]
+    fn apply_resolutions_unknown_id_errors() {
+        let records = vec![add_add_record("a.rs")];
+        let conflicts = assign_conflict_ids(&records);
+        let mut resolutions = BTreeMap::new();
+        resolutions.insert("cf-zzzz".to_string(), Resolution::Ours);
+
+        let ws_dirs = BTreeMap::new();
+        let result = apply_resolutions(&conflicts, &resolutions, &ws_dirs);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown conflict ID"), "error: {err}");
+    }
+
+    #[test]
+    fn apply_resolutions_workspace_strategy() {
+        let records = vec![add_add_record("new.rs")];
+        let conflicts = assign_conflict_ids(&records);
+        let id = conflicts[0].id.clone();
+        let mut resolutions = BTreeMap::new();
+        resolutions.insert(id, Resolution::Workspace("bob".to_string()));
+
+        let ws_dirs = BTreeMap::new();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+
+        assert!(remaining.is_empty());
+        assert_eq!(
+            resolved[&PathBuf::from("new.rs")],
+            b"bob's version"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // conflict_record_to_json_with_id: ID fields in JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conflict_json_includes_id_when_provided() {
+        let record = content_record("src/lib.rs", "base", "alice", "bob");
+        let json = conflict_record_to_json_with_id(&record, Some("cf-test"), &["cf-test.0".to_string()]);
+
+        assert_eq!(json.id.as_deref(), Some("cf-test"));
+        assert_eq!(json.atom_ids, vec!["cf-test.0"]);
+    }
+
+    #[test]
+    fn conflict_json_omits_id_when_none() {
+        let record = content_record("src/lib.rs", "base", "alice", "bob");
+        let json = conflict_record_to_json(&record);
+
+        assert!(json.id.is_none());
+        assert!(json.atom_ids.is_empty());
+
+        // Verify serialization omits the id field
+        let json_str = serde_json::to_string(&json).unwrap();
+        assert!(!json_str.contains("\"id\""), "id should be omitted when None");
     }
 }
