@@ -461,10 +461,34 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let status_output = Self::git_stdout_in(&ws_path, &["status", "--porcelain"])?;
         let dirty_files = parse_porcelain_status(&status_output);
 
-        // Stale = workspace epoch != current epoch.
-        let is_stale = self
-            .current_epoch_opt()
-            .is_some_and(|current| base_epoch != current);
+        // Stale = the current epoch is not in the workspace's ancestry.
+        //
+        // The original check (HEAD != epoch) was wrong: it treated a workspace
+        // that has commits *ahead* of the epoch as stale, causing auto-sync to
+        // wipe those commits via `git checkout --detach <epoch>`.
+        //
+        // Correct semantics:
+        //   - HEAD == epoch           → not stale (at epoch)
+        //   - epoch is ancestor of HEAD → not stale (workspace has commits on top)
+        //   - epoch is NOT ancestor of HEAD → stale (workspace is behind/diverged)
+        //
+        // `git merge-base --is-ancestor A B` exits 0 if A is an ancestor of B.
+        let is_stale = self.current_epoch_opt().is_some_and(|current| {
+            if base_epoch == current {
+                return false;
+            }
+            // Check whether current epoch is an ancestor of HEAD (or equal).
+            // Exit 0 → is-ancestor → workspace is at or ahead of epoch → not stale.
+            // Exit 1 → not an ancestor → workspace is behind/diverged → stale.
+            let result = Command::new("git")
+                .args(["merge-base", "--is-ancestor", current.as_str(), "HEAD"])
+                .current_dir(&ws_path)
+                .status();
+            match result {
+                Ok(status) => !status.success(), // not-ancestor → stale
+                Err(_) => true,                  // can't tell → assume stale
+            }
+        });
 
         // Lazily materialize Level 1 workspace state ref for git inspection.
         self.refresh_workspace_state_ref(name, &ws_path)?;
