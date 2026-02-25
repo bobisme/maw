@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.46.14
+
+### Added
+- **`maw ws describe` command**. Record human-readable descriptions in workspace operation logs. Visible in `maw ws history` output. Useful for agents to annotate work in progress or mark review readiness.
+- **`maw ws annotate` command**. Attach structured JSON metadata (test results, review status, build artifacts) to workspaces via `maw ws annotate <workspace> <key> <json-value>`. Visible in `maw ws history --format json`.
+
+### Fixed
+- **Phantom deletion bug in merge** (bn-1b2b). When a workspace's base epoch is older than the current epoch, files added by other merged workspaces appeared as deletions, crashing the patch-set builder or incorrectly removing files. Now filtered out in the collect phase as phantom deletions (net no-ops).
+
 ## v0.46.7
 
 ### Fixed
