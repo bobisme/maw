@@ -152,6 +152,18 @@ impl GitWorktreeBackend {
         }
     }
 
+    /// Returns true if `ancestor` is an ancestor of (or equal to) `descendant`.
+    ///
+    /// Uses `git merge-base --is-ancestor`; returns `false` on any error.
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
+        Command::new("git")
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .current_dir(&self.root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     /// Count how many commits are reachable from `to_oid` but not from `from_oid`.
     ///
     /// Used to determine how many epoch advancements a workspace is behind.
@@ -408,11 +420,22 @@ impl WorkspaceBackend for GitWorktreeBackend {
             let state = match &current_epoch {
                 Some(current) if epoch == *current => WorkspaceState::Active,
                 Some(current) => {
-                    let behind = self
-                        .count_commits_between(epoch.as_str(), current.as_str())
-                        .unwrap_or(1);
-                    WorkspaceState::Stale {
-                        behind_epochs: behind,
+                    // Use ancestry to distinguish two cases:
+                    //   1. Workspace HEAD is ahead of epoch (has committed work):
+                    //      epoch IS ancestor of HEAD → Active (don't mark stale)
+                    //   2. Workspace HEAD is behind (or diverged from) epoch:
+                    //      epoch is NOT ancestor of HEAD → Stale
+                    //
+                    // The old equality check incorrectly showed workspaces with
+                    // committed work as "stale (behind by 0)", which caused
+                    // `maw ws sync --all` to wipe those commits.
+                    if self.is_ancestor(current.as_str(), epoch.as_str()) {
+                        WorkspaceState::Active
+                    } else {
+                        let behind = self
+                            .count_commits_between(epoch.as_str(), current.as_str())
+                            .unwrap_or(1);
+                        WorkspaceState::Stale { behind_epochs: behind }
                     }
                 }
                 // No epoch ref: can't determine staleness, assume active.
@@ -1422,6 +1445,109 @@ mod tests {
         if let WorkspaceState::Stale { behind_epochs } = infos[0].state {
             assert_eq!(behind_epochs, 1, "should be 1 epoch behind");
         }
+    }
+
+    #[test]
+    fn test_list_active_when_workspace_has_commits_ahead_of_epoch() {
+        // Regression: workspace with committed work ahead of epoch was previously
+        // shown as "stale (behind by 0 epoch(s))", causing maw ws sync --all to
+        // wipe those commits.
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("ahead-ws").unwrap();
+        let info = backend.create(&ws_name, &epoch).unwrap();
+
+        // Set epoch ref to the creation epoch
+        Command::new("git")
+            .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+
+        // Simulate a worker committing inside the workspace
+        fs::write(info.path.join("work.rs"), "fn worker() {}").unwrap();
+        Command::new("git")
+            .args(["add", "work.rs"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "worker commit"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+
+        // Workspace HEAD is now ahead of epoch — must not be shown as stale
+        let infos = backend.list().unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(
+            !infos[0].state.is_stale(),
+            "workspace with committed work ahead of epoch should be Active, not stale: {:?}",
+            infos[0].state
+        );
+    }
+
+    #[test]
+    fn test_list_stale_when_epoch_advanced_past_workspace_with_committed_work() {
+        // Workspace has committed work, then epoch advances laterally (another workspace merged).
+        // Workspace is genuinely stale (epoch not ancestor of HEAD), but the commit count
+        // between workspace HEAD and new epoch should reflect the divergence correctly.
+        let (temp_dir, epoch0) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("diverged-ws").unwrap();
+        let info = backend.create(&ws_name, &epoch0).unwrap();
+
+        // Worker commits inside the workspace
+        fs::write(info.path.join("work.rs"), "fn worker() {}").unwrap();
+        Command::new("git")
+            .args(["add", "work.rs"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "worker commit"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+
+        // Epoch advances on the main repo (simulating another workspace merging)
+        fs::write(root.join("other.md"), "other workspace work").unwrap();
+        Command::new("git")
+            .args(["add", "other.md"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "other workspace merged"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let head_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let epoch1_str = String::from_utf8(head_out.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        Command::new("git")
+            .args(["update-ref", "refs/manifold/epoch/current", &epoch1_str])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+
+        // Now the workspace has diverged from epoch1: both have commits the other doesn't.
+        // list() should show it as Stale (epoch is NOT ancestor of workspace HEAD).
+        let infos = backend.list().unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(
+            infos[0].state.is_stale(),
+            "workspace diverged from epoch should be stale: {:?}",
+            infos[0].state
+        );
     }
 
     // -- status tests --

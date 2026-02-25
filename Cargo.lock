@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "maw"
-version = "0.46.9"
+version = "0.46.11"
 dependencies = [
  "anyhow",
  "clap",
