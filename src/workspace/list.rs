@@ -77,7 +77,7 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
     }
 
     // Read metadata for all workspaces to get mode (ephemeral/persistent).
-    let root = repo_root().unwrap_or_default();
+    let root = repo_root()?;
 
     // Convert backend workspace info to display structs
     let workspaces: Vec<WorkspaceInfo> = backend_workspaces

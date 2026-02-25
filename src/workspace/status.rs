@@ -90,7 +90,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
     };
 
     // Read metadata for mode information.
-    let root = repo_root().unwrap_or_default();
+    let root = repo_root()?;
     let current_workspace =
         detect_current_workspace(&root).unwrap_or_else(|| default_ws_name.to_string());
 
