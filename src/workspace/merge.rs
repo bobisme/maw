@@ -514,9 +514,8 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
 
     // Try a BUILD phase to detect conflicts (don't COMMIT)
     let manifold_dir = root.join(".manifold");
-    let check_dir = manifold_dir.join("check-tmp");
-    let _ = std::fs::remove_dir_all(&check_dir);
-    std::fs::create_dir_all(&check_dir).context("Failed to create temp dir for merge check")?;
+    let temp_check_dir = tempfile::Builder::new().prefix("check-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for merge check")?;
+    let check_dir = temp_check_dir.path().to_path_buf();
 
     let sources: Vec<WorkspaceId> = workspaces
         .iter()
@@ -532,17 +531,19 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     let prepare_result = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
 
     // Clean up temp dir
-    let _ = std::fs::remove_dir_all(&check_dir);
+    drop(temp_check_dir);
 
     match prepare_result {
         Ok(_frozen) => {
             // PREPARE succeeded, now try BUILD
             // Re-create dir for build
-            std::fs::create_dir_all(&check_dir)
-                .context("Failed to create temp dir for build check")?;
-            let _ = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
-            let build_result = run_build_phase(&root, &check_dir, &backend);
-            let _ = std::fs::remove_dir_all(&check_dir);
+            let temp_build_dir = tempfile::Builder::new().prefix("build-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for build check")?;
+            let build_dir = temp_build_dir.path().to_path_buf();
+            // Propagate second prepare error so build doesn't run on uninitialized dir.
+            run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs)
+                .context("prepare phase failed for build check")?;
+            let build_result = run_build_phase(&root, &build_dir, &backend);
+            drop(temp_build_dir);
 
             match build_result {
                 Ok(output) => {
@@ -1074,9 +1075,8 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 
     // Run PREPARE + BUILD in a temp dir to detect conflicts without committing
     let manifold_dir = root.join(".manifold");
-    let check_dir = manifold_dir.join("conflicts-tmp");
-    let _ = std::fs::remove_dir_all(&check_dir);
-    std::fs::create_dir_all(&check_dir).context("Failed to create temp dir for conflict check")?;
+    let temp_check_dir = tempfile::Builder::new().prefix("conflicts-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for conflict check")?;
+    let check_dir = temp_check_dir.path().to_path_buf();
 
     let sources: Vec<WorkspaceId> = workspaces
         .iter()
@@ -1090,7 +1090,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 
     // PREPARE
     let prepare_result = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
-    let _ = std::fs::remove_dir_all(&check_dir);
+    drop(temp_check_dir);
 
     let build_output = match prepare_result {
         Err(e) => {
@@ -1114,11 +1114,11 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         }
         Ok(_frozen) => {
             // Re-run PREPARE + BUILD
-            std::fs::create_dir_all(&check_dir)
-                .context("Failed to create temp dir for build phase")?;
-            let _ = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
-            let result = run_build_phase(&root, &check_dir, &backend);
-            let _ = std::fs::remove_dir_all(&check_dir);
+            let temp_build_dir = tempfile::Builder::new().prefix("build-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for build phase")?;
+            let build_dir = temp_build_dir.path().to_path_buf();
+            let _ = run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs);
+            let result = run_build_phase(&root, &build_dir, &backend);
+            drop(temp_build_dir);
             match result {
                 Ok(out) => out,
                 Err(e) => {
@@ -1863,7 +1863,7 @@ fn record_snapshot_operations<B: WorkspaceBackend>(
         let snapshot_op = Operation {
             parent_ids: vec![head.clone()],
             workspace_id: ws_id.clone(),
-            timestamp: now_timestamp_iso8601(),
+            timestamp: super::now_timestamp_iso8601(),
             payload: OpPayload::Snapshot { patch_set_oid },
         };
 
@@ -1910,7 +1910,7 @@ fn record_merge_operations(
         let op = Operation {
             parent_ids: vec![head.clone()],
             workspace_id: ws_id.clone(),
-            timestamp: now_timestamp_iso8601(),
+            timestamp: super::now_timestamp_iso8601(),
             payload: OpPayload::Merge {
                 sources: sources.to_vec(),
                 epoch_before: epoch_before.clone(),
@@ -1940,7 +1940,7 @@ fn ensure_workspace_oplog_head(
     let create_op = Operation {
         parent_ids: vec![],
         workspace_id: ws_id.clone(),
-        timestamp: now_timestamp_iso8601(),
+        timestamp: super::now_timestamp_iso8601(),
         payload: OpPayload::Create {
             epoch: epoch.clone(),
         },
@@ -2118,34 +2118,7 @@ fn file_id_from_blob(blob: &GitOid) -> FileId {
     FileId::new(n)
 }
 
-fn now_timestamp_iso8601() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
-    let sec = secs % 60;
-    let min = (secs / 60) % 60;
-    let hour = (secs / 3_600) % 24;
-    let days = secs / 86_400;
-
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
-}
-
-const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
 
 // ---------------------------------------------------------------------------
 // Helpers: merge-state management
@@ -2244,12 +2217,12 @@ fn update_default_workspace(
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!(
-            "WARNING: Failed to update default workspace to new epoch: {}",
-            stderr.trim()
-        );
-        eprintln!(
-            "  Manual fix: cd {} && git checkout {}",
+        bail!(
+            "Failed to update default workspace to new epoch: {}\n  \
+             The merge COMMIT succeeded (refs are updated), but the default workspace \
+             working copy could not be checked out.\n  \
+             To fix: git -C {} checkout {}",
+            stderr.trim(),
             default_ws_path.display(),
             &new_epoch.as_str()[..12]
         );
