@@ -112,7 +112,11 @@ enum Commands {
     /// Interactive interface for managing workspaces, viewing commits,
     /// and coordinating agent work. Inspired by lazygit.
     #[command(name = "ui")]
-    Ui,
+    Ui {
+        /// Use plain ASCII status markers (M/A/D/R) instead of Nerd Font icons
+        #[arg(long)]
+        ascii: bool,
+    },
 
     /// Quick repo and workspace status
     Status(status::StatusArgs),
@@ -250,7 +254,7 @@ fn main() {
         Commands::Doctor { format, json } => {
             doctor::run(format::OutputFormat::with_json_flag(format, json))
         }
-        Commands::Ui => tui::run(),
+        Commands::Ui { ascii } => tui::run(ascii),
         Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),
         Commands::Pull(ref args) => transport::run_pull(args),

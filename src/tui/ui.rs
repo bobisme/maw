@@ -193,7 +193,7 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 None
             };
-            draw_workspace_pane(frame, ws, rect, is_focused, selected, app.overlap_paths.get(&ws.name));
+            draw_workspace_pane(frame, ws, rect, is_focused, selected, app.overlap_paths.get(&ws.name), app.ascii);
         }
     }
 }
@@ -259,6 +259,7 @@ fn draw_workspace_pane(
     is_focused: bool,
     selected: Option<usize>,
     overlap_set: Option<&std::collections::BTreeSet<String>>,
+    ascii: bool,
 ) {
     // Build title line: name* +N commits Xm ago [stale]
     let mut title_parts = vec![ws.name.clone()];
@@ -346,7 +347,7 @@ fn draw_workspace_pane(
                     let line = Line::from(vec![
                         Span::raw(format!("{indent}")),
                         Span::styled(
-                            status.label(),
+                            status.display(ascii),
                             Style::default().fg(display_color),
                         ),
                         Span::raw(" "),

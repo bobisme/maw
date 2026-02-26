@@ -38,6 +38,25 @@ impl FileStatus {
         }
     }
 
+    /// Nerd Font icon for this status.
+    pub const fn icon(self) -> &'static str {
+        match self {
+            Self::Modified => "\u{eadc}",  // nf-cod-edit
+            Self::Added => "\u{eade}",     // nf-cod-diff_added
+            Self::Deleted => "\u{eadf}",   // nf-cod-diff_removed
+            Self::Renamed => "\u{eae0}",   // nf-cod-diff_renamed
+        }
+    }
+
+    /// Return icon or ascii label depending on mode.
+    pub const fn display(self, ascii: bool) -> &'static str {
+        if ascii {
+            self.label()
+        } else {
+            self.icon()
+        }
+    }
+
     pub const fn from_char(c: char) -> Self {
         match c {
             'A' => Self::Added,
@@ -226,6 +245,7 @@ pub struct App {
     pub selected_row: usize,
     pub should_quit: bool,
     pub show_help: bool,
+    pub ascii: bool,
     pub epoch_hash: String,
     pub branch_name: String,
     pub warnings: Vec<StatusWarning>,
@@ -238,13 +258,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(ascii: bool) -> Result<Self> {
         let mut app = Self {
             workspaces: Vec::new(),
             focused_pane: 0,
             selected_row: 0,
             should_quit: false,
             show_help: false,
+            ascii,
             epoch_hash: String::new(),
             branch_name: String::new(),
             warnings: Vec::new(),

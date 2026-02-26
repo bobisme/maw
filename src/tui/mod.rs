@@ -16,7 +16,7 @@ use crossterm::{
 use ratatui::{Terminal, prelude::CrosstermBackend};
 
 /// Run the TUI application
-pub fn run() -> Result<()> {
+pub fn run(ascii: bool) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -25,7 +25,7 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run
-    let mut app = App::new()?;
+    let mut app = App::new(ascii)?;
     let result = app.run(&mut terminal);
 
     // Restore terminal
