@@ -399,18 +399,14 @@ impl App {
     }
 
     fn fetch_header_info(&mut self) {
-        // Branch name
-        let git_cwd = crate::workspace::git_cwd().unwrap_or_else(|_| PathBuf::from("."));
-        if let Ok(output) = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(&git_cwd)
-            .output()
-        {
-            self.branch_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let repo_root = crate::workspace::repo_root().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Branch name from maw config (bare repos return "HEAD" from git rev-parse)
+        if let Ok(config) = crate::workspace::MawConfig::load(&repo_root) {
+            self.branch_name = config.branch().to_string();
         }
 
         // Epoch hash from refs/manifold/epoch/current
-        let repo_root = crate::workspace::repo_root().unwrap_or_else(|_| PathBuf::from("."));
         if let Some(output) = Command::new("git")
             .args(["rev-parse", "--short=7", "refs/manifold/epoch/current"])
             .current_dir(&repo_root)

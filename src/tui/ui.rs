@@ -218,8 +218,10 @@ fn draw_workspace_pane(
         ws.commit_count,
         if ws.commit_count == 1 { "" } else { "s" }
     ));
-    if let Some(secs) = ws.last_activity_secs {
-        title_parts.push(format!("  {}", format_time_ago(secs)));
+    if ws.commit_count > 0 {
+        if let Some(secs) = ws.last_activity_secs {
+            title_parts.push(format!("  {}", format_time_ago(secs)));
+        }
     }
     if ws.is_stale {
         title_parts.push("  stale".to_string());
