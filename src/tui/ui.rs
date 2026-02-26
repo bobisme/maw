@@ -280,21 +280,48 @@ fn draw_workspace_pane(
     if ws.is_stale {
         title_parts.push("  stale".to_string());
     }
+    // Append description to title if present
+    if let Some(desc) = &ws.description {
+        title_parts.push(format!("  \u{2014} {desc}")); // em dash
+    }
     let title = title_parts.join("");
 
-    let block = if ws.is_stale {
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_type(theme::BORDER_TYPE)
-            .border_style(if is_focused {
-                Style::default().fg(theme::FOCUSED)
-            } else {
-                Style::default().fg(theme::STALE)
-            })
+    // Build annotation string for bottom title
+    let annotation_line = if ws.annotations.is_empty() {
+        None
     } else {
-        styled_block(&title, is_focused)
+        let parts: Vec<String> = ws
+            .annotations
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect();
+        Some(parts.join("  "))
     };
+
+    let border_style = if ws.is_stale {
+        if is_focused {
+            Style::default().fg(theme::FOCUSED)
+        } else {
+            Style::default().fg(theme::STALE)
+        }
+    } else if is_focused {
+        Style::default().fg(theme::FOCUSED)
+    } else {
+        Style::default()
+    };
+
+    let mut block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(theme::BORDER_TYPE)
+        .border_style(border_style);
+
+    if let Some(ref ann) = annotation_line {
+        block = block.title_bottom(Line::from(Span::styled(
+            ann.clone(),
+            Style::default().fg(theme::STALE), // dim yellow for annotations
+        )));
+    }
 
     // Flatten file tree for rendering
     let flat = flatten_tree(&ws.file_tree, 0);

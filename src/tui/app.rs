@@ -237,6 +237,10 @@ pub struct WorkspacePane {
     pub file_tree: Vec<TreeNode>,
     /// Flat list of file paths (for overlap detection).
     pub file_paths: Vec<String>,
+    /// Latest workspace description from oplog (if any).
+    pub description: Option<String>,
+    /// Latest annotations from oplog: key → flattened value string.
+    pub annotations: Vec<(String, String)>,
 }
 
 /// An overlap between two workspaces on a specific file.
@@ -567,6 +571,9 @@ impl App {
             let file_paths: Vec<String> = all_files.iter().map(|(_, p)| p.clone()).collect();
             let file_tree = build_file_tree(&all_files);
 
+            // Fetch latest description and annotations from oplog
+            let (description, annotations) = Self::fetch_oplog_metadata(&repo_root, &info.id);
+
             panes.push(WorkspacePane {
                 name,
                 commit_count,
@@ -575,6 +582,8 @@ impl App {
                 is_dirty,
                 file_tree,
                 file_paths,
+                description,
+                annotations,
             });
         }
 
@@ -723,6 +732,51 @@ impl App {
     }
 
     /// Compute file-level overlaps across all workspace panes.
+    /// Fetch the latest description and annotations from the workspace oplog.
+    /// Walks at most 20 ops back to find the most recent Describe and Annotate entries.
+    fn fetch_oplog_metadata(
+        repo_root: &Path,
+        ws_id: &crate::model::types::WorkspaceId,
+    ) -> (Option<String>, Vec<(String, String)>) {
+        use crate::oplog::read::walk_chain;
+        use crate::oplog::types::OpPayload;
+
+        let ops = walk_chain(repo_root, ws_id, Some(20), None).unwrap_or_default();
+
+        let mut description: Option<String> = None;
+        let mut annotations: BTreeMap<String, String> = BTreeMap::new();
+
+        for (_oid, op) in &ops {
+            match &op.payload {
+                OpPayload::Describe { message } if description.is_none() => {
+                    description = Some(message.clone());
+                }
+                OpPayload::Annotate { key, data } if !annotations.contains_key(key) => {
+                    // Flatten the JSON data into a compact string
+                    let value = if data.len() == 1 {
+                        // Single-key object: just show the value
+                        let v = data.values().next().unwrap();
+                        format_json_value(v)
+                    } else {
+                        // Multi-key: key=val, key=val
+                        data.iter()
+                            .map(|(k, v)| format!("{k}={}", format_json_value(v)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    annotations.insert(key.clone(), value);
+                }
+                _ => {}
+            }
+            // Stop early if we've found both
+            if description.is_some() && !annotations.is_empty() {
+                // Keep going — might have more annotation keys
+            }
+        }
+
+        (description, annotations.into_iter().collect())
+    }
+
     fn compute_overlaps(&mut self) {
         self.overlaps.clear();
         self.overlap_paths.clear();
@@ -759,6 +813,17 @@ impl App {
 }
 
 /// Format seconds-ago into a human readable string.
+/// Format a JSON value compactly for display.
+fn format_json_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        _ => v.to_string(), // arrays/objects as JSON
+    }
+}
+
 pub fn format_time_ago(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s ago")
