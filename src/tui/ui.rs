@@ -188,12 +188,12 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     for (i, ws) in app.workspaces.iter().enumerate() {
         if let Some(&rect) = app.pane_areas.get(i) {
             let is_focused = i == app.focused_pane;
-            let selected = if is_focused {
-                Some(app.selected_row)
+            let (selected, scroll) = if is_focused {
+                (Some(app.selected_row), app.scroll_offset)
             } else {
-                None
+                (None, 0)
             };
-            draw_workspace_pane(frame, ws, rect, is_focused, selected, app.overlap_paths.get(&ws.name), app.ascii);
+            draw_workspace_pane(frame, ws, rect, is_focused, selected, scroll, app.overlap_paths.get(&ws.name), app.ascii);
         }
     }
 }
@@ -258,6 +258,7 @@ fn draw_workspace_pane(
     area: Rect,
     is_focused: bool,
     selected: Option<usize>,
+    scroll_offset: usize,
     overlap_set: Option<&std::collections::BTreeSet<String>>,
     ascii: bool,
 ) {
@@ -307,6 +308,7 @@ fn draw_workspace_pane(
     let items: Vec<ListItem> = flat
         .iter()
         .enumerate()
+        .skip(scroll_offset)
         .map(|(i, (depth, node))| {
             let indent = "  ".repeat(*depth);
             let is_selected = selected == Some(i);

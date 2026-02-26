@@ -147,6 +147,33 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
     let mut known_dirs: BTreeSet<String> = BTreeSet::new();
 
     for (status, path) in files {
+        // Trailing slash means directory (e.g. untracked dir from git status)
+        let is_dir_entry = path.ends_with('/');
+        let path = path.trim_end_matches('/');
+        if path.is_empty() {
+            continue;
+        }
+
+        if is_dir_entry {
+            // Register the entire path as a directory, no file leaf
+            let parts: Vec<&str> = path.split('/').collect();
+            let mut ancestor = String::new();
+            for part in &parts {
+                let parent = ancestor.clone();
+                if !ancestor.is_empty() {
+                    ancestor.push('/');
+                }
+                ancestor.push_str(part);
+                if known_dirs.insert(ancestor.clone()) {
+                    dir_children
+                        .entry(parent)
+                        .or_default()
+                        .push((part.to_string(), None, ancestor.clone()));
+                }
+            }
+            continue;
+        }
+
         let parts: Vec<&str> = path.split('/').collect();
         // Ensure all ancestor dirs exist
         let mut ancestor = String::new();
@@ -169,7 +196,7 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
                 dir_children
                     .entry(ancestor.clone())
                     .or_default()
-                    .push((part.to_string(), Some(*status), path.clone()));
+                    .push((part.to_string(), Some(*status), path.to_string()));
             }
         }
     }
@@ -243,6 +270,8 @@ pub struct App {
     pub focused_pane: usize,
     /// Selected row within the focused pane's flattened file tree.
     pub selected_row: usize,
+    /// Scroll offset for the focused pane (first visible row).
+    pub scroll_offset: usize,
     pub should_quit: bool,
     pub show_help: bool,
     pub ascii: bool,
@@ -263,6 +292,7 @@ impl App {
             workspaces: Vec::new(),
             focused_pane: 0,
             selected_row: 0,
+            scroll_offset: 0,
             should_quit: false,
             show_help: false,
             ascii,
@@ -329,10 +359,14 @@ impl App {
             // Navigation within focused pane
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('g') => self.selected_row = 0,
+            KeyCode::Char('g') => {
+                self.selected_row = 0;
+                self.ensure_visible();
+            }
             KeyCode::Char('G') => {
                 let max = self.flat_len_for_focused().saturating_sub(1);
                 self.selected_row = max;
+                self.ensure_visible();
             }
 
             // Toggle collapse
@@ -353,11 +387,14 @@ impl App {
                 // Check which pane was clicked and focus it
                 for (i, area) in self.pane_areas.iter().enumerate() {
                     if area.contains((x, y).into()) {
-                        self.focused_pane = i;
-                        // Calculate which row was clicked (accounting for border + header)
-                        let relative_y = y.saturating_sub(area.y + 2);
+                        if self.focused_pane != i {
+                            self.focused_pane = i;
+                            self.scroll_offset = 0;
+                        }
+                        // Calculate which row was clicked (accounting for border + scroll)
+                        let relative_y = y.saturating_sub(area.y + 1); // 1 for top border
                         let max = self.flat_len_for_pane(i).saturating_sub(1);
-                        self.selected_row = (relative_y as usize).min(max);
+                        self.selected_row = (self.scroll_offset + relative_y as usize).min(max);
                         break;
                     }
                 }
@@ -377,6 +414,7 @@ impl App {
         self.focused_pane =
             (self.focused_pane as i32 + direction).rem_euclid(len) as usize;
         self.selected_row = 0;
+        self.scroll_offset = 0;
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -385,9 +423,30 @@ impl App {
         if max == 0 {
             return;
         }
-        let len = max as i32;
-        self.selected_row =
-            (self.selected_row as i32 + direction).rem_euclid(len) as usize;
+        let new = self.selected_row as i32 + direction;
+        self.selected_row = new.clamp(0, max as i32 - 1) as usize;
+        self.ensure_visible();
+    }
+
+    /// Adjust scroll_offset so selected_row is visible within the focused pane.
+    pub fn ensure_visible(&mut self) {
+        // visible_height is set by the UI layer each frame
+        let visible = self.visible_height_for_focused();
+        if visible == 0 {
+            return;
+        }
+        if self.selected_row < self.scroll_offset {
+            self.scroll_offset = self.selected_row;
+        } else if self.selected_row >= self.scroll_offset + visible {
+            self.scroll_offset = self.selected_row - visible + 1;
+        }
+    }
+
+    /// Get visible rows for the focused pane (from pane_areas, minus border+title).
+    fn visible_height_for_focused(&self) -> usize {
+        self.pane_areas
+            .get(self.focused_pane)
+            .map_or(0, |area| area.height.saturating_sub(2) as usize) // 2 for top+bottom border
     }
 
     fn flat_len_for_focused(&self) -> usize {
