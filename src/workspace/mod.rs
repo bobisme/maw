@@ -405,8 +405,11 @@ pub enum WorkspaceCommands {
     /// Use --all to sync all workspaces at once, useful after epoch
     /// advancement or when multiple workspaces may be stale.
     Sync {
+        /// Name of the workspace to sync (defaults to current workspace)
+        name: Option<String>,
+
         /// Sync all workspaces instead of just the current one
-        #[arg(long)]
+        #[arg(long, conflicts_with = "name")]
         all: bool,
     },
 
@@ -747,7 +750,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             overlap::overlap(&ws1, &ws2, fmt)
         }
-        WorkspaceCommands::Sync { all } => sync::sync(all),
+        WorkspaceCommands::Sync { name, all } => sync::sync(name.as_deref(), all),
         WorkspaceCommands::History {
             name,
             limit,

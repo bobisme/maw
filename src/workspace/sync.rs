@@ -38,7 +38,7 @@ fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
     }
 }
 
-pub fn sync(all: bool) -> Result<()> {
+pub fn sync(name: Option<&str>, all: bool) -> Result<()> {
     if all {
         return sync_all();
     }
@@ -55,8 +55,12 @@ pub fn sync(all: bool) -> Result<()> {
         return Ok(());
     };
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
-    let workspace_name = workspace_name_from_cwd(&root, &cwd);
+    let workspace_name = if let Some(n) = name {
+        n.to_string()
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
+        workspace_name_from_cwd(&root, &cwd)
+    };
     let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if is_default_workspace(&workspace_name) {
