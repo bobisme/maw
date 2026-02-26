@@ -436,17 +436,26 @@ impl App {
             let is_stale = info.state.is_stale();
 
             // Get epoch diff: files changed relative to epoch
-            let epoch_files = Self::fetch_epoch_diff(&repo_root, &ws_path);
+            let mut all_files = Self::fetch_epoch_diff(&repo_root, &ws_path);
 
             // Get commit count and last activity
             let (commit_count, last_activity_secs) =
                 Self::fetch_commit_info(&repo_root, &ws_path);
 
-            // Check for dirty working copy
-            let is_dirty = Self::check_dirty(&ws_path);
+            // Get uncommitted changes and merge into file list
+            let dirty_files = Self::fetch_dirty_files(&ws_path);
+            let is_dirty = !dirty_files.is_empty();
+            // Merge dirty files: dirty status overrides epoch status for same path
+            let epoch_paths: std::collections::HashSet<String> =
+                all_files.iter().map(|(_, p)| p.clone()).collect();
+            for (status, path) in dirty_files {
+                if !epoch_paths.contains(&path) {
+                    all_files.push((status, path));
+                }
+            }
 
-            let file_paths: Vec<String> = epoch_files.iter().map(|(_, p)| p.clone()).collect();
-            let file_tree = build_file_tree(&epoch_files);
+            let file_paths: Vec<String> = all_files.iter().map(|(_, p)| p.clone()).collect();
+            let file_tree = build_file_tree(&all_files);
 
             panes.push(WorkspacePane {
                 name,
@@ -555,17 +564,37 @@ impl App {
         (commit_count, last_activity_secs)
     }
 
-    /// Check if workspace has uncommitted changes.
-    fn check_dirty(ws_path: &Path) -> bool {
+    /// Get uncommitted changes as (status, path) pairs. Empty vec = clean.
+    fn fetch_dirty_files(ws_path: &Path) -> Vec<(FileStatus, String)> {
         let output = Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(ws_path)
             .output();
 
-        output
-            .ok()
-            .filter(|o| o.status.success())
-            .is_some_and(|o| !o.stdout.is_empty())
+        let Some(output) = output.ok().filter(|o| o.status.success()) else {
+            return Vec::new();
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut files = Vec::new();
+        for line in stdout.lines() {
+            let line = line.trim_start();
+            if line.len() < 3 {
+                continue;
+            }
+            // Porcelain format: XY filename
+            let status_char = match line.chars().next().unwrap_or(' ') {
+                '?' => 'A', // untracked → treat as added
+                'D' => 'D',
+                'R' => 'R',
+                _ => 'M',
+            };
+            let path = line[3..].to_string();
+            if !path.is_empty() {
+                files.push((FileStatus::from_char(status_char), path));
+            }
+        }
+        files
     }
 
     /// Compute file-level overlaps across all workspace panes.
