@@ -1,6 +1,6 @@
 [package]
 name = "maw"
-version = "0.47.1"
+version = "0.47.2"
 edition = "2024"
 description = "Multi-Agent Workflow coordinator for Manifold git workspaces"
 license = "MIT"
