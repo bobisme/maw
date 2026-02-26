@@ -578,7 +578,11 @@ impl App {
             });
         }
 
-        panes.sort_by(|a, b| a.name.cmp(&b.name));
+        panes.sort_by(|a, b| match (a.name.as_str(), b.name.as_str()) {
+            ("default", _) => std::cmp::Ordering::Less,
+            (_, "default") => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        });
         Ok(panes)
     }
 
