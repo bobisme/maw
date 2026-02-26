@@ -608,18 +608,29 @@ impl App {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut files = Vec::new();
         for line in stdout.lines() {
-            let line = line.trim_start();
-            if line.len() < 3 {
+            // Porcelain format: XY path (2 status chars + space + path)
+            // Do NOT trim_start — the leading space in X position is meaningful.
+            if line.len() < 4 {
                 continue;
             }
-            // Porcelain format: XY filename
-            let status_char = match line.chars().next().unwrap_or(' ') {
-                '?' => 'A', // untracked → treat as added
-                'D' => 'D',
-                'R' => 'R',
-                _ => 'M',
-            };
+            let xy = &line[..2];
             let path = line[3..].to_string();
+            // Pick the most significant status: staged (X) takes priority, else working tree (Y)
+            let status_char = {
+                let x = xy.as_bytes()[0];
+                let y = xy.as_bytes()[1];
+                match (x, y) {
+                    (b'?', _) => 'A',         // untracked → added
+                    (b'D', _) | (_, b'D') => 'D',
+                    (b'R', _) => 'R',
+                    (b' ', c) | (c, _) => match c {
+                        b'A' => 'A',
+                        b'D' => 'D',
+                        b'R' => 'R',
+                        _ => 'M',
+                    },
+                }
+            };
             if !path.is_empty() {
                 files.push((FileStatus::from_char(status_char), path));
             }
