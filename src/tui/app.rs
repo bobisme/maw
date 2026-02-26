@@ -544,13 +544,26 @@ impl App {
 
         let mut panes = Vec::new();
 
+        // Determine the default workspace name so we can skip epoch diff for it.
+        // The default workspace IS the epoch target — diffing it against epoch
+        // would show every file committed since the epoch ref was last advanced.
+        let default_ws_name = crate::workspace::MawConfig::load(&repo_root)
+            .map(|c| c.default_workspace().to_string())
+            .unwrap_or_else(|_| "default".to_string());
+
         for info in &infos {
             let name = info.id.to_string();
             let ws_path = backend.workspace_path(&info.id);
             let is_stale = info.state.is_stale();
 
-            // Get epoch diff: files changed relative to epoch
-            let mut all_files = Self::fetch_epoch_diff(&repo_root, &ws_path);
+            // Get epoch diff: files changed relative to epoch.
+            // Skip for the default workspace — it IS the merge target, so only
+            // dirty (uncommitted) files are meaningful.
+            let mut all_files = if name == default_ws_name {
+                Vec::new()
+            } else {
+                Self::fetch_epoch_diff(&repo_root, &ws_path)
+            };
 
             // Get commit count and last activity
             let (commit_count, last_activity_secs) =
@@ -587,9 +600,9 @@ impl App {
             });
         }
 
-        panes.sort_by(|a, b| match (a.name.as_str(), b.name.as_str()) {
-            ("default", _) => std::cmp::Ordering::Less,
-            (_, "default") => std::cmp::Ordering::Greater,
+        panes.sort_by(|a, b| match (a.name == default_ws_name, b.name == default_ws_name) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
             _ => a.name.cmp(&b.name),
         });
         Ok(panes)
