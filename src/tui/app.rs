@@ -13,6 +13,7 @@ use ratatui::{Terminal, layout::Rect, prelude::CrosstermBackend};
 use super::event::{self, AppEvent};
 use super::ui;
 use crate::backend::WorkspaceBackend;
+use crate::push::main_sync_status_inner;
 
 // ---------------------------------------------------------------------------
 // File tree types
@@ -201,6 +202,19 @@ pub struct OverlapEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Status warnings (from maw status)
+// ---------------------------------------------------------------------------
+
+/// A warning condition surfaced in the header bar.
+#[derive(Debug, Clone)]
+pub enum StatusWarning {
+    /// Main branch is not in sync with origin.
+    SyncIssue(String),
+    /// Stray files at repo root (bare repo should have none).
+    StrayRoot(usize),
+}
+
+// ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
@@ -214,8 +228,7 @@ pub struct App {
     pub show_help: bool,
     pub epoch_hash: String,
     pub branch_name: String,
-    #[allow(dead_code)]
-    pub epoch_status: String,
+    pub warnings: Vec<StatusWarning>,
     pub overlaps: Vec<OverlapEntry>,
     /// Set of file paths that overlap (for highlighting).
     pub overlap_paths: HashMap<String, BTreeSet<String>>,
@@ -234,7 +247,7 @@ impl App {
             show_help: false,
             epoch_hash: String::new(),
             branch_name: String::new(),
-            epoch_status: String::new(),
+            warnings: Vec::new(),
             overlaps: Vec::new(),
             overlap_paths: HashMap::new(),
             last_refresh: Instant::now(),
@@ -402,9 +415,13 @@ impl App {
         let repo_root = crate::workspace::repo_root().unwrap_or_else(|_| PathBuf::from("."));
 
         // Branch name from maw config (bare repos return "HEAD" from git rev-parse)
-        if let Ok(config) = crate::workspace::MawConfig::load(&repo_root) {
-            self.branch_name = config.branch().to_string();
-        }
+        let branch = if let Ok(config) = crate::workspace::MawConfig::load(&repo_root) {
+            let b = config.branch().to_string();
+            self.branch_name = b.clone();
+            b
+        } else {
+            String::new()
+        };
 
         // Epoch hash from refs/manifold/epoch/current
         if let Some(output) = Command::new("git")
@@ -415,6 +432,24 @@ impl App {
             .filter(|o| o.status.success())
         {
             self.epoch_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
+
+        // Collect warnings from maw status checks
+        self.warnings.clear();
+
+        // Main vs origin sync
+        if !branch.is_empty() {
+            let sync = main_sync_status_inner(&repo_root, &branch);
+            if sync.is_warning() {
+                self.warnings
+                    .push(StatusWarning::SyncIssue(sync.describe()));
+            }
+        }
+
+        // Stray root files
+        let stray = crate::doctor::stray_root_entries(&repo_root);
+        if !stray.is_empty() {
+            self.warnings.push(StatusWarning::StrayRoot(stray.len()));
         }
     }
 
@@ -427,11 +462,6 @@ impl App {
 
         for info in &infos {
             let name = info.id.to_string();
-            // Skip default workspace from display (it's the merge target, not an agent workspace)
-            if name == "default" {
-                continue;
-            }
-
             let ws_path = backend.workspace_path(&info.id);
             let is_stale = info.state.is_stale();
 
