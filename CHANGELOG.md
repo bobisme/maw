@@ -2,6 +2,21 @@
 
 All notable changes to maw.
 
+## v0.47.0
+
+### Added
+- **Stateless conflict resolution with `--resolve`**. When `maw ws merge` hits conflicts, each conflict gets a short terseid ID (e.g., `cf-k7mx`). Re-run the same merge with `--resolve cf-k7mx=alice` to resolve inline — no stored state, no interactive prompts, fully idempotent.
+- **`--resolve-all=WORKSPACE` shorthand**. Resolve all conflicts to one workspace's version in a single flag. Individual `--resolve` flags take precedence.
+- **Content snippets in conflict output**. Conflict reports now show up to 5 lines from each side inline, so agents can make resolution decisions without reading files separately.
+- **Terseid IDs in `maw ws conflicts`**. The conflicts inspection command now shows the same IDs and suggested resolve commands as the merge output.
+- **Workspace names replace ours/theirs**. Resolution uses actual workspace names (`--resolve cf-k7mx=alice`) instead of the confusing git-style `ours`/`theirs` terminology.
+
+### Fixed
+- **`patch_candidate_tree` slash handling**. Tree patching now uses a temp index (`GIT_INDEX_FILE` + `read-tree` + `update-index`) instead of `ls-tree -r` + `mktree`, fixing failures on files in subdirectories.
+- **Stale `merge-state.json` on `--resolve` failure**. All error paths in the resolve block now call `abort_merge()` before returning.
+- **`resolve_atoms` silent fallback on AST regions**. Atom-level resolution now handles `Region::AstNode` byte ranges correctly instead of silently falling through to base content.
+- **Partial resolve preserves already-provided resolutions**. The suggested retry command now includes both resolved and remaining conflict IDs, so agents can copy-paste without manually combining flags.
+
 ## v0.46.14
 
 ### Added
