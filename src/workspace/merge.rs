@@ -954,6 +954,10 @@ fn print_conflict_report_with_resolve(
         resolve_args.join(" ")
     );
     println!();
+    let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
+    println!("Or resolve all at once:");
+    println!("  maw ws merge {} --resolve-all={default_ws}", ws_args);
+    println!();
     println!("Options:  ID=WORKSPACE | ID=content:PATH");
     println!();
     println!(
