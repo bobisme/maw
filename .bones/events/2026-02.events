@@ -689,3 +689,5 @@
 1772066827812449	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzuwE		item.update	bn-1aw2	{"field":"size","value":"l"}	blake3:3vzt6Y1PYTuunYueK4zTD8Q6Grxf_p3aGR0WAVh_JqE
 1772066827821034	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzvAE		item.update	bn-1aw2	{"field":"urgency","value":"default"}	blake3:wFWILyfm6OwmqQb41g4WtJK2ZcXZrfdSRvneo-pSxao
 1772066827830035	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEzvQE		item.update	bn-1aw2	{"field":"labels","value":["ui"]}	blake3:qI0OohXfomoe_I97iDGlocCF7XVbrfGZXuchlHGOsSw
+1772222502816809	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEytAQ		item.move	bn-2ux4	{"state":"done"}	blake3:QF6rkqki7I7s1RpThQfREVl4mzfFoHNkFZh9HPztZuI
+1772222503667525	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEytQQ		item.move	bn-3m4o	{"state":"done"}	blake3:qwYh3LFmnyTZ_I58coJ1v9_vTPJEH5xMkl_M3_QPE7E
