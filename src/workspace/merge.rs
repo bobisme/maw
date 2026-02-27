@@ -1197,8 +1197,8 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                     println!("  Description: {}", result.description);
                 }
             } else if result.stale {
-                println!("[BLOCKED] Workspace is stale — sync before merging");
-                println!("  To fix: maw ws sync");
+                println!("[BLOCKED] Workspace is behind main — another workspace was merged since this one was created.");
+                println!("  Run `maw ws sync {}` to rebase onto the latest main, then retry the merge.", result.workspace.name);
             } else if result.conflicts.is_empty() {
                 println!("[BLOCKED] Merge check failed");
             } else {

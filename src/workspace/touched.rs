@@ -121,11 +121,11 @@ fn print_touched_text(touched: &WorkspaceTouched) {
     if touched.is_stale {
         println!();
         println!(
-            "WARNING: Workspace '{}' is stale (base epoch: {}).",
+            "WARNING: Workspace '{}' is behind main (created at epoch {}, main has moved forward).",
             touched.workspace,
             &touched.base_epoch[..12]
         );
-        println!("  Fix: maw ws sync");
+        println!("  Run `maw ws sync {}` to rebase onto the latest main.", touched.workspace);
     }
 
     println!();

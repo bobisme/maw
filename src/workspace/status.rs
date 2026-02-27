@@ -188,8 +188,7 @@ fn print_status_text(
     // Current workspace and stale warning
     println!("workspace: {current_ws}");
     if is_stale {
-        println!("stale: true");
-        println!("  Fix: maw ws sync");
+        println!("stale: true  (main has moved forward — run `maw ws sync {current_ws}` to rebase)");
     }
 
     // Changes
@@ -248,7 +247,7 @@ fn print_status_text(
     if !stale_persistent.is_empty() {
         println!();
         println!(
-            "STALE persistent workspace(s): {}",
+            "Behind main: {} (main moved forward since last sync)",
             stale_persistent.join(", ")
         );
         for ws in &stale_persistent {
@@ -258,11 +257,12 @@ fn print_status_text(
     if !stale_ephemeral.is_empty() {
         println!();
         println!(
-            "WARNING: stale ephemeral workspace(s): {}",
+            "Behind main: {} (main moved forward — rebase before merging)",
             stale_ephemeral.join(", ")
         );
-        println!("  Survived epoch advance — merge or destroy:");
-        println!("  Fix: maw ws sync --all");
+        for ws in &stale_ephemeral {
+            println!("  Fix: maw ws sync {ws}");
+        }
     }
 
     // Next command
@@ -291,8 +291,8 @@ fn print_status_pretty(
 
     // Stale warning
     if is_stale {
-        println!("{yellow}\u{25b2} WARNING:{reset} Workspace is stale (behind current epoch)");
-        println!("  {gray}Fix: maw ws sync{reset}");
+        println!("{yellow}\u{25b2} WARNING:{reset} Workspace is behind main — another workspace was merged since this one was created.");
+        println!("  {gray}Run `maw ws sync {current_ws}` to rebase onto the latest main.{reset}");
         println!();
     }
 
@@ -360,7 +360,7 @@ fn print_status_pretty(
     if !stale_persistent.is_empty() {
         println!();
         println!(
-            "{yellow}STALE persistent workspace(s):{reset} {}",
+            "{yellow}Behind main:{reset} {} {gray}(main moved forward since last sync){reset}",
             stale_persistent.join(", ")
         );
         for ws in &stale_persistent {
@@ -370,11 +370,12 @@ fn print_status_pretty(
     if !stale_ephemeral.is_empty() {
         println!();
         println!(
-            "{yellow}WARNING: stale ephemeral workspace(s):{reset} {}",
+            "{yellow}Behind main:{reset} {} {gray}(main moved forward — rebase before merging){reset}",
             stale_ephemeral.join(", ")
         );
-        println!("  {gray}Survived epoch advance — merge or destroy:{reset}");
-        println!("  {gray}Fix: maw ws sync --all{reset}");
+        for ws in &stale_ephemeral {
+            println!("  {gray}Fix: maw ws sync {ws}{reset}");
+        }
     }
 
     // Next command

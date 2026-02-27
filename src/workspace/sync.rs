@@ -331,16 +331,16 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
         None => {
             eprintln!(
-                "WARNING: Workspace '{name}' is stale but git could not determine commit count. \
-                 Skipping auto-sync to preserve committed work."
+                "WARNING: Workspace '{name}' is behind main (another workspace was merged), \
+                 but git could not determine commit count. Skipping auto-sync to preserve committed work."
             );
             eprintln!("  The lead agent should merge this workspace: maw ws merge {name}");
             return Ok(());
         }
         Some(ahead) if ahead > 0 => {
             eprintln!(
-                "WARNING: Workspace '{name}' is stale relative to current epoch, but has \
-                 {ahead} committed commit(s) not yet merged into epoch."
+                "WARNING: Workspace '{name}' is behind main (another workspace was merged since \
+                 this one was created), and has {ahead} committed commit(s) not yet merged."
             );
             eprintln!("  Skipping auto-sync to preserve committed work.");
             eprintln!("  The lead agent should merge this workspace: maw ws merge {name}");
@@ -349,7 +349,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         Some(_) => {}
     }
 
-    eprintln!("Workspace '{name}' is stale — auto-syncing before running command...");
+    eprintln!("Workspace '{name}' is behind main — auto-syncing before running command...");
 
     sync_worktree_to_epoch(&root, name, current_epoch.as_str())?;
 
