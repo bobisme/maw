@@ -393,11 +393,15 @@ pub enum WorkspaceCommands {
         /// Workspace to inspect
         workspace: String,
 
+        /// Path filter(s) — positional, e.g. `maw ws diff alice src/main.rs`
+        #[arg(trailing_var_arg = true)]
+        path_args: Vec<String>,
+
         /// Compare target: default, epoch, branch:<name>, oid:<sha>, or bare <sha>
         #[arg(long)]
         against: Option<String>,
 
-        /// Output format: summary, patch, or json (default: patch when --paths given, summary otherwise)
+        /// Output format: summary, patch, or json (default: patch when paths given, summary otherwise)
         #[arg(long, value_enum)]
         format: Option<diff::DiffFormat>,
 
@@ -405,7 +409,7 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         name_only: bool,
 
-        /// Comma-separated glob filters (e.g., src/**,README*)
+        /// Comma-separated glob filters (e.g., --paths src/**,README*)
         #[arg(long, value_delimiter = ',')]
         paths: Vec<String>,
     },
@@ -803,17 +807,21 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         }
         WorkspaceCommands::Diff {
             workspace,
+            path_args,
             against,
             format,
             name_only,
             paths,
         } => {
-            let effective_format = format.unwrap_or(if paths.is_empty() {
+            // Merge positional path args with --paths flag.
+            let mut all_paths = paths;
+            all_paths.extend(path_args);
+            let effective_format = format.unwrap_or(if all_paths.is_empty() {
                 diff::DiffFormat::Summary
             } else {
                 diff::DiffFormat::Patch
             });
-            diff::diff(&workspace, against.as_deref(), effective_format, name_only, &paths)
+            diff::diff(&workspace, against.as_deref(), effective_format, name_only, &all_paths)
         }
         WorkspaceCommands::Overlap {
             ws1,
