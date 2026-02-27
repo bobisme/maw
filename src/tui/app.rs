@@ -41,8 +41,8 @@ impl FileStatus {
     /// Nerd Font icon for this status.
     pub const fn icon(self) -> &'static str {
         match self {
-            Self::Modified => "\u{eadc}",  // nf-cod-edit
-            Self::Added => "\u{eade}",     // nf-cod-diff_added
+            Self::Modified => "\u{eade}",  // nf-cod-diff_modified
+            Self::Added => "\u{eadc}",    // nf-cod-diff_added
             Self::Deleted => "\u{eadf}",   // nf-cod-diff_removed
             Self::Renamed => "\u{eae0}",   // nf-cod-diff_renamed
         }
