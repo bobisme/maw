@@ -118,6 +118,7 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     checks.push(check_default_workspace(root.as_deref()));
     checks.push(check_root_bare(root.as_deref()));
     checks.push(check_ghost_working_copy(root.as_deref()));
+    checks.push(check_dangling_snapshots(root.as_deref()));
     checks.push(check_git_head());
 
     let all_ok = checks.iter().all(|c| c.status == "ok");
@@ -416,6 +417,41 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
+    let Some(root) = root else {
+        return DoctorCheck {
+            name: "dangling snapshots".to_string(),
+            status: "ok".to_string(),
+            message: "dangling snapshots: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    match workspace::recover::find_dangling_snapshots(root) {
+        Ok(dangling) if dangling.is_empty() => DoctorCheck {
+            name: "dangling snapshots".to_string(),
+            status: "ok".to_string(),
+            message: "dangling snapshots: none".to_string(),
+            fix: None,
+        },
+        Ok(dangling) => DoctorCheck {
+            name: "dangling snapshots".to_string(),
+            status: "warn".to_string(),
+            message: format!(
+                "dangling snapshots: {} recovery ref(s) from crashed or completed merges",
+                dangling.len()
+            ),
+            fix: Some("Fix: maw ws recover --gc --dry-run  (preview), then: maw ws recover --gc".to_string()),
+        },
+        Err(_) => DoctorCheck {
+            name: "dangling snapshots".to_string(),
+            status: "ok".to_string(),
+            message: "dangling snapshots: could not check (git error)".to_string(),
+            fix: None,
+        },
+    }
 }
 
 fn check_git_head() -> DoctorCheck {

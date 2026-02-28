@@ -26,7 +26,7 @@ mod oplog_runtime;
 mod overlap;
 mod clean;
 mod prune;
-mod recover;
+pub(crate) mod recover;
 mod restore;
 mod status;
 pub mod sync;
@@ -349,6 +349,29 @@ pub enum WorkspaceCommands {
         /// Requires either <name> (latest destroy snapshot) or --ref.
         #[arg(long)]
         to: Option<String>,
+
+        /// Clean up dangling snapshot refs that are no longer needed.
+        ///
+        /// A snapshot ref is "dangling" when the workspace was successfully
+        /// destroyed or when newer recovery points supersede older ones.
+        /// By default only removes superseded refs (conservative).
+        /// Use --gc --all to also remove the last ref for destroyed workspaces.
+        ///
+        /// Combine with --dry-run to preview without deleting.
+        #[arg(long)]
+        gc: bool,
+
+        /// Remove all dangling refs including the last ref for destroyed workspaces.
+        ///
+        /// Only used with --gc. Without this flag, --gc only removes superseded refs.
+        #[arg(long, requires = "gc")]
+        all: bool,
+
+        /// Preview what would be cleaned up without deleting anything.
+        ///
+        /// Only used with --gc.
+        #[arg(long, requires = "gc")]
+        dry_run: bool,
 
         /// Output format: text, json, or pretty
         #[arg(long)]
@@ -827,10 +850,18 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             text,
             show,
             to,
+            gc,
+            all,
+            dry_run,
             format,
             json,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+
+            // --gc mode: detect and clean up dangling snapshot refs.
+            if gc {
+                return recover::gc(all, dry_run, fmt);
+            }
 
             // --ref is mutually exclusive with positional name.
             if recovery_ref.is_some() && name.is_some() {

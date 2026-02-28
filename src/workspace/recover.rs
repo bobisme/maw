@@ -15,7 +15,7 @@
 //! - `maw ws recover --ref <recovery-ref> --to <new-name>` — restore a specific snapshot
 //! - `maw ws recover <name> --to <new-name>` — restore latest destroy snapshot
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -23,6 +23,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::merge_state::MergeStateFile;
 
 use super::capture::RECOVERY_PREFIX;
 use super::destroy_record::{self, DestroyRecord, RecordCaptureMode};
@@ -1092,11 +1093,302 @@ fn populate_from_snapshot(ws_path: &std::path::Path, oid: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Dangling snapshot detection and cleanup
+// ---------------------------------------------------------------------------
+
+/// A snapshot ref that is no longer needed (the workspace was destroyed
+/// or the recovery point has been superseded by newer ones).
+#[derive(Clone, Debug, Serialize)]
+pub struct DanglingSnapshot {
+    /// The full ref name (e.g. `refs/manifold/recovery/alice/2025-01-01T00-00-00Z`).
+    pub ref_name: String,
+    /// The workspace this ref belongs to.
+    pub workspace: String,
+    /// The timestamp suffix from the ref name.
+    pub timestamp: String,
+    /// The OID the ref points to.
+    pub oid: String,
+    /// Why this ref is considered dangling.
+    pub reason: DanglingReason,
+}
+
+/// Reason a snapshot ref is considered dangling.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DanglingReason {
+    /// The workspace no longer exists (successfully destroyed).
+    WorkspaceDestroyed,
+    /// The workspace exists but has newer recovery snapshots that supersede this one.
+    SupersededByNewer,
+}
+
+/// Detect dangling snapshot refs.
+///
+/// A snapshot ref is "dangling" if:
+/// - It exists under `refs/manifold/recovery/<workspace>/`
+/// - The workspace it belongs to no longer exists (destroyed successfully), OR
+/// - The workspace has multiple recovery refs and this one is superseded by
+///   newer snapshots (not the most recent for that workspace).
+///
+/// Safety: never marks a ref as dangling if:
+/// - The workspace still exists and has uncommitted work
+/// - The snapshot is the only recovery point for that workspace
+/// - There's an active merge in progress referencing it
+pub fn find_dangling_snapshots(root: &Path) -> Result<Vec<DanglingSnapshot>> {
+    let git_cwd = super::git_cwd()?;
+    let refs = list_recovery_refs(&git_cwd)?;
+
+    if refs.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Gather set of active workspace names (directories under ws/).
+    let active_workspaces = list_active_workspace_names(root);
+
+    // Check for an active merge in progress.
+    let merge_workspaces = active_merge_workspaces(root);
+
+    // Group refs by workspace name.
+    let mut by_workspace: HashMap<String, Vec<RecoveryRef>> = HashMap::new();
+    for r in &refs {
+        by_workspace
+            .entry(r.workspace.clone())
+            .or_default()
+            .push(r.clone());
+    }
+
+    let mut dangling = Vec::new();
+
+    for (ws_name, mut ws_refs) in by_workspace {
+        // Sort by timestamp (ascending) so last element is the most recent.
+        ws_refs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        let ws_exists = active_workspaces.contains(&ws_name);
+        let ws_in_merge = merge_workspaces.contains(&ws_name);
+
+        if ws_in_merge {
+            // Safety: never GC refs for a workspace involved in an active merge.
+            continue;
+        }
+
+        if !ws_exists {
+            // Workspace was destroyed. All refs for it are dangling UNLESS
+            // it's the only recovery point (we always keep at least the
+            // most recent one to allow future recovery).
+            if ws_refs.len() == 1 {
+                // Only one ref — keep it as the sole recovery point.
+                continue;
+            }
+            // Mark all except the most recent as dangling (destroyed + superseded).
+            // The most recent one is also dangling (workspace gone), but we
+            // keep it for safety unless the user explicitly GCs.
+            for r in &ws_refs {
+                dangling.push(DanglingSnapshot {
+                    ref_name: r.ref_name.clone(),
+                    workspace: r.workspace.clone(),
+                    timestamp: r.timestamp.clone(),
+                    oid: r.oid.clone(),
+                    reason: if r.ref_name == ws_refs.last().unwrap().ref_name {
+                        DanglingReason::WorkspaceDestroyed
+                    } else {
+                        DanglingReason::SupersededByNewer
+                    },
+                });
+            }
+        } else {
+            // Workspace still exists. Only mark older refs as superseded
+            // if there are multiple recovery points.
+            if ws_refs.len() <= 1 {
+                continue;
+            }
+            // Keep the most recent, mark older ones as superseded.
+            for r in &ws_refs[..ws_refs.len() - 1] {
+                dangling.push(DanglingSnapshot {
+                    ref_name: r.ref_name.clone(),
+                    workspace: r.workspace.clone(),
+                    timestamp: r.timestamp.clone(),
+                    oid: r.oid.clone(),
+                    reason: DanglingReason::SupersededByNewer,
+                });
+            }
+        }
+    }
+
+    // Stable sort for deterministic output.
+    dangling.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+
+    Ok(dangling)
+}
+
+/// Clean up dangling snapshot refs.
+///
+/// Deletes refs that `find_dangling_snapshots` identified as safe to remove.
+/// If `all` is true, removes all dangling refs (including the most recent
+/// ref for destroyed workspaces). If `all` is false, only removes
+/// superseded refs (preserving the most recent ref per workspace).
+///
+/// Returns the list of refs that were deleted.
+pub fn cleanup_dangling_snapshots(root: &Path, all: bool) -> Result<Vec<DanglingSnapshot>> {
+    let dangling = find_dangling_snapshots(root)?;
+
+    if dangling.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let to_remove: Vec<&DanglingSnapshot> = if all {
+        dangling.iter().collect()
+    } else {
+        // Conservative: only remove superseded refs, not the last ref
+        // for destroyed workspaces.
+        dangling
+            .iter()
+            .filter(|d| d.reason == DanglingReason::SupersededByNewer)
+            .collect()
+    };
+
+    let mut removed = Vec::new();
+    for d in to_remove {
+        crate::refs::delete_ref(root, &d.ref_name)
+            .map_err(|e| anyhow::anyhow!("failed to delete ref {}: {e}", d.ref_name))?;
+        removed.push(d.clone());
+    }
+
+    Ok(removed)
+}
+
+/// Run `maw ws recover --gc` — list or clean up dangling snapshot refs.
+pub fn gc(all: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
+    let root = repo_root()?;
+
+    if dry_run {
+        let dangling = find_dangling_snapshots(&root)?;
+        let to_show: Vec<&DanglingSnapshot> = if all {
+            dangling.iter().collect()
+        } else {
+            dangling
+                .iter()
+                .filter(|d| d.reason == DanglingReason::SupersededByNewer)
+                .collect()
+        };
+
+        match format {
+            OutputFormat::Json => {
+                let envelope = GcEnvelope {
+                    dry_run: true,
+                    removed: to_show.iter().cloned().cloned().collect(),
+                    total_dangling: dangling.len(),
+                    advice: vec!["Run without --dry-run to delete.".to_string()],
+                };
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            }
+            _ => {
+                if to_show.is_empty() {
+                    println!("No dangling snapshot refs to clean up.");
+                } else {
+                    println!(
+                        "Found {} dangling snapshot ref(s) (dry run):",
+                        to_show.len()
+                    );
+                    println!();
+                    for d in &to_show {
+                        println!(
+                            "  {} ({}, {})",
+                            d.ref_name,
+                            d.workspace,
+                            match &d.reason {
+                                DanglingReason::WorkspaceDestroyed => "workspace destroyed",
+                                DanglingReason::SupersededByNewer => "superseded by newer",
+                            }
+                        );
+                    }
+                    println!();
+                    println!("Run without --dry-run to delete.");
+                }
+            }
+        }
+
+        return Ok(());
+    }
+
+    let removed = cleanup_dangling_snapshots(&root, all)?;
+
+    match format {
+        OutputFormat::Json => {
+            let envelope = GcEnvelope {
+                dry_run: false,
+                removed: removed.clone(),
+                total_dangling: removed.len(),
+                advice: vec![],
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        _ => {
+            if removed.is_empty() {
+                println!("No dangling snapshot refs to clean up.");
+            } else {
+                println!("Removed {} dangling snapshot ref(s):", removed.len());
+                println!();
+                for d in &removed {
+                    println!(
+                        "  {} ({}, {})",
+                        d.ref_name,
+                        d.workspace,
+                        match &d.reason {
+                            DanglingReason::WorkspaceDestroyed => "workspace destroyed",
+                            DanglingReason::SupersededByNewer => "superseded by newer",
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct GcEnvelope {
+    dry_run: bool,
+    removed: Vec<DanglingSnapshot>,
+    total_dangling: usize,
+    advice: Vec<String>,
+}
+
+/// List active workspace names by scanning the `ws/` directory.
+fn list_active_workspace_names(root: &Path) -> HashSet<String> {
+    let ws_dir = root.join("ws");
+    let mut names = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&ws_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+/// Get workspace names involved in an active merge (if any).
+fn active_merge_workspaces(root: &Path) -> HashSet<String> {
+    let state_path = root.join(".manifold").join("merge-state.json");
+    let mut names = HashSet::new();
+    if let Ok(state) = MergeStateFile::read(&state_path) {
+        for ws_id in &state.sources {
+            names.insert(ws_id.as_str().to_string());
+        }
+    }
+    names
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -1205,7 +1497,6 @@ mod tests {
 
     #[test]
     fn list_and_grep_recovery_refs_in_temp_repo() {
-        use std::fs;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -1281,5 +1572,313 @@ three
         assert_eq!(snippet.len(), 3);
         assert_eq!(snippet[1].line, 2);
         assert!(snippet[1].is_match);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dangling snapshot detection
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a git repo with a commit and ws/ directory structure.
+    /// Returns (tempdir, root, HEAD oid).
+    fn setup_dangling_test_repo() -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+
+        fs::write(root.join("a.txt"), "content\n").unwrap();
+        Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+
+        let oid_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
+
+        // Create ws/ directory
+        fs::create_dir_all(root.join("ws")).unwrap();
+
+        (dir, root, oid)
+    }
+
+    fn pin_ref(root: &std::path::Path, ref_name: &str, oid: &str) {
+        let out = Command::new("git")
+            .args(["update-ref", ref_name, oid])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "update-ref failed for {ref_name}");
+    }
+
+    #[test]
+    fn dangling_no_refs_returns_empty() {
+        let (_dir, root, _oid) = setup_dangling_test_repo();
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn single_ref_for_destroyed_workspace_is_not_dangling() {
+        // A single recovery ref for a workspace that no longer exists
+        // should NOT be marked dangling (it's the only recovery point).
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-01T00-00-00Z",
+            &oid,
+        );
+
+        // alice workspace does not exist under ws/
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert!(
+            result.is_empty(),
+            "single ref for destroyed ws should not be dangling"
+        );
+    }
+
+    #[test]
+    fn multiple_refs_for_destroyed_workspace_are_dangling() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-01T00-00-00Z",
+            &oid,
+        );
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-02T00-00-00Z",
+            &oid,
+        );
+
+        // alice workspace does not exist under ws/
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert_eq!(result.len(), 2, "both refs for destroyed ws should be dangling");
+
+        // Check reasons
+        let superseded: Vec<_> = result
+            .iter()
+            .filter(|d| d.reason == DanglingReason::SupersededByNewer)
+            .collect();
+        let destroyed: Vec<_> = result
+            .iter()
+            .filter(|d| d.reason == DanglingReason::WorkspaceDestroyed)
+            .collect();
+        assert_eq!(superseded.len(), 1, "older ref should be superseded");
+        assert_eq!(destroyed.len(), 1, "most recent ref should be 'destroyed'");
+    }
+
+    #[test]
+    fn single_ref_for_active_workspace_is_not_dangling() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        // Create workspace directory
+        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/bob/2025-01-01T00-00-00Z",
+            &oid,
+        );
+
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert!(
+            result.is_empty(),
+            "single ref for active ws should not be dangling"
+        );
+    }
+
+    #[test]
+    fn multiple_refs_for_active_workspace_marks_old_as_superseded() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        // Create workspace directory
+        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/bob/2025-01-01T00-00-00Z",
+            &oid,
+        );
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/bob/2025-01-02T00-00-00Z",
+            &oid,
+        );
+
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert_eq!(result.len(), 1, "only the older ref should be dangling");
+        assert_eq!(result[0].reason, DanglingReason::SupersededByNewer);
+        assert!(result[0].timestamp.contains("01-01"));
+    }
+
+    #[test]
+    fn cleanup_removes_superseded_refs() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        // Two refs for destroyed workspace
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-01T00-00-00Z",
+            &oid,
+        );
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-02T00-00-00Z",
+            &oid,
+        );
+
+        // Conservative cleanup (all=false): only superseded
+        let removed = cleanup_dangling_snapshots(&root, false).unwrap();
+        assert_eq!(removed.len(), 1, "only superseded ref should be removed");
+        assert_eq!(removed[0].reason, DanglingReason::SupersededByNewer);
+
+        // Verify the ref is actually gone
+        let refs = list_recovery_refs(&root).unwrap();
+        assert_eq!(refs.len(), 1, "only one ref should remain after cleanup");
+        assert!(refs[0].timestamp.contains("01-02"));
+    }
+
+    #[test]
+    fn cleanup_all_removes_all_dangling_refs() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        // Two refs for destroyed workspace
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-01T00-00-00Z",
+            &oid,
+        );
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-02T00-00-00Z",
+            &oid,
+        );
+
+        // Aggressive cleanup (all=true)
+        let removed = cleanup_dangling_snapshots(&root, true).unwrap();
+        assert_eq!(removed.len(), 2, "all refs should be removed");
+
+        // Verify all refs are gone
+        let refs = list_recovery_refs(&root).unwrap();
+        assert!(refs.is_empty(), "no refs should remain after cleanup --all");
+    }
+
+    #[test]
+    fn active_merge_protects_workspace_refs() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        // Pin recovery refs for "carol"
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/carol/2025-01-01T00-00-00Z",
+            &oid,
+        );
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/carol/2025-01-02T00-00-00Z",
+            &oid,
+        );
+
+        // Simulate active merge by writing merge-state.json
+        let manifold_dir = root.join(".manifold");
+        fs::create_dir_all(&manifold_dir).unwrap();
+        let merge_state = serde_json::json!({
+            "phase": "Build",
+            "sources": ["carol"],
+            "epoch_before": "a".repeat(40),
+            "started_at": 1704067200u64,
+            "updated_at": 1704067200u64
+        });
+        fs::write(
+            manifold_dir.join("merge-state.json"),
+            serde_json::to_string_pretty(&merge_state).unwrap(),
+        )
+        .unwrap();
+
+        // Should find no dangling refs because carol is in an active merge
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert!(
+            result.is_empty(),
+            "refs for workspace in active merge should not be dangling"
+        );
+    }
+
+    #[test]
+    fn list_active_workspace_names_finds_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("ws").join("alice")).unwrap();
+        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+        // File, not directory — should be excluded
+        fs::write(root.join("ws").join("not-a-ws"), "").unwrap();
+
+        let names = list_active_workspace_names(root);
+        assert!(names.contains("alice"));
+        assert!(names.contains("bob"));
+        assert!(!names.contains("not-a-ws"));
+    }
+
+    #[test]
+    fn mixed_workspaces_only_dangling_for_destroyed() {
+        let (_dir, root, oid) = setup_dangling_test_repo();
+
+        // Create one active workspace
+        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+
+        // bob has one ref (active, should NOT be dangling)
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/bob/2025-01-01T00-00-00Z",
+            &oid,
+        );
+
+        // alice has two refs (destroyed, both dangling)
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-01T00-00-00Z",
+            &oid,
+        );
+        pin_ref(
+            &root,
+            "refs/manifold/recovery/alice/2025-01-02T00-00-00Z",
+            &oid,
+        );
+
+        let result = find_dangling_snapshots(&root).unwrap();
+        assert_eq!(result.len(), 2, "only alice's refs should be dangling");
+        for d in &result {
+            assert_eq!(d.workspace, "alice");
+        }
     }
 }
