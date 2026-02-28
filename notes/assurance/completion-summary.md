@@ -167,7 +167,7 @@ Bones: 64 tagged `assurance`, all done (+ bn-3uad top-level goal)
 ## Known limitations
 
 1. **6 pre-existing test failures** in `destroy_record.rs` and `recover.rs` (binary tests, not caused by assurance work)
-2. **Kani proofs are authored but not CI-verified** — `cargo kani` requires the kani-verifier toolchain, which is not installed. The `formal-check` gate runs Stateright only. Kani proofs compile under `#[cfg(kani)]` but need separate verification.
+2. **Kani proofs are broken** — the 15 harnesses in `src/merge/kani_proofs.rs` compile under `#[cfg(kani)]` but OOM when actually run with `cargo kani`. The proofs call into the real merge pipeline (`resolve_partition`, `partition_by_path`) which pulls in the full crate dependency graph including tree-sitter. Kani tries to symbolically execute through tree-sitter's allocator and exhausts memory. To be usable, the proofs need to either stub out heavy deps under `#[cfg(kani)]` or operate on pure data structures that don't reach the AST merge path. The `formal-check` CI gate runs Stateright only.
 3. **DST harness simulates crashes via merge-state.json** rather than real process kill + restart. True crash injection via `fp!()` + subprocess abort is infrastructure for a future iteration.
 4. **dst-nightly 7-day clean streak** (Phase 3 exit criterion) requires sustained nightly runs — the infrastructure exists but the streak has not been established.
 5. **G2 preserve_checkout_replay()** is implemented but the old `git checkout --force` path still exists as fallback. Full migration requires additional testing.
