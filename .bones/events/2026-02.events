@@ -958,3 +958,6 @@
 1772297946139373	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyyAY		item.move	bn-m8qt	{"state":"doing"}	blake3:nV33C4XGHvyQ-wjDlXzZnG_uXbzJoMiAU2wXn7uV0BE
 1772297946159949	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyyQY		item.move	bn-u3k2	{"state":"doing"}	blake3:5a3dCeXeL7PpGYtXnHfde7B-d8gxZ04qdhMDCBrRWAc
 1772298115596290	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyygY		item.move	bn-ayb0	{"state":"done"}	blake3:ZOXTL0qZpjOzgoOviJKK-Eno8-i9hFHFp8JhsUtZIUc
+1772298423694478	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyywY		item.move	bn-11x6	{"state":"done"}	blake3:mEc4EurZMEtaMNKrKgQh7RBO4OWF6oN9po7xp3Q-6DQ
+1772298423706175	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzAY		item.move	bn-4zow	{"reason":"auto-completed: all children of bn-4zow are done","state":"done"}	blake3:5O_XD9fnp7Gzn89mmwxijfyFGnqbRQPtG8UyFECG-gw
+1772298467701923	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzQY		item.move	bn-u3k2	{"state":"done"}	blake3:ReSDAO8PP6Qt202r1djpdaeQi2IzbAkiNeeuHh8XFVg
