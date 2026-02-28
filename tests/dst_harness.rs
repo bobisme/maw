@@ -41,6 +41,14 @@ use manifold_common::TestRepo;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+/// Read trace count from DST_TRACES env var, defaulting to `default`.
+fn trace_count(default: u64) -> u64 {
+    std::env::var("DST_TRACES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 // ---------------------------------------------------------------------------
 // Crash phase enum (maps to MergePhase in src/merge_state.rs)
 // ---------------------------------------------------------------------------
@@ -1017,5 +1025,158 @@ fn dst_determinism_same_seed_same_trace() {
     assert_eq!(
         result1.invariant_violations, result2.invariant_violations,
         "same seed should produce same invariant check results"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Nightly — high-volume DST sweep (10k+ traces)
+// ---------------------------------------------------------------------------
+
+/// Nightly gate: run 10k+ traces across both G1 and G3 properties.
+/// Use `just dst-nightly` or `DST_TRACES=10000 cargo test --test dst_harness -- --ignored dst_nightly`.
+#[test]
+#[ignore]
+fn dst_nightly_high_volume() {
+    let num_traces = trace_count(10_000);
+    let base_seed_g1: u64 = 0xA1A1_BEEF_0001_0001;
+    let base_seed_g3: u64 = 0xA1A1_BEEF_0003_0001;
+    let mut failures = Vec::new();
+
+    // G1 sweep: half the traces
+    let g1_count = num_traces / 2;
+    for i in 0..g1_count {
+        let seed = base_seed_g1.wrapping_add(i);
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let config = TraceConfig {
+            num_workspaces: rng.random_range(1..=3),
+            num_files_per_ws: rng.random_range(1..=3),
+            crash_phase: CrashPhase::pick(&mut rng, &CrashPhase::ALL),
+            create_candidate: rng.random_bool(0.5),
+        };
+
+        let result = run_trace(seed, &config);
+        if !result.invariant_violations.is_empty() {
+            result.trace.dump();
+            for v in &result.invariant_violations {
+                eprintln!("  VIOLATION (G1): {v}");
+            }
+            failures.push((seed, "G1", result.invariant_violations));
+        }
+    }
+
+    // G3 sweep: other half
+    let g3_count = num_traces - g1_count;
+    for i in 0..g3_count {
+        let seed = base_seed_g3.wrapping_add(i);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let crash_phase = CrashPhase::pick(&mut rng, &CrashPhase::COMMIT_PHASES);
+
+        let result = run_g3_trace(seed, crash_phase);
+        if !result.invariant_violations.is_empty() {
+            result.trace.dump();
+            for v in &result.invariant_violations {
+                eprintln!("  VIOLATION (G3): {v}");
+            }
+            failures.push((seed, "G3", result.invariant_violations));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "DST nightly: {}/{num_traces} traces had invariant violations.\n\
+         Failing seeds: {:?}\n\
+         First failure: {:?}",
+        failures.len(),
+        failures.iter().map(|(s, g, _)| format!("{g}:{s}")).collect::<Vec<_>>(),
+        failures.first().map(|(s, g, v)| format!("{g} seed={s}: {v:?}")),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Incident replay — replay corpus of known failing traces
+// ---------------------------------------------------------------------------
+
+/// Replay every trace in tests/corpus/dst/*.json and verify invariants hold.
+#[test]
+fn incident_replay_corpus() {
+    let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/dst");
+    let mut replayed = 0;
+    let mut failures = Vec::new();
+
+    let entries: Vec<_> = match fs::read_dir(&corpus_dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => {
+            eprintln!("corpus dir not found, skipping incident replay");
+            return;
+        }
+    };
+
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&path).expect("read corpus entry");
+        let value: serde_json::Value = serde_json::from_str(&contents).expect("parse corpus JSON");
+
+        let seed = value["seed"].as_u64().expect("corpus entry needs 'seed'");
+        let phase_str = value["crash_phase"].as_str().expect("corpus entry needs 'crash_phase'");
+        let num_ws = value["num_workspaces"].as_u64().unwrap_or(2) as usize;
+        let num_files = value["num_files_per_ws"].as_u64().unwrap_or(1) as usize;
+        let create_cand = value["create_candidate"].as_bool().unwrap_or(true);
+        let expected = value["expected"].as_str().unwrap_or("pass");
+
+        let crash_phase = match phase_str {
+            "prepare" => CrashPhase::Prepare,
+            "build" => CrashPhase::Build,
+            "validate" => CrashPhase::Validate,
+            "commit" => CrashPhase::Commit,
+            "cleanup" => CrashPhase::Cleanup,
+            other => panic!("unknown crash_phase '{other}' in {}", path.display()),
+        };
+
+        let config = TraceConfig {
+            num_workspaces: num_ws,
+            num_files_per_ws: num_files,
+            crash_phase,
+            create_candidate: create_cand,
+        };
+
+        let result = run_trace(seed, &config);
+        replayed += 1;
+
+        match expected {
+            "pass" => {
+                if !result.invariant_violations.is_empty() {
+                    result.trace.dump();
+                    failures.push((
+                        path.display().to_string(),
+                        seed,
+                        result.invariant_violations,
+                    ));
+                }
+            }
+            "known_violation" => {
+                // Expected to fail — just log it
+                if result.invariant_violations.is_empty() {
+                    eprintln!(
+                        "NOTE: corpus entry {} (seed={seed}) marked as known_violation but passed!",
+                        path.display()
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    eprintln!("incident replay: {replayed} corpus entries replayed");
+
+    assert!(
+        failures.is_empty(),
+        "incident replay: {} corpus entries failed.\n{:?}",
+        failures.len(),
+        failures,
     );
 }

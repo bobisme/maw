@@ -1,0 +1,9 @@
+{
+  "seed": 16045690984833597441,
+  "crash_phase": "commit",
+  "num_workspaces": 2,
+  "num_files_per_ws": 1,
+  "create_candidate": true,
+  "expected": "pass",
+  "description": "Sample: crash at commit phase with 2 workspaces, verify G1 reachability"
+}

@@ -21,5 +21,13 @@ formal-check:
 contract-drift:
   cargo test --test contract_drift
 
+# dst-nightly: 10k+ traces (nightly, ~15-30 min)
+dst-nightly:
+  cargo test --test dst_harness -- --ignored dst_nightly --nocapture
+
+# incident-replay: replay failing traces from corpus
+incident-replay:
+  cargo test --test dst_harness -- incident_replay
+
 # All assurance gates combined
 check: test dst-fast contract-drift
