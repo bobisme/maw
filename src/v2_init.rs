@@ -896,6 +896,9 @@ impl Default for BrownfieldInitOptions {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // Warn (but don't block) if git is below the minimum supported version.
+    crate::doctor::warn_git_version_if_old();
+
     // If we're inside an existing git repo (including inside a workspace
     // worktree), resolve the actual repo root rather than using CWD directly.
     // Running `maw init` from inside ws/alice/ should initialize the repo at

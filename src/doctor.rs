@@ -7,6 +7,70 @@ use serde::Serialize;
 use crate::format::OutputFormat;
 use crate::workspace;
 
+// ---------------------------------------------------------------------------
+// Git version check
+// ---------------------------------------------------------------------------
+
+/// Minimum supported git version. Features used by maw (e.g. `git worktree`
+/// improvements, `--orphan` flag) require at least this version.
+const MIN_GIT_VERSION: (u32, u32, u32) = (2, 40, 0);
+
+/// Parse a git version string like "git version 2.47.1" into (major, minor, patch).
+///
+/// Tolerates extra suffixes (e.g. "2.47.1.windows.1" or "2.39.3 (Apple Git-146)").
+fn parse_git_version(version_output: &str) -> Option<(u32, u32, u32)> {
+    // Expect first line to start with "git version "
+    let line = version_output.lines().next()?;
+    let version_str = line.strip_prefix("git version ")?;
+
+    // Split on '.' and parse up to 3 numeric components
+    let mut parts = version_str.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    // Patch may contain extra suffixes (e.g. "1 (Apple Git-146)") — take digits only
+    let patch: u32 = parts
+        .next()
+        .and_then(|s| {
+            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        })
+        .unwrap_or(0);
+
+    Some((major, minor, patch))
+}
+
+/// Get the installed git version by running `git --version`.
+fn get_git_version() -> Option<(u32, u32, u32)> {
+    let output = Command::new("git").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_git_version(&stdout)
+}
+
+/// Emit a warning to stderr if the installed git version is below the minimum.
+///
+/// This is a no-op if git is not found or the version is at or above the minimum.
+/// Intended to be called from `maw init` and other entry points as a soft check.
+pub fn warn_git_version_if_old() {
+    if let Some(version) = get_git_version() {
+        if version < MIN_GIT_VERSION {
+            eprintln!(
+                "WARNING: git {}.{}.{} detected; maw requires git {}.{}.{} or later. \
+                 Some features may not work correctly.\n  \
+                 Upgrade: https://git-scm.com/downloads",
+                version.0,
+                version.1,
+                version.2,
+                MIN_GIT_VERSION.0,
+                MIN_GIT_VERSION.1,
+                MIN_GIT_VERSION.2,
+            );
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct DoctorEnvelope {
     checks: Vec<DoctorCheck>,
@@ -46,6 +110,7 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
         &["--version"],
         "https://git-scm.com/downloads",
     ));
+    checks.push(check_git_version());
 
     let root = workspace::repo_root().ok();
 
@@ -110,6 +175,32 @@ fn check_tool(name: &str, args: &[&str], install_url: &str) -> DoctorCheck {
             status: "fail".to_string(),
             message: format!("{name}: not found"),
             fix: Some(format!("Install: {install_url}")),
+        },
+    }
+}
+
+fn check_git_version() -> DoctorCheck {
+    match get_git_version() {
+        Some(version) if version >= MIN_GIT_VERSION => DoctorCheck {
+            name: "git version".to_string(),
+            status: "ok".to_string(),
+            message: format!("git version: {}.{}.{} (>= {}.{}.{})", version.0, version.1, version.2, MIN_GIT_VERSION.0, MIN_GIT_VERSION.1, MIN_GIT_VERSION.2),
+            fix: None,
+        },
+        Some(version) => DoctorCheck {
+            name: "git version".to_string(),
+            status: "warn".to_string(),
+            message: format!(
+                "git version: {}.{}.{} (minimum {}.{}.{} recommended)",
+                version.0, version.1, version.2, MIN_GIT_VERSION.0, MIN_GIT_VERSION.1, MIN_GIT_VERSION.2
+            ),
+            fix: Some("Upgrade: https://git-scm.com/downloads".to_string()),
+        },
+        None => DoctorCheck {
+            name: "git version".to_string(),
+            status: "warn".to_string(),
+            message: "git version: could not determine version".to_string(),
+            fix: Some("Ensure git is installed: https://git-scm.com/downloads".to_string()),
         },
     }
 }
@@ -353,5 +444,95 @@ fn check_git_head() -> DoctorCheck {
                 )),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_standard_git_version() {
+        assert_eq!(
+            parse_git_version("git version 2.47.1"),
+            Some((2, 47, 1))
+        );
+    }
+
+    #[test]
+    fn parse_git_version_two_components() {
+        // Some distributions emit "git version 2.40" with no patch
+        assert_eq!(
+            parse_git_version("git version 2.40"),
+            Some((2, 40, 0))
+        );
+    }
+
+    #[test]
+    fn parse_git_version_with_suffix() {
+        // macOS Apple Git
+        assert_eq!(
+            parse_git_version("git version 2.39.3 (Apple Git-146)"),
+            Some((2, 39, 3))
+        );
+    }
+
+    #[test]
+    fn parse_git_version_windows() {
+        assert_eq!(
+            parse_git_version("git version 2.43.0.windows.1"),
+            Some((2, 43, 0))
+        );
+    }
+
+    #[test]
+    fn parse_git_version_multiline() {
+        // Only the first line matters
+        assert_eq!(
+            parse_git_version("git version 2.45.2\nsome extra info"),
+            Some((2, 45, 2))
+        );
+    }
+
+    #[test]
+    fn parse_git_version_invalid() {
+        assert_eq!(parse_git_version("not git output"), None);
+        assert_eq!(parse_git_version(""), None);
+        assert_eq!(parse_git_version("git version "), None);
+        assert_eq!(parse_git_version("git version abc.def.ghi"), None);
+    }
+
+    #[test]
+    fn version_comparison_at_minimum() {
+        let v = (2, 40, 0);
+        assert!(v >= MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn version_comparison_above_minimum() {
+        let v = (2, 47, 1);
+        assert!(v >= MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn version_comparison_below_minimum() {
+        let v = (2, 39, 3);
+        assert!(v < MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn version_comparison_major_below() {
+        let v = (1, 99, 99);
+        assert!(v < MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn version_comparison_major_above() {
+        let v = (3, 0, 0);
+        assert!(v >= MIN_GIT_VERSION);
     }
 }
