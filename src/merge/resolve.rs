@@ -109,8 +109,123 @@ pub struct ConflictRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Pure classification (Kani-provable)
+// Generic merge algebra (Kani-provable)
 // ---------------------------------------------------------------------------
+
+/// Outcome of resolving a shared path's entries through the full merge algebra.
+///
+/// This is the return type of [`resolve_entries`], the generic function that
+/// contains the complete classification + k-way diff3 fold logic. It uses
+/// the content type `C` directly, avoiding any Path/ConflictRecord/ConflictAtom
+/// dependencies that would pull in heavy types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeOutcome<C> {
+    /// All entries are deletions → resolved delete.
+    Delete,
+    /// All entries agree on content, or diff3 merged cleanly → resolved upsert.
+    Upsert(C),
+    /// Entries could not be auto-merged → conflict with reason.
+    Conflict(ConflictReason),
+}
+
+/// Diff3 result for the generic merge algebra.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Diff3Result<C> {
+    /// Clean merge.
+    Clean(C),
+    /// Conflicting merge.
+    Conflict,
+}
+
+/// Resolve a set of shared-path entries through the full merge algebra.
+///
+/// This is the generic core of the resolve pipeline. It contains the complete
+/// classification decision tree AND the k-way diff3 fold, parameterized by:
+///
+/// - `C`: content type (`Vec<u8>` in production, `u8` under Kani)
+/// - `diff3`: a function `(base, ours, theirs) → Result<Diff3Result<C>>` that
+///   merges two variants against a base
+///
+/// Production [`resolve_shared_path`] calls this with `Vec<u8>` content and
+/// the real `git merge-file` diff3. Kani proofs call it with `u8` content and
+/// a deterministic stub.
+///
+/// The function does not allocate PathBuf, build ConflictRecord, format
+/// workspace labels, or do any I/O. The caller maps the [`MergeOutcome`]
+/// to concrete output types.
+pub fn resolve_entries<C, E, F>(
+    kinds: &[ChangeKind],
+    contents: &[Option<C>],
+    base: Option<&C>,
+    diff3: F,
+) -> Result<MergeOutcome<C>, E>
+where
+    C: Eq + Clone,
+    F: Fn(&C, &C, &C) -> Result<Diff3Result<C>, E>,
+{
+    assert_eq!(kinds.len(), contents.len(), "kinds and contents must have same length");
+
+    // Step 1: classification (same logic as classify_shared_path).
+    let classification = {
+        let all_have_content = kinds.iter().zip(contents.iter()).all(|(k, c)| {
+            matches!(k, ChangeKind::Deleted) || c.is_some()
+        });
+
+        // Gather non-None contents for equality check.
+        let non_delete_contents: Vec<&C> = contents.iter().filter_map(|c| c.as_ref()).collect();
+        let all_content_equal = if non_delete_contents.len() >= 2 {
+            non_delete_contents.windows(2).all(|w| w[0] == w[1])
+        } else {
+            true
+        };
+
+        classify_shared_path(kinds, all_have_content, all_content_equal, base.is_some())
+    };
+
+    // Step 2: map definite classifications to outcomes.
+    match classification {
+        SharedClassification::ResolvedDelete => return Ok(MergeOutcome::Delete),
+        SharedClassification::ResolvedIdentical => {
+            // Return the first non-None content.
+            let content = contents.iter().find_map(|c| c.as_ref()).unwrap().clone();
+            return Ok(MergeOutcome::Upsert(content));
+        }
+        SharedClassification::ConflictModifyDelete => {
+            return Ok(MergeOutcome::Conflict(ConflictReason::ModifyDelete));
+        }
+        SharedClassification::ConflictMissingContent => {
+            return Ok(MergeOutcome::Conflict(ConflictReason::MissingContent));
+        }
+        SharedClassification::ConflictAddAddDifferent => {
+            return Ok(MergeOutcome::Conflict(ConflictReason::AddAddDifferent));
+        }
+        SharedClassification::ConflictMissingBase => {
+            return Ok(MergeOutcome::Conflict(ConflictReason::MissingBase));
+        }
+        SharedClassification::NeedsDiff3 => {} // fall through
+    }
+
+    // Step 3: k-way diff3 fold.
+    let base = base.expect("NeedsDiff3 implies base is present");
+    let variants: Vec<&C> = contents.iter().filter_map(|c| c.as_ref()).collect();
+
+    let mut merged = variants[0].clone();
+    for next in &variants[1..] {
+        if merged == **next {
+            continue;
+        }
+        match diff3(base, &merged, next)? {
+            Diff3Result::Clean(out) => {
+                merged = out;
+            }
+            Diff3Result::Conflict => {
+                return Ok(MergeOutcome::Conflict(ConflictReason::Diff3Conflict));
+            }
+        }
+    }
+
+    Ok(MergeOutcome::Upsert(merged))
+}
 
 /// Pre-diff3 classification of a shared path.
 ///
@@ -412,119 +527,88 @@ fn resolve_shared_path(
     entries: &[PathEntry],
     base: Option<&[u8]>,
 ) -> Result<SharedOutcome, ResolveError> {
-    // Gather inputs for the pure classifier.
+    // Use blob OID equality as a fast path before falling into the generic
+    // algebra. The generic resolve_entries only sees content bytes, so we
+    // check OID equality here and feed the result through.
+    let blob_eq = all_blobs_equal(entries);
+
+    // Build inputs for the generic algebra.
     let kinds: Vec<ChangeKind> = entries.iter().map(|e| e.kind.clone()).collect();
-    let all_have_content = entries.iter().all(|e| e.is_deletion() || e.content.is_some());
-    let (variants, all_content_equal) = {
-        let mut vs: Vec<Vec<u8>> = Vec::new();
-        let mut all_eq = true;
-        for entry in entries {
-            if let Some(c) = &entry.content {
-                vs.push(c.clone());
-            }
-        }
-        if vs.len() >= 2 {
-            all_eq = all_blobs_equal(entries) || all_equal(&vs);
-        }
-        (vs, all_eq)
+    let contents: Vec<Option<Vec<u8>>> = entries.iter().map(|e| e.content.clone()).collect();
+
+    // If blob OIDs all match, override content equality to avoid byte comparison.
+    // We do this by checking here and, if true, substituting identical content
+    // so the generic function sees equal values.
+    let effective_contents = if blob_eq && contents.iter().filter(|c| c.is_some()).count() >= 2 {
+        // All blobs equal — make the generic function see identical content.
+        let first = contents.iter().find_map(|c| c.as_ref()).cloned();
+        contents
+            .iter()
+            .map(|c| if c.is_some() { first.clone() } else { None })
+            .collect::<Vec<_>>()
+    } else {
+        contents
     };
 
-    // Pure classification — the Kani proofs verify properties of this function.
-    match classify_shared_path(&kinds, all_have_content, all_content_equal, base.is_some()) {
-        SharedClassification::ResolvedDelete => {
-            return Ok(SharedOutcome::Resolved(ResolvedChange::Delete {
-                path: path.to_path_buf(),
-            }));
-        }
-        SharedClassification::ConflictModifyDelete => {
-            return Ok(SharedOutcome::Conflict(conflict_record(
-                path,
-                entries,
-                base,
-                ConflictReason::ModifyDelete,
-                vec![],
-            )));
-        }
-        SharedClassification::ConflictMissingContent => {
-            return Ok(SharedOutcome::Conflict(conflict_record(
-                path,
-                entries,
-                base,
-                ConflictReason::MissingContent,
-                vec![],
-            )));
-        }
-        SharedClassification::ResolvedIdentical => {
-            return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
-                path: path.to_path_buf(),
-                content: variants[0].clone(),
-            }));
-        }
-        SharedClassification::ConflictAddAddDifferent => {
-            return Ok(SharedOutcome::Conflict(conflict_record(
-                path,
-                entries,
-                None,
-                ConflictReason::AddAddDifferent,
-                vec![],
-            )));
-        }
-        SharedClassification::ConflictMissingBase => {
-            return Ok(SharedOutcome::Conflict(conflict_record(
-                path,
-                entries,
-                None,
-                ConflictReason::MissingBase,
-                vec![],
-            )));
-        }
-        SharedClassification::NeedsDiff3 => {} // fall through to diff3 below
-    }
-
-    // K-way deterministic merge by folding pairwise diff3 against the same base.
-    let base_bytes = base.expect("NeedsDiff3 implies base is present");
-    // Track the workspace names that contributed to the accumulated "ours" side
-    // so that ConflictAtom edits can carry meaningful workspace labels.
-    let mut merged = variants[0].clone();
-    let mut ours_ws_label: String = entries[0].workspace_id.to_string();
-
-    for (i, next) in variants[1..].iter().enumerate() {
-        if merged == *next {
-            let theirs_ws = &entries[i + 1].workspace_id;
-            ours_ws_label = format!("{ours_ws_label}+{theirs_ws}");
-            continue;
-        }
-
-        let theirs_ws_label = entries[i + 1].workspace_id.to_string();
-
-        match diff3_merge_bytes(base_bytes, &merged, next)? {
-            Diff3Outcome::Clean(out) => {
-                merged = out;
-                ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
-            }
-            Diff3Outcome::Conflict { marker_output } => {
-                if let Some(retried) = retry_with_shifted_alignment(base_bytes, &merged, next)? {
-                    merged = retried;
-                    ours_ws_label = format!("{ours_ws_label}+{theirs_ws_label}");
-                    continue;
+    // Run through the generic merge algebra (classification + k-way fold).
+    // This is the function Kani verifies.
+    let outcome = resolve_entries(
+        &kinds,
+        &effective_contents,
+        base.map(|b| b.to_vec()).as_ref(),
+        |base_c, ours_c, theirs_c| -> Result<Diff3Result<Vec<u8>>, ResolveError> {
+            // Try diff3, then shifted-alignment retry.
+            match diff3_merge_bytes(base_c, ours_c, theirs_c)? {
+                Diff3Outcome::Clean(out) => Ok(Diff3Result::Clean(out)),
+                Diff3Outcome::Conflict { .. } => {
+                    if let Some(retried) =
+                        retry_with_shifted_alignment(base_c, ours_c, theirs_c)?
+                    {
+                        Ok(Diff3Result::Clean(retried))
+                    } else {
+                        Ok(Diff3Result::Conflict)
+                    }
                 }
-
-                let atoms = parse_diff3_atoms(&marker_output, &ours_ws_label, &theirs_ws_label);
-                return Ok(SharedOutcome::Conflict(conflict_record(
-                    path,
-                    entries,
-                    Some(base_bytes),
-                    ConflictReason::Diff3Conflict,
-                    atoms,
-                )));
             }
+        },
+    )?;
+
+    // Map the generic outcome to concrete types with path/conflict details.
+    match outcome {
+        MergeOutcome::Delete => Ok(SharedOutcome::Resolved(ResolvedChange::Delete {
+            path: path.to_path_buf(),
+        })),
+        MergeOutcome::Upsert(content) => Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+            path: path.to_path_buf(),
+            content,
+        })),
+        MergeOutcome::Conflict(reason) => {
+            let base_for_record = if matches!(
+                reason,
+                ConflictReason::AddAddDifferent | ConflictReason::MissingBase
+            ) {
+                None
+            } else {
+                base
+            };
+            // For Diff3Conflict, we lost the marker output / atoms by going
+            // through the generic path. Re-run diff3 to recover them for the
+            // conflict record. This only happens on the conflict path, so the
+            // cost is negligible.
+            let atoms = if matches!(reason, ConflictReason::Diff3Conflict) {
+                recover_diff3_atoms(entries, base)
+            } else {
+                vec![]
+            };
+            Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                base_for_record,
+                reason,
+                atoms,
+            )))
         }
     }
-
-    Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
-        path: path.to_path_buf(),
-        content: merged,
-    }))
 }
 
 /// Resolve a shared path with AST-aware merge as fallback after diff3.
@@ -673,6 +757,50 @@ fn resolve_shared_path_with_ast(
         ConflictReason::Diff3Conflict,
         atoms,
     )))
+}
+
+/// Re-run the k-way diff3 fold to recover conflict markers and parse atoms.
+///
+/// Called only on the conflict path when `resolve_entries` returns
+/// `MergeOutcome::Conflict(Diff3Conflict)`. The generic function doesn't
+/// carry marker output, so we re-run diff3 here to get it.
+fn recover_diff3_atoms(entries: &[PathEntry], base: Option<&[u8]>) -> Vec<ConflictAtom> {
+    let base_bytes = match base {
+        Some(b) => b,
+        None => return vec![],
+    };
+    let variants: Vec<&[u8]> = entries
+        .iter()
+        .filter_map(|e| e.content.as_deref())
+        .collect();
+    if variants.len() < 2 {
+        return vec![];
+    }
+
+    let mut merged = variants[0].to_vec();
+    let mut ours_label = entries[0].workspace_id.to_string();
+
+    for (i, next) in variants[1..].iter().enumerate() {
+        if merged == *next {
+            let theirs_ws = &entries[i + 1].workspace_id;
+            ours_label = format!("{ours_label}+{theirs_ws}");
+            continue;
+        }
+
+        let theirs_label = entries[i + 1].workspace_id.to_string();
+
+        match diff3_merge_bytes(base_bytes, &merged, next) {
+            Ok(Diff3Outcome::Clean(out)) => {
+                merged = out;
+                ours_label = format!("{ours_label}+{theirs_label}");
+            }
+            Ok(Diff3Outcome::Conflict { marker_output }) => {
+                return parse_diff3_atoms(&marker_output, &ours_label, &theirs_label);
+            }
+            Err(_) => return vec![],
+        }
+    }
+    vec![]
 }
 
 fn all_equal(contents: &[Vec<u8>]) -> bool {

@@ -44,21 +44,32 @@ using bounded symbolic inputs.
 
 | Kani Harness | Source Property | CI Gate |
 |---|---|---|
-| `permutation_determinism_2ws_1change` | Merge result is independent of workspace ordering (2 workspaces, 1 change each). Exercises `src/merge/partition.rs:partition_by_path` and `src/merge/resolve.rs:resolve_partition`. | `formal-check` |
-| `permutation_determinism_3ws_1change` | Merge result is independent of workspace ordering (3 workspaces, 1 change each, all 6 permutations). Exercises `src/merge/partition.rs:partition_by_path` and `src/merge/resolve.rs:resolve_partition`. | `formal-check` |
-| `idempotence_2ws_identical_changes` | Identical modifications from 2 workspaces resolve cleanly to the same content as a single workspace. Exercises hash-equality resolution in `src/merge/resolve.rs:resolve_partition`. | `formal-check` |
-| `idempotence_3ws_identical_adds` | Identical adds from 3 workspaces produce a single clean upsert. Exercises add/add hash-equality in `src/merge/resolve.rs:resolve_partition`. | `formal-check` |
-| `idempotence_delete_delete_resolves` | N workspaces (2-3) all deleting the same file resolve to a single clean delete. Exercises delete/delete resolution in `src/merge/resolve.rs:resolve_partition`. | `formal-check` |
-| `conflict_monotonicity_no_silent_drops_2ws` | Every input path appears in either resolved or conflicts (no silent drops). Exercises `src/merge/resolve.rs:resolve_partition` output completeness. | `formal-check` |
-| `conflict_monotonicity_no_path_duplication_2ws` | No path appears in both resolved and conflicts. Exercises `src/merge/resolve.rs:resolve_partition` output partitioning. | `formal-check` |
-| `conflict_monotonicity_modify_delete_always_conflicts` | Modify/delete on the same path always produces a conflict with exactly 2 sides. Exercises `src/merge/resolve.rs:resolve_partition` conflict detection. | `formal-check` |
-| `conflict_monotonicity_add_add_different_conflicts` | Add/add with different content always produces a conflict. Exercises `src/merge/resolve.rs:resolve_partition` divergence detection. | `formal-check` |
-| `disjoint_changes_never_conflict` | Two workspaces with disjoint file paths never conflict. Exercises `src/merge/partition.rs:partition_by_path` unique/shared classification. | `formal-check` |
-| `partition_paths_sorted` | Partition output paths (both unique and shared) are always lexicographically sorted. Exercises `src/merge/partition.rs:partition_by_path` ordering. | `formal-check` |
-| `partition_path_accounting` | Unique + shared path counts equal the total distinct input paths. Exercises `src/merge/partition.rs:partition_by_path` accounting. | `formal-check` |
-| `resolve_output_paths_sorted` | Resolved and conflict paths in output are lexicographically sorted. Exercises `src/merge/resolve.rs:resolve_partition` output ordering. | `formal-check` |
-| `patch_set_sorts_by_path` | `PatchSet::new` always sorts changes by path regardless of input order. Exercises `src/merge/types.rs:PatchSet::new` construction invariant. | `formal-check` |
-| `empty_patch_sets_produce_empty_result` | Empty patch sets (1-3 workspaces with no changes) produce an empty, clean result. Exercises `src/merge/resolve.rs:resolve_partition` base case. | `formal-check` |
+| **classify_shared_path (decision tree, 13 harnesses)** | | |
+| `totality_2_entries` | No panics for any 2-entry kind/boolean combination. Exercises `classify_shared_path`. | `kani-check` |
+| `totality_3_entries` | No panics for any 3-entry kind/boolean combination. Exercises `classify_shared_path`. | `kani-check` |
+| `no_silent_drops_2_entries` | Every result is ResolvedDelete, ResolvedIdentical, Conflict*, or NeedsDiff3. | `kani-check` |
+| `commutativity_2_entries` | Swapping 2 entries produces the same classification. | `kani-check` |
+| `commutativity_3_entries` | All 6 permutations of 3 entries produce the same classification. | `kani-check` |
+| `idempotence_identical_non_deletes` | Identical non-delete inputs resolve to ResolvedIdentical. | `kani-check` |
+| `idempotence_all_deletes` | All-delete inputs resolve to ResolvedDelete. | `kani-check` |
+| `modify_delete_always_conflicts` | Mixed delete/non-delete always produces ConflictModifyDelete. | `kani-check` |
+| `add_add_different_always_conflicts` | Add/add with different content and no base produces ConflictAddAddDifferent. | `kani-check` |
+| `missing_content_always_conflicts` | Missing content on non-delete entries produces ConflictMissingContent. | `kani-check` |
+| `needs_diff3_conditions` | Different content with base produces NeedsDiff3. | `kani-check` |
+| `no_base_mixed_kinds_is_missing_base` | Different content, no base, not all adds produces ConflictMissingBase. | `kani-check` |
+| `exhaustive_2_entry_decision_table` | Structural consistency of all 72 input combinations (9 kind pairs × 8 boolean combos). | `kani-check` |
+| **resolve_entries (full pipeline with k-way diff3 fold, 11 harnesses)** | | |
+| `re_totality_2_entries` | No panics for any 2-entry input with symbolic content. Exercises `resolve_entries<u8>`. | `kani-check` |
+| `re_totality_3_entries` | No panics for any 3-entry input with symbolic content. Exercises `resolve_entries<u8>`. | `kani-check` |
+| `re_outcome_consistency_2_entries` | Every result is Delete, Upsert, or Conflict with valid structural invariants. | `kani-check` |
+| `re_commutativity_2_entries` | Swapping 2 entries (kinds + content) produces the same MergeOutcome. | `kani-check` |
+| `re_commutativity_3_entries` | All 6 permutations of 3 entries produce the same MergeOutcome (bounded content 0..4). | `kani-check` |
+| `re_idempotence_identical_content` | Identical non-delete content resolves to Upsert with that content. | `kani-check` |
+| `re_idempotence_all_deletes` | All-delete entries resolve to Delete. | `kani-check` |
+| `re_conflict_monotonicity` | Pre-diff3 conflicts from classify_shared_path remain conflicts through resolve_entries. | `kani-check` |
+| `re_diff3_one_side_changed` | When one side matches base, resolve picks the changed side (clean merge). | `kani-check` |
+| `re_diff3_one_of_three_changed` | When 2 of 3 sides match base, resolve picks the changed value. | `kani-check` |
+| `re_diff3_both_sides_changed_conflicts` | Both sides changed differently from base produces Diff3Conflict. | `kani-check` |
 
 ---
 
@@ -103,9 +114,9 @@ artifacts (Stateright actions, Kani proofs, guarantees) exercise it.
 | `src/workspace/merge.rs` | `merge` (line 1941), `update_default_workspace` (line 2982), `handle_post_merge_destroy` (line 3069) | `Cleanup` (via orchestration) | -- | G2 (I-G2.1), G4 (I-G4.1, I-G4.2) |
 | `src/workspace/capture.rs` | `capture_before_destroy` | -- | -- | G1 (I-G1.2), G2 (I-G2.1, I-G2.3), G4 (I-G4.1) |
 | `src/workspace/recover.rs` | `recover` (search/show/restore) | -- | -- | G5 (I-G5.1, I-G5.2), G6 (I-G6.1, I-G6.2, I-G6.3) |
-| `src/merge/partition.rs` | `partition_by_path` | `Build` (sub-step) | `partition_paths_sorted`, `partition_path_accounting`, `disjoint_changes_never_conflict` | -- |
-| `src/merge/resolve.rs` | `resolve_partition` | `Build` (sub-step) | `permutation_determinism_2ws_1change`, `permutation_determinism_3ws_1change`, `idempotence_2ws_identical_changes`, `idempotence_3ws_identical_adds`, `idempotence_delete_delete_resolves`, `conflict_monotonicity_no_silent_drops_2ws`, `conflict_monotonicity_no_path_duplication_2ws`, `conflict_monotonicity_modify_delete_always_conflicts`, `conflict_monotonicity_add_add_different_conflicts`, `resolve_output_paths_sorted`, `empty_patch_sets_produce_empty_result` | -- |
-| `src/merge/types.rs` | `PatchSet::new` | -- | `patch_set_sorts_by_path` | -- |
+| `src/merge/partition.rs` | `partition_by_path` | `Build` (sub-step) | -- | -- |
+| `src/merge/resolve.rs` | `classify_shared_path`, `resolve_entries` | `Build` (sub-step) | 13 `classify_shared_path` harnesses + 11 `resolve_entries<u8>` harnesses (see Table 2) | -- |
+| `src/merge/types.rs` | `PatchSet::new`, `ChangeKind` | -- | (via `classify_shared_path` and `resolve_entries` harnesses) | -- |
 | `src/merge/determinism_tests.rs` | 25+ proptest harnesses | -- | (Kani proofs upgrade these) | -- |
 | `src/merge/pushout_tests.rs` | 1000+ proptest harnesses | -- | (Kani proofs upgrade these) | -- |
 | `src/refs.rs` | `advance_epoch`, `write_ref_cas`, `read_ref` | `CommitEpoch`, `CommitBranch` | -- | G1 (I-G1.1), G3 (I-G3.1, I-G3.2) |
@@ -129,7 +140,7 @@ artifacts (Stateright actions, Kani proofs, guarantees) exercise it.
 | Artifact Category | Implemented | Planned | Notes |
 |---|---|---|---|
 | Stateright model (`src/assurance/model.rs`) | 0/10 actions | 10/10 | Phase 4 deliverable; uses actual `MergePhase`/`MergeStateFile` types |
-| Kani proof harnesses (`src/merge/kani_proofs.rs`) | 13/13 | -- | Pure algebra proofs on `classify_shared_path`; run with `cargo kani --no-default-features` |
+| Kani proof harnesses (`src/merge/kani_proofs.rs`) | 24/24 | -- | 13 `classify_shared_path` (decision tree) + 11 `resolve_entries<u8>` (full pipeline with k-way diff3 fold); run with `cargo kani --no-default-features` |
 | Oracle functions (`check_g1..check_g6`) | 0/6 | 6/6 | Phase 2 deliverable; specified in `notes/assurance/invariants.md` section 4 |
 | DST scenarios (named `DST-G*-001`) | 0/4 | 4/4 | Phase 2-3 deliverable; `tests/concurrent_safety.rs` provides lightweight DST coverage |
 | CI gates | 0/5 | 5/5 | All gates specified; none wired into CI yet |
