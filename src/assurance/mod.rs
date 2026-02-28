@@ -25,6 +25,7 @@
 //! ```
 
 pub mod oracle;
+pub mod trace;
 
 // Re-export key types for convenience.
 pub use oracle::{
