@@ -42,18 +42,22 @@ Use uppercase IDs with stable namespace prefixes:
 
 ### BUILD
 
-- `FP_BUILD_BEFORE_PHASE_ADVANCE`
-- `FP_BUILD_AFTER_PHASE_ADVANCE`
-- `FP_BUILD_BEFORE_CANDIDATE_WRITE`
-- `FP_BUILD_AFTER_CANDIDATE_WRITE`
+- `FP_BUILD_BEFORE_WORKTREE_ADD` (implemented) — before advance to BUILD phase
+- `FP_BUILD_AFTER_WORKTREE_ADD` (implemented) — after BUILD phase state written
+- `FP_BUILD_BEFORE_MERGE_COMPUTE` (implemented) — before merge pipeline runs
+- `FP_BUILD_AFTER_MERGE_COMPUTE` (implemented) — after merge result computed
+- `FP_BUILD_BEFORE_CANDIDATE_WRITE` (planned)
+- `FP_BUILD_AFTER_CANDIDATE_WRITE` (planned)
 
 ### VALIDATE
 
-- `FP_VALIDATE_BEFORE_WORKTREE_ADD`
-- `FP_VALIDATE_AFTER_WORKTREE_ADD`
-- `FP_VALIDATE_BEFORE_RESULT_WRITE`
-- `FP_VALIDATE_AFTER_RESULT_WRITE`
-- `FP_VALIDATE_BEFORE_WORKTREE_REMOVE`
+- `FP_VALIDATE_BEFORE_CHECK` (implemented) — before validation commands run
+- `FP_VALIDATE_AFTER_CHECK` (implemented) — after validation completes
+- `FP_VALIDATE_BEFORE_WORKTREE_ADD` (planned)
+- `FP_VALIDATE_AFTER_WORKTREE_ADD` (planned)
+- `FP_VALIDATE_BEFORE_RESULT_WRITE` (planned)
+- `FP_VALIDATE_AFTER_RESULT_WRITE` (planned)
+- `FP_VALIDATE_BEFORE_WORKTREE_REMOVE` (planned)
 
 ### COMMIT
 
@@ -147,10 +151,12 @@ Use uppercase IDs with stable namespace prefixes:
 
 ### DESTROY paths
 
-- `FP_DESTROY_BEFORE_STATUS`
-- `FP_DESTROY_AFTER_STATUS`
-- `FP_DESTROY_BEFORE_CAPTURE`
-- `FP_DESTROY_AFTER_CAPTURE`
+- `FP_DESTROY_BEFORE_STATUS` (planned)
+- `FP_DESTROY_AFTER_STATUS` (implemented in create.rs)
+- `FP_DESTROY_BEFORE_CAPTURE` (implemented in merge.rs)
+- `FP_DESTROY_AFTER_CAPTURE` (planned)
+- `FP_DESTROY_AFTER_RECORD` (implemented in merge.rs)
+- `FP_DESTROY_AFTER_DELETE` (implemented in merge.rs)
 
 - `FP_DESTROY_BEFORE_RECORD`
   - Location: `src/workspace/merge.rs:3058-3061` (before `write_destroy_record`)
@@ -163,9 +169,11 @@ Use uppercase IDs with stable namespace prefixes:
 
 ### RECOVER/search paths
 
-- `FP_RECOVER_BEFORE_REF_ENUM`
-- `FP_RECOVER_AFTER_REF_ENUM`
-- `FP_RECOVER_BEFORE_SHOW`
+- `FP_RECOVER_BEFORE_RESTORE` (implemented in recover.rs)
+- `FP_RECOVER_BEFORE_SEARCH` (implemented in recover.rs)
+- `FP_RECOVER_BEFORE_REF_ENUM` (planned)
+- `FP_RECOVER_AFTER_REF_ENUM` (planned)
+- `FP_RECOVER_BEFORE_SHOW` (planned)
 
 ## 4) Injection behavior
 

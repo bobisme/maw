@@ -68,7 +68,16 @@ fn parse_failpoint_catalog(root: &Path) -> BTreeSet<String> {
     ids
 }
 
+/// Standard failpoint namespace prefixes — only fp! calls using these
+/// are checked against the catalog. Test-only names (FP_TEST_*, FP_A, etc.)
+/// are excluded.
+const FP_STANDARD_PREFIXES: &[&str] = &[
+    "FP_PREPARE_", "FP_BUILD_", "FP_VALIDATE_", "FP_COMMIT_",
+    "FP_CAPTURE_", "FP_CLEANUP_", "FP_DESTROY_", "FP_RECOVER_",
+];
+
 /// Extract all fp!("FP_...") calls from Rust source files under src/.
+/// Only includes calls using standard namespace prefixes.
 fn parse_fp_calls_in_source(root: &Path) -> BTreeSet<String> {
     let src_dir = root.join("src");
     let files = collect_rs_files(&src_dir);
@@ -83,7 +92,10 @@ fn parse_fp_calls_in_source(root: &Path) -> BTreeSet<String> {
                     let rest = &line[start + 5..]; // skip fp!("
                     if let Some(end) = rest.find('"') {
                         let id = &rest[..end];
-                        ids.insert(id.to_string());
+                        // Only include standard-prefix failpoints
+                        if FP_STANDARD_PREFIXES.iter().any(|p| id.starts_with(p)) {
+                            ids.insert(id.to_string());
+                        }
                     }
                 }
             }
