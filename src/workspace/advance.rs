@@ -8,11 +8,11 @@
 //! 2. Get the workspace's current HEAD (its base epoch).
 //! 3. Get the current epoch from `refs/manifold/epoch/current`.
 //! 4. If already up-to-date, exit early.
-//! 5. Stash any uncommitted changes in the workspace.
-//! 6. Reset the workspace HEAD to the new epoch.
-//! 7. Pop the stash to apply changes on top of the new base.
-//! 8. Detect and report any conflicts.
-//! 9. Update the workspace metadata base epoch.
+//! 5. Snapshot uncommitted changes (stash create + pinned ref).
+//! 6. Checkout the new epoch (detached, tree is clean after snapshot).
+//! 7. Replay the snapshot onto the new epoch.
+//! 8. Clean up the snapshot ref (if replay was clean).
+//! 9. Report conflicts if any (working-copy-preserving — left as markers).
 
 use std::path::Path;
 use std::process::Command;
@@ -25,7 +25,8 @@ use crate::model::types::WorkspaceMode;
 use crate::refs as manifold_refs;
 
 use super::working_copy::{
-    WorkingCopyConflict, checkout_epoch, pop_stash_and_detect_conflicts, stash_changes,
+    SnapshotReplayResult, WorkingCopyConflict,
+    checkout_to, cleanup_snapshot, replay_snapshot, snapshot_working_copy,
 };
 use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
 
@@ -141,24 +142,40 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         println!();
     }
 
-    // Step 1: Stash uncommitted changes.
-    let had_stash = stash_changes(&ws_path)?;
+    // Step 1: Snapshot uncommitted changes (stash create + pinned ref).
+    let snapshot = snapshot_working_copy(&ws_path, &root, name)
+        .with_context(|| format!("Failed to snapshot workspace '{name}' before advance"))?;
 
-    // Step 2: Reset HEAD to the new epoch.
-    // IMPORTANT: if checkout fails, restore the stash first so changes are not
-    // orphaned. Without this, the user's work would be stranded in the stash
-    // stack with no recovery path.
-    if let Err(e) = checkout_epoch(&ws_path, &new_epoch) {
-        if had_stash {
-            // Best-effort restore — ignore errors so the original error surfaces.
-            let _ = pop_stash_and_detect_conflicts(&ws_path);
+    // Step 2: Checkout the new epoch (detached — tree is clean after snapshot).
+    if let Err(e) = checkout_to(&ws_path, &new_epoch, None) {
+        // Checkout failed. The snapshot ref is preserved for recovery.
+        if let Some(ref snap) = snapshot {
+            eprintln!(
+                "  Snapshot preserved at: {}\n  \
+                 To recover: git -C {} stash apply {}",
+                snap.ref_name,
+                ws_path.display(),
+                snap.oid,
+            );
         }
         return Err(e.context(format!("Failed to checkout new epoch in workspace '{name}'")));
     }
 
-    // Step 3: Pop the stash if there was one.
-    let conflicts = if had_stash {
-        pop_stash_and_detect_conflicts(&ws_path)?
+    // Step 3: Replay the snapshot if there was one.
+    let conflicts = if let Some(ref snapshot) = snapshot {
+        match replay_snapshot(&ws_path, snapshot)? {
+            SnapshotReplayResult::Clean => {
+                // Clean replay — delete the snapshot ref.
+                if let Err(e) = cleanup_snapshot(&root, name) {
+                    tracing::warn!("failed to clean up snapshot ref: {e}");
+                }
+                vec![]
+            }
+            SnapshotReplayResult::Conflicts(c) => {
+                // Conflicts — keep snapshot ref as recovery anchor.
+                c
+            }
+        }
     } else {
         vec![]
     };

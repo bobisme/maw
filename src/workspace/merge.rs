@@ -2969,16 +2969,22 @@ fn now_secs() -> u64 {
 
 /// Update the default workspace to check out the new epoch commit.
 ///
-/// Uses [`preserve_checkout_replay`] to safely update the default workspace's
-/// working copy to the new epoch commit, preserving any uncommitted user work.
+/// Uses the snapshot-based composable helpers to safely update the default
+/// workspace's working copy, preserving uncommitted user work (working-copy-preserving).
 ///
-/// If the workspace is clean, this is a fast checkout. If dirty, the user's
-/// changes are captured under a recovery ref and replayed on top of the new
-/// tree. On replay failure, the workspace is left at a clean checkout and
-/// the recovery ref is printed so the user can retrieve their work.
+/// Algorithm:
+/// 1. SNAPSHOT — if dirty, capture via `snapshot_working_copy()` (stash create
+///    + pinned ref, no stash-stack pollution).
+/// 2. CHECKOUT — `checkout_to()` with branch attachment (tree is clean after
+///    snapshot, no --force needed).
+/// 3. REPLAY — `replay_snapshot()` applies the snapshot. Conflicts become
+///    markers in the working tree (working-copy-preserving — conflicts are data, not errors).
+/// 4. CLEANUP — if replay was clean, delete the snapshot ref. If conflicts,
+///    KEEP the ref as a recovery anchor and print conflicted file list.
 ///
-/// Errors from replay are reported as warnings — they never abort the cleanup
-/// phase, because the merge COMMIT has already succeeded.
+/// CRITICAL: errors and conflicts during replay never abort the cleanup phase.
+/// The merge COMMIT has already succeeded — remaining cleanup (workspace
+/// destroy, GC, merge-state removal) MUST still run.
 fn update_default_workspace(
     default_ws_path: &Path,
     branch: &str,
@@ -2986,96 +2992,180 @@ fn update_default_workspace(
     repo_root: &Path,
     text_mode: bool,
 ) -> Result<()> {
-    use super::working_copy::{ReplayResult, preserve_checkout_replay};
+    use super::working_copy::{
+        SnapshotReplayResult, checkout_to, cleanup_snapshot,
+        replay_snapshot, snapshot_working_copy,
+    };
 
-    // Temporarily detach HEAD and soft-reset to the old epoch.
-    // This ensures that HEAD matches the expected worktree state (epoch_before),
-    // so that preserve_checkout_replay correctly detects user work relative
-    // to the anchor OID, even if the branch has already moved to the target.
-    let _ = std::process::Command::new("git")
-        .args(["checkout", "--detach"])
-        .current_dir(default_ws_path)
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["reset", "--soft", epoch_before])
-        .current_dir(default_ws_path)
-        .output();
+    let ws_name = super::DEFAULT_WORKSPACE;
 
-    match preserve_checkout_replay(
-        default_ws_path,
-        epoch_before,
-        branch,
-        repo_root,
-        super::DEFAULT_WORKSPACE,
-    ) {
-        Ok(ReplayResult::Clean) => {
+    // Step 0: ANCHOR — detach HEAD at epoch_before without touching the
+    // working tree.
+    //
+    // The COMMIT phase has already moved the branch ref to the new epoch, but
+    // the working tree still has the old epoch's files (possibly with user
+    // edits). If we snapshot now, `git stash create` would capture deltas
+    // relative to the NEW epoch (the branch's current target), which includes
+    // spurious "reversions" of the merge results.
+    //
+    // We need HEAD at epoch_before so the stash captures only the ACTUAL
+    // user changes relative to the old epoch.
+    //
+    // We can't use `git checkout --detach` because it updates the working
+    // tree (which fails with dirty files or destroys them with --force).
+    // Instead we write the raw OID to the worktree's HEAD file — the
+    // standard git plumbing for detaching without a tree update.
+    {
+        let git_dir = {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "--git-dir"])
+                .current_dir(default_ws_path)
+                .output()
+                .context("failed to locate worktree git dir")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("git rev-parse --git-dir failed: {}", stderr.trim());
+            }
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let head_path = std::path::Path::new(&git_dir).join("HEAD");
+        std::fs::write(&head_path, format!("{epoch_before}\n"))
+            .with_context(|| format!("failed to write detached HEAD to {}", head_path.display()))?;
+
+        // Reset the index to match HEAD (epoch_before) without touching working tree.
+        // This ensures `git status` and `git stash create` see only user changes.
+        let reset_output = std::process::Command::new("git")
+            .args(["reset"])
+            .current_dir(default_ws_path)
+            .output()
+            .context("failed to run git reset for index sync")?;
+        if !reset_output.status.success() {
+            tracing::warn!(
+                "git reset failed during anchor step: {}",
+                String::from_utf8_lossy(&reset_output.stderr).trim()
+            );
+        }
+    }
+
+    // Step 1: SNAPSHOT — capture dirty state if any.
+    let snapshot = match snapshot_working_copy(default_ws_path, repo_root, ws_name) {
+        Ok(snap) => snap,
+        Err(e) => {
+            // Snapshot failed — fall back to force checkout. The COMMIT
+            // already succeeded so we must not abort.
+            eprintln!("  WARNING: snapshot_working_copy failed: {e:#}");
+            eprintln!("  Falling back to force checkout (uncommitted changes may be lost)...");
+            force_checkout_fallback(default_ws_path, branch, text_mode);
+            return Ok(());
+        }
+    };
+
+    // Step 2: CHECKOUT — switch to the branch (tree is clean after snapshot).
+    if let Err(e) = checkout_to(default_ws_path, branch, Some(branch)) {
+        // Checkout failed — fall back to force checkout.
+        eprintln!("  WARNING: checkout_to failed: {e:#}");
+        eprintln!("  Falling back to force checkout...");
+        force_checkout_fallback(default_ws_path, branch, text_mode);
+        return Ok(());
+    }
+
+    // Step 3: REPLAY — if there was a snapshot, replay it.
+    let Some(snapshot) = snapshot else {
+        // Clean workspace — checkout was enough.
+        if text_mode {
+            println!("  Default workspace updated to new epoch.");
+        }
+        return Ok(());
+    };
+
+    match replay_snapshot(default_ws_path, &snapshot) {
+        Ok(SnapshotReplayResult::Clean) => {
+            // Step 4a: CLEANUP — replay was clean, delete snapshot ref.
+            if let Err(e) = cleanup_snapshot(repo_root, ws_name) {
+                // Non-fatal — the ref is harmless, just orphaned.
+                tracing::warn!("failed to clean up snapshot ref: {e}");
+            }
             if text_mode {
                 println!("  Default workspace updated to new epoch.");
+                println!("  User work replayed successfully.");
             }
         }
-        Ok(ReplayResult::Replayed {
-            recovery_ref,
-            recovery_oid,
-        }) => {
+        Ok(SnapshotReplayResult::Conflicts(conflicts)) => {
+            // Step 4b: Conflicts — KEEP snapshot ref as recovery anchor.
+            // Print WARNING but do NOT abort cleanup.
+            eprintln!(
+                "  WARNING: {} file(s) have conflicts after replay onto new epoch:",
+                conflicts.len()
+            );
+            for c in &conflicts {
+                eprintln!("    [{:>20}] {}", c.conflict_type, c.path);
+            }
+            eprintln!("  Snapshot preserved at: {}", snapshot.ref_name);
+            eprintln!(
+                "  To recover clean state: git -C {} stash apply {}",
+                default_ws_path.display(),
+                snapshot.oid,
+            );
             if text_mode {
-                println!("  Default workspace updated to new epoch.");
                 println!(
-                    "  User work replayed successfully (recovery ref: {}  oid: {}).",
-                    recovery_ref,
-                    &recovery_oid[..12.min(recovery_oid.len())],
+                    "  Default workspace updated to new epoch ({} conflict(s) — resolve manually).",
+                    conflicts.len()
                 );
-            }
-        }
-        Ok(ReplayResult::Rollback {
-            recovery_ref,
-            recovery_oid,
-            reason,
-        }) => {
-            // Conflicts during replay must NOT abort cleanup. Print a
-            // warning and continue — the merge COMMIT already succeeded.
-            eprintln!(
-                "  WARNING: Could not replay user work onto new epoch: {reason}"
-            );
-            eprintln!("  Your uncommitted changes are preserved at:");
-            eprintln!("    ref:  {recovery_ref}");
-            eprintln!("    oid:  {recovery_oid}");
-            eprintln!(
-                "  To recover: maw ws recover default --ref {recovery_ref}"
-            );
-            if text_mode {
-                println!("  Default workspace updated to new epoch (user work rolled back).");
             }
         }
         Err(e) => {
-            // Even a hard error must not abort cleanup — the COMMIT already
-            // landed. Fall back to a force checkout as a last resort.
-            eprintln!("  WARNING: preserve_checkout_replay failed: {e:#}");
-            eprintln!("  Falling back to force checkout...");
-            let output = std::process::Command::new("git")
-                .args(["checkout", "--force", branch])
-                .current_dir(default_ws_path)
-                .output()
-                .context("Fallback git checkout --force also failed")?;
-
-            if output.status.success() {
-                if text_mode {
-                    println!("  Default workspace updated to new epoch (force checkout fallback).");
-                }
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(
-                    "  WARNING: Fallback checkout also failed: {}\n  \
-                     The merge COMMIT succeeded (refs are updated), but the default workspace \
-                     working copy could not be checked out.\n  \
-                     To fix: git -C {} checkout {branch}",
-                    stderr.trim(),
-                    default_ws_path.display(),
-                );
+            // Replay hard-failed. Snapshot ref is kept for recovery.
+            eprintln!("  WARNING: replay_snapshot failed: {e:#}");
+            eprintln!("  Snapshot preserved at: {}", snapshot.ref_name);
+            eprintln!(
+                "  To recover: git -C {} stash apply {}",
+                default_ws_path.display(),
+                snapshot.oid,
+            );
+            if text_mode {
+                println!("  Default workspace updated to new epoch (replay failed, snapshot preserved).");
             }
         }
     }
 
     Ok(())
+}
+
+/// Last-resort force checkout when snapshot/replay fails.
+///
+/// This is the nuclear option — it destroys any uncommitted changes.
+/// Only used when the snapshot-based path itself has errored.
+fn force_checkout_fallback(ws_path: &Path, branch: &str, text_mode: bool) {
+    let output = std::process::Command::new("git")
+        .args(["checkout", "--force", branch])
+        .current_dir(ws_path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            if text_mode {
+                println!("  Default workspace updated to new epoch (force checkout fallback).");
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            eprintln!(
+                "  WARNING: Fallback checkout also failed: {}\n  \
+                 The merge COMMIT succeeded (refs are updated), but the default workspace \
+                 working copy could not be checked out.\n  \
+                 To fix: git -C {} checkout {branch}",
+                stderr.trim(),
+                ws_path.display(),
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "  WARNING: Could not run fallback checkout: {e}\n  \
+                 To fix: git -C {} checkout {branch}",
+                ws_path.display(),
+            );
+        }
+    }
 }
 
 /// Handle post-merge workspace destruction with confirmation check.
