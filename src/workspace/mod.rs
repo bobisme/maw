@@ -1189,10 +1189,13 @@ fn check_stale_workspaces() -> Result<Vec<String>> {
 }
 
 pub(crate) fn now_timestamp_iso8601() -> String {
-    let secs = std::time::SystemTime::now()
+    let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .unwrap_or_default();
+
+    let total_millis = dur.as_millis() as u64;
+    let millis = total_millis % 1000;
+    let secs = total_millis / 1000;
 
     let sec = secs % 60;
     let min = (secs / 60) % 60;
@@ -1200,7 +1203,7 @@ pub(crate) fn now_timestamp_iso8601() -> String {
     let days = secs / 86_400;
 
     let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
 }
 
 const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
