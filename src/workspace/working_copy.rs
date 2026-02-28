@@ -26,8 +26,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use std::io::Write as _;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::model::types::GitOid;
@@ -45,6 +48,205 @@ pub struct WorkingCopyConflict {
     /// Conflict type: `"content"`, `"both_added"`, `"both_deleted"`,
     /// `"add_mod_conflict"`, `"delete_mod_conflict"`.
     pub conflict_type: String,
+}
+
+// ---------------------------------------------------------------------------
+// Rewrite artifact types
+// ---------------------------------------------------------------------------
+
+/// Summary of dirty-state delta at the time of a rewrite.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct DeltaSummary {
+    pub staged_files: u32,
+    pub unstaged_files: u32,
+    pub untracked_files: u32,
+}
+
+/// Outcome of the replay step in a rewrite operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReplayOutcome {
+    /// Working copy was clean — no replay needed.
+    Clean,
+    /// Dirty state was successfully replayed on top of the new target.
+    Replayed,
+    /// Replay failed; working copy was rolled back to the recovery point.
+    Rollback,
+}
+
+impl std::fmt::Display for ReplayOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Clean => write!(f, "clean"),
+            Self::Replayed => write!(f, "replayed"),
+            Self::Rollback => write!(f, "rollback"),
+        }
+    }
+}
+
+/// A record of a single working-copy rewrite event.
+///
+/// Written to `.manifold/artifacts/rewrite/<workspace>/<timestamp>/record.json`
+/// for crash recovery and audit trail.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct RewriteRecord {
+    /// Workspace name.
+    pub workspace: String,
+    /// ISO 8601 timestamp of the rewrite.
+    pub timestamp: String,
+    /// OID of the workspace HEAD before the rewrite (the base epoch).
+    pub base_epoch: String,
+    /// OID of the target commit the workspace was rewritten to.
+    pub target_ref: String,
+    /// Git ref name of the recovery pin (under `refs/manifold/recovery/`).
+    pub recovery_ref: String,
+    /// OID that the recovery ref points to.
+    pub recovery_oid: String,
+    /// Outcome of the replay step.
+    pub replay_outcome: ReplayOutcome,
+    /// Reason for rollback, if applicable.
+    pub rollback_reason: Option<String>,
+    /// Summary of dirty files at the time of the rewrite.
+    pub delta_summary: DeltaSummary,
+    /// Tool version that wrote this record.
+    pub tool_version: String,
+}
+
+// ---------------------------------------------------------------------------
+// Rewrite artifact paths
+// ---------------------------------------------------------------------------
+
+/// Root directory for rewrite artifacts for a given workspace.
+fn rewrite_dir(root: &Path, workspace: &str) -> PathBuf {
+    root.join(".manifold")
+        .join("artifacts")
+        .join("rewrite")
+        .join(workspace)
+}
+
+/// Directory for a specific rewrite record (by timestamp).
+fn rewrite_record_dir(root: &Path, workspace: &str, filename_ts: &str) -> PathBuf {
+    rewrite_dir(root, workspace).join(filename_ts)
+}
+
+// ---------------------------------------------------------------------------
+// Rewrite artifact I/O
+// ---------------------------------------------------------------------------
+
+/// Atomically write a JSON value to a file (write-tmp + fsync + rename).
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let dir = path
+        .parent()
+        .with_context(|| format!("no parent directory for {}", path.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("create dir {}", dir.display()))?;
+
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "artifact".to_owned());
+    let tmp_path = dir.join(format!(".{filename}.tmp"));
+
+    let json = serde_json::to_string_pretty(value).context("serialize rewrite record")?;
+
+    let mut file = fs::File::create(&tmp_path)
+        .with_context(|| format!("create temp file {}", tmp_path.display()))?;
+    file.write_all(json.as_bytes())
+        .with_context(|| format!("write temp file {}", tmp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync temp file {}", tmp_path.display()))?;
+    drop(file);
+
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} -> {}", tmp_path.display(), path.display()))?;
+
+    Ok(())
+}
+
+/// Write a rewrite record artifact to disk.
+pub(crate) fn write_rewrite_record(
+    root: &Path,
+    workspace: &str,
+    record: &RewriteRecord,
+) -> Result<PathBuf> {
+    let filename_ts = record.timestamp.replace(':', "-");
+    let record_dir = rewrite_record_dir(root, workspace, &filename_ts);
+    let record_path = record_dir.join("record.json");
+    write_json_atomic(&record_path, record)?;
+    Ok(record_path)
+}
+
+/// List all rewrite records for a workspace, sorted by timestamp directory name.
+pub(crate) fn list_rewrite_records(
+    root: &Path,
+    workspace: &str,
+) -> Result<Vec<RewriteRecord>> {
+    let dir = rewrite_dir(root, workspace);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut entries: Vec<String> = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with('.') {
+            entries.push(name);
+        }
+    }
+    entries.sort();
+
+    let mut records = Vec::new();
+    for ts_dir in &entries {
+        let record_path = dir.join(ts_dir).join("record.json");
+        if record_path.exists() {
+            match read_rewrite_record(&record_path) {
+                Ok(r) => records.push(r),
+                Err(e) => {
+                    tracing::warn!(path = %record_path.display(), error = %e, "skipping corrupt rewrite record");
+                }
+            }
+        }
+    }
+
+    Ok(records)
+}
+
+/// Read a single rewrite record from disk.
+pub(crate) fn read_rewrite_record(path: &Path) -> Result<RewriteRecord> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let record: RewriteRecord = serde_json::from_str(&content)
+        .with_context(|| format!("parse {}", path.display()))?;
+    Ok(record)
+}
+
+/// List all workspace names that have rewrite records.
+pub(crate) fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
+    let rewrite_root = root
+        .join(".manifold")
+        .join("artifacts")
+        .join("rewrite");
+    if !rewrite_root.exists() {
+        return Ok(vec![]);
+    }
+    let mut names = Vec::new();
+    for entry in
+        fs::read_dir(&rewrite_root).with_context(|| format!("read dir {}", rewrite_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let ws_name = entry.file_name().to_string_lossy().to_string();
+        if !ws_name.starts_with('.') {
+            names.push(ws_name);
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -751,5 +953,114 @@ mod tests {
         assert!(!has_conflict_markers("?? new-file.txt\n"));
         assert!(!has_conflict_markers("A  staged.txt\n"));
         assert!(!has_conflict_markers(""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Rewrite artifact tests
+    // -----------------------------------------------------------------------
+
+    fn make_test_record(workspace: &str, outcome: ReplayOutcome) -> RewriteRecord {
+        RewriteRecord {
+            workspace: workspace.to_owned(),
+            timestamp: "2025-06-01T12:00:00Z".to_owned(),
+            base_epoch: "a".repeat(40),
+            target_ref: "b".repeat(40),
+            recovery_ref: format!(
+                "refs/manifold/recovery/{workspace}/2025-06-01T12-00-00Z"
+            ),
+            recovery_oid: "c".repeat(40),
+            replay_outcome: outcome,
+            rollback_reason: None,
+            delta_summary: DeltaSummary {
+                staged_files: 1,
+                unstaged_files: 2,
+                untracked_files: 3,
+            },
+            tool_version: "0.47.0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rewrite_record_serialization_roundtrip() {
+        let record = make_test_record("test-ws", ReplayOutcome::Replayed);
+        let json = serde_json::to_string_pretty(&record).unwrap();
+        let parsed: RewriteRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.workspace, "test-ws");
+        assert_eq!(parsed.replay_outcome, ReplayOutcome::Replayed);
+        assert_eq!(parsed.delta_summary.staged_files, 1);
+        assert_eq!(parsed.delta_summary.unstaged_files, 2);
+        assert_eq!(parsed.delta_summary.untracked_files, 3);
+        assert!(parsed.rollback_reason.is_none());
+    }
+
+    #[test]
+    fn rewrite_record_rollback_serialization() {
+        let mut record = make_test_record("ws", ReplayOutcome::Rollback);
+        record.rollback_reason = Some("stash pop failed: conflict".to_owned());
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"rollback\""));
+        assert!(json.contains("stash pop failed"));
+    }
+
+    #[test]
+    fn write_and_read_rewrite_artifact() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let record = make_test_record("agent-1", ReplayOutcome::Replayed);
+
+        let path = write_rewrite_record(root, "agent-1", &record).unwrap();
+        assert!(path.exists());
+
+        let read_back = read_rewrite_record(&path).unwrap();
+        assert_eq!(read_back.workspace, "agent-1");
+        assert_eq!(read_back.replay_outcome, ReplayOutcome::Replayed);
+        assert_eq!(read_back.delta_summary.staged_files, 1);
+    }
+
+    #[test]
+    fn list_rewrite_records_returns_sorted() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        for ts in &["2025-06-01T12:00:00Z", "2025-06-02T12:00:00Z"] {
+            let mut record = make_test_record("agent-1", ReplayOutcome::Replayed);
+            record.timestamp = ts.to_string();
+            record.recovery_ref =
+                format!("refs/manifold/recovery/agent-1/{}", ts.replace(':', "-"));
+            write_rewrite_record(root, "agent-1", &record).unwrap();
+        }
+
+        let records = list_rewrite_records(root, "agent-1").unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records[0].recovery_ref.contains("2025-06-01"));
+        assert!(records[1].recovery_ref.contains("2025-06-02"));
+    }
+
+    #[test]
+    fn list_rewrite_records_empty_for_nonexistent_workspace() {
+        let dir = TempDir::new().unwrap();
+        let records = list_rewrite_records(dir.path(), "nonexistent").unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn list_rewritten_workspaces_discovers_workspace_dirs() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        for ws in &["alpha", "beta"] {
+            let record = make_test_record(ws, ReplayOutcome::Clean);
+            write_rewrite_record(root, ws, &record).unwrap();
+        }
+
+        let names = list_rewritten_workspaces(root).unwrap();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn replay_outcome_display() {
+        assert_eq!(ReplayOutcome::Clean.to_string(), "clean");
+        assert_eq!(ReplayOutcome::Replayed.to_string(), "replayed");
+        assert_eq!(ReplayOutcome::Rollback.to_string(), "rollback");
     }
 }
