@@ -238,10 +238,21 @@ fn collect_one<B: WorkspaceBackend>(
     // epoch) show up as "Deleted" here because the worker never had them.
     // These are phantom deletions — skip them so the merge engine doesn't
     // remove files the worker never touched.
+    //
+    // IMPORTANT: We must check against the workspace's *creation* epoch, not
+    // its current HEAD. Agents may commit changes inside a workspace (e.g.
+    // `git rm foo && git commit`), advancing HEAD beyond the creation epoch.
+    // If a committed deletion moves HEAD to a commit where the file is absent,
+    // checking HEAD would incorrectly classify the deletion as phantom.
+    //
+    // `workspace_creation_epoch()` finds the original epoch by computing the
+    // merge-base of the workspace HEAD with the current epoch ref. This is
+    // the commit the workspace was initially created from.
+    let creation_epoch = workspace_creation_epoch(repo_root, &ws_path, &epoch);
     for path in &snapshot.deleted {
-        if !path_exists_at_commit(repo_root, &epoch, path) {
-            // File doesn't exist at the workspace's base epoch — it was added
-            // after this workspace was created. Not a real deletion.
+        if !path_exists_at_commit(repo_root, &creation_epoch, path) {
+            // File doesn't exist at the workspace's creation epoch — it was
+            // added after this workspace was created. Not a real deletion.
             continue;
         }
         let file_id = file_id_map.id_for_path(path);
@@ -255,6 +266,52 @@ fn collect_one<B: WorkspaceBackend>(
     }
 
     Ok(PatchSet::new(ws_id.clone(), epoch, changes))
+}
+
+/// Determine the epoch a workspace was originally created from.
+///
+/// Agents may commit changes inside a workspace, advancing HEAD beyond the
+/// epoch the workspace was created at. The `status().base_epoch` returns HEAD,
+/// which is wrong for the phantom-deletion filter when the agent has committed
+/// deletions.
+///
+/// This function computes `git merge-base HEAD <epoch>` inside the workspace
+/// to find the fork point — the original creation epoch. Falls back to `epoch`
+/// (the workspace HEAD from status) when:
+/// - The merge-base command fails (e.g. non-git backend)
+/// - HEAD equals the epoch (no agent commits)
+fn workspace_creation_epoch(repo_root: &Path, ws_path: &Path, ws_head: &EpochId) -> EpochId {
+    // Read the current epoch ref from the repo root.
+    let epoch_ref_output = Command::new("git")
+        .args(["rev-parse", "refs/manifold/epoch/current"])
+        .current_dir(repo_root)
+        .output();
+
+    let current_epoch_oid = match epoch_ref_output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+        _ => return ws_head.clone(), // No epoch ref → fall back to ws HEAD
+    };
+
+    // If HEAD already equals the current epoch, no agent commits were made.
+    if ws_head.as_str() == current_epoch_oid {
+        return ws_head.clone();
+    }
+
+    // Compute merge-base(HEAD, current_epoch) inside the workspace.
+    let mb_output = Command::new("git")
+        .args(["merge-base", "HEAD", &current_epoch_oid])
+        .current_dir(ws_path)
+        .output();
+
+    match mb_output {
+        Ok(out) if out.status.success() => {
+            let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            EpochId::new(&oid_str).unwrap_or_else(|_| ws_head.clone())
+        }
+        _ => ws_head.clone(), // merge-base failed → fall back to ws HEAD
+    }
 }
 
 /// Check whether a file path exists in a given git commit's tree.
@@ -518,6 +575,68 @@ mod tests {
         let change = &ps.changes[0];
         assert_eq!(change.path, PathBuf::from("README.md"));
         assert!(matches!(change.kind, ChangeKind::Deleted));
+        assert!(change.content.is_none(), "deletions have no content");
+    }
+
+    /// Committed deletion: agent does `git rm` + `git commit` inside the workspace.
+    ///
+    /// This is a regression test for bn-129d: the merge engine silently dropped
+    /// file deletions that were committed (not just staged or working-tree
+    /// changes). The phantom-deletion filter was using HEAD (which had the
+    /// deletion committed) instead of the creation epoch (where the file still
+    /// existed), causing it to incorrectly classify real deletions as phantom.
+    #[test]
+    fn collect_committed_deletion() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path();
+        let backend = GitWorktreeBackend::new(root.to_path_buf());
+
+        // Set refs/manifold/epoch/current so snapshot() diffs against the epoch.
+        Command::new("git")
+            .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let ws_id = WorkspaceId::new("committed-del").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+
+        // Agent commits a deletion inside the workspace (git rm + git commit).
+        Command::new("git")
+            .args(["rm", "README.md"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete README.md"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+
+        // Verify HEAD has advanced beyond the epoch.
+        let ws_head = git_head_oid(&info.path);
+        assert_ne!(
+            ws_head,
+            epoch.as_str(),
+            "workspace HEAD should have advanced after commit"
+        );
+
+        let results = collect_snapshots(root, &backend, &[ws_id]).unwrap();
+        let ps = &results[0];
+
+        assert_eq!(
+            ps.change_count(),
+            1,
+            "committed deletion should be captured, not silently dropped: {:?}",
+            ps.changes
+        );
+        let change = &ps.changes[0];
+        assert_eq!(change.path, PathBuf::from("README.md"));
+        assert!(
+            matches!(change.kind, ChangeKind::Deleted),
+            "change should be Deleted, got {:?}",
+            change.kind
+        );
         assert!(change.content.is_none(), "deletions have no content");
     }
 
