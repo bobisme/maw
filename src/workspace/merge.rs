@@ -2988,6 +2988,19 @@ fn update_default_workspace(
 ) -> Result<()> {
     use super::working_copy::{ReplayResult, preserve_checkout_replay};
 
+    // Temporarily detach HEAD and soft-reset to the old epoch.
+    // This ensures that HEAD matches the expected worktree state (epoch_before),
+    // so that preserve_checkout_replay correctly detects user work relative
+    // to the anchor OID, even if the branch has already moved to the target.
+    let _ = std::process::Command::new("git")
+        .args(["checkout", "--detach"])
+        .current_dir(default_ws_path)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["reset", "--soft", epoch_before])
+        .current_dir(default_ws_path)
+        .output();
+
     match preserve_checkout_replay(
         default_ws_path,
         epoch_before,

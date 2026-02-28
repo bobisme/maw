@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn list_destroyed_workspaces_only_includes_ws_with_latest_json() {
+    fn list_destroyed_workspaces_includes_ws_even_without_latest_json() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
 
@@ -537,18 +537,19 @@ mod tests {
         let orphan_latest = destroy_dir(root, "ws-orphan").join("latest.json");
         std::fs::remove_file(&orphan_latest).unwrap();
 
-        // list_destroyed_workspaces only returns workspaces with latest.json.
+        // list_destroyed_workspaces SHOULD still return ws-orphan because it
+        // scans for timestamped record files as a fallback.
         let destroyed = list_destroyed_workspaces(root).unwrap();
         assert!(
             destroyed.contains(&"ws-complete".to_owned()),
             "ws-complete should be listed"
         );
         assert!(
-            !destroyed.contains(&"ws-orphan".to_owned()),
-            "ws-orphan should NOT be listed (no latest.json)"
+            destroyed.contains(&"ws-orphan".to_owned()),
+            "ws-orphan SHOULD be listed (fallback to directory scan)"
         );
 
-        // But the orphaned workspace's record is still discoverable via directory scan.
+        // And the orphaned workspace's record is discoverable via directory scan.
         let orphan_records = list_record_files(root, "ws-orphan").unwrap();
         assert!(
             !orphan_records.is_empty(),

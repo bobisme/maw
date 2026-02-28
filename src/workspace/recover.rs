@@ -1171,7 +1171,12 @@ pub enum DanglingReason {
 /// - The snapshot is the only recovery point for that workspace
 /// - There's an active merge in progress referencing it
 pub fn find_dangling_snapshots(root: &Path) -> Result<Vec<DanglingSnapshot>> {
-    let git_cwd = super::git_cwd()?;
+    let default_ws = root.join("ws").join("default");
+    let git_cwd = if default_ws.exists() {
+        default_ws
+    } else {
+        root.to_path_buf()
+    };
     let refs = list_recovery_refs(&git_cwd)?;
 
     if refs.is_empty() {
@@ -1850,7 +1855,7 @@ three
         let manifold_dir = root.join(".manifold");
         fs::create_dir_all(&manifold_dir).unwrap();
         let merge_state = serde_json::json!({
-            "phase": "Build",
+            "phase": "build",
             "sources": ["carol"],
             "epoch_before": "a".repeat(40),
             "started_at": 1704067200u64,

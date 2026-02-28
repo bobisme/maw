@@ -756,6 +756,7 @@ fn parse_name_status(
             // Split into [status, old, new]
             let parts: Vec<&str> = line.split('\t').collect();
             if parts.len() >= 3 {
+                deleted.push(PathBuf::from(parts[1].trim()));
                 added.push(PathBuf::from(parts[2].trim()));
             }
             continue;

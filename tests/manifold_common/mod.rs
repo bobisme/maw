@@ -80,14 +80,16 @@ impl TestRepo {
         // Ensure we're on `main`
         git_ok(&root, &["checkout", "-B", "main"]);
 
-        // 2. Create epoch₀ (initial empty commit)
+        // 2. Create epoch₀ (including .gitignore)
+        let gitignore_content = "# Manifold workspaces\nws/\n\n# Manifold ephemeral data\n.manifold/epochs/\n.manifold/cow/\n.manifold/artifacts/\n";
+        std::fs::write(root.join(".gitignore"), gitignore_content).expect("failed to write .gitignore");
+        git_ok(&root, &["add", ".gitignore"]);
         git_ok(
             &root,
             &[
                 "commit",
-                "--allow-empty",
                 "-m",
-                "manifold: epoch₀ (initial empty commit)",
+                "manifold: epoch₀ (initial commit)",
             ],
         );
 
@@ -139,11 +141,6 @@ impl TestRepo {
                 &epoch0,
             ],
         );
-
-        // Write .gitignore in the default workspace
-        let gitignore_content = "# Manifold workspaces\nws/\n\n# Manifold ephemeral data\n.manifold/epochs/\n.manifold/cow/\n.manifold/artifacts/\n";
-        std::fs::write(ws_default.join(".gitignore"), gitignore_content)
-            .expect("failed to write .gitignore");
 
         Self {
             _dir: dir,
@@ -243,9 +240,6 @@ impl TestRepo {
                 &epoch0,
             ],
         );
-
-        let gitignore_content = "# Manifold workspaces\nws/\n\n# Manifold ephemeral data\n.manifold/epochs/\n.manifold/cow/\n.manifold/artifacts/\n";
-        std::fs::write(ws_default.join(".gitignore"), gitignore_content).unwrap();
 
         let repo = Self {
             _dir: dir,
@@ -538,7 +532,7 @@ impl TestRepo {
         git_ok(&ws_default, &["add", "-A"]);
 
         // Commit (in detached HEAD — does not update any branch ref)
-        git_ok(&ws_default, &["commit", "-m", message]);
+        git_ok(&ws_default, &["commit", "--allow-empty", "-m", message]);
 
         // Read the new commit OID
         let new_oid = git_ok(&ws_default, &["rev-parse", "HEAD"])

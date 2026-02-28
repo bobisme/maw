@@ -410,12 +410,29 @@ pub(crate) fn preserve_checkout_replay(
     _repo_root: &Path,
     workspace_name: &str,
 ) -> Result<ReplayResult> {
-    // Step 1: Check for user work.
-    let status_output = git_status_porcelain(ws_path)?;
-    let head_oid = resolve_head_str(ws_path)?;
+    // Step 1: Check for user work relative to the base epoch.
+    // We want to know if the user has made any changes since they last synced.
+    // A workspace is "clean" if its index and worktree match the base epoch,
+    // regardless of where HEAD currently points (e.g. if a branch moved).
+    let is_index_clean = Command::new("git")
+        .args(["diff", "--cached", "--quiet", base_epoch])
+        .current_dir(ws_path)
+        .status()?
+        .success();
+    let is_worktree_clean = Command::new("git")
+        .args(["diff", "--quiet", base_epoch])
+        .current_dir(ws_path)
+        .status()?
+        .success();
+    let untracked_output = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git ls-files")?;
+    let untracked_empty = String::from_utf8_lossy(&untracked_output.stdout).trim().is_empty();
 
-    if status_output.is_empty() && head_oid == base_epoch {
-        tracing::debug!("no user work detected, fast-path checkout");
+    if is_index_clean && is_worktree_clean && untracked_empty {
+        tracing::debug!("no user work detected (clean vs base), fast-path checkout");
         git_checkout_force(ws_path, target_ref)?;
         return Ok(ReplayResult::Clean);
     }
