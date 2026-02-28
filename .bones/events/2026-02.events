@@ -908,3 +908,11 @@
 1772293513107627	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEylgY		item.move	bn-t9cm	{"state":"done"}	blake3:qRBD_LhYxzPN0dp8O6ZJbtI-2aXZvGurqhu8sYXsPN4
 1772293513123936	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEylwY		item.move	bn-1a10	{"state":"done"}	blake3:ibiL_LJbBUBGGA-PjkzWWh_jHJvZLry3VDqkmBaDR-Y
 1772293513139048	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymAY		item.move	bn-ndf4	{"state":"done"}	blake3:QoiejxaeET3U2L_HOvX9X-GS02-KAGhiDf17ZdDUrnI
+1772293564496004	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymQY		item.comment	bn-2ta9	{"body":"Superseded by bn-2agp (same work — replace git checkout --force in update_default_workspace()). bn-2agp has the more precise spec (uses preserve_checkout_replay from bn-ndf4, now merged)."}	blake3:aVWZYeca16PkElG6ZAAzuAbwqA-ae9NDW52diKeDtVY
+1772293564517184	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymgY		item.move	bn-2ta9	{"state":"done"}	blake3:5Z22sf2dMoKzhgfmDcC4el2U_kF5WWJfkaoZ5dInd1o
+1772293569238964	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymwY		item.move	bn-2agp	{"state":"doing"}	blake3:Guw7PNel_J18oA518Qj11rpbiGRkm9jP3fpyOQtf65I
+1772293569253532	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEynAY		item.move	bn-2p36	{"state":"doing"}	blake3:OY2s8QFIkxpZLM5F4Bp5hDwTORLZd1J_YVQ9epgV09U
+1772293569268204	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEynQY		item.move	bn-1ug5	{"state":"doing"}	blake3:gSHiVwek9rzml6ZmvSufaztoxhp2M1bxuYuvnbzlxq0
+1772293569281306	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyngY		item.move	bn-3nvm	{"state":"doing"}	blake3:e-Q5Mo6m8mgIU2hGPnWY5AQicE9vmQAV3Cemus5NDrs
+1772293569294857	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEynwY		item.move	bn-3bvn	{"state":"doing"}	blake3:6HUMKcN4lukn_srJuKSCGYV4qEAELjovpnGuJyNFWH4
+1772293569309294	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyoAY		item.move	bn-2akk	{"state":"doing"}	blake3:SHgKxybubdDwwS2YQqr1kpe4w_gDqX0CF_ys1HzLd-I
