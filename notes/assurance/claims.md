@@ -37,9 +37,9 @@ guarantee.
 ### Recoverable
 
 Restorable through documented maw CLI surfaces plus deterministic artifact/ref
-locations. Recoverable state must also be *searchable* (agents can locate content
-by pattern) and *chunk-addressable* (agents can extract bounded file excerpts
-without restoring an entire workspace).
+locations. **Note**: searchability is a separate guarantee (G6), not part of
+the definition of "recoverable". See `assurance-plan.md` section 3 for the
+normative definition.
 
 ### Chunk
 
@@ -84,12 +84,12 @@ Before any maw-initiated rewrite that can overwrite state, maw must either:
 1. prove no user work exists for this boundary, or
 2. capture recoverability under contract-defined ref/artifact surfaces.
 
-### G3: post-COMMIT cleanup monotonicity
+### G3: post-COMMIT monotonicity
 
-After COMMIT moves refs successfully, later cleanup failures must not imply the
-commit did not succeed and must not destroy captured user work.
+After COMMIT moves refs successfully, later cleanup failures must not
+undo/obscure the successful commit and must not destroy captured user work.
 
-### G4: destructive operation gate
+### G4: Destructive gate
 
 Any operation that can destroy/overwrite workspace state must abort or skip if
 capture prerequisites fail. "Best effort destroy anyway" is forbidden.

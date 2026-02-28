@@ -16,18 +16,21 @@ Purpose: map each guarantee/invariant to concrete tests and CI gates
 
 | Claim | Invariants | Minimum tests | Required CI lane |
 |---|---|---|---|
-| G1 committed no-loss | I-G1.1, I-G1.2 | `IT-G1-001`, `DST-G1-001` | `dst-fast`, nightly DST |
-| G2 rewrite no-loss | I-G2.1, I-G2.2, I-G2.3 | `IT-G2-001`, `IT-G2-002`, `UT-G2-001`, `DST-G2-001` | `dst-fast`, integration |
+| G1 committed no-loss | I-G1.1, I-G1.2 | `IT-G1-001`, `UT-G1/G4-001`, `DST-G1-001` | `dst-fast`, nightly DST |
+| G2 rewrite no-loss | I-G2.1, I-G2.2, I-G2.3 | `IT-G2-001`, `IT-G2-002`, `IT-G2-adj`, `UT-G2-001`, `DST-G2-001` | `dst-fast`, integration |
 | G3 post-COMMIT monotonicity | I-G3.1, I-G3.2 | `UT-G3-001`, `IT-G3-001`, `DST-G3-001` | `dst-fast`, unit |
-| G4 destructive gate | I-G4.1, I-G4.2 | `IT-G4-001`, `UT-G4-001`, `DST-G4-001` | integration, nightly DST |
-| G5 discoverable recovery | I-G5.1, I-G5.2 | `IT-G5-001`, `IT-G5-002` | integration |
+| G4 Destructive gate | I-G4.1, I-G4.2 | `IT-G4-001`, `UT-G4-001`, `UT-G1/G4-001`, `DST-G4-001` | integration, nightly DST |
+| G5 discoverable recovery | I-G5.1, I-G5.2 | `IT-G5-001`, `IT-G5-002`, `IT-G5-003`, `IT-G5-004` | integration |
 | G6 searchable recovery | I-G6.1, I-G6.2, I-G6.3 | `UT-G6-001`, `UT-G6-002`, `IT-G6-001`, `IT-G6-002` | unit, integration |
+| Merge determinism | (cross-cutting) | `PT-merge-001`, `PT-merge-002` | unit |
+| Concurrent safety | (cross-cutting) | `DST-lite-001` | integration |
 
 ## 3) Test catalog (initial backlog)
 
 ### G1
 
 - `IT-G1-001`: merge + cleanup preserves pre-committed reachability via durable/ref recovery paths.
+- `UT-G1/G4-001`: capture primitives: clean/dirty/untracked/committed-ahead.
 - `DST-G1-001`: random interleavings with crash at commit/rewrite boundaries preserve I-G1.1.
 
 ### G2
@@ -35,6 +38,7 @@ Purpose: map each guarantee/invariant to concrete tests and CI gates
 - `UT-G2-001`: rewrite helper refuses destructive action without capture or no-work proof.
 - `IT-G2-001`: dirty default (staged+unstaged+untracked) survives post-COMMIT rewrite.
 - `IT-G2-002`: replay failure rolls back to snapshot; emitted recovery ref/artifact valid.
+- `IT-G2-adj`: sync rewrite behavior (sync worktree to epoch edge cases).
 - `DST-G2-001`: failpoint sweep across capture/reset/replay enforces I-G2.1/2/3.
 
 ### G3
@@ -53,6 +57,8 @@ Purpose: map each guarantee/invariant to concrete tests and CI gates
 
 - `IT-G5-001`: recovery-producing failures print ref+oid+artifact+command fields.
 - `IT-G5-002`: emitted recovery command succeeds and restores expected bytes.
+- `IT-G5-003`: recovery-producing failures print ref+oid+artifact+command fields (rewrite path).
+- `IT-G5-004`: emitted recovery command succeeds and restores expected bytes (rewrite path).
 
 ### G6
 
@@ -60,6 +66,12 @@ Purpose: map each guarantee/invariant to concrete tests and CI gates
 - `UT-G6-002`: snippet builder returns correct context boundaries and match marker.
 - `IT-G6-001`: `maw ws recover --search` finds known strings in tracked and untracked snapshot files.
 - `IT-G6-002`: `--ref ... --show` returns exact bytes for file from hit provenance.
+
+### Cross-cutting
+
+- `PT-merge-001`: merge permutation determinism (25+ property tests, 100 cases each).
+- `PT-merge-002`: pushout embedding, minimality, commutativity (1000+ property tests).
+- `DST-lite-001`: 5-agent concurrent merge scenarios with data-loss checks, `git fsck` corruption checks, determinism verification (100-seed randomized).
 
 ## 4) Formal checks (planning)
 

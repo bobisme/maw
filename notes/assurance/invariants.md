@@ -23,7 +23,8 @@ For each operation `op`, define:
 
 Observed state sets:
 
-- `DRefs(s)`: durable refs in `refs/**`
+- `DRefs(s)`: durable non-recovery refs in `refs/**` excluding `refs/manifold/recovery/**`
+  (e.g., branch refs, epoch refs, tag refs)
 - `RRefs(s)`: recovery refs in `refs/manifold/recovery/**`
 - `Reach(s)`: commits reachable from `DRefs(s)`
 - `Artifacts(s)`: `.manifold/artifacts/**` entries
@@ -84,7 +85,7 @@ Each invariant is identified as `I-Gx.y` and maps to one or more tests.
 - Predicate: if epoch ref moved but branch ref did not, recovery finalizes branch
   or reports deterministic actionable state; no silent divergence.
 
-### G4: Destructive operation gate
+### G4: Destructive gate
 
 `I-G4.1 Destroy refuses on unknown safety`
 

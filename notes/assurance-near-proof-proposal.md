@@ -2,6 +2,11 @@
 
 Canonical doc: `notes/assurance-plan.md`.
 
+> **Numbering note**: This proposal uses G1-G5 numbering. The authoritative
+> guarantee numbering is G1-G6 in `assurance-plan.md`, which supersedes this
+> document's numbering. The plan's I-G*.* invariant scheme also supersedes the
+> I1-I6 scheme used here.
+
 Date: 2026-02-27
 Status: Draft proposal
 Audience: maw maintainers, security reviewer, automation owners
@@ -515,7 +520,7 @@ implicit confidence.
 2. `notes/assurance/working-copy.md` with normative rewrite/replay semantics.
 3. `notes/assurance/recovery-contract.md` + discoverability tests.
 4. `notes/assurance/search.md` with searchable recovery + chunk retrieval contract.
-5. `tests/dst/` harness with seeded deterministic traces.
+5. `tests/corpus/dst/` harness with seeded deterministic traces.
 6. `src/failpoints.rs` + instrumentation at critical boundaries.
 7. `formal/tla/` spec + checked invariants.
 8. `formal/lean/` core merge proofs.

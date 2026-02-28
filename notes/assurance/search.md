@@ -70,6 +70,7 @@ Search flags:
 - `--regex`: treat pattern as regex (default is fixed-string)
 - `--ignore-case`
 - `--text`: treat binary blobs as text for search (default: skip binary)
+- `--format <text|json>`: output format (default: text; json uses schema in `search-schema-v1.md`)
 
 ### Show exact bytes
 

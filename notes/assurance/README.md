@@ -66,7 +66,7 @@ Primary entrypoint for agents/reviewers:
   - dirty rewrite tests: staged + unstaged + untracked preservation.
 - G3 (post-COMMIT monotonicity)
   - COMMIT success remains success even if cleanup warns/fails.
-- G4 (destructive operation gate)
+- G4 (Destructive gate)
   - destroy/rewrite must abort or skip when capture/status preconditions fail.
 - G5 (discoverable recovery)
   - output includes required recovery fields; emitted commands execute.
@@ -75,7 +75,7 @@ Primary entrypoint for agents/reviewers:
 
 Planned placement:
 
-- deterministic simulation and failpoint scenarios: `tests/dst/`
+- deterministic simulation and failpoint scenarios: `tests/corpus/dst/`
 - focused module tests: colocated `#[cfg(test)]` suites in affected modules
 - integration coverage for CLI contract: `tests/` integration tests
 
