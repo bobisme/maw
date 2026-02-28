@@ -870,7 +870,7 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 #[test]
 fn dst_g1_random_crash_preserves_committed_data() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0001;
-    let num_traces = 128;
+    let num_traces = 256;
     let mut failures = Vec::new();
 
     for i in 0..num_traces {
@@ -916,7 +916,7 @@ fn dst_g1_random_crash_preserves_committed_data() {
 #[test]
 fn dst_g3_crash_at_commit_satisfies_monotonicity() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0003;
-    let num_traces = 128;
+    let num_traces = 256;
     let mut failures = Vec::new();
 
     for i in 0..num_traces {
