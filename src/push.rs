@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use tracing::instrument;
 
+use crate::merge_state::MergeStateFile;
 use crate::transport::ManifoldPushArgs;
 use crate::workspace::{MawConfig, git_cwd, repo_root};
 
@@ -167,7 +168,29 @@ pub fn run(args: &PushArgs) -> Result<()> {
 /// branch ref. But if work was committed directly (e.g., manual edits
 /// in the default workspace), the branch may lag behind the epoch.
 /// `--advance` moves the branch to match the current epoch.
+///
+/// Uses compare-and-swap (CAS) semantics on the ref update to prevent
+/// race conditions with concurrent merge operations.
 fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
+    // Guard: refuse to advance if a merge is in progress (non-terminal phase).
+    // A concurrent merge COMMIT could be updating the same ref, so --advance
+    // would race with the merge's own CAS ref update.
+    let manifold_dir = root.join(".manifold");
+    let merge_state_path = MergeStateFile::default_path(&manifold_dir);
+    match MergeStateFile::read(&merge_state_path) {
+        Ok(state) if !state.phase.is_terminal() => {
+            bail!(
+                "A merge is in progress (phase: {}).\n  \
+                 --advance cannot safely update the branch ref while a merge is active.\n  \
+                 Wait for the merge to complete, or abort it first:\n    \
+                 maw ws merge --recover",
+                state.phase
+            );
+        }
+        // Terminal states (Complete/Aborted) or missing file are fine — no active merge.
+        Ok(_) | Err(_) => {}
+    }
+
     // Read the current epoch
     let epoch_output = Command::new("git")
         .args(["rev-parse", "refs/manifold/epoch/current"])
@@ -187,7 +210,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         .to_string();
     let epoch_short = &epoch_oid[..12.min(epoch_oid.len())];
 
-    // Read the current branch position
+    // Read the current branch position (this is our CAS "expected" value)
     let branch_ref = format!("refs/heads/{branch}");
     let branch_output = Command::new("git")
         .args(["rev-parse", &branch_ref])
@@ -232,21 +255,52 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         }
     }
 
-    // Move the branch to the epoch commit
+    // Move the branch to the epoch commit using CAS (compare-and-swap).
+    // `git update-ref <ref> <new> <old>` only succeeds if the ref still
+    // points to <old>. If another process (e.g., a merge COMMIT) moved the
+    // ref between our read and this write, the update fails atomically.
     println!(
         "Advancing {branch} to current epoch ({})...",
         epoch_short
     );
 
-    let update = Command::new("git")
-        .args(["update-ref", &branch_ref, &epoch_oid])
-        .current_dir(root)
-        .output()
-        .context("Failed to update branch ref")?;
+    let update = if branch_oid.is_empty() {
+        // Branch doesn't exist yet — create it.
+        // Use the zero OID as the expected old value to assert creation.
+        let zero_oid = "0000000000000000000000000000000000000000";
+        Command::new("git")
+            .args(["update-ref", &branch_ref, &epoch_oid, zero_oid])
+            .current_dir(root)
+            .output()
+            .context("Failed to update branch ref")?
+    } else {
+        // Branch exists — CAS: only update if ref still equals branch_oid.
+        Command::new("git")
+            .args(["update-ref", &branch_ref, &epoch_oid, &branch_oid])
+            .current_dir(root)
+            .output()
+            .context("Failed to update branch ref")?
+    };
 
     if !update.status.success() {
         let stderr = String::from_utf8_lossy(&update.stderr);
-        bail!("Failed to advance {branch}: {}", stderr.trim());
+        let stderr_trimmed = stderr.trim();
+
+        // Detect CAS failure: git says "old value" / "expected" / "lock" on race
+        if stderr_trimmed.contains("old value")
+            || stderr_trimmed.contains("expected")
+            || stderr_trimmed.contains("lock")
+        {
+            bail!(
+                "Branch ref was modified concurrently (CAS failed).\n  \
+                 Another process (likely a merge) updated {branch} between read and write.\n  \
+                 Re-run `maw push --advance` to retry.\n  \
+                 Detail: {}",
+                stderr_trimmed
+            );
+        }
+
+        bail!("Failed to advance {branch}: {}", stderr_trimmed);
     }
 
     if branch_oid.is_empty() {
