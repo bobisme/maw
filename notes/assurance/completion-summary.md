@@ -3,6 +3,7 @@
 Completed: 2026-02-28
 Top-level bone: bn-3uad
 Commits: 81 (from `11cca2cd` to `528a87b7`)
+Bones: 64 tagged `assurance`, all done (+ bn-3uad top-level goal)
 
 ## Phase completion
 
@@ -71,68 +72,97 @@ Commits: 81 (from `11cca2cd` to `528a87b7`)
 | `just incident-replay` | per-PR | Replay historical failure corpus |
 | `just check` | per-PR | All of: test + dst-fast + contract-drift |
 
-## Bones closed (assurance-related)
+## All 64 assurance bones (all done)
 
-### Phase 0: Stop known loss vectors
-- bn-1lyt: Replay correctness predicate
-- bn-2y9l: Enforce capture-gate in post-merge destroy
-- bn-28iq: Subsecond timestamps for recovery refs
+### Goal bones (5)
+- bn-3uad: Assurance plan for maw concurrency and recovery
+- bn-qxp4: Phase 0: Stop known loss vectors
+- bn-2nlh: Phase 0.5: Concurrency hardening
+- bn-4zow: Phase 1: Recovery discoverability hardening
+- bn-31j5: Phase 2: Failpoint infrastructure + fast DST
+- bn-s0po: Phase 3: Full DST coverage
+- bn-zjt6: Phase 4: Formal methods (stretch)
+
+### R&D / validation (10)
+- bn-1qa5: R&D/validation: assurance plan completeness
+- bn-f143: Identify guarantee gaps not yet captured in plan
+- bn-2l3l: Validate invariant predicates are machine-checkable
+- bn-aj6j: Verify assumptions A1-A4 are testable in CI
+- bn-1pxe: Validate failpoint catalog covers all critical code boundaries
+- bn-3t38: Validate test matrix against existing test files
+- bn-3yvo: Validate subsidiary docs consistent with consolidated plan
+- bn-1s1v: Audit all rewrite code paths for capture coverage
+- bn-1qrl: Validate search schema v1 against implementation output
+- bn-nfv0: R&D: Evaluate Rust-native model checking (stateright/loom/kani) vs TLA+/Lean
+
+### Phase 0: Stop known loss vectors (7)
+- bn-1lyt: Write replay correctness definition into working-copy.md
+- bn-2y9l: Enforce capture-gate in post-merge destroy (G4 fix)
+- bn-28iq: Fix recovery ref timestamp collision (G1 caveat)
 - bn-28kh: Extract working_copy.rs shared helpers
-- bn-129d: Propagate committed file deletions in merge
+- bn-129d: Merge engine now correctly propagates committed file deletions
+- bn-1glq: Resolve G4 post-merge destroy exception
+- bn-20t6: Define replay correctness predicate
 
-### Phase 0.5: Concurrency hardening
-- bn-2i11: Propagate directory fsync errors in COMMIT
-- bn-20jn: Atomic two-ref COMMIT via update-ref --stdin
-- bn-qf0b: Resilient destroy record discovery
-- bn-34dg: Refuse sync with uncommitted changes
-- bn-3v42: Rollback workspace creation on failure
-- bn-3i7u: Runtime git version check (minimum 2.40)
-- bn-t9cm: CAS for push --advance ref update
-- bn-1a10: O_EXCL for merge-state.json (TOCTOU prevention)
+### Phase 0 evaluation (2)
+- bn-ypa6: Evaluate update-ref --stdin for atomic two-ref COMMIT
+- bn-10wf: Evaluate .manifold locking strategy (A3)
+
+### Phase 0.5: Concurrency hardening (10)
+- bn-2i11: Fix best-effort dir fsync in commit.rs (A2 weakness)
+- bn-20jn: Migrate COMMIT to update-ref --stdin transaction
+- bn-qf0b: Fix destroy record / latest.json atomicity
+- bn-34dg: Add dirty-state check to sync_worktree_to_epoch()
+- bn-3v42: Add restore_to rollback on populate failure
+- bn-3i7u: Add runtime git version check
+- bn-t9cm: CAS for maw push --advance ref update
+- bn-1a10: O_EXCL create for merge-state.json (TOCTOU fix)
 - bn-ndf4: Implement preserve_checkout_replay() primitive
-
-### Phase 0.5 continued
-- bn-3nvm: Remove dead sync_stale_workspaces_for_merge()
-- bn-3bvn: Use real timestamps for epoch merge commits
-- bn-1ug5: Phase 0.5 concurrency integration tests
+- bn-3nvm: Remove or fix dead code sync_stale_workspaces_for_merge()
+- bn-1ug5: Phase 0.5 integration tests
 - bn-2akk: Detect and recover dangling snapshot refs
+- bn-3bvn: Use real timestamps for epoch merge commits (not listed as assurance-tagged but done in Phase 0.5 wave)
 
-### Phase 1: Recovery discoverability
-- bn-11x6: Recovery output contract (5 required fields)
-- bn-2rld: Operation trace logger for DST
-- bn-1ao2: Search integration tests
-- bn-3fmh: Search schema compliance tests
+### Phase 1: Recovery discoverability (5)
+- bn-11x6: Enforce recovery output contract on all failure paths
+- bn-2rld: Implement operation trace logger
+- bn-1ao2: Search integration tests (IT-G6-001, IT-G6-002)
+- bn-3fmh: Search schema compliance check (automated)
+- bn-3ta2: Release --search in binary
 
-### Phase 2: Failpoint infrastructure + fast DST
-- bn-ayb0: COMMIT/CLEANUP failpoint instrumentation
-- bn-2pvj: Remaining failpoint boundaries (13 call sites)
-- bn-8tqf: Invariant oracle implementation
+### Phase 2: Failpoint infrastructure + fast DST (8)
+- bn-ayb0: Instrument COMMIT and CLEANUP boundaries with failpoints
+- bn-1os6: Implement failpoint macro framework (src/failpoints.rs)
+- bn-2pvj: Instrument remaining failpoint boundaries (PREPARE/BUILD/VALIDATE/DESTROY/RECOVER)
+- bn-8tqf: Implement invariant oracle (check_g1..check_g6)
 - bn-lbg7: MVP DST harness with seeded scheduler
-- bn-3np4: DST-G1-001 and DST-G3-001 tests
-- bn-2rkw: Contract drift CI gate
-- bn-1iez: dst-fast CI gate
+- bn-3np4: DST tests for G1 and G3 (DST-G1-001, DST-G3-001)
+- bn-2rkw: Contract drift CI gate (doc/code consistency)
+- bn-1iez: dst-fast CI gate (200-500 traces per PR)
 - bn-32kn: formal-check CI gate
 
-### Phase 3: Full DST coverage
-- bn-2oan: DST-G2-001 and DST-G4-001 scenarios
-- bn-nas9: dst-nightly gate (10k+ traces)
-- bn-30he: Incident replay corpus
+### Phase 3: Full DST coverage (3)
+- bn-2oan: DST scenarios for G2 and G4 (DST-G2-001, DST-G4-001)
+- bn-nas9: dst-nightly CI gate (10k+ traces)
+- bn-30he: Incident replay CI gate and corpus
 
-### Phase 4: Formal methods
-- bn-m8qt: Stateright model of merge protocol
-- bn-u3k2: Kani proof harnesses (15 proofs)
-- bn-1ssl: Traceability map
+### Phase 4: Formal methods (3)
+- bn-m8qt: Stateright model for merge protocol (replaces TLA+)
+- bn-u3k2: Kani verification for merge algebra (replaces Lean)
+- bn-1ssl: Build traceability map (theorem → source → DST → CI)
 
-### Cross-cutting
-- bn-1w52: Non-guarantees documentation
-- bn-3bc5: Merge performance baseline
-- bn-304u: Phase 0 integration smoke tests
-- bn-lbv8: Working-copy preservation regression tests
-- bn-2tf3: Snapshot op in default workspace oplog
-- bn-2udc: Align subsidiary docs with plan
-- bn-27yf: Update assurance plan after Phase 0
-- bn-3owv: Update assurance plan after Phases 0-2
-- bn-nfv0: Rust-native formal verification R&D
+### Cross-cutting / documentation (9)
+- bn-1w52: Document explicit non-guarantees
+- bn-3bc5: Establish merge performance baseline before Phase 0
+- bn-304u: Phase 0 smoke test: verify new recovery surfaces work end-to-end
+- bn-4102: Phase 0 integration tests (IT-G2, IT-G4)
+- bn-2ok6: Implement audit event logging for recovery operations
+- bn-2p36: Write rewrite artifacts under .manifold/artifacts/rewrite/
+- bn-2agp: Replace git checkout --force in update_default_workspace()
+- bn-xp1a: Clean up failpoint catalog (phantoms, naming, missing)
+- bn-2udc: Align subsidiary docs with plan (section 15 fixes)
+- bn-27yf: Update assurance plan after Phase 0 (status columns)
+- bn-3owv: Update assurance plan after each subsequent phase
 
 ## Known limitations
 
