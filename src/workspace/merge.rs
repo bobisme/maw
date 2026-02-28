@@ -2481,7 +2481,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Update the default workspace to point to the new epoch
     if default_ws_path.exists() {
-        update_default_workspace(&default_ws_path, branch, text_mode)?;
+        update_default_workspace(&default_ws_path, branch, epoch_before_oid.as_str(), &root, text_mode)?;
     }
 
     // Destroy source workspaces if requested
@@ -2911,37 +2911,97 @@ fn now_secs() -> u64 {
 
 /// Update the default workspace to check out the new epoch commit.
 ///
-/// Uses `git checkout` to update the default workspace's working copy
-/// to the new epoch commit.
+/// Uses [`preserve_checkout_replay`] to safely update the default workspace's
+/// working copy to the new epoch commit, preserving any uncommitted user work.
+///
+/// If the workspace is clean, this is a fast checkout. If dirty, the user's
+/// changes are captured under a recovery ref and replayed on top of the new
+/// tree. On replay failure, the workspace is left at a clean checkout and
+/// the recovery ref is printed so the user can retrieve their work.
+///
+/// Errors from replay are reported as warnings — they never abort the cleanup
+/// phase, because the merge COMMIT has already succeeded.
 fn update_default_workspace(
     default_ws_path: &Path,
     branch: &str,
+    epoch_before: &str,
+    repo_root: &Path,
     text_mode: bool,
 ) -> Result<()> {
-    // Checkout the branch by name so default stays attached to it.
-    // The COMMIT phase already advanced refs/heads/{branch} to the new epoch,
-    // so checking out the branch updates the working tree AND keeps HEAD
-    // attached (not detached).
-    let output = std::process::Command::new("git")
-        .args(["checkout", "--force", branch])
-        .current_dir(default_ws_path)
-        .output()
-        .context("Failed to update default workspace")?;
+    use super::working_copy::{ReplayResult, preserve_checkout_replay};
 
-    if output.status.success() {
-        if text_mode {
-            println!("  Default workspace updated to new epoch.");
+    match preserve_checkout_replay(
+        default_ws_path,
+        epoch_before,
+        branch,
+        repo_root,
+        super::DEFAULT_WORKSPACE,
+    ) {
+        Ok(ReplayResult::Clean) => {
+            if text_mode {
+                println!("  Default workspace updated to new epoch.");
+            }
         }
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to update default workspace to new epoch: {}\n  \
-             The merge COMMIT succeeded (refs are updated), but the default workspace \
-             working copy could not be checked out.\n  \
-             To fix: git -C {} checkout {branch}",
-            stderr.trim(),
-            default_ws_path.display(),
-        );
+        Ok(ReplayResult::Replayed {
+            recovery_ref,
+            recovery_oid,
+        }) => {
+            if text_mode {
+                println!("  Default workspace updated to new epoch.");
+                println!(
+                    "  User work replayed successfully (recovery ref: {}  oid: {}).",
+                    recovery_ref,
+                    &recovery_oid[..12.min(recovery_oid.len())],
+                );
+            }
+        }
+        Ok(ReplayResult::Rollback {
+            recovery_ref,
+            recovery_oid,
+            reason,
+        }) => {
+            // Conflicts during replay must NOT abort cleanup. Print a
+            // warning and continue — the merge COMMIT already succeeded.
+            eprintln!(
+                "  WARNING: Could not replay user work onto new epoch: {reason}"
+            );
+            eprintln!("  Your uncommitted changes are preserved at:");
+            eprintln!("    ref:  {recovery_ref}");
+            eprintln!("    oid:  {recovery_oid}");
+            eprintln!(
+                "  To recover: maw ws recover default --ref {recovery_ref}"
+            );
+            if text_mode {
+                println!("  Default workspace updated to new epoch (user work rolled back).");
+            }
+        }
+        Err(e) => {
+            // Even a hard error must not abort cleanup — the COMMIT already
+            // landed. Fall back to a force checkout as a last resort.
+            eprintln!("  WARNING: preserve_checkout_replay failed: {e:#}");
+            eprintln!("  Falling back to force checkout...");
+            let output = std::process::Command::new("git")
+                .args(["checkout", "--force", branch])
+                .current_dir(default_ws_path)
+                .output()
+                .context("Fallback git checkout --force also failed")?;
+
+            if output.status.success() {
+                if text_mode {
+                    println!("  Default workspace updated to new epoch (force checkout fallback).");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "  WARNING: Fallback checkout also failed: {}\n  \
+                     The merge COMMIT succeeded (refs are updated), but the default workspace \
+                     working copy could not be checked out.\n  \
+                     To fix: git -C {} checkout {branch}",
+                    stderr.trim(),
+                    default_ws_path.display(),
+                );
+            }
+        }
     }
 
     Ok(())
