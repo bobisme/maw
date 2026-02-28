@@ -2,6 +2,34 @@
 
 All notable changes to maw.
 
+## v0.49.0
+
+### Added
+- **Assurance framework** (Phase 0 complete). Six guarantees (G1-G6) defined, tested, and enforced:
+  - G1 (committed no-loss): recovery refs use monotonic timestamps — no collision risk
+  - G2 (rewrite no-loss): `preserve_checkout_replay()` replaces `git checkout --force` in merge cleanup — dirty files in ws/default are captured and replayed
+  - G4 (destructive gate): post-merge destroy captures recovery snapshot before deletion; refuses if capture fails
+- **`maw ws recover --search`**. Search content across all recovery snapshots using pattern matching. Supports regex, case-insensitive, and context lines.
+- **Failpoint framework** (`src/failpoints.rs`). Feature-gated `fp!()` macro for deterministic simulation testing. Zero overhead when disabled.
+- **Invariant oracle** (`src/assurance/oracle.rs`). Six check functions (check_g1..check_g6) for DST harness. Feature-gated behind `assurance`.
+- **Audit event logging** (`src/audit.rs`). Structured JSON audit trail for recovery operations (search, show, restore, prune) with SHA-256 pattern hashing.
+- **Rewrite artifact types** (`src/workspace/working_copy.rs`). `RewriteRecord`, `DeltaSummary`, `ReplayOutcome` types with JSON I/O for working-copy audit trail.
+- **Snapshot op in oplog**. When default workspace has dirty files at merge time, a Snapshot operation is recorded in the default workspace's oplog.
+- **Working-copy regression tests** (`tests/working_copy_regression.rs`). Five regression tests (T1-T5) exercising full merge path for dirty-state preservation.
+- **Phase 0 integration tests** (`tests/rewrite_safety.rs`, `tests/destroy_gate.rs`). IT-G2 and IT-G4 integration test suites.
+
+### Fixed
+- **G2 violation**: `update_default_workspace()` no longer uses `git checkout --force`. Now uses `preserve_checkout_replay()` which captures dirty state, checks out new epoch, and replays user changes.
+- **G4 violation**: Post-merge destroy now always captures a recovery snapshot. Destroy refuses on capture failure unless `--force`.
+- **G1 collision caveat**: Recovery ref timestamps now use monotonic clock with nanosecond precision — no more collision risk.
+- **Dangling snapshot refs**: Recovery refs from failed operations are now detected and cleaned up.
+- **Dead code**: Removed `sync_stale_workspaces_for_merge()` which was unreachable.
+
+## v0.48.0
+
+### Added
+- **Epoch merge workflow**. Multiple improvements to merge reliability and agent UX.
+
 ## v0.47.0
 
 ### Added
