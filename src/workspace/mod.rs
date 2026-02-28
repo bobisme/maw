@@ -33,6 +33,7 @@ pub mod sync;
 mod templates;
 mod touched;
 mod undo;
+pub(crate) mod working_copy;
 
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;

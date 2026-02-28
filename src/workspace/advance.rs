@@ -24,21 +24,17 @@ use crate::format::OutputFormat;
 use crate::model::types::WorkspaceMode;
 use crate::refs as manifold_refs;
 
+use super::working_copy::{
+    WorkingCopyConflict, checkout_epoch, pop_stash_and_detect_conflicts, stash_changes,
+};
 use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
 
 // ---------------------------------------------------------------------------
 // Conflict info
 // ---------------------------------------------------------------------------
 
-/// A single file conflict detected during advance.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct AdvanceConflict {
-    /// Path of the conflicted file, relative to the workspace root.
-    pub path: String,
-    /// Conflict type: `"content"`, `"deleted_by_us"`, `"deleted_by_them"`,
-    /// `"added_by_us"`, `"added_by_them"`, `"both_added"`.
-    pub conflict_type: String,
-}
+/// Type alias preserving the original name for backward compatibility.
+pub type AdvanceConflict = WorkingCopyConflict;
 
 /// Result of a `maw ws advance` operation.
 #[derive(Clone, Debug, Serialize)]
@@ -227,115 +223,6 @@ fn get_worktree_head(ws_path: &Path) -> Result<String> {
         bail!("git rev-parse HEAD failed: {}", stderr.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-/// Stash uncommitted changes. Returns `true` if there was something to stash.
-fn stash_changes(ws_path: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["stash", "--include-untracked"])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to run git stash")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git stash failed: {}", stderr.trim());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // If working tree is clean, git outputs "No local changes to save"
-    let had_changes = !stdout.trim().starts_with("No local changes");
-    Ok(had_changes)
-}
-
-/// Checkout the workspace HEAD to a specific epoch OID (detached).
-fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["checkout", "--detach", epoch_oid])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to run git checkout --detach")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout --detach failed: {}", stderr.trim());
-    }
-    Ok(())
-}
-
-/// Pop the stash and return a list of conflict entries (if any).
-///
-/// After `git stash pop` with conflicts, git leaves the working tree in a
-/// partially-merged state with conflict markers. We detect conflicts via
-/// `git status --porcelain` and parse the two-character status code.
-fn pop_stash_and_detect_conflicts(ws_path: &Path) -> Result<Vec<AdvanceConflict>> {
-    let output = Command::new("git")
-        .args(["stash", "pop"])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to run git stash pop")?;
-
-    if output.status.success() {
-        // Clean apply — no conflicts.
-        return Ok(vec![]);
-    }
-
-    // stash pop failed — check for conflict markers.
-    let conflicts = detect_conflicts_in_worktree(ws_path)?;
-    if conflicts.is_empty() {
-        // Something else failed.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git stash pop failed (no conflicts detected): {}",
-            stderr.trim()
-        );
-    }
-    Ok(conflicts)
-}
-
-/// Parse `git status --porcelain` to find conflicted files.
-///
-/// Conflict status codes (first two chars of porcelain output):
-/// - `AA` — both added
-/// - `DD` — both deleted
-/// - `UU` — both modified (content conflict)
-/// - `AU` / `UA` — added/updated conflict
-/// - `DU` / `UD` — deleted/updated conflict
-fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<AdvanceConflict>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to run git status --porcelain")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git status failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut conflicts = Vec::new();
-
-    for line in stdout.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let xy = &line[..2];
-        let path = line[3..].to_owned();
-
-        let conflict_type = match xy {
-            "UU" => "content",
-            "AA" => "both_added",
-            "DD" => "both_deleted",
-            "AU" | "UA" => "add_mod_conflict",
-            "DU" | "UD" => "delete_mod_conflict",
-            _ => continue, // not a conflict status
-        };
-
-        conflicts.push(AdvanceConflict {
-            path,
-            conflict_type: conflict_type.to_owned(),
-        });
-    }
-
-    Ok(conflicts)
 }
 
 // ---------------------------------------------------------------------------
