@@ -387,57 +387,6 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Sync stale workspaces before merge to avoid spurious conflicts.
-///
-/// In the git worktree model, each workspace's HEAD is at the epoch it
-/// was created from. If the epoch has advanced, the workspace is stale.
-/// Syncing updates the HEAD to the current epoch before merging.
-#[allow(dead_code)]
-pub fn sync_stale_workspaces_for_merge(workspaces: &[String], root: &Path) -> Result<()> {
-    let backend = get_backend()?;
-
-    let current_epoch = manifold_refs::read_epoch_current(root)
-        .map_err(|e| anyhow::anyhow!("Failed to read current epoch: {e}"))?;
-
-    let Some(current_epoch) = current_epoch else {
-        // No epoch ref — nothing to sync
-        return Ok(());
-    };
-
-    let mut synced_count = 0;
-
-    for ws_name in workspaces {
-        if is_default_workspace(ws_name) {
-            continue;
-        }
-
-        let Ok(ws_id) = WorkspaceId::new(ws_name) else {
-            continue;
-        };
-
-        if !backend.exists(&ws_id) {
-            continue;
-        }
-
-        let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        if !ws_status.is_stale {
-            continue;
-        }
-
-        println!("Syncing stale workspace '{ws_name}' before merge...");
-        sync_worktree_to_epoch(root, ws_name, current_epoch.as_str())?;
-        synced_count += 1;
-    }
-
-    if synced_count > 0 {
-        println!("Synced {synced_count} stale workspace(s). Proceeding with merge.");
-        println!();
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::workspace_name_from_cwd;
