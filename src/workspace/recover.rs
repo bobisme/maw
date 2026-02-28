@@ -69,16 +69,14 @@ pub fn list_destroyed(format: OutputFormat) -> Result<()> {
 
     let mut summaries = Vec::new();
     for name in &names {
-        if let Ok(Some(latest)) = destroy_record::read_latest_pointer(&root, name) {
-            if let Ok(record) = destroy_record::read_record(&root, name, &latest.record) {
-                summaries.push(DestroyedWorkspaceSummary {
-                    name: name.clone(),
-                    destroyed_at: record.destroyed_at.clone(),
-                    capture_mode: record.capture_mode.to_string(),
-                    snapshot_oid: record.snapshot_oid.as_ref().map(|o| o[..12].to_string()),
-                    dirty_file_count: record.dirty_files.len(),
-                });
-            }
+        if let Ok(Some(record)) = destroy_record::read_latest_record(&root, name) {
+            summaries.push(DestroyedWorkspaceSummary {
+                name: name.clone(),
+                destroyed_at: record.destroyed_at.clone(),
+                capture_mode: record.capture_mode.to_string(),
+                snapshot_oid: record.snapshot_oid.as_ref().map(|o| o[..12].to_string()),
+                dirty_file_count: record.dirty_files.len(),
+            });
         }
     }
 
@@ -872,9 +870,8 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
     validate_show_path(path)?;
     let root = repo_root()?;
 
-    let latest = destroy_record::read_latest_pointer(&root, name)?
+    let record = destroy_record::read_latest_record(&root, name)?
         .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
-    let record = destroy_record::read_record(&root, name, &latest.record)?;
 
     let oid = resolve_recoverable_oid(&record)?;
 
@@ -991,9 +988,8 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     // (it's fine if a destroyed workspace has the same name as a live one —
     // the user asked to restore it to a *different* name)
 
-    let latest = destroy_record::read_latest_pointer(&root, name)?
+    let record = destroy_record::read_latest_record(&root, name)?
         .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
-    let record = destroy_record::read_record(&root, name, &latest.record)?;
 
     let oid = resolve_recoverable_oid(&record)?;
 

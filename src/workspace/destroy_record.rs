@@ -207,6 +207,11 @@ pub(crate) fn list_record_files(root: &Path, workspace_name: &str) -> Result<Vec
 }
 
 /// List all workspace names that have destroy records.
+///
+/// A workspace is considered "destroyed" if its `destroy/` directory contains
+/// either a `latest.json` pointer or any timestamped record files.  This makes
+/// discovery resilient to partial writes where the record was persisted but
+/// `latest.json` was not (e.g. crash between the two writes).
 pub(crate) fn list_destroyed_workspaces(root: &Path) -> Result<Vec<String>> {
     let ws_dir = root
         .join(".manifold")
@@ -222,13 +227,59 @@ pub(crate) fn list_destroyed_workspaces(root: &Path) -> Result<Vec<String>> {
             continue;
         }
         let ws_name = entry.file_name().to_string_lossy().to_string();
-        let destroy_dir = entry.path().join("destroy");
-        if destroy_dir.join("latest.json").exists() {
+        let destroy_path = entry.path().join("destroy");
+        if !destroy_path.exists() {
+            continue;
+        }
+        // Check for latest.json first (fast path), then fall back to scanning
+        // for any timestamped record files.
+        if destroy_path.join("latest.json").exists() {
+            names.push(ws_name);
+        } else if has_any_record_files(&destroy_path) {
             names.push(ws_name);
         }
     }
     names.sort();
     Ok(names)
+}
+
+/// Check whether a destroy directory contains any timestamped record files.
+fn has_any_record_files(destroy_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(destroy_dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".json") && name != "latest.json" && !name.starts_with('.') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read the latest destroy record for a workspace, trying `latest.json` first,
+/// then falling back to scanning timestamped record files.
+///
+/// Returns `None` only if no records exist at all.
+pub(crate) fn read_latest_record(root: &Path, workspace_name: &str) -> Result<Option<DestroyRecord>> {
+    // Fast path: latest.json exists and points to a valid record.
+    if let Some(pointer) = read_latest_pointer(root, workspace_name)? {
+        if let Ok(record) = read_record(root, workspace_name, &pointer.record) {
+            return Ok(Some(record));
+        }
+        // latest.json exists but points to a missing/corrupt record — fall through
+        // to the directory scan.
+    }
+
+    // Fallback: scan the directory for timestamped record files.
+    let files = list_record_files(root, workspace_name)?;
+    if let Some(last) = files.last() {
+        let record = read_record(root, workspace_name, last)?;
+        return Ok(Some(record));
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -267,5 +318,90 @@ mod tests {
         let latest_json = std::fs::read_to_string(latest).unwrap();
         assert!(latest_json.contains(".json"));
         assert!(latest_json.contains("destroyed_at"));
+    }
+
+    #[test]
+    fn list_destroyed_workspaces_finds_ws_without_latest_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws = WorkspaceId::new("orphan-1").unwrap();
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head = GitOid::new(&"b".repeat(40)).unwrap();
+
+        // Write a normal destroy record (creates both timestamped + latest.json).
+        write_destroy_record(root, ws.as_str(), &base, &head, None, DestroyReason::Destroy)
+            .unwrap();
+
+        // Verify the workspace is listed normally.
+        let names = list_destroyed_workspaces(root).unwrap();
+        assert_eq!(names, vec!["orphan-1"]);
+
+        // Simulate a partial write: delete latest.json, leaving the timestamped record.
+        let latest = destroy_dir(root, ws.as_str()).join("latest.json");
+        std::fs::remove_file(&latest).unwrap();
+        assert!(!latest.exists());
+
+        // The workspace should still be discovered via directory scan.
+        let names = list_destroyed_workspaces(root).unwrap();
+        assert_eq!(names, vec!["orphan-1"]);
+    }
+
+    #[test]
+    fn read_latest_record_falls_back_when_latest_json_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws = WorkspaceId::new("orphan-2").unwrap();
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head = GitOid::new(&"b".repeat(40)).unwrap();
+
+        write_destroy_record(root, ws.as_str(), &base, &head, None, DestroyReason::Destroy)
+            .unwrap();
+
+        // Delete latest.json.
+        let latest = destroy_dir(root, ws.as_str()).join("latest.json");
+        std::fs::remove_file(&latest).unwrap();
+
+        // read_latest_record should still find the timestamped record.
+        let record = read_latest_record(root, ws.as_str()).unwrap();
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.workspace_id, "orphan-2");
+        assert_eq!(record.final_head, "b".repeat(40));
+    }
+
+    #[test]
+    fn read_latest_record_returns_none_when_no_records() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+
+        let record = read_latest_record(root, "nonexistent").unwrap();
+        assert!(record.is_none());
+    }
+
+    #[test]
+    fn read_latest_record_falls_back_when_latest_json_points_to_missing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws = WorkspaceId::new("orphan-3").unwrap();
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head = GitOid::new(&"b".repeat(40)).unwrap();
+
+        write_destroy_record(root, ws.as_str(), &base, &head, None, DestroyReason::Destroy)
+            .unwrap();
+
+        // Corrupt latest.json: point it to a nonexistent file.
+        let latest_path = destroy_dir(root, ws.as_str()).join("latest.json");
+        let bad_pointer = LatestPointer {
+            record: "does-not-exist.json".to_string(),
+            destroyed_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&bad_pointer).unwrap();
+        std::fs::write(&latest_path, json).unwrap();
+
+        // read_latest_record should fall back to the timestamped record.
+        let record = read_latest_record(root, ws.as_str()).unwrap();
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.workspace_id, "orphan-3");
     }
 }
