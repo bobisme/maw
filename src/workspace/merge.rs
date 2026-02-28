@@ -2479,9 +2479,62 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Advance merge-state to Cleanup phase
     advance_merge_state(&manifold_dir, MergePhase::Cleanup)?;
 
-    // Update the default workspace to point to the new epoch
+    // Update the default workspace to point to the new epoch.
+    // If the default workspace has dirty state, snapshot it before checkout
+    // and record a Snapshot op in the default workspace's oplog (§6.1 Step 1).
     if default_ws_path.exists() {
+        // Compute patchset BEFORE the checkout so we capture pre-rewrite state.
+        let pre_checkout_patchset = crate::model::diff::compute_patchset(
+            &default_ws_path,
+            &frozen.epoch,
+        )
+        .ok();
+
         update_default_workspace(&default_ws_path, branch, epoch_before_oid.as_str(), &root, text_mode)?;
+
+        // Record a Snapshot op if the default workspace had dirty files.
+        if let Some(ref patch_set) = pre_checkout_patchset {
+            if !patch_set.is_empty() {
+                let default_ws_id = WorkspaceId::new(DEFAULT_WORKSPACE)
+                    .expect("'default' is a valid workspace name");
+
+                match write_patch_set_blob(&root, patch_set) {
+                    Ok(patch_set_oid) => {
+                        match ensure_workspace_oplog_head(&root, &default_ws_id, &frozen.epoch) {
+                            Ok(head) => {
+                                let snapshot_op = Operation {
+                                    parent_ids: vec![head.clone()],
+                                    workspace_id: default_ws_id.clone(),
+                                    timestamp: super::now_timestamp_iso8601(),
+                                    payload: OpPayload::Snapshot { patch_set_oid },
+                                };
+
+                                if let Err(e) = append_operation_with_runtime_checkpoint(
+                                    &root,
+                                    &default_ws_id,
+                                    &snapshot_op,
+                                    Some(&head),
+                                ) {
+                                    tracing::warn!(
+                                        "Could not record default workspace snapshot op: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Could not bootstrap default workspace oplog: {e}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Could not write default workspace patch-set blob: {e}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Destroy source workspaces if requested

@@ -256,3 +256,82 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
         "src/lib.rs added by epoch-advancer should survive the worker merge"
     );
 }
+
+/// When the default workspace has dirty (uncommitted) files at merge time,
+/// the merge should record a Snapshot operation in the default workspace's
+/// oplog capturing those dirty files before the checkout.
+#[test]
+fn merge_with_dirty_default_records_snapshot_op_in_default_oplog() {
+    let repo = TestRepo::new();
+
+    // Create a workspace and make changes.
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.add_file("agent", "agent.txt", "agent work\n");
+
+    // Add a dirty (untracked/uncommitted) file in the default workspace.
+    repo.add_file("default", "local-notes.txt", "my local notes\n");
+
+    // Merge the agent workspace.
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+
+    // The default workspace's oplog should contain a Snapshot operation.
+    let history = repo.maw_ok(&["ws", "history", "default", "--format", "json"]);
+    let payload: serde_json::Value =
+        serde_json::from_str(&history).expect("history output should be valid JSON");
+    let operations = payload["operations"]
+        .as_array()
+        .expect("history operations should be an array");
+
+    assert!(
+        operations
+            .iter()
+            .any(|op| op["op_type"].as_str() == Some("snapshot")),
+        "expected a snapshot operation in default workspace history when dirty: {payload}"
+    );
+
+    // The dirty file should still be present after merge (replayed).
+    assert_eq!(
+        repo.read_file("default", "local-notes.txt").as_deref(),
+        Some("my local notes\n"),
+        "dirty file should be preserved after merge"
+    );
+}
+
+/// When the default workspace is clean (no uncommitted changes) at merge time,
+/// no Snapshot operation should be recorded in the default workspace's oplog.
+#[test]
+fn merge_with_clean_default_does_not_record_snapshot_op() {
+    let repo = TestRepo::new();
+
+    // Seed a file so the workspace has content but is clean.
+    repo.seed_files(&[("README.md", "# Test\n")]);
+
+    // Create a workspace and make changes.
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.add_file("agent", "agent.txt", "agent work\n");
+
+    // Do NOT add any dirty files to the default workspace.
+
+    // Merge the agent workspace.
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+
+    // The default workspace's oplog should NOT contain a Snapshot operation.
+    let history_result = repo.maw_raw(&["ws", "history", "default", "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&history_result.stdout);
+
+    if history_result.status.success() {
+        let payload: serde_json::Value =
+            serde_json::from_str(&stdout).expect("history output should be valid JSON");
+
+        if let Some(operations) = payload["operations"].as_array() {
+            assert!(
+                !operations
+                    .iter()
+                    .any(|op| op["op_type"].as_str() == Some("snapshot")),
+                "expected NO snapshot operation in default workspace history when clean: {payload}"
+            );
+        }
+    }
+    // If `ws history default` fails (no oplog exists), that's also correct —
+    // no snapshot was recorded.
+}
