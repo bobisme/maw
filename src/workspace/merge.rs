@@ -3005,21 +3005,12 @@ fn handle_post_merge_destroy(
             Ok(status) => status.base_epoch,
             Err(e) => {
                 eprintln!(
-                    "    WARNING: Could not get status for '{ws_name}': {e}. \
-                     Skipping capture — proceeding with destroy anyway."
+                    "    WARNING: Could not check workspace status before destroy: {e}"
                 );
                 eprintln!(
-                    "    HINT: If '{ws_name}' had unmerged work, it may be gone. \
-                     Check git reflog for recovery options."
+                    "    Workspace '{ws_name}' preserved for manual cleanup. \
+                     The merge itself succeeded."
                 );
-                match backend.destroy(&ws_id) {
-                    Ok(()) => {
-                        if text_mode {
-                            println!("    Destroyed: {ws_name}");
-                        }
-                    }
-                    Err(e2) => eprintln!("    WARNING: Failed to destroy '{ws_name}': {e2}"),
-                }
                 continue;
             }
         };
@@ -3033,12 +3024,15 @@ fn handle_post_merge_destroy(
                     "    WARNING: Failed to capture state for '{ws_name}' before destroy: {e}"
                 );
                 eprintln!(
+                    "    Workspace '{ws_name}' preserved for manual cleanup. \
+                     The merge itself succeeded."
+                );
+                eprintln!(
                     "    HINT: To attempt manual recovery, run: \
                      git -C {ws_path} stash list",
                     ws_path = ws_path.display()
                 );
-                // Emit recovery hint but continue with destroy — merge already succeeded.
-                None
+                continue;
             }
         };
 
