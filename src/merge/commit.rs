@@ -223,10 +223,9 @@ fn write_merge_state(root: &Path, state: &CommitStateFile) -> Result<(), CommitE
     fs::rename(&tmp, &path)?;
 
     if let Some(parent) = path.parent() {
-        // Best-effort fsync of parent directory so rename is durable.
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        // Fsync parent directory so the rename is durable across power loss.
+        let dir = File::open(parent)?;
+        dir.sync_all()?;
     }
 
     Ok(())
