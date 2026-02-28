@@ -1,0 +1,1265 @@
+--- a/src/workspace/mod.rs
++++ b/src/workspace/mod.rs
+@@ -269,30 +269,83 @@
+         /// Name of the workspace to restore
+         name: String,
+     },
+-
+-    /// List, inspect, and recover snapshots from destroyed workspaces
+-    ///
+-    /// When a workspace is destroyed (via `maw ws destroy --force` or
+-    /// `maw ws merge --destroy`), its state is captured as a snapshot.
+-    /// Use this command to list destroyed workspaces, inspect their
+-    /// snapshots, show individual files, or restore them to a new workspace.
++    /// List, inspect, and recover pinned snapshots
+     ///
+-    /// Examples:
+-    ///   maw ws recover                          # list destroyed workspaces
+-    ///   maw ws recover alice                    # show destroy history for alice
+-    ///   maw ws recover alice --show src/main.rs # show a file from the snapshot
+-    ///   maw ws recover alice --to alice-restored # restore to a new workspace
++    /// maw pins recovery commits under `refs/manifold/recovery/<workspace>/<timestamp>`.
++    /// Destroyed workspaces also write destroy records under
++    /// `.manifold/artifacts/ws/<workspace>/destroy/`.
++    ///
++    /// This command supports:
++    /// - listing destroyed workspaces (destroy records)
++    /// - inspecting destroy history for a workspace
++    /// - searching across pinned recovery snapshots by content (agents)
++    /// - showing a file from a specific recovery ref
++    /// - restoring a pinned snapshot into a new workspace
++    ///
++    /// Examples:
++    ///   maw ws recover                             # list destroyed workspaces
++    ///   maw ws recover alice                       # show destroy history for alice
++    ///   maw ws recover --search "TODO("            # search all recovery snapshots
++    ///   maw ws recover alice --search "needle"      # search snapshots for one workspace
++    ///   maw ws recover alice --show src/main.rs    # show a file from latest destroy snapshot
++    ///   maw ws recover --ref <recovery-ref> --show src/main.rs
++    ///   maw ws recover alice --to alice-restored   # restore latest destroy snapshot
++    ///   maw ws recover --ref <recovery-ref> --to scratch
+     Recover {
+-        /// Name of the destroyed workspace to inspect or recover.
+-        /// Omit to list all destroyed workspaces with snapshots.
++        /// Workspace name to inspect (destroy records), or to filter recovery refs.
++        ///
++        /// - With no other flags: shows destroy history for that workspace.
++        /// - With --search: filters pinned recovery refs to that workspace.
++        ///
++        /// Omit to list all destroyed workspaces (no flags), or to search across all
++        /// pinned recovery refs (--search).
+         name: Option<String>,
+ 
+-        /// Show a specific file from the latest snapshot.
++        /// Operate on a specific pinned recovery ref.
++        ///
++        /// Must be under `refs/manifold/recovery/`.
++        /// Enables inspection/restoration of rewrite captures (not only destroyed workspaces).
++        #[arg(long = "ref", value_name = "REF")]
++        recovery_ref: Option<String>,
++
++        /// Search for a pattern inside recovery snapshots.
++        ///
++        /// By default, searches all pinned refs under `refs/manifold/recovery/`.
++        /// If <name> is provided, filters to that workspace.
++        /// If --ref is provided, searches only that snapshot.
++        #[arg(long)]
++        search: Option<String>,
++
++        /// Number of context lines to include around each match (for --search).
++        #[arg(long, default_value_t = 2)]
++        context: usize,
++
++        /// Maximum number of matches to return (for --search).
++        #[arg(long, default_value_t = 200)]
++        max_hits: usize,
++
++        /// Treat --search as a regex (default: fixed string).
++        #[arg(long)]
++        regex: bool,
++
++        /// Case-insensitive search.
++        #[arg(long)]
++        ignore_case: bool,
++
++        /// Treat binary files as text when searching (default: skip binary).
++        #[arg(long)]
++        text: bool,
++
++        /// Show a specific file from the snapshot.
++        ///
++        /// Requires either <name> (latest destroy snapshot) or --ref.
+         /// The path must be relative (no directory traversal allowed).
+         #[arg(long)]
+         show: Option<String>,
+ 
+-        /// Restore the latest snapshot into a new workspace with this name.
++        /// Restore the snapshot into a new workspace with this name.
++        ///
++        /// Requires either <name> (latest destroy snapshot) or --ref.
+         #[arg(long)]
+         to: Option<String>,
+ 
+@@ -764,30 +817,85 @@
+         WorkspaceCommands::Restore { name } => restore::restore(&name),
+         WorkspaceCommands::Recover {
+             name,
++            recovery_ref,
++            search,
++            context,
++            max_hits,
++            regex,
++            ignore_case,
++            text,
+             show,
+             to,
+             format,
+             json,
+         } => {
+             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+-            match (name, show, to) {
+-                // maw ws recover <name> --show <path>
+-                (Some(n), Some(path), None) => recover::show_file(&n, &path),
+-                // maw ws recover <name> --to <new-name>
+-                (Some(n), None, Some(target)) => recover::restore_to(&n, &target),
+-                // maw ws recover <name> (inspect)
+-                (Some(n), None, None) => recover::show_workspace(&n, fmt),
+-                // maw ws recover (list all)
+-                (None, None, None) => recover::list_destroyed(fmt),
++
++            // --ref is mutually exclusive with positional name.
++            if recovery_ref.is_some() && name.is_some() {
++                anyhow::bail!("Cannot use both <name> and --ref.
++    Use <name> for destroyed-workspace history, or --ref for an explicit recovery snapshot.")
++            }
++
++            // Search mode (content search across pinned recovery refs).
++            if let Some(pattern) = search {
++                if show.is_some() || to.is_some() {
++                    anyhow::bail!("--search cannot be combined with --show or --to.")
++                }
++
++                return recover::search(
++                    &pattern,
++                    name.as_deref(),
++                    recovery_ref.as_deref(),
++                    context,
++                    max_hits,
++                    regex,
++                    ignore_case,
++                    text,
++                    fmt,
++                );
++            }
++
++            match (name, recovery_ref, show, to) {
++                // Explicit ref: show file
++                (None, Some(r), Some(path), None) => recover::show_file_by_ref(&r, &path),
++                // Explicit ref: restore
++                (None, Some(r), None, Some(target)) => recover::restore_ref_to(&r, &target),
++                // Explicit ref without action
++                (None, Some(_), None, None) => {
++                    anyhow::bail!("--ref requires --show, --to, or --search.
++    Examples:
++    maw ws recover --ref <ref> --show <path>
++    maw ws recover --ref <ref> --to <new-workspace>
++    maw ws recover --ref <ref> --search <pattern>")
++                }
++
++                // Destroyed workspace latest snapshot: show file
++                (Some(n), None, Some(path), None) => recover::show_file(&n, &path),
++                // Destroyed workspace latest snapshot: restore
++                (Some(n), None, None, Some(target)) => recover::restore_to(&n, &target),
++                // Destroyed workspace history
++                (Some(n), None, None, None) => recover::show_workspace(&n, fmt),
++                // List destroyed workspaces
++                (None, None, None, None) => recover::list_destroyed(fmt),
++
+                 // Invalid combos
+-                (None, Some(_), _) => {
+-                    anyhow::bail!("--show requires a workspace name.\n  Usage: maw ws recover <name> --show <path>")
++                (None, None, Some(_), _) => {
++                    anyhow::bail!("--show requires a workspace name or --ref.
++  Usage:
++    maw ws recover <name> --show <path>
++    maw ws recover --ref <ref> --show <path>")
+                 }
+-                (None, _, Some(_)) => {
+-                    anyhow::bail!("--to requires a workspace name.\n  Usage: maw ws recover <name> --to <new-name>")
++                (None, None, _, Some(_)) => {
++                    anyhow::bail!("--to requires a workspace name or --ref.
++  Usage:
++    maw ws recover <name> --to <new-name>
++    maw ws recover --ref <ref> --to <new-name>")
+                 }
+-                (Some(_), Some(_), Some(_)) => {
+-                    anyhow::bail!("Cannot use --show and --to together.\n  Use --show to inspect, or --to to restore.")
++                (Some(_), Some(_), _, _) => unreachable!(),
++                (Some(_), None, Some(_), Some(_)) | (None, Some(_), Some(_), Some(_)) => {
++                    anyhow::bail!("Cannot use --show and --to together.
++  Use --show to inspect, or --to to restore.")
+                 }
+             }
+         }
+--- a/src/workspace/recover.rs
++++ b/src/workspace/recover.rs
+@@ -1,12 +1,22 @@
+-//! `maw ws recover` — list, inspect, and recover snapshots from destroyed workspaces.
++//! `maw ws recover` — list, inspect, search, and restore recovery snapshots.
+ //!
+-//! # Subcommands
++//! Recovery points are pinned under `refs/manifold/recovery/<workspace>/<timestamp>`.
++//! Destroyed workspaces additionally write destroy records under
++//! `.manifold/artifacts/ws/<workspace>/destroy/` which `maw ws recover <name>` uses.
+ //!
+-//! - `maw ws recover` — list all destroyed workspaces with snapshots
+-//! - `maw ws recover <name>` — show full destroy history for a workspace
+-//! - `maw ws recover <name> --show <path>` — show a specific file from the snapshot
+-//! - `maw ws recover <name> --to <new-name>` — restore snapshot into a new workspace
++//! # Modes
++//!
++//! - `maw ws recover` — list destroyed workspaces with snapshots (destroy records)
++//! - `maw ws recover <name>` — show destroy history for a workspace
++//! - `maw ws recover --search <pattern>` — content search across pinned recovery snapshots
++//! - `maw ws recover <name> --search <pattern>` — search snapshots for one workspace
++//! - `maw ws recover --ref <recovery-ref> --show <path>` — show a file from a specific snapshot
++//! - `maw ws recover <name> --show <path>` — show a file from latest destroy snapshot
++//! - `maw ws recover --ref <recovery-ref> --to <new-name>` — restore a specific snapshot
++//! - `maw ws recover <name> --to <new-name>` — restore latest destroy snapshot
+ 
++use std::collections::HashMap;
++use std::path::Path;
+ use std::process::Command;
+ 
+ use anyhow::{Context, Result, bail};
+@@ -18,6 +28,7 @@
+     self, DestroyRecord, RecordCaptureMode,
+ };
+ use super::{repo_root, validate_workspace_name, workspace_path};
++use super::capture::RECOVERY_PREFIX;
+ 
+ // ---------------------------------------------------------------------------
+ // List all destroyed workspaces
+@@ -173,6 +184,510 @@
+ }
+ 
+ // ---------------------------------------------------------------------------
++// Search pinned recovery refs (agents)
++// ---------------------------------------------------------------------------
++
++#[derive(Clone, Debug)]
++struct RecoveryRef {
++    ref_name: String,
++    workspace: String,
++    timestamp: String,
++    oid: String,
++}
++
++#[derive(Clone, Debug)]
++struct GrepHit {
++    path: String,
++    line: usize,
++    line_text: String,
++}
++
++#[derive(Serialize)]
++struct SnippetLine {
++    line: usize,
++    text: String,
++    is_match: bool,
++}
++
++#[derive(Serialize)]
++struct SearchHit {
++    ref_name: String,
++    workspace: String,
++    timestamp: String,
++    oid: String,
++    oid_short: String,
++    path: String,
++    line: usize,
++    snippet: Vec<SnippetLine>,
++}
++
++#[derive(Serialize)]
++struct RecoverSearchEnvelope {
++    pattern: String,
++    workspace_filter: Option<String>,
++    ref_filter: Option<String>,
++    scanned_refs: usize,
++    hit_count: usize,
++    truncated: bool,
++    hits: Vec<SearchHit>,
++    advice: Vec<String>,
++}
++
++/// Search pinned recovery snapshots by content.
++///
++/// - If `workspace_filter` is `Some`, only snapshots for that workspace are searched.
++/// - If `ref_filter` is `Some`, only that snapshot is searched.
++///
++/// `context` controls how many surrounding lines are included per match.
++/// `max_hits` caps total matches returned (deterministic truncation).
++#[allow(clippy::too_many_arguments)]
++pub fn search(
++    pattern: &str,
++    workspace_filter: Option<&str>,
++    ref_filter: Option<&str>,
++    context: usize,
++    max_hits: usize,
++    regex: bool,
++    ignore_case: bool,
++    text: bool,
++    format: OutputFormat,
++) -> Result<()> {
++    if pattern.is_empty() {
++        bail!("Search pattern cannot be empty");
++    }
++    if max_hits == 0 {
++        bail!("--max-hits must be >= 1");
++    }
++
++    let git_cwd = super::git_cwd()?;
++    let mut refs = list_recovery_refs(&git_cwd)?;
++
++    if let Some(ws) = workspace_filter {
++        refs.retain(|r| r.workspace == ws);
++    }
++
++    if let Some(rf) = ref_filter {
++        validate_recovery_ref(rf)?;
++        refs.retain(|r| r.ref_name == rf);
++        if refs.is_empty() {
++            bail!(
++                "Recovery ref '{rf}' not found under {RECOVERY_PREFIX}.\n  \
++                 List refs: git for-each-ref {RECOVERY_PREFIX}"
++            );
++        }
++    }
++
++    // Deterministic order regardless of filesystem ref ordering.
++    refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
++
++    if refs.is_empty() {
++        match format {
++            OutputFormat::Json => {
++                let envelope = RecoverSearchEnvelope {
++                    pattern: pattern.to_string(),
++                    workspace_filter: workspace_filter.map(|s| s.to_string()),
++                    ref_filter: ref_filter.map(|s| s.to_string()),
++                    scanned_refs: 0,
++                    hit_count: 0,
++                    truncated: false,
++                    hits: vec![],
++                    advice: vec![
++                        "No pinned recovery snapshots found to search.".to_string(),
++                        format!("List refs: git for-each-ref {RECOVERY_PREFIX}"),
++                    ],
++                };
++                println!("{}", serde_json::to_string_pretty(&envelope)?);
++            }
++            _ => {
++                println!("No pinned recovery snapshots found to search.");
++                println!("List refs: git for-each-ref {RECOVERY_PREFIX}");
++            }
++        }
++        return Ok(());
++    }
++
++    let mut hits: Vec<SearchHit> = Vec::new();
++    let mut truncated = false;
++    let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
++
++    'scan: for r in &refs {
++        let grep_hits = git_grep_hits(&git_cwd, &r.oid, pattern, regex, ignore_case, text)?;
++        for gh in grep_hits {
++            let snippet = build_snippet(
++                &git_cwd,
++                &r.oid,
++                &gh.path,
++                gh.line,
++                context,
++                &gh.line_text,
++                &mut file_cache,
++            )?;
++
++            hits.push(SearchHit {
++                ref_name: r.ref_name.clone(),
++                workspace: r.workspace.clone(),
++                timestamp: r.timestamp.clone(),
++                oid: r.oid.clone(),
++                oid_short: r.oid[..r.oid.len().min(12)].to_string(),
++                path: gh.path,
++                line: gh.line,
++                snippet,
++            });
++
++            if hits.len() >= max_hits {
++                truncated = true;
++                break 'scan;
++            }
++        }
++    }
++
++    let envelope = RecoverSearchEnvelope {
++        pattern: pattern.to_string(),
++        workspace_filter: workspace_filter.map(|s| s.to_string()),
++        ref_filter: ref_filter.map(|s| s.to_string()),
++        scanned_refs: refs.len(),
++        hit_count: hits.len(),
++        truncated,
++        hits,
++        advice: vec![
++            "Show file: maw ws recover --ref <ref> --show <path>".to_string(),
++            "Restore:   maw ws recover --ref <ref> --to <new-workspace>".to_string(),
++        ],
++    };
++
++    match format {
++        OutputFormat::Json => {
++            println!("{}", serde_json::to_string_pretty(&envelope)?);
++        }
++        OutputFormat::Text => print_search_text(&envelope),
++        OutputFormat::Pretty => print_search_pretty(&envelope, format),
++    }
++
++    Ok(())
++}
++
++fn validate_recovery_ref(r: &str) -> Result<()> {
++    if !r.starts_with(RECOVERY_PREFIX) {
++        bail!(
++            "Recovery ref must be under {RECOVERY_PREFIX}.\n  \
++             Got: {r}"
++        );
++    }
++    // Require a workspace + timestamp suffix (two components after prefix).
++    let rest = &r[RECOVERY_PREFIX.len()..];
++    if !rest.contains('/') {
++        bail!(
++            "Recovery ref must be of form {RECOVERY_PREFIX}<workspace>/<timestamp>.\n  \
++             Got: {r}"
++        );
++    }
++    Ok(())
++}
++
++fn parse_recovery_ref_name(ref_name: &str) -> Option<(String, String)> {
++    if !ref_name.starts_with(RECOVERY_PREFIX) {
++        return None;
++    }
++    let rest = &ref_name[RECOVERY_PREFIX.len()..];
++    let mut it = rest.splitn(2, '/');
++    let ws = it.next()?;
++    let ts = it.next()?;
++    Some((ws.to_string(), ts.to_string()))
++}
++
++fn list_recovery_refs(git_cwd: &Path) -> Result<Vec<RecoveryRef>> {
++    let output = Command::new("git")
++        .args([
++            "for-each-ref",
++            "--format=%(refname) %(objectname)",
++            RECOVERY_PREFIX,
++        ])
++        .current_dir(git_cwd)
++        .output()
++        .context("failed to run git for-each-ref for recovery refs")?;
++
++    if !output.status.success() {
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        bail!("git for-each-ref failed: {}", stderr.trim());
++    }
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let mut out: Vec<RecoveryRef> = Vec::new();
++
++    for line in stdout.lines() {
++        let line = line.trim();
++        if line.is_empty() {
++            continue;
++        }
++        let mut parts = line.split_whitespace();
++        let ref_name = match parts.next() {
++            Some(v) => v,
++            None => continue,
++        };
++        let oid = match parts.next() {
++            Some(v) => v,
++            None => continue,
++        };
++        if let Some((ws, ts)) = parse_recovery_ref_name(ref_name) {
++            out.push(RecoveryRef {
++                ref_name: ref_name.to_string(),
++                workspace: ws,
++                timestamp: ts,
++                oid: oid.to_string(),
++            });
++        }
++    }
++
++    Ok(out)
++}
++
++fn git_grep_hits(
++    git_cwd: &Path,
++    oid: &str,
++    pattern: &str,
++    regex: bool,
++    ignore_case: bool,
++    text: bool,
++) -> Result<Vec<GrepHit>> {
++    let mut args: Vec<&str> = vec!["grep", "-n", "--no-color"];
++
++    if ignore_case {
++        args.push("-i");
++    }
++    if !regex {
++        args.push("-F");
++    }
++    if text {
++        // Search binary blobs as if they were text.
++        args.push("-a");
++    } else {
++        // Default: ignore binary files.
++        args.push("-I");
++    }
++
++    // Always use -e so patterns beginning with '-' can't be interpreted as flags.
++    args.push("-e");
++    args.push(pattern);
++    args.push(oid);
++
++    let output = Command::new("git")
++        .args(args)
++        .current_dir(git_cwd)
++        .output()
++        .context("failed to run git grep")?;
++
++    match output.status.code() {
++        Some(0) => {}
++        Some(1) => return Ok(vec![]),
++        _ => {
++            let stderr = String::from_utf8_lossy(&output.stderr);
++            bail!("git grep failed: {}", stderr.trim());
++        }
++    }
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let mut hits: Vec<GrepHit> = Vec::new();
++    let prefix = format!("{oid}:");
++
++    for line in stdout.lines() {
++        let line = line.trim_end();
++        if line.is_empty() {
++            continue;
++        }
++        let rest = line.strip_prefix(&prefix).unwrap_or(line);
++        let mut parts = rest.splitn(3, ':');
++        let path = match parts.next() {
++            Some(v) => v,
++            None => continue,
++        };
++        let line_str = match parts.next() {
++            Some(v) => v,
++            None => continue,
++        };
++        let text = parts.next().unwrap_or("");
++
++        let line_no: usize = match line_str.parse() {
++            Ok(n) => n,
++            Err(_) => continue,
++        };
++
++        hits.push(GrepHit {
++            path: path.to_string(),
++            line: line_no,
++            line_text: text.to_string(),
++        });
++    }
++
++    Ok(hits)
++}
++
++fn read_file_lines(git_cwd: &Path, oid: &str, path: &str) -> Result<Vec<String>> {
++    let output = Command::new("git")
++        .args(["show", &format!("{oid}:{path}")])
++        .current_dir(git_cwd)
++        .output()
++        .context("failed to run git show for snippet")?;
++
++    if !output.status.success() {
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        bail!(
++            "git show failed while building snippet for {oid_short}:{path}: {}",
++            stderr.trim(),
++            oid_short = &oid[..oid.len().min(12)]
++        );
++    }
++
++    let content = String::from_utf8_lossy(&output.stdout);
++    Ok(content.lines().map(|l| l.to_string()).collect())
++}
++
++fn build_snippet(
++    git_cwd: &Path,
++    oid: &str,
++    path: &str,
++    line: usize,
++    context: usize,
++    fallback_line_text: &str,
++    cache: &mut HashMap<String, Vec<String>>,
++) -> Result<Vec<SnippetLine>> {
++    if context == 0 {
++        return Ok(vec![SnippetLine {
++            line,
++            text: fallback_line_text.to_string(),
++            is_match: true,
++        }]);
++    }
++
++    let key = format!("{oid}:{path}");
++    if !cache.contains_key(&key) {
++        let lines = read_file_lines(git_cwd, oid, path)?;
++        cache.insert(key.clone(), lines);
++    }
++
++    let lines = cache
++        .get(&key)
++        .context("internal error: file cache missing key")?;
++
++    if lines.is_empty() {
++        return Ok(vec![]);
++    }
++
++    // git grep line numbers are 1-based.
++    let start = line.saturating_sub(context).max(1);
++    let mut end = line.saturating_add(context);
++    if end > lines.len() {
++        end = lines.len();
++    }
++
++    let mut out = Vec::new();
++    for ln in start..=end {
++        if let Some(text) = lines.get(ln - 1) {
++            out.push(SnippetLine {
++                line: ln,
++                text: text.clone(),
++                is_match: ln == line,
++            });
++        }
++    }
++    Ok(out)
++}
++
++fn print_search_text(env: &RecoverSearchEnvelope) {
++    println!("PATTERN\t{}", env.pattern);
++    if let Some(ref ws) = env.workspace_filter {
++        println!("WORKSPACE\t{ws}");
++    }
++    if let Some(ref rf) = env.ref_filter {
++        println!("REF\t{rf}");
++    }
++
++    let trunc = if env.truncated { " (truncated)" } else { "" };
++    println!(
++        "SCANNED_REFS\t{}\nHITS\t{}{}",
++        env.scanned_refs, env.hit_count, trunc
++    );
++    println!();
++
++    for h in &env.hits {
++        println!(
++            "{}\t{}\t{}\t{}:{}\t{}",
++            h.workspace, h.timestamp, h.oid_short, h.path, h.line, h.ref_name
++        );
++        for sl in &h.snippet {
++            let marker = if sl.is_match { ">" } else { " " };
++            println!("  {marker} {:>6}\t{}", sl.line, sl.text);
++        }
++        println!();
++    }
++
++    println!("Next: maw ws recover --ref <ref> --show <path>");
++    println!("      maw ws recover --ref <ref> --to <new-workspace>");
++}
++
++fn print_search_pretty(env: &RecoverSearchEnvelope, format: OutputFormat) {
++    let use_color = format.should_use_color();
++
++    if use_color {
++        println!("\x1b[1mSearch recovery snapshots\x1b[0m");
++    } else {
++        println!("Search recovery snapshots");
++    }
++
++    println!("  Pattern:  {}", env.pattern);
++    if let Some(ref ws) = env.workspace_filter {
++        println!("  Workspace: {ws}");
++    }
++    if let Some(ref rf) = env.ref_filter {
++        println!("  Ref:      {rf}");
++    }
++
++    let trunc = if env.truncated { " (truncated)" } else { "" };
++    println!(
++        "  Scanned:  {} ref(s)\n  Hits:     {}{}",
++        env.scanned_refs, env.hit_count, trunc
++    );
++    println!();
++
++    for h in &env.hits {
++        if use_color {
++            println!(
++                "\x1b[33m{}\x1b[0m {} {}... {}:{}",
++                h.workspace,
++                h.timestamp,
++                h.oid_short,
++                h.path,
++                h.line
++            );
++            println!("  \x1b[90mref: {}\x1b[0m", h.ref_name);
++        } else {
++            println!(
++                "{} {} {}... {}:{}",
++                h.workspace, h.timestamp, h.oid_short, h.path, h.line
++            );
++            println!("  ref: {}", h.ref_name);
++        }
++
++        for sl in &h.snippet {
++            let marker = if sl.is_match { ">" } else { " " };
++            if use_color && sl.is_match {
++                println!("  {marker} \x1b[1m{:>6}\x1b[0m {}", sl.line, sl.text);
++            } else {
++                println!("  {marker} {:>6} {}", sl.line, sl.text);
++            }
++        }
++        println!();
++    }
++
++    if use_color {
++        println!("\x1b[90mNext: maw ws recover --ref <ref> --show <path>\x1b[0m");
++        println!("\x1b[90m      maw ws recover --ref <ref> --to <new-workspace>\x1b[0m");
++    } else {
++        println!("Next: maw ws recover --ref <ref> --show <path>");
++        println!("      maw ws recover --ref <ref> --to <new-workspace>");
++    }
++}
++
++// ---------------------------------------------------------------------------
+ // Show destroy history for a specific workspace
+ // ---------------------------------------------------------------------------
+ 
+@@ -310,6 +825,51 @@
+ // Show a specific file from the snapshot
+ // ---------------------------------------------------------------------------
+ 
++pub fn show_file_by_ref(recovery_ref: &str, path: &str) -> Result<()> {
++    validate_recovery_ref(recovery_ref)?;
++    validate_show_path(path)?;
++
++    let git_cwd = super::git_cwd()?;
++    let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
++    show_file_at_oid(&git_cwd, &oid, path)
++}
++
++fn resolve_ref_to_oid(git_cwd: &Path, reference: &str) -> Result<String> {
++    let output = Command::new("git")
++        .args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
++        .current_dir(git_cwd)
++        .output()
++        .context("failed to resolve recovery ref")?;
++
++    if !output.status.success() {
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        bail!("Failed to resolve recovery ref '{reference}': {}", stderr.trim());
++    }
++
++    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
++}
++
++fn show_file_at_oid(git_cwd: &Path, oid: &str, path: &str) -> Result<()> {
++    let output = Command::new("git")
++        .args(["show", &format!("{oid}:{path}")])
++        .current_dir(git_cwd)
++        .output()
++        .context("failed to run git show")?;
++
++    if !output.status.success() {
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        bail!(
++            "Failed to show file '{path}' from snapshot {oid_short}: {}",
++            stderr.trim(),
++            oid_short = &oid[..oid.len().min(12)]
++        );
++    }
++
++    use std::io::Write;
++    std::io::stdout().write_all(&output.stdout)?;
++    Ok(())
++}
++
+ pub fn show_file(name: &str, path: &str) -> Result<()> {
+     validate_workspace_name(name)?;
+     validate_show_path(path)?;
+@@ -394,6 +954,24 @@
+ // Restore snapshot to a new workspace
+ // ---------------------------------------------------------------------------
+ 
++pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
++    validate_recovery_ref(recovery_ref)?;
++    validate_workspace_name(new_name)?;
++
++    let git_cwd = super::git_cwd()?;
++    let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
++
++    // Create new workspace (empty) and then populate it from the snapshot tree.
++    super::create::create(new_name, None, false, None)?;
++    let new_path = workspace_path(new_name);
++    populate_from_snapshot(&new_path, &oid)?;
++
++    println!("Restored snapshot {oid_short} to workspace '{new_name}'.", oid_short = &oid[..oid.len().min(12)]);
++    println!("Next: cd ws/{new_name} && git status");
++
++    Ok(())
++}
++
+ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
+     validate_workspace_name(name)?;
+     validate_workspace_name(new_name)?;
+@@ -591,4 +1169,102 @@
+         };
+         assert!(resolve_recoverable_oid(&record).is_err());
+     }
++
++    #[test]
++    fn validate_recovery_ref_requires_prefix_and_suffix() {
++        assert!(validate_recovery_ref("refs/heads/main").is_err());
++        assert!(validate_recovery_ref("refs/manifold/recovery").is_err());
++        assert!(validate_recovery_ref("refs/manifold/recovery/").is_err());
++        assert!(validate_recovery_ref("refs/manifold/recovery/ws-only").is_err());
++        assert!(
++            validate_recovery_ref("refs/manifold/recovery/alice/2025-01-01T00-00-00Z").is_ok()
++        );
++    }
++
++    #[test]
++    fn parse_recovery_ref_name_extracts_workspace_and_timestamp() {
++        let (ws, ts) = parse_recovery_ref_name(
++            "refs/manifold/recovery/alice/2025-01-01T00-00-00Z",
++        )
++        .unwrap();
++        assert_eq!(ws, "alice");
++        assert_eq!(ts, "2025-01-01T00-00-00Z");
++    }
++
++    #[test]
++    fn list_and_grep_recovery_refs_in_temp_repo() {
++        use std::fs;
++        use tempfile::TempDir;
++
++        let dir = TempDir::new().unwrap();
++        let root = dir.path();
++
++        // init repo
++        Command::new("git")
++            .args(["init", "-q"])
++            .current_dir(root)
++            .output()
++            .unwrap();
++        Command::new("git")
++            .args(["config", "user.email", "test@example.com"])
++            .current_dir(root)
++            .output()
++            .unwrap();
++        Command::new("git")
++            .args(["config", "user.name", "Test"])
++            .current_dir(root)
++            .output()
++            .unwrap();
++
++        fs::write(root.join("a.txt"), "one
++needle
++three
++").unwrap();
++        Command::new("git")
++            .args(["add", "a.txt"])
++            .current_dir(root)
++            .output()
++            .unwrap();
++        Command::new("git")
++            .args(["commit", "-qm", "init"])
++            .current_dir(root)
++            .output()
++            .unwrap();
++
++        let oid_out = Command::new("git")
++            .args(["rev-parse", "HEAD"])
++            .current_dir(root)
++            .output()
++            .unwrap();
++        assert!(oid_out.status.success());
++        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
++
++        // pin recovery ref
++        let ref_name = "refs/manifold/recovery/alice/2025-01-01T00-00-00Z";
++        let upd = Command::new("git")
++            .args(["update-ref", ref_name, &oid])
++            .current_dir(root)
++            .output()
++            .unwrap();
++        assert!(upd.status.success());
++
++        let refs = list_recovery_refs(root).unwrap();
++        assert_eq!(refs.len(), 1);
++        assert_eq!(refs[0].ref_name, ref_name);
++        assert_eq!(refs[0].workspace, "alice");
++        assert_eq!(refs[0].oid, oid);
++
++        let hits = git_grep_hits(root, &oid, "needle", false, false, false).unwrap();
++        assert_eq!(hits.len(), 1);
++        assert_eq!(hits[0].path, "a.txt");
++        assert_eq!(hits[0].line, 2);
++
++        let mut cache = HashMap::new();
++        let snippet = build_snippet(root, &oid, "a.txt", 2, 1, &hits[0].line_text, &mut cache)
++            .unwrap();
++        assert_eq!(snippet.len(), 3);
++        assert_eq!(snippet[1].line, 2);
++        assert!(snippet[1].is_match);
++    }
++
+ }
+--- a/notes/assurance/README.md
++++ b/notes/assurance/README.md
+@@ -8,10 +8,11 @@
+ ## Documents
+ 
+ - `notes/assurance/claims.md`
+-  - Contract definitions and global guarantees (G1-G5).
++  - Contract definitions and global guarantees (G1-G6).
+ - `notes/assurance/working-copy.md`
+   - Normative preserve/materialize/replay semantics for worktree rewrites.
+ - `notes/assurance/recovery-contract.md`
++- `notes/assurance/search.md` — content search + chunk retrieval contract (agents).
+   - Required recovery surfaces, output requirements, and validation criteria.
+ 
+ ## Code Mapping
+@@ -33,7 +34,7 @@
+   - Pre-destroy/rewrite capture and recovery ref pinning.
+ - `src/workspace/destroy_record.rs`
+   - Destroy metadata artifacts consumed by recovery UX.
+-- `src/workspace/recover.rs`
++- `src/workspace/recover.rs` — destroyed-workspace recovery + recovery-ref search/show/restore.
+   - User/agent recovery CLI surface and command discoverability.
+ - `src/workspace/sync.rs`
+   - Workspace rewrite/update flows outside merge cleanup.
+@@ -66,7 +67,7 @@
+ 1. `notes/assurance/claims.md` (if guarantee semantics change)
+ 2. `notes/assurance/working-copy.md` (if rewrite mechanics change)
+ 3. `notes/assurance/recovery-contract.md` (if recovery UX/surfaces change)
+-4. tests proving G1-G5 still hold
++4. tests proving G1-G6 still hold
+ 
+ Do not merge safety-sensitive behavior changes without matching contract and
+ test updates.
+--- a/notes/assurance/claims.md
++++ b/notes/assurance/claims.md
+@@ -35,7 +35,20 @@
+ ### Recoverable
+ 
+ Restorable through documented maw CLI surfaces plus deterministic artifact/ref
+-locations.
++locations. Recoverable state must also be *searchable* (agents can locate content
++by pattern) and *chunk-addressable* (agents can extract bounded file excerpts
++without restoring an entire workspace).
++
++### Chunk
++
++A bounded excerpt from a file in a recovery point (path + line range + bytes),
++returned by maw without requiring a full workspace restore.
++
++### Searchable
++
++A recovery point is searchable if maw can deterministically search its file
++contents (including untracked non-ignored files captured in snapshots) and
++return matching chunks with provenance (workspace/ref + path + line numbers).
+ 
+ ### Lost work
+ 
+@@ -84,6 +97,13 @@
+ When recoverable state exists, maw output and `maw ws recover` must make it
+ discoverable with executable commands.
+ 
++### G6: searchable recovery
++
++When recoverable state exists, maw must provide deterministic content search
++across recovery points and must be able to show matching chunks without
++restoring an entire workspace. Search must cover the captured snapshot
++contents, including untracked non-ignored files.
++
+ ## 4) Required enforcement points
+ 
+ The following are proof obligations for code + tests:
+@@ -97,7 +117,7 @@
+ 
+ Claims are valid only while the following pass:
+ 
+-- deterministic simulation invariants for G1-G5;
++- deterministic simulation invariants for G1-G6;
+ - crash/failpoint replay suite over merge and rewrite boundaries;
+ - recoverability discoverability tests executing emitted recovery commands.
+ 
+@@ -108,4 +128,4 @@
+ - this contract (if semantics change),
+ - `notes/assurance/working-copy.md` (rewrite semantics),
+ - `notes/assurance/recovery-contract.md` (recovery surfaces),
+-- tests proving G1-G5 remain true.
++- tests proving G1-G6 remain true.
+--- a/notes/assurance/working-copy.md
++++ b/notes/assurance/working-copy.md
+@@ -44,20 +44,33 @@
+ 1. Derive user deltas from explicit base:
+    - staged tracked delta: `git diff --cached --binary <base_epoch>`
+    - unstaged tracked delta: `git diff --binary`
+-   - untracked manifest: `git ls-files --others --exclude-standard`
++   - untracked set (names): `git ls-files --others --exclude-standard`
+ 2. If all deltas/manifests are empty:
+    - materialize target directly (`git reset --hard <target_ref>` or equivalent)
+    - done.
+ 3. If any user work exists:
+    - create durable recovery snapshot ref under
+-     `refs/manifold/recovery/<workspace>/<timestamp>`;
+-   - write artifacts under `.manifold/artifacts/rewrite/<workspace>/<timestamp>/`.
+-4. Materialize target state (`git reset --hard <target_ref>` or equivalent).
++     `refs/manifold/recovery/<workspace>/<timestamp>` whose commit tree is a
++     byte-for-byte capture of the entire working copy at the boundary
++     (tracked + untracked non-ignored);
++   - write artifacts under `.manifold/artifacts/rewrite/<workspace>/<timestamp>/`
++     (metadata + deltas; artifacts do not need to duplicate full file bytes
++     if the snapshot ref exists).
++
++   The snapshot ref is the canonical source for **byte recovery** and for
++   **content search** (agents can `grep` the snapshot without restoring a
++   workspace).
++4. Materialize target state into a clean working copy:
++   - `git reset --hard <target_ref>` (or equivalent)
++   - `git clean -fd` (remove untracked non-ignored files before replay)
+ 5. Replay tracked deltas deterministically:
+    - staged first: `git apply --index --3way -`
+    - unstaged second: `git apply --3way -`
+-6. Rehydrate untracked files when policy requires immediate replay; if immediate
+-   replay is not possible, keep explicit recovery command and metadata.
++6. Rehydrate untracked files (when policy requires immediate replay) by
++   extracting bytes from the snapshot tree and writing them back as *untracked*
++   files (do not silently stage them). If immediate replay is not possible,
++   keep explicit recovery command(s) and metadata so an agent/operator can
++   recover selectively.
+ 7. If replay step fails:
+    - rollback to captured snapshot (or abort before destructive step if possible),
+    - emit warning/error with ref, oid, artifact path, and exact recovery command.
+@@ -70,7 +83,8 @@
+   and recommended recovery command(s);
+ - `index.patch`: staged tracked delta payload (can be empty file);
+ - `worktree.patch`: unstaged tracked delta payload (can be empty file);
+-- `untracked.json`: list of untracked paths observed pre-rewrite.
++- `untracked.json`: list of untracked paths observed pre-rewrite (names only;
++  file bytes are recoverable from the snapshot ref).
+ 
+ ## 5) Conflict and rollback semantics
+ 
+@@ -87,3 +101,5 @@
+ - replay failure triggers rollback and preserved recoverability surfaces;
+ - no-user-work fast path materializes target cleanly;
+ - emitted recovery commands execute successfully in harness.
++- content search over recovery snapshots finds known strings in both tracked and
++  untracked files.
+--- a/notes/assurance/recovery-contract.md
++++ b/notes/assurance/recovery-contract.md
+@@ -6,7 +6,10 @@
+ 
+ ## 1) Recovery surfaces
+ 
+-Every maw-created recovery point must exist on both surfaces.
++Every maw-created recovery point MUST have a durable Git ref (the source of truth for bytes).
++
++Artifacts are operation-specific but MUST include enough metadata to locate the
++Git ref deterministically.
+ 
+ ### Git surface (durable refs)
+ 
+@@ -15,19 +18,35 @@
+ The associated commit oid must be recorded in artifacts and exposed by CLI
+ output when relevant.
+ 
++The pinned commit tree MUST be a byte-for-byte capture of the working copy at
++the capture boundary (tracked + untracked non-ignored). This enables:
++
++- exact byte recovery (via `git show <oid>:<path>`), and
++- deterministic content search across "lost" work without restoring workspaces.
++
+ ### Artifact surface (filesystem)
+ 
++Rewrite artifacts:
++
+ - `.manifold/artifacts/rewrite/<workspace>/<timestamp>/`
+ 
+-Minimum required files:
++Destroy artifacts:
++
++- `.manifold/artifacts/ws/<workspace>/destroy/<timestamp>.json`
++- `.manifold/artifacts/ws/<workspace>/destroy/latest.json`
++
++(Other operations may add additional artifact locations, but they must be
++documented and test-covered.)
++
++Minimum required files for rewrite artifacts:
+ 
+ - `meta.json`
+ - `index.patch` (can be empty)
+ - `worktree.patch` (can be empty)
+ - `untracked.json`
+ 
+-Destroy/recover workflows may use additional artifact locations, but rewrite
+-recoverability must include the directory above.
++Destroy/recover workflows MUST at least include the destroy-record locations
++above. Rewrite recoverability must include the rewrite artifact directory above.
+ 
+ ## 2) CLI discoverability requirements
+ 
+@@ -36,9 +55,12 @@
+ 1. clearly state whether operation was aborted, skipped, or rolled back;
+ 2. clearly state whether merge COMMIT already succeeded (if applicable);
+ 3. print snapshot ref and oid;
+-4. print artifact directory path;
++4. print artifact path (rewrite directory or destroy record);
+ 5. print at least one executable recovery command.
+ 
++The preferred command form is `maw ws recover --ref <recovery-ref> ...` because
++it works for both destroy snapshots and rewrite captures.
++
+ ## 3) Required recovery commands
+ 
+ At least one deterministic recovery path must be executable non-interactively,
+@@ -47,6 +69,10 @@
+ - `maw ws recover <workspace>`
+ - `maw ws recover <workspace> --show <path>`
+ - `maw ws recover <workspace> --to <new-workspace>`
++- `maw ws recover --ref <recovery-ref> --show <path>`
++- `maw ws recover --ref <recovery-ref> --to <new-workspace>`
++- `maw ws recover --search <pattern>`
++- `maw ws recover <workspace> --search <pattern>`
+ 
+ If command suggestions include raw git commands, maw command equivalents should
+ also be included where available.
+@@ -58,6 +84,8 @@
+ - recovery-producing failures include required fields from Section 2;
+ - suggested recovery commands execute successfully;
+ - restored files are byte-equivalent to preserved state for covered paths.
++- `maw ws recover --search` finds known strings in recovery snapshots and returns
++  file chunks with provenance (ref + path + line numbers).
+ 
+ ## 5) Retention and garbage collection
+ 
+@@ -74,3 +102,6 @@
+ - `maw ws recover` output,
+ - contract-defined artifact directories,
+ - contract-defined recovery ref namespace.
++
++Responders/agents should be able to locate unknown "lost" work via
++`maw ws recover --search <pattern>` before choosing a restore target.
+--- a/notes/assurance/search.md
++++ b/notes/assurance/search.md
+@@ -0,0 +1,91 @@
++# Content search and chunk retrieval contract
++
++This document defines the required behavior for searching "lost" work and
++extracting bounded file chunks from recovery points.
++
++## Scope
++
++- Search operates over *pinned recovery snapshots*: commits referenced by
++  `refs/manifold/recovery/<workspace>/<timestamp>`.
++- Search must work whether the recovery point originated from a workspace
++  destroy, a workspace rewrite, or any other maw operation that pins a recovery
++  ref.
++
++## Requirements
++
++### R1: Searchable bytes
++
++The snapshot commit tree pinned by a recovery ref MUST contain the full file
++bytes captured at the boundary, including untracked non-ignored files.
++
++### R2: Deterministic search surface
++
++maw MUST provide a deterministic CLI for searching across recovery points:
++
++- global search across all pinned recovery refs
++- optional filtering to a single workspace
++- optional targeting of a single recovery ref
++
++Search MUST NOT modify the repository.
++
++### R3: Chunk retrieval
++
++Search results MUST return bounded file excerpts ("chunks") suitable for
++machine consumption:
++
++- provenance: recovery ref (and derived workspace/timestamp), snapshot oid
++- file identity: relative path
++- location: 1-based line number(s)
++- bytes: excerpt lines (UTF-8 lossy is acceptable for display, but exact bytes
++  MUST remain recoverable via `--show`/`git show`)
++
++Chunks MUST be obtainable without restoring an entire workspace.
++
++### R4: Stable output
++
++For agent consumption:
++
++- `--format json` MUST emit a stable schema.
++- `--format text` MUST emit a stable, line-oriented format.
++
++## CLI contract
++
++### Search
++
++- `maw ws recover --search <pattern>`
++  - searches all recovery refs under `refs/manifold/recovery/`
++
++- `maw ws recover <workspace> --search <pattern>`
++  - searches only refs whose `<workspace>` component matches
++
++- `maw ws recover --ref <recovery-ref> --search <pattern>`
++  - searches only that snapshot
++
++Search flags:
++
++- `--context <N>`: include N lines of context before/after each match
++- `--max-hits <N>`: hard cap on total matches returned
++- `--regex`: treat pattern as regex (default is fixed-string)
++- `--ignore-case`
++- `--text`: treat binary blobs as text for search (default: skip binary)
++
++### Show exact bytes
++
++- `maw ws recover --ref <recovery-ref> --show <path>`
++
++This command MUST print exact bytes for `<path>` from the snapshot.
++
++### Restore
++
++- `maw ws recover --ref <recovery-ref> --to <new-workspace>`
++
++This command MUST restore the snapshot into a new workspace.
++
++## Test coverage
++
++Implementations MUST include harness tests that prove:
++
++- a known string in a tracked file is found by `--search`
++- a known string in an untracked file is found by `--search`
++- emitted chunks include provenance + correct line numbers
++- `--show` returns byte-equivalent content for a covered file
