@@ -29,10 +29,13 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::collections::BTreeMap;
+#[cfg(not(kani))]
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(kani))]
 use std::process::Command;
 
+#[cfg(not(kani))]
 use tempfile::Builder;
 
 use crate::model::conflict::{
@@ -103,6 +106,105 @@ pub struct ConflictRecord {
     /// was successfully extracted. Empty for other conflict reasons (add/add,
     /// modify/delete) or when the diff3 output could not be parsed.
     pub atoms: Vec<ConflictAtom>,
+}
+
+// ---------------------------------------------------------------------------
+// Pure classification (Kani-provable)
+// ---------------------------------------------------------------------------
+
+/// Pre-diff3 classification of a shared path.
+///
+/// This is the pure decision tree extracted from [`resolve_shared_path`]. It
+/// determines the merge outcome category without performing any I/O, allocation,
+/// or subprocess calls. The Kani proof harnesses verify algebraic properties
+/// (commutativity, idempotence, conflict monotonicity) directly on this function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedClassification {
+    /// All workspaces deleted the same path → resolved delete.
+    ResolvedDelete,
+    /// All non-delete variants have identical content → resolved upsert.
+    ResolvedIdentical,
+    /// Mix of delete and non-delete changes → conflict.
+    ConflictModifyDelete,
+    /// A non-delete entry has no content → conflict.
+    ConflictMissingContent,
+    /// All adds, different content, no base → conflict.
+    ConflictAddAddDifferent,
+    /// Different content, no base, not all adds → conflict.
+    ConflictMissingBase,
+    /// Different content with base available → needs diff3.
+    NeedsDiff3,
+}
+
+impl SharedClassification {
+    /// Whether this classification produces a definite outcome (not NeedsDiff3).
+    #[must_use]
+    pub const fn is_definite(self) -> bool {
+        !matches!(self, Self::NeedsDiff3)
+    }
+
+    /// Whether this classification is a conflict.
+    #[must_use]
+    pub const fn is_conflict(self) -> bool {
+        matches!(
+            self,
+            Self::ConflictModifyDelete
+                | Self::ConflictMissingContent
+                | Self::ConflictAddAddDifferent
+                | Self::ConflictMissingBase
+        )
+    }
+}
+
+/// Classify a shared path based on change kinds, content equality, and base
+/// presence.
+///
+/// This mirrors the decision tree in [`resolve_shared_path`] exactly:
+///
+/// 1. All deletions → [`ResolvedDelete`](SharedClassification::ResolvedDelete)
+/// 2. Mixed delete + non-delete → [`ConflictModifyDelete`](SharedClassification::ConflictModifyDelete)
+/// 3. Missing content on a non-delete → [`ConflictMissingContent`](SharedClassification::ConflictMissingContent)
+/// 4. All content equal → [`ResolvedIdentical`](SharedClassification::ResolvedIdentical)
+/// 5. No base, all adds → [`ConflictAddAddDifferent`](SharedClassification::ConflictAddAddDifferent)
+/// 6. No base, not all adds → [`ConflictMissingBase`](SharedClassification::ConflictMissingBase)
+/// 7. Has base → [`NeedsDiff3`](SharedClassification::NeedsDiff3)
+pub fn classify_shared_path(
+    kinds: &[ChangeKind],
+    all_have_content: bool,
+    all_content_equal: bool,
+    has_base: bool,
+) -> SharedClassification {
+    // Step 1: all deletions.
+    if kinds.iter().all(|k| matches!(k, ChangeKind::Deleted)) {
+        return SharedClassification::ResolvedDelete;
+    }
+
+    // Step 2: mixed delete + non-delete.
+    let has_delete = kinds.iter().any(|k| matches!(k, ChangeKind::Deleted));
+    if has_delete {
+        return SharedClassification::ConflictModifyDelete;
+    }
+
+    // Step 3: missing content on a non-delete entry.
+    if !all_have_content {
+        return SharedClassification::ConflictMissingContent;
+    }
+
+    // Step 4: all content equal (hash equality short-circuit).
+    if all_content_equal {
+        return SharedClassification::ResolvedIdentical;
+    }
+
+    // Step 5/6: no base.
+    if !has_base {
+        if kinds.iter().all(|k| matches!(k, ChangeKind::Added)) {
+            return SharedClassification::ConflictAddAddDifferent;
+        }
+        return SharedClassification::ConflictMissingBase;
+    }
+
+    // Step 7: different content, base available.
+    SharedClassification::NeedsDiff3
 }
 
 /// Output of the RESOLVE phase.
@@ -310,30 +412,40 @@ fn resolve_shared_path(
     entries: &[PathEntry],
     base: Option<&[u8]>,
 ) -> Result<SharedOutcome, ResolveError> {
-    // delete/delete[/...] => resolved delete
-    if entries.iter().all(PathEntry::is_deletion) {
-        return Ok(SharedOutcome::Resolved(ResolvedChange::Delete {
-            path: path.to_path_buf(),
-        }));
-    }
+    // Gather inputs for the pure classifier.
+    let kinds: Vec<ChangeKind> = entries.iter().map(|e| e.kind.clone()).collect();
+    let all_have_content = entries.iter().all(|e| e.is_deletion() || e.content.is_some());
+    let (variants, all_content_equal) = {
+        let mut vs: Vec<Vec<u8>> = Vec::new();
+        let mut all_eq = true;
+        for entry in entries {
+            if let Some(c) = &entry.content {
+                vs.push(c.clone());
+            }
+        }
+        if vs.len() >= 2 {
+            all_eq = all_blobs_equal(entries) || all_equal(&vs);
+        }
+        (vs, all_eq)
+    };
 
-    // Any deletion mixed with non-deletion => modify/delete conflict.
-    let has_delete = entries.iter().any(PathEntry::is_deletion);
-    let has_non_delete = entries.iter().any(|e| !e.is_deletion());
-    if has_delete && has_non_delete {
-        return Ok(SharedOutcome::Conflict(conflict_record(
-            path,
-            entries,
-            base,
-            ConflictReason::ModifyDelete,
-            vec![],
-        )));
-    }
-
-    // Remaining cases are all non-deletions; gather bytes.
-    let mut variants: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let Some(content) = &entry.content else {
+    // Pure classification — the Kani proofs verify properties of this function.
+    match classify_shared_path(&kinds, all_have_content, all_content_equal, base.is_some()) {
+        SharedClassification::ResolvedDelete => {
+            return Ok(SharedOutcome::Resolved(ResolvedChange::Delete {
+                path: path.to_path_buf(),
+            }));
+        }
+        SharedClassification::ConflictModifyDelete => {
+            return Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                base,
+                ConflictReason::ModifyDelete,
+                vec![],
+            )));
+        }
+        SharedClassification::ConflictMissingContent => {
             return Ok(SharedOutcome::Conflict(conflict_record(
                 path,
                 entries,
@@ -341,40 +453,36 @@ fn resolve_shared_path(
                 ConflictReason::MissingContent,
                 vec![],
             )));
-        };
-        variants.push(content.clone());
+        }
+        SharedClassification::ResolvedIdentical => {
+            return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+                path: path.to_path_buf(),
+                content: variants[0].clone(),
+            }));
+        }
+        SharedClassification::ConflictAddAddDifferent => {
+            return Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                None,
+                ConflictReason::AddAddDifferent,
+                vec![],
+            )));
+        }
+        SharedClassification::ConflictMissingBase => {
+            return Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                None,
+                ConflictReason::MissingBase,
+                vec![],
+            )));
+        }
+        SharedClassification::NeedsDiff3 => {} // fall through to diff3 below
     }
-
-    // Hash equality short-circuit.
-    //
-    // Prefer blob OID comparison when all entries carry one: O(1) per entry
-    // instead of O(file size). Fall back to byte equality when OIDs are
-    // absent (Phase 1 paths, tests, legacy workspaces).
-    if all_blobs_equal(entries) || all_equal(&variants) {
-        return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
-            path: path.to_path_buf(),
-            content: variants[0].clone(),
-        }));
-    }
-
-    // Without base, differing non-delete variants are add/add (or malformed)
-    // and cannot be auto-merged in Phase 1.
-    let Some(base_bytes) = base else {
-        let reason = if entries.iter().all(|e| matches!(e.kind, ChangeKind::Added)) {
-            ConflictReason::AddAddDifferent
-        } else {
-            ConflictReason::MissingBase
-        };
-        return Ok(SharedOutcome::Conflict(conflict_record(
-            path,
-            entries,
-            None,
-            reason,
-            vec![],
-        )));
-    };
 
     // K-way deterministic merge by folding pairwise diff3 against the same base.
+    let base_bytes = base.expect("NeedsDiff3 implies base is present");
     // Track the workspace names that contributed to the accumulated "ours" side
     // so that ConflictAtom edits can carry meaningful workspace labels.
     let mut merged = variants[0].clone();
@@ -627,6 +735,33 @@ enum Diff3Outcome {
 /// - `Ok(Diff3Outcome::Clean(bytes))` for clean merge (exit 0)
 /// - `Ok(Diff3Outcome::Conflict { marker_output })` for conflicts (exit 1)
 /// - `Err` for command/runtime failures
+///
+/// Under Kani, subprocess execution is not possible. The stub returns `Clean`
+/// when inputs are byte-equal and `Conflict` otherwise — sufficient for
+/// verifying merge algebra properties (commutativity, idempotence, conflict
+/// monotonicity) without the real diff3 implementation.
+#[cfg(kani)]
+fn diff3_merge_bytes(
+    _base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+) -> Result<Diff3Outcome, ResolveError> {
+    if ours == theirs {
+        Ok(Diff3Outcome::Clean(ours.to_vec()))
+    } else {
+        Ok(Diff3Outcome::Conflict {
+            marker_output: Vec::new(),
+        })
+    }
+}
+
+/// Run `git merge-file -p --diff3` for one 3-way merge.
+///
+/// Returns:
+/// - `Ok(Diff3Outcome::Clean(bytes))` for clean merge (exit 0)
+/// - `Ok(Diff3Outcome::Conflict { marker_output })` for conflicts (exit 1)
+/// - `Err` for command/runtime failures
+#[cfg(not(kani))]
 fn diff3_merge_bytes(
     base: &[u8],
     ours: &[u8],

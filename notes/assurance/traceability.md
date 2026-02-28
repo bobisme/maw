@@ -118,7 +118,7 @@ artifacts (Stateright actions, Kani proofs, guarantees) exercise it.
 |---|---|---|---|
 | `dst-fast` | Per-PR | 256 DST traces across crash/recovery boundaries | Stateright actions (Crash, Recover), oracle checks `check_g1..check_g4` |
 | `dst-nightly` | Nightly | 10,000 DST traces, broader parameter space | All Stateright actions, all oracle checks |
-| `formal-check` | Pre-release | Stateright model check (3 workspaces, 20 steps) + `cargo kani` | All Stateright safety/liveness properties, all 15 Kani proof harnesses |
+| `formal-check` | Pre-release | Stateright model check (3 workspaces, 20 steps) | All Stateright safety/liveness properties |
 | `contract-drift` | Nightly | Doc/code consistency (schema validation, invariant predicate alignment) | G5/G6 oracle checks, search schema validation |
 | `incident-replay` | Nightly | Historical failure corpus replay | Regression coverage for past DST/production failures |
 
@@ -129,7 +129,7 @@ artifacts (Stateright actions, Kani proofs, guarantees) exercise it.
 | Artifact Category | Implemented | Planned | Notes |
 |---|---|---|---|
 | Stateright model (`src/assurance/model.rs`) | 0/10 actions | 10/10 | Phase 4 deliverable; uses actual `MergePhase`/`MergeStateFile` types |
-| Kani proof harnesses (`src/merge/kani_proofs.rs`) | 15/15 | -- | All harnesses authored; awaiting `formal-check` CI gate |
+| Kani proof harnesses (`src/merge/kani_proofs.rs`) | 13/13 | -- | Pure algebra proofs on `classify_shared_path`; run with `cargo kani --no-default-features` |
 | Oracle functions (`check_g1..check_g6`) | 0/6 | 6/6 | Phase 2 deliverable; specified in `notes/assurance/invariants.md` section 4 |
 | DST scenarios (named `DST-G*-001`) | 0/4 | 4/4 | Phase 2-3 deliverable; `tests/concurrent_safety.rs` provides lightweight DST coverage |
 | CI gates | 0/5 | 5/5 | All gates specified; none wired into CI yet |
