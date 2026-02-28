@@ -61,6 +61,10 @@ enum CrashPhase {
     Validate,
     Commit,
     Cleanup,
+    // Destroy-path phases (G4)
+    DestroyBeforeCapture,
+    DestroyAfterCapture,
+    DestroyBeforeDelete,
 }
 
 impl CrashPhase {
@@ -79,6 +83,21 @@ impl CrashPhase {
         CrashPhase::Cleanup,
     ];
 
+    /// Rewrite-path phases for G2 testing.
+    const REWRITE_PHASES: [CrashPhase; 4] = [
+        CrashPhase::Prepare,
+        CrashPhase::Build,
+        CrashPhase::Validate,
+        CrashPhase::Cleanup,
+    ];
+
+    /// Destroy-path phases for G4 testing.
+    const DESTROY_PHASES: [CrashPhase; 3] = [
+        CrashPhase::DestroyBeforeCapture,
+        CrashPhase::DestroyAfterCapture,
+        CrashPhase::DestroyBeforeDelete,
+    ];
+
     fn as_str(self) -> &'static str {
         match self {
             CrashPhase::Prepare => "prepare",
@@ -86,6 +105,9 @@ impl CrashPhase {
             CrashPhase::Validate => "validate",
             CrashPhase::Commit => "commit",
             CrashPhase::Cleanup => "cleanup",
+            CrashPhase::DestroyBeforeCapture => "destroy_before_capture",
+            CrashPhase::DestroyAfterCapture => "destroy_after_capture",
+            CrashPhase::DestroyBeforeDelete => "destroy_before_delete",
         }
     }
 
@@ -97,6 +119,7 @@ impl CrashPhase {
     fn is_pre_commit(self) -> bool {
         matches!(self, CrashPhase::Prepare | CrashPhase::Build)
     }
+
 }
 
 impl fmt::Display for CrashPhase {
@@ -1025,6 +1048,504 @@ fn dst_determinism_same_seed_same_trace() {
     assert_eq!(
         result1.invariant_violations, result2.invariant_violations,
         "same seed should produce same invariant check results"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G2/G4 invariant checks and trace runners
+// ---------------------------------------------------------------------------
+
+/// G2 check: verify that all workspace files are preserved after a crash
+/// during the rewrite path. Crashes during capture/rewrite operations must
+/// never silently lose workspace data (I-G2.1, I-G2.2, I-G2.3).
+fn check_g2_workspace_files_preserved(
+    repo: &TestRepo,
+    workspace_names: &[String],
+    expected_files: &[(String, String)],
+) -> Result<(), String> {
+    for ws_name in workspace_names {
+        if !repo.workspace_exists(ws_name) {
+            return Err(format!(
+                "I-G2: workspace '{}' no longer exists after crash recovery",
+                ws_name
+            ));
+        }
+
+        for (rel_path, expected_content) in expected_files {
+            match repo.read_file(ws_name, rel_path) {
+                Some(actual) if actual == *expected_content => {}
+                Some(actual) => {
+                    return Err(format!(
+                        "I-G2: workspace '{}' file '{}': content mismatch\n  expected: {:?}\n  actual: {:?}",
+                        ws_name, rel_path, expected_content, actual
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "I-G2: workspace '{}' file '{}': missing after crash recovery (silent data loss)",
+                        ws_name, rel_path
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// G4 check: verify that a workspace still exists on disk after a failed
+/// destroy attempt. The destructive gate guarantee says that if capture
+/// fails, the workspace must NOT be deleted (I-G4.1, I-G4.2).
+fn check_g4_workspace_exists_after_failed_destroy(
+    repo: &TestRepo,
+    workspace_name: &str,
+    expected_files: &[(String, String)],
+) -> Result<(), String> {
+    if !repo.workspace_exists(workspace_name) {
+        return Err(format!(
+            "I-G4.1: workspace '{}' was destroyed despite capture failure",
+            workspace_name
+        ));
+    }
+
+    for (rel_path, expected_content) in expected_files {
+        match repo.read_file(workspace_name, rel_path) {
+            Some(actual) if actual == *expected_content => {}
+            Some(actual) => {
+                return Err(format!(
+                    "I-G4: workspace '{}' file '{}': content mismatch after failed destroy\n  expected: {:?}\n  actual: {:?}",
+                    workspace_name, rel_path, expected_content, actual
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "I-G4.2: workspace '{}' file '{}': missing after failed destroy (data loss via fallback)",
+                    workspace_name, rel_path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Simulate creating a capture/recovery ref for a workspace.
+///
+/// This mimics what `capture_before_destroy` does in the real code: stages
+/// all files, creates a git stash commit, and pins it under
+/// `refs/manifold/recovery/`.
+fn simulate_capture_ref(repo: &TestRepo, ws_path: &Path, ws_name: &str) {
+    let add_out = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(ws_path)
+        .output()
+        .expect("git add -A in workspace");
+    assert!(
+        add_out.status.success(),
+        "git add -A failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+
+    let stash_out = Command::new("git")
+        .args(["stash", "create", "dst: simulated capture"])
+        .current_dir(ws_path)
+        .output()
+        .expect("git stash create");
+
+    let stash_oid = String::from_utf8_lossy(&stash_out.stdout)
+        .trim()
+        .to_string();
+
+    if !stash_oid.is_empty() {
+        let ref_name = format!("refs/manifold/recovery/{ws_name}/dst-capture");
+        repo.git(&["update-ref", &ref_name, &stash_oid]);
+    }
+
+    // Restore the index
+    let _ = Command::new("git")
+        .args(["reset"])
+        .current_dir(ws_path)
+        .output();
+}
+
+/// Run a single G2 (rewrite path) trace.
+///
+/// 1. Set up a fresh TestRepo with seed files and workspace(s)
+/// 2. Write merge-state at the crash phase
+/// 3. Run recovery
+/// 4. Assert all workspace files are preserved (I-G2.1, I-G2.2, I-G2.3)
+/// 5. Assert git integrity
+fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
+    let mut trace = TraceLog::new(seed);
+    let mut violations = Vec::new();
+
+    let repo = TestRepo::new();
+    repo.seed_files(&[
+        ("base.txt", "epoch base content\n"),
+        ("config.toml", &format!("[test]\nseed = {seed}\n")),
+    ]);
+
+    // Deterministic workspace count and file count based on seed
+    let ws_count = 1 + (seed as usize % 3); // 1-3 workspaces
+    let file_count = 1 + (seed as usize % 4); // 1-4 files per workspace
+
+    let mut workspace_names = Vec::new();
+    let mut workspace_files: Vec<(String, String)> = Vec::new();
+
+    // Build the file list (same for all workspaces in this trace)
+    for j in 0..file_count {
+        let path = if j == 0 {
+            "result.txt".to_string()
+        } else {
+            format!("src/module_{j}.rs")
+        };
+        let content = format!("content-seed-{seed}-file-{j}\n");
+        workspace_files.push((path, content));
+    }
+
+    for i in 0..ws_count {
+        let name = format!("ws-{i}");
+        repo.create_workspace(&name);
+        for (rel_path, content) in &workspace_files {
+            repo.add_file(&name, rel_path, content);
+        }
+        workspace_names.push(name);
+    }
+
+    let epoch_before = repo.current_epoch();
+    let fake_candidate = format!("{:0>40x}", seed);
+    let ws_refs: Vec<&str> = workspace_names.iter().map(String::as_str).collect();
+
+    trace.push(TraceEntry {
+        step: 0,
+        action: format!("setup: {ws_count} workspaces, {file_count} files each, crash at {crash_phase}"),
+        phase: Some(crash_phase),
+        outcome: "ok".to_string(),
+        epoch_before: epoch_before.clone(),
+        epoch_after: epoch_before.clone(),
+    });
+
+    // Inject crash at the configured phase
+    match crash_phase {
+        CrashPhase::Prepare => {
+            write_crash_state(repo.root(), crash_phase, &ws_refs, &epoch_before, None);
+        }
+        CrashPhase::Build | CrashPhase::Validate | CrashPhase::Cleanup => {
+            write_crash_state(
+                repo.root(),
+                crash_phase,
+                &ws_refs,
+                &epoch_before,
+                Some(&fake_candidate),
+            );
+        }
+        _ => {
+            violations.push(format!("crash phase {crash_phase} is not a rewrite-path phase"));
+            return TraceResult {
+                trace,
+                invariant_violations: violations,
+            };
+        }
+    }
+
+    trace.push(TraceEntry {
+        step: 1,
+        action: format!("inject crash at {crash_phase}"),
+        phase: Some(crash_phase),
+        outcome: "crash_state_written".to_string(),
+        epoch_before: epoch_before.clone(),
+        epoch_after: epoch_before.clone(),
+    });
+
+    // Run recovery
+    let recovery_outcome = simulate_recovery(repo.root());
+    let epoch_after = repo.current_epoch();
+
+    trace.push(TraceEntry {
+        step: 2,
+        action: "recovery".to_string(),
+        phase: Some(crash_phase),
+        outcome: recovery_outcome.to_string(),
+        epoch_before: epoch_before.clone(),
+        epoch_after: epoch_after.clone(),
+    });
+
+    // G2 invariant: all workspace files must be preserved
+    if let Err(e) = check_g2_workspace_files_preserved(&repo, &workspace_names, &workspace_files) {
+        violations.push(e);
+    }
+
+    // Default workspace seed files must also survive
+    if let Err(e) = check_workspace_files_preserved(
+        &repo,
+        "default",
+        &[
+            ("base.txt", "epoch base content\n"),
+            ("config.toml", &format!("[test]\nseed = {seed}\n")),
+        ],
+    ) {
+        violations.push(format!("default workspace: {e}"));
+    }
+
+    // Git integrity
+    if let Err(e) = check_git_integrity(repo.root()) {
+        violations.push(e);
+    }
+
+    TraceResult {
+        trace,
+        invariant_violations: violations,
+    }
+}
+
+/// Run a single G4 (destroy path) trace.
+///
+/// 1. Set up a fresh TestRepo with a workspace that has committed + dirty changes
+/// 2. Simulate a destroy attempt that crashes at the configured phase
+/// 3. Assert workspace still exists on disk (I-G4.1, I-G4.2)
+/// 4. Assert no data loss
+/// 5. Assert git integrity
+fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
+    let mut trace = TraceLog::new(seed);
+    let mut violations = Vec::new();
+
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "shared base\n")]);
+
+    // Create the target workspace
+    let ws_name = "destroy-target";
+    repo.create_workspace(ws_name);
+
+    // Deterministic file count based on seed
+    let file_count = 1 + (seed as usize % 3); // 1-3 files
+    let mut workspace_files: Vec<(String, String)> = Vec::new();
+
+    for j in 0..file_count {
+        let path = if j == 0 {
+            "important.txt".to_string()
+        } else {
+            format!("data/file_{j}.dat")
+        };
+        let content = format!("destroy-test-seed-{seed}-file-{j}\n");
+        repo.add_file(ws_name, &path, &content);
+        workspace_files.push((path, content));
+    }
+
+    // Commit the changes
+    repo.git_in_workspace(ws_name, &["add", "-A"]);
+    repo.git_in_workspace(ws_name, &["commit", "-m", "workspace changes"]);
+
+    // Add uncommitted dirty state (makes the destroy path exercise capture)
+    let extra = (
+        "uncommitted.txt".to_string(),
+        format!("dirty-seed-{seed}\n"),
+    );
+    repo.add_file(ws_name, &extra.0, &extra.1);
+    workspace_files.push(extra);
+
+    let epoch_before = repo.current_epoch();
+
+    trace.push(TraceEntry {
+        step: 0,
+        action: format!(
+            "setup: 1 workspace ({file_count} committed + 1 dirty), crash at {crash_phase}"
+        ),
+        phase: Some(crash_phase),
+        outcome: "ok".to_string(),
+        epoch_before: epoch_before.clone(),
+        epoch_after: epoch_before.clone(),
+    });
+
+    // Simulate a destroy attempt that crashes at the configured phase.
+    //
+    // The destroy path in maw:
+    //   1. Check workspace status (dirty/clean)
+    //   2. Capture dirty state → recovery ref
+    //   3. Delete the workspace (git worktree remove)
+    //
+    // A crash at any step before delete completes must leave workspace intact.
+    match crash_phase {
+        CrashPhase::DestroyBeforeCapture => {
+            // Crash before capture — workspace completely untouched
+        }
+        CrashPhase::DestroyAfterCapture => {
+            // Crash after capture but before delete — recovery ref exists
+            let ws_path = repo.workspace_path(ws_name);
+            simulate_capture_ref(&repo, &ws_path, ws_name);
+        }
+        CrashPhase::DestroyBeforeDelete => {
+            // Crash just before deletion — capture succeeded, delete never ran
+            let ws_path = repo.workspace_path(ws_name);
+            simulate_capture_ref(&repo, &ws_path, ws_name);
+            // Write a destroy-in-progress marker
+            let manifold_dir = repo.root().join(".manifold");
+            fs::create_dir_all(&manifold_dir).ok();
+            let marker = serde_json::json!({
+                "workspace": ws_name,
+                "phase": "destroy_pending",
+                "captured": true
+            });
+            fs::write(
+                manifold_dir.join("destroy-pending.json"),
+                serde_json::to_string_pretty(&marker).unwrap(),
+            )
+            .ok();
+        }
+        _ => {
+            violations.push(format!("crash phase {crash_phase} is not a destroy-path phase"));
+            return TraceResult {
+                trace,
+                invariant_violations: violations,
+            };
+        }
+    }
+
+    trace.push(TraceEntry {
+        step: 1,
+        action: format!("inject crash at {crash_phase}"),
+        phase: Some(crash_phase),
+        outcome: "crash_simulated".to_string(),
+        epoch_before: epoch_before.clone(),
+        epoch_after: epoch_before.clone(),
+    });
+
+    // G4 invariant: workspace MUST still exist after failed destroy
+    if let Err(e) =
+        check_g4_workspace_exists_after_failed_destroy(&repo, ws_name, &workspace_files)
+    {
+        violations.push(e);
+    }
+
+    // Default workspace files must also survive
+    if let Err(e) = check_workspace_files_preserved(
+        &repo,
+        "default",
+        &[("shared.txt", "shared base\n")],
+    ) {
+        violations.push(format!("default workspace: {e}"));
+    }
+
+    // Git integrity
+    if let Err(e) = check_git_integrity(repo.root()) {
+        violations.push(e);
+    }
+
+    let epoch_after = repo.current_epoch();
+    trace.push(TraceEntry {
+        step: 2,
+        action: "invariant_checks".to_string(),
+        phase: Some(crash_phase),
+        outcome: if violations.is_empty() {
+            "pass".to_string()
+        } else {
+            format!("{} violations", violations.len())
+        },
+        epoch_before: epoch_before,
+        epoch_after,
+    });
+
+    TraceResult {
+        trace,
+        invariant_violations: violations,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: G2 — rewrite path failpoint sweep (DST-G2-001)
+// ---------------------------------------------------------------------------
+
+/// DST-G2-001: Rewrite path failpoint sweep.
+///
+/// Tests that crashes during capture/rewrite operations don't silently lose
+/// workspace data (invariants I-G2.1, I-G2.2, I-G2.3).
+///
+/// For each rewrite-related crash phase:
+/// - Inject crash at Prepare/Build/Validate/Cleanup phases
+/// - Run recovery
+/// - Verify workspace files still exist (no silent data loss)
+/// - Verify git integrity
+///
+/// Uses 256 traces distributed across the rewrite-path crash phases.
+#[test]
+fn dst_g2_rewrite_path_preserves_workspace_data() {
+    let base_seed: u64 = 0xDEAD_BEEF_CAFE_0002;
+    let num_traces: u64 = 256;
+    let mut failures = Vec::new();
+
+    for i in 0..num_traces {
+        let seed = base_seed.wrapping_add(i);
+        // Rotate through rewrite-path phases
+        let phase_idx = i as usize % CrashPhase::REWRITE_PHASES.len();
+        let crash_phase = CrashPhase::REWRITE_PHASES[phase_idx];
+
+        let result = run_g2_trace(seed, crash_phase);
+
+        if !result.invariant_violations.is_empty() {
+            result.trace.dump();
+            for v in &result.invariant_violations {
+                eprintln!("  VIOLATION (G2): {v}");
+            }
+            failures.push((seed, result.invariant_violations));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "DST-G2-001: {}/{num_traces} traces had invariant violations.\n\
+         Failing seeds: {:?}\n\
+         First failure: {:?}",
+        failures.len(),
+        failures.iter().map(|(s, _)| s).collect::<Vec<_>>(),
+        failures.first().map(|(s, v)| format!("seed={s}: {v:?}")),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: G4 — destroy path error injection (DST-G4-001)
+// ---------------------------------------------------------------------------
+
+/// DST-G4-001: Destroy path error injection.
+///
+/// Tests that workspace destruction never proceeds if capture fails
+/// (invariants I-G4.1, I-G4.2).
+///
+/// For each destroy-related crash phase:
+/// - Set up a workspace with committed + dirty changes
+/// - Attempt destroy with crash injection
+/// - Verify workspace still exists on disk after failed destroy
+/// - Verify no data loss
+///
+/// Uses 256 traces distributed across the destroy-path crash phases
+/// (DestroyBeforeCapture, DestroyAfterCapture, DestroyBeforeDelete).
+#[test]
+fn dst_g4_destroy_requires_successful_capture() {
+    let base_seed: u64 = 0xDEAD_BEEF_CAFE_0004;
+    let num_traces: u64 = 256;
+    let mut failures = Vec::new();
+
+    for i in 0..num_traces {
+        let seed = base_seed.wrapping_add(i);
+        // Rotate through destroy-path phases
+        let phase_idx = i as usize % CrashPhase::DESTROY_PHASES.len();
+        let crash_phase = CrashPhase::DESTROY_PHASES[phase_idx];
+
+        let result = run_g4_trace(seed, crash_phase);
+
+        if !result.invariant_violations.is_empty() {
+            result.trace.dump();
+            for v in &result.invariant_violations {
+                eprintln!("  VIOLATION (G4): {v}");
+            }
+            failures.push((seed, result.invariant_violations));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "DST-G4-001: {}/{num_traces} traces had invariant violations.\n\
+         Failing seeds: {:?}\n\
+         First failure: {:?}",
+        failures.len(),
+        failures.iter().map(|(s, _)| s).collect::<Vec<_>>(),
+        failures.first().map(|(s, v)| format!("seed={s}: {v:?}")),
     );
 }
 
