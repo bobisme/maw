@@ -222,12 +222,16 @@ pub fn run_build_phase<B: WorkspaceBackend>(
 
     // 2. Advance to BUILD (fsync — crash after this means recovery aborts)
     let now = now_secs();
+    crate::fp!("FP_BUILD_BEFORE_WORKTREE_ADD").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
     state.advance(MergePhase::Build, now)?;
     state.write_atomic(&state_path)?;
+    crate::fp!("FP_BUILD_AFTER_WORKTREE_ADD").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
 
     // Run the pipeline and capture the result. On error, the merge-state
     // stays in Build phase — recovery will abort it.
+    crate::fp!("FP_BUILD_BEFORE_MERGE_COMPUTE").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
     let output = run_pipeline(repo_root, backend, &state, &config.merge)?;
+    crate::fp!("FP_BUILD_AFTER_MERGE_COMPUTE").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
 
     // 8. Record candidate OID in merge-state (fsync)
     state.epoch_candidate = Some(output.candidate.clone());

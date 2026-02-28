@@ -80,6 +80,9 @@ pub enum PrepareError {
     State(MergeStateError),
     /// Git command failed.
     GitError(String),
+    /// Failpoint injection (assurance testing only).
+    #[cfg(feature = "failpoints")]
+    Failpoint(String),
 }
 
 impl fmt::Display for PrepareError {
@@ -106,6 +109,8 @@ impl fmt::Display for PrepareError {
             }
             Self::State(e) => write!(f, "PREPARE: {e}"),
             Self::GitError(detail) => write!(f, "PREPARE: git error: {detail}"),
+            #[cfg(feature = "failpoints")]
+            Self::Failpoint(name) => write!(f, "PREPARE: failpoint fired: {name}"),
         }
     }
 }
@@ -319,6 +324,7 @@ pub fn run_prepare_phase_with_epoch(
 
     // Try exclusive creation (O_CREAT | O_EXCL) — first writer wins
     let state_path = MergeStateFile::default_path(manifold_dir);
+    crate::fp!("FP_PREPARE_BEFORE_STATE_WRITE").map_err(|e| PrepareError::GitError(e.to_string()))?;
     if !state.write_exclusive(&state_path)? {
         // File already exists — check if it's safe to overwrite
         match MergeStateFile::read(&state_path) {
@@ -331,6 +337,7 @@ pub fn run_prepare_phase_with_epoch(
             }
         }
     }
+    crate::fp!("FP_PREPARE_AFTER_STATE_WRITE").map_err(|e| PrepareError::GitError(e.to_string()))?;
 
     Ok(FrozenInputs { epoch, heads })
 }

@@ -305,6 +305,7 @@ pub fn search(
     let mut truncated = false;
     let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
 
+    crate::fp!("FP_RECOVER_BEFORE_SEARCH")?;
     'scan: for r in &refs {
         let grep_hits = git_grep_hits(&git_cwd, &r.oid, pattern, regex, ignore_case, text)?;
         for gh in grep_hits {
@@ -1011,6 +1012,7 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
 }
 
 pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
+    crate::fp!("FP_RECOVER_BEFORE_RESTORE")?;
     validate_workspace_name(name)?;
     validate_workspace_name(new_name)?;
 

@@ -314,6 +314,7 @@ pub fn run_validate_phase(
     }
 
     // 3. Run validation commands in sequence
+    crate::fp!("FP_VALIDATE_BEFORE_CHECK").map_err(|e| ValidateError::CommandSpawn(e.to_string()))?;
     let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
     let result = run_commands_pipeline(&cmd_refs, &worktree_dir, config.timeout_seconds);
 
@@ -322,6 +323,7 @@ pub fn run_validate_phase(
     let _ = fs::remove_dir_all(&worktree_dir);
 
     let result = result?;
+    crate::fp!("FP_VALIDATE_AFTER_CHECK").map_err(|e| ValidateError::CommandSpawn(e.to_string()))?;
 
     // 5. Apply on_failure policy
     Ok(apply_policy(&result, &config.on_failure))

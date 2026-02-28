@@ -3140,6 +3140,7 @@ fn handle_post_merge_destroy(
         };
 
         // --- Step 2: Capture dirty state and pin recovery ref ---
+        crate::fp!("FP_DESTROY_BEFORE_CAPTURE")?;
         let capture_result = capture_before_destroy(&ws_path, ws_name, base_epoch.oid());
         let capture = match capture_result {
             Ok(c) => c,
@@ -3180,6 +3181,7 @@ fn handle_post_merge_destroy(
         if let Err(ref e) = artifact_path_result {
             tracing::warn!("Failed to write destroy record for '{ws_name}': {e}");
         }
+        crate::fp!("FP_DESTROY_AFTER_RECORD")?;
 
         if let Some(ref c) = capture {
             if text_mode {
@@ -3210,6 +3212,7 @@ fn handle_post_merge_destroy(
         // --- Step 4: Destroy the workspace ---
         match backend.destroy(&ws_id) {
             Ok(()) => {
+                crate::fp!("FP_DESTROY_AFTER_DELETE")?;
                 if text_mode {
                     if capture.is_some() {
                         println!("    Destroyed: {ws_name} (snapshot saved)");
