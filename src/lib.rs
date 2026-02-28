@@ -5,6 +5,7 @@
 //! and model types directly without going through the CLI.
 
 pub mod backend;
+pub mod failpoints;
 pub mod config;
 pub mod epoch_gc;
 pub mod eval;

@@ -5,6 +5,7 @@ use clap_complete::Shell;
 
 mod agents;
 mod backend;
+pub mod failpoints;
 mod config;
 mod doctor;
 mod epoch;
