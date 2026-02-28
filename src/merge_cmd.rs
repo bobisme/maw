@@ -22,14 +22,16 @@ use crate::workspace::{MawConfig, get_backend, repo_root};
 pub enum MergeCommands {
     /// Promote a quarantine workspace to a committed epoch.
     ///
-    /// Re-runs validation in the quarantine workspace. If validation passes,
-    /// advances the epoch and branch refs and cleans up the quarantine.
+    /// Re-runs validation in the quarantine workspace. If validation
+    /// passes, advances the epoch and branch refs and cleans up the
+    /// quarantine.
     ///
-    /// The quarantine workspace is a normal git worktree — you can edit files
-    /// in it to fix the build failure before running promote.
+    /// The quarantine workspace is a normal git worktree -- you can
+    /// edit files in it to fix the build failure before running promote.
     ///
     /// Examples:
-    ///   maw merge promote abc123def456   # promote quarantine with given id
+    ///   maw merge promote abc123def456
+    #[command(verbatim_doc_comment)]
     Promote {
         /// Quarantine ID (first 12 characters of the candidate commit OID).
         merge_id: String,
@@ -38,13 +40,14 @@ pub enum MergeCommands {
     /// Abandon (discard) a quarantine workspace.
     ///
     /// Removes the quarantine workspace directory and its state file.
-    /// Source workspaces are NOT affected — the merge can be retried
+    /// Source workspaces are NOT affected -- the merge can be retried
     /// separately with `maw ws merge`.
     ///
     /// This operation is idempotent.
     ///
     /// Examples:
     ///   maw merge abandon abc123def456   # discard quarantine
+    #[command(verbatim_doc_comment)]
     Abandon {
         /// Quarantine ID (first 12 characters of the candidate commit OID).
         merge_id: String,
@@ -57,6 +60,7 @@ pub enum MergeCommands {
     ///
     /// Examples:
     ///   maw merge list
+    #[command(verbatim_doc_comment)]
     List,
 }
 

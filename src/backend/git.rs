@@ -291,6 +291,22 @@ impl WorkspaceBackend for GitWorktreeBackend {
             });
         }
 
+        // Record the creation epoch so status() can distinguish
+        // "HEAD advanced because the agent committed" from "HEAD is the epoch".
+        let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
+        let epoch_oid = GitOid::new(epoch.as_str()).map_err(|e| GitBackendError::GitCommand {
+            command: "record workspace epoch".to_owned(),
+            stderr: format!("invalid epoch OID: {e}"),
+            exit_code: None,
+        })?;
+        manifold_refs::write_ref(&self.root, &epoch_ref, &epoch_oid).map_err(|e| {
+            GitBackendError::GitCommand {
+                command: format!("git update-ref {epoch_ref}"),
+                stderr: e.to_string(),
+                exit_code: None,
+            }
+        })?;
+
         Ok(WorkspaceInfo {
             id: name.clone(),
             path,
@@ -344,6 +360,10 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // Prune Level 1 materialized workspace ref if present.
         let ws_ref = manifold_refs::workspace_state_ref(name.as_str());
         let _ = manifold_refs::delete_ref(&self.root, &ws_ref);
+
+        // Prune per-workspace creation epoch ref if present.
+        let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
+        let _ = manifold_refs::delete_ref(&self.root, &epoch_ref);
 
         Ok(())
     }
@@ -414,9 +434,18 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 continue;
             };
 
-            let Ok(epoch) = EpochId::new(head_str.trim()) else {
+            let Ok(head_epoch) = EpochId::new(head_str.trim()) else {
                 // Invalid OID (e.g., detached with no commits); skip.
                 continue;
+            };
+
+            // Resolve the base epoch: prefer the recorded per-workspace epoch
+            // ref (set at creation time), falling back to HEAD for backward
+            // compat with workspaces created before the ref was introduced.
+            let epoch_ref = manifold_refs::workspace_epoch_ref(name_str);
+            let epoch = match manifold_refs::read_ref(&self.root, &epoch_ref) {
+                Ok(Some(oid)) => EpochId::new(oid.as_str()).unwrap_or(head_epoch.clone()),
+                _ => head_epoch.clone(),
             };
 
             // Use ancestry to distinguish cases:
@@ -426,12 +455,24 @@ impl WorkspaceBackend for GitWorktreeBackend {
             //
             // The old equality check treated case 2 as Stale {behind_epochs: 0},
             // causing maw ws sync --all to wipe committed work.
+            //
+            // Note: staleness is checked against `epoch` (creation epoch), not
+            // HEAD, because HEAD may have advanced via agent commits.
             let (state, commits_ahead) = match &current_epoch {
-                Some(current) if epoch == *current => (WorkspaceState::Active, 0),
+                Some(current) if epoch == *current => {
+                    // Workspace is at the current epoch; count agent commits.
+                    let ahead = if head_epoch != epoch {
+                        self.count_commits_between(epoch.as_str(), head_epoch.as_str())
+                            .unwrap_or(1)
+                    } else {
+                        0
+                    };
+                    (WorkspaceState::Active, ahead)
+                }
                 Some(current) => {
                     if self.is_ancestor(current.as_str(), epoch.as_str()) {
                         let ahead = self
-                            .count_commits_between(current.as_str(), epoch.as_str())
+                            .count_commits_between(current.as_str(), head_epoch.as_str())
                             .unwrap_or(1);
                         (WorkspaceState::Active, ahead)
                     } else {
@@ -473,15 +514,35 @@ impl WorkspaceBackend for GitWorktreeBackend {
             });
         }
 
-        // The workspace HEAD is the epoch commit it was created at.
-        // Agents make working-tree changes only (no commits), so HEAD is stable.
-        let head_str = Self::git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
-        let base_epoch =
-            EpochId::new(head_str.trim()).map_err(|e| GitBackendError::GitCommand {
-                command: "git rev-parse HEAD".to_owned(),
-                stderr: format!("invalid OID from HEAD: {e}"),
-                exit_code: None,
-            })?;
+        // Resolve the base epoch: prefer the recorded per-workspace epoch ref
+        // (set at creation time), falling back to HEAD for backward compat
+        // with workspaces created before this ref was introduced.
+        //
+        // The per-workspace epoch ref is critical because agents may commit
+        // inside a workspace, advancing HEAD beyond the creation epoch. Using
+        // HEAD as base_epoch would hide those committed changes from both the
+        // patchset guard and the pre-destroy capture.
+        let base_epoch = {
+            let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
+            match manifold_refs::read_ref(&self.root, &epoch_ref) {
+                Ok(Some(oid)) => {
+                    EpochId::new(oid.as_str()).map_err(|e| GitBackendError::GitCommand {
+                        command: format!("read {epoch_ref}"),
+                        stderr: format!("invalid OID from workspace epoch ref: {e}"),
+                        exit_code: None,
+                    })?
+                }
+                _ => {
+                    // Fallback: use HEAD (correct for workspaces without commits).
+                    let head_str = Self::git_stdout_in(&ws_path, &["rev-parse", "HEAD"])?;
+                    EpochId::new(head_str.trim()).map_err(|e| GitBackendError::GitCommand {
+                        command: "git rev-parse HEAD".to_owned(),
+                        stderr: format!("invalid OID from HEAD: {e}"),
+                        exit_code: None,
+                    })?
+                }
+            }
+        };
 
         // Collect dirty files: tracked modifications + untracked files.
         let status_output = Self::git_stdout_in(&ws_path, &["status", "--porcelain"])?;
@@ -1758,5 +1819,73 @@ mod tests {
 
         let err = GitBackendError::NotImplemented("destroy");
         assert!(format!("{err}").contains("destroy"));
+    }
+
+    // -- workspace epoch ref tests --
+
+    #[test]
+    fn test_create_records_workspace_epoch_ref() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("epoch-ref-ws").unwrap();
+
+        backend.create(&ws_name, &epoch).unwrap();
+
+        // The per-workspace epoch ref should exist and match the creation epoch
+        let epoch_ref = manifold_refs::workspace_epoch_ref("epoch-ref-ws");
+        let stored = manifold_refs::read_ref(&root, &epoch_ref).unwrap();
+        assert_eq!(
+            stored,
+            Some(epoch.oid().clone()),
+            "workspace epoch ref should be set to creation epoch"
+        );
+
+        // After destroy, the ref should be cleaned up
+        backend.destroy(&ws_name).unwrap();
+        let stored = manifold_refs::read_ref(&root, &epoch_ref).unwrap();
+        assert!(stored.is_none(), "workspace epoch ref should be pruned on destroy");
+    }
+
+    #[test]
+    fn test_status_base_epoch_stable_after_agent_commit() {
+        // Regression: status().base_epoch was derived from HEAD, so when an
+        // agent committed work (advancing HEAD), base_epoch would advance too.
+        // This caused capture_before_destroy to see HEAD == base_epoch and
+        // skip the capture, losing committed work on destroy.
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("commit-ws").unwrap();
+        let info = backend.create(&ws_name, &epoch).unwrap();
+
+        // Simulate an agent committing inside the workspace
+        fs::write(info.path.join("work.rs"), "fn work() {}").unwrap();
+        Command::new("git")
+            .args(["add", "work.rs"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "agent work"])
+            .current_dir(&info.path)
+            .output()
+            .unwrap();
+
+        // HEAD has advanced, but status().base_epoch must still be the
+        // original creation epoch
+        let status = backend.status(&ws_name).unwrap();
+        assert_eq!(
+            status.base_epoch, epoch,
+            "base_epoch should be the creation epoch, not HEAD"
+        );
+
+        // The workspace HEAD should differ from base_epoch
+        let head_str = GitWorktreeBackend::git_stdout_in(&info.path, &["rev-parse", "HEAD"]).unwrap();
+        let head_epoch = EpochId::new(head_str.trim()).unwrap();
+        assert_ne!(
+            head_epoch, epoch,
+            "HEAD should have advanced beyond creation epoch"
+        );
     }
 }

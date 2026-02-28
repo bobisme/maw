@@ -213,6 +213,14 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         );
     }
 
+    // Update the per-workspace creation epoch ref to the new epoch.
+    // After sync, the workspace is rebased onto the new epoch, so
+    // the epoch ref should reflect the new base.
+    if let Ok(oid) = crate::model::types::GitOid::new(epoch_oid) {
+        let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
+        let _ = manifold_refs::write_ref(root, &epoch_ref, &oid);
+    }
+
     println!(
         "  \u{2713} {ws_name} - synced to epoch {}",
         &epoch_oid[..12]

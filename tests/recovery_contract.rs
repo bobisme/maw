@@ -107,7 +107,7 @@ fn standalone_destroy_dirty_workspace_emits_recovery_surface() {
 }
 
 // ---------------------------------------------------------------------------
-// IT-G5-003b: Merge --destroy emits all 5 fields
+// IT-G5-003b: Merge --destroy --verbose emits all 5 fields
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -120,10 +120,11 @@ fn merge_destroy_emits_recovery_surface_for_dirty_workspace() {
     // Also add an uncommitted file that will be captured
     repo.add_file("merge-contract", "leftover.txt", "uncommitted\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "merge-contract", "--destroy"]);
+    // --verbose is required to get full RECOVERY_SURFACE output
+    let out = repo.maw_raw(&["ws", "merge", "merge-contract", "--destroy", "--verbose"]);
     assert!(
         out.status.success(),
-        "merge --destroy should succeed.\nstdout: {}\nstderr: {}",
+        "merge --destroy --verbose should succeed.\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -137,6 +138,43 @@ fn merge_destroy_emits_recovery_surface_for_dirty_workspace() {
 
     let result = extract_field(&stderr, "result:");
     assert_eq!(result, Some("success"), "merge should report success");
+}
+
+// ---------------------------------------------------------------------------
+// IT-G5-003e: Merge --destroy (no --verbose) omits full surface, shows short line
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_destroy_without_verbose_omits_recovery_surface() {
+    let repo = TestRepo::new();
+
+    repo.create_workspace("merge-short");
+    repo.add_file("merge-short", "committed.txt", "merged content\n");
+    repo.add_file("merge-short", "leftover.txt", "uncommitted\n");
+
+    let out = repo.maw_raw(&["ws", "merge", "merge-short", "--destroy"]);
+    assert!(
+        out.status.success(),
+        "merge --destroy should succeed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("RECOVERY_SURFACE"),
+        "without --verbose, RECOVERY_SURFACE should not appear on stderr.\nstderr:\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Destroyed: merge-short (snapshot saved"),
+        "short success line should appear on stdout.\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("maw ws recover merge-short"),
+        "short line should include recover command.\nstdout:\n{stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------

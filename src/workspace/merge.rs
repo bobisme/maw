@@ -1927,6 +1927,8 @@ pub struct MergeOptions<'a> {
     /// Resolve all remaining conflicts to this workspace name.
     /// Individual `--resolve` flags take precedence.
     pub resolve_all: Option<String>,
+    /// Show verbose output (full recovery surface details on destroy).
+    pub verbose: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1947,6 +1949,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         format,
         ref resolve,
         ref resolve_all,
+        verbose,
     } = *opts;
     let ws_to_merge = workspaces.to_vec();
     let text_mode = format != OutputFormat::Json;
@@ -2057,6 +2060,32 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         build_output.resolved_count
     );
     textln!("  Candidate: {}", &build_output.candidate.as_str()[..12]);
+
+    // Check for empty merge (no changes detected)
+    if build_output.unique_count == 0
+        && build_output.shared_count == 0
+        && build_output.conflicts.is_empty()
+    {
+        abort_merge(&manifold_dir, "empty merge (no changes)");
+
+        let ws_list = ws_to_merge.join(", ");
+        if format == OutputFormat::Json {
+            let output = serde_json::json!({
+                "status": "empty",
+                "workspaces": ws_to_merge,
+                "message": format!("No changes detected in workspace(s): {ws_list}"),
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            textln!();
+            textln!("No changes detected in workspace(s): {ws_list}");
+            textln!("Nothing to merge. Workspaces were not destroyed.");
+        }
+
+        bail!(
+            "No changes detected in workspace(s): {ws_list}. Nothing to merge."
+        );
+    }
 
     // Check for unresolved conflicts
     if !build_output.conflicts.is_empty() {
@@ -2544,7 +2573,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Destroy source workspaces if requested
     if destroy_after {
-        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, &root, text_mode)?;
+        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, &root, text_mode, verbose)?;
     }
 
     // Remove merge-state file
@@ -3176,6 +3205,7 @@ fn handle_post_merge_destroy(
     backend: &impl WorkspaceBackend<Error: std::fmt::Display>,
     root: &Path,
     text_mode: bool,
+    verbose: bool,
 ) -> Result<()> {
     let ws_to_destroy: Vec<String> = ws_to_merge
         .iter()
@@ -3287,7 +3317,7 @@ fn handle_post_merge_destroy(
         crate::fp!("FP_DESTROY_AFTER_RECORD")?;
 
         if let Some(ref c) = capture {
-            if text_mode {
+            if verbose && text_mode {
                 println!(
                     "    Captured '{ws_name}' state ({mode}) → {ref_name}",
                     mode = match c.mode {
@@ -3297,14 +3327,16 @@ fn handle_post_merge_destroy(
                     ref_name = c.pinned_ref
                 );
             }
-            // Emit full recovery surface contract
-            super::capture::emit_recovery_surface(
-                ws_name,
-                c,
-                artifact_path_result.as_deref().ok(),
-                true, // commit already succeeded before destroy
-                true, // merge succeeded
-            );
+            if verbose {
+                // Emit full recovery surface contract
+                super::capture::emit_recovery_surface(
+                    ws_name,
+                    c,
+                    artifact_path_result.as_deref().ok(),
+                    true, // commit already succeeded before destroy
+                    true, // merge succeeded
+                );
+            }
         }
 
         // FP: crash after capture but before workspace deletion.
@@ -3318,7 +3350,7 @@ fn handle_post_merge_destroy(
                 crate::fp!("FP_DESTROY_AFTER_DELETE")?;
                 if text_mode {
                     if capture.is_some() {
-                        println!("    Destroyed: {ws_name} (snapshot saved)");
+                        println!("    Destroyed: {ws_name} (snapshot saved \u{2192} maw ws recover {ws_name})");
                     } else {
                         println!("    Destroyed: {ws_name}");
                     }

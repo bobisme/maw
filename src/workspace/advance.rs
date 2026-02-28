@@ -161,6 +161,13 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         return Err(e.context(format!("Failed to checkout new epoch in workspace '{name}'")));
     }
 
+    // Update the per-workspace epoch ref to the new epoch. After advance,
+    // HEAD points to the new epoch, so status() must know the new base.
+    if let Ok(oid) = crate::model::types::GitOid::new(&new_epoch) {
+        let epoch_ref = manifold_refs::workspace_epoch_ref(name);
+        let _ = manifold_refs::write_ref(&root, &epoch_ref, &oid);
+    }
+
     // Step 3: Replay the snapshot if there was one.
     let conflicts = if let Some(ref snapshot) = snapshot {
         match replay_snapshot(&ws_path, snapshot)? {

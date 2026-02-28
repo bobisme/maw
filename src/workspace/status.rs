@@ -402,8 +402,18 @@ fn compute_global_view_summary(
     let view =
         compute_global_view(root, &workspace_ids, |oid| read_patch_set_blob(root, oid)).ok()?;
 
+    // Use the max epoch from the workspace list (backend.list()), not from
+    // the oplog-materialized view. The backend reads from
+    // refs/manifold/epoch/current which is always authoritative, while the
+    // oplog may lag behind after epoch transitions (bn-22fi).
+    let authoritative_epoch = workspaces
+        .iter()
+        .map(|ws| &ws.epoch)
+        .max_by(|a, b| a.as_str().cmp(b.as_str()))
+        .map(|e| e.as_str()[..12].to_string());
+
     Some(GlobalViewSummary {
-        epoch: view.epoch.as_ref().map(|e| e.as_str()[..12].to_string()),
+        epoch: authoritative_epoch,
         workspace_count: view.workspace_count(),
         total_patches: view.total_patches(),
         conflict_count: view.conflicts.len(),

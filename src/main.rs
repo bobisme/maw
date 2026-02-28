@@ -132,7 +132,7 @@ enum Commands {
 
     /// Run a command inside a workspace directory
     ///
-    /// Run any command inside a workspace — useful for running tools
+    /// Run any command inside a workspace -- useful for running tools
     /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
     /// needing persistent `cd`.
     ///
@@ -143,6 +143,7 @@ enum Commands {
     ///   maw exec alice -- cargo test
     ///   maw exec alice -- br list
     ///   maw exec alice -- ls -la src/
+    #[command(verbatim_doc_comment)]
     Exec(exec::ExecArgs),
 
     /// Push the main branch to remote
@@ -155,33 +156,38 @@ enum Commands {
     /// hasn't been moved yet, use --advance to move it first.
     ///
     /// Use --manifold to also push Manifold metadata (op logs, workspace
-    /// heads, epoch pointer) to refs/manifold/* on the remote. This enables
-    /// multi-machine Manifold collaboration (Level 2 Git transport, §8).
+    /// heads, epoch pointer) to refs/manifold/* on the remote. This
+    /// enables multi-machine Manifold collaboration (Level 2 Git
+    /// transport, section 8).
     ///
     /// Configure the branch name in .maw.toml:
     ///   [repo]
     ///   branch = "main"
+    #[command(verbatim_doc_comment)]
     Push(push::PushArgs),
 
     /// Fetch Manifold state from remote (Level 2 Git transport)
     ///
-    /// Fetches all Manifold metadata (op logs, workspace heads, epoch pointer)
-    /// from the remote under refs/manifold/* and merges remote op log heads
-    /// into the local op log DAG.
+    /// Fetches all Manifold metadata (op logs, workspace heads, epoch
+    /// pointer) from the remote under refs/manifold/* and merges remote
+    /// op log heads into the local op log DAG.
     ///
-    /// Divergent workspace heads are resolved by creating a synthetic merge
-    /// operation that includes both chains as parents, preserving the full
-    /// causal history.
+    /// Divergent workspace heads are resolved by creating a synthetic
+    /// merge operation that includes both chains as parents, preserving
+    /// the full causal history.
     ///
-    /// Epoch divergence (two machines with conflicting epoch pointers) is
-    /// detected and reported but not auto-resolved — manual recovery required.
+    /// Epoch divergence (two machines with conflicting epoch pointers)
+    /// is detected and reported but not auto-resolved -- manual recovery
+    /// required.
     ///
-    /// Use --dry-run to preview what would be merged without changing refs.
+    /// Use --dry-run to preview what would be merged without changing
+    /// refs.
     ///
     /// Examples:
     ///   maw pull --manifold              # pull from origin
     ///   maw pull --manifold upstream     # pull from a named remote
     ///   maw pull --manifold --dry-run    # preview only
+    #[command(verbatim_doc_comment)]
     Pull(transport::PullArgs),
 
     /// Tag and push a release
@@ -196,6 +202,7 @@ enum Commands {
     ///
     /// Assumes your version bump is already committed. Run this after:
     ///   <edit version> && git commit -m "chore: bump to vX.Y.Z"
+    #[command(verbatim_doc_comment)]
     Release(release::ReleaseArgs),
 
     /// Manage the epoch ref
@@ -226,6 +233,7 @@ enum Commands {
     ///   maw completions fish > ~/.config/fish/completions/maw.fish
     ///   maw completions bash > ~/.local/share/bash-completion/completions/maw
     ///   maw completions zsh > ~/.zfunc/_maw
+    #[command(verbatim_doc_comment)]
     Completions {
         /// Shell to generate completions for
         shell: Shell,
@@ -233,16 +241,16 @@ enum Commands {
 
     /// Manage merge quarantine workspaces
     ///
-    /// When post-merge validation fails with `on_failure = "quarantine"` or
-    /// `on_failure = "block-quarantine"`, a quarantine workspace is created
-    /// containing the candidate merge result. These commands let you promote
-    /// (fix-forward) or abandon (discard) the quarantine.
+    /// When post-merge validation fails with `on_failure = "quarantine"`
+    /// or `on_failure = "block-quarantine"`, a quarantine workspace is
+    /// created containing the candidate merge result. These commands let
+    /// you promote (fix-forward) or abandon (discard) the quarantine.
     ///
     /// Examples:
     ///   maw merge list               # list active quarantines
     ///   maw merge promote abc123     # re-validate and commit if green
     ///   maw merge abandon abc123     # discard quarantine workspace
-    #[command(subcommand)]
+    #[command(subcommand, verbatim_doc_comment)]
     Merge(merge_cmd::MergeCommands),
 }
 

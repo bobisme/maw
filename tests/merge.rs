@@ -335,3 +335,75 @@ fn merge_with_clean_default_does_not_record_snapshot_op() {
     // If `ws history default` fails (no oplog exists), that's also correct —
     // no snapshot was recorded.
 }
+
+/// Merging a workspace with zero changes should NOT create an epoch commit.
+/// This prevents agents from accidentally advancing the epoch with empty merges.
+#[test]
+fn merge_empty_workspace_rejects_without_epoch_advance() {
+    let repo = TestRepo::new();
+
+    // Capture HEAD before merge attempt.
+    let head_before = repo.git(&["rev-parse", "HEAD"]);
+
+    repo.maw_ok(&["ws", "create", "empty-agent"]);
+    // Don't add any files — the workspace has zero changes.
+
+    // Merge should fail (non-zero exit).
+    let out = repo.maw_raw(&["ws", "merge", "empty-agent", "--destroy"]);
+    assert!(
+        !out.status.success(),
+        "merging an empty workspace should fail"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+    assert!(
+        combined.contains("no changes detected"),
+        "expected 'no changes detected' message, got:\n{combined}"
+    );
+
+    // HEAD should NOT have advanced.
+    let head_after = repo.git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        head_before, head_after,
+        "epoch should not advance for an empty merge"
+    );
+
+    // The workspace should NOT have been destroyed (--destroy was passed but
+    // nothing was merged, so workspaces are preserved).
+    let names = workspace_names(&repo);
+    assert!(
+        names.contains(&"empty-agent".to_owned()),
+        "empty workspace should be preserved (not destroyed) after empty merge"
+    );
+}
+
+/// Same as above, but with --format json: output should be valid JSON with
+/// status "empty".
+#[test]
+fn merge_empty_workspace_json_output() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "empty-json"]);
+
+    let out = repo.maw_raw(&["ws", "merge", "empty-json", "--format", "json"]);
+    assert!(
+        !out.status.success(),
+        "merging an empty workspace should fail even with --format json"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        stdout.starts_with('{'),
+        "stdout should be pure JSON, got: {stdout}"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("empty merge JSON output should be valid JSON");
+    assert_eq!(
+        payload["status"].as_str(),
+        Some("empty"),
+        "JSON status should be 'empty', got: {payload}"
+    );
+}

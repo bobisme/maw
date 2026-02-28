@@ -49,6 +49,13 @@ pub const HEAD_PREFIX: &str = "refs/manifold/head/";
 /// Prefix for per-workspace materialized state refs (Level 1 compatibility).
 pub const WORKSPACE_STATE_PREFIX: &str = "refs/manifold/ws/";
 
+/// Prefix for per-workspace creation epoch refs.
+///
+/// Stores the epoch a workspace was created at, so that `status()` can
+/// distinguish "HEAD advanced because the agent committed" from "HEAD is the
+/// epoch" even after the workspace has local commits.
+pub const WORKSPACE_EPOCH_PREFIX: &str = "refs/manifold/epoch/ws/";
+
 /// Build the per-workspace head ref name.
 ///
 /// # Example
@@ -71,6 +78,22 @@ pub fn workspace_head_ref(workspace_name: &str) -> String {
 #[must_use]
 pub fn workspace_state_ref(workspace_name: &str) -> String {
     format!("{WORKSPACE_STATE_PREFIX}{workspace_name}")
+}
+
+/// Build the per-workspace creation epoch ref name.
+///
+/// This ref records the epoch a workspace was based on at creation time.
+/// Unlike HEAD (which advances when agents commit), this ref stays fixed
+/// for the lifetime of the workspace.
+///
+/// # Example
+/// ```
+/// assert_eq!(maw::refs::workspace_epoch_ref("agent-1"),
+///            "refs/manifold/epoch/ws/agent-1");
+/// ```
+#[must_use]
+pub fn workspace_epoch_ref(workspace_name: &str) -> String {
+    format!("{WORKSPACE_EPOCH_PREFIX}{workspace_name}")
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +560,18 @@ mod tests {
     fn workspace_state_ref_format() {
         assert_eq!(workspace_state_ref("default"), "refs/manifold/ws/default");
         assert_eq!(workspace_state_ref("agent-1"), "refs/manifold/ws/agent-1");
+    }
+
+    #[test]
+    fn workspace_epoch_ref_format() {
+        assert_eq!(
+            workspace_epoch_ref("agent-1"),
+            "refs/manifold/epoch/ws/agent-1"
+        );
+        assert_eq!(
+            workspace_epoch_ref("default"),
+            "refs/manifold/epoch/ws/default"
+        );
     }
 
     // -----------------------------------------------------------------------

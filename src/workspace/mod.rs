@@ -161,6 +161,7 @@ pub enum WorkspaceCommands {
     ///   Persistent (--persistent): can survive across epoch advances. Use
     ///   `maw ws advance <name>` to rebase onto the latest epoch when stale.
     ///   Suitable for long-running agent tasks that span multiple epochs.
+    #[command(verbatim_doc_comment)]
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -202,6 +203,7 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws describe alice "wip: implementing auth module"
     ///   maw ws describe bob "ready for review: auth-module-v1"
+    #[command(verbatim_doc_comment)]
     Describe {
         /// Name of the workspace to describe
         name: String,
@@ -222,6 +224,7 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws annotate alice test-results '{"passed": 42, "failed": 0}'
     ///   maw ws annotate bob review-status '{"approved": true, "reviewer": "security"}'
+    #[command(verbatim_doc_comment)]
     Annotate {
         /// Name of the workspace to annotate
         name: String,
@@ -266,6 +269,7 @@ pub enum WorkspaceCommands {
     ///
     /// Examples:
     ///   maw ws restore alice    # recreate alice's workspace
+    #[command(verbatim_doc_comment)]
     Restore {
         /// Name of the workspace to restore
         name: String,
@@ -292,6 +296,7 @@ pub enum WorkspaceCommands {
     ///   maw ws recover --ref <recovery-ref> --show src/main.rs
     ///   maw ws recover alice --to alice-restored   # restore latest destroy snapshot
     ///   maw ws recover --ref <recovery-ref> --to scratch
+    #[command(verbatim_doc_comment)]
     Recover {
         /// Workspace name to inspect (destroy records), or to filter recovery refs.
         ///
@@ -434,6 +439,7 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws touched alice
     ///   maw ws touched alice --format json
+    #[command(verbatim_doc_comment)]
     Touched {
         /// Workspace name
         workspace: String,
@@ -463,6 +469,7 @@ pub enum WorkspaceCommands {
     ///   maw ws diff alice --name-only
     ///   maw ws diff alice --name-status
     ///   maw ws diff alice --against epoch --format json
+    #[command(verbatim_doc_comment)]
     Diff {
         /// Workspace to inspect
         workspace: String,
@@ -504,6 +511,7 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws overlap alice bob
     ///   maw ws overlap alice bob --format json
+    #[command(verbatim_doc_comment)]
     Overlap {
         /// First workspace name
         ws1: String,
@@ -545,6 +553,7 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws history alice           # show commits in alice workspace
     ///   maw ws history alice --limit 5 # show only last 5 commits
+    #[command(verbatim_doc_comment)]
     History {
         /// Name of the workspace
         name: String,
@@ -570,6 +579,7 @@ pub enum WorkspaceCommands {
     ///
     /// Examples:
     ///   maw ws undo alice
+    #[command(verbatim_doc_comment)]
     Undo {
         /// Name of the workspace to undo
         name: String,
@@ -590,6 +600,7 @@ pub enum WorkspaceCommands {
     ///   maw ws prune --force      # actually delete orphaned/missing
     ///   maw ws prune --empty      # preview including empty workspaces
     ///   maw ws prune --empty --force  # delete all problematic workspaces
+    #[command(verbatim_doc_comment)]
     Prune {
         /// Actually delete workspaces (default: preview only)
         #[arg(long)]
@@ -602,17 +613,20 @@ pub enum WorkspaceCommands {
 
     /// Clean build artifacts for workspace(s)
     ///
-    /// Removes `target/` directories from workspace build contexts to reclaim disk space.
-    /// By default, cleans only the default workspace.
-    /// Use `--all` to clean every active workspace including agent and default workspaces.
+    /// Removes `target/` directories from workspace build contexts to
+    /// reclaim disk space. By default, cleans only the default workspace.
+    /// Use `--all` to clean every active workspace including agent and
+    /// default workspaces.
     ///
-    /// This is equivalent to running `cargo clean` in each workspace, but removes the
-    /// build output directory directly for speed and reliability.
+    /// This is equivalent to running `cargo clean` in each workspace,
+    /// but removes the build output directory directly for speed and
+    /// reliability.
     ///
     /// Examples:
     ///   maw ws clean          # clean target/ in ws/default only
     ///   maw ws clean agent-a   # clean target/ in ws/agent-a only
     ///   maw ws clean --all    # clean target/ in all workspaces
+    #[command(verbatim_doc_comment)]
     Clean {
         /// Workspace name (defaults to `default` when omitted)
         #[arg(conflicts_with = "all")]
@@ -631,6 +645,7 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws attach orphaned               # reconnect orphaned directory
     ///   maw ws attach orphaned -r main       # attach at specific revision
+    #[command(verbatim_doc_comment)]
     Attach {
         /// Name of the workspace directory to attach
         name: String,
@@ -661,6 +676,7 @@ pub enum WorkspaceCommands {
     ///
     /// On conflict, the workspace is left with conflict markers for manual
     /// resolution. Resolve conflicts in the workspace files, then continue.
+    #[command(verbatim_doc_comment)]
     Advance {
         /// Name of the persistent workspace to advance
         name: String,
@@ -682,28 +698,31 @@ pub enum WorkspaceCommands {
     /// Creates a merge commit combining work from the specified workspaces.
     /// Works with one or more workspaces. Stale workspaces are automatically
     /// synced before merge to avoid spurious conflicts. After merge, check
-    /// output for undescribed commits (commits with no message) that may block push.
+    /// output for undescribed commits (commits with no message) that may
+    /// block push.
     ///
     /// Use --check for a dry-run conflict detection that undoes itself:
     ///   exit 0 = safe to merge, non-zero = blocked (conflicts/stale).
     ///   Combine with --format json for structured output.
     ///
-    /// Use --format json to receive structured output for success and conflict
-    /// cases. On conflict, the JSON includes per-file conflict details with
-    /// workspace attribution, base content, and resolution strategies.
+    /// Use --format json to receive structured output for success and
+    /// conflict cases. On conflict, the JSON includes per-file conflict
+    /// details with workspace attribution, base content, and resolution
+    /// strategies.
     ///
     /// Examples:
     ///   maw ws merge alice                       # adopt alice's work
     ///   maw ws merge alice bob                   # merge alice and bob's work
-    ///   maw ws merge alice bob --destroy         # merge and clean up (non-interactive)
-    ///   maw ws merge alice bob --dry-run         # preview merge without committing
-    ///   maw ws merge alice bob --plan      # deterministic merge plan (no commit)
-    ///   maw ws merge alice bob --plan --json  # machine-parseable plan JSON
-    ///   maw ws merge alice --check               # pre-flight: can we merge cleanly?
-    ///   maw ws merge alice --check --format json # structured check result
-    ///   maw ws merge alice --format json         # structured merge result (success or conflict)
+    ///   maw ws merge alice bob --destroy         # merge and clean up
+    ///   maw ws merge alice bob --dry-run         # preview merge
+    ///   maw ws merge alice bob --plan            # deterministic plan
+    ///   maw ws merge alice bob --plan --json     # plan as JSON
+    ///   maw ws merge alice --check               # pre-flight check
+    ///   maw ws merge alice --check --format json # structured check
+    ///   maw ws merge alice --format json         # structured result
     ///   maw ws merge alice bob --resolve cf-k7mx=alice --resolve cf-r3np=bob
-    ///   maw ws merge alice bob --resolve-all=alice   # resolve all conflicts to alice's version
+    ///   maw ws merge alice bob --resolve-all=alice
+    #[command(verbatim_doc_comment)]
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
@@ -776,15 +795,23 @@ pub enum WorkspaceCommands {
         ///   maw ws merge alice bob --resolve-all=alice
         #[arg(long = "resolve-all", value_name = "WORKSPACE", conflicts_with = "check", conflicts_with = "plan")]
         resolve_all: Option<String>,
+
+        /// Show detailed recovery surface output for each destroyed workspace.
+        ///
+        /// Without this flag, each destroyed workspace prints a single summary line.
+        /// With --verbose, the full RECOVERY_SURFACE block is emitted (snapshot ref,
+        /// OID, capture mode, artifact path, and recovery command).
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Show detailed conflict information for workspace(s)
     ///
     /// Runs the merge engine's PREPARE + BUILD phases to detect conflicts
-    /// and outputs structured data — without committing anything.
+    /// and outputs structured data -- without committing anything.
     ///
-    /// Useful for agents to inspect conflicts before deciding how to resolve
-    /// them. Each conflict includes:
+    /// Useful for agents to inspect conflicts before deciding how to
+    /// resolve them. Each conflict includes:
     ///   - File path and conflict type (content, add/add, modify/delete)
     ///   - Each workspace's contribution (change kind + content)
     ///   - Base (common ancestor) content for reference
@@ -792,9 +819,10 @@ pub enum WorkspaceCommands {
     ///   - Suggested resolution strategies
     ///
     /// Examples:
-    ///   maw ws conflicts alice                  # show conflicts for alice workspace
-    ///   maw ws conflicts alice bob              # show conflicts across both workspaces
-    ///   maw ws conflicts alice --format json    # machine-parseable output for agents
+    ///   maw ws conflicts alice               # conflicts for alice
+    ///   maw ws conflicts alice bob            # across both workspaces
+    ///   maw ws conflicts alice --format json  # machine-parseable output
+    #[command(verbatim_doc_comment)]
     Conflicts {
         /// Workspace names to check for conflicts
         #[arg(required = true)]
@@ -1012,6 +1040,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             json,
             resolve,
             resolve_all,
+            verbose,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             if check {
@@ -1030,6 +1059,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     format: fmt,
                     resolve,
                     resolve_all,
+                    verbose,
                 },
             )
         }
