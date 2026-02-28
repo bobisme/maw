@@ -168,6 +168,34 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         bail!("Workspace directory does not exist: {}", ws_path.display());
     }
 
+    // Safety: refuse to sync if the workspace has uncommitted changes.
+    // `git checkout --detach` would overwrite tracked files, losing staged,
+    // unstaged, and untracked work.
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&ws_path)
+        .output()
+        .with_context(|| {
+            format!("Failed to check dirty state for workspace '{ws_name}'")
+        })?;
+
+    if !status_output.status.success() {
+        let stderr = String::from_utf8_lossy(&status_output.stderr);
+        bail!(
+            "Failed to check dirty state for workspace '{ws_name}': {}",
+            stderr.trim()
+        );
+    }
+
+    if !status_output.stdout.is_empty() {
+        bail!(
+            "Workspace '{ws_name}' has uncommitted changes that would be lost by sync. \
+             Commit or stash first.\n  \
+             Check: git -C {} status",
+            ws_path.display()
+        );
+    }
+
     // Use checkout --detach to move HEAD to the new epoch
     let output = Command::new("git")
         .args(["checkout", "--detach", epoch_oid])
