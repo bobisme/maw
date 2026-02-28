@@ -278,6 +278,10 @@ fn capture_dirty_worktree(
         .current_dir(ws_path)
         .output();
 
+    // FP: crash after stash/tree creation but before ref pinning.
+    // A crash here means the commit object exists but is unreachable (no ref).
+    crate::fp!("FP_CAPTURE_BEFORE_PIN")?;
+
     // Pin the commit under a recovery ref
     let timestamp = super::now_timestamp_iso8601();
     let ref_name = recovery_ref(ws_name, &timestamp);

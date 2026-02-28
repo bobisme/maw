@@ -2490,6 +2490,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         )
         .ok();
 
+        // FP: crash before updating the default workspace to the new epoch.
+        // A crash here means COMMIT succeeded but the default workspace
+        // still points at the old epoch.
+        crate::fp!("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT")?;
+
         update_default_workspace(&default_ws_path, branch, epoch_before_oid.as_str(), &root, text_mode)?;
 
         // Record a Snapshot op if the default workspace had dirty files.
@@ -3161,6 +3166,11 @@ fn handle_post_merge_destroy(
                 );
             }
         }
+
+        // FP: crash after capture but before workspace deletion.
+        // A crash here means the recovery ref is pinned but the workspace
+        // still exists on disk.
+        crate::fp!("FP_CLEANUP_AFTER_CAPTURE")?;
 
         // --- Step 3: Write append-only destroy record ---
         let final_head = super::capture::resolve_head(&ws_path)

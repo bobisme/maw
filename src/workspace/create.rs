@@ -286,6 +286,9 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         .map(|patch_set| patch_set.len())
         .map_err(|e| anyhow::anyhow!("Failed to inspect local changes before destroy: {e}"))?;
 
+    // FP: crash after status check but before any destructive action.
+    crate::fp!("FP_DESTROY_AFTER_STATUS")?;
+
     if touched_count > 0 && !force {
         bail!(
             "Workspace '{name}' has {touched_count} unmerged change(s). Refusing destroy to avoid data loss.\n  \
@@ -336,6 +339,11 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     ) {
         tracing::warn!("Failed to write destroy record: {e}");
     }
+
+    // FP: crash after capture/record but before actual workspace deletion.
+    // A crash here means the destroy record is written but the workspace
+    // still exists on disk.
+    crate::fp!("FP_DESTROY_BEFORE_DELETE")?;
 
     backend
         .destroy(&ws_id)

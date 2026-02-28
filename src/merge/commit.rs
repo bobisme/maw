@@ -48,6 +48,9 @@ pub enum CommitError {
         epoch: Option<GitOid>,
         branch: Option<GitOid>,
     },
+    /// Injected failpoint fired during commit phase.
+    #[cfg(feature = "failpoints")]
+    Failpoint(String),
 }
 
 impl std::fmt::Display for CommitError {
@@ -64,6 +67,8 @@ impl std::fmt::Display for CommitError {
                 f,
                 "inconsistent ref state during commit recovery (epoch={epoch:?}, branch={branch:?})"
             ),
+            #[cfg(feature = "failpoints")]
+            Self::Failpoint(msg) => write!(f, "failpoint: {msg}"),
         }
     }
 }
@@ -74,7 +79,9 @@ impl std::error::Error for CommitError {
             Self::Ref(e) => Some(e),
             Self::Io(e) => Some(e),
             Self::Serde(e) => Some(e),
-            _ => None,
+            Self::PartialCommit | Self::InconsistentRefState { .. } => None,
+            #[cfg(feature = "failpoints")]
+            Self::Failpoint(_) => None,
         }
     }
 }
@@ -136,6 +143,9 @@ pub fn run_commit_phase(
 
     write_merge_state(root, &state)?;
 
+    // FP: crash before the atomic CAS that moves epoch + branch refs.
+    fp_commit("FP_COMMIT_BEFORE_BRANCH_CAS")?;
+
     let branch_ref = format!("refs/heads/{branch}");
     refs::update_refs_atomic(
         root,
@@ -144,6 +154,13 @@ pub fn run_commit_phase(
             (&branch_ref, epoch_before, epoch_candidate),
         ],
     )?;
+
+    // FP: crash after epoch ref moved — HIGHEST risk point: refs advanced
+    // but commit-state.json still says "Commit".
+    fp_commit("FP_COMMIT_BETWEEN_CAS_OPS")?;
+
+    // FP: crash after CAS, before final state persistence.
+    fp_commit("FP_COMMIT_AFTER_EPOCH_CAS")?;
 
     state.phase = CommitPhase::Committed;
     state.epoch_ref_updated = true;
@@ -227,6 +244,17 @@ fn write_merge_state(root: &Path, state: &CommitStateFile) -> Result<(), CommitE
         dir.sync_all()?;
     }
 
+    Ok(())
+}
+
+/// Invoke a failpoint and convert the result to [`CommitError`].
+///
+/// Without the `failpoints` feature this compiles to a no-op.
+fn fp_commit(_name: &str) -> Result<(), CommitError> {
+    #[cfg(feature = "failpoints")]
+    {
+        crate::fp!(_name).map_err(|e| CommitError::Failpoint(e.to_string()))?;
+    }
     Ok(())
 }
 
