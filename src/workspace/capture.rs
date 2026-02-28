@@ -340,6 +340,79 @@ fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Recovery surface output
+// ---------------------------------------------------------------------------
+
+/// Emit the full recovery output contract to stderr.
+///
+/// All 5 required fields:
+/// 1. Operation result (success/failure)
+/// 2. Whether COMMIT succeeded
+/// 3. Snapshot ref + oid
+/// 4. Artifact path
+/// 5. Executable recovery command
+///
+/// This function is the single source of truth for recovery surface output.
+/// All code paths that create recovery snapshots MUST call this to ensure
+/// agents can parse and act on the output consistently.
+pub fn emit_recovery_surface(
+    workspace_name: &str,
+    capture: &CaptureResult,
+    artifact_path: Option<&std::path::Path>,
+    commit_succeeded: bool,
+    operation_succeeded: bool,
+) {
+    let status = if operation_succeeded {
+        "success"
+    } else {
+        "failure"
+    };
+    let commit_status = if commit_succeeded { "yes" } else { "no" };
+    let mode_label = match capture.mode {
+        CaptureMode::WorktreeCapture => "worktree-snapshot",
+        CaptureMode::HeadOnly => "head-only",
+    };
+
+    eprintln!("RECOVERY_SURFACE for '{workspace_name}':");
+    eprintln!("  result:       {status}");
+    eprintln!("  commit:       {commit_status}");
+    eprintln!("  snapshot_ref: {}", capture.pinned_ref);
+    eprintln!("  snapshot_oid: {}", capture.commit_oid);
+    eprintln!("  capture_mode: {mode_label}");
+    if let Some(path) = artifact_path {
+        eprintln!("  artifact:     {}", path.display());
+    } else {
+        eprintln!("  artifact:     (none)");
+    }
+    eprintln!(
+        "  recover_cmd:  maw ws recover {workspace_name}"
+    );
+}
+
+/// Emit a structured recovery failure notice when capture itself fails.
+///
+/// Emits the same field names as [`emit_recovery_surface`] but with
+/// `(capture failed)` placeholders so agents can still parse the output
+/// structure consistently.
+pub fn emit_recovery_surface_failed(
+    workspace_name: &str,
+    error: &dyn std::fmt::Display,
+    commit_succeeded: bool,
+) {
+    let commit_status = if commit_succeeded { "yes" } else { "no" };
+
+    eprintln!("RECOVERY_SURFACE for '{workspace_name}':");
+    eprintln!("  result:       failure");
+    eprintln!("  commit:       {commit_status}");
+    eprintln!("  snapshot_ref: (capture failed)");
+    eprintln!("  snapshot_oid: (capture failed)");
+    eprintln!("  capture_mode: (capture failed)");
+    eprintln!("  artifact:     (none)");
+    eprintln!("  recover_cmd:  git -C <workspace-path> stash list");
+    eprintln!("  error:        {error}");
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

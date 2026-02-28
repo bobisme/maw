@@ -3129,6 +3129,12 @@ fn handle_post_merge_destroy(
                     "    Workspace '{ws_name}' preserved for manual cleanup. \
                      The merge itself succeeded."
                 );
+                // Emit structured recovery failure for agent parsing
+                super::capture::emit_recovery_surface_failed(
+                    ws_name,
+                    &e,
+                    true, // commit already succeeded before destroy
+                );
                 continue;
             }
         };
@@ -3150,9 +3156,30 @@ fn handle_post_merge_destroy(
                      git -C {ws_path} stash list",
                     ws_path = ws_path.display()
                 );
+                // Emit structured recovery failure for agent parsing
+                super::capture::emit_recovery_surface_failed(
+                    ws_name,
+                    &e,
+                    true, // commit already succeeded before destroy
+                );
                 continue;
             }
         };
+
+        // --- Step 3: Write append-only destroy record ---
+        let final_head = super::capture::resolve_head(&ws_path)
+            .unwrap_or_else(|_| base_epoch.oid().clone());
+        let artifact_path_result = write_destroy_record(
+            root,
+            ws_name,
+            &base_epoch,
+            &final_head,
+            capture.as_ref(),
+            DestroyReason::MergeDestroy,
+        );
+        if let Err(ref e) = artifact_path_result {
+            tracing::warn!("Failed to write destroy record for '{ws_name}': {e}");
+        }
 
         if let Some(ref c) = capture {
             if text_mode {
@@ -3165,26 +3192,20 @@ fn handle_post_merge_destroy(
                     ref_name = c.pinned_ref
                 );
             }
+            // Emit full recovery surface contract
+            super::capture::emit_recovery_surface(
+                ws_name,
+                c,
+                artifact_path_result.as_deref().ok(),
+                true, // commit already succeeded before destroy
+                true, // merge succeeded
+            );
         }
 
         // FP: crash after capture but before workspace deletion.
         // A crash here means the recovery ref is pinned but the workspace
         // still exists on disk.
         crate::fp!("FP_CLEANUP_AFTER_CAPTURE")?;
-
-        // --- Step 3: Write append-only destroy record ---
-        let final_head = super::capture::resolve_head(&ws_path)
-            .unwrap_or_else(|_| base_epoch.oid().clone());
-        if let Err(e) = write_destroy_record(
-            root,
-            ws_name,
-            &base_epoch,
-            &final_head,
-            capture.as_ref(),
-            DestroyReason::MergeDestroy,
-        ) {
-            tracing::warn!("Failed to write destroy record for '{ws_name}': {e}");
-        }
 
         // --- Step 4: Destroy the workspace ---
         match backend.destroy(&ws_id) {

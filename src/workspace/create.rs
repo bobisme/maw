@@ -329,14 +329,15 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         tracing::warn!("Failed to record workspace destroy in history: {e}");
     }
 
-    if let Err(e) = super::destroy_record::write_destroy_record(
+    let artifact_path_result = super::destroy_record::write_destroy_record(
         &root,
         name,
         &status.base_epoch,
         &final_head,
         capture_result.as_ref(),
         super::destroy_record::DestroyReason::Destroy,
-    ) {
+    );
+    if let Err(ref e) = artifact_path_result {
         tracing::warn!("Failed to write destroy record: {e}");
     }
 
@@ -353,11 +354,19 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     let _ = metadata::delete(&root, name);
 
     if force {
-        if let Some(capture) = capture_result {
+        if let Some(ref capture) = capture_result {
             let short_oid = &capture.commit_oid.as_str()[..12];
             println!("Snapshot saved: {short_oid}");
             println!("  Recover with: maw ws recover {name}");
             println!("Workspace '{name}' destroyed.");
+            // Emit full recovery surface contract
+            super::capture::emit_recovery_surface(
+                name,
+                capture,
+                artifact_path_result.as_deref().ok(),
+                false, // no merge commit — standalone destroy
+                true,  // destroy operation succeeded
+            );
         } else {
             println!("Workspace '{name}' destroyed. (nothing to snapshot)");
         }
