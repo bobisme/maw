@@ -22,6 +22,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+use crate::audit::{self, AuditEvent};
 use crate::format::OutputFormat;
 use crate::merge_state::MergeStateFile;
 
@@ -348,6 +349,13 @@ pub fn search(
             "Restore:   maw ws recover --ref <ref> --to <new-workspace>".to_string(),
         ],
     };
+
+    audit::log_audit(&AuditEvent::Search {
+        pattern_hash: audit::hash_pattern(pattern),
+        workspace_filter: workspace_filter.map(|s| s.to_string()),
+        ref_filter: ref_filter.map(|s| s.to_string()),
+        hit_count: envelope.hit_count,
+    });
 
     match format {
         OutputFormat::Json => {
@@ -822,6 +830,11 @@ pub fn show_file_by_ref(recovery_ref: &str, path: &str) -> Result<()> {
     validate_recovery_ref(recovery_ref)?;
     validate_show_path(path)?;
 
+    audit::log_audit(&AuditEvent::Show {
+        ref_name: recovery_ref.to_string(),
+        path: path.to_string(),
+    });
+
     let git_cwd = super::git_cwd()?;
     let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
     show_file_at_oid(&git_cwd, &oid, path)
@@ -873,6 +886,16 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
 
     let record = destroy_record::read_latest_record(&root, name)?
         .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
+
+    // Log the show using the snapshot ref if available, otherwise the workspace name.
+    let ref_for_audit = record
+        .snapshot_ref
+        .clone()
+        .unwrap_or_else(|| format!("(workspace:{name})"));
+    audit::log_audit(&AuditEvent::Show {
+        ref_name: ref_for_audit,
+        path: path.to_string(),
+    });
 
     let oid = resolve_recoverable_oid(&record)?;
 
@@ -953,6 +976,11 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
     validate_recovery_ref(recovery_ref)?;
     validate_workspace_name(new_name)?;
 
+    audit::log_audit(&AuditEvent::Restore {
+        ref_name: recovery_ref.to_string(),
+        new_workspace: new_name.to_string(),
+    });
+
     let git_cwd = super::git_cwd()?;
     let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
 
@@ -985,6 +1013,12 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
 pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     validate_workspace_name(name)?;
     validate_workspace_name(new_name)?;
+
+    audit::log_audit(&AuditEvent::Restore {
+        ref_name: format!("(workspace:{name})"),
+        new_workspace: new_name.to_string(),
+    });
+
     let root = repo_root()?;
 
     // Check that the destination doesn't already exist

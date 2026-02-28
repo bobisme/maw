@@ -4,6 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 mod agents;
+mod audit;
 mod backend;
 pub mod failpoints;
 mod config;
