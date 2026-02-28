@@ -923,3 +923,9 @@
 1772295747181157	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEypQY		item.move	bn-1ug5	{"state":"done"}	blake3:Z7Xhmgz4_XgfKDfpofs73J68KxdgfMfDjW4YVuDqE6c
 1772295747185845	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEypgY		item.move	bn-2nlh	{"reason":"auto-completed: all children of bn-2nlh are done","state":"done"}	blake3:E3F6a9J7DEhmNsVBnv3eT57OiaOp4lp2WtNRacd7n4k
 1772295747196954	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEypwY		item.move	bn-2akk	{"state":"done"}	blake3:9Jx8ra0Bh9eM5DHhJA33jvbF3YcHwcxYonMX3IhCKbU
+1772295835853664	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqAY		item.move	bn-4102	{"state":"doing"}	blake3:P3FxX3Uolz4aROYXr9cwaIw-TRgM5CqTHmAT9W6f34Q
+1772295835874626	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqQY		item.move	bn-2tf3	{"state":"doing"}	blake3:OHiQJ-fVmMg36bNY_VMjX_oMIMEu-dwMxwRxBgIhX0A
+1772295835890341	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqgY		item.move	bn-lbv8	{"state":"doing"}	blake3:w8sNErUUx33CSSllmqD8PeWnk-nELGMk1jU0NpauYK0
+1772295835905647	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqwY		item.move	bn-8tqf	{"state":"doing"}	blake3:cvU5VUUZOLfeQSZAWcJVZdEPRW8U3p0FwD5zlm5nOwM
+1772295835918541	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyrAY		item.move	bn-2ok6	{"state":"doing"}	blake3:6D4b4w9Qep1mLMIg6q3yRrvAKf3EeRoiNbLHsszjzDY
+1772295835934197	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyrQY		item.move	bn-1os6	{"state":"doing"}	blake3:rn6_uUvX2bSe2g9dmFdLLkLiWkSVeQPXMatXZJ0-G-U
