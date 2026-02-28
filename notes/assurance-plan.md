@@ -378,7 +378,7 @@ Additional relevant: `tests/merge.rs`, `tests/merge_scenarios.rs`,
 | `dst-nightly` | Nightly | `DST-*` (10k+ traces) | **not implemented** |
 | `incident-replay` | Nightly | Historical failure corpus | **not implemented** |
 | `contract-drift` | Nightly | Doc/code consistency | **not implemented** |
-| `formal-check` | Pre-release | TLA+/Lean | **not implemented** |
+| `formal-check` | Pre-release | Stateright/Kani | **not implemented** |
 
 ## 9) Failpoints and DST
 
