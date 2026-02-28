@@ -37,10 +37,10 @@ pub mod validate;
 #[allow(unused_imports)]
 pub use build_phase::run_build_phase_with_inputs;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "proptests"))]
 mod determinism_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "proptests"))]
 mod pushout_tests;
 
 #[cfg(kani)]

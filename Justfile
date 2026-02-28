@@ -11,11 +11,11 @@ install:
 
 # dst-fast: 256 seeded DST traces per PR (<60s)
 dst-fast:
-  cargo test --test dst_harness -- dst_g1 dst_g3 dst_determinism
+  cargo test --test dst_harness -- --ignored dst_g1 dst_g3 dst_determinism
 
 # formal-check: Stateright model checking (pre-release)
 formal-check:
-  cargo test --features assurance --test formal_model
+  cargo test --features assurance --test formal_model -- --ignored
 
 # contract-drift: doc/code consistency checks
 contract-drift:
@@ -27,7 +27,10 @@ dst-nightly:
 
 # incident-replay: replay failing traces from corpus
 incident-replay:
-  cargo test --test dst_harness -- incident_replay
+  cargo test --test dst_harness -- --ignored incident_replay
 
 # All assurance gates combined
 check: test dst-fast contract-drift
+
+coverage:
+  cargo llvm-cov

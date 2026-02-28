@@ -24,6 +24,7 @@ otel = [
 ]
 failpoints = []
 assurance = ["dep:stateright"]
+proptests = []
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

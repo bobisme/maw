@@ -14,6 +14,7 @@ fn parallelism() -> usize {
 }
 
 #[test]
+#[ignore] // Slow (Stateright exhaustive check). Run via `just formal-check` or `cargo test -- --ignored`.
 fn merge_model_check_two_workspaces() {
     let model = MergeModel::new(vec!["alice".into(), "bob".into()]);
     model
@@ -25,6 +26,7 @@ fn merge_model_check_two_workspaces() {
 }
 
 #[test]
+#[ignore] // Slow (Stateright exhaustive check). Run via `just formal-check` or `cargo test -- --ignored`.
 fn merge_model_check_three_workspaces() {
     let model = MergeModel::new(vec!["alice".into(), "bob".into(), "carol".into()]);
     model

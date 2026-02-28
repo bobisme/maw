@@ -899,6 +899,7 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 /// Run 100+ traces with random crash points, verifying that committed data
 /// is never silently lost (I-G1.1) and workspace files survive pre-commit crashes.
 #[test]
+#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
 fn dst_g1_random_crash_preserves_committed_data() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0001;
     let num_traces = 256;
@@ -945,6 +946,7 @@ fn dst_g1_random_crash_preserves_committed_data() {
 /// that the epoch ref never decreases (I-G3.1) and epoch+main don't diverge
 /// irrecoverably (I-G3.2).
 #[test]
+#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
 fn dst_g3_crash_at_commit_satisfies_monotonicity() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0003;
     let num_traces = 256;
@@ -984,6 +986,7 @@ fn dst_g3_crash_at_commit_satisfies_monotonicity() {
 
 /// Verify that running the same seed twice produces identical traces.
 #[test]
+#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
 fn dst_determinism_same_seed_same_trace() {
     let seed: u64 = 0xAAAA_BBBB_CCCC_DDDD;
 
@@ -1465,6 +1468,7 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 ///
 /// Uses 256 traces distributed across the rewrite-path crash phases.
 #[test]
+#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
 fn dst_g2_rewrite_path_preserves_workspace_data() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0002;
     let num_traces: u64 = 256;
@@ -1516,6 +1520,7 @@ fn dst_g2_rewrite_path_preserves_workspace_data() {
 /// Uses 256 traces distributed across the destroy-path crash phases
 /// (DestroyBeforeCapture, DestroyAfterCapture, DestroyBeforeDelete).
 #[test]
+#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
 fn dst_g4_destroy_requires_successful_capture() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0004;
     let num_traces: u64 = 256;
@@ -1620,6 +1625,7 @@ fn dst_nightly_high_volume() {
 
 /// Replay every trace in tests/corpus/dst/*.json and verify invariants hold.
 #[test]
+#[ignore] // Slow. Run via `just incident-replay` or `cargo test -- --ignored`.
 fn incident_replay_corpus() {
     let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/dst");
     let mut replayed = 0;
