@@ -494,37 +494,45 @@ path still works).
 - **`maw push` does not check for in-progress merges**: Push pushes whatever
   the branch ref points to. During COMMIT, this could push pre-merge state.
 
-## 11) Formal proof boundary
+## 11) Formal verification boundary
 
-Formal methods are a stretch goal. They require DST to be operational first
-(to validate that formal models match implementation behavior). Explicitly
-marking scope and tractability.
+Formal verification is a stretch goal. It requires DST to be operational first
+(to validate that models match implementation behavior). We use **Rust-native
+tools** to eliminate the spec-to-implementation translation gap.
 
-### TLA+ — protocol safety (tractable, high value)
+### Stateright — protocol safety (replaces TLA+)
 
 Model the PREPARE -> BUILD -> VALIDATE -> COMMIT -> CLEANUP state machine
-with crash/restart transitions and ref movement constraints.
+using [Stateright](https://github.com/stateright/stateright), a Rust-native
+model checker. The model uses actual maw types (`MergePhase`,
+`MergeStateFile`) from `src/merge_state.rs` — no separate spec language.
 
-Variables: `epoch_ref`, `branch_ref`, `merge_state.phase`,
+State variables: `epoch_ref`, `branch_ref`, `merge_state.phase`,
 `workspace_heads`, `workspace_dirty`, `recovery_refs`, `destroy_records`.
 
 Actions: `Prepare`, `Build`, `ValidatePass`, `ValidateFail`, `CommitEpoch`,
 `CommitBranch`, `Cleanup`, `Abort`, `Crash`, `Recover`.
 
-Proof obligations:
-- Safety: no silent loss under any action sequence.
+Safety properties (`always` checks):
+- No silent loss under any action sequence.
 - Commit atomicity: COMMIT either fully completed or deterministically
   recoverable.
-- Liveness: non-failing validations eventually commit under fair scheduling.
+- Destructive gate: no destruction after failed capture.
 
-This is a bounded model check (not infinite-state proof). Practical for
-2-3 workspaces and 10-20 step traces. Estimated effort: 2-3 weeks for
-initial spec + check.
+Liveness (`eventually` checks):
+- Non-failing validations eventually commit.
 
-### Lean — merge algebra (tractable, moderate value)
+Bounded model check for 2-3 workspaces, 10-20 step traces. Runs via
+`cargo test --features assurance`. No external toolchain (Java/TLC)
+required. Stateright also provides an interactive web Explorer for
+visualizing state space and debugging counterexamples.
 
-Prove pure properties of the merge operator. These proofs operate on abstract
-patch sets, not on filesystem/git effects.
+### Kani — merge algebra (replaces Lean)
+
+Verify pure properties of the merge operator using
+[Kani](https://github.com/model-checking/kani), Amazon's bounded model
+checker for Rust. Upgrades existing property tests from random sampling
+(proptest, 100 cases) to symbolic exhaustive verification.
 
 Targets:
 - Permutation determinism (workspace merge order doesn't change result).
@@ -532,9 +540,16 @@ Targets:
 - Embedding of non-conflicting side edits into merge result.
 - Monotonic conflict exposure (conflicts are explicit data, not hidden drops).
 
-These should mirror existing property tests in `src/merge/determinism_tests.rs`
-and `src/merge/pushout_tests.rs` so theorem statements can be cross-checked
-against executable fuzzing. Estimated effort: 3-5 weeks for initial theorems.
+These directly upgrade existing property tests in
+`src/merge/determinism_tests.rs` and `src/merge/pushout_tests.rs` by adding
+`#[kani::proof]` harnesses alongside the proptests. Both run in CI:
+proptests for broad random exploration, Kani for exhaustive bounded proof.
+
+Trade-off vs Lean: Kani gives bounded verification (proves for N<=K) not
+universal theorems. But N<=10 covers all realistic merge scenarios, and
+operating on actual Rust code eliminates the translation gap entirely.
+
+Runs via `cargo kani`. No external toolchain beyond `kani-verifier`.
 
 ### What is NOT tractable
 
@@ -542,6 +557,7 @@ against executable fuzzing. Estimated effort: 3-5 weeks for initial theorems.
 - Proving filesystem semantics end-to-end (out of scope; we assume A2).
 - Proving the full Rust implementation correct (too large; DST covers this
   empirically).
+- Universal proofs for all N (Kani is bounded; accept N<=10 as sufficient).
 
 ## 12) Search JSON contract
 
@@ -706,19 +722,22 @@ we can test discoverability of those surfaces).
 **Exit criteria**: nightly DST runs without invariant violation for 7
 consecutive days.
 
-### Phase 4: Formal methods (stretch)
+### Phase 4: Formal verification (stretch)
 
 **Prerequisites**: Phase 2 (DST must exist to cross-validate formal models).
 
 **Deliverables**:
-1. TLA+ spec for merge protocol (`formal/tla/`).
-2. Lean theorems for merge algebra core (`formal/lean/`).
-3. Traceability map: theorem -> source module -> DST invariant check -> CI job.
-4. `formal-check` CI gate.
+1. Stateright model for merge protocol (`src/assurance/model.rs`).
+2. Kani proof harnesses for merge algebra (`src/merge/*_tests.rs`).
+3. Traceability map: model action / proof -> source module -> DST invariant
+   check -> CI job.
+4. `formal-check` CI gate (`cargo test --features assurance` +
+   `cargo kani`).
 5. `contract-drift` CI gate (doc/code consistency).
 
-**Exit criteria**: TLA+ model check clean for bounded params (3 workspaces,
-20 steps). Lean theorems for permutation determinism and conflict monotonicity.
+**Exit criteria**: Stateright model check clean for bounded params
+(3 workspaces, 20 steps). Kani proofs verify permutation determinism and
+conflict monotonicity for N<=5.
 
 ## 15) Subsidiary document alignment
 
