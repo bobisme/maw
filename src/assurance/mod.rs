@@ -12,6 +12,7 @@
 //! - [`oracle::check_g5_discoverability`] — G5: discoverable recovery
 //! - [`oracle::check_g6_searchability`] — G6: searchable recovery
 //! - [`oracle::check_all`] — run all six checks
+//! - [`model`] — Stateright model-checking definitions
 //!
 //! # Usage
 //!
@@ -24,6 +25,7 @@
 //! check_all(&pre, &post)?;
 //! ```
 
+pub mod model;
 pub mod oracle;
 pub mod trace;
 

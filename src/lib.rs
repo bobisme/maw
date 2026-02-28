@@ -4,6 +4,9 @@
 //! modules so that integration tests can exercise the merge engine, backend,
 //! and model types directly without going through the CLI.
 
+#[cfg(feature = "assurance")]
+pub mod assurance;
+
 pub mod backend;
 pub mod failpoints;
 pub mod config;
@@ -14,9 +17,6 @@ pub mod merge_state;
 pub mod model;
 pub mod oplog;
 pub mod refs;
-
-#[cfg(feature = "assurance")]
-pub mod assurance;
 
 // Private modules only used by the binary — not re-exported.
 // agents, doctor, error, exec, format, init, push, release,
