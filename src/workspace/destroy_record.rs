@@ -404,4 +404,198 @@ mod tests {
         let record = record.unwrap();
         assert_eq!(record.workspace_id, "orphan-3");
     }
+
+    // -----------------------------------------------------------------------
+    // Destroy record resilience tests (bn-qf0b)
+    //
+    // read_latest_pointer falls back to directory scan when latest.json is
+    // missing or points to a nonexistent record.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_record_files_finds_records_without_latest_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws_name = "agent-orphan";
+
+        // Write a destroy record.
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head = GitOid::new(&"b".repeat(40)).unwrap();
+        write_destroy_record(root, ws_name, &base, &head, None, DestroyReason::Destroy).unwrap();
+
+        // Remove latest.json to simulate crash after record write but before
+        // latest pointer was written.
+        let latest_path = destroy_dir(root, ws_name).join("latest.json");
+        assert!(latest_path.exists());
+        std::fs::remove_file(&latest_path).unwrap();
+        assert!(!latest_path.exists());
+
+        // list_record_files should still find the timestamped record.
+        let records = list_record_files(root, ws_name).unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "expected exactly 1 record file via directory scan, got: {records:?}"
+        );
+        assert!(
+            records[0].ends_with(".json"),
+            "record filename should be a .json file"
+        );
+
+        // We can read the record directly from the discovered filename.
+        let record = read_record(root, ws_name, &records[0]).unwrap();
+        assert_eq!(record.workspace_id, ws_name);
+        assert_eq!(record.final_head, "b".repeat(40));
+    }
+
+    #[test]
+    fn read_latest_pointer_returns_none_when_latest_json_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws_name = "no-latest";
+
+        // Write a destroy record, then delete latest.json.
+        let base = EpochId::new(&"c".repeat(40)).unwrap();
+        let head = GitOid::new(&"d".repeat(40)).unwrap();
+        write_destroy_record(root, ws_name, &base, &head, None, DestroyReason::MergeDestroy)
+            .unwrap();
+        let latest_path = destroy_dir(root, ws_name).join("latest.json");
+        std::fs::remove_file(&latest_path).unwrap();
+
+        // read_latest_pointer returns None (no latest.json).
+        let pointer = read_latest_pointer(root, ws_name).unwrap();
+        assert!(
+            pointer.is_none(),
+            "expected None when latest.json is missing"
+        );
+
+        // But the fallback path (list_record_files -> read_record) still works.
+        let records = list_record_files(root, ws_name).unwrap();
+        assert!(!records.is_empty(), "directory scan should find records");
+        let record = read_record(root, ws_name, records.last().unwrap()).unwrap();
+        assert_eq!(record.workspace_id, ws_name);
+    }
+
+    #[test]
+    fn latest_json_pointing_to_nonexistent_file_is_detected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws_name = "stale-latest";
+
+        // Create the destroy directory with a real record.
+        let base = EpochId::new(&"e".repeat(40)).unwrap();
+        let head = GitOid::new(&"f".repeat(40)).unwrap();
+        write_destroy_record(root, ws_name, &base, &head, None, DestroyReason::Destroy).unwrap();
+
+        // Overwrite latest.json to point to a nonexistent record file.
+        let bad_pointer = LatestPointer {
+            record: "nonexistent-9999.json".to_owned(),
+            destroyed_at: "2025-01-01T00:00:00Z".to_owned(),
+        };
+        let latest_path = destroy_dir(root, ws_name).join("latest.json");
+        let json = serde_json::to_string_pretty(&bad_pointer).unwrap();
+        std::fs::write(&latest_path, json).unwrap();
+
+        // read_latest_pointer succeeds (it just reads the pointer).
+        let pointer = read_latest_pointer(root, ws_name).unwrap().unwrap();
+        assert_eq!(pointer.record, "nonexistent-9999.json");
+
+        // But reading the record it points to fails.
+        let read_result = read_record(root, ws_name, &pointer.record);
+        assert!(
+            read_result.is_err(),
+            "reading a nonexistent record should fail"
+        );
+
+        // Fallback: list_record_files finds the real record.
+        let records = list_record_files(root, ws_name).unwrap();
+        assert!(!records.is_empty(), "directory scan should find the real record");
+        // The real record is not the nonexistent one.
+        assert!(
+            !records.contains(&"nonexistent-9999.json".to_owned()),
+            "directory scan should not return nonexistent files"
+        );
+        // We can read the real record.
+        let record = read_record(root, ws_name, records.last().unwrap()).unwrap();
+        assert_eq!(record.workspace_id, ws_name);
+    }
+
+    #[test]
+    fn list_destroyed_workspaces_only_includes_ws_with_latest_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Create two destroy records.
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head = GitOid::new(&"b".repeat(40)).unwrap();
+        write_destroy_record(root, "ws-complete", &base, &head, None, DestroyReason::Destroy)
+            .unwrap();
+        write_destroy_record(root, "ws-orphan", &base, &head, None, DestroyReason::Destroy)
+            .unwrap();
+
+        // Remove latest.json from ws-orphan (simulating partial write failure).
+        let orphan_latest = destroy_dir(root, "ws-orphan").join("latest.json");
+        std::fs::remove_file(&orphan_latest).unwrap();
+
+        // list_destroyed_workspaces only returns workspaces with latest.json.
+        let destroyed = list_destroyed_workspaces(root).unwrap();
+        assert!(
+            destroyed.contains(&"ws-complete".to_owned()),
+            "ws-complete should be listed"
+        );
+        assert!(
+            !destroyed.contains(&"ws-orphan".to_owned()),
+            "ws-orphan should NOT be listed (no latest.json)"
+        );
+
+        // But the orphaned workspace's record is still discoverable via directory scan.
+        let orphan_records = list_record_files(root, "ws-orphan").unwrap();
+        assert!(
+            !orphan_records.is_empty(),
+            "orphaned records should be findable via list_record_files"
+        );
+    }
+
+    #[test]
+    fn multiple_destroy_records_for_same_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws_name = "multi-destroy";
+
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head1 = GitOid::new(&"1".repeat(40)).unwrap();
+        let head2 = GitOid::new(&"2".repeat(40)).unwrap();
+
+        // Write first destroy record.
+        write_destroy_record(root, ws_name, &base, &head1, None, DestroyReason::Destroy).unwrap();
+
+        // The timestamp uses second-level granularity, so we must wait at
+        // least one second for the filenames to differ.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Write second destroy record.
+        write_destroy_record(root, ws_name, &base, &head2, None, DestroyReason::MergeDestroy)
+            .unwrap();
+
+        // Both records should be listed.
+        let records = list_record_files(root, ws_name).unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "expected 2 destroy records, got: {records:?}"
+        );
+
+        // latest.json should point to the most recent one.
+        let pointer = read_latest_pointer(root, ws_name).unwrap().unwrap();
+        let latest_record = read_record(root, ws_name, &pointer.record).unwrap();
+        assert_eq!(
+            latest_record.final_head,
+            "2".repeat(40),
+            "latest should point to the second record"
+        );
+
+        // First record is still readable.
+        let first_record = read_record(root, ws_name, &records[0]).unwrap();
+        assert_eq!(first_record.final_head, "1".repeat(40));
+    }
 }
