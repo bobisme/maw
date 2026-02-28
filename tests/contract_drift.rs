@@ -502,7 +502,9 @@ fn check3_test_matrix_coverage_reality() {
             } else {
                 // Verify the file has at least one #[test] or #[cfg(test)]
                 if let Ok(content) = fs::read_to_string(&full_path) {
-                    let has_tests = content.contains("#[test]") || content.contains("#[cfg(test)]");
+                    let has_tests = content.contains("#[test]")
+                        || content.contains("#[cfg(test)]")
+                        || content.contains("#[kani::proof]");
                     if !has_tests {
                         failures.push(format!(
                             "Test {} claims location `{}` but file contains no test attributes",
