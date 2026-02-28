@@ -27,8 +27,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::fmt;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::model::types::GitOid;
 
@@ -292,6 +293,87 @@ pub fn write_ref_cas(
             new_oid.as_str(),
             old_oid.as_str()
         ),
+        stderr: stderr_trimmed.to_owned(),
+        exit_code: output.status.code(),
+    })
+}
+
+/// Atomically update multiple refs using `git update-ref --stdin`.
+///
+/// Each entry is a `(ref_name, old_oid, new_oid)` tuple. All updates are
+/// applied in a single transaction: either every ref moves or none does.
+///
+/// Uses the `start` / `prepare` / `commit` protocol so that the prepare
+/// step validates all updates before the commit step makes them visible.
+///
+/// # CAS semantics
+/// Each update includes the expected old OID. If any ref's current value
+/// does not match its expected old OID, the entire transaction is aborted
+/// and [`RefError::CasMismatch`] is returned (with the first ref name
+/// that git complained about, or the first ref in the batch if the
+/// specific ref cannot be determined).
+///
+/// # Errors
+/// - [`RefError::CasMismatch`] — a ref was modified concurrently.
+/// - [`RefError::GitCommand`] — other git failure.
+/// - [`RefError::Io`] — git could not be spawned or stdin write failed.
+pub fn update_refs_atomic(
+    root: &Path,
+    updates: &[(&str, &GitOid, &GitOid)],
+) -> Result<(), RefError> {
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    {
+        let stdin = child.stdin.as_mut().ok_or_else(|| RefError::Io(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "failed to open stdin"),
+        ))?;
+
+        writeln!(stdin, "start")?;
+        for (ref_name, old_oid, new_oid) in updates {
+            writeln!(
+                stdin,
+                "update {} {} {}",
+                ref_name,
+                new_oid.as_str(),
+                old_oid.as_str()
+            )?;
+        }
+        writeln!(stdin, "prepare")?;
+        writeln!(stdin, "commit")?;
+    }
+
+    let output = child.wait_with_output()?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_trimmed = stderr.trim();
+
+    if stderr_trimmed.contains("cannot lock ref")
+        || stderr_trimmed.contains("is at")
+        || stderr_trimmed.contains("but expected")
+    {
+        // Try to identify which ref failed from stderr.
+        let ref_name = updates
+            .iter()
+            .find(|(name, _, _)| stderr_trimmed.contains(name))
+            .map_or_else(
+                || updates[0].0.to_owned(),
+                |(name, _, _)| (*name).to_owned(),
+            );
+        return Err(RefError::CasMismatch { ref_name });
+    }
+
+    Err(RefError::GitCommand {
+        command: "git update-ref --stdin".to_owned(),
         stderr: stderr_trimmed.to_owned(),
         exit_code: output.status.code(),
     })
@@ -677,6 +759,82 @@ mod tests {
             matches!(err, RefError::CasMismatch { .. }),
             "expected CasMismatch: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // update_refs_atomic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn update_refs_atomic_moves_both_refs() {
+        let (dir, v1) = setup_repo();
+        let root = dir.path();
+        let v2 = add_commit(root);
+
+        write_ref(root, EPOCH_CURRENT, &v1).unwrap();
+        write_ref(root, "refs/heads/test-branch", &v1).unwrap();
+
+        update_refs_atomic(
+            root,
+            &[
+                (EPOCH_CURRENT, &v1, &v2),
+                ("refs/heads/test-branch", &v1, &v2),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2.clone()));
+        assert_eq!(
+            read_ref(root, "refs/heads/test-branch").unwrap(),
+            Some(v2)
+        );
+    }
+
+    #[test]
+    fn update_refs_atomic_fails_if_any_ref_stale() {
+        let (dir, v1) = setup_repo();
+        let root = dir.path();
+        let v2 = add_commit(root);
+        let v3 = add_commit(root);
+
+        // Set epoch to v2, branch to v1
+        write_ref(root, EPOCH_CURRENT, &v2).unwrap();
+        write_ref(root, "refs/heads/test-branch", &v1).unwrap();
+
+        // Try atomic update expecting epoch=v1 (wrong!) and branch=v1
+        let err = update_refs_atomic(
+            root,
+            &[
+                (EPOCH_CURRENT, &v1, &v3),
+                ("refs/heads/test-branch", &v1, &v3),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, RefError::CasMismatch { .. }),
+            "expected CasMismatch, got: {err}"
+        );
+
+        // Neither ref should have moved
+        assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2));
+        assert_eq!(
+            read_ref(root, "refs/heads/test-branch").unwrap(),
+            Some(v1)
+        );
+    }
+
+    #[test]
+    fn update_refs_atomic_single_ref() {
+        let (dir, v1) = setup_repo();
+        let root = dir.path();
+        let v2 = add_commit(root);
+
+        write_ref(root, EPOCH_CURRENT, &v1).unwrap();
+
+        update_refs_atomic(root, &[(EPOCH_CURRENT, &v1, &v2)]).unwrap();
+
+        assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2));
     }
 
     // -----------------------------------------------------------------------

@@ -136,18 +136,17 @@ pub fn run_commit_phase(
 
     write_merge_state(root, &state)?;
 
-    refs::advance_epoch(root, epoch_before, epoch_candidate)?;
-    state.epoch_ref_updated = true;
-    state.updated_at_unix_ms = now_unix_ms();
-    write_merge_state(root, &state)?;
-
     let branch_ref = format!("refs/heads/{branch}");
-    if refs::write_ref_cas(root, &branch_ref, epoch_before, epoch_candidate).is_err() {
-        // Keep state file for deterministic recovery.
-        return Err(CommitError::PartialCommit);
-    }
+    refs::update_refs_atomic(
+        root,
+        &[
+            (refs::EPOCH_CURRENT, epoch_before, epoch_candidate),
+            (&branch_ref, epoch_before, epoch_candidate),
+        ],
+    )?;
 
     state.phase = CommitPhase::Committed;
+    state.epoch_ref_updated = true;
     state.branch_ref_updated = true;
     state.updated_at_unix_ms = now_unix_ms();
     write_merge_state(root, &state)?;
