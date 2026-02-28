@@ -269,30 +269,83 @@ pub enum WorkspaceCommands {
         /// Name of the workspace to restore
         name: String,
     },
-
-    /// List, inspect, and recover snapshots from destroyed workspaces
+    /// List, inspect, and recover pinned snapshots
     ///
-    /// When a workspace is destroyed (via `maw ws destroy --force` or
-    /// `maw ws merge --destroy`), its state is captured as a snapshot.
-    /// Use this command to list destroyed workspaces, inspect their
-    /// snapshots, show individual files, or restore them to a new workspace.
+    /// maw pins recovery commits under `refs/manifold/recovery/<workspace>/<timestamp>`.
+    /// Destroyed workspaces also write destroy records under
+    /// `.manifold/artifacts/ws/<workspace>/destroy/`.
+    ///
+    /// This command supports:
+    /// - listing destroyed workspaces (destroy records)
+    /// - inspecting destroy history for a workspace
+    /// - searching across pinned recovery snapshots by content (agents)
+    /// - showing a file from a specific recovery ref
+    /// - restoring a pinned snapshot into a new workspace
     ///
     /// Examples:
-    ///   maw ws recover                          # list destroyed workspaces
-    ///   maw ws recover alice                    # show destroy history for alice
-    ///   maw ws recover alice --show src/main.rs # show a file from the snapshot
-    ///   maw ws recover alice --to alice-restored # restore to a new workspace
+    ///   maw ws recover                             # list destroyed workspaces
+    ///   maw ws recover alice                       # show destroy history for alice
+    ///   maw ws recover --search "TODO("            # search all recovery snapshots
+    ///   maw ws recover alice --search "needle"      # search snapshots for one workspace
+    ///   maw ws recover alice --show src/main.rs    # show a file from latest destroy snapshot
+    ///   maw ws recover --ref <recovery-ref> --show src/main.rs
+    ///   maw ws recover alice --to alice-restored   # restore latest destroy snapshot
+    ///   maw ws recover --ref <recovery-ref> --to scratch
     Recover {
-        /// Name of the destroyed workspace to inspect or recover.
-        /// Omit to list all destroyed workspaces with snapshots.
+        /// Workspace name to inspect (destroy records), or to filter recovery refs.
+        ///
+        /// - With no other flags: shows destroy history for that workspace.
+        /// - With --search: filters pinned recovery refs to that workspace.
+        ///
+        /// Omit to list all destroyed workspaces (no flags), or to search across all
+        /// pinned recovery refs (--search).
         name: Option<String>,
 
-        /// Show a specific file from the latest snapshot.
+        /// Operate on a specific pinned recovery ref.
+        ///
+        /// Must be under `refs/manifold/recovery/`.
+        /// Enables inspection/restoration of rewrite captures (not only destroyed workspaces).
+        #[arg(long = "ref", value_name = "REF")]
+        recovery_ref: Option<String>,
+
+        /// Search for a pattern inside recovery snapshots.
+        ///
+        /// By default, searches all pinned refs under `refs/manifold/recovery/`.
+        /// If <name> is provided, filters to that workspace.
+        /// If --ref is provided, searches only that snapshot.
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Number of context lines to include around each match (for --search).
+        #[arg(long, default_value_t = 2)]
+        context: usize,
+
+        /// Maximum number of matches to return (for --search).
+        #[arg(long, default_value_t = 200)]
+        max_hits: usize,
+
+        /// Treat --search as a regex (default: fixed string).
+        #[arg(long)]
+        regex: bool,
+
+        /// Case-insensitive search.
+        #[arg(long)]
+        ignore_case: bool,
+
+        /// Treat binary files as text when searching (default: skip binary).
+        #[arg(long)]
+        text: bool,
+
+        /// Show a specific file from the snapshot.
+        ///
+        /// Requires either <name> (latest destroy snapshot) or --ref.
         /// The path must be relative (no directory traversal allowed).
         #[arg(long)]
         show: Option<String>,
 
-        /// Restore the latest snapshot into a new workspace with this name.
+        /// Restore the snapshot into a new workspace with this name.
+        ///
+        /// Requires either <name> (latest destroy snapshot) or --ref.
         #[arg(long)]
         to: Option<String>,
 
@@ -764,30 +817,85 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Restore { name } => restore::restore(&name),
         WorkspaceCommands::Recover {
             name,
+            recovery_ref,
+            search,
+            context,
+            max_hits,
+            regex,
+            ignore_case,
+            text,
             show,
             to,
             format,
             json,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
-            match (name, show, to) {
-                // maw ws recover <name> --show <path>
-                (Some(n), Some(path), None) => recover::show_file(&n, &path),
-                // maw ws recover <name> --to <new-name>
-                (Some(n), None, Some(target)) => recover::restore_to(&n, &target),
-                // maw ws recover <name> (inspect)
-                (Some(n), None, None) => recover::show_workspace(&n, fmt),
-                // maw ws recover (list all)
-                (None, None, None) => recover::list_destroyed(fmt),
+
+            // --ref is mutually exclusive with positional name.
+            if recovery_ref.is_some() && name.is_some() {
+                anyhow::bail!("Cannot use both <name> and --ref.
+    Use <name> for destroyed-workspace history, or --ref for an explicit recovery snapshot.")
+            }
+
+            // Search mode (content search across pinned recovery refs).
+            if let Some(pattern) = search {
+                if show.is_some() || to.is_some() {
+                    anyhow::bail!("--search cannot be combined with --show or --to.")
+                }
+
+                return recover::search(
+                    &pattern,
+                    name.as_deref(),
+                    recovery_ref.as_deref(),
+                    context,
+                    max_hits,
+                    regex,
+                    ignore_case,
+                    text,
+                    fmt,
+                );
+            }
+
+            match (name, recovery_ref, show, to) {
+                // Explicit ref: show file
+                (None, Some(r), Some(path), None) => recover::show_file_by_ref(&r, &path),
+                // Explicit ref: restore
+                (None, Some(r), None, Some(target)) => recover::restore_ref_to(&r, &target),
+                // Explicit ref without action
+                (None, Some(_), None, None) => {
+                    anyhow::bail!("--ref requires --show, --to, or --search.
+    Examples:
+    maw ws recover --ref <ref> --show <path>
+    maw ws recover --ref <ref> --to <new-workspace>
+    maw ws recover --ref <ref> --search <pattern>")
+                }
+
+                // Destroyed workspace latest snapshot: show file
+                (Some(n), None, Some(path), None) => recover::show_file(&n, &path),
+                // Destroyed workspace latest snapshot: restore
+                (Some(n), None, None, Some(target)) => recover::restore_to(&n, &target),
+                // Destroyed workspace history
+                (Some(n), None, None, None) => recover::show_workspace(&n, fmt),
+                // List destroyed workspaces
+                (None, None, None, None) => recover::list_destroyed(fmt),
+
                 // Invalid combos
-                (None, Some(_), _) => {
-                    anyhow::bail!("--show requires a workspace name.\n  Usage: maw ws recover <name> --show <path>")
+                (None, None, Some(_), _) => {
+                    anyhow::bail!("--show requires a workspace name or --ref.
+  Usage:
+    maw ws recover <name> --show <path>
+    maw ws recover --ref <ref> --show <path>")
                 }
-                (None, _, Some(_)) => {
-                    anyhow::bail!("--to requires a workspace name.\n  Usage: maw ws recover <name> --to <new-name>")
+                (None, None, _, Some(_)) => {
+                    anyhow::bail!("--to requires a workspace name or --ref.
+  Usage:
+    maw ws recover <name> --to <new-name>
+    maw ws recover --ref <ref> --to <new-name>")
                 }
-                (Some(_), Some(_), Some(_)) => {
-                    anyhow::bail!("Cannot use --show and --to together.\n  Use --show to inspect, or --to to restore.")
+                (Some(_), Some(_), _, _) => unreachable!(),
+                (Some(_), None, Some(_), Some(_)) | (None, Some(_), Some(_), Some(_)) => {
+                    anyhow::bail!("Cannot use --show and --to together.
+  Use --show to inspect, or --to to restore.")
                 }
             }
         }

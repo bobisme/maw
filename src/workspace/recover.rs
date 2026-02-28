@@ -1,22 +1,31 @@
-//! `maw ws recover` — list, inspect, and recover snapshots from destroyed workspaces.
+//! `maw ws recover` — list, inspect, search, and restore recovery snapshots.
 //!
-//! # Subcommands
+//! Recovery points are pinned under `refs/manifold/recovery/<workspace>/<timestamp>`.
+//! Destroyed workspaces additionally write destroy records under
+//! `.manifold/artifacts/ws/<workspace>/destroy/` which `maw ws recover <name>` uses.
 //!
-//! - `maw ws recover` — list all destroyed workspaces with snapshots
-//! - `maw ws recover <name>` — show full destroy history for a workspace
-//! - `maw ws recover <name> --show <path>` — show a specific file from the snapshot
-//! - `maw ws recover <name> --to <new-name>` — restore snapshot into a new workspace
+//! # Modes
+//!
+//! - `maw ws recover` — list destroyed workspaces with snapshots (destroy records)
+//! - `maw ws recover <name>` — show destroy history for a workspace
+//! - `maw ws recover --search <pattern>` — content search across pinned recovery snapshots
+//! - `maw ws recover <name> --search <pattern>` — search snapshots for one workspace
+//! - `maw ws recover --ref <recovery-ref> --show <path>` — show a file from a specific snapshot
+//! - `maw ws recover <name> --show <path>` — show a file from latest destroy snapshot
+//! - `maw ws recover --ref <recovery-ref> --to <new-name>` — restore a specific snapshot
+//! - `maw ws recover <name> --to <new-name>` — restore latest destroy snapshot
 
+use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
 
-use super::destroy_record::{
-    self, DestroyRecord, RecordCaptureMode,
-};
+use super::capture::RECOVERY_PREFIX;
+use super::destroy_record::{self, DestroyRecord, RecordCaptureMode};
 use super::{repo_root, validate_workspace_name, workspace_path};
 
 // ---------------------------------------------------------------------------
@@ -131,10 +140,7 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
         .max(4);
 
     for s in summaries {
-        let snapshot_display = s
-            .snapshot_oid
-            .as_deref()
-            .unwrap_or("-");
+        let snapshot_display = s.snapshot_oid.as_deref().unwrap_or("-");
         let dirty_suffix = if s.dirty_file_count > 0 {
             format!(" ({} dirty files)", s.dirty_file_count)
         } else {
@@ -169,6 +175,506 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
         println!("\x1b[90mNext: maw ws recover <name>\x1b[0m");
     } else {
         println!("Next: maw ws recover <name>");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search pinned recovery refs (agents)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct RecoveryRef {
+    ref_name: String,
+    workspace: String,
+    timestamp: String,
+    oid: String,
+}
+
+#[derive(Clone, Debug)]
+struct GrepHit {
+    path: String,
+    line: usize,
+    line_text: String,
+}
+
+#[derive(Serialize)]
+struct SnippetLine {
+    line: usize,
+    text: String,
+    is_match: bool,
+}
+
+#[derive(Serialize)]
+struct SearchHit {
+    ref_name: String,
+    workspace: String,
+    timestamp: String,
+    oid: String,
+    oid_short: String,
+    path: String,
+    line: usize,
+    snippet: Vec<SnippetLine>,
+}
+
+#[derive(Serialize)]
+struct RecoverSearchEnvelope {
+    pattern: String,
+    workspace_filter: Option<String>,
+    ref_filter: Option<String>,
+    scanned_refs: usize,
+    hit_count: usize,
+    truncated: bool,
+    hits: Vec<SearchHit>,
+    advice: Vec<String>,
+}
+
+/// Search pinned recovery snapshots by content.
+///
+/// - If `workspace_filter` is `Some`, only snapshots for that workspace are searched.
+/// - If `ref_filter` is `Some`, only that snapshot is searched.
+///
+/// `context` controls how many surrounding lines are included per match.
+/// `max_hits` caps total matches returned (deterministic truncation).
+#[allow(clippy::too_many_arguments)]
+pub fn search(
+    pattern: &str,
+    workspace_filter: Option<&str>,
+    ref_filter: Option<&str>,
+    context: usize,
+    max_hits: usize,
+    regex: bool,
+    ignore_case: bool,
+    text: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    if pattern.is_empty() {
+        bail!("Search pattern cannot be empty");
+    }
+    if max_hits == 0 {
+        bail!("--max-hits must be >= 1");
+    }
+
+    let git_cwd = super::git_cwd()?;
+    let mut refs = list_recovery_refs(&git_cwd)?;
+
+    if let Some(ws) = workspace_filter {
+        refs.retain(|r| r.workspace == ws);
+    }
+
+    if let Some(rf) = ref_filter {
+        validate_recovery_ref(rf)?;
+        refs.retain(|r| r.ref_name == rf);
+        if refs.is_empty() {
+            bail!(
+                "Recovery ref '{rf}' not found under {RECOVERY_PREFIX}.\n  \
+                 List refs: git for-each-ref {RECOVERY_PREFIX}"
+            );
+        }
+    }
+
+    // Deterministic order regardless of filesystem ref ordering.
+    refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+
+    if refs.is_empty() {
+        match format {
+            OutputFormat::Json => {
+                let envelope = RecoverSearchEnvelope {
+                    pattern: pattern.to_string(),
+                    workspace_filter: workspace_filter.map(|s| s.to_string()),
+                    ref_filter: ref_filter.map(|s| s.to_string()),
+                    scanned_refs: 0,
+                    hit_count: 0,
+                    truncated: false,
+                    hits: vec![],
+                    advice: vec![
+                        "No pinned recovery snapshots found to search.".to_string(),
+                        format!("List refs: git for-each-ref {RECOVERY_PREFIX}"),
+                    ],
+                };
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            }
+            _ => {
+                println!("No pinned recovery snapshots found to search.");
+                println!("List refs: git for-each-ref {RECOVERY_PREFIX}");
+            }
+        }
+        return Ok(());
+    }
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut truncated = false;
+    let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
+
+    'scan: for r in &refs {
+        let grep_hits = git_grep_hits(&git_cwd, &r.oid, pattern, regex, ignore_case, text)?;
+        for gh in grep_hits {
+            let snippet = build_snippet(
+                &git_cwd,
+                &r.oid,
+                &gh.path,
+                gh.line,
+                context,
+                &gh.line_text,
+                &mut file_cache,
+            )?;
+
+            hits.push(SearchHit {
+                ref_name: r.ref_name.clone(),
+                workspace: r.workspace.clone(),
+                timestamp: r.timestamp.clone(),
+                oid: r.oid.clone(),
+                oid_short: r.oid[..r.oid.len().min(12)].to_string(),
+                path: gh.path,
+                line: gh.line,
+                snippet,
+            });
+
+            if hits.len() >= max_hits {
+                truncated = true;
+                break 'scan;
+            }
+        }
+    }
+
+    let envelope = RecoverSearchEnvelope {
+        pattern: pattern.to_string(),
+        workspace_filter: workspace_filter.map(|s| s.to_string()),
+        ref_filter: ref_filter.map(|s| s.to_string()),
+        scanned_refs: refs.len(),
+        hit_count: hits.len(),
+        truncated,
+        hits,
+        advice: vec![
+            "Show file: maw ws recover --ref <ref> --show <path>".to_string(),
+            "Restore:   maw ws recover --ref <ref> --to <new-workspace>".to_string(),
+        ],
+    };
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        OutputFormat::Text => print_search_text(&envelope),
+        OutputFormat::Pretty => print_search_pretty(&envelope, format),
+    }
+
+    Ok(())
+}
+
+fn validate_recovery_ref(r: &str) -> Result<()> {
+    if !r.starts_with(RECOVERY_PREFIX) {
+        bail!(
+            "Recovery ref must be under {RECOVERY_PREFIX}.\n  \
+             Got: {r}"
+        );
+    }
+    // Require a workspace + timestamp suffix (two components after prefix).
+    let rest = &r[RECOVERY_PREFIX.len()..];
+    if !rest.contains('/') {
+        bail!(
+            "Recovery ref must be of form {RECOVERY_PREFIX}<workspace>/<timestamp>.\n  \
+             Got: {r}"
+        );
+    }
+    Ok(())
+}
+
+fn parse_recovery_ref_name(ref_name: &str) -> Option<(String, String)> {
+    if !ref_name.starts_with(RECOVERY_PREFIX) {
+        return None;
+    }
+    let rest = &ref_name[RECOVERY_PREFIX.len()..];
+    let mut it = rest.splitn(2, '/');
+    let ws = it.next()?;
+    let ts = it.next()?;
+    Some((ws.to_string(), ts.to_string()))
+}
+
+fn list_recovery_refs(git_cwd: &Path) -> Result<Vec<RecoveryRef>> {
+    let output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            RECOVERY_PREFIX,
+        ])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git for-each-ref for recovery refs")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git for-each-ref failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out: Vec<RecoveryRef> = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let ref_name = match parts.next() {
+            Some(v) => v,
+            None => continue,
+        };
+        let oid = match parts.next() {
+            Some(v) => v,
+            None => continue,
+        };
+        if let Some((ws, ts)) = parse_recovery_ref_name(ref_name) {
+            out.push(RecoveryRef {
+                ref_name: ref_name.to_string(),
+                workspace: ws,
+                timestamp: ts,
+                oid: oid.to_string(),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+fn git_grep_hits(
+    git_cwd: &Path,
+    oid: &str,
+    pattern: &str,
+    regex: bool,
+    ignore_case: bool,
+    text: bool,
+) -> Result<Vec<GrepHit>> {
+    let mut args: Vec<&str> = vec!["grep", "-n", "--no-color"];
+
+    if ignore_case {
+        args.push("-i");
+    }
+    if !regex {
+        args.push("-F");
+    }
+    if text {
+        // Search binary blobs as if they were text.
+        args.push("-a");
+    } else {
+        // Default: ignore binary files.
+        args.push("-I");
+    }
+
+    // Always use -e so patterns beginning with '-' can't be interpreted as flags.
+    args.push("-e");
+    args.push(pattern);
+    args.push(oid);
+
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git grep")?;
+
+    match output.status.code() {
+        Some(0) => {}
+        Some(1) => return Ok(vec![]),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git grep failed: {}", stderr.trim());
+        }
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut hits: Vec<GrepHit> = Vec::new();
+    let prefix = format!("{oid}:");
+
+    for line in stdout.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let rest = line.strip_prefix(&prefix).unwrap_or(line);
+        let mut parts = rest.splitn(3, ':');
+        let path = match parts.next() {
+            Some(v) => v,
+            None => continue,
+        };
+        let line_str = match parts.next() {
+            Some(v) => v,
+            None => continue,
+        };
+        let text = parts.next().unwrap_or("");
+
+        let line_no: usize = match line_str.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        hits.push(GrepHit {
+            path: path.to_string(),
+            line: line_no,
+            line_text: text.to_string(),
+        });
+    }
+
+    Ok(hits)
+}
+
+fn read_file_lines(git_cwd: &Path, oid: &str, path: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["show", &format!("{oid}:{path}")])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git show for snippet")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "git show failed while building snippet for {oid_short}:{path}: {}",
+            stderr.trim(),
+            oid_short = &oid[..oid.len().min(12)]
+        );
+    }
+
+    let content = String::from_utf8_lossy(&output.stdout);
+    Ok(content.lines().map(|l| l.to_string()).collect())
+}
+
+fn build_snippet(
+    git_cwd: &Path,
+    oid: &str,
+    path: &str,
+    line: usize,
+    context: usize,
+    fallback_line_text: &str,
+    cache: &mut HashMap<String, Vec<String>>,
+) -> Result<Vec<SnippetLine>> {
+    if context == 0 {
+        return Ok(vec![SnippetLine {
+            line,
+            text: fallback_line_text.to_string(),
+            is_match: true,
+        }]);
+    }
+
+    let key = format!("{oid}:{path}");
+    if !cache.contains_key(&key) {
+        let lines = read_file_lines(git_cwd, oid, path)?;
+        cache.insert(key.clone(), lines);
+    }
+
+    let lines = cache
+        .get(&key)
+        .context("internal error: file cache missing key")?;
+
+    if lines.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // git grep line numbers are 1-based.
+    let start = line.saturating_sub(context).max(1);
+    let mut end = line.saturating_add(context);
+    if end > lines.len() {
+        end = lines.len();
+    }
+
+    let mut out = Vec::new();
+    for ln in start..=end {
+        if let Some(text) = lines.get(ln - 1) {
+            out.push(SnippetLine {
+                line: ln,
+                text: text.clone(),
+                is_match: ln == line,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn print_search_text(env: &RecoverSearchEnvelope) {
+    println!("PATTERN\t{}", env.pattern);
+    if let Some(ref ws) = env.workspace_filter {
+        println!("WORKSPACE\t{ws}");
+    }
+    if let Some(ref rf) = env.ref_filter {
+        println!("REF\t{rf}");
+    }
+
+    let trunc = if env.truncated { " (truncated)" } else { "" };
+    println!(
+        "SCANNED_REFS\t{}\nHITS\t{}{}",
+        env.scanned_refs, env.hit_count, trunc
+    );
+    println!();
+
+    for h in &env.hits {
+        println!(
+            "{}\t{}\t{}\t{}:{}\t{}",
+            h.workspace, h.timestamp, h.oid_short, h.path, h.line, h.ref_name
+        );
+        for sl in &h.snippet {
+            let marker = if sl.is_match { ">" } else { " " };
+            println!("  {marker} {:>6}\t{}", sl.line, sl.text);
+        }
+        println!();
+    }
+
+    println!("Next: maw ws recover --ref <ref> --show <path>");
+    println!("      maw ws recover --ref <ref> --to <new-workspace>");
+}
+
+fn print_search_pretty(env: &RecoverSearchEnvelope, format: OutputFormat) {
+    let use_color = format.should_use_color();
+
+    if use_color {
+        println!("\x1b[1mSearch recovery snapshots\x1b[0m");
+    } else {
+        println!("Search recovery snapshots");
+    }
+
+    println!("  Pattern:  {}", env.pattern);
+    if let Some(ref ws) = env.workspace_filter {
+        println!("  Workspace: {ws}");
+    }
+    if let Some(ref rf) = env.ref_filter {
+        println!("  Ref:      {rf}");
+    }
+
+    let trunc = if env.truncated { " (truncated)" } else { "" };
+    println!(
+        "  Scanned:  {} ref(s)\n  Hits:     {}{}",
+        env.scanned_refs, env.hit_count, trunc
+    );
+    println!();
+
+    for h in &env.hits {
+        if use_color {
+            println!(
+                "\x1b[33m{}\x1b[0m {} {}... {}:{}",
+                h.workspace, h.timestamp, h.oid_short, h.path, h.line
+            );
+            println!("  \x1b[90mref: {}\x1b[0m", h.ref_name);
+        } else {
+            println!(
+                "{} {} {}... {}:{}",
+                h.workspace, h.timestamp, h.oid_short, h.path, h.line
+            );
+            println!("  ref: {}", h.ref_name);
+        }
+
+        for sl in &h.snippet {
+            let marker = if sl.is_match { ">" } else { " " };
+            if use_color && sl.is_match {
+                println!("  {marker} \x1b[1m{:>6}\x1b[0m {}", sl.line, sl.text);
+            } else {
+                println!("  {marker} {:>6} {}", sl.line, sl.text);
+            }
+        }
+        println!();
+    }
+
+    if use_color {
+        println!("\x1b[90mNext: maw ws recover --ref <ref> --show <path>\x1b[0m");
+        println!("\x1b[90m      maw ws recover --ref <ref> --to <new-workspace>\x1b[0m");
+    } else {
+        println!("Next: maw ws recover --ref <ref> --show <path>");
+        println!("      maw ws recover --ref <ref> --to <new-workspace>");
     }
 }
 
@@ -221,7 +727,10 @@ pub fn show_workspace(name: &str, format: OutputFormat) -> Result<()> {
 }
 
 fn print_show_text(name: &str, records: &[DestroyRecord]) {
-    println!("Destroy history for workspace '{name}' ({} record(s)):", records.len());
+    println!(
+        "Destroy history for workspace '{name}' ({} record(s)):",
+        records.len()
+    );
     println!();
     for (i, r) in records.iter().enumerate() {
         println!("--- Record {} ---", i + 1);
@@ -310,6 +819,54 @@ fn print_show_pretty(name: &str, records: &[DestroyRecord], format: OutputFormat
 // Show a specific file from the snapshot
 // ---------------------------------------------------------------------------
 
+pub fn show_file_by_ref(recovery_ref: &str, path: &str) -> Result<()> {
+    validate_recovery_ref(recovery_ref)?;
+    validate_show_path(path)?;
+
+    let git_cwd = super::git_cwd()?;
+    let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
+    show_file_at_oid(&git_cwd, &oid, path)
+}
+
+fn resolve_ref_to_oid(git_cwd: &Path, reference: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to resolve recovery ref")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Failed to resolve recovery ref '{reference}': {}",
+            stderr.trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn show_file_at_oid(git_cwd: &Path, oid: &str, path: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["show", &format!("{oid}:{path}")])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git show")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Failed to show file '{path}' from snapshot {oid_short}: {}",
+            stderr.trim(),
+            oid_short = &oid[..oid.len().min(12)]
+        );
+    }
+
+    use std::io::Write;
+    std::io::stdout().write_all(&output.stdout)?;
+    Ok(())
+}
+
 pub fn show_file(name: &str, path: &str) -> Result<()> {
     validate_workspace_name(name)?;
     validate_show_path(path)?;
@@ -394,6 +951,27 @@ fn resolve_recoverable_oid(record: &DestroyRecord) -> Result<String> {
 // Restore snapshot to a new workspace
 // ---------------------------------------------------------------------------
 
+pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
+    validate_recovery_ref(recovery_ref)?;
+    validate_workspace_name(new_name)?;
+
+    let git_cwd = super::git_cwd()?;
+    let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
+
+    // Create new workspace (empty) and then populate it from the snapshot tree.
+    super::create::create(new_name, None, false, None)?;
+    let new_path = workspace_path(new_name)?;
+    populate_from_snapshot(&new_path, &oid)?;
+
+    println!(
+        "Restored snapshot {oid_short} to workspace '{new_name}'.",
+        oid_short = &oid[..oid.len().min(12)]
+    );
+    println!("Next: maw exec {new_name} -- git status");
+
+    Ok(())
+}
+
 pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     validate_workspace_name(name)?;
     validate_workspace_name(new_name)?;
@@ -433,10 +1011,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     println!("  Snapshot:  {}...", &oid[..oid.len().min(12)]);
     println!("  Path:      {}/", new_ws_path.display());
     if !record.dirty_files.is_empty() {
-        println!(
-            "  Recovered: {} dirty file(s)",
-            record.dirty_files.len()
-        );
+        println!("  Recovered: {} dirty file(s)", record.dirty_files.len());
     }
     println!();
     println!("Next: maw exec {new_name} -- git status");
@@ -590,5 +1165,102 @@ mod tests {
             tool_version: "0.47.0".to_string(),
         };
         assert!(resolve_recoverable_oid(&record).is_err());
+    }
+
+    #[test]
+    fn validate_recovery_ref_requires_prefix_and_suffix() {
+        assert!(validate_recovery_ref("refs/heads/main").is_err());
+        assert!(validate_recovery_ref("refs/manifold/recovery").is_err());
+        assert!(validate_recovery_ref("refs/manifold/recovery/").is_err());
+        assert!(validate_recovery_ref("refs/manifold/recovery/ws-only").is_err());
+        assert!(validate_recovery_ref("refs/manifold/recovery/alice/2025-01-01T00-00-00Z").is_ok());
+    }
+
+    #[test]
+    fn parse_recovery_ref_name_extracts_workspace_and_timestamp() {
+        let (ws, ts) =
+            parse_recovery_ref_name("refs/manifold/recovery/alice/2025-01-01T00-00-00Z").unwrap();
+        assert_eq!(ws, "alice");
+        assert_eq!(ts, "2025-01-01T00-00-00Z");
+    }
+
+    #[test]
+    fn list_and_grep_recovery_refs_in_temp_repo() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // init repo
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        fs::write(
+            root.join("a.txt"),
+            "one
+needle
+three
+",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let oid_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(oid_out.status.success());
+        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
+
+        // pin recovery ref
+        let ref_name = "refs/manifold/recovery/alice/2025-01-01T00-00-00Z";
+        let upd = Command::new("git")
+            .args(["update-ref", ref_name, &oid])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(upd.status.success());
+
+        let refs = list_recovery_refs(root).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].ref_name, ref_name);
+        assert_eq!(refs[0].workspace, "alice");
+        assert_eq!(refs[0].oid, oid);
+
+        let hits = git_grep_hits(root, &oid, "needle", false, false, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "a.txt");
+        assert_eq!(hits[0].line, 2);
+
+        let mut cache = HashMap::new();
+        let snippet =
+            build_snippet(root, &oid, "a.txt", 2, 1, &hits[0].line_text, &mut cache).unwrap();
+        assert_eq!(snippet.len(), 3);
+        assert_eq!(snippet[1].line, 2);
+        assert!(snippet[1].is_match);
     }
 }
