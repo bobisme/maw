@@ -3,10 +3,15 @@
 //! Freezes all merge inputs (epoch commit + workspace HEAD commits) so that
 //! the merge is deterministic regardless of concurrent workspace activity.
 //!
-//! # Crash safety
+//! # Concurrency & crash safety
 //!
-//! The merge-state file is written atomically (write-to-temp + fsync +
-//! rename). If a crash occurs during PREPARE:
+//! The merge-state file is created exclusively (`O_CREAT | O_EXCL` via
+//! `OpenOptions::create_new`). The first writer wins atomically; a second
+//! concurrent PREPARE receives `EEXIST` and maps it to
+//! `MergeAlreadyInProgress`. When overwriting a terminal/stale state the
+//! regular atomic write (write-to-temp + fsync + rename) is used.
+//!
+//! If a crash occurs during PREPARE:
 //!
 //! - **Before write:** No merge-state file exists → nothing to recover.
 //! - **After write:** A valid merge-state in `Prepare` phase exists →
@@ -203,10 +208,44 @@ pub fn run_prepare_phase(
         return Err(PrepareError::NoSources);
     }
 
-    // 2. Check for in-progress merge
+    // 2. Read current epoch
+    let epoch = read_epoch_ref(repo_root)?;
+
+    // 3. Read workspace HEADs
+    let mut heads = BTreeMap::new();
+    for ws_id in sources {
+        let ws_dir =
+            workspace_dirs
+                .get(ws_id)
+                .ok_or_else(|| PrepareError::WorkspaceHeadNotFound {
+                    workspace: ws_id.clone(),
+                    detail: "workspace directory not provided".to_owned(),
+                })?;
+        let head = read_workspace_head(repo_root, ws_id, ws_dir)?;
+        heads.insert(ws_id.clone(), head);
+    }
+
+    // 4. Create merge-state
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut state = MergeStateFile::new(sources.to_vec(), epoch.clone(), now);
+    state.frozen_heads = heads.clone();
+
+    // 5. Ensure .manifold directory exists
+    std::fs::create_dir_all(manifold_dir).map_err(|e| {
+        PrepareError::State(MergeStateError::Io(format!(
+            "create {}: {e}",
+            manifold_dir.display()
+        )))
+    })?;
+
+    // 6. Try exclusive creation (O_CREAT | O_EXCL) — first writer wins
     let state_path = MergeStateFile::default_path(manifold_dir);
-    if state_path.exists() {
-        // Check if it's a terminal state — if so, we can overwrite
+    if !state.write_exclusive(&state_path)? {
+        // File already exists — check if it's safe to overwrite
         match MergeStateFile::read(&state_path) {
             Ok(existing) if !existing.phase.is_terminal() => {
                 // For Commit/Cleanup phases the COMMIT has already run (refs
@@ -233,52 +272,18 @@ pub fn run_prepare_phase(
                          advanced — previous merge completed without cleanup. Clearing stale state.",
                         existing.phase
                     );
-                    // Fall through: overwrite the stale file below
+                    // Overwrite stale file
+                    state.write_atomic(&state_path)?;
                 } else {
                     return Err(PrepareError::MergeAlreadyInProgress);
                 }
             }
             _ => {
                 // Terminal or corrupt — safe to overwrite
+                state.write_atomic(&state_path)?;
             }
         }
     }
-
-    // 3. Read current epoch
-    let epoch = read_epoch_ref(repo_root)?;
-
-    // 4. Read workspace HEADs
-    let mut heads = BTreeMap::new();
-    for ws_id in sources {
-        let ws_dir =
-            workspace_dirs
-                .get(ws_id)
-                .ok_or_else(|| PrepareError::WorkspaceHeadNotFound {
-                    workspace: ws_id.clone(),
-                    detail: "workspace directory not provided".to_owned(),
-                })?;
-        let head = read_workspace_head(repo_root, ws_id, ws_dir)?;
-        heads.insert(ws_id.clone(), head);
-    }
-
-    // 5. Create merge-state
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut state = MergeStateFile::new(sources.to_vec(), epoch.clone(), now);
-    state.frozen_heads = heads.clone();
-
-    // 6. Write atomically with fsync
-    // Ensure .manifold directory exists
-    std::fs::create_dir_all(manifold_dir).map_err(|e| {
-        PrepareError::State(MergeStateError::Io(format!(
-            "create {}: {e}",
-            manifold_dir.display()
-        )))
-    })?;
-    state.write_atomic(&state_path)?;
 
     Ok(FrozenInputs { epoch, heads })
 }
@@ -297,16 +302,6 @@ pub fn run_prepare_phase_with_epoch(
         return Err(PrepareError::NoSources);
     }
 
-    let state_path = MergeStateFile::default_path(manifold_dir);
-    if state_path.exists() {
-        match MergeStateFile::read(&state_path) {
-            Ok(existing) if !existing.phase.is_terminal() => {
-                return Err(PrepareError::MergeAlreadyInProgress);
-            }
-            _ => {}
-        }
-    }
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -321,7 +316,21 @@ pub fn run_prepare_phase_with_epoch(
             manifold_dir.display()
         )))
     })?;
-    state.write_atomic(&state_path)?;
+
+    // Try exclusive creation (O_CREAT | O_EXCL) — first writer wins
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    if !state.write_exclusive(&state_path)? {
+        // File already exists — check if it's safe to overwrite
+        match MergeStateFile::read(&state_path) {
+            Ok(existing) if !existing.phase.is_terminal() => {
+                return Err(PrepareError::MergeAlreadyInProgress);
+            }
+            _ => {
+                // Terminal or corrupt — safe to overwrite
+                state.write_atomic(&state_path)?;
+            }
+        }
+    }
 
     Ok(FrozenInputs { epoch, heads })
 }

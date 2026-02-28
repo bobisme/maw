@@ -269,6 +269,43 @@ impl MergeStateFile {
         serde_json::from_str(json).map_err(|e| MergeStateError::Deserialize(e.to_string()))
     }
 
+    /// Create the merge-state file exclusively (O_CREAT | O_EXCL).
+    ///
+    /// Uses `OpenOptions::create_new(true)` so exactly one writer wins.
+    /// Returns `Ok(true)` on success, `Ok(false)` if the file already exists,
+    /// and `Err` on any other I/O error.
+    ///
+    /// The write is crash-safe: data is serialized, written, and fsynced
+    /// directly to the target path. Unlike `write_atomic`, there is no
+    /// temp+rename dance because the `O_EXCL` flag already guarantees
+    /// the file did not exist.
+    pub fn write_exclusive(&self, path: &Path) -> Result<bool, MergeStateError> {
+        use std::fs::OpenOptions;
+
+        let json = self.to_json()?;
+
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                file.write_all(json.as_bytes()).map_err(|e| {
+                    MergeStateError::Io(format!("write {}: {e}", path.display()))
+                })?;
+                file.sync_all().map_err(|e| {
+                    MergeStateError::Io(format!("fsync {}: {e}", path.display()))
+                })?;
+                Ok(true)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(MergeStateError::Io(format!(
+                "create_new {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
     /// Write the merge-state file atomically with fsync.
     ///
     /// 1. Serialize to pretty JSON.
