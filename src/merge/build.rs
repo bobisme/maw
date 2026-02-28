@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -187,9 +188,10 @@ impl From<std::io::Error> for BuildError {
 /// # Determinism
 ///
 /// Given the same `epoch`, `workspace_ids`, and `resolved` inputs (in any
-/// order — this function sorts them internally), the output commit OID is
+/// order -- this function sorts them internally), the output tree OID is
 /// always the same. This follows from git's content-addressable storage:
-/// identical tree content → identical OID.
+/// identical tree content produces an identical tree OID. Commit OIDs will
+/// vary because they include a real timestamp.
 pub fn build_merge_commit(
     root: &Path,
     epoch: &EpochId,
@@ -469,22 +471,31 @@ fn run_mktree(root: &Path, input: &str) -> Result<GitOid, BuildError> {
 /// Create a git commit object.
 ///
 /// Uses `git commit-tree <tree-oid> -p <parent-oid> -m <message>`.
-/// Sets `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` to a fixed epoch
-/// so that identical inputs produce identical commit OIDs (determinism).
+/// Sets `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` to the current real time
+/// so that merge commits carry accurate timestamps.
 ///
 /// # Note on identity
 ///
 /// `git commit-tree` uses the repo's `user.name` and `user.email` config for
-/// authorship. The timestamps are fixed to ensure deterministic output.
+/// authorship.
+///
+/// # Determinism
+///
+/// Tree content is still fully deterministic (same inputs produce the same
+/// tree OID). Commit OIDs will vary because they include the real timestamp,
+/// but this is the expected behavior for merge commits that should reflect
+/// when they actually occurred.
 fn create_commit(
     root: &Path,
     parent: &EpochId,
     tree: &GitOid,
     message: &str,
 ) -> Result<GitOid, BuildError> {
-    // Fixed timestamp for determinism: 2020-01-01T00:00:00Z epoch.
-    // This makes identical inputs produce identical commit OIDs.
-    const FIXED_TIMESTAMP: &str = "1577836800 +0000";
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let timestamp = format!("{now_secs} +0000");
 
     let output = Command::new("git")
         .args([
@@ -496,8 +507,8 @@ fn create_commit(
             message,
         ])
         .current_dir(root)
-        .env("GIT_AUTHOR_DATE", FIXED_TIMESTAMP)
-        .env("GIT_COMMITTER_DATE", FIXED_TIMESTAMP)
+        .env("GIT_AUTHOR_DATE", &timestamp)
+        .env("GIT_COMMITTER_DATE", &timestamp)
         .output()?;
 
     if !output.status.success() {
@@ -844,11 +855,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Determinism: same inputs → same OID
+    // Determinism: same inputs → same tree OID
     // -----------------------------------------------------------------------
 
     #[test]
-    fn build_is_deterministic() {
+    fn build_tree_is_deterministic() {
         let (dir, epoch) = setup_git_repo();
         let root = dir.path();
 
@@ -868,7 +879,49 @@ mod tests {
         let oid2 =
             build_merge_commit(root, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
 
-        assert_eq!(oid1, oid2, "same inputs must produce same commit OID");
+        // Tree OIDs must be identical (content-addressed).
+        let tree1 = git_oid(root, &format!("{}^{{tree}}", oid1.as_str()));
+        let tree2 = git_oid(root, &format!("{}^{{tree}}", oid2.as_str()));
+        assert_eq!(tree1, tree2, "same inputs must produce same tree OID");
+    }
+
+    // -----------------------------------------------------------------------
+    // Merge commits use real timestamps (not fixed/synthetic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_commit_uses_real_timestamp() {
+        let (dir, epoch) = setup_git_repo();
+        let root = dir.path();
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let commit_oid =
+            build_merge_commit(root, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
+
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Read the author date from the commit.
+        let log_out = Command::new("git")
+            .args(["log", "--format=%at", "-1", commit_oid.as_str()])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let author_ts: u64 = String::from_utf8_lossy(&log_out.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+
+        assert!(
+            author_ts >= before && author_ts <= after,
+            "commit timestamp {author_ts} should be between {before} and {after}"
+        );
     }
 
     // -----------------------------------------------------------------------

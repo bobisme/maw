@@ -15,7 +15,7 @@
 //! - **Change types**: disjoint, overlapping (diff3-resolvable), conflicting,
 //!   identical, delete/delete, modify/delete, add/add
 //! - **End-to-end**: full pipeline through `build_merge_commit` with real git
-//!   repos in /tmp, verifying identical commit OIDs across orderings
+//!   repos in /tmp, verifying identical tree OIDs across orderings
 //! - **100+ random scenarios**: via proptest with `ProptestConfig::with_cases(100)`
 
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -845,7 +845,7 @@ fn run_full_merge(
 }
 
 /// End-to-end determinism: 2 workspaces with disjoint file additions.
-/// Different workspace orderings must produce the same commit OID.
+/// Different workspace orderings must produce the same tree OID.
 #[test]
 fn e2e_determinism_2_workspaces_disjoint() {
     let (dir, epoch) = setup_git_repo();
@@ -880,9 +880,11 @@ fn e2e_determinism_2_workspaces_disjoint() {
         &base,
     );
 
+    let tree_forward = git_tree_oid(root, oid_forward.as_str());
+    let tree_reverse = git_tree_oid(root, oid_reverse.as_str());
     assert_eq!(
-        oid_forward, oid_reverse,
-        "2-workspace disjoint merge must produce identical commit OID regardless of ordering"
+        tree_forward, tree_reverse,
+        "2-workspace disjoint merge must produce identical tree OID regardless of ordering"
     );
 }
 
@@ -922,14 +924,16 @@ fn e2e_determinism_3_workspaces_shared_file() {
     // Test all 6 permutations of 3 workspaces.
     let perms = permutations(3);
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
+    let reference_tree = git_tree_oid(root, reference_oid.as_str());
 
     for (i, perm) in perms.iter().enumerate().skip(1) {
         let reordered: Vec<WorkspaceScenario> =
             perm.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
+        let tree = git_tree_oid(root, oid.as_str());
         assert_eq!(
-            reference_oid, oid,
-            "3-workspace permutation {i} ({perm:?}) produced different commit OID"
+            reference_tree, tree,
+            "3-workspace permutation {i} ({perm:?}) produced different tree OID"
         );
     }
 }
@@ -1010,14 +1014,16 @@ fn e2e_determinism_5_workspaces_mixed() {
     // Test all 120 permutations of 5 workspaces.
     let perms = permutations(5);
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
+    let reference_tree = git_tree_oid(root, reference_oid.as_str());
 
     for (i, perm) in perms.iter().enumerate().skip(1) {
         let reordered: Vec<WorkspaceScenario> =
             perm.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
+        let tree = git_tree_oid(root, oid.as_str());
         assert_eq!(
-            reference_oid, oid,
-            "5-workspace permutation {i} ({perm:?}) produced different commit OID"
+            reference_tree, tree,
+            "5-workspace permutation {i} ({perm:?}) produced different tree OID"
         );
     }
 }
@@ -1059,6 +1065,7 @@ fn e2e_determinism_10_workspaces_same_file() {
     // Sample 50 orderings of 10 workspaces.
     let orderings = sampled_orderings(10, 50);
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
+    let reference_tree = git_tree_oid(root, reference_oid.as_str());
 
     // Verify the merged result contains all 10 edits.
     {
@@ -1087,11 +1094,12 @@ fn e2e_determinism_10_workspaces_same_file() {
         let reordered: Vec<WorkspaceScenario> =
             ordering.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
+        let tree = git_tree_oid(root, oid.as_str());
         assert_eq!(
-            reference_oid, oid,
-            "10-workspace ordering {i} ({ordering:?}) produced different commit OID.\n\
-             Reference OID: {reference_oid}\n\
-             Got OID: {oid}"
+            reference_tree, tree,
+            "10-workspace ordering {i} ({ordering:?}) produced different tree OID.\n\
+             Reference tree: {reference_tree}\n\
+             Got tree: {tree}"
         );
     }
 }
@@ -1117,14 +1125,16 @@ fn e2e_determinism_10_workspaces_disjoint() {
     let base = BTreeMap::new();
     let orderings = sampled_orderings(10, 50);
     let reference_oid = run_full_merge(root, &epoch, &scenarios, &base);
+    let reference_tree = git_tree_oid(root, reference_oid.as_str());
 
     for (i, ordering) in orderings.iter().enumerate().skip(1) {
         let reordered: Vec<WorkspaceScenario> =
             ordering.iter().map(|&j| scenarios[j].clone()).collect();
         let oid = run_full_merge(root, &epoch, &reordered, &base);
+        let tree = git_tree_oid(root, oid.as_str());
         assert_eq!(
-            reference_oid, oid,
-            "10-workspace disjoint ordering {i} produced different commit OID"
+            reference_tree, tree,
+            "10-workspace disjoint ordering {i} produced different tree OID"
         );
     }
 }
