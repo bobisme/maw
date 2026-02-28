@@ -123,7 +123,66 @@ Claims are valid only while the following pass:
 - crash/failpoint replay suite over merge and rewrite boundaries;
 - recoverability discoverability tests executing emitted recovery commands.
 
-## 6) Change control
+## 6) Explicit non-guarantees
+
+The following behaviors are known limitations, not bugs. They are documented
+here so that operators and agents have correct expectations. See
+`notes/assurance-plan.md` section 10 (concurrency threat model) for the full
+analysis.
+
+### NG1: no concurrent merge exclusion
+
+maw does not prevent multiple merge operations from running in parallel. Two
+`maw ws merge` invocations can both proceed through PREPARE, BUILD, and
+VALIDATE concurrently. Only one will succeed at COMMIT, because the epoch CAS
+(`refs/manifold/epoch/current`) rejects stale callers. The losing merge wastes
+compute and receives a CAS error.
+
+**Implication for operators**: concurrent merges are safe in terms of
+correctness (no data loss), but the losing merge's work is discarded. If
+merge latency matters, coordinate merge invocations externally.
+
+### NG2: no dirty-state protection during sync
+
+`maw ws sync` checks whether a workspace has committed-ahead work (commits
+not yet in the epoch) before syncing. It does **not** check for unstaged or
+untracked changes. If a workspace has uncommitted modifications, `sync` will
+proceed and git's own merge/checkout machinery provides some conflict
+detection -- but this is git's behavior, not a maw guarantee. Uncommitted
+untracked files are particularly vulnerable: git will silently overwrite them
+if the incoming epoch introduces a file at the same path.
+
+**Planned fix**: bn-34dg adds explicit dirty-state detection to
+`sync_worktree_to_epoch()`. Until that lands, commit or stash all work before
+running `maw ws sync`.
+
+### NG3: destroy record writes are best-effort
+
+When a workspace is destroyed (standalone `maw ws destroy` or post-merge
+`--destroy`), maw writes a destroy record to `.manifold/destroy-records/` and
+updates `latest.json`. Both standalone `destroy()` and
+`handle_post_merge_destroy()` treat failures in this write as warnings, not
+errors. The operation continues and the workspace is removed.
+
+**Why this is acceptable**: the recovery ref
+(`refs/manifold/recovery/<workspace>`) is the critical data for recovering
+destroyed workspace content. The destroy record is metadata (timestamp, reason,
+original HEAD) that aids discoverability but is not required for restoration.
+`maw ws recover --search` can locate recovery refs even when destroy records
+are missing.
+
+### NG4: maw push does not check for in-progress merges
+
+`maw push` pushes whatever the configured branch ref currently points to. It
+does not check whether a merge COMMIT is in progress. If `maw push` runs
+during the window between a merge's epoch CAS and branch ref update, it could
+push the pre-merge branch state.
+
+**Implication for operators**: do not run `maw push` concurrently with
+`maw ws merge`. The merge operation is fast (sub-second COMMIT phase), so the
+race window is small, but no interlock prevents it.
+
+## 7) Change control
 
 Any PR that changes destructive/rewrite behavior must update:
 
