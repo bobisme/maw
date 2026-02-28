@@ -112,79 +112,63 @@ but not yet implemented).
 
 | ID | Guarantee | Status |
 |----|-----------|--------|
-| G1 | **Committed no-loss**: pre-op committed content remains durably reachable from durable or recovery refs after any maw operation. | holds (with caveat) |
-| G2 | **Rewrite no-loss**: before any maw-initiated rewrite that can overwrite workspace state, maw must either prove no user work exists or capture recoverability under contract-defined surfaces. | **violated** |
+| G1 | **Committed no-loss**: pre-op committed content remains durably reachable from durable or recovery refs after any maw operation. | holds |
+| G2 | **Rewrite no-loss**: before any maw-initiated rewrite that can overwrite workspace state, maw must either prove no user work exists or capture recoverability under contract-defined surfaces. | holds |
 | G3 | **Post-COMMIT monotonicity**: after COMMIT moves refs successfully, later cleanup failures must not undo/obscure the successful commit and must not destroy captured user work. | holds |
-| G4 | **Destructive gate**: any operation that can destroy/overwrite workspace state must abort or skip if capture prerequisites fail. "Best effort destroy anyway" is forbidden. | **violated** |
+| G4 | **Destructive gate**: any operation that can destroy/overwrite workspace state must abort or skip if capture prerequisites fail. "Best effort destroy anyway" is forbidden. | holds |
 | G5 | **Discoverable recovery**: when recoverable state exists, maw output and `maw ws recover` make it discoverable with executable commands. | partial |
 | G6 | **Searchable recovery**: `maw ws recover --search` finds content in pinned recovery snapshots with provenance and bounded snippets. | holds |
 
-### Known violations (must fix before claiming assurance)
+### Previously violated (now fixed)
 
-**G1 caveat — recovery ref collision on same-second captures**:
-`now_timestamp_iso8601()` in `src/workspace/mod.rs:1191` has 1-second
-resolution. Recovery refs use `refs/manifold/recovery/<workspace>/<timestamp>`.
-If two captures for the same workspace occur within the same second,
-`refs::write_ref()` in `src/refs.rs:222` overwrites without CAS — the first
-recovery ref is silently clobbered, making its commit object unreachable from
-durable refs. Fix: use subsecond resolution (millis or nanos), or use
-`write_ref_cas` with `0000...` as old_oid (create-only semantics) and retry
-on collision.
+**G1 caveat (fixed) — recovery ref collision on same-second captures**:
+Previously, `now_timestamp_iso8601()` had 1-second resolution and recovery
+refs could collide. Fixed by bn-28iq: monotonic timestamps with subsecond
+resolution eliminate collision risk.
 
-**G2 violation — post-COMMIT default workspace rewrite**:
-`update_default_workspace()` at `src/workspace/merge.rs:2916` uses
-`git checkout --force <branch>` without any capture step. If `ws/default/`
-has dirty state (staged, unstaged, or untracked non-ignored files) at the
-moment of post-COMMIT cleanup, that work is silently destroyed.
+**G2 violation (fixed) — post-COMMIT default workspace rewrite**:
+Previously, `update_default_workspace()` used `git checkout --force <branch>`
+without any capture step, silently destroying dirty state. Fixed:
+`preserve_checkout_replay()` replaces the force-checkout path, and recovery
+refs capture pre-rewrite state before materialization.
 
-Additionally: after COMMIT advances `refs/heads/<branch>`, `ws/default/` can
-appear dirty even when the "diff" is non-user content caused by HEAD movement.
-Naive `stash -> checkout -> stash pop` would replay old-epoch checkout content
-and silently undo the post-COMMIT update. Any fix must anchor user-delta
-extraction to `epoch_before` from merge state, not to post-COMMIT dirty status.
-
-**G2 adjacent — sync rewrite without dirty check**:
-`sync_worktree_to_epoch()` at `src/workspace/sync.rs:165` uses
-`git checkout --detach` (no `--force`), which is safer but can still silently
-overwrite tracked files whose workspace version differs from epoch when git
-doesn't detect a conflict. Callers check committed-ahead but NOT dirty
-uncommitted changes. Minor risk.
+**G2 adjacent (fixed) — sync rewrite without dirty check**:
+`sync_worktree_to_epoch()` now includes dirty-state checking before rewrite.
 
 **Dead code risk**: `sync_stale_workspaces_for_merge()` at
 `src/workspace/sync.rs:368` is `#[allow(dead_code)]` and lacks the
 `committed_ahead_of_epoch()` safety check. Would be a G2 violation if activated.
 
-**G4 violation — best-effort destroy after status failure**:
-`src/workspace/merge.rs:3006-3023`: when `backend.status()` fails in
-`handle_post_merge_destroy()`, the code skips capture entirely and proceeds
-to destroy. The workspace may have dirty state that is destroyed without any
-recovery ref.
+**G4 violation (fixed) — best-effort destroy after status/capture failure**:
+Previously, `handle_post_merge_destroy()` skipped capture on status failure
+and continued destroy on capture failure. Fixed: capture-gate is now enforced
+on all destroy paths. Destroy refuses to proceed if capture fails (unless
+`--force` is explicitly passed).
 
-**G4 violation — best-effort destroy after capture failure**:
-`src/workspace/merge.rs:3031-3043` logs a WARNING when
-`capture_before_destroy()` fails, then proceeds to destroy the workspace
-anyway. This is the exact "best effort destroy anyway" path that G4 forbids.
-
-**Design tension for post-merge G4**: The post-merge destroy continues after
-capture failure because the *merged content* is already durable via the
-committed merge. The content at risk is dirty files accumulated *after* the
-workspace's changes were snapshotted for merge — not the merged work itself.
-Resolution needed: either narrow the G4 invariant to exclude post-merge
-destroy where merged content is already committed, or change the code to
-abort post-merge destroy on capture failure.
+**G4 design tension (resolved)**: The post-merge destroy path now enforces
+the capture-gate unconditionally. If `capture_before_destroy()` fails, destroy
+is refused. The `--force` escape hatch exists for operators who understand the
+risk, but the default path is safe.
 
 ### What does hold
 
 - **G1**: merge COMMIT uses CAS ref movement (`src/merge/commit.rs`) with
   partial-commit recovery. Recovery refs are pinned before destroy via
   `capture_before_destroy()` (`src/workspace/capture.rs:100`). Integration
-  tests in `tests/recovery_capture.rs` verify durability across GC. The
-  same-second collision caveat above is the only known weakness.
+  tests in `tests/recovery_capture.rs` verify durability across GC. Monotonic
+  timestamps (bn-28iq) eliminate same-second collision risk.
+- **G2**: `preserve_checkout_replay()` replaces `git checkout --force` for
+  all rewrite paths. Recovery refs capture pre-rewrite state before
+  materialization. Dirty-state detection anchors user-delta extraction to
+  `epoch_before` from merge state, not post-COMMIT dirty status.
 - **G3**: COMMIT writes atomic state after both refs move. Cleanup failures
   are post-commit warnings, not commit failures. Tested in
   `tests/crash_recovery.rs` (note: tests use reimplemented recovery, not
   production `recover_from_merge_state()` — the invariants tested are valid
   but the production path is not exercised end-to-end).
+- **G4**: capture-gate enforced on all destroy paths. Destroy refuses if
+  `capture_before_destroy()` fails (unless `--force` is explicitly passed).
+  Status-failure paths no longer skip capture and proceed to destroy.
 - **G6**: `maw ws recover --search` is fully implemented
   (`src/workspace/recover.rs:239`) with deterministic ref-name ordering,
   bounded truncation, provenanced snippets, and stable JSON schema.
@@ -201,44 +185,41 @@ follow this algorithm. Steps marked with current implementation status.
    - staged tracked: `git diff --cached --binary <base_epoch>`
    - unstaged tracked: `git diff --binary`
    - untracked set: `git ls-files --others --exclude-standard`
-   - Status: **not implemented** — current code does not extract deltas.
+   - Status: **implemented** — `preserve_checkout_replay()` extracts deltas
+     from explicit base.
 
 2. **If all deltas are empty**: materialize target directly
    (`git reset --hard <target_ref>`), done.
-   - Status: **not implemented** — no fast-path check exists.
+   - Status: **implemented** — fast-path check skips capture when workspace
+     is clean.
 
 3. **If user work exists**: create pinned recovery ref under
    `refs/manifold/recovery/<workspace>/<timestamp>` whose commit tree is a
    byte-for-byte capture of the working copy (tracked + untracked
    non-ignored). Write artifacts under
    `.manifold/artifacts/rewrite/<workspace>/<timestamp>/`.
-   - Status: **implemented for destroy path** (`capture_before_destroy()`),
-     **not implemented for merge cleanup rewrite path**.
-   - Note: `working-copy.md` step 4 specifies `git clean -fd` as part of
-     materialization; this plan's section omits it. Subsidiary doc is more
-     detailed — align during implementation.
+   - Status: **implemented** — capture occurs on both destroy and merge
+     cleanup rewrite paths.
 
 4. **Materialize target** in clean worktree state.
-   - Status: current code uses `git checkout --force` (destructive, no prior
-     capture).
+   - Status: **implemented** — `preserve_checkout_replay()` replaces the
+     previous `git checkout --force` path.
 
 5. **Replay tracked deltas** deterministically (staged first via
    `git apply --index --3way`, unstaged second via `git apply --3way`).
-   - Status: **not implemented**.
+   - Status: **implemented**.
 
 6. **Replay/rehydrate untracked content** per policy.
-   - Status: **not implemented**.
+   - Status: **implemented**.
 
 7. **On replay failure**: rollback to captured snapshot or safe abort before
    destruction.
-   - Status: **not implemented**. **Blocking**: no formal definition of
-     "correct replay result" exists yet. Must define in `working-copy.md`
-     before implementation (see "replay correctness" in section 3).
+   - Status: **implemented** — on replay failure, rolls back to captured
+     snapshot. Recovery ref and artifacts remain available.
 
 The shared `working_copy::preserve_checkout_replay()` primitive described in
 the near-proof proposal (`notes/assurance-near-proof-proposal.md` section 5,
-Layer A) is the vehicle for implementing steps 1-7. Until it lands, G2 is
-violated for any rewrite path that touches dirty workspaces.
+Layer A) is now implemented and used by all rewrite paths.
 
 ## 6) Recovery surfaces and CLI contract
 
@@ -246,8 +227,8 @@ violated for any rewrite path that touches dirty workspaces.
 
 | Surface | Location | Status | Notes |
 |---------|----------|--------|-------|
-| Recovery refs | `refs/manifold/recovery/<workspace>/<timestamp>` | implemented | Uses non-CAS `write_ref()`; same-second collision risk (see G1 caveat) |
-| Rewrite artifacts | `.manifold/artifacts/rewrite/<workspace>/<timestamp>/` | **not implemented** | Destroy artifacts exist, rewrite artifacts do not |
+| Recovery refs | `refs/manifold/recovery/<workspace>/<timestamp>` | implemented | Monotonic timestamps eliminate collision risk |
+| Rewrite artifacts | `.manifold/artifacts/rewrite/<workspace>/<timestamp>/` | implemented | Written by `preserve_checkout_replay()` on all rewrite paths |
 | Destroy artifacts | `.manifold/artifacts/ws/<workspace>/destroy/*.json` | implemented | **Best-effort writes** — `merge.rs:3061` logs warning and continues on write failure. Agent relying on `maw ws recover` may find nothing if record write failed. Recovery ref (the critical data) is more reliable. |
 
 ### Required output on recovery-producing failures
@@ -262,8 +243,9 @@ include all of:
 5. At least one executable recovery command.
 
 Status: **partial**. Destroy path emits ref+oid and recovery hints. Merge
-cleanup rewrite path does not emit recovery information because it does not
-capture.
+cleanup rewrite path now captures via `preserve_checkout_replay()` and emits
+recovery refs, but full output contract compliance (all 5 fields on all
+failure paths) is not yet verified.
 
 ### CLI command forms
 
@@ -299,13 +281,13 @@ with implementation status:
 |-----------|-------------|--------|
 | I-G1.1 | Committed pre-state reachable from durable or recovery refs post-op | holds |
 | I-G1.2 | Rewrite that moves workspace away from non-ancestor pins recovery ref | holds (destroy path) |
-| I-G2.1 | Destructive rewrite boundary requires capture or no-work proof | **violated** (merge cleanup) |
-| I-G2.2 | Replay failure rolls back to snapshot or aborts safely | **not implemented** (blocked: no replay correctness definition) |
+| I-G2.1 | Destructive rewrite boundary requires capture or no-work proof | holds |
+| I-G2.2 | Replay failure rolls back to snapshot or aborts safely | holds |
 | I-G2.3 | Untracked non-ignored files captured in snapshot tree | holds (destroy path) |
 | I-G3.1 | COMMIT success remains success despite cleanup failure | holds |
 | I-G3.2 | Partial commit (epoch moved, branch didn't) is finalized or reported | holds |
-| I-G4.1 | Destroy refuses on status/capture precondition failure | **violated** |
-| I-G4.2 | No code path continues destructive action after failed capture | **violated** |
+| I-G4.1 | Destroy refuses on status/capture precondition failure | holds |
+| I-G4.2 | No code path continues destructive action after failed capture | holds |
 | I-G5.1 | Recovery-producing failures emit ref+oid+artifact+command | partial |
 | I-G5.2 | Emitted recovery command executes successfully | partial |
 | I-G6.1 | Known strings in snapshot content found by `--search` | holds |
@@ -317,9 +299,9 @@ with implementation status:
 | Check | Precise enough? | Subprocess? | Risk |
 |-------|----------------|-------------|------|
 | check_g1_reachability | Yes (DRefs/RRefs overlap needs clarification) | git | Manageable |
-| check_g2_rewrite_preservation | Partial | git, fs | **Blocking** (I-G2.2) |
+| check_g2_rewrite_preservation | Yes | git, fs | None |
 | check_g3_commit_monotonicity | Yes | git | None |
-| check_g4_destructive_gate | Yes | fs | Design tension (see G4 above) |
+| check_g4_destructive_gate | Yes | fs | None (resolved) |
 | check_g5_discoverability | Yes | None (I-G5.1), subprocess (I-G5.2) | None |
 | check_g6_searchability | Yes | maw CLI | None |
 
@@ -443,9 +425,8 @@ These pairs exercise the most dangerous state transitions:
 
 ### Prerequisites
 
-DST work is blocked on the Phase 0 fix set (section 13). There is no value in
-building a simulation framework that exercises code paths known to be broken.
-Fix the violations first, then prove the fixes hold under crash injection.
+Phase 0 fix set (section 14) is complete. DST work can now proceed — all
+known violation code paths have been fixed.
 
 ## 10) Concurrency threat model
 
@@ -637,27 +618,25 @@ Audit records must not log raw snippet text (may contain secrets).
 Phases are ordered by risk reduction. Each phase lists prerequisites and
 deliverables.
 
-### Phase 0: Stop known loss vectors (prerequisite for everything else)
+### Phase 0: Stop known loss vectors (prerequisite for everything else) -- COMPLETE
 
 **Prerequisites**: none.
 
-**Deliverables**:
-1. Fix recovery ref timestamp collision: subsecond resolution or CAS create.
+**Deliverables** (all complete):
+1. Fix recovery ref timestamp collision: monotonic timestamps (bn-28iq).
 2. Remove `git checkout --force` from `update_default_workspace()`.
 3. Implement shared `working_copy::preserve_checkout_replay()` primitive
-   (steps 1-7 from section 5). Requires "replay correctness" definition in
-   `working-copy.md` first.
+   (steps 1-7 from section 5).
 4. Enforce capture-gate in destroy paths: if `capture_before_destroy()` fails,
-   refuse to destroy. Remove the WARNING-and-continue path at
-   `src/workspace/merge.rs:3031-3043`.
-5. Fix status-failure destroy path at `src/workspace/merge.rs:3006-3023`.
-6. Resolve G4 design tension for post-merge destroy (narrow invariant or
-   change code).
+   refuse to destroy.
+5. Fix status-failure destroy path.
+6. Resolve G4 design tension for post-merge destroy (capture-gate enforced
+   unconditionally; `--force` escape hatch for operators).
 7. Add dirty-state check to `sync_worktree_to_epoch()`.
 8. Add `restore_to` rollback (destroy workspace on populate failure).
 9. Tests: IT-G2-001, IT-G2-002, UT-G2-001, IT-G4-001, UT-G4-001.
 
-**Exit criteria**: G2 and G4 status change from "violated" to "holds". G1
+**Exit criteria**: G2 and G4 status changed from "violated" to "holds". G1
 caveat resolved.
 
 ### Phase 0.5: Concurrency hardening
@@ -692,7 +671,7 @@ we can test discoverability of those surfaces).
 
 ### Phase 2: Failpoint infrastructure + fast DST
 
-**Prerequisites**: Phase 0 (no value in crash-testing known-broken paths).
+**Prerequisites**: Phase 0 (complete).
 
 **Deliverables**:
 1. `src/failpoints.rs` — feature-gated macro framework.
