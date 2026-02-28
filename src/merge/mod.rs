@@ -42,3 +42,6 @@ mod determinism_tests;
 
 #[cfg(test)]
 mod pushout_tests;
+
+#[cfg(kani)]
+mod kani_proofs;
