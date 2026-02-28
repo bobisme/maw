@@ -15,6 +15,9 @@ pub mod model;
 pub mod oplog;
 pub mod refs;
 
+#[cfg(feature = "assurance")]
+pub mod assurance;
+
 // Private modules only used by the binary — not re-exported.
 // agents, doctor, error, exec, format, init, push, release,
 // status, transport, tui, upgrade, v2_init, workspace

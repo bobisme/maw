@@ -23,6 +23,7 @@ otel = [
   "dep:tracing-opentelemetry",
 ]
 failpoints = []
+assurance = []
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
