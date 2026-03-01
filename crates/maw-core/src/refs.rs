@@ -98,7 +98,7 @@ pub fn workspace_epoch_ref(workspace_name: &str) -> String {
 // OID conversion helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a `maw_core` GitOid (String-based) to a `maw_git` GitOid (byte-based).
+/// Convert a `maw_core` `GitOid` (String-based) to a `maw_git` `GitOid` (byte-based).
 fn to_git_oid(oid: &GitOid) -> Result<maw_git::GitOid, RefError> {
     oid.as_str().parse::<maw_git::GitOid>().map_err(|e| RefError::InvalidOid {
         ref_name: String::new(),
@@ -106,7 +106,7 @@ fn to_git_oid(oid: &GitOid) -> Result<maw_git::GitOid, RefError> {
     })
 }
 
-/// Convert a `maw_git` GitOid (byte-based) to a `maw_core` GitOid (String-based).
+/// Convert a `maw_git` `GitOid` (byte-based) to a `maw_core` `GitOid` (String-based).
 fn from_git_oid(oid: maw_git::GitOid) -> Result<GitOid, RefError> {
     let s = oid.to_string();
     GitOid::new(&s).map_err(|_| RefError::InvalidOid {
@@ -265,8 +265,7 @@ pub fn read_ref_via(repo: &dyn maw_git::GitRepo, name: &str) -> Result<Option<Gi
     if let Ok(ref_name) = to_ref_name(name) {
         match repo.read_ref(&ref_name) {
             Ok(Some(oid)) => return Ok(Some(from_git_oid(oid)?)),
-            Ok(None) => return Ok(None),
-            Err(maw_git::GitError::NotFound { .. }) => return Ok(None),
+            Ok(None) | Err(maw_git::GitError::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(map_git_error(name, e)),
         }
     }
@@ -340,13 +339,12 @@ pub fn write_ref_cas_via(
     // When old_oid is zero (create-only semantics), verify the ref doesn't
     // exist first. gix's MustNotExist may not reliably reject updates to
     // existing refs in all storage backends.
-    if old.is_zero() {
-        if let Ok(Some(_)) = repo.read_ref(&ref_name) {
+    if old.is_zero()
+        && let Ok(Some(_)) = repo.read_ref(&ref_name) {
             return Err(RefError::CasMismatch {
                 ref_name: name.to_owned(),
             });
         }
-    }
 
     let edit = maw_git::RefEdit {
         name: ref_name,
@@ -420,8 +418,7 @@ pub fn delete_ref(root: &Path, name: &str) -> Result<(), RefError> {
 pub fn delete_ref_via(repo: &dyn maw_git::GitRepo, name: &str) -> Result<(), RefError> {
     let ref_name = to_ref_name(name)?;
     match repo.delete_ref(&ref_name) {
-        Ok(()) => Ok(()),
-        Err(maw_git::GitError::NotFound { .. }) => Ok(()),
+        Ok(()) | Err(maw_git::GitError::NotFound { .. }) => Ok(()),
         Err(e) => Err(map_git_error(name, e)),
     }
 }

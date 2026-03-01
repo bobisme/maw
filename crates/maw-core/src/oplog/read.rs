@@ -218,8 +218,7 @@ pub fn read_operation_via(
 /// Open a `GixRepo` at the given path.
 fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, OpLogReadError> {
     maw_git::GixRepo::open(root).map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>).map_err(|e| {
-        OpLogReadError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        OpLogReadError::Io(std::io::Error::other(
             format!("failed to open repo: {e}"),
         ))
     })

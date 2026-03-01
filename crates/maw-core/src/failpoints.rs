@@ -106,7 +106,7 @@ mod tests {
         clear("FP_TEST_ERROR");
     }
 
-    /// clear_all resets all failpoints.
+    /// `clear_all` resets all failpoints.
     #[test]
     fn clear_all_resets() {
         set("FP_A", FailpointAction::Error("a".into()));

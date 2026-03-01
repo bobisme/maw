@@ -269,7 +269,7 @@ impl MergeStateFile {
         serde_json::from_str(json).map_err(|e| MergeStateError::Deserialize(e.to_string()))
     }
 
-    /// Create the merge-state file exclusively (O_CREAT | O_EXCL).
+    /// Create the merge-state file exclusively (`O_CREAT` | `O_EXCL`).
     ///
     /// Uses `OpenOptions::create_new(true)` so exactly one writer wins.
     /// Returns `Ok(true)` on success, `Ok(false)` if the file already exists,

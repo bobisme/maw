@@ -298,22 +298,19 @@ fn walk_tree_recursive(
             prefix.join(&entry.name)
         };
 
-        match entry.mode {
-            maw_git::EntryMode::Tree => {
-                // Recurse into subtrees.
-                walk_tree_recursive(repo, entry.oid, &entry_path, flat)?;
-            }
-            _ => {
-                // Blob, executable, symlink, gitlink — collect as flat entry.
-                let mode_str = match entry.mode {
-                    maw_git::EntryMode::Blob => "100644",
-                    maw_git::EntryMode::BlobExecutable => "100755",
-                    maw_git::EntryMode::Link => "120000",
-                    maw_git::EntryMode::Commit => "160000",
-                    maw_git::EntryMode::Tree => unreachable!(),
-                };
-                flat.insert(entry_path, (mode_str.to_owned(), entry.oid.to_string()));
-            }
+        if entry.mode == maw_git::EntryMode::Tree {
+            // Recurse into subtrees.
+            walk_tree_recursive(repo, entry.oid, &entry_path, flat)?;
+        } else {
+            // Blob, executable, symlink, gitlink — collect as flat entry.
+            let mode_str = match entry.mode {
+                maw_git::EntryMode::Blob => "100644",
+                maw_git::EntryMode::BlobExecutable => "100755",
+                maw_git::EntryMode::Link => "120000",
+                maw_git::EntryMode::Commit => "160000",
+                maw_git::EntryMode::Tree => unreachable!(),
+            };
+            flat.insert(entry_path, (mode_str.to_owned(), entry.oid.to_string()));
         }
     }
     Ok(())
