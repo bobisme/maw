@@ -600,6 +600,21 @@ pub fn try_ast_merge_with_config(
         };
     }
 
+    // Before reconstructing, check that no variant changed interstitial text
+    // (comments, whitespace, or other content between named items). The
+    // reconstruction copies interstitial regions from base verbatim, so any
+    // variant changes to those regions would be silently lost.
+    for (_ws_id, variant_content) in variants {
+        let Ok((_vt, variant_items)) = parse_and_extract(variant_content, lang) else {
+            return AstMergeResult::Unsupported;
+        };
+        if interstitial_differs(base, &base_items, variant_content, &variant_items) {
+            // Fall back to diff3 conflict — interstitial changes can't be
+            // merged at the AST item level.
+            return AstMergeResult::Unsupported;
+        }
+    }
+
     // All changes are to disjoint items — reconstruct the merged file.
     AstMergeResult::Clean(reconstruct_merged_file(
         base,
@@ -849,6 +864,58 @@ fn extract_signature(item: &TopLevelItem, lang: AstLanguage) -> Option<String> {
     } else {
         Some(signature)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Interstitial region check
+// ---------------------------------------------------------------------------
+
+/// Extract interstitial byte slices (the gaps between named items) from source.
+fn interstitial_regions<'a>(source: &'a [u8], items: &[TopLevelItem]) -> Vec<&'a [u8]> {
+    let mut regions = Vec::with_capacity(items.len() + 1);
+    let mut cursor = 0;
+    for item in items {
+        if item.start_byte > cursor {
+            regions.push(&source[cursor..item.start_byte]);
+        }
+        cursor = item.end_byte;
+    }
+    if cursor < source.len() {
+        regions.push(&source[cursor..]);
+    }
+    regions
+}
+
+/// Check whether interstitial text (comments, whitespace between named items)
+/// differs between base and a variant. Returns `true` if any interstitial
+/// region was modified — meaning the AST merge cannot safely reconstruct the
+/// file from base gaps + variant items without losing changes.
+///
+/// Only compares when the same number of items exist (no additions/deletions).
+/// When items are added or removed, the interstitial structure naturally
+/// changes and the reconstruction handles those gaps correctly via the item
+/// edit script.
+fn interstitial_differs(
+    base: &[u8],
+    base_items: &[TopLevelItem],
+    variant: &[u8],
+    variant_items: &[TopLevelItem],
+) -> bool {
+    // If the number of items changed, interstitial regions can't be compared
+    // positionally — item additions/deletions legitimately shift the gaps.
+    if base_items.len() != variant_items.len() {
+        return false;
+    }
+
+    let base_regions = interstitial_regions(base, base_items);
+    let variant_regions = interstitial_regions(variant, variant_items);
+
+    // Same number of items should yield same number of interstitial regions.
+    if base_regions.len() != variant_regions.len() {
+        return true;
+    }
+
+    base_regions.iter().zip(variant_regions.iter()).any(|(b, v)| b != v)
 }
 
 // ---------------------------------------------------------------------------
