@@ -1122,6 +1122,9 @@ version = "0.1.0"
 [[package]]
 name = "maw-git"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "maw-tui"
