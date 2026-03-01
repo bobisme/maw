@@ -43,6 +43,7 @@ use crate::config::{ConfigError, ManifoldConfig, MergeConfig, MergeDriver, Merge
 use crate::merge::build::{BuildError, ResolvedChange, build_merge_commit};
 use crate::merge::collect::{CollectError, collect_snapshots};
 use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
+use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 #[cfg(not(feature = "ast-merge"))]
 use crate::merge::resolve::resolve_partition;
 #[cfg(feature = "ast-merge")]
@@ -315,6 +316,241 @@ fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, BuildPhaseError> 
 }
 
 // ---------------------------------------------------------------------------
+// Internal: epoch-delta injection for stale workspaces
+// ---------------------------------------------------------------------------
+
+/// Compute the merge-base of a workspace epoch and the current epoch.
+///
+/// When an agent commits inside a workspace, the workspace HEAD advances
+/// beyond the original creation epoch. `git merge-base` finds the fork point
+/// (i.e., the epoch the workspace was originally created from).
+///
+/// Falls back to `ws_epoch` if merge-base fails or if the two OIDs are equal.
+fn workspace_merge_base(
+    repo_root: &Path,
+    ws_epoch: &EpochId,
+    current_epoch: &EpochId,
+) -> EpochId {
+    // Fast path: if they're already equal, no need to shell out.
+    if ws_epoch.as_str() == current_epoch.as_str() {
+        return current_epoch.clone();
+    }
+
+    let output = Command::new("git")
+        .args(["merge-base", ws_epoch.as_str(), current_epoch.as_str()])
+        .current_dir(repo_root)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            EpochId::new(&oid).unwrap_or_else(|_| ws_epoch.clone())
+        }
+        _ => ws_epoch.clone(),
+    }
+}
+
+/// Compute the set of file paths that changed between two epoch commits.
+///
+/// Uses `git diff-tree -r --no-commit-id` to enumerate changed paths.
+/// Returns a set of relative paths (as `PathBuf`s).
+fn epoch_delta_paths(
+    repo_root: &Path,
+    old_epoch: &EpochId,
+    new_epoch: &EpochId,
+) -> Result<BTreeSet<PathBuf>, BuildPhaseError> {
+    let output = Command::new("git")
+        .args([
+            "diff-tree",
+            "-r",
+            "--no-commit-id",
+            "--name-only",
+            old_epoch.as_str(),
+            new_epoch.as_str(),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| BuildPhaseError::Build(BuildError::GitCommand {
+            command: format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str()),
+            stderr: e.to_string(),
+            exit_code: None,
+        }))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BuildPhaseError::Build(BuildError::GitCommand {
+            command: format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str()),
+            stderr: stderr.trim().to_string(),
+            exit_code: output.status.code(),
+        }));
+    }
+
+    let paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| PathBuf::from(l.trim()))
+        .collect();
+
+    Ok(paths)
+}
+
+/// Result of epoch-delta injection.
+///
+/// Contains the (possibly modified) PatchSets and any base-content overrides
+/// needed for correct three-way merge resolution.
+struct EpochDeltaResult {
+    /// Base content overrides: for overlapping paths, the base content should
+    /// be read from the stale workspace's base epoch (not the current epoch)
+    /// so that diff3 sees the correct common ancestor.
+    base_overrides: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+/// Inject a synthetic epoch-delta [`PatchSet`] when stale workspaces are present.
+///
+/// For each workspace whose base epoch differs from `current_epoch`, computes
+/// the set of files that changed in the epoch delta (between the workspace's
+/// base epoch and the current epoch). Files that overlap with any workspace's
+/// changes are added to a synthetic `PatchSet` with workspace ID `epoch-delta`.
+///
+/// This causes `partition_by_path` to classify those overlapping files as
+/// "shared" (touched by 2+ sources), routing them through the normal diff3
+/// conflict resolution instead of silently applying the workspace's version.
+///
+/// Also returns base-content overrides so that `read_base_contents` results
+/// can be patched: for overlapping paths, the base must be the stale workspace's
+/// base epoch version (the true common ancestor), not the current epoch version.
+///
+/// If no workspace is stale, this is a no-op.
+fn inject_epoch_delta(
+    repo_root: &Path,
+    current_epoch: &EpochId,
+    patch_sets: &mut Vec<PatchSet>,
+) -> Result<EpochDeltaResult, BuildPhaseError> {
+    // Collect all workspace-touched paths and find stale base epochs.
+    //
+    // NOTE: `ps.epoch` is the workspace HEAD from `status().base_epoch`, NOT
+    // the original creation epoch. When an agent has committed inside the
+    // workspace, HEAD advances beyond the creation epoch. To determine whether
+    // a workspace is truly stale, we compute `merge-base(ps.epoch, current_epoch)`.
+    // If the merge-base equals `current_epoch`, the workspace was created from
+    // the current epoch (not stale). If it differs, the workspace is stale and
+    // the merge-base is the actual creation epoch.
+    let mut stale_base_epochs: BTreeSet<String> = BTreeSet::new();
+    let mut all_ws_paths: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for ps in patch_sets.iter() {
+        let creation_epoch = workspace_merge_base(repo_root, &ps.epoch, current_epoch);
+        if creation_epoch.as_str() != current_epoch.as_str() {
+            stale_base_epochs.insert(creation_epoch.as_str().to_owned());
+        }
+        for change in &ps.changes {
+            all_ws_paths.insert(change.path.clone());
+        }
+    }
+
+    // No stale workspaces → nothing to inject.
+    if stale_base_epochs.is_empty() {
+        return Ok(EpochDeltaResult {
+            base_overrides: BTreeMap::new(),
+        });
+    }
+
+    // Compute the union of epoch-delta paths across all distinct stale base epochs.
+    // Also track the oldest stale base epoch for base-content overrides.
+    let mut delta_paths: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut oldest_base_epoch: Option<EpochId> = None;
+    for base_hex in &stale_base_epochs {
+        let base_epoch = EpochId::new(base_hex).map_err(|e| {
+            BuildPhaseError::Build(BuildError::GitCommand {
+                command: "parse stale base epoch".to_string(),
+                stderr: e.to_string(),
+                exit_code: None,
+            })
+        })?;
+        let paths = epoch_delta_paths(repo_root, &base_epoch, current_epoch)?;
+        delta_paths.extend(paths);
+        // Track the oldest (first seen) base epoch for base overrides.
+        // In practice there's usually just one stale base epoch.
+        if oldest_base_epoch.is_none() {
+            oldest_base_epoch = Some(base_epoch);
+        }
+    }
+
+    // Intersect with workspace-touched paths — only overlapping files matter.
+    let overlapping: BTreeSet<PathBuf> = delta_paths
+        .intersection(&all_ws_paths)
+        .cloned()
+        .collect();
+
+    if overlapping.is_empty() {
+        return Ok(EpochDeltaResult {
+            base_overrides: BTreeMap::new(),
+        });
+    }
+
+    let oldest_base = oldest_base_epoch.expect("at least one stale epoch");
+
+    // Build synthetic FileChange entries for each overlapping file.
+    // Read the current epoch's version of each file (this is the epoch-delta side).
+    let mut changes = Vec::with_capacity(overlapping.len());
+    let mut base_overrides = BTreeMap::new();
+    for path in &overlapping {
+        match read_file_at_epoch(repo_root, current_epoch, path) {
+            Ok(content) => {
+                // File exists at current epoch — it was modified (or added).
+                changes.push(FileChange::new(
+                    path.clone(),
+                    ChangeKind::Modified,
+                    Some(content),
+                ));
+            }
+            Err(ReadBaseError::NotFound) => {
+                // File was deleted in the epoch delta — represent as deletion.
+                changes.push(FileChange::new(
+                    path.clone(),
+                    ChangeKind::Deleted,
+                    None,
+                ));
+            }
+            Err(ReadBaseError::GitError(detail)) => {
+                return Err(BuildPhaseError::ReadBase {
+                    path: path.clone(),
+                    detail,
+                });
+            }
+        }
+
+        // Read the stale base epoch's version as the true common ancestor.
+        match read_file_at_epoch(repo_root, &oldest_base, path) {
+            Ok(content) => {
+                base_overrides.insert(path.clone(), content);
+            }
+            Err(ReadBaseError::NotFound) => {
+                // File didn't exist at the stale base — no override needed.
+                // The file was added in the epoch delta AND by the workspace.
+                // This will be an add/add conflict handled normally (no base).
+            }
+            Err(ReadBaseError::GitError(detail)) => {
+                return Err(BuildPhaseError::ReadBase {
+                    path: path.clone(),
+                    detail,
+                });
+            }
+        }
+    }
+
+    // Create the synthetic PatchSet and append it.
+    let synthetic = PatchSet::new(
+        WorkspaceId::epoch_delta(),
+        current_epoch.clone(),
+        changes,
+    );
+    patch_sets.push(synthetic);
+
+    Ok(EpochDeltaResult { base_overrides })
+}
+
+// ---------------------------------------------------------------------------
 // Internal: pipeline execution
 // ---------------------------------------------------------------------------
 
@@ -327,7 +563,13 @@ fn run_pipeline<B: WorkspaceBackend>(
     merge_config: &MergeConfig,
 ) -> Result<BuildPhaseOutput, BuildPhaseError> {
     // Collect snapshots from all source workspaces (enriched with FileId + blob OID)
-    let patch_sets = collect_snapshots(repo_root, backend, &state.sources)?;
+    let mut patch_sets = collect_snapshots(repo_root, backend, &state.sources)?;
+
+    // Inject a synthetic epoch-delta PatchSet for stale workspaces.
+    // If any workspace's base epoch differs from the current epoch, files that
+    // changed in the epoch delta AND overlap with workspace changes must go
+    // through conflict resolution instead of being silently overwritten.
+    let epoch_delta = inject_epoch_delta(repo_root, &state.epoch_before, &mut patch_sets)?;
 
     // Partition changed paths into unique vs shared
     let partition = partition_by_path(&patch_sets);
@@ -335,7 +577,15 @@ fn run_pipeline<B: WorkspaceBackend>(
     let shared_count = partition.shared_count();
 
     // Read base (epoch) content for all shared paths
-    let base_contents = read_base_contents(repo_root, &state.epoch_before, &partition)?;
+    let mut base_contents = read_base_contents(repo_root, &state.epoch_before, &partition)?;
+
+    // Apply epoch-delta base overrides: for paths where the epoch-delta
+    // synthetic PatchSet overlaps with a stale workspace, the base must be
+    // the stale workspace's base epoch version (common ancestor), not the
+    // current epoch version.
+    for (path, content) in epoch_delta.base_overrides {
+        base_contents.insert(path, content);
+    }
 
     // Resolve shared paths via hash equality / diff3 / AST merge fallback
     let resolve_result = resolve_partition_for_build(&partition, &base_contents, merge_config)?;
@@ -1835,5 +2085,218 @@ command = "exit 19"
         let err = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("treated as validation failure"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale workspace epoch-delta conflict detection tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: advance the epoch by committing a file change, returning the
+    /// new `EpochId`. Does NOT update the `refs/manifold/epoch/current` ref
+    /// (the caller decides when to update it).
+    fn advance_epoch(root: &Path, path: &str, content: &str, msg: &str) -> EpochId {
+        commit_epoch_file(root, path, content, msg)
+    }
+
+    /// Stale workspace modifies a file that was ALSO changed in the epoch
+    /// delta → should produce a conflict (not silently overwrite).
+    #[test]
+    fn stale_workspace_overlapping_change_produces_conflict() {
+        // Setup: initial epoch with README.md = "line 1\n"
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@test.com"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+
+        fs::write(root.join("README.md"), "line 1\n").unwrap();
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "epoch: initial"]);
+        let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
+        let initial_epoch = EpochId::new(&initial_hex).unwrap();
+        run_git(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/epoch/current",
+                initial_epoch.as_str(),
+            ],
+        );
+
+        // Simulate a previous merge that changed README.md.
+        // This creates a NEW epoch.
+        let current_epoch =
+            advance_epoch(root, "README.md", "line 1 (merged)\n", "epoch: merge ws-a");
+
+        // Now create a stale workspace based on the INITIAL epoch that also
+        // modifies README.md.
+        let (ws_path, snapshot) = make_workspace_with_modified_file(
+            root,
+            "ws-stale",
+            "README.md",
+            b"line 1 (stale edit)\n",
+        );
+        let mut backend = MockBackend::new();
+        // The stale workspace's status reports the initial epoch as its base.
+        backend.add_workspace("ws-stale", initial_epoch.clone(), snapshot, ws_path);
+
+        // Write merge-state with current epoch and the stale source.
+        let manifold_dir = root.join(".manifold");
+        let sources = vec![WorkspaceId::new("ws-stale").unwrap()];
+        write_prepare_state(&manifold_dir, &sources, &current_epoch);
+
+        // Run the build phase.
+        let result = run_build_phase(root, &manifold_dir, &backend).unwrap();
+
+        // The overlapping file should produce a conflict.
+        assert!(
+            !result.conflicts.is_empty(),
+            "Expected conflict for overlapping stale edit, but got none. \
+             unique_count={}, shared_count={}",
+            result.unique_count,
+            result.shared_count
+        );
+
+        // Verify the conflict is for README.md.
+        let readme_conflict = result
+            .conflicts
+            .iter()
+            .find(|c| c.path == PathBuf::from("README.md"));
+        assert!(
+            readme_conflict.is_some(),
+            "Expected a conflict on README.md, conflicts: {:?}",
+            result.conflicts.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+
+        // Verify one side is the epoch-delta.
+        let conflict = readme_conflict.unwrap();
+        let has_epoch_side = conflict
+            .sides
+            .iter()
+            .any(|s| s.workspace_id.is_epoch_delta());
+        assert!(
+            has_epoch_side,
+            "Expected an epoch-delta side in the conflict, sides: {:?}",
+            conflict.sides.iter().map(|s| s.workspace_id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Stale workspace modifies a file that was NOT changed in the epoch
+    /// delta → should merge cleanly (no conflict).
+    #[test]
+    fn stale_workspace_non_overlapping_change_merges_cleanly() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@test.com"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+
+        fs::write(root.join("README.md"), "readme\n").unwrap();
+        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "epoch: initial"]);
+        let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
+        let initial_epoch = EpochId::new(&initial_hex).unwrap();
+        run_git(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/epoch/current",
+                initial_epoch.as_str(),
+            ],
+        );
+
+        // Previous merge changed README.md (epoch delta).
+        let current_epoch =
+            advance_epoch(root, "README.md", "readme (merged)\n", "epoch: merge ws-a");
+
+        // Stale workspace modifies lib.rs (no overlap with epoch delta).
+        let (ws_path, snapshot) = make_workspace_with_modified_file(
+            root,
+            "ws-stale",
+            "lib.rs",
+            b"pub fn lib() { /* edited */ }\n",
+        );
+        let mut backend = MockBackend::new();
+        backend.add_workspace("ws-stale", initial_epoch.clone(), snapshot, ws_path);
+
+        let manifold_dir = root.join(".manifold");
+        let sources = vec![WorkspaceId::new("ws-stale").unwrap()];
+        write_prepare_state(&manifold_dir, &sources, &current_epoch);
+
+        let result = run_build_phase(root, &manifold_dir, &backend).unwrap();
+
+        assert!(
+            result.conflicts.is_empty(),
+            "Expected no conflicts for non-overlapping stale edit, got {} conflict(s): {:?}",
+            result.conflicts.len(),
+            result.conflicts.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// Stale workspace and epoch delta edit DIFFERENT lines of the same file
+    /// → diff3 should auto-resolve (no conflict).
+    #[test]
+    fn stale_workspace_diff3_auto_resolve() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@test.com"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+
+        // Create a multi-line file so diff3 can resolve non-overlapping edits.
+        let original = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        fs::write(root.join("multi.txt"), original).unwrap();
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "epoch: initial"]);
+        let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
+        let initial_epoch = EpochId::new(&initial_hex).unwrap();
+        run_git(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/epoch/current",
+                initial_epoch.as_str(),
+            ],
+        );
+
+        // Previous merge changed line 1 only.
+        let epoch_version = "LINE 1 CHANGED\nline 2\nline 3\nline 4\nline 5\n";
+        let current_epoch =
+            advance_epoch(root, "multi.txt", epoch_version, "epoch: merge ws-a");
+
+        // Stale workspace changes line 5 only (non-overlapping).
+        let ws_version = b"line 1\nline 2\nline 3\nline 4\nLINE 5 CHANGED\n";
+        let (ws_path, snapshot) = make_workspace_with_modified_file(
+            root,
+            "ws-stale",
+            "multi.txt",
+            ws_version,
+        );
+        let mut backend = MockBackend::new();
+        backend.add_workspace("ws-stale", initial_epoch.clone(), snapshot, ws_path);
+
+        let manifold_dir = root.join(".manifold");
+        let sources = vec![WorkspaceId::new("ws-stale").unwrap()];
+        write_prepare_state(&manifold_dir, &sources, &current_epoch);
+
+        let result = run_build_phase(root, &manifold_dir, &backend).unwrap();
+
+        assert!(
+            result.conflicts.is_empty(),
+            "Expected diff3 auto-resolve (no conflicts), got {} conflict(s): {:?}",
+            result.conflicts.len(),
+            result
+                .conflicts
+                .iter()
+                .map(|c| format!("{}: {}", c.path.display(), c.reason))
+                .collect::<Vec<_>>()
+        );
     }
 }

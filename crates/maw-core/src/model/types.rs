@@ -165,6 +165,14 @@ impl WorkspaceId {
     /// The maximum length of a workspace name.
     pub const MAX_LEN: usize = 64;
 
+    /// Reserved workspace ID for the synthetic epoch-delta PatchSet.
+    ///
+    /// Used during merge to represent files changed in the epoch delta
+    /// (between a stale workspace's base epoch and the current epoch).
+    /// This allows the partition step to detect conflicts between
+    /// workspace edits and previously-merged epoch changes.
+    pub const EPOCH_DELTA: &'static str = "epoch-delta";
+
     /// Create a new `WorkspaceId` from a string, validating format.
     ///
     /// # Errors
@@ -172,6 +180,20 @@ impl WorkspaceId {
     pub fn new(s: &str) -> Result<Self, ValidationError> {
         Self::validate(s)?;
         Ok(Self(s.to_owned()))
+    }
+
+    /// Create the reserved epoch-delta workspace ID.
+    ///
+    /// This bypasses the normal validation since the constant is known-valid.
+    #[must_use]
+    pub fn epoch_delta() -> Self {
+        Self(Self::EPOCH_DELTA.to_owned())
+    }
+
+    /// Returns `true` if this is the synthetic epoch-delta workspace ID.
+    #[must_use]
+    pub fn is_epoch_delta(&self) -> bool {
+        self.0 == Self::EPOCH_DELTA
     }
 
     /// Return the workspace name as a string.

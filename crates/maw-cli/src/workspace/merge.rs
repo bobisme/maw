@@ -685,6 +685,20 @@ pub struct ConflictsOutput {
 // ConflictRecord → ConflictJson conversion
 // ---------------------------------------------------------------------------
 
+/// Map a workspace ID to a display name.
+///
+/// The synthetic `epoch-delta` workspace (injected for stale-workspace
+/// conflict detection) is shown as `"epoch (previous merge)"` so agents
+/// and humans understand it represents content from a prior merge, not an
+/// actual workspace.
+fn workspace_display_name(ws_id: &WorkspaceId) -> String {
+    if ws_id.is_epoch_delta() {
+        "epoch (previous merge)".to_string()
+    } else {
+        ws_id.as_str().to_string()
+    }
+}
+
 /// Convert a `ConflictRecord` from the merge engine into a `ConflictJson`
 /// suitable for structured JSON output.
 ///
@@ -759,11 +773,11 @@ fn conflict_record_to_json_with_id(
             ),
         };
 
-    // Extract workspace names from sides
+    // Extract workspace names from sides (with epoch-delta display name)
     let workspaces: Vec<String> = record
         .sides
         .iter()
-        .map(|s| s.workspace_id.as_str().to_string())
+        .map(|s| workspace_display_name(&s.workspace_id))
         .collect();
 
     // Convert sides to JSON-friendly form
@@ -776,7 +790,7 @@ fn conflict_record_to_json_with_id(
                     .map_or((None, true), |text| (Some(text.to_string()), false))
             });
             ConflictSideJson {
-                workspace: s.workspace_id.as_str().to_string(),
+                workspace: workspace_display_name(&s.workspace_id),
                 change: s.kind.to_string(),
                 content,
                 is_binary,
@@ -825,7 +839,7 @@ fn conflict_record_to_info(record: &ConflictRecord) -> ConflictInfo {
     let mut sides: Vec<String> = record
         .sides
         .iter()
-        .map(|s| s.workspace_id.as_str().to_owned())
+        .map(|s| workspace_display_name(&s.workspace_id))
         .collect();
     sides.sort();
 
@@ -877,7 +891,7 @@ fn print_conflict_report_with_resolve(
             .record
             .sides
             .iter()
-            .map(|s| s.workspace_id.as_str().to_string())
+            .map(|s| workspace_display_name(&s.workspace_id))
             .collect();
         println!(
             "  {:<10} {:<40} {}",
@@ -898,7 +912,7 @@ fn print_conflict_report_with_resolve(
                 let preview_lines = 5;
                 let truncated = lines.len() > preview_lines;
                 let shown: Vec<&str> = lines.iter().take(preview_lines).copied().collect();
-                let label = side.workspace_id.as_str();
+                let label = workspace_display_name(&side.workspace_id);
                 println!("           [{label}]:");
                 for line in &shown {
                     println!("             {line}");
@@ -1425,7 +1439,7 @@ fn build_predicted_conflicts(
                 .map(|(_, entries)| {
                     entries
                         .iter()
-                        .map(|e| e.workspace_id.as_str().to_owned())
+                        .map(|e| workspace_display_name(&e.workspace_id))
                         .collect()
                 })
                 .unwrap_or_default();
