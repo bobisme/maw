@@ -3,22 +3,22 @@ use std::path::Path;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
-use maw::agents;
-use maw::doctor;
-use maw::epoch;
-use maw::epoch_gc;
-use maw::exec;
-use maw::format;
-use maw::merge_cmd;
-use maw::push;
-use maw::release;
-use maw::status;
-use maw::telemetry;
-use maw::transport;
-use maw::tui;
-use maw::upgrade;
-use maw::v2_init;
-use maw::workspace;
+use maw_cli::agents;
+use maw_cli::doctor;
+use maw_cli::epoch;
+use maw_cli::epoch_gc;
+use maw_cli::exec;
+use maw_cli::format;
+use maw_cli::merge_cmd;
+use maw_cli::push;
+use maw_cli::release;
+use maw_cli::status;
+use maw_cli::telemetry;
+use maw_cli::transport;
+use maw_cli::tui;
+use maw_cli::upgrade;
+use maw_cli::v2_init;
+use maw_cli::workspace;
 
 /// Multi-Agent Workspaces coordinator
 ///
