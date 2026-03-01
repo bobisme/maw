@@ -15,3 +15,6 @@ gix = { version = "0.72", default-features = false, features = [
     "dirwalk",
     "tree-editor",
 ] }
+
+[dev-dependencies]
+tempfile = "3"
