@@ -697,9 +697,10 @@ fn results_equal(a: &ResolveResult, b: &ResolveResult) -> bool {
     true
 }
 
-/// Generate all permutations for small N, sampled orderings for large N.
+/// Generate orderings for commutativity testing, capped at `max_sample`.
+/// Uses all permutations when n! ≤ max_sample, sampled orderings otherwise.
 fn orderings(n: usize, max_sample: usize) -> Vec<Vec<usize>> {
-    if n <= 5 {
+    if factorial(n) <= max_sample {
         let mut result = Vec::new();
         let mut indices: Vec<usize> = (0..n).collect();
         permute(&mut indices, 0, &mut result);
@@ -740,6 +741,10 @@ fn permute(arr: &mut Vec<usize>, start: usize, result: &mut Vec<Vec<usize>>) {
         permute(arr, start + 1, result);
         arr.swap(start, i);
     }
+}
+
+fn factorial(n: usize) -> usize {
+    (1..=n).product()
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,8 +1040,8 @@ proptest! {
     // ===================================================================
 
     /// The merge result is independent of workspace ordering (pushout
-    /// uniqueness up to isomorphism). Tests all permutations for N≤5,
-    /// sampled orderings for N>5.
+    /// uniqueness up to isomorphism). Tests all permutations when
+    /// n! ≤ max_sample, sampled orderings otherwise.
     #[test]
     fn pushout_commutativity_order_independent(workspaces in arb_workspaces()) {
         let base_contents = make_base_contents(&workspaces);
