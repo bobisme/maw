@@ -119,7 +119,7 @@ pub struct InvariantResults {
 impl InvariantResults {
     /// Create results where all checks pass.
     #[must_use]
-    pub fn all_pass() -> Self {
+    pub const fn all_pass() -> Self {
         Self {
             g1: InvariantResult::Pass,
             g2: InvariantResult::Pass,
@@ -132,7 +132,7 @@ impl InvariantResults {
 
     /// Create results where all checks are skipped.
     #[must_use]
-    pub fn all_skip() -> Self {
+    pub const fn all_skip() -> Self {
         Self {
             g1: InvariantResult::Skip,
             g2: InvariantResult::Skip,
@@ -221,7 +221,7 @@ impl TraceLogger {
     }
 
     /// Return the next sequence number (1-based) and advance the counter.
-    pub fn next_seq(&mut self) -> u64 {
+    pub const fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
     }

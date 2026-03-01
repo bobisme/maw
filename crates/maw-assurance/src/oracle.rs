@@ -458,7 +458,7 @@ pub fn check_g2_rewrite_preservation(
         let post_ws = post.workspaces.get(ws_name);
 
         // Check if the HEAD changed (workspace gone entirely counts as changed)
-        let head_changed = post_ws.map_or(true, |pw| pw.head_oid != pre_ws.head_oid);
+        let head_changed = post_ws.is_none_or(|pw| pw.head_oid != pre_ws.head_oid);
 
         if !head_changed {
             continue;
@@ -741,7 +741,6 @@ mod tests {
     /// Fake OID strings for testing (valid 40-char hex).
     const OID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const OID_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
     fn empty_state() -> AssuranceState {
         AssuranceState {
@@ -1015,7 +1014,7 @@ mod tests {
         post.repo_root = root.to_path_buf();
         post.recovery_refs.insert(
             "refs/manifold/recovery/test/2025-01-01T00-00-00Z".to_owned(),
-            head_oid.clone(),
+            head_oid,
         );
 
         assert!(check_g5_discoverability(&post).is_ok());
@@ -1146,7 +1145,7 @@ mod tests {
         let pre = AssuranceState {
             repo_root: root.to_path_buf(),
             durable_refs: HashMap::from([
-                ("refs/heads/main".to_owned(), head_oid.clone()),
+                ("refs/heads/main".to_owned(), head_oid),
             ]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
@@ -1173,7 +1172,7 @@ mod tests {
         let pre = AssuranceState {
             repo_root: root.to_path_buf(),
             durable_refs: HashMap::from([
-                ("refs/heads/main".to_owned(), first_oid.clone()),
+                ("refs/heads/main".to_owned(), first_oid),
             ]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
@@ -1213,7 +1212,7 @@ mod tests {
             repo_root: root.to_path_buf(),
             durable_refs: HashMap::from([
                 ("refs/heads/main".to_owned(), first_oid.clone()),
-                ("refs/heads/temp".to_owned(), temp_oid.clone()),
+                ("refs/heads/temp".to_owned(), temp_oid),
             ]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
@@ -1317,8 +1316,7 @@ mod tests {
 
     #[test]
     fn violation_display_messages() {
-        let violations = vec![
-            AssuranceViolation::ReachabilityLost {
+        let violations = [AssuranceViolation::ReachabilityLost {
                 oid: OID_A.to_owned(),
                 previous_ref: "refs/heads/main".to_owned(),
             },
@@ -1348,8 +1346,7 @@ mod tests {
                 check: "test".to_owned(),
                 command: "git foo".to_owned(),
                 stderr: "bar".to_owned(),
-            },
-        ];
+            }];
 
         let expected_prefixes = [
             "G1 violation", "G2 violation", "G3 violation",
