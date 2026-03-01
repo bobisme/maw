@@ -180,8 +180,15 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
 
     if is_dirty {
         bail!(
-            "Workspace '{ws_name}' has uncommitted changes that would be lost by sync. \
-             Commit or stash first.\n  \
+            "Workspace '{ws_name}' has uncommitted changes that would be lost by sync.\n\
+             \n  \
+             Sync rebases the workspace onto the latest epoch, which requires a clean\n  \
+             working tree. (This is different from `maw ws merge` and `maw ws diff`,\n  \
+             which operate on working-tree state including uncommitted changes.)\n\
+             \n  \
+             Commit first:\n    \
+             maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m 'wip'\n\
+             \n  \
              Check: git -C {} status",
             ws_path.display()
         );
