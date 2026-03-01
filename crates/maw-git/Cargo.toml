@@ -5,3 +5,14 @@ edition = "2021"
 
 [dependencies]
 thiserror = "2"
+gix = { version = "0.72", default-features = false, features = [
+    "basic",
+    "worktree-mutation",
+    "index",
+    "worktree-stream",
+    "revision",
+    "status",
+    "dirwalk",
+] }
+gix-diff = "0.50"
+gix-object = "0.48"
