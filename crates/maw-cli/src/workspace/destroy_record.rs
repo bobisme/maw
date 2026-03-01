@@ -233,9 +233,7 @@ pub(crate) fn list_destroyed_workspaces(root: &Path) -> Result<Vec<String>> {
         }
         // Check for latest.json first (fast path), then fall back to scanning
         // for any timestamped record files.
-        if destroy_path.join("latest.json").exists() {
-            names.push(ws_name);
-        } else if has_any_record_files(&destroy_path) {
+        if destroy_path.join("latest.json").exists() || has_any_record_files(&destroy_path) {
             names.push(ws_name);
         }
     }
@@ -264,13 +262,12 @@ fn has_any_record_files(destroy_dir: &Path) -> bool {
 /// Returns `None` only if no records exist at all.
 pub(crate) fn read_latest_record(root: &Path, workspace_name: &str) -> Result<Option<DestroyRecord>> {
     // Fast path: latest.json exists and points to a valid record.
-    if let Some(pointer) = read_latest_pointer(root, workspace_name)? {
-        if let Ok(record) = read_record(root, workspace_name, &pointer.record) {
+    if let Some(pointer) = read_latest_pointer(root, workspace_name)?
+        && let Ok(record) = read_record(root, workspace_name, &pointer.record) {
             return Ok(Some(record));
         }
         // latest.json exists but points to a missing/corrupt record — fall through
         // to the directory scan.
-    }
 
     // Fallback: scan the directory for timestamped record files.
     let files = list_record_files(root, workspace_name)?;

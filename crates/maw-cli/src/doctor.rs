@@ -54,8 +54,8 @@ fn get_git_version() -> Option<(u32, u32, u32)> {
 /// This is a no-op if git is not found or the version is at or above the minimum.
 /// Intended to be called from `maw init` and other entry points as a soft check.
 pub fn warn_git_version_if_old() {
-    if let Some(version) = get_git_version() {
-        if version < MIN_GIT_VERSION {
+    if let Some(version) = get_git_version()
+        && version < MIN_GIT_VERSION {
             eprintln!(
                 "WARNING: git {}.{}.{} detected; maw requires git {}.{}.{} or later. \
                  Some features may not work correctly.\n  \
@@ -68,7 +68,6 @@ pub fn warn_git_version_if_old() {
                 MIN_GIT_VERSION.2,
             );
         }
-    }
 }
 
 #[derive(Serialize)]

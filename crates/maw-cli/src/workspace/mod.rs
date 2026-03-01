@@ -1088,8 +1088,8 @@ pub fn repo_root() -> Result<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output();
-    if let Ok(output) = output {
-        if output.status.success() {
+    if let Ok(output) = output
+        && output.status.success() {
             let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
             let mut root = common_dir
                 .parent()
@@ -1109,7 +1109,6 @@ pub fn repo_root() -> Result<PathBuf> {
             // Both cases give us the correct root directly.
             return Ok(root);
         }
-    }
 
     // Fallback: ancestor walk for Manifold markers. Used when git is not
     // available or not in a git repo at all.

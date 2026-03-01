@@ -417,7 +417,7 @@ fn parse_against(raw: Option<&str>) -> AgainstMode {
 
 fn looks_like_oid(value: &str) -> bool {
     let len = value.len();
-    len >= 7 && len <= 40 && value.chars().all(|c| c.is_ascii_hexdigit())
+    (7..=40).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn resolve_pathspecs(paths: &[String]) -> Result<Vec<String>> {

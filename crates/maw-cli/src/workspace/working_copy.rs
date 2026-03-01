@@ -624,7 +624,7 @@ pub(crate) fn replay_snapshot(
     match repo.stash_apply(oid) {
         Ok(()) => {
             tracing::info!("snapshot replayed cleanly");
-            return Ok(SnapshotReplayResult::Clean);
+            Ok(SnapshotReplayResult::Clean)
         }
         Err(_e) => {
             // stash apply failed — check for conflict markers.
@@ -642,7 +642,7 @@ pub(crate) fn replay_snapshot(
                 "snapshot replay produced conflicts (left as markers in working tree)"
             );
 
-            return Ok(SnapshotReplayResult::Conflicts(conflicts));
+            Ok(SnapshotReplayResult::Conflicts(conflicts))
         }
     }
 }
@@ -814,8 +814,8 @@ pub(crate) fn preserve_checkout_replay(
     }
 
     // Step 5: Replay staged deltas (if non-empty).
-    if let Some(ref staged_patch) = deltas.staged_patch_path {
-        if let Err(e) = git_apply_patch(ws_path, staged_patch, true) {
+    if let Some(ref staged_patch) = deltas.staged_patch_path
+        && let Err(e) = git_apply_patch(ws_path, staged_patch, true) {
             tracing::warn!("staged patch apply failed: {e}, rolling back");
             let _ = git_checkout_force(ws_path, &recovery_oid);
             return Ok(ReplayResult::Rollback {
@@ -824,11 +824,10 @@ pub(crate) fn preserve_checkout_replay(
                 reason: format!("staged patch replay failed: {e}"),
             });
         }
-    }
 
     // Step 6: Replay unstaged deltas (if non-empty).
-    if let Some(ref unstaged_patch) = deltas.unstaged_patch_path {
-        if let Err(e) = git_apply_patch(ws_path, unstaged_patch, false) {
+    if let Some(ref unstaged_patch) = deltas.unstaged_patch_path
+        && let Err(e) = git_apply_patch(ws_path, unstaged_patch, false) {
             tracing::warn!("unstaged patch apply failed: {e}, rolling back");
             let _ = git_checkout_force(ws_path, &recovery_oid);
             return Ok(ReplayResult::Rollback {
@@ -837,7 +836,6 @@ pub(crate) fn preserve_checkout_replay(
                 reason: format!("unstaged patch replay failed: {e}"),
             });
         }
-    }
 
     // Step 7: Restore untracked files.
     if let Some(ref untracked) = deltas.untracked {

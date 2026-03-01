@@ -199,8 +199,8 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
         let config = MawConfig::load(root).unwrap_or_default();
         let branch = config.branch();
         let branch_ref = format!("refs/heads/{branch}");
-        if let Ok(Some(branch_oid)) = manifold_refs::read_ref(root, &branch_ref) {
-            if oid != branch_oid {
+        if let Ok(Some(branch_oid)) = manifold_refs::read_ref(root, &branch_ref)
+            && oid != branch_oid {
                 let branch_id = EpochId::new(branch_oid.as_str())
                     .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))?;
                 manifold_refs::write_epoch_current(root, &branch_oid)
@@ -212,7 +212,6 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
                 );
                 return Ok(branch_id);
             }
-        }
 
         return Ok(epoch);
     }

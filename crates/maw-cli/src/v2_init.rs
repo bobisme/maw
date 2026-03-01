@@ -303,7 +303,7 @@ fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
             exit_code: None,
         })?;
 
-    if name.as_deref().map_or(true, |v| v.trim().is_empty()) {
+    if name.as_deref().is_none_or(|v| v.trim().is_empty()) {
         repo.write_config("user.name", "Manifold")
             .map_err(|e| InitError::GitCommand {
                 command: "git config user.name Manifold".to_owned(),
@@ -319,7 +319,7 @@ fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
             exit_code: None,
         })?;
 
-    if email.as_deref().map_or(true, |v| v.trim().is_empty()) {
+    if email.as_deref().is_none_or(|v| v.trim().is_empty()) {
         repo.write_config("user.email", "manifold@localhost")
             .map_err(|e| InitError::GitCommand {
                 command: "git config user.email manifold@localhost".to_owned(),

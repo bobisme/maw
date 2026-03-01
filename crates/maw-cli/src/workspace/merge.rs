@@ -1779,7 +1779,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         // Reuse the same format as merge conflict output
-        print_conflict_report(&conflicts_with_ids, &workspaces.to_vec());
+        print_conflict_report(&conflicts_with_ids, workspaces);
     }
 
     Ok(())
@@ -2416,8 +2416,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // between PREPARE and COMMIT, the branch CAS will fail after the epoch
     // ref has already moved, leaving epoch and branch permanently diverged.
     // Detect and abort cleanly before touching any refs.
-    if let Ok(Some(current_branch)) = maw_core::refs::read_ref(&root, &branch_ref) {
-        if current_branch != epoch_before_oid {
+    if let Ok(Some(current_branch)) = maw_core::refs::read_ref(&root, &branch_ref)
+        && current_branch != epoch_before_oid {
             abort_merge(
                 &manifold_dir,
                 "branch diverged from epoch since PREPARE (direct commits detected)",
@@ -2433,7 +2433,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 &current_branch.as_str()[..12],
             );
         }
-    }
 
     match run_commit_phase(&root, branch, &epoch_before_oid, &build_output.candidate) {
         Ok(CommitResult::Committed) => {
@@ -2517,8 +2516,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         update_default_workspace(&default_ws_path, branch, epoch_before_oid.as_str(), &root, text_mode)?;
 
         // Record a Snapshot op if the default workspace had dirty files.
-        if let Some(ref patch_set) = pre_checkout_patchset {
-            if !patch_set.is_empty() {
+        if let Some(ref patch_set) = pre_checkout_patchset
+            && !patch_set.is_empty() {
                 let default_ws_id = WorkspaceId::new(DEFAULT_WORKSPACE)
                     .expect("'default' is a valid workspace name");
 
@@ -2558,7 +2557,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     }
                 }
             }
-        }
     }
 
     // Destroy source workspaces if requested

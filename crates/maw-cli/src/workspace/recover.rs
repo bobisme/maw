@@ -393,9 +393,9 @@ fn parse_recovery_ref_name(ref_name: &str) -> Option<(String, String)> {
         return None;
     }
     let rest = &ref_name[RECOVERY_PREFIX.len()..];
-    let mut it = rest.splitn(2, '/');
-    let ws = it.next()?;
-    let ts = it.next()?;
+    let (ws, ts) = rest.split_once('/')?;
+    
+    
     Some((ws.to_string(), ts.to_string()))
 }
 

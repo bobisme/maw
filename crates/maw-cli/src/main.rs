@@ -320,9 +320,8 @@ fn main() {
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
 mod tests {
-    use std::collections::BTreeSet;
+    
     use std::fs;
-    use std::path::{Path, PathBuf};
 
     use clap::CommandFactory;
     use tempfile::tempdir;
@@ -359,27 +358,6 @@ mod tests {
         let dir = tempdir().unwrap();
 
         assert!(!should_emit_migration_notice(dir.path()));
-    }
-
-    fn collect_rs_files(root: &Path) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-        let Ok(entries) = fs::read_dir(root) else {
-            return files;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(collect_rs_files(&path));
-                continue;
-            }
-
-            if path.extension().is_some_and(|ext| ext == "rs") {
-                files.push(path);
-            }
-        }
-
-        files
     }
 
     fn has_jj_token(content: &str) -> bool {

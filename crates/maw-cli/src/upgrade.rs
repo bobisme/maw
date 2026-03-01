@@ -273,12 +273,11 @@ fn set_git_bare() -> Result<()> {
     let repo = maw_git::GixRepo::open(&cwd)
         .map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
 
-    if let Ok(Some(val)) = repo.read_config("core.bare") {
-        if val.trim() == "true" {
+    if let Ok(Some(val)) = repo.read_config("core.bare")
+        && val.trim() == "true" {
             println!("[OK] git core.bare already true");
             return Ok(());
         }
-    }
 
     repo.write_config("core.bare", "true")
         .map_err(|e| anyhow::anyhow!("Failed to set git core.bare: {e}\n  Try: git config core.bare true"))?;
