@@ -18,7 +18,7 @@ impl GixRepo {
     /// Open the git repository at or above `path`.
     pub fn open(path: &Path) -> Result<Self, GitError> {
         let repo = gix::open(path).map_err(|e| GitError::BackendError { message: e.to_string() })?;
-        let workdir = repo.work_dir().map(|p| p.to_path_buf());
+        let workdir = repo.workdir().map(|p| p.to_path_buf());
         Ok(Self { repo, workdir })
     }
 
@@ -26,7 +26,7 @@ impl GixRepo {
     pub fn open_at(path: &Path) -> Result<Self, GitError> {
         let repo = gix::open_opts(path, gix::open::Options::isolated())
             .map_err(|e| GitError::BackendError { message: e.to_string() })?;
-        let workdir = repo.work_dir().map(|p| p.to_path_buf());
+        let workdir = repo.workdir().map(|p| p.to_path_buf());
         Ok(Self { repo, workdir })
     }
 }

@@ -13,6 +13,5 @@ gix = { version = "0.72", default-features = false, features = [
     "revision",
     "status",
     "dirwalk",
+    "tree-editor",
 ] }
-gix-diff = "0.50"
-gix-object = "0.48"
