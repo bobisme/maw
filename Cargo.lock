@@ -2157,6 +2157,7 @@ dependencies = [
  "crossterm",
  "glob",
  "maw-core",
+ "maw-git",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

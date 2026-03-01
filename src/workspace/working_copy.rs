@@ -35,6 +35,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use maw_git::GitRepo as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -313,6 +314,7 @@ pub(crate) fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Stash uncommitted changes. Returns `true` if there was something to stash.
+// TODO(gix): replace with GitRepo trait method when `git stash --include-untracked` is supported.
 #[allow(dead_code)]
 pub(crate) fn stash_changes(ws_path: &Path) -> Result<bool> {
     let output = Command::new("git")
@@ -331,6 +333,7 @@ pub(crate) fn stash_changes(ws_path: &Path) -> Result<bool> {
 }
 
 /// Checkout the workspace HEAD to a specific epoch OID (detached).
+// TODO(gix): replace with GitRepo trait method when `git checkout --detach` is supported.
 #[allow(dead_code)]
 pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
     let output = Command::new("git")
@@ -350,6 +353,7 @@ pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
 /// After `git stash pop` with conflicts, git leaves the working tree in a
 /// partially-merged state with conflict markers. We detect conflicts via
 /// `git status --porcelain` and parse the two-character status code.
+// TODO(gix): replace with GitRepo trait method when `git stash pop` is supported.
 #[allow(dead_code)]
 pub(crate) fn pop_stash_and_detect_conflicts(
     ws_path: &Path,
@@ -386,6 +390,7 @@ pub(crate) fn pop_stash_and_detect_conflicts(
 /// - `UU` — both modified (content conflict)
 /// - `AU` / `UA` — added/updated conflict
 /// - `DU` / `UD` — deleted/updated conflict
+// TODO(gix): replace with GitRepo trait method when gix status reports conflict markers.
 pub(crate) fn detect_conflicts_in_worktree(
     ws_path: &Path,
 ) -> Result<Vec<WorkingCopyConflict>> {
@@ -445,6 +450,9 @@ pub(crate) fn detect_conflicts_in_worktree(
 /// 5. `git reset` — unstage everything (clean index for subsequent checkout).
 ///
 /// If a prior snapshot ref exists, it is overwritten (with a warning).
+// TODO(gix): replace CLI calls with GitRepo trait methods when git add -A, stash create,
+// reset, reset --hard, and clean -fd are supported. Currently gix stash_create only
+// captures index state (not working tree modifications).
 #[instrument(skip_all, fields(workspace = ws_name))]
 pub(crate) fn snapshot_working_copy(
     ws_path: &Path,
@@ -572,6 +580,7 @@ pub(crate) fn snapshot_working_copy(
 /// already captured and cleaned the dirty state. This function does NOT
 /// use `--force`; a dirty tree will cause `git checkout` to fail, which is
 /// the correct behavior (it means the snapshot step was skipped or broken).
+// TODO(gix): replace with GitRepo trait method when `git checkout` is supported.
 pub(crate) fn checkout_to(
     ws_path: &Path,
     target: &str,
@@ -611,6 +620,7 @@ pub(crate) fn checkout_to(
 /// - `SnapshotReplayResult::Conflicts(list)` if there are conflict markers
 ///   in the working tree. The conflicts are left as markers (working-copy-preserving —
 ///   conflicts are data, not errors).
+// TODO(gix): replace with GitRepo trait method when `git stash apply` is supported.
 pub(crate) fn replay_snapshot(
     ws_path: &Path,
     snapshot: &SnapshotRef,
@@ -715,6 +725,8 @@ pub(crate) enum ReplayResult {
 /// * `target_ref` — the commit/branch to materialize (T)
 /// * `repo_root` — repo root path (for recovery ref pinning)
 /// * `workspace_name` — workspace name (for recovery ref naming)
+// TODO(gix): replace CLI calls (git diff --cached --quiet, git diff --quiet,
+// git ls-files --others) with GitRepo trait methods when supported.
 #[instrument(skip_all, fields(workspace = workspace_name, target = target_ref))]
 #[allow(dead_code)]
 pub(crate) fn preserve_checkout_replay(
@@ -885,6 +897,8 @@ struct UserDeltas {
 }
 
 /// Extract user deltas from the workspace relative to the base epoch.
+// TODO(gix): replace CLI calls (git diff --cached --binary, git diff --binary,
+// git ls-files --others) with GitRepo trait methods when supported.
 fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
     let temp_dir = tempfile::TempDir::new()
         .context("failed to create temp directory for delta extraction")?;
@@ -998,6 +1012,7 @@ fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
 // ---------------------------------------------------------------------------
 
 /// Run `git status --porcelain` and return the raw output.
+// TODO(gix): replace with GitRepo::status() when gix reports untracked files and conflict markers.
 fn git_status_porcelain(ws_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -1016,21 +1031,16 @@ fn git_status_porcelain(ws_path: &Path) -> Result<String> {
 /// Resolve HEAD to a string OID.
 #[allow(dead_code)]
 fn resolve_head_str(ws_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git rev-parse HEAD")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-parse HEAD failed: {}", stderr.trim());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let oid = repo
+        .rev_parse("HEAD")
+        .map_err(|e| anyhow::anyhow!("failed to resolve HEAD: {e}"))?;
+    Ok(oid.to_string())
 }
 
 /// Run `git checkout --force <ref>`.
+// TODO(gix): replace with GitRepo trait method when `git checkout --force` is supported.
 fn git_checkout_force(ws_path: &Path, target: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["checkout", "--force", target])
@@ -1047,6 +1057,7 @@ fn git_checkout_force(ws_path: &Path, target: &str) -> Result<()> {
 }
 
 /// Apply a patch file via `git apply --3way`.
+// TODO(gix): replace with GitRepo trait method when `git apply --3way` is supported.
 fn git_apply_patch(ws_path: &Path, patch_path: &Path, index: bool) -> Result<()> {
     let mut args = vec!["apply", "--3way"];
     if index {

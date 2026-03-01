@@ -43,6 +43,7 @@ kani-slow = []
 
 [dependencies]
 maw-core = { path = "crates/maw-core" }
+maw-git = { path = "crates/maw-git" }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
 anyhow = "1"

@@ -26,6 +26,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use maw_git::GitRepo as _;
 use serde::Serialize;
 use tracing::instrument;
 
@@ -126,6 +127,7 @@ pub fn capture_before_destroy(
 // ---------------------------------------------------------------------------
 
 /// List all dirty paths in the workspace (staged + unstaged + untracked).
+// TODO(gix): replace with GitRepo trait method when full porcelain status is available
 fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args(["status", "--porcelain=v1", "-uall"])
@@ -160,18 +162,11 @@ fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
 
 /// Resolve HEAD to a full OID.
 pub(crate) fn resolve_head(ws_path: &Path) -> Result<GitOid> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git rev-parse HEAD")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-parse HEAD failed: {}", stderr.trim());
-    }
-
-    let oid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let git_oid = repo.rev_parse("HEAD")
+        .map_err(|e| anyhow::anyhow!("failed to resolve HEAD: {e}"))?;
+    let oid_str = git_oid.to_string();
     GitOid::new(&oid_str).map_err(|e| anyhow::anyhow!("invalid HEAD OID: {e}"))
 }
 
@@ -222,6 +217,9 @@ fn capture_dirty_worktree(
     // changes. Untracked files are missed unless we stage them first.
     // We use `git add -A` to stage everything, then `git stash create`
     // to build the commit, then `git reset` to restore the index.
+    //
+    // TODO(gix): replace git add/stash/reset with GitRepo trait methods
+    // when working-tree-capturing stash and index operations are available.
 
     // Stage all files (including untracked)
     let add_output = Command::new("git")
@@ -309,6 +307,7 @@ fn capture_dirty_worktree(
 ///
 /// Uses `git rev-parse --git-common-dir` to find the shared git directory,
 /// then derives the repo root from it.
+// TODO(gix): replace with GitRepo trait method when repo-root discovery is available
 fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])

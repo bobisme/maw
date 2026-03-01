@@ -237,20 +237,26 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
             .to_string_lossy()
             .into_owned();
 
-        // Read HEAD to get current OID
-        let head_oid = {
+        // Read HEAD to get current OID and detached state
+        let (head_oid, is_detached) = {
             let head_file = entry_path.join("HEAD");
             if head_file.exists() {
                 let content = std::fs::read_to_string(&head_file)
                     .ok()
                     .unwrap_or_default();
-                let hex = content.trim();
-                // Try to parse as a hex OID (40 hex chars)
-                if hex.len() == 40 {
+                let trimmed = content.trim();
+                if let Some(ref_target) = trimmed.strip_prefix("ref: ") {
+                    // Symbolic ref (e.g., "ref: refs/heads/main") — resolve via repo
+                    let oid = crate::types::RefName::new(ref_target)
+                        .ok()
+                        .and_then(|rn| crate::refs_impl::read_ref(repo, &rn).ok().flatten());
+                    (oid, false)
+                } else if trimmed.len() == 40 {
+                    // Direct hex OID (detached HEAD)
                     let mut bytes = [0u8; 20];
                     let mut valid = true;
                     for i in 0..20 {
-                        match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+                        match u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16) {
                             Ok(b) => bytes[i] = b,
                             Err(_) => {
                                 valid = false;
@@ -259,15 +265,15 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
                         }
                     }
                     if valid {
-                        Some(GitOid::from_bytes(bytes))
+                        (Some(GitOid::from_bytes(bytes)), true)
                     } else {
-                        None
+                        (None, true)
                     }
                 } else {
-                    None
+                    (None, true)
                 }
             } else {
-                None
+                (None, true)
             }
         };
 
@@ -290,7 +296,7 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
             name,
             path: wt_path,
             head_oid,
-            is_detached: true,
+            is_detached,
         });
     }
 
