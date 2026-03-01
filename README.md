@@ -62,10 +62,16 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.49.0
+cargo install maw-workspaces
 ```
 
-Requires Git. No jj dependency is required for Manifold workflows.
+Or from source:
+
+```bash
+cargo install --git https://github.com/bobisme/maw
+```
+
+Requires Git 2.40+.
 
 ## Quick Start
 

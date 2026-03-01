@@ -63,6 +63,7 @@ fn make_temp_repo(n: usize) -> (tempfile::TempDir, PathBuf, String) {
     git(&["init", "-b", "main"]);
     git(&["config", "user.email", "bench@manifold"]);
     git(&["config", "user.name", "bench"]);
+    git(&["config", "commit.gpgsign", "false"]);
 
     // Create ws/ so git-worktree works correctly.
     std::fs::create_dir_all(root.join("ws")).expect("mkdir ws");

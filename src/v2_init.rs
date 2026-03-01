@@ -2033,6 +2033,11 @@ mod brownfield_tests {
             .current_dir(root)
             .output()
             .unwrap();
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         let err = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap_err();
         assert!(

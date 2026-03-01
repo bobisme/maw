@@ -1559,6 +1559,11 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         fs::write(
             root.join("a.txt"),
