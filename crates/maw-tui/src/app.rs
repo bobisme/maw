@@ -10,9 +10,34 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{Terminal, layout::Rect, prelude::CrosstermBackend};
 
-use super::event::{self, AppEvent};
-use super::ui;
-use maw_core::backend::WorkspaceBackend;
+use crate::event::{self, AppEvent};
+use crate::ui;
+
+// ---------------------------------------------------------------------------
+// RepoDataSource trait — abstraction over workspace/repo queries
+// ---------------------------------------------------------------------------
+
+/// Information about a single workspace, returned by [`RepoDataSource::list_workspaces`].
+pub struct WorkspaceEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_stale: bool,
+}
+
+/// Trait that provides repo/workspace data to the TUI.
+///
+/// Implemented by maw-cli to bridge the workspace subsystem into the TUI crate
+/// without a direct dependency on maw-cli internals.
+pub trait RepoDataSource {
+    /// Return the repository root directory.
+    fn repo_root(&self) -> Result<PathBuf>;
+
+    /// Return the configured branch name (e.g. "main").
+    fn branch_name(&self) -> Result<String>;
+
+    /// List active workspaces (excluding "default").
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceEntry>>;
+}
 
 // ---------------------------------------------------------------------------
 // File tree types
@@ -222,10 +247,12 @@ pub struct App {
     last_refresh: Instant,
     /// Pane areas for mouse hit testing (updated each frame).
     pub pane_areas: Vec<Rect>,
+    /// Data source for repo/workspace queries.
+    data_source: Box<dyn RepoDataSource>,
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(data_source: Box<dyn RepoDataSource>) -> Result<Self> {
         let mut app = Self {
             workspaces: Vec::new(),
             focused_pane: 0,
@@ -239,6 +266,7 @@ impl App {
             overlap_paths: HashMap::new(),
             last_refresh: Instant::now(),
             pane_areas: Vec::new(),
+            data_source,
         };
         app.refresh()?;
         Ok(app)
@@ -382,7 +410,7 @@ impl App {
 
     pub fn refresh(&mut self) -> Result<()> {
         self.fetch_header_info();
-        self.workspaces = Self::fetch_workspace_panes()?;
+        self.workspaces = self.fetch_workspace_panes()?;
         self.compute_overlaps();
         self.last_refresh = Instant::now();
 
@@ -399,11 +427,11 @@ impl App {
     }
 
     fn fetch_header_info(&mut self) {
-        let repo_root = crate::workspace::repo_root().unwrap_or_else(|_| PathBuf::from("."));
+        let repo_root = self.data_source.repo_root().unwrap_or_else(|_| PathBuf::from("."));
 
-        // Branch name from maw config (bare repos return "HEAD" from git rev-parse)
-        if let Ok(config) = crate::workspace::MawConfig::load(&repo_root) {
-            self.branch_name = config.branch().to_string();
+        // Branch name from data source
+        if let Ok(branch) = self.data_source.branch_name() {
+            self.branch_name = branch;
         }
 
         // Epoch hash from refs/manifold/epoch/current
@@ -418,41 +446,33 @@ impl App {
         }
     }
 
-    fn fetch_workspace_panes() -> Result<Vec<WorkspacePane>> {
-        let backend = crate::workspace::get_backend()?;
-        let infos = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let repo_root = crate::workspace::repo_root()?;
+    fn fetch_workspace_panes(&self) -> Result<Vec<WorkspacePane>> {
+        let entries = self.data_source.list_workspaces()?;
+        let repo_root = self.data_source.repo_root()?;
 
         let mut panes = Vec::new();
 
-        for info in &infos {
-            let name = info.id.to_string();
-            // Skip default workspace from display (it's the merge target, not an agent workspace)
-            if name == "default" {
-                continue;
-            }
-
-            let ws_path = backend.workspace_path(&info.id);
-            let is_stale = info.state.is_stale();
+        for entry in &entries {
+            let ws_path = &entry.path;
 
             // Get epoch diff: files changed relative to epoch
-            let epoch_files = Self::fetch_epoch_diff(&repo_root, &ws_path);
+            let epoch_files = Self::fetch_epoch_diff(&repo_root, ws_path);
 
             // Get commit count and last activity
             let (commit_count, last_activity_secs) =
-                Self::fetch_commit_info(&repo_root, &ws_path);
+                Self::fetch_commit_info(&repo_root, ws_path);
 
             // Check for dirty working copy
-            let is_dirty = Self::check_dirty(&ws_path);
+            let is_dirty = Self::check_dirty(ws_path);
 
             let file_paths: Vec<String> = epoch_files.iter().map(|(_, p)| p.clone()).collect();
             let file_tree = build_file_tree(&epoch_files);
 
             panes.push(WorkspacePane {
-                name,
+                name: entry.name.clone(),
                 commit_count,
                 last_activity_secs,
-                is_stale,
+                is_stale: entry.is_stale,
                 is_dirty,
                 file_tree,
                 file_paths,

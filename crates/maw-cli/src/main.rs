@@ -15,6 +15,7 @@ use maw_cli::release;
 use maw_cli::status;
 use maw_cli::telemetry;
 use maw_cli::transport;
+#[cfg(feature = "tui")]
 use maw_cli::tui;
 use maw_cli::upgrade;
 use maw_cli::v2_init;
@@ -98,6 +99,7 @@ enum Commands {
     ///
     /// Interactive interface for managing workspaces, viewing commits,
     /// and coordinating agent work. Inspired by lazygit.
+    #[cfg(feature = "tui")]
     #[command(name = "ui")]
     Ui,
 
@@ -279,6 +281,7 @@ fn main() {
         Commands::Doctor { format, json } => {
             doctor::run(format::OutputFormat::with_json_flag(format, json))
         }
+        #[cfg(feature = "tui")]
         Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),
         Commands::Push(args) => push::run(&args),

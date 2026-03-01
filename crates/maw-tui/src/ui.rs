@@ -6,8 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use super::app::{App, TreeNode, flatten_tree, format_time_ago};
-use super::theme;
+use crate::app::{App, TreeNode, flatten_tree, format_time_ago};
+use crate::theme;
 
 /// Create a styled block with rounded corners
 fn styled_block(title: &str, is_focused: bool) -> Block<'_> {
@@ -23,18 +23,16 @@ fn styled_block(title: &str, is_focused: bool) -> Block<'_> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    // Top-level layout: header + overlap bar (optional) + pane grid + footer
     let has_overlaps = !app.overlaps.is_empty();
 
-    let mut constraints = vec![Constraint::Length(1)]; // header
+    let mut constraints = vec![Constraint::Length(1)];
     if has_overlaps {
-        // One line per unique overlap pair, capped at 3
         #[allow(clippy::cast_possible_truncation)]
         let overlap_lines = app.overlaps.len().min(3) as u16;
         constraints.push(Constraint::Length(overlap_lines));
     }
-    constraints.push(Constraint::Min(0)); // pane grid
-    constraints.push(Constraint::Length(1)); // footer
+    constraints.push(Constraint::Min(0));
+    constraints.push(Constraint::Length(1));
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -57,21 +55,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     slot += 1;
     let footer_area = outer[slot];
 
-    // Draw header
     draw_header(frame, app, header_area);
 
-    // Draw overlap bar
     if let Some(area) = overlap_area {
         draw_overlap_bar(frame, app, area);
     }
 
-    // Draw pane grid
     draw_pane_grid(frame, app, grid_area);
-
-    // Draw footer
     draw_footer(frame, footer_area);
 
-    // Help popup (rendered on top)
     if app.show_help {
         draw_help_popup(frame);
     }
@@ -127,10 +119,6 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Tiling strategy:
-    //   1 workspace: full width
-    //   2 workspaces: side by side
-    //   3+ workspaces: 2-column grid
     app.pane_areas = compute_pane_rects(ws_count, area);
 
     for (i, ws) in app.workspaces.iter().enumerate() {
@@ -161,7 +149,6 @@ fn compute_pane_rects(count: usize, area: Rect) -> Vec<Rect> {
         return vec![cols[0], cols[1]];
     }
 
-    // 2-column grid
     let cols = 2;
     let rows = count.div_ceil(cols);
     #[allow(clippy::cast_possible_truncation)]
@@ -183,7 +170,6 @@ fn compute_pane_rects(count: usize, area: Rect) -> Vec<Rect> {
         };
 
         if items_in_row == 1 {
-            // Last row with single item: span full width
             rects.push(row_rect);
         } else {
             let col_rects = Layout::default()
@@ -202,13 +188,12 @@ fn compute_pane_rects(count: usize, area: Rect) -> Vec<Rect> {
 #[allow(clippy::too_many_arguments)]
 fn draw_workspace_pane(
     frame: &mut Frame,
-    ws: &super::app::WorkspacePane,
+    ws: &crate::app::WorkspacePane,
     area: Rect,
     is_focused: bool,
     selected: Option<usize>,
     overlap_set: Option<&std::collections::BTreeSet<String>>,
 ) {
-    // Build title line: name* +N commits Xm ago [stale]
     let mut title_parts = vec![ws.name.clone()];
     if ws.is_dirty {
         title_parts.push("*".to_string());
@@ -242,7 +227,6 @@ fn draw_workspace_pane(
         styled_block(&title, is_focused)
     };
 
-    // Flatten file tree for rendering
     let flat = flatten_tree(&ws.file_tree, 0);
 
     if flat.is_empty() {
@@ -279,13 +263,12 @@ fn draw_workspace_pane(
                     full_path,
                 } => {
                     let color = match status {
-                        super::app::FileStatus::Modified => theme::FILE_MODIFIED,
-                        super::app::FileStatus::Added => theme::FILE_ADDED,
-                        super::app::FileStatus::Deleted => theme::FILE_DELETED,
-                        super::app::FileStatus::Renamed => theme::FILE_RENAMED,
+                        crate::app::FileStatus::Modified => theme::FILE_MODIFIED,
+                        crate::app::FileStatus::Added => theme::FILE_ADDED,
+                        crate::app::FileStatus::Deleted => theme::FILE_DELETED,
+                        crate::app::FileStatus::Renamed => theme::FILE_RENAMED,
                     };
 
-                    // Check if this file overlaps with another workspace
                     let is_overlap = overlap_set
                         .is_some_and(|set| set.contains(full_path.as_str()));
 

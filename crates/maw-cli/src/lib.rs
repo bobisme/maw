@@ -18,6 +18,7 @@ pub mod release;
 pub mod status;
 pub mod telemetry;
 pub mod transport;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod upgrade;
 pub mod v2_init;
