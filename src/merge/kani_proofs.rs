@@ -37,9 +37,14 @@
 //! # Running
 //!
 //! ```bash
-//! cargo kani --no-default-features --harness <harness_name>
-//! # or all harnesses:
+//! # Fast proofs only (classify_shared_path, ~seconds):
 //! cargo kani --no-default-features
+//!
+//! # All proofs including resolve_entries (~49 minutes):
+//! cargo kani --no-default-features --features kani-slow
+//!
+//! # Single harness:
+//! cargo kani --no-default-features --harness <harness_name>
 //! ```
 
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -480,7 +485,16 @@ fn exhaustive_2_entry_decision_table() {
 // These exercise the production resolve_entries function with C=u8 and
 // stub_diff3, verifying properties that classify_shared_path alone cannot:
 // the k-way fold, content threading, and outcome consistency.
+//
+// GATED: These harnesses take ~49 minutes to run. Enable with:
+//   cargo kani --no-default-features --features kani-slow
+//
+// The classify_shared_path proofs above run in seconds and are always
+// available via `cargo kani --no-default-features`.
 // =========================================================================
+#[cfg(feature = "kani-slow")]
+mod resolve_entries_proofs {
+    use super::*;
 
 // =========================================================================
 // PROPERTY: Totality — resolve_entries never panics
@@ -879,3 +893,5 @@ fn re_diff3_both_sides_changed_conflicts() {
         "Both-sides-changed-differently must conflict"
     );
 }
+
+} // mod resolve_entries_proofs

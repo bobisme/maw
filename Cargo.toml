@@ -25,6 +25,7 @@ otel = [
 failpoints = []
 assurance = ["dep:stateright"]
 proptests = []
+kani-slow = []
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
