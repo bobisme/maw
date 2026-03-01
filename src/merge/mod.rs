@@ -19,19 +19,23 @@
 //! - File content (blob identity) drives resolution, not timestamps.
 //! - diff3 is itself deterministic given the same inputs.
 
+// --- Modules moved to maw-core (re-exported) ---
+pub use maw_core::merge::build;
+pub use maw_core::merge::partition;
+pub use maw_core::merge::plan;
+#[allow(unused_imports)]
+pub use maw_core::merge::rename;
+pub use maw_core::merge::types;
+
+// --- Modules that remain here (have cross-deps on backend/config/refs/merge_state/ast-merge) ---
 #[cfg(feature = "ast-merge")]
 pub mod ast_merge;
-pub mod build;
 pub mod build_phase;
 pub mod collect;
 pub mod commit;
-pub mod partition;
-pub mod plan;
 pub mod prepare;
 pub mod quarantine;
-pub mod rename;
 pub mod resolve;
-pub mod types;
 pub mod validate;
 
 #[allow(unused_imports)]

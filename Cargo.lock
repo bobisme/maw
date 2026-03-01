@@ -2121,12 +2121,14 @@ version = "0.1.0"
 name = "maw-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "proptest",
  "rand 0.9.2",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

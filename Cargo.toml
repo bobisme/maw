@@ -36,7 +36,7 @@ otel = [
   "dep:opentelemetry-appender-tracing",
   "dep:tracing-opentelemetry",
 ]
-failpoints = []
+failpoints = ["maw-core/failpoints"]
 assurance = ["dep:stateright"]
 proptests = []
 kani-slow = []
