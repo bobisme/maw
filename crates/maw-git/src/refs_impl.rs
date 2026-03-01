@@ -181,7 +181,7 @@ pub fn rev_parse(repo: &GixRepo, spec: &str) -> Result<GitOid, GitError> {
 pub fn rev_parse_opt(repo: &GixRepo, spec: &str) -> Result<Option<GitOid>, GitError> {
     match repo.repo.rev_parse_single(spec) {
         Ok(id) => Ok(Some(from_gix_oid(id.as_ref()))),
-        Err(e) => {
+        Err(_e) => {
             // gix rev_parse errors are all resolution failures —
             // malformed specs, missing refs, unborn HEAD, etc.
             // These all map to None (spec could not be resolved).

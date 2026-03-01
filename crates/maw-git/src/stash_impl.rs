@@ -130,8 +130,8 @@ pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
         let commit = gix::objs::Commit {
             message: "index on HEAD".into(),
             tree: tree_gix,
-            author: author_sig.clone().into(),
-            committer: committer_sig.clone().into(),
+            author: author_sig.into(),
+            committer: committer_sig.into(),
             encoding: None,
             parents: vec![head_gix].into(),
             extra_headers: Default::default(),

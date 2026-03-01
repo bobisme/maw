@@ -190,8 +190,8 @@ pub fn worktree_remove(repo: &GixRepo, name: &str) -> Result<(), GitError> {
             })?;
         let gitdir_path = std::path::PathBuf::from(gitdir_content.trim());
         // gitdir points to <worktree>/.git, so parent is the worktree root
-        if let Some(wt_path) = gitdir_path.parent() {
-            if wt_path.exists() {
+        if let Some(wt_path) = gitdir_path.parent()
+            && wt_path.exists() {
                 std::fs::remove_dir_all(wt_path).map_err(|e| GitError::BackendError {
                     message: format!(
                         "failed to remove worktree dir {}: {e}",
@@ -199,7 +199,6 @@ pub fn worktree_remove(repo: &GixRepo, name: &str) -> Result<(), GitError> {
                     ),
                 })?;
             }
-        }
     }
 
     // Remove the admin directory
