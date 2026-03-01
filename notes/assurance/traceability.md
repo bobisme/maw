@@ -77,20 +77,20 @@ using bounded symbolic inputs.
 
 Guarantees are defined in `notes/assurance-plan.md` section 4. Invariant
 predicates are specified in `notes/assurance/invariants.md`. Oracle functions
-are specified in `notes/assurance/invariants.md` section 4 (not yet implemented
-in code; Phase 2/4 deliverable).
+are implemented in `src/assurance/oracle.rs` and exercised by
+`tests/dst_harness.rs` when run with `--features assurance`.
 
 | Guarantee | Invariant ID | Oracle Function | DST Test | CI Gate |
 |---|---|---|---|---|
-| G1: Committed no-loss | I-G1.1 (durable reachability) | `check_g1_reachability(pre, post)` | `DST-G1-001` (not yet implemented); existing: `tests/concurrent_safety.rs:concurrent_agents_100_scenarios_no_corruption_or_data_loss`, `tests/concurrent_safety.rs:high_load_five_agents_100_files_total_no_data_loss` | `dst-fast`, `dst-nightly` |
-| G1: Committed no-loss | I-G1.2 (rewrite pin-before-risk) | `check_g1_reachability(pre, post)` | `DST-G1-001` (not yet implemented); existing: `tests/concurrent_safety.rs:concurrent_agents_100_scenarios_no_corruption_or_data_loss` | `dst-fast`, `dst-nightly` |
-| G2: Rewrite no-loss | I-G2.1 (capture-or-proof gate) | `check_g2_rewrite_preservation(pre, post, workspace)` | `DST-G2-001` (not yet implemented) | `dst-fast`, `dst-nightly` |
-| G2: Rewrite no-loss | I-G2.2 (replay/rollback safety) | `check_g2_rewrite_preservation(pre, post, workspace)` | `DST-G2-001` (not yet implemented) | `dst-fast`, `dst-nightly` |
-| G2: Rewrite no-loss | I-G2.3 (untracked preservation) | `check_g2_rewrite_preservation(pre, post, workspace)` | `DST-G2-001` (not yet implemented) | `dst-fast`, `dst-nightly` |
-| G3: Post-COMMIT monotonicity | I-G3.1 (commit success monotonic) | `check_g3_commit_monotonicity(pre, post)` | `DST-G3-001` (not yet implemented); existing: `tests/crash_recovery.rs:crash_in_commit_state_file_persists_for_ref_check`, `tests/crash_recovery.rs:crash_in_cleanup_state_file_deleted_and_idempotent` | `dst-fast`, `dst-nightly`, `formal-check` |
-| G3: Post-COMMIT monotonicity | I-G3.2 (partial commit recoverable) | `check_g3_commit_monotonicity(pre, post)` | `DST-G3-001` (not yet implemented); existing: `src/merge/commit.rs` inline tests (`recovery_finalizes_when_only_epoch_moved`, `recovery_reports_already_committed_when_both_refs_new`, `recovery_reports_not_committed_when_both_refs_old`) | `dst-fast`, `dst-nightly`, `formal-check` |
-| G4: Destructive gate | I-G4.1 (destroy refuses on unknown safety) | `check_g4_destructive_gate(pre, post, workspace)` | `DST-G4-001` (not yet implemented) | `dst-fast`, `dst-nightly` |
-| G4: Destructive gate | I-G4.2 (no best-effort destructive fallback) | `check_g4_destructive_gate(pre, post, workspace)` | `DST-G4-001` (not yet implemented) | `dst-fast`, `dst-nightly` |
+| G1: Committed no-loss | I-G1.1 (durable reachability) | `check_g1_reachability(pre, post)` | `tests/dst_harness.rs:dst_g1_random_crash_preserves_committed_data` | `dst-fast`, `dst-nightly` |
+| G1: Committed no-loss | I-G1.2 (rewrite pin-before-risk) | `check_g1_reachability(pre, post)` | `tests/dst_harness.rs:dst_g1_random_crash_preserves_committed_data` | `dst-fast`, `dst-nightly` |
+| G2: Rewrite no-loss | I-G2.1 (capture-or-proof gate) | `check_g2_rewrite_preservation(pre, post)` | `tests/dst_harness.rs:dst_g2_rewrite_path_preserves_workspace_data` | `dst-fast` |
+| G2: Rewrite no-loss | I-G2.2 (replay/rollback safety) | `check_g2_rewrite_preservation(pre, post)` | `tests/dst_harness.rs:dst_g2_rewrite_path_preserves_workspace_data` | `dst-fast` |
+| G2: Rewrite no-loss | I-G2.3 (untracked preservation) | `check_g2_rewrite_preservation(pre, post)` | `tests/dst_harness.rs:dst_g2_rewrite_path_preserves_workspace_data` | `dst-fast` |
+| G3: Post-COMMIT monotonicity | I-G3.1 (commit success monotonic) | `check_g3_commit_monotonicity(pre, post)` | `tests/dst_harness.rs:dst_g3_crash_at_commit_satisfies_monotonicity`; `tests/crash_recovery.rs:crash_in_commit_state_file_persists_for_ref_check` | `dst-fast`, `dst-nightly`, `formal-check` |
+| G3: Post-COMMIT monotonicity | I-G3.2 (partial commit recoverable) | `check_g3_commit_monotonicity(pre, post)` | `tests/dst_harness.rs:dst_g3_crash_at_commit_satisfies_monotonicity`; `src/merge/commit.rs` inline tests (`recovery_finalizes_when_only_epoch_moved`, `recovery_reports_already_committed_when_both_refs_new`, `recovery_reports_not_committed_when_both_refs_old`) | `dst-fast`, `dst-nightly`, `formal-check` |
+| G4: Destructive gate | I-G4.1 (destroy refuses on unknown safety) | `check_g4_destructive_gate(pre, post)` | `tests/dst_harness.rs:dst_g4_destroy_requires_successful_capture` | `dst-fast` |
+| G4: Destructive gate | I-G4.2 (no best-effort destructive fallback) | `check_g4_destructive_gate(pre, post)` | `tests/dst_harness.rs:dst_g4_destroy_requires_successful_capture` | `dst-fast` |
 | G5: Discoverable recovery | I-G5.1 (recovery surface presence) | `check_g5_discoverability(output, post)` | N/A (integration tests only); existing: `tests/destroy_recover.rs` (11 tests) | `contract-drift` |
 | G5: Discoverable recovery | I-G5.2 (executable next step) | `check_g5_discoverability(output, post)` | N/A (integration tests only); existing: `tests/destroy_recover.rs` (11 tests) | `contract-drift` |
 | G6: Searchable recovery | I-G6.1 (search coverage) | `check_g6_searchability(repo_state, query_cases)` | N/A (unit + integration tests only); existing: `src/workspace/recover.rs` inline tests (10 tests) | `contract-drift` |
@@ -139,9 +139,9 @@ artifacts (Stateright actions, Kani proofs, guarantees) exercise it.
 
 | Artifact Category | Implemented | Planned | Notes |
 |---|---|---|---|
-| Stateright model (`src/assurance/model.rs`) | 0/10 actions | 10/10 | Phase 4 deliverable; uses actual `MergePhase`/`MergeStateFile` types |
+| Stateright model (`src/assurance/model.rs`) | 10/10 actions | 10/10 | Model + ignored integration checks are in-tree (`tests/formal_model.rs`) |
 | Kani proof harnesses (`src/merge/kani_proofs.rs`) | 24/24 | -- | 13 `classify_shared_path` (decision tree) + 11 `resolve_entries<u8>` (full pipeline with k-way diff3 fold); run with `cargo kani --no-default-features` |
-| Oracle functions (`check_g1..check_g6`) | 0/6 | 6/6 | Phase 2 deliverable; specified in `notes/assurance/invariants.md` section 4 |
-| DST scenarios (named `DST-G*-001`) | 0/4 | 4/4 | Phase 2-3 deliverable; `tests/concurrent_safety.rs` provides lightweight DST coverage |
-| CI gates | 0/5 | 5/5 | All gates specified; none wired into CI yet |
+| Oracle functions (`check_g1..check_g6`) | 6/6 | 6/6 | Implemented in `src/assurance/oracle.rs`; used by DST harness in assurance mode |
+| DST scenarios (named `DST-G*-001`) | 4/4 | 4/4 | Implemented in `tests/dst_harness.rs` (`dst_g1`, `dst_g2`, `dst_g3`, `dst_g4`) |
+| CI gates | 5/5 recipes | 5/5 | Implemented as `just` gates; repository CI workflow wiring may still be external |
 | Failpoint framework | 0/1 | 1/1 | Phase 2 prerequisite; 30 failpoint IDs cataloged in `notes/assurance/failpoints.md` |
