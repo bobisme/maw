@@ -2,6 +2,25 @@
 
 All notable changes to maw.
 
+## v0.50.0
+
+### Fixed
+- **AST merge silent data loss** (bn-2cv5). When two workspaces modified the same interstitial text (comments, whitespace between functions), the AST merge layer silently resolved to base content instead of raising a conflict. Added `interstitial_differs()` check that falls back to diff3 when inter-item regions change.
+- **AST merge stripped doc comments from new functions** (bn-3vmr). Functions added by a workspace lost their `///` doc comments and `#[...]` attributes during AST reconstruction. Added `leading_trivia()` to preserve preceding documentation and attributes on Added items.
+- **AST merge appended use declarations at EOF** (bn-1ldh). New `use` declarations added by a workspace were placed at the end of the file instead of near existing imports. Now spliced after the last surviving `use_declaration` in the output.
+- **Epoch-delta stale merge protection** (bn-7phd). `inject_epoch_delta()` now creates synthetic PatchSets for files changed between a workspace's creation epoch and the current epoch, forcing stale-overlapping files through diff3 conflict resolution instead of silent overwrite.
+- **Sequential stale merge reversion** (bn-1k7n). Multiple stale workspaces merged sequentially could revert each other's changes. Root cause was operational (old binary without epoch-delta code); confirmed fixed with current binary.
+- **Workspace reversion on stale merge** (bn-1zdc). Merging a workspace created before other merges no longer silently reverts already-merged files.
+- **Merge ordering sensitivity** (bn-2axt). Merge results no longer depend on the order workspaces are listed on the command line.
+- **Missing epoch ref after merge** (bn-3qeh). `refs/manifold/epoch/current` is now always advanced after a successful merge commit.
+- **Dirty default workspace data loss on merge** (bn-2ge6). Uncommitted changes in `ws/default/` are now captured and replayed after merge cleanup.
+- **Concurrent merge race condition** (bn-21a3). Merge pipeline now uses atomic ref updates to prevent interleaved merges from corrupting epoch state.
+- **Stale workspace sync after merge** (bn-3v88). `maw ws sync` correctly handles workspaces that fell behind by multiple epochs.
+
+### Changed
+- **Crate extraction complete**. `maw-git`, `maw-core`, `maw-cli`, `maw-tui`, and `maw-assurance` are now independent crates in the workspace. `maw-git` provides the `GitRepo` trait with a pure-gix implementation (zero CLI calls in core).
+- **Gix migration complete**. All git operations in `maw-git` and `maw-core` use gix. Remaining CLI calls are isolated in `maw-cli` (push/fetch, detached HEAD worktree ops, rev-list --count, worktree prune).
+
 ## v0.49.0
 
 ### Added
