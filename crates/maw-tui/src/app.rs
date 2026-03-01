@@ -53,6 +53,7 @@ pub enum FileStatus {
 }
 
 impl FileStatus {
+    #[must_use] 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Modified => "M",
@@ -62,6 +63,7 @@ impl FileStatus {
         }
     }
 
+    #[must_use] 
     pub const fn from_char(c: char) -> Self {
         match c {
             'A' => Self::Added,
@@ -88,6 +90,7 @@ pub enum TreeNode {
 }
 
 impl TreeNode {
+    #[must_use] 
     pub fn name(&self) -> &str {
         match self {
             Self::Dir { name, .. } | Self::File { name, .. } => name,
@@ -95,6 +98,7 @@ impl TreeNode {
     }
 
     #[allow(dead_code)]
+    #[must_use] 
     pub const fn is_dir(&self) -> bool {
         matches!(self, Self::Dir { .. })
     }
@@ -102,6 +106,7 @@ impl TreeNode {
 
 /// Build a nested tree from a flat list of (status, path) pairs.
 /// Directories are sorted first, then files, both alphabetical.
+#[must_use] 
 pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
     fn build_children(
         dir_path: &str,
@@ -184,6 +189,7 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
 
 /// Flatten a tree into a list of `(depth, &TreeNode)` for rendering.
 /// Skips children of collapsed directories.
+#[must_use] 
 pub fn flatten_tree(nodes: &[TreeNode], depth: usize) -> Vec<(usize, &TreeNode)> {
     let mut result = Vec::new();
     for node in nodes {
@@ -514,7 +520,7 @@ impl App {
             // Handle renames: R100\toldpath\tnewpath
             let path = if status_char == 'R' {
                 // Take the last tab-separated field (new path)
-                line.split('\t').last().unwrap_or("").to_string()
+                line.split('\t').next_back().unwrap_or("").to_string()
             } else {
                 line.split('\t').nth(1).unwrap_or("").to_string()
             };
@@ -625,6 +631,7 @@ impl App {
 }
 
 /// Format seconds-ago into a human readable string.
+#[must_use] 
 pub fn format_time_ago(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s ago")
