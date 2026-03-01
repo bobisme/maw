@@ -76,7 +76,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     if format == OutputFormat::Json {
         let summary = collect_status()?;
         let envelope = StatusEnvelope {
-            workspaces: summary.workspace_names.clone(),
+            workspaces: summary.workspace_entries.clone(),
             changed_files: summary.changed_files.clone(),
             untracked_files: summary.untracked_files.clone(),
             is_stale: summary.is_stale,
@@ -141,9 +141,15 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceEntry {
+    name: String,
+    is_stale: bool,
+}
+
 #[derive(Serialize)]
 struct StatusEnvelope {
-    workspaces: Vec<String>,
+    workspaces: Vec<WorkspaceEntry>,
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
     is_stale: bool,
@@ -154,7 +160,7 @@ struct StatusEnvelope {
 
 #[derive(Debug)]
 struct StatusSummary {
-    workspace_names: Vec<String>,
+    workspace_entries: Vec<WorkspaceEntry>,
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
     is_stale: bool,
@@ -168,7 +174,7 @@ impl StatusSummary {
         if !self.stray_root_files.is_empty() {
             count += 1;
         }
-        if !self.workspace_names.is_empty() {
+        if !self.workspace_entries.is_empty() {
             count += 1;
         }
         if !self.changed_files.is_empty() {
@@ -187,7 +193,7 @@ impl StatusSummary {
         let check = green_check();
         let warn = yellow_warn();
         let stray = self.stray_root_files.len();
-        let ws = self.workspace_names.len();
+        let ws = self.workspace_entries.len();
         let changes = self.changed_files.len();
         let untracked = self.untracked_files.len();
         let mut parts = Vec::new();
@@ -237,7 +243,7 @@ impl StatusSummary {
             }
         }
 
-        let ws_count = self.workspace_names.len();
+        let ws_count = self.workspace_entries.len();
         out.push_str(&text_status_line(
             "Non-default workspaces",
             &if ws_count == 0 {
@@ -247,8 +253,12 @@ impl StatusSummary {
             },
             ws_count == 0,
         ));
-        for name in &self.workspace_names {
-            let _ = writeln!(out, "  - {name}");
+        for entry in &self.workspace_entries {
+            if entry.is_stale {
+                let _ = writeln!(out, "  - {} (stale)", entry.name);
+            } else {
+                let _ = writeln!(out, "  - {}", entry.name);
+            }
         }
 
         let change_count = self.changed_files.len();
@@ -317,7 +327,7 @@ impl StatusSummary {
             out.push_str(&colorize_light_red("ROOT!"));
         }
 
-        let ws = self.workspace_names.len();
+        let ws = self.workspace_entries.len();
         if ws > 0 {
             let workspace = format!("\u{f0645} {ws}");
             let colored = colorize_orange(&workspace);
@@ -363,7 +373,7 @@ impl StatusSummary {
             }
         }
 
-        let ws_count = self.workspace_names.len();
+        let ws_count = self.workspace_entries.len();
         out.push_str(&status_line(
             "Non-default workspaces",
             &if ws_count == 0 {
@@ -373,8 +383,17 @@ impl StatusSummary {
             },
             ws_count == 0,
         ));
-        for name in &self.workspace_names {
-            let _ = writeln!(out, "  - {name}");
+        for entry in &self.workspace_entries {
+            if entry.is_stale {
+                let _ = writeln!(
+                    out,
+                    "  - {} {}",
+                    entry.name,
+                    colorize_yellow("(stale)")
+                );
+            } else {
+                let _ = writeln!(out, "  - {}", entry.name);
+            }
         }
 
         let change_count = self.changed_files.len();
@@ -541,15 +560,18 @@ fn collect_status() -> Result<StatusSummary> {
     let branch = config.branch();
     let default_ws_name = config.default_workspace();
 
-    // Get non-default workspace names from backend
-    let workspace_names = get_backend()
+    // Get non-default workspace names (with staleness) from backend
+    let workspace_entries = get_backend()
         .ok()
         .and_then(|backend| backend.list().ok())
         .map_or_else(Vec::new, |infos| {
             infos
                 .into_iter()
                 .filter(|ws| ws.id.as_str() != default_ws_name)
-                .map(|ws| ws.id.as_str().to_string())
+                .map(|ws| WorkspaceEntry {
+                    name: ws.id.as_str().to_string(),
+                    is_stale: ws.state.is_stale(),
+                })
                 .collect()
         });
 
@@ -572,7 +594,7 @@ fn collect_status() -> Result<StatusSummary> {
     let stray_root_files = doctor::stray_root_entries(&root);
 
     Ok(StatusSummary {
-        workspace_names,
+        workspace_entries,
         changed_files,
         untracked_files,
         is_stale,

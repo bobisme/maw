@@ -1673,17 +1673,6 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("{e}")))
         .collect::<Result<Vec<_>>>()?;
 
-    // Check that all workspaces exist before running merge logic
-    for ws_id in &sources {
-        if !backend.exists(ws_id) {
-            bail!(
-                "Workspace '{}' does not exist\n  Check: maw ws list\n  Fix: maw ws create {}",
-                ws_id,
-                ws_id
-            );
-        }
-    }
-
     let mut workspace_dirs = BTreeMap::new();
     for ws_id in &sources {
         workspace_dirs.insert(ws_id.clone(), backend.workspace_path(ws_id));
