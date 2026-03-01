@@ -7,11 +7,18 @@ It gives each agent an isolated workspace, tracks agent lifecycle in Manifold me
 
 ## Why maw is awesome
 
-- **Agent-native UX**: agents get directories, files, and JSON output - not VCS ceremony.
+- **Agent-native UX**: agents get directories, files, and JSON output -- not VCS ceremony.
 - **Parallel by default**: each agent works in `ws/<name>/` without stepping on others.
 - **Deterministic merge flow**: merge outcomes are based on epoch + workspace patch sets, with predictable conflict surfaces.
 - **Operational safety**: repairable repo state, health checks (`maw doctor`), and explicit recovery paths.
 - **Git-compatible mainline**: normal `git log`, `git bisect`, and remote workflows still work.
+- **Zero-loss merge**: snapshot-rebase-replay preserves uncommitted work in the default workspace during merge -- no silent data loss.
+- **Formal verification**: merge algebra proven correct with Kani bounded model checking; protocol state machine verified with Stateright.
+- **Deterministic simulation testing**: seeded DST harness replays multi-agent merge scenarios with invariant oracles checking all guarantees every trace.
+- **AST-aware conflict detection**: tree-sitter powered semantic analysis for Rust, Python, TypeScript, JavaScript, and Go reduces false-positive conflicts.
+- **Crash-resilient recovery**: `maw ws recover --search` finds and restores snapshots, dangling refs, and destroyed workspaces. Every destructive operation leaves a recovery anchor.
+- **Persistent workspaces**: long-lived agent workspaces survive epoch advances via `maw ws advance`, rebasing uncommitted work onto the new epoch with structured conflict reporting.
+- **Machine-readable everything**: `--format json` on every command. Agents parse structured output, humans get pretty tables -- same data, different rendering.
 
 ## Why better than raw git worktrees
 
@@ -44,10 +51,18 @@ Manifold's design (see `notes/manifold-v2.md`) treats workspace state as algebra
 
 The practical effect: merge cost and conflict analysis scale with touched paths/conflict set, not the entire repo size or total workspace count.
 
+### Verified properties
+
+The merge algebra and protocol aren't just specified -- they're machine-checked:
+
+- **Kani bounded proofs** (`src/merge/kani_proofs.rs`): 13 harnesses verify `classify_shared_path` correctness -- every pair of file operations produces the right merge action. An additional 11 harnesses verify `resolve_entries` algebra properties (commutativity, associativity, idempotence) behind the `kani-slow` feature gate.
+- **Stateright model checking** (`tests/formal_model.rs`): the merge protocol state machine (PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP → DESTROY) is explored exhaustively for deadlock freedom, liveness, and safety invariants.
+- **Deterministic simulation testing**: seeded DST harness replays multi-agent merge traces with invariant oracles checking guarantees G1-G6 (epoch monotonicity, rewrite no-loss, no phantom files, destructive gate, merge atomicity, recovery completeness) on every step.
+
 ## Install
 
 ```bash
-cargo install --git https://github.com/bobisme/maw --tag v0.46.7
+cargo install --git https://github.com/bobisme/maw --tag v0.49.0
 ```
 
 Requires Git. No jj dependency is required for Manifold workflows.
@@ -89,23 +104,29 @@ maw push
 
 ## Core commands
 
-| Command                              | Description                                     |
-| ------------------------------------ | ----------------------------------------------- |
-| `maw ws create <name>`               | Create isolated workspace for an agent          |
-| `maw ws list`                        | List all workspaces                             |
-| `maw ws status`                      | Show workspace health, staleness, and conflicts |
-| `maw ws diff <name> [--against ...]` | Compare workspace changes (summary/patch/json)  |
-| `maw exec <name> -- <cmd>`           | Run any command inside a workspace              |
-| `maw ws merge <a> <b> [--destroy]`   | Merge one or more workspaces into default       |
-| `maw ws destroy <name>`              | Remove a workspace                              |
-| `maw ws restore <name>`              | Restore a previously destroyed workspace        |
-| `maw ws sync`                        | Sync stale workspace state                      |
-| `maw init`                           | Initialize/repair Manifold repo state           |
-| `maw doctor`                         | Validate repo/tool health and migration state   |
-| `maw status`                         | Quick repo + workspace summary                  |
-| `maw push [--advance]`               | Push configured branch to remote                |
-| `maw release <tag>`                  | Push and tag a release                          |
-| `maw agents init`                    | Add maw instructions to AGENTS.md               |
+| Command                              | Description                                      |
+| ------------------------------------ | ------------------------------------------------ |
+| `maw ws create <name>`               | Create isolated workspace for an agent           |
+| `maw ws list`                        | List all workspaces with staleness and commit info|
+| `maw ws status`                      | Show workspace health, staleness, and conflicts  |
+| `maw ws diff <name> [--against ...]` | Compare workspace changes (summary/patch/json)   |
+| `maw exec <name> -- <cmd>`           | Run any command inside a workspace               |
+| `maw ws merge <a> <b> [--destroy]`   | Merge one or more workspaces into default        |
+| `maw ws destroy <name>`              | Remove a workspace (leaves recovery anchor)      |
+| `maw ws restore <name>`              | Restore a previously destroyed workspace         |
+| `maw ws sync`                        | Sync stale workspace to current epoch            |
+| `maw ws advance <name>`              | Rebase persistent workspace onto new epoch       |
+| `maw ws conflicts <name>`            | Inspect merge conflicts before resolving         |
+| `maw ws overlap <a> <b>`             | Check file overlap between workspaces            |
+| `maw ws history <name>`              | View workspace operation history                 |
+| `maw ws undo <name>`                 | Undo local workspace changes                     |
+| `maw ws recover [--search]`          | Find and restore lost snapshots and workspaces   |
+| `maw init`                           | Initialize/repair Manifold repo state            |
+| `maw doctor`                         | Validate repo/tool health and migration state    |
+| `maw status`                         | Quick repo + workspace summary                   |
+| `maw push [--advance]`               | Push configured branch to remote                 |
+| `maw release <tag>`                  | Push and tag a release                           |
+| `maw agents init`                    | Add maw instructions to AGENTS.md                |
 
 ## Configuration
 
