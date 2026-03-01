@@ -982,7 +982,7 @@ fn reconstruct_merged_file(
         result.extend_from_slice(&base[cursor..]);
     }
 
-    // Append items added by variants (not present in base).
+    // Collect items added by variants (not present in base).
     let mut added_items: Vec<(&WorkspaceId, &TopLevelItem)> = Vec::new();
     for constraint in resolutions.values() {
         if let ItemChange::Added { variant_item, .. } = &constraint.change {
@@ -990,15 +990,68 @@ fn reconstruct_merged_file(
         }
     }
 
-    // Also collect added items from variants directly for items that aren't
-    // in the resolutions (shouldn't happen, but defensive).
     // Sort by workspace ID then position for determinism.
     added_items.sort_by(|a, b| {
         a.0.cmp(b.0)
             .then_with(|| a.1.start_byte.cmp(&b.1.start_byte))
     });
 
-    for (_ws_id, item) in &added_items {
+    // Split added items: use_declarations should be inserted near existing
+    // uses (not appended at EOF), everything else is appended.
+    let mut uses_inserted = std::collections::BTreeSet::new();
+
+    // Find the last surviving (not deleted) use_declaration in base items.
+    let last_surviving_use = base_items
+        .iter()
+        .filter(|item| item.kind == "use_declaration" || item.kind == "extern_crate_declaration")
+        .filter(|item| {
+            // Only consider uses that are NOT deleted (still in the result).
+            let key = item.identity_key(
+                base_items.iter().position(|b| std::ptr::eq(b, *item)).unwrap_or(0),
+            );
+            !resolutions.contains_key(&key)
+                || !matches!(
+                    resolutions[&key].change,
+                    ItemChange::Deleted { .. }
+                )
+        })
+        .last();
+
+    if let Some(anchor_use) = last_surviving_use {
+        let use_adds: Vec<_> = added_items
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, item))| {
+                item.kind == "use_declaration" || item.kind == "extern_crate_declaration"
+            })
+            .collect();
+
+        if !use_adds.is_empty() {
+            // Find where the anchor use declaration ends in the result.
+            let insert_pos = result
+                .windows(anchor_use.content.len())
+                .position(|w| w == anchor_use.content.as_slice())
+                .map(|start| start + anchor_use.content.len());
+
+            if let Some(pos) = insert_pos {
+                let mut insert_buf = Vec::new();
+                for (idx, (_, item)) in &use_adds {
+                    insert_buf.push(b'\n');
+                    insert_buf.extend_from_slice(&item.content);
+                    uses_inserted.insert(*idx);
+                }
+                result.splice(pos..pos, insert_buf);
+            }
+        }
+    }
+
+    // Append remaining added items at EOF (non-use items, or use items that
+    // couldn't be inserted near existing uses).
+    for (idx, (ws_id, item)) in added_items.iter().enumerate() {
+        if uses_inserted.contains(&idx) {
+            continue; // Already inserted near existing uses above.
+        }
+
         // Ensure there's a newline before the added item.
         if !result.is_empty() && !result.ends_with(b"\n") {
             result.push(b'\n');
@@ -1006,16 +1059,64 @@ fn reconstruct_merged_file(
         if !result.is_empty() && !result.ends_with(b"\n\n") {
             result.push(b'\n');
         }
+
+        // Include leading trivia (doc comments, attributes) from the variant
+        // source. The item.content only contains the AST node itself (e.g.
+        // `pub fn foo() { ... }`), but doc comments like `/// ...` precede
+        // the node and would otherwise be lost.
+        if let Some(variant_source) = variants.iter().find_map(|(id, src)| {
+            (id == *ws_id).then_some(src.as_slice())
+        }) {
+            let trivia = leading_trivia(variant_source, item);
+            if !trivia.is_empty() {
+                result.extend_from_slice(trivia);
+            }
+        }
+
         result.extend_from_slice(&item.content);
         result.push(b'\n');
     }
 
-    // Find added items that were resolved from each variant
-    // and also ensure no items from variants that we should include were missed.
-    // (The above loop handles all added items from resolutions.)
-    let _ = variants; // Used indirectly through resolutions
-
     result
+}
+
+/// Extract leading trivia (doc comments, attributes, blank lines) that precede
+/// an item in the source. Scans backwards from `item.start_byte` to find
+/// contiguous comment lines (`///`, `//!`, `#[`) and blank lines.
+///
+/// Returns a byte slice from the source that should be prepended when the item
+/// is spliced into the merged file.
+fn leading_trivia<'a>(source: &'a [u8], item: &TopLevelItem) -> &'a [u8] {
+    let text = match std::str::from_utf8(source) {
+        Ok(t) => t,
+        Err(_) => return &[],
+    };
+
+    // Work backwards from item start, line by line.
+    let before = &text[..item.start_byte];
+    let mut trivia_start = item.start_byte;
+
+    for line in before.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("///")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with("#[")
+            || trimmed.starts_with("#![")
+        {
+            // This line is trivia — include it.
+            // Find this line's byte offset in the source.
+            let line_offset = line.as_ptr() as usize - text.as_ptr() as usize;
+            trivia_start = line_offset;
+        } else if trimmed.is_empty() && trivia_start < item.start_byte {
+            // Blank line between trivia and the item — include it.
+            let line_offset = line.as_ptr() as usize - text.as_ptr() as usize;
+            trivia_start = line_offset;
+        } else {
+            break;
+        }
+    }
+
+    &source[trivia_start..item.start_byte]
 }
 
 /// Skip trailing whitespace (spaces, tabs, newlines) after a byte position.
