@@ -136,7 +136,7 @@ fn s2_destroy_record_is_valid_json() {
         // a timestamped record file.
         let entries: Vec<_> = std::fs::read_dir(&destroy_dir)
             .expect("should be able to read destroy dir")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 e.path()
                     .extension()
@@ -274,7 +274,7 @@ fn s4_recovery_ref_contains_pre_destroy_content() {
     let files: Vec<&str> = tree_output.lines().map(str::trim).collect();
 
     assert!(
-        files.iter().any(|f| *f == "agent-work.txt"),
+        files.contains(&"agent-work.txt"),
         "Recovery commit should contain agent-work.txt, files in tree: {files:?}"
     );
 
@@ -298,7 +298,7 @@ fn s4_recovery_ref_contains_pre_destroy_content() {
         // For stash-style commits, the file might be accessible through
         // a parent commit. Verify it exists via ls-tree instead.
         assert!(
-            files.iter().any(|f| *f == "agent-work.txt"),
+            files.contains(&"agent-work.txt"),
             "agent-work.txt should at minimum be in the recovery commit tree"
         );
     }

@@ -247,9 +247,8 @@ fn search_json_truncation_with_max_hits() {
         hits.len()
     );
 
-    assert_eq!(
+    assert!(
         json["truncated"].as_bool().unwrap(),
-        true,
         "truncated should be true when results exceed --max-hits"
     );
 
@@ -285,9 +284,8 @@ fn search_json_empty_results_shape() {
         "hits should be an empty array for no matches"
     );
 
-    assert_eq!(
-        json["truncated"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["truncated"].as_bool().unwrap(),
         "truncated should be false when no results"
     );
 
@@ -437,9 +435,8 @@ fn search_json_max_hits_above_actual_count_is_not_truncated() {
     let hits = json["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 3, "should have exactly 3 hits");
 
-    assert_eq!(
-        json["truncated"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["truncated"].as_bool().unwrap(),
         "truncated should be false when actual hits < max_hits"
     );
 

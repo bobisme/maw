@@ -27,7 +27,7 @@ const REQUIRED_FIELDS: &[&str] = &[
     "recover_cmd:",
 ];
 
-/// Assert that stderr contains the RECOVERY_SURFACE header and all 5 fields.
+/// Assert that stderr contains the `RECOVERY_SURFACE` header and all 5 fields.
 fn assert_recovery_surface_present(stderr: &str, workspace: &str) {
     let header = format!("RECOVERY_SURFACE for '{workspace}':");
     assert!(

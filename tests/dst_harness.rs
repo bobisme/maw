@@ -6,7 +6,7 @@
 //!
 //! # How it works
 //!
-//! 1. **Setup**: Create a TestRepo with N workspaces, each with files.
+//! 1. **Setup**: Create a `TestRepo` with N workspaces, each with files.
 //! 2. **Crash injection**: Before running a merge, write merge-state.json at a
 //!    randomly selected phase (simulating a crash at that point in the merge
 //!    state machine).
@@ -47,7 +47,7 @@ use maw::assurance::oracle::{
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-/// Read trace count from DST_TRACES env var, defaulting to `default`.
+/// Read trace count from `DST_TRACES` env var, defaulting to `default`.
 fn trace_count(default: u64) -> u64 {
     std::env::var("DST_TRACES")
         .ok()
@@ -71,7 +71,7 @@ fn capture_oracle_snapshot(
 }
 
 #[cfg(not(feature = "assurance"))]
-fn capture_oracle_snapshot(
+const fn capture_oracle_snapshot(
     _root: &Path,
     _violations: &mut Vec<String>,
     _context: &str,
@@ -96,7 +96,7 @@ fn run_oracle_checks(
 }
 
 #[cfg(not(feature = "assurance"))]
-fn run_oracle_checks(
+const fn run_oracle_checks(
     _pre: Option<&()>,
     _post: Option<&()>,
     _violations: &mut Vec<String>,
@@ -123,56 +123,56 @@ enum CrashPhase {
 }
 
 impl CrashPhase {
-    const ALL: [CrashPhase; 5] = [
-        CrashPhase::Prepare,
-        CrashPhase::Build,
-        CrashPhase::Validate,
-        CrashPhase::Commit,
-        CrashPhase::Cleanup,
+    const ALL: [Self; 5] = [
+        Self::Prepare,
+        Self::Build,
+        Self::Validate,
+        Self::Commit,
+        Self::Cleanup,
     ];
 
     /// Only the COMMIT-related phases for G3 monotonicity testing.
-    const COMMIT_PHASES: [CrashPhase; 3] = [
-        CrashPhase::Validate,
-        CrashPhase::Commit,
-        CrashPhase::Cleanup,
+    const COMMIT_PHASES: [Self; 3] = [
+        Self::Validate,
+        Self::Commit,
+        Self::Cleanup,
     ];
 
     /// Rewrite-path phases for G2 testing.
-    const REWRITE_PHASES: [CrashPhase; 4] = [
-        CrashPhase::Prepare,
-        CrashPhase::Build,
-        CrashPhase::Validate,
-        CrashPhase::Cleanup,
+    const REWRITE_PHASES: [Self; 4] = [
+        Self::Prepare,
+        Self::Build,
+        Self::Validate,
+        Self::Cleanup,
     ];
 
     /// Destroy-path phases for G4 testing.
-    const DESTROY_PHASES: [CrashPhase; 3] = [
-        CrashPhase::DestroyBeforeCapture,
-        CrashPhase::DestroyAfterCapture,
-        CrashPhase::DestroyBeforeDelete,
+    const DESTROY_PHASES: [Self; 3] = [
+        Self::DestroyBeforeCapture,
+        Self::DestroyAfterCapture,
+        Self::DestroyBeforeDelete,
     ];
 
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            CrashPhase::Prepare => "prepare",
-            CrashPhase::Build => "build",
-            CrashPhase::Validate => "validate",
-            CrashPhase::Commit => "commit",
-            CrashPhase::Cleanup => "cleanup",
-            CrashPhase::DestroyBeforeCapture => "destroy_before_capture",
-            CrashPhase::DestroyAfterCapture => "destroy_after_capture",
-            CrashPhase::DestroyBeforeDelete => "destroy_before_delete",
+            Self::Prepare => "prepare",
+            Self::Build => "build",
+            Self::Validate => "validate",
+            Self::Commit => "commit",
+            Self::Cleanup => "cleanup",
+            Self::DestroyBeforeCapture => "destroy_before_capture",
+            Self::DestroyAfterCapture => "destroy_after_capture",
+            Self::DestroyBeforeDelete => "destroy_before_delete",
         }
     }
 
-    fn pick(rng: &mut StdRng, phases: &[CrashPhase]) -> CrashPhase {
+    fn pick(rng: &mut StdRng, phases: &[Self]) -> Self {
         phases[rng.random_range(0..phases.len())]
     }
 
     /// Whether this phase is pre-commit (safe to abort).
-    fn is_pre_commit(self) -> bool {
-        matches!(self, CrashPhase::Prepare | CrashPhase::Build)
+    const fn is_pre_commit(self) -> bool {
+        matches!(self, Self::Prepare | Self::Build)
     }
 
 }
@@ -220,7 +220,7 @@ struct TraceLog {
 }
 
 impl TraceLog {
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         Self {
             seed,
             entries: Vec::new(),
@@ -345,8 +345,8 @@ fn check_g3_monotonicity(
     // G3.2: epoch and main should not diverge in a way that's not recoverable.
     // If epoch advanced but main did not, that's a partial commit (recoverable),
     // not a violation. The violation would be main > epoch (nonsensical).
-    if let (Some(ep), Some(mn)) = (&current_epoch, &current_main) {
-        if mn != ep {
+    if let (Some(ep), Some(mn)) = (&current_epoch, &current_main)
+        && mn != ep {
             // Check if main is an ancestor of epoch (ok) or epoch is ancestor of main (ok)
             // or they diverged (violation)
             let main_is_ancestor = is_ancestor(root, mn, ep);
@@ -359,7 +359,6 @@ fn check_g3_monotonicity(
                 ));
             }
         }
-    }
 
     Ok(())
 }
@@ -697,7 +696,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
         action: "recovery".to_string(),
         phase: Some(config.crash_phase),
         outcome: recovery_outcome.to_string(),
-        epoch_before: epoch_before.clone(),
+        epoch_before,
         epoch_after: epoch_after_recovery.clone(),
     });
 
@@ -746,7 +745,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
     // Running the maw binary is expensive; sample 1-in-8 to keep total time down.
     clear_merge_state(repo.root());
 
-    let run_retry = seed % 8 == 0;
+    let run_retry = seed.is_multiple_of(8);
     if run_retry && !workspace_names.is_empty() {
         let mut merge_args: Vec<&str> = vec!["ws", "merge"];
         for name in &workspace_names {
@@ -768,7 +767,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
                 format!("failed: {}", merge_stderr.lines().next().unwrap_or("?"))
             },
             epoch_before: epoch_after_recovery,
-            epoch_after: epoch_after_merge.clone(),
+            epoch_after: epoch_after_merge,
         });
 
         // Post-merge G1 check: committed data still reachable
@@ -777,8 +776,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
             for oid in &committed_before {
                 if !committed_after_merge.contains(oid) {
                     violations.push(format!(
-                        "I-G1.1 (post-merge): commit {} lost after retry merge",
-                        oid
+                        "I-G1.1 (post-merge): commit {oid} lost after retry merge"
                     ));
                 }
             }
@@ -923,7 +921,7 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         phase: Some(crash_phase),
         outcome: recovery_outcome.to_string(),
         epoch_before: epoch_before.clone(),
-        epoch_after: epoch_after.clone(),
+        epoch_after,
     });
 
     // G3 check: epoch must not decrease (use the oracle function)
@@ -973,7 +971,7 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 /// Run 100+ traces with random crash points, verifying that committed data
 /// is never silently lost (I-G1.1) and workspace files survive pre-commit crashes.
 #[test]
-#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
+#[ignore = "Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`."]
 fn dst_g1_random_crash_preserves_committed_data() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0001;
     let num_traces = 256;
@@ -1020,7 +1018,7 @@ fn dst_g1_random_crash_preserves_committed_data() {
 /// that the epoch ref never decreases (I-G3.1) and epoch+main don't diverge
 /// irrecoverably (I-G3.2).
 #[test]
-#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
+#[ignore = "Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`."]
 fn dst_g3_crash_at_commit_satisfies_monotonicity() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0003;
     let num_traces = 256;
@@ -1060,7 +1058,7 @@ fn dst_g3_crash_at_commit_satisfies_monotonicity() {
 
 /// Verify that running the same seed twice produces identical traces.
 #[test]
-#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
+#[ignore = "Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`."]
 fn dst_determinism_same_seed_same_trace() {
     let seed: u64 = 0xAAAA_BBBB_CCCC_DDDD;
 
@@ -1116,8 +1114,8 @@ fn dst_determinism_same_seed_same_trace() {
             "step {i}: outcomes differ for same seed"
         );
         assert_eq!(
-            e1.phase.map(|p| p.as_str()),
-            e2.phase.map(|p| p.as_str()),
+            e1.phase.map(CrashPhase::as_str),
+            e2.phase.map(CrashPhase::as_str),
             "step {i}: phases differ for same seed"
         );
     }
@@ -1143,8 +1141,7 @@ fn check_g2_workspace_files_preserved(
     for ws_name in workspace_names {
         if !repo.workspace_exists(ws_name) {
             return Err(format!(
-                "I-G2: workspace '{}' no longer exists after crash recovery",
-                ws_name
+                "I-G2: workspace '{ws_name}' no longer exists after crash recovery"
             ));
         }
 
@@ -1153,14 +1150,12 @@ fn check_g2_workspace_files_preserved(
                 Some(actual) if actual == *expected_content => {}
                 Some(actual) => {
                     return Err(format!(
-                        "I-G2: workspace '{}' file '{}': content mismatch\n  expected: {:?}\n  actual: {:?}",
-                        ws_name, rel_path, expected_content, actual
+                        "I-G2: workspace '{ws_name}' file '{rel_path}': content mismatch\n  expected: {expected_content:?}\n  actual: {actual:?}"
                     ));
                 }
                 None => {
                     return Err(format!(
-                        "I-G2: workspace '{}' file '{}': missing after crash recovery (silent data loss)",
-                        ws_name, rel_path
+                        "I-G2: workspace '{ws_name}' file '{rel_path}': missing after crash recovery (silent data loss)"
                     ));
                 }
             }
@@ -1179,8 +1174,7 @@ fn check_g4_workspace_exists_after_failed_destroy(
 ) -> Result<(), String> {
     if !repo.workspace_exists(workspace_name) {
         return Err(format!(
-            "I-G4.1: workspace '{}' was destroyed despite capture failure",
-            workspace_name
+            "I-G4.1: workspace '{workspace_name}' was destroyed despite capture failure"
         ));
     }
 
@@ -1189,14 +1183,12 @@ fn check_g4_workspace_exists_after_failed_destroy(
             Some(actual) if actual == *expected_content => {}
             Some(actual) => {
                 return Err(format!(
-                    "I-G4: workspace '{}' file '{}': content mismatch after failed destroy\n  expected: {:?}\n  actual: {:?}",
-                    workspace_name, rel_path, expected_content, actual
+                    "I-G4: workspace '{workspace_name}' file '{rel_path}': content mismatch after failed destroy\n  expected: {expected_content:?}\n  actual: {actual:?}"
                 ));
             }
             None => {
                 return Err(format!(
-                    "I-G4.2: workspace '{}' file '{}': missing after failed destroy (data loss via fallback)",
-                    workspace_name, rel_path
+                    "I-G4.2: workspace '{workspace_name}' file '{rel_path}': missing after failed destroy (data loss via fallback)"
                 ));
             }
         }
@@ -1245,7 +1237,7 @@ fn simulate_capture_ref(repo: &TestRepo, ws_path: &Path, ws_name: &str) {
 
 /// Run a single G2 (rewrite path) trace.
 ///
-/// 1. Set up a fresh TestRepo with seed files and workspace(s)
+/// 1. Set up a fresh `TestRepo` with seed files and workspace(s)
 /// 2. Write merge-state at the crash phase
 /// 3. Run recovery
 /// 4. Assert all workspace files are preserved (I-G2.1, I-G2.2, I-G2.3)
@@ -1288,7 +1280,7 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     }
 
     let epoch_before = repo.current_epoch();
-    let fake_candidate = format!("{:0>40x}", seed);
+    let fake_candidate = format!("{seed:0>40x}");
     let ws_refs: Vec<&str> = workspace_names.iter().map(String::as_str).collect();
 
     trace.push(TraceEntry {
@@ -1344,8 +1336,8 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         action: "recovery".to_string(),
         phase: Some(crash_phase),
         outcome: recovery_outcome.to_string(),
-        epoch_before: epoch_before.clone(),
-        epoch_after: epoch_after.clone(),
+        epoch_before,
+        epoch_after,
     });
 
     // G2 invariant: all workspace files must be preserved
@@ -1385,7 +1377,7 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 
 /// Run a single G4 (destroy path) trace.
 ///
-/// 1. Set up a fresh TestRepo with a workspace that has committed + dirty changes
+/// 1. Set up a fresh `TestRepo` with a workspace that has committed + dirty changes
 /// 2. Simulate a destroy attempt that crashes at the configured phase
 /// 3. Assert workspace still exists on disk (I-G4.1, I-G4.2)
 /// 4. Assert no data loss
@@ -1535,7 +1527,7 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         } else {
             format!("{} violations", violations.len())
         },
-        epoch_before: epoch_before,
+        epoch_before,
         epoch_after,
     });
 
@@ -1562,7 +1554,7 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 ///
 /// Uses 256 traces distributed across the rewrite-path crash phases.
 #[test]
-#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
+#[ignore = "Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`."]
 fn dst_g2_rewrite_path_preserves_workspace_data() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0002;
     let num_traces: u64 = 256;
@@ -1612,9 +1604,9 @@ fn dst_g2_rewrite_path_preserves_workspace_data() {
 /// - Verify no data loss
 ///
 /// Uses 256 traces distributed across the destroy-path crash phases
-/// (DestroyBeforeCapture, DestroyAfterCapture, DestroyBeforeDelete).
+/// (`DestroyBeforeCapture`, `DestroyAfterCapture`, `DestroyBeforeDelete`).
 #[test]
-#[ignore] // Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`.
+#[ignore = "Slow (256 traces). Run via `just dst-fast` or `cargo test -- --ignored`."]
 fn dst_g4_destroy_requires_successful_capture() {
     let base_seed: u64 = 0xDEAD_BEEF_CAFE_0004;
     let num_traces: u64 = 256;
@@ -1655,7 +1647,7 @@ fn dst_g4_destroy_requires_successful_capture() {
 /// Nightly gate: run 10k+ traces across both G1 and G3 properties.
 /// Use `just dst-nightly` or `DST_TRACES=10000 cargo test --test dst_harness -- --ignored dst_nightly`.
 #[test]
-#[ignore]
+#[ignore = "reason missing"]
 fn dst_nightly_high_volume() {
     let num_traces = trace_count(10_000);
     let base_seed_g1: u64 = 0xA1A1_BEEF_0001_0001;
@@ -1719,18 +1711,15 @@ fn dst_nightly_high_volume() {
 
 /// Replay every trace in tests/corpus/dst/*.json and verify invariants hold.
 #[test]
-#[ignore] // Slow. Run via `just incident-replay` or `cargo test -- --ignored`.
+#[ignore = "Slow. Run via `just incident-replay` or `cargo test -- --ignored`."]
 fn incident_replay_corpus() {
     let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/dst");
     let mut replayed = 0;
     let mut failures = Vec::new();
 
-    let entries: Vec<_> = match fs::read_dir(&corpus_dir) {
-        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
-        Err(_) => {
-            eprintln!("corpus dir not found, skipping incident replay");
-            return;
-        }
+    let entries: Vec<_> = if let Ok(entries) = fs::read_dir(&corpus_dir) { entries.filter_map(std::result::Result::ok).collect() } else {
+        eprintln!("corpus dir not found, skipping incident replay");
+        return;
     };
 
     for entry in entries {

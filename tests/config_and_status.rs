@@ -77,7 +77,7 @@ fn status_does_not_flag_default_stale_when_branch_ahead_of_epoch() {
         serde_json::from_str(&stdout).expect("status --format=json should produce valid JSON");
 
     assert_eq!(
-        parsed.get("is_stale").and_then(|v| v.as_bool()),
+        parsed.get("is_stale").and_then(serde_json::Value::as_bool),
         Some(false),
         "default branch workspace should not be reported stale when epoch lags branch"
     );

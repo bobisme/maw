@@ -69,7 +69,7 @@ fn parse_failpoint_catalog(root: &Path) -> BTreeSet<String> {
 }
 
 /// Standard failpoint namespace prefixes — only fp! calls using these
-/// are checked against the catalog. Test-only names (FP_TEST_*, FP_A, etc.)
+/// are checked against the catalog. Test-only names (`FP_TEST`_*, `FP_A`, etc.)
 /// are excluded.
 const FP_STANDARD_PREFIXES: &[&str] = &[
     "FP_PREPARE_", "FP_BUILD_", "FP_VALIDATE_", "FP_COMMIT_",
@@ -105,13 +105,14 @@ fn parse_fp_calls_in_source(root: &Path) -> BTreeSet<String> {
 }
 
 /// Create an FP_ identifier finder (no regex crate needed).
-fn regex_simple_fp() -> FpFinderAdapter {
+const fn regex_simple_fp() -> FpFinderAdapter {
     FpFinderAdapter
 }
 
 struct FpFinderAdapter;
 
 impl FpFinderAdapter {
+    #[allow(clippy::unused_self)]
     fn find_iter<'a>(&self, text: &'a str) -> Vec<&'a str> {
         let bytes = text.as_bytes();
         let mut results = Vec::new();
@@ -199,8 +200,7 @@ fn check1_failpoint_catalog_matches_source() {
     let uncataloged: Vec<_> = source_ids.difference(&catalog_ids).collect();
     if !uncataloged.is_empty() {
         failures.push(format!(
-            "fp!() calls in source with no catalog entry in failpoints.md: {:?}",
-            uncataloged
+            "fp!() calls in source with no catalog entry in failpoints.md: {uncataloged:?}"
         ));
     }
 
@@ -253,11 +253,10 @@ fn extract_g_numbers(text: &str) -> BTreeSet<u32> {
                 // But G1.1, G1-001, G1: etc. are fine
                 let followed_ok =
                     end >= bytes.len() || !bytes[end].is_ascii_alphabetic();
-                if followed_ok {
-                    if let Ok(n) = text[start..end].parse::<u32>() {
+                if followed_ok
+                    && let Ok(n) = text[start..end].parse::<u32>() {
                         numbers.insert(n);
                     }
-                }
                 i = end;
                 continue;
             }
@@ -283,15 +282,14 @@ fn check2_g_numbering_consistency() {
         .unwrap_or_else(|e| panic!("Cannot read {}: {}", plan_path.display(), e));
     let plan_g_numbers = extract_g_numbers(&plan_content);
 
-    println!("  Main plan G-numbers: {:?}", plan_g_numbers);
+    println!("  Main plan G-numbers: {plan_g_numbers:?}");
 
     // The plan should reference exactly G1-G6
     let plan_out_of_range: Vec<_> = plan_g_numbers.difference(&valid_range).collect();
     if !plan_out_of_range.is_empty() {
         // G0 or G7+ in the main plan would be a structural problem
         println!(
-            "  WARNING: Main plan references G-numbers outside G1-G6: {:?}",
-            plan_out_of_range
+            "  WARNING: Main plan references G-numbers outside G1-G6: {plan_out_of_range:?}"
         );
     }
 
@@ -300,9 +298,8 @@ fn check2_g_numbering_consistency() {
     let mut failures = Vec::new();
 
     for file in &md_files {
-        let content = match fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
         };
         let g_numbers = extract_g_numbers(&content);
         let relative = file.strip_prefix(&root).unwrap_or(file);
@@ -353,7 +350,7 @@ struct ImplementedTestEntry {
 }
 
 /// Parse the "Implemented" section of the assurance plan for test ID -> location mappings.
-/// Looks for table rows like: `| IT-G1-001 | `tests/recovery_capture.rs` (4 tests) | ... |`
+/// Looks for table rows like: `| IT-G1-001 | ``tests/recovery_capture.rs`` (4 tests) | ... |`
 fn parse_implemented_tests(root: &Path) -> Vec<ImplementedTestEntry> {
     let plan_path = root.join("notes/assurance-plan.md");
     let content = fs::read_to_string(&plan_path)
@@ -494,12 +491,7 @@ fn check3_test_matrix_coverage_reality() {
     for entry in &implemented {
         if let Some(file_path) = extract_file_path(&entry.location) {
             let full_path = root.join(&file_path);
-            if !full_path.exists() {
-                failures.push(format!(
-                    "Test {} claims location `{}` but file does not exist",
-                    entry.test_id, file_path
-                ));
-            } else {
+            if full_path.exists() {
                 // Verify the file has at least one #[test] or #[cfg(test)]
                 if let Ok(content) = fs::read_to_string(&full_path) {
                     let has_tests = content.contains("#[test]")
@@ -512,6 +504,11 @@ fn check3_test_matrix_coverage_reality() {
                         ));
                     }
                 }
+            } else {
+                failures.push(format!(
+                    "Test {} claims location `{}` but file does not exist",
+                    entry.test_id, file_path
+                ));
             }
         } else {
             warnings.push(format!(
@@ -533,8 +530,7 @@ fn check3_test_matrix_coverage_reality() {
                 && id.chars().last().is_some_and(|c| c.is_ascii_digit());
             if is_standard {
                 warnings.push(format!(
-                    "Plan lists {} as implemented but it's not in test-matrix.md",
-                    id
+                    "Plan lists {id} as implemented but it's not in test-matrix.md"
                 ));
             }
         }
@@ -560,9 +556,8 @@ fn check3_test_matrix_coverage_reality() {
                 .any(|e| e.location.contains(test_file));
             if !referenced {
                 warnings.push(format!(
-                    "Test file `{}` exists and appears assurance-relevant (expected {}) \
-                     but is not in the plan's implemented table",
-                    test_file, expected_prefix
+                    "Test file `{test_file}` exists and appears assurance-relevant (expected {expected_prefix}) \
+                     but is not in the plan's implemented table"
                 ));
             }
         }
@@ -635,9 +630,8 @@ fn check2b_invariant_ids_reference_valid_guarantees() {
     let mut failures = Vec::new();
 
     for file in &md_files {
-        let content = match fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
         };
         let inv_ids = extract_invariant_ids(&content);
         let relative = file.strip_prefix(&root).unwrap_or(file);
@@ -645,9 +639,9 @@ fn check2b_invariant_ids_reference_valid_guarantees() {
         for inv_id in &inv_ids {
             // Extract the G-number from I-G<N>.<M> or I-G<N>.*
             if let Some(g_part) = inv_id.strip_prefix("I-G") {
-                let g_num_str: String = g_part.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(g_num) = g_num_str.parse::<u32>() {
-                    if !valid_g_range.contains(&g_num) {
+                let g_num_str: String = g_part.chars().take_while(char::is_ascii_digit).collect();
+                if let Ok(g_num) = g_num_str.parse::<u32>()
+                    && !valid_g_range.contains(&g_num) {
                         failures.push(format!(
                             "{}: invariant {} references G{} which is outside valid range G1-G6",
                             relative.display(),
@@ -655,7 +649,6 @@ fn check2b_invariant_ids_reference_valid_guarantees() {
                             g_num
                         ));
                     }
-                }
             }
         }
     }
@@ -666,15 +659,13 @@ fn check2b_invariant_ids_reference_valid_guarantees() {
         let inv_ids = extract_invariant_ids(&content);
         for inv_id in &inv_ids {
             if let Some(g_part) = inv_id.strip_prefix("I-G") {
-                let g_num_str: String = g_part.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(g_num) = g_num_str.parse::<u32>() {
-                    if !valid_g_range.contains(&g_num) {
+                let g_num_str: String = g_part.chars().take_while(char::is_ascii_digit).collect();
+                if let Ok(g_num) = g_num_str.parse::<u32>()
+                    && !valid_g_range.contains(&g_num) {
                         failures.push(format!(
-                            "notes/assurance-plan.md: invariant {} references G{} outside valid range",
-                            inv_id, g_num
+                            "notes/assurance-plan.md: invariant {inv_id} references G{g_num} outside valid range"
                         ));
                     }
-                }
             }
         }
     }
