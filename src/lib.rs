@@ -1,8 +1,8 @@
-//! maw library crate — re-exports for integration tests.
+//! maw library crate — re-exports for the CLI and integration tests.
 //!
-//! The primary interface is the `maw` binary. This lib.rs exposes internal
-//! modules so that integration tests can exercise the merge engine, backend,
-//! and model types directly without going through the CLI.
+//! The primary interface is the `maw` CLI binary (in the maw-cli crate).
+//! This lib.rs exposes all modules so that maw-cli and integration tests
+//! can access them.
 
 #[cfg(feature = "assurance")]
 pub mod assurance;
@@ -18,6 +18,22 @@ pub mod model;
 pub mod oplog;
 pub mod refs;
 
-// Private modules only used by the binary — not re-exported.
-// agents, doctor, error, exec, format, init, push, release,
-// status, transport, tui, upgrade, v2_init, workspace
+// CLI modules — used by the maw-cli binary crate.
+pub mod agents;
+pub mod audit;
+pub mod doctor;
+pub mod epoch;
+#[allow(dead_code)]
+pub mod error;
+pub mod exec;
+pub mod format;
+pub mod merge_cmd;
+pub mod push;
+pub mod release;
+pub mod status;
+pub mod telemetry;
+pub mod transport;
+pub mod tui;
+pub mod upgrade;
+pub mod v2_init;
+pub mod workspace;

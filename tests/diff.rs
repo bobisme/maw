@@ -97,7 +97,7 @@ fn ws_diff_runs_from_default_workspace_cwd() {
     repo.create_workspace("alice");
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let output = Command::new(manifold_common::maw_bin())
         .args(["ws", "diff", "alice", "--json"])
         .current_dir(repo.default_workspace())
         .output()

@@ -12,10 +12,6 @@ keywords = ["git", "workspaces", "multi-agent", "merge", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["notes/", "images/", ".bones/", ".agents/", ".manifold/"]
 
-[[bin]]
-name = "maw"
-path = "src/main.rs"
-
 [lib]
 name = "maw"
 

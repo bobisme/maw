@@ -2115,7 +2115,27 @@ version = "0.1.0"
 
 [[package]]
 name = "maw-cli"
-version = "0.1.0"
+version = "0.49.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "crossterm",
+ "maw-core",
+ "maw-git",
+ "maw-workspaces",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "maw-core"

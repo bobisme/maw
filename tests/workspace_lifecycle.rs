@@ -221,7 +221,7 @@ fn ws_commands_work_from_inside_workspace_directory() {
     let repo = TestRepo::new();
     repo.maw_ok(&["ws", "create", "agent-a"]);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let output = Command::new(manifold_common::maw_bin())
         .args(["ws", "list", "--format", "json"])
         .current_dir(repo.workspace_path("agent-a"))
         .output()
@@ -252,7 +252,7 @@ fn ws_status_reports_current_workspace_from_invocation_context() {
     let repo = TestRepo::new();
     repo.maw_ok(&["ws", "create", "agent-a"]);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let output = Command::new(manifold_common::maw_bin())
         .args(["ws", "status", "--format", "json"])
         .current_dir(repo.workspace_path("agent-a"))
         .output()

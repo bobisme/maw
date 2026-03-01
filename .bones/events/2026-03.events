@@ -211,3 +211,6 @@
 1772337292333570	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyvwg		item.move	bn-3ury	{"state":"done"}	blake3:jVWkmjHQWhlRATPX2wEt3VIZ-tu2hUBRjG9i2HODCdQ
 1772337292353040	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywAg		item.move	bn-2mep	{"state":"done"}	blake3:9uKiMfX8RCzMSugQ2M9SpTZrCQKVBIHJzdZ-1LjS1Ho
 1772337299701778	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywQg		item.move	bn-2hlz	{"state":"doing"}	blake3:c3Hu6Epw4BdEWDnfHxoCanShiTAQlRQmwYwIq-UAbGE
+1772338917179867	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywgg		item.move	bn-2hlz	{"state":"done"}	blake3:Ujnl7L5IMxW5gq4clABFZQZAmnSuyrm1iwMi-F_h0HQ
+1772338917184534	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywwg		item.move	bn-10ha	{"reason":"auto-completed: all children of bn-10ha are done","state":"done"}	blake3:5et69_V-yfsdT6n0zWxIwPb0oeZg2P3umZpu6o0cya4
+1772338941198331	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyxAg		item.move	bn-11e8	{"state":"doing"}	blake3:DK3c5DDhfWZEHJbV1tG3NZWa2mxJzZxjTDsnNIeckwQ

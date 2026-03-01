@@ -154,7 +154,7 @@ fn push_manifold_refs_sends_all_manifold_refs_to_remote() {
     );
 
     // Push manifold refs.
-    let out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let out = Command::new(manifold_common::maw_bin())
         .args(["push", "--manifold", "--no-tags"])
         .current_dir(root)
         .output()
@@ -230,7 +230,7 @@ fn pull_manifold_refs_fast_forwards_workspace_head() {
     );
 
     // Pull manifold refs.
-    let out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let out = Command::new(manifold_common::maw_bin())
         .args(["pull", "--manifold", "origin"])
         .current_dir(&root_b)
         .output()
@@ -278,7 +278,7 @@ fn round_trip_push_pull_produces_equivalent_state() {
     write_ref(root_a, "refs/manifold/epoch/current", &epoch0);
 
     // Push from machine A.
-    let push_out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let push_out = Command::new(manifold_common::maw_bin())
         .args(["push", "--manifold", "--no-tags"])
         .current_dir(root_a)
         .output()
@@ -294,7 +294,7 @@ fn round_trip_push_pull_produces_equivalent_state() {
     let (root_b, _dir_b) = clone_from_bare(remote_path, "default");
 
     // Pull to machine B.
-    let pull_out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let pull_out = Command::new(manifold_common::maw_bin())
         .args(["pull", "--manifold", "origin"])
         .current_dir(&root_b)
         .output()
@@ -358,7 +358,7 @@ fn pull_creates_merge_op_for_divergent_heads() {
     let (root_b, _dir_b) = clone_from_bare(remote_path, "default");
 
     // Machine B fast-forwards to get the initial head.
-    let pull_out1 = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let pull_out1 = Command::new(manifold_common::maw_bin())
         .args(["pull", "--manifold", "origin"])
         .current_dir(&root_b)
         .output()
@@ -400,7 +400,7 @@ fn pull_creates_merge_op_for_divergent_heads() {
 
     // Now machine B pulls: local and remote have diverged from initial_blob.
     // pull should create a merge op with both as parents.
-    let pull_out2 = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let pull_out2 = Command::new(manifold_common::maw_bin())
         .args(["pull", "--manifold", "origin"])
         .current_dir(&root_b)
         .output()
@@ -451,7 +451,7 @@ fn pull_creates_merge_op_for_divergent_heads() {
 fn pull_without_manifold_flag_gives_clear_error() {
     let repo = TestRepo::new();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let out = Command::new(manifold_common::maw_bin())
         .args(["pull"])
         .current_dir(repo.root())
         .output()
@@ -483,7 +483,7 @@ fn push_manifold_with_no_refs_gives_helpful_message() {
         .current_dir(repo.root())
         .output();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let out = Command::new(manifold_common::maw_bin())
         .args(["push", "--manifold", "--no-tags"])
         .current_dir(repo.root())
         .output()
@@ -531,7 +531,7 @@ fn pull_dry_run_does_not_modify_refs() {
     let (root_b, _dir_b) = clone_from_bare(remote_path, "default");
 
     // Dry-run pull.
-    let out = Command::new(env!("CARGO_BIN_EXE_maw"))
+    let out = Command::new(manifold_common::maw_bin())
         .args(["pull", "--manifold", "--dry-run", "origin"])
         .current_dir(&root_b)
         .output()

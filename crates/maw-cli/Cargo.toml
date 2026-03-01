@@ -1,4 +1,34 @@
 [package]
 name = "maw-cli"
-version = "0.1.0"
-edition = "2021"
+version = "0.49.0"
+edition = "2024"
+
+[[bin]]
+name = "maw"
+path = "src/main.rs"
+
+[dependencies]
+maw = { path = "../..", package = "maw-workspaces" }
+maw-core = { path = "../maw-core" }
+maw-git = { path = "../maw-git" }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+crossterm = "0.28"
+ratatui = "0.29"
+tempfile = "3"
+
+# OTEL deps (mirrored from root crate)
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true, features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.31", optional = true, default-features = false, features = ["trace", "logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+
+[features]
+default = ["otel"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing", "dep:tracing-opentelemetry", "maw/otel"]

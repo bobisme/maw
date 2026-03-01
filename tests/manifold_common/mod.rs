@@ -31,6 +31,28 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
+// Binary path helper
+// ---------------------------------------------------------------------------
+
+/// Locate the `maw` binary built by the workspace.
+///
+/// The binary lives in maw-cli but shares the same target directory as the
+/// test binary. We find it by looking next to the current test executable.
+pub fn maw_bin() -> PathBuf {
+    let test_exe = std::env::current_exe().expect("cannot determine test executable path");
+    // test binaries live in target/<profile>/deps/; the maw binary is at target/<profile>/maw
+    let deps_dir = test_exe.parent().expect("no parent for test exe");
+    let profile_dir = deps_dir.parent().expect("no parent for deps dir");
+    let maw = profile_dir.join("maw");
+    assert!(
+        maw.exists(),
+        "maw binary not found at {}; run `cargo build -p maw-cli` first",
+        maw.display()
+    );
+    maw
+}
+
+// ---------------------------------------------------------------------------
 // TestRepo
 // ---------------------------------------------------------------------------
 
@@ -574,7 +596,7 @@ impl TestRepo {
     ///
     /// Returns the raw `Output`.
     pub fn maw_raw(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_maw"))
+        Command::new(maw_bin())
             .args(args)
             .current_dir(&self.root)
             .output()
