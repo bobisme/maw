@@ -1,5 +1,27 @@
 [package]
 name = "maw-assurance"
-version = "0.1.0"
-edition = "2021"
+version = "0.49.0"
+edition = "2024"
 publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+stateright = { version = "0.30", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+kani-slow = []
+stateright = ["dep:stateright"]
+
+[lints.rust]
+unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

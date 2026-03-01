@@ -1,10 +1,10 @@
 //! Integration test: exhaustive model check of the merge protocol.
 //!
-//! Requires the `assurance` feature: `cargo test --test formal_model --features assurance`
+//! Requires the `stateright` feature: `cargo test --test formal_model --features stateright`
 
-#![cfg(feature = "assurance")]
+#![cfg(feature = "stateright")]
 
-use maw::assurance::model::*;
+use maw_assurance::model::*;
 use stateright::*;
 
 fn parallelism() -> usize {

@@ -339,7 +339,7 @@ Test IDs are defined in `notes/assurance/test-matrix.md`. Current reality:
 | DST-G1-001 | `tests/dst_harness.rs` (256 seeded traces) | Random crash interleavings preserve committed reachability (`dst_g1_random_crash_preserves_committed_data`) |
 | DST-G3-001 | `tests/dst_harness.rs` (256 seeded traces) | Crash at each COMMIT step satisfies monotonicity (`dst_g3_crash_at_commit_satisfies_monotonicity`) |
 | CT-drift-001 | `tests/contract_drift.rs` (4 checks) | Doc/code consistency: guarantee table, invariant IDs, failpoint catalog, CI gate definitions |
-| FM-001 | `tests/formal_model.rs` (2 integration tests) + `src/assurance/model.rs` (6 unit tests) | Stateright model checking for merge protocol safety properties |
+| FM-001 | `crates/maw-assurance/tests/formal_model.rs` (2 integration tests) + `crates/maw-assurance/src/model.rs` (6 unit tests) | Stateright model checking for merge protocol safety properties |
 | KP-001 | `src/merge/kani_proofs.rs` (15 proof harnesses) | Bounded verification of merge algebra: permutation determinism, idempotence, embedding, conflict monotonicity |
 
 Additional relevant: `tests/merge.rs`, `tests/merge_scenarios.rs`,

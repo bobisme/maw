@@ -4,7 +4,7 @@
 //! CLI-specific modules (workspace, status, push, etc.) now live in maw-cli.
 
 #[cfg(feature = "assurance")]
-pub mod assurance;
+pub use maw_assurance as assurance;
 
 pub mod backend;
 pub mod config;

@@ -2111,7 +2111,13 @@ dependencies = [
 
 [[package]]
 name = "maw-assurance"
-version = "0.1.0"
+version = "0.49.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stateright",
+ "tempfile",
+]
 
 [[package]]
 name = "maw-cli"
@@ -2186,6 +2192,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "glob",
+ "maw-assurance",
  "maw-core",
  "maw-git",
  "opentelemetry",
@@ -2198,7 +2205,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "stateright",
  "tempfile",
  "terseid",
  "toml",

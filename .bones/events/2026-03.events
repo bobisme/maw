@@ -219,3 +219,13 @@
 1772339699636930	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyxwg		item.move	bn-17pr	{"state":"doing"}	blake3:ThXH-hWwDj8jwiQhm5ZPUPbDeWvH2up7JJxibVATr3o
 1772339699657152	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyyAg		item.move	bn-6zjw	{"state":"doing"}	blake3:IkxRfb9cKkytHsB3XPh3_G_8fV4k6pxrAQorxffQtAc
 1772339699676560	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyyQg		item.move	bn-b74f	{"state":"doing"}	blake3:hQmBp_XIPKk0Xf9YumSHaERQ1Tvd3WM3Tisx-H5AAlM
+1772340710186346	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyygg		item.move	bn-136o	{"state":"done"}	blake3:7zc6UVFM6gOdwwyeNRduUa54NZxuvWaVfPuDSsnlQik
+1772340710206281	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyywg		item.move	bn-17pr	{"state":"done"}	blake3:WEwPecKH08gK6RQOr0-FAu-3g1UQd92YONiB-2PFEOg
+1772340710228090	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzAg		item.move	bn-6zjw	{"state":"done"}	blake3:wAhC5jaMHf9DNiTRef5gOfpY_ci4JKYqvtwO3eZCPu8
+1772340710247996	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzQg		item.move	bn-b74f	{"state":"done"}	blake3:KYoKR6jiGwHJSPhup6-qfUKeNlizjllaqM_s4lqOtMw
+1772340728008527	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzgg		item.move	bn-32ne	{"state":"doing"}	blake3:LobAqNwwQYqLJmDxQA6JBwcvwYfzksM6VtJmgofXLy4
+1772340766596105	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzwg		item.move	bn-32ne	{"state":"done"}	blake3:qn8SXgccokQsSIG3fwvmo2G6fruuhcwo3VkCYpgZQRc
+1772340766601098	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0Ag		item.move	bn-2o5g	{"reason":"auto-completed: all children of bn-2o5g are done","state":"done"}	blake3:erJW32sJurvPZEgzulzUFVtxNUyXTfJdWVIylWrJQmU
+1772340780151353	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0Qg		item.move	bn-vsu4	{"state":"doing"}	blake3:5A78DtWu-6m9T-xc4pQ_msYkAq29GB7YatpbmPxMEsY
+1772340780176924	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0gg		item.move	bn-12lp	{"state":"doing"}	blake3:LeXjrCH01JB_yYw5u9lxliE6Pdy0ctry9txwIRhaq18
+1772340780195743	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0wg		item.move	bn-3hrs	{"state":"doing"}	blake3:_-xUThpz3hxslbEx4VifJcJ8aCTfcWmOhCaFQBySrpU
