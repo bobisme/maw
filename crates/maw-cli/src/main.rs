@@ -8,6 +8,7 @@ use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
 use maw_cli::exec;
+use maw_cli::ref_gc;
 use maw_cli::format;
 use maw_cli::merge_cmd;
 use maw_cli::push;
@@ -198,14 +199,33 @@ enum Commands {
     #[command(subcommand)]
     Epoch(EpochCommands),
 
-    /// Garbage-collect unreferenced epoch snapshots
+    /// Garbage-collect unreferenced epoch snapshots and stale refs
     ///
-    /// Removes `.manifold/epochs/e-<oid>` directories that are no longer
-    /// referenced by any active workspace and are not the current epoch.
+    /// Without flags: removes `.manifold/epochs/e-<oid>` directories that
+    /// are no longer referenced by any active workspace.
+    ///
+    /// With --refs: also cleans up stale `refs/manifold/head/*` refs for
+    /// workspaces that no longer exist, and old `refs/manifold/recovery/*`
+    /// refs whose commits are older than --older-than days (default: 30).
+    ///
+    /// Examples:
+    ///   maw gc                    # epoch GC only
+    ///   maw gc --refs             # epoch GC + stale ref cleanup
+    ///   maw gc --refs --dry-run   # preview ref cleanup
+    ///   maw gc --refs --older-than 7  # delete recovery refs older than 7 days
+    #[command(verbatim_doc_comment)]
     Gc {
         /// Preview removals without deleting anything
         #[arg(long)]
         dry_run: bool,
+
+        /// Also clean up stale manifold refs (head + recovery)
+        #[arg(long)]
+        refs: bool,
+
+        /// For recovery refs: delete if older than this many days (default: 30)
+        #[arg(long, default_value = "30")]
+        older_than: u64,
     },
 
     /// Generate shell completions
@@ -291,8 +311,14 @@ fn main() {
         Commands::Epoch(cmd) => match cmd {
             EpochCommands::Sync => epoch::sync(),
         },
-        Commands::Gc { dry_run } => {
-            workspace::repo_root().and_then(|root| epoch_gc::run_cli(&root, dry_run))
+        Commands::Gc { dry_run, refs, older_than } => {
+            workspace::repo_root().and_then(|root| {
+                epoch_gc::run_cli(&root, dry_run)?;
+                if refs {
+                    ref_gc::run_cli(&root, older_than, dry_run)?;
+                }
+                Ok(())
+            })
         }
         Commands::Completions { shell } => {
             clap_complete::generate(

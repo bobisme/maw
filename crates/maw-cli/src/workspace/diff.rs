@@ -106,19 +106,14 @@ pub fn diff(
 
     let pathspecs = resolve_pathspecs(paths)?;
 
-    // Resolve the workspace HEAD for metadata (JSON output label/oid), but
-    // diff against the working directory — not the HEAD commit — so that
-    // uncommitted changes are visible. This matches the merge engine's
-    // behaviour, which operates on the working-tree file state.
     let head = materialize_workspace_state(&backend, &root, &ws_id)?;
     let base = resolve_against(&backend, &root, &ws_id, against)?;
-    let ws_path = backend.workspace_path(&ws_id);
 
     match format {
-        DiffFormat::Patch => print_patch(&ws_path, &base.oid, &pathspecs)?,
-        DiffFormat::Stat => print_stat(&ws_path, &base.oid, &pathspecs)?,
+        DiffFormat::Patch => print_patch(&root, &base.rev, &head.rev, &pathspecs)?,
+        DiffFormat::Stat => print_stat(&root, &base.rev, &head.rev, &pathspecs)?,
         DiffFormat::NameOnly | DiffFormat::NameStatus => {
-            let mut entries = collect_diff_entries(&ws_path, &base.oid, &pathspecs)?;
+            let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
             entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
             if matches!(format, DiffFormat::NameOnly) {
                 let mut names = BTreeSet::new();
@@ -139,7 +134,7 @@ pub fn diff(
             }
         }
         DiffFormat::Json => {
-            let mut entries = collect_diff_entries(&ws_path, &base.oid, &pathspecs)?;
+            let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
             entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
             print_json(&ws_id, &base, &head, &entries)?;
         }
@@ -148,15 +143,15 @@ pub fn diff(
     Ok(())
 }
 
-fn print_stat(ws_path: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
+fn print_stat(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-    // Only base_rev is provided — git diffs against the working tree.
     let mut args = vec![
         "diff".to_string(),
         "--stat".to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
+        head_rev.to_string(),
     ];
     if !pathspecs.is_empty() {
         args.push("--".to_string());
@@ -166,7 +161,7 @@ fn print_stat(ws_path: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()
     if is_tty {
         let status = Command::new("git")
             .args(&args)
-            .current_dir(ws_path)
+            .current_dir(root)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -177,21 +172,21 @@ fn print_stat(ws_path: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()
         }
     } else {
         args.insert(1, "--color=never".to_string());
-        let out = git_stdout(ws_path, &args)?;
+        let out = git_stdout(root, &args)?;
         print!("{out}");
     }
 
     Ok(())
 }
 
-fn print_patch(ws_path: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
+fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-    // Only base_rev is provided — git diffs against the working tree.
     let mut diff_args = vec![
         "diff".to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
+        head_rev.to_string(),
     ];
     if !pathspecs.is_empty() {
         diff_args.push("--".to_string());
@@ -203,7 +198,7 @@ fn print_patch(ws_path: &Path, base_rev: &str, pathspecs: &[String]) -> Result<(
         // (core.pager / GIT_PAGER, e.g. delta).
         let status = Command::new("git")
             .args(&diff_args)
-            .current_dir(ws_path)
+            .current_dir(root)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -215,7 +210,7 @@ fn print_patch(ws_path: &Path, base_rev: &str, pathspecs: &[String]) -> Result<(
     } else {
         // No tty — capture output, no pager, no color.
         diff_args.insert(1, "--color=never".to_string());
-        let patch = git_stdout(ws_path, &diff_args)?;
+        let patch = git_stdout(root, &diff_args)?;
         print!("{patch}");
     }
 
@@ -440,27 +435,28 @@ fn resolve_pathspecs(paths: &[String]) -> Result<Vec<String>> {
 }
 
 fn collect_diff_entries(
-    ws_path: &Path,
+    root: &Path,
     base_rev: &str,
+    head_rev: &str,
     pathspecs: &[String],
 ) -> Result<Vec<DiffEntry>> {
-    // Only base_rev is provided — git diffs against the working tree.
     let mut args = vec![
         "diff".to_string(),
         "--name-status".to_string(),
         "-z".to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
+        head_rev.to_string(),
     ];
     if !pathspecs.is_empty() {
         args.push("--".to_string());
         args.extend(pathspecs.iter().cloned());
     }
-    let raw = git_stdout_bytes(ws_path, &args)?;
+    let raw = git_stdout_bytes(root, &args)?;
     let mut entries = parse_name_status_z(&raw)?;
 
     for entry in &mut entries {
-        let stats = collect_numstat_for_entry(ws_path, base_rev, entry)?;
+        let stats = collect_numstat_for_entry(root, base_rev, head_rev, entry)?;
         entry.additions = stats.0;
         entry.deletions = stats.1;
         entry.binary = stats.2;
@@ -470,21 +466,22 @@ fn collect_diff_entries(
 }
 
 fn collect_numstat_for_entry(
-    ws_path: &Path,
+    root: &Path,
     base_rev: &str,
+    head_rev: &str,
     entry: &DiffEntry,
 ) -> Result<(u32, u32, bool)> {
     let target_path = entry.path.as_str();
-    // Only base_rev is provided — git diffs against the working tree.
     let args = vec![
         "diff".to_string(),
         "--numstat".to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
+        head_rev.to_string(),
         "--".to_string(),
         target_path.to_string(),
     ];
-    let out = git_stdout(ws_path, &args)?;
+    let out = git_stdout(root, &args)?;
     let Some(line) = out.lines().next() else {
         return Ok((0, 0, false));
     };

@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::ref_gc;
 use crate::workspace;
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     checks.push(check_root_bare(root.as_deref()));
     checks.push(check_ghost_working_copy(root.as_deref()));
     checks.push(check_dangling_snapshots(root.as_deref()));
+    checks.push(check_stale_head_refs(root.as_deref()));
     checks.push(check_git_head());
 
     let all_ok = checks.iter().all(|c| c.status == "ok");
@@ -450,6 +452,40 @@ fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
             name: "dangling snapshots".to_string(),
             status: "ok".to_string(),
             message: "dangling snapshots: could not check (git error)".to_string(),
+            fix: None,
+        },
+    }
+}
+
+fn check_stale_head_refs(root: Option<&Path>) -> DoctorCheck {
+    let Some(root) = root else {
+        return DoctorCheck {
+            name: "stale head refs".to_string(),
+            status: "ok".to_string(),
+            message: "stale head refs: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    match ref_gc::count_stale_head_refs(root) {
+        Ok(0) => DoctorCheck {
+            name: "stale head refs".to_string(),
+            status: "ok".to_string(),
+            message: "stale head refs: none".to_string(),
+            fix: None,
+        },
+        Ok(count) => DoctorCheck {
+            name: "stale head refs".to_string(),
+            status: "warn".to_string(),
+            message: format!(
+                "stale head refs: found {count} head ref(s) for non-existent workspaces"
+            ),
+            fix: Some("Run: maw gc --refs".to_string()),
+        },
+        Err(_) => DoctorCheck {
+            name: "stale head refs".to_string(),
+            status: "ok".to_string(),
+            message: "stale head refs: could not check (git error)".to_string(),
             fix: None,
         },
     }
