@@ -136,7 +136,7 @@ refs capture pre-rewrite state before materialization.
 `sync_worktree_to_epoch()` now includes dirty-state checking before rewrite.
 
 **Dead code risk**: `sync_stale_workspaces_for_merge()` at
-`src/workspace/sync.rs:368` is `#[allow(dead_code)]` and lacks the
+`crates/maw-cli/src/workspace/sync.rs:368` is `#[allow(dead_code)]` and lacks the
 `committed_ahead_of_epoch()` safety check. Would be a G2 violation if activated.
 
 **G4 violation (fixed) — best-effort destroy after status/capture failure**:
@@ -154,7 +154,7 @@ risk, but the default path is safe.
 
 - **G1**: merge COMMIT uses CAS ref movement (`src/merge/commit.rs`) with
   partial-commit recovery. Recovery refs are pinned before destroy via
-  `capture_before_destroy()` (`src/workspace/capture.rs:100`). Integration
+  `capture_before_destroy()` (`crates/maw-cli/src/workspace/capture.rs:100`). Integration
   tests in `tests/recovery_capture.rs` verify durability across GC. Monotonic
   timestamps (bn-28iq) eliminate same-second collision risk.
 - **G2**: `preserve_checkout_replay()` replaces `git checkout --force` for
@@ -169,13 +169,13 @@ risk, but the default path is safe.
 - **G4**: capture-gate enforced on all destroy paths. Destroy refuses if
   `capture_before_destroy()` fails (unless `--force` is explicitly passed).
   Status-failure paths no longer skip capture and proceed to destroy.
-- **G5**: recovery output contract implemented (`src/workspace/capture.rs`).
+- **G5**: recovery output contract implemented (`crates/maw-cli/src/workspace/capture.rs`).
   All recovery-producing failure paths emit 5 required fields to stderr:
   operation result, COMMIT status, snapshot ref+oid, artifact path, and
   executable recovery command. 29 recovery contract tests pass. I-G5.1 and
   I-G5.2 both hold.
 - **G6**: `maw ws recover --search` is fully implemented
-  (`src/workspace/recover.rs:239`) with deterministic ref-name ordering,
+  (`crates/maw-cli/src/workspace/recover.rs:239`) with deterministic ref-name ordering,
   bounded truncation, provenanced snippets, and stable JSON schema.
   Unit tests cover parser/validator and snippet builder. **Schema validated**:
   all 22 field/behavior checks pass against `notes/assurance/search-schema-v1.md`.
@@ -249,7 +249,7 @@ include all of:
 
 Status: **holds**. All recovery-producing failure paths (destroy, merge
 cleanup rewrite, replay failure) emit the 5 required fields to stderr.
-Recovery output contract implemented in `src/workspace/capture.rs` with
+Recovery output contract implemented in `crates/maw-cli/src/workspace/capture.rs` with
 29 tests verifying field presence and executable command validity.
 
 ### CLI command forms
@@ -328,8 +328,8 @@ Test IDs are defined in `notes/assurance/test-matrix.md`. Current reality:
 | IT-G1-001 | `tests/recovery_capture.rs` (4 tests) | Recovery refs survive GC, repeated destroys preserve history |
 | IT-G3-001 | `tests/crash_recovery.rs` | Crash at merge phases, idempotent recovery. **Caveat**: uses reimplemented recovery, not production `recover_from_merge_state()` path |
 | IT-G5-001 | `tests/destroy_recover.rs` (11 tests) | End-to-end destroy -> recover lifecycle, JSON output, --show, --to |
-| UT-G6-001 | `src/workspace/recover.rs` (10 inline tests) | Recovery-ref parser/validator, snippet builder context boundaries |
-| UT-G1/G4-001 | `src/workspace/capture.rs` (8 inline tests) | Capture primitives: clean/dirty/untracked/committed-ahead |
+| UT-G6-001 | `crates/maw-cli/src/workspace/recover.rs` (10 inline tests) | Recovery-ref parser/validator, snippet builder context boundaries |
+| UT-G1/G4-001 | `crates/maw-cli/src/workspace/capture.rs` (8 inline tests) | Capture primitives: clean/dirty/untracked/committed-ahead |
 | UT-G3-001 | `src/merge/commit.rs` (4 inline tests) | CAS commit and partial-commit recovery |
 | IT-G5-002 | `tests/restore.rs` (6 tests) | Restore recovery surface end-to-end |
 | IT-G2-adj | `tests/sync.rs` (3 tests) | Sync rewrite behavior |
@@ -695,7 +695,7 @@ eliminated.
 1. Recovery output contract enforced on all failure paths: 5 required fields
    (operation result, COMMIT status, snapshot ref+oid, artifact path,
    executable recovery command) emitted to stderr. Implemented in
-   `src/workspace/capture.rs`.
+   `crates/maw-cli/src/workspace/capture.rs`.
 2. Recovery contract test suite: 29 tests pass.
 3. Tests: IT-G6-001, IT-G6-002 — covered by existing search tests.
 4. Search schema compliance check — automated.

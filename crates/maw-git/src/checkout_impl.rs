@@ -1,5 +1,6 @@
 //! gix-backed checkout and index operations.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -47,6 +48,13 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
             message: format!("failed to create index from tree {tree_oid}: {e}"),
         })?;
 
+    // Collect all paths in the target tree so we can remove stale files after checkout.
+    let tree_paths: HashSet<String> = index_file
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.path(&index_file).to_str().ok().map(|s| s.to_owned()))
+        .collect();
+
     // Get checkout options from the repository configuration.
     let mut opts = repo
         .repo
@@ -89,6 +97,56 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
                 first.error,
             ),
         });
+    }
+
+    // Remove working-tree files not present in the target tree.
+    // This fulfills the trait contract: "Existing working-tree files not in
+    // the tree are removed."
+    remove_stale_files(workdir, workdir, &tree_paths)?;
+
+    Ok(())
+}
+
+/// Walk `dir` and remove any files whose path relative to `workdir` is not in `tree_paths`.
+/// Skips `.git` directories/files. Removes empty directories after file cleanup.
+fn remove_stale_files(
+    workdir: &Path,
+    dir: &Path,
+    tree_paths: &HashSet<String>,
+) -> Result<(), GitError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let name = entry.file_name();
+
+        // Never touch .git (file or directory).
+        if name == ".git" {
+            continue;
+        }
+
+        if path.is_dir() {
+            remove_stale_files(workdir, &path, tree_paths)?;
+            // Remove directory if it became empty (ignore errors — may not be empty).
+            let _ = std::fs::remove_dir(&path);
+        } else {
+            let rel = path
+                .strip_prefix(workdir)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if !rel.is_empty() && !tree_paths.contains(&rel) {
+                std::fs::remove_file(&path).map_err(|e| GitError::BackendError {
+                    message: format!("failed to remove stale file '{}': {e}", rel),
+                })?;
+            }
+        }
     }
 
     Ok(())

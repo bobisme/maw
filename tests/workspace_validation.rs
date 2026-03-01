@@ -8,35 +8,35 @@ use manifold_common::TestRepo;
 fn rejects_empty_workspace_name() {
     let repo = TestRepo::new();
     let stderr = repo.maw_fails(&["ws", "create", ""]);
-    assert!(stderr.contains("cannot be empty"), "Got: {stderr}");
+    assert!(stderr.contains("must not be empty") || stderr.contains("cannot be empty"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_path_traversal_dotdot() {
     let repo = TestRepo::new();
     let stderr = repo.maw_fails(&["ws", "create", ".."]);
-    assert!(stderr.contains("cannot be '.' or '..'"), "Got: {stderr}");
+    assert!(stderr.contains("must contain only") || stderr.contains("cannot be '.' or '..'"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_path_traversal_slash() {
     let repo = TestRepo::new();
     let stderr = repo.maw_fails(&["ws", "create", "../etc"]);
-    assert!(stderr.contains("path separators"), "Got: {stderr}");
+    assert!(stderr.contains("must contain only") || stderr.contains("path separators"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_path_traversal_backslash() {
     let repo = TestRepo::new();
     let stderr = repo.maw_fails(&["ws", "create", "..\\etc"]);
-    assert!(stderr.contains("path separators"), "Got: {stderr}");
+    assert!(stderr.contains("must contain only") || stderr.contains("path separators"), "Got: {stderr}");
 }
 
 #[test]
 fn rejects_leading_dash() {
     let repo = TestRepo::new();
     let stderr = repo.maw_fails(&["ws", "create", "--", "-rf"]);
-    assert!(stderr.contains("cannot start with '-'"), "Got: {stderr}");
+    assert!(stderr.contains("must not start or end with a hyphen") || stderr.contains("cannot start with '-'"), "Got: {stderr}");
 }
 
 #[test]

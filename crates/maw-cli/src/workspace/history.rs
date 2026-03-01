@@ -10,7 +10,7 @@ use maw_core::model::types::WorkspaceId;
 use maw_core::oplog::read::{OpLogReadError, walk_chain};
 use maw_core::oplog::types::OpPayload;
 
-use super::{get_backend, repo_root, validate_workspace_name};
+use super::{get_backend, repo_root};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,7 +64,6 @@ pub struct HistoryCommit {
 /// - `--json` / `OutputFormat::Json`: structured JSON envelope
 /// - `--limit N`: cap entries (default: 20)
 pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result<()> {
-    validate_workspace_name(name)?;
     let format = OutputFormat::resolve(format);
 
     let backend = get_backend()?;
@@ -175,7 +174,11 @@ fn summarize_payload(payload: &OpPayload) -> String {
         OpPayload::Compensate { reason, .. } => format!("undo: {reason}"),
         OpPayload::Describe { message } => {
             let truncated = if message.len() > 60 {
-                format!("{}…", &message[..60])
+                let mut end = 60;
+                while !message.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &message[..end])
             } else {
                 message.clone()
             };
@@ -448,6 +451,20 @@ mod tests {
         let summary = summarize_payload(&OpPayload::Describe { message: long_msg });
         assert!(summary.len() < 80);
         assert!(summary.contains('…'));
+    }
+
+    #[test]
+    fn summarize_describe_truncation_multibyte() {
+        // Place a multi-byte char (3-byte '→') right at the byte-60 boundary.
+        // 58 ASCII bytes + '→' (3 bytes) = 61 bytes total, so byte 60 falls
+        // inside the '→'. Before the fix this panicked with a byte-index error.
+        let msg = format!("{}→rest", "x".repeat(58));
+        let summary = summarize_payload(&OpPayload::Describe { message: msg });
+        // Must not panic, and the truncation must land before the '→'
+        assert!(summary.starts_with("describe: "));
+        assert!(summary.ends_with('…'));
+        // The 58 'x' chars should survive; the '→' is excluded
+        assert!(summary.contains(&"x".repeat(58)));
     }
 
     #[test]

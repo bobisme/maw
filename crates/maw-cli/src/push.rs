@@ -2,6 +2,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use maw_git::GitRepo as _;
 use tracing::instrument;
 
 use maw_core::merge_state::MergeStateFile;
@@ -192,38 +193,31 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     }
 
     // Read the current epoch
-    let epoch_output = Command::new("git")
-        .args(["rev-parse", "refs/manifold/epoch/current"])
-        .current_dir(root)
-        .output()
-        .context("Failed to read current epoch")?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
-    if !epoch_output.status.success() {
-        bail!(
+    let epoch_git_oid = repo.rev_parse_opt("refs/manifold/epoch/current")
+        .map_err(|e| anyhow::anyhow!("Failed to read current epoch: {e}"))?;
+
+    let epoch_git_oid = match epoch_git_oid {
+        Some(oid) => oid,
+        None => bail!(
             "No current epoch found (refs/manifold/epoch/current missing).\n  \
              Run `maw init` first, or ensure maw ws merge has been run."
-        );
-    }
+        ),
+    };
 
-    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout)
-        .trim()
-        .to_string();
+    let epoch_oid = epoch_git_oid.to_string();
     let epoch_short = &epoch_oid[..12.min(epoch_oid.len())];
 
     // Read the current branch position (this is our CAS "expected" value)
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_output = Command::new("git")
-        .args(["rev-parse", &branch_ref])
-        .current_dir(root)
-        .output()
-        .context("Failed to read branch ref")?;
+    let branch_git_oid = repo.rev_parse_opt(&branch_ref)
+        .map_err(|e| anyhow::anyhow!("Failed to read branch ref: {e}"))?;
 
-    let branch_oid = if branch_output.status.success() {
-        String::from_utf8_lossy(&branch_output.stdout)
-            .trim()
-            .to_string()
-    } else {
-        String::new()
+    let branch_oid = match branch_git_oid {
+        Some(oid) => oid.to_string(),
+        None => String::new(),
     };
 
     if branch_oid == epoch_oid {
@@ -264,43 +258,34 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         epoch_short
     );
 
-    let update = if branch_oid.is_empty() {
-        // Branch doesn't exist yet — create it.
-        // Use the zero OID as the expected old value to assert creation.
-        let zero_oid = "0000000000000000000000000000000000000000";
-        Command::new("git")
-            .args(["update-ref", &branch_ref, &epoch_oid, zero_oid])
-            .current_dir(root)
-            .output()
-            .context("Failed to update branch ref")?
+    let expected_old = if branch_oid.is_empty() {
+        maw_git::GitOid::ZERO
     } else {
-        // Branch exists — CAS: only update if ref still equals branch_oid.
-        Command::new("git")
-            .args(["update-ref", &branch_ref, &epoch_oid, &branch_oid])
-            .current_dir(root)
-            .output()
-            .context("Failed to update branch ref")?
+        branch_oid.parse::<maw_git::GitOid>()
+            .map_err(|e| anyhow::anyhow!("invalid branch OID '{branch_oid}': {e}"))?
     };
 
-    if !update.status.success() {
-        let stderr = String::from_utf8_lossy(&update.stderr);
-        let stderr_trimmed = stderr.trim();
+    let ref_name = maw_git::RefName::new(&branch_ref)
+        .map_err(|e| anyhow::anyhow!("invalid ref name '{branch_ref}': {e}"))?;
 
-        // Detect CAS failure: git says "old value" / "expected" / "lock" on race
-        if stderr_trimmed.contains("old value")
-            || stderr_trimmed.contains("expected")
-            || stderr_trimmed.contains("lock")
-        {
+    let edit = maw_git::RefEdit {
+        name: ref_name,
+        new_oid: epoch_git_oid,
+        expected_old_oid: expected_old,
+    };
+
+    if let Err(e) = repo.atomic_ref_update(&[edit]) {
+        let msg = e.to_string();
+        if msg.contains("conflict") || msg.contains("lock") || msg.contains("expected") {
             bail!(
                 "Branch ref was modified concurrently (CAS failed).\n  \
                  Another process (likely a merge) updated {branch} between read and write.\n  \
                  Re-run `maw push --advance` to retry.\n  \
                  Detail: {}",
-                stderr_trimmed
+                msg
             );
         }
-
-        bail!("Failed to advance {branch}: {}", stderr_trimmed);
+        bail!("Failed to advance {branch}: {}", msg);
     }
 
     if branch_oid.is_empty() {
@@ -317,60 +302,49 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
 }
 
 fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git merge-base --is-ancestor")?;
-
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
-        }
-    }
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let ancestor_oid: maw_git::GitOid = ancestor.parse()
+        .map_err(|e| anyhow::anyhow!("invalid ancestor OID '{ancestor}': {e}"))?;
+    let descendant_oid: maw_git::GitOid = descendant.parse()
+        .map_err(|e| anyhow::anyhow!("invalid descendant OID '{descendant}': {e}"))?;
+    repo.is_ancestor(ancestor_oid, descendant_oid)
+        .map_err(|e| anyhow::anyhow!("is_ancestor check failed: {e}"))
 }
 
 /// Suggest --advance if the epoch is ahead of the branch.
 fn suggest_advance(root: &std::path::Path, branch: &str) {
-    let epoch = Command::new("git")
-        .args(["rev-parse", "refs/manifold/epoch/current"])
-        .current_dir(root)
-        .output();
+    let Ok(repo) = maw_git::GixRepo::open(root) else { return };
+
+    let epoch_oid = match repo.rev_parse_opt("refs/manifold/epoch/current") {
+        Ok(Some(oid)) => oid,
+        _ => return,
+    };
 
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_pos = Command::new("git")
-        .args(["rev-parse", &branch_ref])
-        .current_dir(root)
-        .output();
+    let branch_oid = match repo.rev_parse_opt(&branch_ref) {
+        Ok(Some(oid)) => oid,
+        _ => return,
+    };
 
-    if let (Ok(e), Ok(b)) = (epoch, branch_pos)
-        && e.status.success()
-        && b.status.success()
-    {
-        let epoch_oid = String::from_utf8_lossy(&e.stdout).trim().to_string();
-        let branch_oid = String::from_utf8_lossy(&b.stdout).trim().to_string();
-
-        if epoch_oid != branch_oid {
-            // Check if epoch is ahead of branch
-            let count = Command::new("git")
-                .args(["rev-list", "--count", &format!("{branch_oid}..{epoch_oid}")])
-                .current_dir(root)
-                .output();
-            if let Ok(c) = count {
-                let n: usize = String::from_utf8_lossy(&c.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                if n > 0 {
-                    println!();
-                    println!(
-                        "Hint: epoch is {n} commit(s) ahead of {branch}.\n  \
-                             To push latest work: maw push --advance"
-                    );
-                }
+    if epoch_oid != branch_oid {
+        // Check if epoch is ahead of branch
+        // TODO(gix): rev-list --count has no GitRepo equivalent. Keep CLI for count.
+        let count = Command::new("git")
+            .args(["rev-list", "--count", &format!("{branch_oid}..{epoch_oid}")])
+            .current_dir(root)
+            .output();
+        if let Ok(c) = count {
+            let n: usize = String::from_utf8_lossy(&c.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            if n > 0 {
+                println!();
+                println!(
+                    "Hint: epoch is {n} commit(s) ahead of {branch}.\n  \
+                         To push latest work: maw push --advance"
+                );
             }
         }
     }
@@ -494,26 +468,23 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
     let branch_ref = format!("refs/heads/{branch}");
     let remote_ref = format!("refs/remotes/origin/{branch}");
 
-    // Check if local branch exists
-    let local = Command::new("git")
-        .args(["rev-parse", "--verify", &branch_ref])
-        .current_dir(root)
-        .output();
+    let repo = match maw_git::GixRepo::open(root) {
+        Ok(r) => r,
+        Err(e) => return SyncStatus::Unknown(format!("failed to open repo: {e}")),
+    };
 
-    let local_oid = match local {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return SyncStatus::NoLocal,
+    // Check if local branch exists
+    let local_oid = match repo.rev_parse_opt(&branch_ref) {
+        Ok(Some(oid)) => oid.to_string(),
+        Ok(None) => return SyncStatus::NoLocal,
+        Err(e) => return SyncStatus::Unknown(format!("rev-parse {branch_ref} failed: {e}")),
     };
 
     // Check if remote branch exists
-    let remote = Command::new("git")
-        .args(["rev-parse", "--verify", &remote_ref])
-        .current_dir(root)
-        .output();
-
-    let remote_oid = match remote {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return SyncStatus::NoRemote,
+    let remote_oid = match repo.rev_parse_opt(&remote_ref) {
+        Ok(Some(oid)) => oid.to_string(),
+        Ok(None) => return SyncStatus::NoRemote,
+        Err(e) => return SyncStatus::Unknown(format!("rev-parse {remote_ref} failed: {e}")),
     };
 
     if local_oid == remote_oid {

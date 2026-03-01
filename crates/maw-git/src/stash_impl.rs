@@ -287,6 +287,13 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                     Err(_) => continue,
                 };
 
+                // Reject paths with .. components (path traversal protection).
+                if path_str.split('/').any(|c| c == "..") {
+                    return Err(GitError::BackendError {
+                        message: format!("refusing path with '..' component: '{path_str}'"),
+                    });
+                }
+
                 // Read blob from stash.
                 let blob = repo
                     .repo
@@ -329,6 +336,13 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
+
+                // Reject paths with .. components (path traversal protection).
+                if path_str.split('/').any(|c| c == "..") {
+                    return Err(GitError::BackendError {
+                        message: format!("refusing path with '..' component: '{path_str}'"),
+                    });
+                }
 
                 // Remove file from worktree.
                 let file_path = workdir.join(path_str);

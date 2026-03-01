@@ -342,6 +342,45 @@ fn checkout_tree_creates_files() {
     assert_eq!(contents, "hello world\n");
 }
 
+#[test]
+fn checkout_tree_removes_stale_files() {
+    let (dir, repo, _, _) = setup_repo_with_commit();
+    let workdir = dir.path();
+
+    // Create a tree with only "goodbye.txt" (no "hello.txt").
+    let blob_oid = repo.write_blob(b"goodbye\n").unwrap();
+    let tree2 = repo
+        .write_tree(&[TreeEntry {
+            name: "goodbye.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob_oid,
+        }])
+        .unwrap();
+
+    // First checkout the original tree (has hello.txt).
+    let blob1 = repo.write_blob(b"hello world\n").unwrap();
+    let tree1 = repo
+        .write_tree(&[TreeEntry {
+            name: "hello.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob1,
+        }])
+        .unwrap();
+    repo.checkout_tree(tree1, workdir).unwrap();
+    assert!(workdir.join("hello.txt").exists());
+
+    // Now checkout tree2 — hello.txt should be removed.
+    repo.checkout_tree(tree2, workdir).unwrap();
+    assert!(
+        workdir.join("goodbye.txt").exists(),
+        "goodbye.txt should exist after checkout"
+    );
+    assert!(
+        !workdir.join("hello.txt").exists(),
+        "hello.txt should be removed (not in target tree)"
+    );
+}
+
 // ===========================================================================
 // 5. Status and diff
 // ===========================================================================

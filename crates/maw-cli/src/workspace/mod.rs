@@ -8,6 +8,7 @@ use serde::Deserialize;
 use maw_core::backend::platform;
 use maw_core::backend::{AnyBackend, WorkspaceBackend};
 use maw_core::config::{BackendKind, ManifoldConfig};
+use maw_core::model::types::WorkspaceId;
 use crate::format::OutputFormat;
 
 mod advance;
@@ -1205,36 +1206,15 @@ pub fn workspace_path(name: &str) -> Result<PathBuf> {
     Ok(workspaces_dir()?.join(name))
 }
 
-/// Validate workspace name to prevent path traversal and command injection
+/// Validate workspace name using the canonical rules in [`WorkspaceId`].
+///
+/// This delegates to `WorkspaceId::new()` so that the CLI and core layers
+/// enforce identical rules: lowercase alphanumeric with hyphens, 1–64
+/// characters, no leading/trailing/consecutive hyphens.
 fn validate_workspace_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        bail!("Workspace name cannot be empty");
-    }
-
-    if name.starts_with('-') {
-        bail!("Workspace name cannot start with '-' (would be interpreted as a flag)");
-    }
-
-    if name == "." || name == ".." {
-        bail!("Workspace name cannot be '.' or '..'");
-    }
-
-    if name.contains('/') || name.contains('\\') || name.contains('\0') {
-        bail!("Workspace name cannot contain path separators or null bytes");
-    }
-
-    // Only allow alphanumeric, hyphen, underscore
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!(
-            "Workspace name must contain only letters, numbers, hyphens, and underscores\n\
-             Got: '{name}'"
-        );
-    }
-
-    Ok(())
+    WorkspaceId::new(name)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Check all workspaces for staleness and return list of stale workspace names.

@@ -16,6 +16,12 @@ pub fn worktree_add(
     target: GitOid,
     path: &Path,
 ) -> Result<(), GitError> {
+    // Reject names with path separators or .. components (path traversal protection).
+    if name.contains('/') || name.contains('\\') || name == ".." || name.contains("/../") {
+        return Err(GitError::BackendError {
+            message: format!("invalid worktree name: '{name}' (contains path separators or '..')"),
+        });
+    }
     let git_dir = repo.repo.git_dir().to_path_buf();
     let admin_dir = git_dir.join("worktrees").join(name);
 

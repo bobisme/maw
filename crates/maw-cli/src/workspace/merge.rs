@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use maw_git::GitRepo as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -638,34 +639,23 @@ fn patch_candidate_tree(
     let new_tree_oid = String::from_utf8_lossy(&write_tree.stdout).trim().to_string();
 
     // 5. commit-tree with the same parent as the candidate
-    let parent_output = Command::new("git")
-        .args(["rev-parse", &format!("{candidate}^")])
-        .current_dir(root)
-        .output()
-        .context("Failed to get candidate parent")?;
-    let parent_oid = String::from_utf8_lossy(&parent_output.stdout).trim().to_string();
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let parent_spec = format!("{candidate}^");
+    let parent_git_oid = repo.rev_parse(&parent_spec)
+        .map_err(|e| anyhow::anyhow!("Failed to get candidate parent: {e}"))?;
 
-    let commit_output = Command::new("git")
-        .args([
-            "commit-tree",
-            &new_tree_oid,
-            "-p",
-            &parent_oid,
-            "-m",
-            "epoch: merge with conflict resolutions",
-        ])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git commit-tree")?;
-    if !commit_output.status.success() {
-        bail!(
-            "git commit-tree failed: {}",
-            String::from_utf8_lossy(&commit_output.stderr).trim()
-        );
-    }
-    let new_commit_oid = String::from_utf8_lossy(&commit_output.stdout)
-        .trim()
-        .to_string();
+    let new_tree_git_oid: maw_git::GitOid = new_tree_oid.parse()
+        .map_err(|e| anyhow::anyhow!("invalid tree OID '{new_tree_oid}': {e}"))?;
+
+    let new_commit_git_oid = repo.create_commit(
+        new_tree_git_oid,
+        &[parent_git_oid],
+        "epoch: merge with conflict resolutions",
+        None,
+    ).map_err(|e| anyhow::anyhow!("commit-tree failed: {e}"))?;
+
+    let new_commit_oid = new_commit_git_oid.to_string();
     GitOid::new(&new_commit_oid)
         .map_err(|e| anyhow::anyhow!("Invalid patched commit OID '{new_commit_oid}': {e}"))
 }
@@ -2832,77 +2822,30 @@ fn write_patch_set_blob(root: &Path, patch_set: &ModelPatchSet) -> Result<GitOid
     let payload = serde_json::to_vec(patch_set)
         .map_err(|e| anyhow::anyhow!("serialize patch-set JSON: {e}"))?;
 
-    let mut child = Command::new("git")
-        .args(["hash-object", "-w", "--stdin"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn git hash-object: {e}"))?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let git_oid = maw_git::GitRepo::write_blob(&repo, &payload)
+        .map_err(|e| anyhow::anyhow!("write_blob for patch-set failed: {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&payload).map_err(|e| {
-            anyhow::anyhow!("write patch-set payload to git hash-object stdin: {e}")
-        })?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| anyhow::anyhow!("wait for git hash-object: {e}"))?;
-    if !output.status.success() {
-        bail!(
-            "git hash-object -w --stdin failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    GitOid::new(&raw).map_err(|e| anyhow::anyhow!("invalid patch-set blob OID '{raw}': {e}"))
+    GitOid::new(&git_oid.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid patch-set blob OID: {e}"))
 }
 
 fn git_hash_object(root: &Path, content: &[u8]) -> Option<GitOid> {
-    let mut child = Command::new("git")
-        .args(["hash-object", "-w", "--stdin"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(content);
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let hex = String::from_utf8(output.stdout).ok()?;
-    GitOid::new(hex.trim()).ok()
+    let repo = maw_git::GixRepo::open(root).ok()?;
+    let git_oid = maw_git::GitRepo::write_blob(&repo, content).ok()?;
+    GitOid::new(&git_oid.to_string()).ok()
 }
 
 fn epoch_blob_oid(root: &Path, epoch: &EpochId, path: &Path) -> Result<GitOid> {
     let rev = format!("{}:{}", epoch.as_str(), path.to_string_lossy());
-    let output = Command::new("git")
-        .args(["rev-parse", &rev])
-        .current_dir(root)
-        .output()
-        .map_err(|e| anyhow::anyhow!("spawn git rev-parse for '{}': {e}", path.display()))?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let git_oid = repo.rev_parse(&rev)
+        .map_err(|e| anyhow::anyhow!("rev-parse '{}' failed: {e}", rev))?;
 
-    if !output.status.success() {
-        bail!(
-            "git rev-parse {} failed: {}",
-            rev,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    GitOid::new(&raw)
-        .map_err(|e| anyhow::anyhow!("invalid blob OID '{raw}' for '{}': {e}", path.display()))
+    GitOid::new(&git_oid.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid blob OID for '{}': {e}", path.display()))
 }
 
 fn file_id_from_path(path: &Path) -> FileId {
