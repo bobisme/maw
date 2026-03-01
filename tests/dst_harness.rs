@@ -38,6 +38,12 @@ use std::path::Path;
 use std::process::Command;
 
 use manifold_common::TestRepo;
+#[cfg(feature = "assurance")]
+use maw::assurance::oracle::{
+    AssuranceState as OracleState,
+    capture_state as capture_oracle_state,
+    check_all as oracle_check_all,
+};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -47,6 +53,55 @@ fn trace_count(default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(feature = "assurance")]
+fn capture_oracle_snapshot(
+    root: &Path,
+    violations: &mut Vec<String>,
+    context: &str,
+) -> Option<OracleState> {
+    match capture_oracle_state(root) {
+        Ok(state) => Some(state),
+        Err(err) => {
+            violations.push(format!("{context}: failed to capture oracle state: {err}"));
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "assurance"))]
+fn capture_oracle_snapshot(
+    _root: &Path,
+    _violations: &mut Vec<String>,
+    _context: &str,
+) -> Option<()> {
+    None
+}
+
+#[cfg(feature = "assurance")]
+fn run_oracle_checks(
+    pre: Option<&OracleState>,
+    post: Option<&OracleState>,
+    violations: &mut Vec<String>,
+    context: &str,
+) {
+    let (Some(pre), Some(post)) = (pre, post) else {
+        return;
+    };
+
+    if let Err(err) = oracle_check_all(pre, post) {
+        violations.push(format!("{context}: {err}"));
+    }
+}
+
+#[cfg(not(feature = "assurance"))]
+fn run_oracle_checks(
+    _pre: Option<&()>,
+    _post: Option<&()>,
+    _violations: &mut Vec<String>,
+    _context: &str,
+) {
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +659,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
 
     let fallback_candidate = "b".repeat(40);
     let candidate_ref = candidate_oid.as_deref().unwrap_or(&fallback_candidate);
+    let oracle_pre = capture_oracle_snapshot(repo.root(), &mut violations, "run_trace pre");
 
     // Step 3: Inject crash by writing merge-state.json
     let source_refs: Vec<&str> = workspace_names.iter().map(String::as_str).collect();
@@ -634,6 +690,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
     let recovery_outcome = simulate_recovery(repo.root());
 
     let epoch_after_recovery = repo.current_epoch();
+    let oracle_post = capture_oracle_snapshot(repo.root(), &mut violations, "run_trace post");
 
     trace.push(TraceEntry {
         step: 2,
@@ -645,6 +702,13 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
     });
 
     // Step 5: Check invariants
+
+    run_oracle_checks(
+        oracle_pre.as_ref(),
+        oracle_post.as_ref(),
+        &mut violations,
+        "run_trace oracle",
+    );
 
     // G1: No silent loss of committed work
     if let Err(e) = check_g1_reachability(repo.root(), &committed_before) {
@@ -846,9 +910,12 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         });
     }
 
+    let oracle_pre = capture_oracle_snapshot(repo.root(), &mut violations, "run_g3_trace pre");
+
     // Run recovery
     let recovery_outcome = simulate_recovery(repo.root());
     let epoch_after = repo.current_epoch();
+    let oracle_post = capture_oracle_snapshot(repo.root(), &mut violations, "run_g3_trace post");
 
     trace.push(TraceEntry {
         step: 2,
@@ -864,6 +931,13 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     if let Err(e) = check_g3_monotonicity(repo.root(), &epoch_before, committed_during_commit) {
         violations.push(e);
     }
+
+    run_oracle_checks(
+        oracle_pre.as_ref(),
+        oracle_post.as_ref(),
+        &mut violations,
+        "run_g3_trace oracle",
+    );
 
     // G1 check: committed data still reachable
     if let Err(e) = check_g1_reachability(repo.root(), &committed_before) {
@@ -1258,9 +1332,12 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         epoch_after: epoch_before.clone(),
     });
 
+    let oracle_pre = capture_oracle_snapshot(repo.root(), &mut violations, "run_g2_trace pre");
+
     // Run recovery
     let recovery_outcome = simulate_recovery(repo.root());
     let epoch_after = repo.current_epoch();
+    let oracle_post = capture_oracle_snapshot(repo.root(), &mut violations, "run_g2_trace post");
 
     trace.push(TraceEntry {
         step: 2,
@@ -1275,6 +1352,13 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     if let Err(e) = check_g2_workspace_files_preserved(&repo, &workspace_names, &workspace_files) {
         violations.push(e);
     }
+
+    run_oracle_checks(
+        oracle_pre.as_ref(),
+        oracle_post.as_ref(),
+        &mut violations,
+        "run_g2_trace oracle",
+    );
 
     // Default workspace seed files must also survive
     if let Err(e) = check_workspace_files_preserved(
@@ -1410,6 +1494,8 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         epoch_after: epoch_before.clone(),
     });
 
+    let oracle_pre = capture_oracle_snapshot(repo.root(), &mut violations, "run_g4_trace pre");
+
     // G4 invariant: workspace MUST still exist after failed destroy
     if let Err(e) =
         check_g4_workspace_exists_after_failed_destroy(&repo, ws_name, &workspace_files)
@@ -1430,6 +1516,14 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     if let Err(e) = check_git_integrity(repo.root()) {
         violations.push(e);
     }
+
+    let oracle_post = capture_oracle_snapshot(repo.root(), &mut violations, "run_g4_trace post");
+    run_oracle_checks(
+        oracle_pre.as_ref(),
+        oracle_post.as_ref(),
+        &mut violations,
+        "run_g4_trace oracle",
+    );
 
     let epoch_after = repo.current_epoch();
     trace.push(TraceEntry {
