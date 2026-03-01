@@ -115,6 +115,7 @@ impl GitWorktreeBackend {
     /// Create a new `GitWorktreeBackend`.
     ///
     /// Opens a `GixRepo` at the given root. Panics if the repo cannot be opened.
+    #[must_use] 
     pub fn new(root: PathBuf) -> Self {
         let repo = open_repo_at(&root)
             .unwrap_or_else(|e| panic!("failed to open git repo at {}: {e}", root.display()));
@@ -125,6 +126,7 @@ impl GitWorktreeBackend {
     ///
     /// Useful for testing with mock implementations.
     #[cfg(test)]
+    #[must_use] 
     pub fn with_repo(root: PathBuf, repo: Box<dyn maw_git::GitRepo>) -> Self {
         Self { root, repo }
     }
@@ -346,15 +348,14 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let path = self.workspace_path(name);
 
         // Step 1: Try to remove via GitRepo trait
-        if path.exists() {
-            if let Err(_e) = self.repo.worktree_remove(name.as_str()) {
+        if path.exists()
+            && let Err(_e) = self.repo.worktree_remove(name.as_str()) {
                 // Step 2: If worktree_remove fails, fall back to manual cleanup.
                 // This handles cases where the worktree is in a broken state.
                 if path.exists() {
                     std::fs::remove_dir_all(&path)?;
                 }
             }
-        }
 
         // Step 3: Prune stale worktree entries. This cleans up the
         // .git/worktrees/<name> administrative directory even if
@@ -430,7 +431,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             // compat with workspaces created before the ref was introduced.
             let epoch_ref = manifold_refs::workspace_epoch_ref(name_str);
             let epoch = match manifold_refs::read_ref(&self.root, &epoch_ref) {
-                Ok(Some(oid)) => EpochId::new(oid.as_str()).unwrap_or(head_epoch.clone()),
+                Ok(Some(oid)) => EpochId::new(oid.as_str()).unwrap_or_else(|_| head_epoch.clone()),
                 _ => head_epoch.clone(),
             };
 
@@ -447,11 +448,11 @@ impl WorkspaceBackend for GitWorktreeBackend {
             let (state, commits_ahead) = match &current_epoch {
                 Some(current) if epoch == *current => {
                     // Workspace is at the current epoch; count agent commits.
-                    let ahead = if head_epoch != epoch {
+                    let ahead = if head_epoch == epoch {
+                        0
+                    } else {
                         self.count_commits_between(epoch.as_str(), head_epoch.as_str())
                             .unwrap_or(1)
-                    } else {
-                        0
                     };
                     (WorkspaceState::Active, ahead)
                 }
@@ -510,26 +511,23 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // patchset guard and the pre-destroy capture.
         let base_epoch = {
             let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
-            match manifold_refs::read_ref(&self.root, &epoch_ref) {
-                Ok(Some(oid)) => {
-                    EpochId::new(oid.as_str()).map_err(|e| GitBackendError::GitCommand {
-                        command: format!("read {epoch_ref}"),
-                        stderr: format!("invalid OID from workspace epoch ref: {e}"),
-                        exit_code: None,
-                    })?
-                }
-                _ => {
-                    // Fallback: use HEAD (correct for workspaces without commits).
-                    let ws_repo = open_repo_at(&ws_path)?;
-                    let head_oid = ws_repo.rev_parse("HEAD")
-                        .map_err(|e| map_git_error("rev-parse HEAD", e))?;
-                    let head_str = head_oid.to_string();
-                    EpochId::new(&head_str).map_err(|e| GitBackendError::GitCommand {
-                        command: "rev-parse HEAD".to_owned(),
-                        stderr: format!("invalid OID from HEAD: {e}"),
-                        exit_code: None,
-                    })?
-                }
+            if let Ok(Some(oid)) = manifold_refs::read_ref(&self.root, &epoch_ref) {
+                EpochId::new(oid.as_str()).map_err(|e| GitBackendError::GitCommand {
+                    command: format!("read {epoch_ref}"),
+                    stderr: format!("invalid OID from workspace epoch ref: {e}"),
+                    exit_code: None,
+                })?
+            } else {
+                // Fallback: use HEAD (correct for workspaces without commits).
+                let ws_repo = open_repo_at(&ws_path)?;
+                let head_oid = ws_repo.rev_parse("HEAD")
+                    .map_err(|e| map_git_error("rev-parse HEAD", e))?;
+                let head_str = head_oid.to_string();
+                EpochId::new(&head_str).map_err(|e| GitBackendError::GitCommand {
+                    command: "rev-parse HEAD".to_owned(),
+                    stderr: format!("invalid OID from HEAD: {e}"),
+                    exit_code: None,
+                })?
             }
         };
 
@@ -596,13 +594,10 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // Use the epoch as the diff base, not HEAD.
         // If the epoch ref is missing, fall back to HEAD (pre-Manifold compat).
         let ws_repo = open_repo_at(&ws_path)?;
-        let base_oid = match self.current_epoch_opt() {
-            Some(epoch) => epoch.as_str().to_owned(),
-            None => {
-                let head = ws_repo.rev_parse("HEAD")
-                    .map_err(|e| map_git_error("rev-parse HEAD", e))?;
-                head.to_string()
-            }
+        let base_oid = if let Some(epoch) = self.current_epoch_opt() { epoch.as_str().to_owned() } else {
+            let head = ws_repo.rev_parse("HEAD")
+                .map_err(|e| map_git_error("rev-parse HEAD", e))?;
+            head.to_string()
         };
 
         let mut added = Vec::new();
