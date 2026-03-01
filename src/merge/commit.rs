@@ -250,7 +250,7 @@ fn write_merge_state(root: &Path, state: &CommitStateFile) -> Result<(), CommitE
 /// Invoke a failpoint and convert the result to [`CommitError`].
 ///
 /// Without the `failpoints` feature this compiles to a no-op.
-fn fp_commit(_name: &str) -> Result<(), CommitError> {
+const fn fp_commit(_name: &str) -> Result<(), CommitError> {
     #[cfg(feature = "failpoints")]
     {
         crate::fp!(_name).map_err(|e| CommitError::Failpoint(e.to_string()))?;

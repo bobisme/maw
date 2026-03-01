@@ -150,7 +150,7 @@ pub enum Diff3Result<C> {
 /// the real `git merge-file` diff3. Kani proofs call it with `u8` content and
 /// a deterministic stub.
 ///
-/// The function does not allocate PathBuf, build ConflictRecord, format
+/// The function does not allocate `PathBuf`, build `ConflictRecord`, format
 /// workspace labels, or do any I/O. The caller maps the [`MergeOutcome`]
 /// to concrete output types.
 pub fn resolve_entries<C, E, F>(
@@ -252,7 +252,7 @@ pub enum SharedClassification {
 }
 
 impl SharedClassification {
-    /// Whether this classification produces a definite outcome (not NeedsDiff3).
+    /// Whether this classification produces a definite outcome (not `NeedsDiff3`).
     #[must_use]
     pub const fn is_definite(self) -> bool {
         !matches!(self, Self::NeedsDiff3)
@@ -283,6 +283,7 @@ impl SharedClassification {
 /// 5. No base, all adds → [`ConflictAddAddDifferent`](SharedClassification::ConflictAddAddDifferent)
 /// 6. No base, not all adds → [`ConflictMissingBase`](SharedClassification::ConflictMissingBase)
 /// 7. Has base → [`NeedsDiff3`](SharedClassification::NeedsDiff3)
+#[must_use] 
 pub fn classify_shared_path(
     kinds: &[ChangeKind],
     all_have_content: bool,
@@ -555,7 +556,7 @@ fn resolve_shared_path(
     let outcome = resolve_entries(
         &kinds,
         &effective_contents,
-        base.map(|b| b.to_vec()).as_ref(),
+        base.map(<[u8]>::to_vec).as_ref(),
         |base_c, ours_c, theirs_c| -> Result<Diff3Result<Vec<u8>>, ResolveError> {
             // Try diff3, then shifted-alignment retry.
             match diff3_merge_bytes(base_c, ours_c, theirs_c)? {
