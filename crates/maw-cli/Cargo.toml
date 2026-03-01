@@ -1,7 +1,8 @@
 [package]
 name = "maw-cli"
-version = "0.49.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+publish = false
 
 [[bin]]
 name = "maw"

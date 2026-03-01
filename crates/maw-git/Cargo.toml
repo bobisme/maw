@@ -1,7 +1,12 @@
 [package]
 name = "maw-git"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git abstraction layer for maw — trait-based interface backed by gix"
+keywords = ["git", "gix", "abstraction", "repository"]
+categories = ["development-tools"]
 
 [dependencies]
 thiserror = "2"

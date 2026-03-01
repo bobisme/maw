@@ -1,7 +1,12 @@
 [package]
 name = "maw-tui"
-version = "0.49.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI for maw workspace status dashboard"
+keywords = ["tui", "ratatui", "terminal", "dashboard"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

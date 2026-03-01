@@ -1,13 +1,19 @@
 [workspace]
 members = [".", "crates/maw-git", "crates/maw-core", "crates/maw-cli", "crates/maw-tui", "crates/maw-assurance"]
 
-[package]
-name = "maw-workspaces"
+[workspace.package]
 version = "0.49.0"
 edition = "2024"
-description = "Multi-Agent Workflow coordinator for Manifold git workspaces"
 license = "MIT"
 repository = "https://github.com/bobisme/maw"
+
+[package]
+name = "maw-workspaces"
+version.workspace = true
+edition.workspace = true
+description = "Multi-Agent Workflow coordinator for Manifold git workspaces"
+license.workspace = true
+repository.workspace = true
 keywords = ["git", "workspaces", "multi-agent", "merge", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["notes/", "images/", ".bones/", ".agents/", ".manifold/"]
