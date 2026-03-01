@@ -2073,6 +2073,27 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         abort_merge(&manifold_dir, "empty merge (no changes)");
 
         let ws_list = ws_to_merge.join(", ");
+
+        // Destroy workspaces if requested, even though there's nothing to merge.
+        // The user explicitly asked for destruction with --destroy.
+        if destroy_after {
+            if format != OutputFormat::Json {
+                textln!();
+                textln!("No changes to merge. Destroying workspace(s): {ws_list}");
+            }
+            handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, &root, text_mode, verbose)?;
+            if format == OutputFormat::Json {
+                let output = serde_json::json!({
+                    "status": "empty",
+                    "workspaces": ws_to_merge,
+                    "destroyed": true,
+                    "message": format!("No changes detected in workspace(s): {ws_list}. Workspace(s) destroyed."),
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            return Ok(());
+        }
+
         if format == OutputFormat::Json {
             let output = serde_json::json!({
                 "status": "empty",
