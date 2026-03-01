@@ -1,8 +1,8 @@
 //! Git ref management for Manifold's `refs/manifold/*` namespace.
 //!
 //! Provides low-level helpers to read, write, atomically update, and delete
-//! git refs used by Manifold. All operations run `git update-ref` (or
-//! `git rev-parse`) in the repository root directory.
+//! git refs used by Manifold. All operations delegate to a
+//! [`maw_git::GitRepo`] implementation.
 //!
 //! # Manifold Ref Hierarchy
 //!
@@ -27,9 +27,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::fmt;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::model::types::GitOid;
 
@@ -94,6 +92,65 @@ pub fn workspace_state_ref(workspace_name: &str) -> String {
 #[must_use]
 pub fn workspace_epoch_ref(workspace_name: &str) -> String {
     format!("{WORKSPACE_EPOCH_PREFIX}{workspace_name}")
+}
+
+// ---------------------------------------------------------------------------
+// OID conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `maw_core` GitOid (String-based) to a `maw_git` GitOid (byte-based).
+fn to_git_oid(oid: &GitOid) -> Result<maw_git::GitOid, RefError> {
+    oid.as_str().parse::<maw_git::GitOid>().map_err(|e| RefError::InvalidOid {
+        ref_name: String::new(),
+        raw_value: e.to_string(),
+    })
+}
+
+/// Convert a `maw_git` GitOid (byte-based) to a `maw_core` GitOid (String-based).
+fn from_git_oid(oid: maw_git::GitOid) -> Result<GitOid, RefError> {
+    let s = oid.to_string();
+    GitOid::new(&s).map_err(|_| RefError::InvalidOid {
+        ref_name: String::new(),
+        raw_value: s,
+    })
+}
+
+/// Parse a ref name string into a `maw_git::RefName`.
+fn to_ref_name(name: &str) -> Result<maw_git::RefName, RefError> {
+    maw_git::RefName::new(name).map_err(|e| RefError::GitCommand {
+        command: format!("ref name validation: {name}"),
+        stderr: e.to_string(),
+        exit_code: None,
+    })
+}
+
+/// Map a `maw_git::GitError` to a `RefError`.
+fn map_git_error(name: &str, err: maw_git::GitError) -> RefError {
+    match &err {
+        maw_git::GitError::RefConflict { ref_name, .. } => RefError::CasMismatch {
+            ref_name: ref_name.clone(),
+        },
+        maw_git::GitError::IoError(e) => RefError::Io(std::io::Error::new(e.kind(), e.to_string())),
+        maw_git::GitError::InvalidOid { value, reason } => RefError::InvalidOid {
+            ref_name: name.to_owned(),
+            raw_value: format!("{value}: {reason}"),
+        },
+        // gix may report CAS mismatches as BackendError with "should have content"
+        maw_git::GitError::BackendError { message }
+            if message.contains("should have content")
+                || message.contains("cannot lock ref")
+                || message.contains("but expected") =>
+        {
+            RefError::CasMismatch {
+                ref_name: name.to_owned(),
+            }
+        }
+        _ => RefError::GitCommand {
+            command: name.to_owned(),
+            stderr: err.to_string(),
+            exit_code: None,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,81 +248,59 @@ impl From<std::io::Error> for RefError {
 
 /// Read a git ref and return its OID, or `None` if it does not exist.
 ///
-/// Runs `git rev-parse <name>` in `root`. Returns `None` if the ref is
-/// missing (git exits non-zero with "unknown revision or path").
+/// Uses [`maw_git::GitRepo::rev_parse_opt`] for general revspecs (like `HEAD`)
+/// and [`maw_git::GitRepo::read_ref`] for proper ref names.
 ///
 /// # Errors
-/// Returns an error if git cannot be spawned, if git fails for a reason
-/// other than a missing ref, or if the returned OID is malformed.
+/// Returns an error if the operation fails for a reason other than a missing
+/// ref, or if the returned OID is malformed.
 pub fn read_ref(root: &Path, name: &str) -> Result<Option<GitOid>, RefError> {
-    let output = Command::new("git")
-        .args(["rev-parse", name])
-        .current_dir(root)
-        .output()?;
+    let repo = open_repo(root)?;
+    read_ref_via(&*repo, name)
+}
 
-    if output.status.success() {
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let oid_str = raw.trim();
-        let oid = GitOid::new(oid_str).map_err(|_| RefError::InvalidOid {
-            ref_name: name.to_owned(),
-            raw_value: oid_str.to_owned(),
-        })?;
-        return Ok(Some(oid));
+/// Read a git ref via a `GitRepo` trait object.
+pub fn read_ref_via(repo: &dyn maw_git::GitRepo, name: &str) -> Result<Option<GitOid>, RefError> {
+    // Try as a proper ref name first (refs/... or HEAD etc.)
+    if let Ok(ref_name) = to_ref_name(name) {
+        match repo.read_ref(&ref_name) {
+            Ok(Some(oid)) => return Ok(Some(from_git_oid(oid)?)),
+            Ok(None) => return Ok(None),
+            Err(maw_git::GitError::NotFound { .. }) => return Ok(None),
+            Err(e) => return Err(map_git_error(name, e)),
+        }
     }
-
-    // Distinguish "ref not found" from other errors.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_trimmed = stderr.trim();
-
-    // git rev-parse exits 128 with "unknown revision or path" when the ref
-    // does not exist. Treat this as "not found" rather than a hard error.
-    if stderr_trimmed.contains("unknown revision")
-        || stderr_trimmed.contains("ambiguous argument")
-        || stderr_trimmed.contains("not a valid object")
-    {
-        return Ok(None);
+    // Fall back to rev_parse_opt for arbitrary revspecs
+    match repo.rev_parse_opt(name) {
+        Ok(Some(oid)) => Ok(Some(from_git_oid(oid)?)),
+        Ok(None) => Ok(None),
+        Err(e) => Err(map_git_error(name, e)),
     }
-
-    Err(RefError::GitCommand {
-        command: format!("git rev-parse {name}"),
-        stderr: stderr_trimmed.to_owned(),
-        exit_code: output.status.code(),
-    })
 }
 
 /// Write (create or overwrite) a git ref unconditionally.
 ///
-/// Runs `git update-ref <name> <oid>`. This is equivalent to
-/// `git update-ref <name> <new_oid>` without an old-value guard, so it
-/// will succeed regardless of the ref's current value.
-///
 /// For safe concurrent updates, use [`write_ref_cas`] instead.
 ///
 /// # Errors
-/// Returns an error if git cannot be spawned or exits non-zero.
+/// Returns an error if the operation fails.
 pub fn write_ref(root: &Path, name: &str, oid: &GitOid) -> Result<(), RefError> {
-    let output = Command::new("git")
-        .args(["update-ref", name, oid.as_str()])
-        .current_dir(root)
-        .output()?;
+    let repo = open_repo(root)?;
+    write_ref_via(&*repo, name, oid)
+}
 
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(RefError::GitCommand {
-        command: format!("git update-ref {name} {}", oid.as_str()),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        exit_code: output.status.code(),
-    })
+/// Write a git ref via a `GitRepo` trait object.
+pub fn write_ref_via(repo: &dyn maw_git::GitRepo, name: &str, oid: &GitOid) -> Result<(), RefError> {
+    let ref_name = to_ref_name(name)?;
+    let git_oid = to_git_oid(oid)?;
+    repo.write_ref(&ref_name, git_oid, "")
+        .map_err(|e| map_git_error(name, e))
 }
 
 /// Atomically update a git ref using compare-and-swap (CAS).
 ///
-/// Runs `git update-ref <name> <new_oid> <old_oid>`. Git internally holds
-/// a lock on the ref file during the update. The update succeeds only if
-/// the ref's current value matches `old_oid`. If it does not match, git
-/// exits non-zero and this function returns [`RefError::CasMismatch`].
+/// The update succeeds only if the ref's current value matches `old_oid`.
+/// If it does not match, [`RefError::CasMismatch`] is returned.
 ///
 /// # Concurrency
 /// This is the correct primitive for epoch advancement in multi-agent
@@ -287,54 +322,50 @@ pub fn write_ref_cas(
     old_oid: &GitOid,
     new_oid: &GitOid,
 ) -> Result<(), RefError> {
-    let output = Command::new("git")
-        .args(["update-ref", name, new_oid.as_str(), old_oid.as_str()])
-        .current_dir(root)
-        .output()?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_trimmed = stderr.trim();
-
-    // git update-ref prints "cannot lock ref" or "is at ... not ..." when
-    // the old-value check fails (CAS mismatch).
-    if stderr_trimmed.contains("cannot lock ref")
-        || stderr_trimmed.contains("is at")
-        || stderr_trimmed.contains("but expected")
-    {
-        return Err(RefError::CasMismatch {
-            ref_name: name.to_owned(),
-        });
-    }
-
-    Err(RefError::GitCommand {
-        command: format!(
-            "git update-ref {name} {} {}",
-            new_oid.as_str(),
-            old_oid.as_str()
-        ),
-        stderr: stderr_trimmed.to_owned(),
-        exit_code: output.status.code(),
-    })
+    let repo = open_repo(root)?;
+    write_ref_cas_via(&*repo, name, old_oid, new_oid)
 }
 
-/// Atomically update multiple refs using `git update-ref --stdin`.
+/// CAS update a git ref via a `GitRepo` trait object.
+pub fn write_ref_cas_via(
+    repo: &dyn maw_git::GitRepo,
+    name: &str,
+    old_oid: &GitOid,
+    new_oid: &GitOid,
+) -> Result<(), RefError> {
+    let ref_name = to_ref_name(name)?;
+    let old = to_git_oid(old_oid)?;
+    let new = to_git_oid(new_oid)?;
+
+    // When old_oid is zero (create-only semantics), verify the ref doesn't
+    // exist first. gix's MustNotExist may not reliably reject updates to
+    // existing refs in all storage backends.
+    if old.is_zero() {
+        if let Ok(Some(_)) = repo.read_ref(&ref_name) {
+            return Err(RefError::CasMismatch {
+                ref_name: name.to_owned(),
+            });
+        }
+    }
+
+    let edit = maw_git::RefEdit {
+        name: ref_name,
+        new_oid: new,
+        expected_old_oid: old,
+    };
+    repo.atomic_ref_update(&[edit])
+        .map_err(|e| map_git_error(name, e))
+}
+
+/// Atomically update multiple refs.
 ///
 /// Each entry is a `(ref_name, old_oid, new_oid)` tuple. All updates are
 /// applied in a single transaction: either every ref moves or none does.
 ///
-/// Uses the `start` / `prepare` / `commit` protocol so that the prepare
-/// step validates all updates before the commit step makes them visible.
-///
 /// # CAS semantics
 /// Each update includes the expected old OID. If any ref's current value
 /// does not match its expected old OID, the entire transaction is aborted
-/// and [`RefError::CasMismatch`] is returned (with the first ref name
-/// that git complained about, or the first ref in the batch if the
-/// specific ref cannot be determined).
+/// and [`RefError::CasMismatch`] is returned.
 ///
 /// # Errors
 /// - [`RefError::CasMismatch`] — a ref was modified concurrently.
@@ -344,94 +375,55 @@ pub fn update_refs_atomic(
     root: &Path,
     updates: &[(&str, &GitOid, &GitOid)],
 ) -> Result<(), RefError> {
-    let mut child = Command::new("git")
-        .args(["update-ref", "--stdin"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let repo = open_repo(root)?;
+    update_refs_atomic_via(&*repo, updates)
+}
 
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| RefError::Io(
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "failed to open stdin"),
-        ))?;
+/// Atomically update multiple refs via a `GitRepo` trait object.
+pub fn update_refs_atomic_via(
+    repo: &dyn maw_git::GitRepo,
+    updates: &[(&str, &GitOid, &GitOid)],
+) -> Result<(), RefError> {
+    let edits: Vec<maw_git::RefEdit> = updates
+        .iter()
+        .map(|(name, old_oid, new_oid)| {
+            Ok(maw_git::RefEdit {
+                name: to_ref_name(name)?,
+                new_oid: to_git_oid(new_oid)?,
+                expected_old_oid: to_git_oid(old_oid)?,
+            })
+        })
+        .collect::<Result<Vec<_>, RefError>>()?;
 
-        writeln!(stdin, "start")?;
-        for (ref_name, old_oid, new_oid) in updates {
-            writeln!(
-                stdin,
-                "update {} {} {}",
-                ref_name,
-                new_oid.as_str(),
-                old_oid.as_str()
-            )?;
-        }
-        writeln!(stdin, "prepare")?;
-        writeln!(stdin, "commit")?;
-    }
-
-    let output = child.wait_with_output()?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_trimmed = stderr.trim();
-
-    if stderr_trimmed.contains("cannot lock ref")
-        || stderr_trimmed.contains("is at")
-        || stderr_trimmed.contains("but expected")
-    {
-        // Try to identify which ref failed from stderr.
-        let ref_name = updates
-            .iter()
-            .find(|(name, _, _)| stderr_trimmed.contains(name))
-            .map_or_else(
-                || updates[0].0.to_owned(),
-                |(name, _, _)| (*name).to_owned(),
-            );
-        return Err(RefError::CasMismatch { ref_name });
-    }
-
-    Err(RefError::GitCommand {
-        command: "git update-ref --stdin".to_owned(),
-        stderr: stderr_trimmed.to_owned(),
-        exit_code: output.status.code(),
+    repo.atomic_ref_update(&edits).map_err(|e| {
+        // Try to identify which ref failed
+        let first_ref = updates.first().map_or("unknown", |u| u.0);
+        map_git_error(first_ref, e)
     })
 }
 
 /// Delete a git ref.
 ///
-/// Runs `git update-ref -d <name>`. Idempotent: if the ref does not exist,
-/// git exits successfully (no-op). If you need to guard against concurrent
-/// deletion, use [`write_ref_cas`] with the expected OID followed by
-/// `delete_ref`.
+/// Idempotent: if the ref does not exist, this is a no-op.
 ///
 /// # Errors
-/// Returns an error if git cannot be spawned or exits non-zero for a
-/// reason other than the ref already being absent.
+/// Returns an error if the operation fails for a reason other than the
+/// ref already being absent.
 pub fn delete_ref(root: &Path, name: &str) -> Result<(), RefError> {
-    let output = Command::new("git")
-        .args(["update-ref", "-d", name])
-        .current_dir(root)
-        .output()?;
+    let repo = open_repo(root)?;
+    delete_ref_via(&*repo, name)
+}
 
-    if output.status.success() {
-        return Ok(());
+/// Delete a git ref via a `GitRepo` trait object.
+///
+/// Idempotent: if the ref does not exist, this is a no-op.
+pub fn delete_ref_via(repo: &dyn maw_git::GitRepo, name: &str) -> Result<(), RefError> {
+    let ref_name = to_ref_name(name)?;
+    match repo.delete_ref(&ref_name) {
+        Ok(()) => Ok(()),
+        Err(maw_git::GitError::NotFound { .. }) => Ok(()),
+        Err(e) => Err(map_git_error(name, e)),
     }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_trimmed = stderr.trim();
-
-    // git update-ref -d exits 0 if the ref doesn't exist (no-op).
-    // If it exits non-zero, something else went wrong.
-    Err(RefError::GitCommand {
-        command: format!("git update-ref -d {name}"),
-        stderr: stderr_trimmed.to_owned(),
-        exit_code: output.status.code(),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +449,21 @@ pub fn write_epoch_current(root: &Path, oid: &GitOid) -> Result<(), RefError> {
 /// Returns [`RefError::CasMismatch`] if another agent advanced the epoch first.
 pub fn advance_epoch(root: &Path, old_epoch: &GitOid, new_epoch: &GitOid) -> Result<(), RefError> {
     write_ref_cas(root, EPOCH_CURRENT, old_epoch, new_epoch)
+}
+
+// ---------------------------------------------------------------------------
+// Repo opening helper
+// ---------------------------------------------------------------------------
+
+/// Open a `GixRepo` for the given root path.
+fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, RefError> {
+    maw_git::GixRepo::open(root)
+        .map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>)
+        .map_err(|e| RefError::GitCommand {
+            command: format!("open repo at {}", root.display()),
+            stderr: e.to_string(),
+            exit_code: None,
+        })
 }
 
 // ---------------------------------------------------------------------------

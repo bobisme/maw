@@ -2122,6 +2122,7 @@ name = "maw-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "maw-git",
  "proptest",
  "rand 0.9.2",
  "serde",
@@ -2129,6 +2130,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "tracing",
 ]
 
 [[package]]

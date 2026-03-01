@@ -306,7 +306,9 @@ fn main() {
         Commands::Epoch(cmd) => match cmd {
             EpochCommands::Sync => epoch::sync(),
         },
-        Commands::Gc { dry_run } => epoch_gc::run_cli(dry_run),
+        Commands::Gc { dry_run } => {
+            workspace::repo_root().and_then(|root| epoch_gc::run_cli(&root, dry_run))
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

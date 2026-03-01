@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result};
 
@@ -16,11 +15,10 @@ pub struct EpochGcReport {
     pub removed: Vec<String>,
 }
 
-/// Run epoch GC for the current repo and print a concise summary.
+/// Run epoch GC for the given repo root and print a concise summary.
 #[allow(clippy::missing_errors_doc)]
-pub fn run_cli(dry_run: bool) -> Result<()> {
-    let root = repo_root()?;
-    let report = gc_unreferenced_epochs(&root, dry_run)?;
+pub fn run_cli(root: &Path, dry_run: bool) -> Result<()> {
+    let report = gc_unreferenced_epochs(root, dry_run)?;
 
     if report.scanned == 0 {
         println!("No epoch snapshots found in .manifold/epochs.");
@@ -45,24 +43,6 @@ pub fn run_cli(dry_run: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn repo_root() -> Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--show-toplevel"])
-        .output()
-        .context("Failed to run git rev-parse --show-toplevel")?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "Not in a git repository: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-    ))
 }
 
 /// Remove unreferenced epoch snapshots from `.manifold/epochs`.
