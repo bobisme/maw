@@ -42,6 +42,7 @@ proptests = []
 kani-slow = []
 
 [dependencies]
+maw-core = { path = "crates/maw-core" }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
 anyhow = "1"

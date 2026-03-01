@@ -570,11 +570,11 @@ impl fmt::Display for ConflictAtom {
 /// Uses `#[serde(tag = "type")]` for tagged JSON output with `snake_case` names.
 ///
 /// ```
-/// use maw::model::conflict::{Conflict, ConflictSide, ConflictAtom};
-/// use maw::model::types::GitOid;
-/// use maw::model::ordering::OrderingKey;
-/// use maw::model::patch::FileId;
-/// use maw::model::types::EpochId;
+/// use maw_core::model::conflict::{Conflict, ConflictSide, ConflictAtom};
+/// use maw_core::model::types::GitOid;
+/// use maw_core::model::ordering::OrderingKey;
+/// use maw_core::model::patch::FileId;
+/// use maw_core::model::types::EpochId;
 ///
 /// let oid = GitOid::new(&"a".repeat(40)).unwrap();
 /// let epoch = EpochId::new(&"e".repeat(40)).unwrap();
