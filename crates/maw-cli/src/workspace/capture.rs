@@ -127,34 +127,15 @@ pub fn capture_before_destroy(
 // ---------------------------------------------------------------------------
 
 /// List all dirty paths in the workspace (staged + unstaged + untracked).
-// TODO(gix): replace with GitRepo trait method when full porcelain status is available
 fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-uall"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git status")?;
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let entries = repo.status()
+        .map_err(|e| anyhow::anyhow!("git status failed: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git status failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let paths: Vec<String> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            // porcelain v1 format: "XY <path>" or "XY <path> -> <path>"
-            // Skip the 3-character status prefix
-            let path_part = &line[3..];
-            // Handle renames: "old -> new"
-            if let Some(pos) = path_part.find(" -> ") {
-                path_part[pos + 4..].to_string()
-            } else {
-                path_part.to_string()
-            }
-        })
+    let paths: Vec<String> = entries
+        .into_iter()
+        .map(|entry| entry.path)
         .collect();
 
     Ok(paths)
@@ -218,8 +199,8 @@ fn capture_dirty_worktree(
     // We use `git add -A` to stage everything, then `git stash create`
     // to build the commit, then `git reset` to restore the index.
     //
-    // TODO(gix): replace git add/stash/reset with GitRepo trait methods
-    // when working-tree-capturing stash and index operations are available.
+    // TODO(gix): replace git add -A and git reset with GitRepo trait methods
+    // when full working-tree staging is available.
 
     // Stage all files (including untracked)
     let add_output = Command::new("git")
@@ -234,43 +215,41 @@ fn capture_dirty_worktree(
     }
 
     // Create a stash commit (does not modify HEAD or stash list)
-    let stash_output = Command::new("git")
-        .args(["stash", "create", "maw: pre-destroy capture"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git stash create")?;
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let stash_result = repo.stash_create()
+        .map_err(|e| {
+            // Restore index state before bailing
+            // TODO(gix): replace git reset with GitRepo trait method
+            let _ = Command::new("git")
+                .args(["reset"])
+                .current_dir(ws_path)
+                .output();
+            anyhow::anyhow!("git stash create failed during capture: {e}")
+        })?;
 
-    if !stash_output.status.success() {
-        let stderr = String::from_utf8_lossy(&stash_output.stderr);
-        // Restore index state before bailing
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
-        bail!("git stash create failed during capture: {}", stderr.trim());
-    }
+    let stash_git_oid = match stash_result {
+        Some(oid) => oid,
+        None => {
+            // `stash_create` returns None if there's nothing to stash
+            // (shouldn't happen since we checked dirty_paths, but be defensive)
+            // TODO(gix): replace git reset with GitRepo trait method
+            let _ = Command::new("git")
+                .args(["reset"])
+                .current_dir(ws_path)
+                .output();
+            tracing::warn!("stash_create returned None despite dirty paths");
+            return Ok(None);
+        }
+    };
 
-    let stash_oid_str = String::from_utf8_lossy(&stash_output.stdout)
-        .trim()
-        .to_string();
-
-    // `git stash create` outputs nothing if there's nothing to stash
-    // (shouldn't happen since we checked dirty_paths, but be defensive)
-    if stash_oid_str.is_empty() {
-        // Restore index
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
-        tracing::warn!("git stash create produced no output despite dirty paths");
-        return Ok(None);
-    }
-
+    let stash_oid_str = stash_git_oid.to_string();
     let commit_oid = GitOid::new(&stash_oid_str)
         .map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
 
     // Restore the index to its pre-add state (don't leave staged changes
     // behind — the workspace is about to be destroyed, but be clean anyway)
+    // TODO(gix): replace git reset with GitRepo trait method
     let _ = Command::new("git")
         .args(["reset"])
         .current_dir(ws_path)
@@ -307,7 +286,7 @@ fn capture_dirty_worktree(
 ///
 /// Uses `git rev-parse --git-common-dir` to find the shared git directory,
 /// then derives the repo root from it.
-// TODO(gix): replace with GitRepo trait method when repo-root discovery is available
+// TODO(gix): replace with a dedicated GitRepo method for repo-root discovery
 fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])

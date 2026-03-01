@@ -314,7 +314,8 @@ pub(crate) fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Stash uncommitted changes. Returns `true` if there was something to stash.
-// TODO(gix): replace with GitRepo trait method when `git stash --include-untracked` is supported.
+// TODO(gix): `git stash --include-untracked` captures untracked files; GitRepo::stash_create()
+// does not push to the stash stack and may not capture untracked files. Kept as CLI for now.
 #[allow(dead_code)]
 pub(crate) fn stash_changes(ws_path: &Path) -> Result<bool> {
     let output = Command::new("git")
@@ -333,17 +334,19 @@ pub(crate) fn stash_changes(ws_path: &Path) -> Result<bool> {
 }
 
 /// Checkout the workspace HEAD to a specific epoch OID (detached).
-// TODO(gix): replace with GitRepo trait method when `git checkout --detach` is supported.
 #[allow(dead_code)]
+// TODO(gix): checkout_tree() does not update HEAD, and write_ref("HEAD")
+// doesn't reliably create a detached HEAD in linked worktrees. Keep
+// `git checkout --detach` until gix gains proper worktree HEAD support.
 pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["checkout", "--detach", epoch_oid])
         .current_dir(ws_path)
         .output()
-        .context("Failed to run git checkout --detach")?;
+        .context("failed to run git checkout --detach")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout --detach failed: {}", stderr.trim());
+        bail!("git checkout --detach {epoch_oid} failed: {}", stderr.trim());
     }
     Ok(())
 }
@@ -390,7 +393,8 @@ pub(crate) fn pop_stash_and_detect_conflicts(
 /// - `UU` — both modified (content conflict)
 /// - `AU` / `UA` — added/updated conflict
 /// - `DU` / `UD` — deleted/updated conflict
-// TODO(gix): replace with GitRepo trait method when gix status reports conflict markers.
+// TODO(gix): GitRepo::status() does not yet report conflict markers (UU/AA/DD).
+// Keep CLI for conflict detection until gix reports merge conflicts.
 pub(crate) fn detect_conflicts_in_worktree(
     ws_path: &Path,
 ) -> Result<Vec<WorkingCopyConflict>> {
@@ -460,19 +464,12 @@ pub(crate) fn snapshot_working_copy(
     ws_name: &str,
 ) -> Result<Option<SnapshotRef>> {
     // Step 1: Check for dirty state.
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git status --porcelain")?;
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let is_dirty = repo.is_dirty()
+        .map_err(|e| anyhow::anyhow!("is_dirty check failed: {e}"))?;
 
-    if !status_output.status.success() {
-        let stderr = String::from_utf8_lossy(&status_output.stderr);
-        bail!("git status --porcelain failed: {}", stderr.trim());
-    }
-
-    let status_str = String::from_utf8_lossy(&status_output.stdout);
-    if status_str.trim().is_empty() {
+    if !is_dirty {
         tracing::debug!("working copy is clean, skipping snapshot");
         return Ok(None);
     }
@@ -501,35 +498,30 @@ pub(crate) fn snapshot_working_copy(
     }
 
     // Step 3: Create a stash commit (does NOT modify HEAD or stash list).
-    let stash_output = Command::new("git")
-        .args(["stash", "create", "maw: working-copy snapshot"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git stash create")?;
+    let stash_result = repo.stash_create()
+        .map_err(|e| {
+            // Restore index before bailing.
+            // TODO(gix): replace git reset with GitRepo trait method
+            let _ = Command::new("git")
+                .args(["reset"])
+                .current_dir(ws_path)
+                .output();
+            anyhow::anyhow!("stash_create failed during snapshot: {e}")
+        })?;
 
-    if !stash_output.status.success() {
-        let stderr = String::from_utf8_lossy(&stash_output.stderr);
-        // Restore index before bailing.
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
-        bail!("git stash create failed during snapshot: {}", stderr.trim());
-    }
-
-    let stash_oid = String::from_utf8_lossy(&stash_output.stdout)
-        .trim()
-        .to_string();
-
-    if stash_oid.is_empty() {
-        // Shouldn't happen since we checked status, but be defensive.
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
-        tracing::warn!("git stash create produced no output despite dirty status");
-        return Ok(None);
-    }
+    let stash_oid = match stash_result {
+        Some(oid) => oid.to_string(),
+        None => {
+            // Shouldn't happen since we checked status, but be defensive.
+            // TODO(gix): replace git reset with GitRepo trait method
+            let _ = Command::new("git")
+                .args(["reset"])
+                .current_dir(ws_path)
+                .output();
+            tracing::warn!("stash_create returned None despite dirty status");
+            return Ok(None);
+        }
+    };
 
     // Step 4: Pin to durable ref (crash-safe).
     let oid = GitOid::new(&stash_oid)
@@ -611,48 +603,48 @@ pub(crate) fn checkout_to(
 
 /// Replay a snapshot onto the current working tree.
 ///
-/// Uses `git stash apply <oid>` to reapply the captured changes. Unlike the
+/// Uses `stash_apply()` to reapply the captured changes. Unlike the
 /// legacy stash-based helpers, this does NOT pop from the stash stack (the
-/// snapshot was created with `git stash create`, not `git stash push`).
+/// snapshot was created with `stash_create`, not `git stash push`).
 ///
 /// Returns:
 /// - `SnapshotReplayResult::Clean` if all changes applied without conflict.
 /// - `SnapshotReplayResult::Conflicts(list)` if there are conflict markers
 ///   in the working tree. The conflicts are left as markers (working-copy-preserving —
 ///   conflicts are data, not errors).
-// TODO(gix): replace with GitRepo trait method when `git stash apply` is supported.
 pub(crate) fn replay_snapshot(
     ws_path: &Path,
     snapshot: &SnapshotRef,
 ) -> Result<SnapshotReplayResult> {
-    let output = Command::new("git")
-        .args(["stash", "apply", &snapshot.oid])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git stash apply")?;
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let oid: maw_git::GitOid = snapshot.oid.parse()
+        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
 
-    if output.status.success() {
-        tracing::info!("snapshot replayed cleanly");
-        return Ok(SnapshotReplayResult::Clean);
+    match repo.stash_apply(oid) {
+        Ok(()) => {
+            tracing::info!("snapshot replayed cleanly");
+            return Ok(SnapshotReplayResult::Clean);
+        }
+        Err(_e) => {
+            // stash apply failed — check for conflict markers.
+            let conflicts = detect_conflicts_in_worktree(ws_path)?;
+            if conflicts.is_empty() {
+                // Something else went wrong (not a merge conflict).
+                bail!(
+                    "stash_apply failed (no conflicts detected): {}",
+                    _e
+                );
+            }
+
+            tracing::info!(
+                conflict_count = conflicts.len(),
+                "snapshot replay produced conflicts (left as markers in working tree)"
+            );
+
+            return Ok(SnapshotReplayResult::Conflicts(conflicts));
+        }
     }
-
-    // stash apply failed — check for conflict markers.
-    let conflicts = detect_conflicts_in_worktree(ws_path)?;
-    if conflicts.is_empty() {
-        // Something else went wrong (not a merge conflict).
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git stash apply failed (no conflicts detected): {}",
-            stderr.trim()
-        );
-    }
-
-    tracing::info!(
-        conflict_count = conflicts.len(),
-        "snapshot replay produced conflicts (left as markers in working tree)"
-    );
-
-    Ok(SnapshotReplayResult::Conflicts(conflicts))
 }
 
 /// Delete the snapshot ref for a workspace.
@@ -740,6 +732,10 @@ pub(crate) fn preserve_checkout_replay(
     // We want to know if the user has made any changes since they last synced.
     // A workspace is "clean" if its index and worktree match the base epoch,
     // regardless of where HEAD currently points (e.g. if a branch moved).
+    //
+    // TODO(gix): These diff-against-base-epoch checks need a more targeted
+    // GitRepo method (e.g. diff_trees with index). For now, keep CLI since
+    // is_dirty() only checks HEAD, not an arbitrary base epoch.
     let is_index_clean = Command::new("git")
         .args(["diff", "--cached", "--quiet", base_epoch])
         .current_dir(ws_path)
@@ -1012,7 +1008,8 @@ fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
 // ---------------------------------------------------------------------------
 
 /// Run `git status --porcelain` and return the raw output.
-// TODO(gix): replace with GitRepo::status() when gix reports untracked files and conflict markers.
+// TODO(gix): GitRepo::status() does not yet report conflict markers (UU/AA/DD).
+// Need raw porcelain output for conflict detection in has_conflict_markers().
 fn git_status_porcelain(ws_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])

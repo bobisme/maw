@@ -20,6 +20,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use maw_git::GitRepo as _;
 use serde::Serialize;
 
 use crate::audit::{self, AuditEvent};
@@ -399,41 +400,17 @@ fn parse_recovery_ref_name(ref_name: &str) -> Option<(String, String)> {
 }
 
 fn list_recovery_refs(git_cwd: &Path) -> Result<Vec<RecoveryRef>> {
-    let output = Command::new("git")
-        .args([
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            RECOVERY_PREFIX,
-        ])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git for-each-ref for recovery refs")?;
+    let repo = maw_git::GixRepo::open(git_cwd)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", git_cwd.display()))?;
+    let refs = repo.list_refs(RECOVERY_PREFIX)
+        .map_err(|e| anyhow::anyhow!("list_refs failed: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git for-each-ref failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut out: Vec<RecoveryRef> = Vec::new();
 
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let ref_name = match parts.next() {
-            Some(v) => v,
-            None => continue,
-        };
-        let oid = match parts.next() {
-            Some(v) => v,
-            None => continue,
-        };
-        if let Some((ws, ts)) = parse_recovery_ref_name(ref_name) {
+    for (ref_name, oid) in refs {
+        if let Some((ws, ts)) = parse_recovery_ref_name(ref_name.as_str()) {
             out.push(RecoveryRef {
-                ref_name: ref_name.to_string(),
+                ref_name: ref_name.as_str().to_string(),
                 workspace: ws,
                 timestamp: ts,
                 oid: oid.to_string(),
@@ -524,6 +501,9 @@ fn git_grep_hits(
     Ok(hits)
 }
 
+// TODO(gix): `git show <oid>:<path>` requires tree-walking to find a blob at a nested
+// path. GitRepo has read_tree() + read_blob() but no "resolve path in tree" helper.
+// Keep CLI until a path-resolution helper is added.
 fn read_file_lines(git_cwd: &Path, oid: &str, path: &str) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args(["show", &format!("{oid}:{path}")])
@@ -842,23 +822,15 @@ pub fn show_file_by_ref(recovery_ref: &str, path: &str) -> Result<()> {
 }
 
 fn resolve_ref_to_oid(git_cwd: &Path, reference: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to resolve recovery ref")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to resolve recovery ref '{reference}': {}",
-            stderr.trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let repo = maw_git::GixRepo::open(git_cwd)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", git_cwd.display()))?;
+    let spec = format!("{reference}^{{commit}}");
+    let oid = repo.rev_parse(&spec)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve recovery ref '{reference}': {e}"))?;
+    Ok(oid.to_string())
 }
 
+// TODO(gix): same as read_file_lines — needs path-resolution in tree.
 fn show_file_at_oid(git_cwd: &Path, oid: &str, path: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["show", &format!("{oid}:{path}")])
@@ -902,6 +874,7 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
 
     // Use git show <oid>:<path> to retrieve the file content.
     // Run from the git common dir (repo root) so the ref resolves.
+    // TODO(gix): needs path-resolution in tree (read_commit + tree walk + read_blob).
     let git_cwd = super::git_cwd()?;
     let output = Command::new("git")
         .args(["show", &format!("{oid}:{path}")])
@@ -1076,44 +1049,25 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Populate a workspace from a snapshot OID using git2-style operations.
+/// Populate a workspace from a snapshot OID.
 ///
-/// Uses `git read-tree` to load the snapshot tree into the index, then
-/// `git checkout-index` to materialize the files.
+/// Uses `checkout_tree()` to materialize the snapshot tree into the working
+/// directory, then resets the index back to HEAD so files show as unstaged.
 fn populate_from_snapshot(ws_path: &std::path::Path, oid: &str) -> Result<()> {
-    // For stash commits (WorktreeCapture), the worktree state is stored
-    // in the third parent's tree. But `git read-tree` on the stash commit
-    // itself accesses the top-level tree which includes the index state.
-    //
-    // The safest approach: use `git checkout <oid> -- .` which overwrites
-    // the working tree with the snapshot's content.
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let git_oid: maw_git::GitOid = oid.parse()
+        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{oid}': {e}"))?;
 
-    // First, read the snapshot tree into the index
-    let read_tree = Command::new("git")
-        .args(["read-tree", oid])
-        .current_dir(ws_path)
-        .output()
-        .context("git read-tree failed")?;
-
-    if !read_tree.status.success() {
-        let stderr = String::from_utf8_lossy(&read_tree.stderr);
-        bail!("git read-tree failed: {}", stderr.trim());
-    }
-
-    // Then checkout the index to the working tree (overwrite existing files)
-    let checkout = Command::new("git")
-        .args(["checkout-index", "--all", "--force"])
-        .current_dir(ws_path)
-        .output()
-        .context("git checkout-index failed")?;
-
-    if !checkout.status.success() {
-        let stderr = String::from_utf8_lossy(&checkout.stderr);
-        bail!("git checkout-index failed: {}", stderr.trim());
-    }
+    // Read the commit to get its tree OID, then checkout the tree
+    let commit_info = repo.read_commit(git_oid)
+        .map_err(|e| anyhow::anyhow!("failed to read snapshot commit {oid}: {e}"))?;
+    repo.checkout_tree(commit_info.tree_oid, ws_path)
+        .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
 
     // Reset the index back to HEAD so the workspace shows snapshot files
     // as unstaged modifications (not staged additions)
+    // TODO(gix): replace git reset with GitRepo trait method
     let reset = Command::new("git")
         .args(["reset"])
         .current_dir(ws_path)

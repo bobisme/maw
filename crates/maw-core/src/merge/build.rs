@@ -25,10 +25,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -193,14 +190,14 @@ impl From<std::io::Error> for BuildError {
 /// identical tree content produces an identical tree OID. Commit OIDs will
 /// vary because they include a real timestamp.
 pub fn build_merge_commit(
-    root: &Path,
+    repo: &dyn maw_git::GitRepo,
     epoch: &EpochId,
     workspace_ids: &[WorkspaceId],
     resolved: &[ResolvedChange],
     message: Option<&str>,
 ) -> Result<GitOid, BuildError> {
     // Step 1: Read the epoch tree into a flat map path -> (mode, blob_oid).
-    let mut tree = read_epoch_tree(root, epoch)?;
+    let mut tree = read_epoch_tree(repo, epoch)?;
 
     // Step 2: Apply resolved changes (sorted for determinism).
     let mut sorted = resolved.to_vec();
@@ -209,7 +206,7 @@ pub fn build_merge_commit(
     for change in &sorted {
         match change {
             ResolvedChange::Upsert { path, content } => {
-                let blob_oid = write_blob(root, content)?;
+                let blob_oid = write_blob(repo, content)?;
                 // Regular file mode. We preserve original mode if the file
                 // already exists in the tree; otherwise use 100644.
                 let mode = tree
@@ -224,7 +221,7 @@ pub fn build_merge_commit(
     }
 
     // Step 3: Build git tree objects bottom-up.
-    let root_tree_oid = build_tree(root, &tree)?;
+    let root_tree_oid = build_tree(repo, &tree)?;
 
     // Step 4: Build commit message.
     let commit_msg = message.map_or_else(
@@ -241,7 +238,7 @@ pub fn build_merge_commit(
     );
 
     // Step 5: Create the commit.
-    let commit_oid = create_commit(root, epoch, &root_tree_oid, &commit_msg)?;
+    let commit_oid = create_commit(repo, epoch, &root_tree_oid, &commit_msg)?;
 
     Ok(commit_oid)
 }
@@ -256,117 +253,97 @@ pub fn build_merge_commit(
 /// which is required for deterministic tree building.
 type FlatTree = BTreeMap<PathBuf, (String, String)>;
 
-/// Read the epoch's flat tree using `git ls-tree -r <epoch>`.
+/// Read the epoch's flat tree using `GitRepo::read_tree()` and `read_commit()`.
 ///
-/// Returns a `BTreeMap` from relative path to `(mode, blob_oid)`.
-fn read_epoch_tree(root: &Path, epoch: &EpochId) -> Result<FlatTree, BuildError> {
-    // `-r` recurses into subtrees, giving a fully flat list of blobs.
-    // `--full-tree` ensures paths are always relative to the repo root.
-    // `--long` is not used — we only need mode, type, OID, and path.
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "--full-tree", epoch.as_str()])
-        .current_dir(root)
-        .output()?;
+/// Recursively walks the tree to produce a flat `BTreeMap` from relative path
+/// to `(mode, blob_oid)`.
+fn read_epoch_tree(repo: &dyn maw_git::GitRepo, epoch: &EpochId) -> Result<FlatTree, BuildError> {
+    // Resolve the epoch commit to its tree OID.
+    let epoch_oid = epoch.as_str().parse::<maw_git::GitOid>().map_err(|_| {
+        BuildError::InvalidOid {
+            context: "epoch OID parse".to_owned(),
+            raw: epoch.as_str().to_owned(),
+        }
+    })?;
+    let commit_info = repo.read_commit(epoch_oid).map_err(|e| {
+        BuildError::GitCommand {
+            command: format!("read_commit {}", epoch.as_str()),
+            stderr: e.to_string(),
+            exit_code: None,
+        }
+    })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(BuildError::GitCommand {
-            command: format!("git ls-tree -r --full-tree {}", epoch.as_str()),
-            stderr,
-            exit_code: output.status.code(),
-        });
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
     let mut tree = FlatTree::new();
-
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Format: "<mode> blob <oid>\t<path>"
-        // We only include blobs (ignore tree entries — they appear in -r
-        // output as recursive entries, but we only want blobs).
-        let (meta, path_str) =
-            line.split_once('\t')
-                .ok_or_else(|| BuildError::MalformedLsTree {
-                    line: line.to_owned(),
-                })?;
-
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        if parts.len() < 3 {
-            return Err(BuildError::MalformedLsTree {
-                line: line.to_owned(),
-            });
-        }
-
-        let mode = parts[0].to_owned();
-        let obj_type = parts[1];
-        let oid = parts[2].to_owned();
-
-        // Skip tree entries (they are synthesized during build_tree).
-        if obj_type != "blob" {
-            continue;
-        }
-
-        tree.insert(PathBuf::from(path_str), (mode, oid));
-    }
-
+    walk_tree_recursive(repo, commit_info.tree_oid, &PathBuf::new(), &mut tree)?;
     Ok(tree)
 }
 
-/// Write a blob object to the git object store.
+/// Recursively walk a tree object, collecting blobs into a flat map.
+fn walk_tree_recursive(
+    repo: &dyn maw_git::GitRepo,
+    tree_oid: maw_git::GitOid,
+    prefix: &Path,
+    flat: &mut FlatTree,
+) -> Result<(), BuildError> {
+    let entries = repo.read_tree(tree_oid).map_err(|e| BuildError::GitCommand {
+        command: format!("read_tree {tree_oid}"),
+        stderr: e.to_string(),
+        exit_code: None,
+    })?;
+
+    for entry in entries {
+        let entry_path = if prefix == Path::new("") {
+            PathBuf::from(&entry.name)
+        } else {
+            prefix.join(&entry.name)
+        };
+
+        match entry.mode {
+            maw_git::EntryMode::Tree => {
+                // Recurse into subtrees.
+                walk_tree_recursive(repo, entry.oid, &entry_path, flat)?;
+            }
+            _ => {
+                // Blob, executable, symlink, gitlink — collect as flat entry.
+                let mode_str = match entry.mode {
+                    maw_git::EntryMode::Blob => "100644",
+                    maw_git::EntryMode::BlobExecutable => "100755",
+                    maw_git::EntryMode::Link => "120000",
+                    maw_git::EntryMode::Commit => "160000",
+                    maw_git::EntryMode::Tree => unreachable!(),
+                };
+                flat.insert(entry_path, (mode_str.to_owned(), entry.oid.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write a blob object to the git object store via `GitRepo::write_blob`.
 ///
-/// Pipes `content` into `git hash-object -w --stdin` and returns the OID.
-fn write_blob(root: &Path, content: &[u8]) -> Result<GitOid, BuildError> {
-    let mut child = Command::new("git")
-        .args(["hash-object", "-w", "--stdin"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    // Write content to stdin.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(content).map_err(BuildError::Io)?;
-        // stdin is dropped here, closing the pipe.
-    }
-
-    let output = child.wait_with_output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(BuildError::GitCommand {
-            command: "git hash-object -w --stdin".to_owned(),
-            stderr,
-            exit_code: output.status.code(),
-        });
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    GitOid::new(&raw).map_err(|_| BuildError::InvalidOid {
-        context: "hash-object output".to_owned(),
-        raw,
+/// Returns the OID of the written blob.
+fn write_blob(repo: &dyn maw_git::GitRepo, content: &[u8]) -> Result<GitOid, BuildError> {
+    let git_oid = repo.write_blob(content).map_err(|e| BuildError::GitCommand {
+        command: "write_blob".to_owned(),
+        stderr: e.to_string(),
+        exit_code: None,
+    })?;
+    let oid_str = git_oid.to_string();
+    GitOid::new(&oid_str).map_err(|_| BuildError::InvalidOid {
+        context: "write_blob output".to_owned(),
+        raw: oid_str,
     })
 }
 
-/// Build the full git tree hierarchy from a flat path → (mode, oid) map.
+/// Build the full git tree hierarchy from a flat path -> (mode, oid) map.
 ///
-/// `git mktree` builds a single tree level from its stdin. For nested paths,
-/// we must build bottom-up: deepest subtrees first, then include the
-/// resulting tree OIDs as entries in their parents.
+/// Uses `GitRepo::write_tree()` to build tree objects bottom-up: deepest
+/// subtrees first, then include the resulting tree OIDs as entries in their
+/// parents.
 ///
 /// Returns the root tree OID.
-fn build_tree(root: &Path, flat: &FlatTree) -> Result<GitOid, BuildError> {
-    // Group blobs by their parent directory path.
-    // `dir_blobs[dir_path]` = list of (mode, "blob", oid, name) for direct children.
-    // `dir_trees[dir_path]` = list of (mode, "tree", oid, name) for subtrees.
-    // We use a HashMap<PathBuf, Vec<_>> where the key is the parent directory.
-
-    // Collect all unique directory paths (excluding root "").
+fn build_tree(repo: &dyn maw_git::GitRepo, flat: &FlatTree) -> Result<GitOid, BuildError> {
+    // Collect all unique directory paths (including root "").
     let mut all_dirs: Vec<PathBuf> = vec![PathBuf::new()]; // root = empty path
 
     for path in flat.keys() {
@@ -387,22 +364,34 @@ fn build_tree(root: &Path, flat: &FlatTree) -> Result<GitOid, BuildError> {
         b_depth.cmp(&a_depth).then(a.cmp(b))
     });
 
-    // Map from directory path → its tree OID (filled in as we process bottom-up).
-    let mut tree_oids: HashMap<PathBuf, String> = HashMap::new();
+    // Map from directory path -> its tree OID (filled in as we process bottom-up).
+    let mut tree_oids: HashMap<PathBuf, maw_git::GitOid> = HashMap::new();
 
     for dir in &all_dirs {
-        // Collect direct-child blob entries for this directory.
-        let mut entries: Vec<String> = Vec::new();
+        let mut tree_entries: Vec<maw_git::TreeEntry> = Vec::new();
 
         // Blob entries: files directly under `dir`.
-        for (path, (mode, oid)) in flat {
+        for (path, (mode_str, oid_str)) in flat {
             let parent = path.parent().map(PathBuf::from).unwrap_or_default();
             if &parent == dir {
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                entries.push(format!("{mode} blob {oid}\t{name}"));
+                    .unwrap_or_default()
+                    .to_owned();
+                let mode = match mode_str.as_str() {
+                    "100755" => maw_git::EntryMode::BlobExecutable,
+                    "120000" => maw_git::EntryMode::Link,
+                    "160000" => maw_git::EntryMode::Commit,
+                    _ => maw_git::EntryMode::Blob,
+                };
+                let oid = oid_str.parse::<maw_git::GitOid>().map_err(|_| {
+                    BuildError::InvalidOid {
+                        context: format!("blob OID for {}", path.display()),
+                        raw: oid_str.clone(),
+                    }
+                })?;
+                tree_entries.push(maw_git::TreeEntry { name, mode, oid });
             }
         }
 
@@ -413,116 +402,86 @@ fn build_tree(root: &Path, flat: &FlatTree) -> Result<GitOid, BuildError> {
                 let name = sub_path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                entries.push(format!("040000 tree {sub_oid}\t{name}"));
+                    .unwrap_or_default()
+                    .to_owned();
+                tree_entries.push(maw_git::TreeEntry {
+                    name,
+                    mode: maw_git::EntryMode::Tree,
+                    oid: *sub_oid,
+                });
             }
         }
 
-        // Sort entries for determinism.
-        entries.sort();
+        // Sort entries by name for determinism.
+        tree_entries.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Build this tree level using `git mktree`.
-        let mktree_input = entries.join("\n") + if entries.is_empty() { "" } else { "\n" };
-        let tree_oid = run_mktree(root, &mktree_input)?;
-        tree_oids.insert(dir.clone(), tree_oid.as_str().to_owned());
+        // Write this tree level.
+        let tree_oid = repo.write_tree(&tree_entries).map_err(|e| {
+            BuildError::GitCommand {
+                command: "write_tree".to_owned(),
+                stderr: e.to_string(),
+                exit_code: None,
+            }
+        })?;
+        tree_oids.insert(dir.clone(), tree_oid);
     }
 
     // The root directory (PathBuf::new()) holds the root tree OID.
-    let root_oid_str = tree_oids.get(&PathBuf::new()).cloned().unwrap_or_default();
+    let root_git_oid = tree_oids
+        .get(&PathBuf::new())
+        .copied()
+        .ok_or_else(|| BuildError::InvalidOid {
+            context: "root tree OID from write_tree".to_owned(),
+            raw: String::new(),
+        })?;
 
-    GitOid::new(&root_oid_str).map_err(|_| BuildError::InvalidOid {
-        context: "root tree OID from mktree".to_owned(),
-        raw: root_oid_str,
+    let oid_str = root_git_oid.to_string();
+    GitOid::new(&oid_str).map_err(|_| BuildError::InvalidOid {
+        context: "root tree OID from write_tree".to_owned(),
+        raw: oid_str,
     })
 }
 
-/// Run `git mktree` with the given stdin input and return the tree OID.
-fn run_mktree(root: &Path, input: &str) -> Result<GitOid, BuildError> {
-    let mut child = Command::new("git")
-        .args(["mktree"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes()).map_err(BuildError::Io)?;
-    }
-
-    let output = child.wait_with_output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(BuildError::GitCommand {
-            command: "git mktree".to_owned(),
-            stderr,
-            exit_code: output.status.code(),
-        });
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    GitOid::new(&raw).map_err(|_| BuildError::InvalidOid {
-        context: "git mktree output".to_owned(),
-        raw,
-    })
-}
-
-/// Create a git commit object.
+/// Create a git commit object via `GitRepo::create_commit`.
 ///
-/// Uses `git commit-tree <tree-oid> -p <parent-oid> -m <message>`.
-/// Sets `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` to the current real time
-/// so that merge commits carry accurate timestamps.
-///
-/// # Note on identity
-///
-/// `git commit-tree` uses the repo's `user.name` and `user.email` config for
-/// authorship.
+/// Uses the repo's configured `user.name` and `user.email` for authorship.
 ///
 /// # Determinism
 ///
 /// Tree content is still fully deterministic (same inputs produce the same
-/// tree OID). Commit OIDs will vary because they include the real timestamp,
+/// tree OID). Commit OIDs will vary because they include a real timestamp,
 /// but this is the expected behavior for merge commits that should reflect
 /// when they actually occurred.
 fn create_commit(
-    root: &Path,
+    repo: &dyn maw_git::GitRepo,
     parent: &EpochId,
     tree: &GitOid,
     message: &str,
 ) -> Result<GitOid, BuildError> {
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let timestamp = format!("{now_secs} +0000");
+    let tree_git_oid = tree.as_str().parse::<maw_git::GitOid>().map_err(|_| {
+        BuildError::InvalidOid {
+            context: "tree OID parse for create_commit".to_owned(),
+            raw: tree.as_str().to_owned(),
+        }
+    })?;
+    let parent_git_oid = parent.as_str().parse::<maw_git::GitOid>().map_err(|_| {
+        BuildError::InvalidOid {
+            context: "parent OID parse for create_commit".to_owned(),
+            raw: parent.as_str().to_owned(),
+        }
+    })?;
 
-    let output = Command::new("git")
-        .args([
-            "commit-tree",
-            tree.as_str(),
-            "-p",
-            parent.as_str(),
-            "-m",
-            message,
-        ])
-        .current_dir(root)
-        .env("GIT_AUTHOR_DATE", &timestamp)
-        .env("GIT_COMMITTER_DATE", &timestamp)
-        .output()?;
+    let commit_git_oid = repo
+        .create_commit(tree_git_oid, &[parent_git_oid], message, None)
+        .map_err(|e| BuildError::GitCommand {
+            command: format!("create_commit tree={} parent={}", tree.as_str(), parent.as_str()),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(BuildError::GitCommand {
-            command: format!("git commit-tree {} -p {}", tree.as_str(), parent.as_str()),
-            stderr,
-            exit_code: output.status.code(),
-        });
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let raw = commit_git_oid.to_string();
     GitOid::new(&raw).map_err(|_| BuildError::InvalidOid {
-        context: "git commit-tree output".to_owned(),
+        context: "create_commit output".to_owned(),
         raw,
     })
 }
@@ -544,7 +503,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Set up a fresh git repo with git identity configured.
-    fn setup_git_repo() -> (TempDir, EpochId) {
+    fn setup_git_repo() -> (TempDir, EpochId, Box<dyn maw_git::GitRepo>) {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
 
@@ -560,7 +519,12 @@ mod tests {
 
         let oid = git_oid(root, "HEAD");
         let epoch = EpochId::new(oid.as_str()).unwrap();
-        (dir, epoch)
+        let repo = open_test_repo(root);
+        (dir, epoch, repo)
+    }
+
+    fn open_test_repo(root: &Path) -> Box<dyn maw_git::GitRepo> {
+        Box::new(maw_git::GixRepo::open(root).unwrap())
     }
 
     fn run_git(root: &Path, args: &[&str]) {
@@ -651,10 +615,10 @@ mod tests {
 
     #[test]
     fn build_with_no_changes_matches_epoch_tree() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(root, &epoch, &ws_ids(&["alpha"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], None).unwrap();
 
         // The new commit should have the same tree as the epoch.
         let epoch_tree = git_oid(root, &format!("{}^{{tree}}", epoch.as_str()));
@@ -671,7 +635,7 @@ mod tests {
 
     #[test]
     fn build_adds_new_file() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let resolved = vec![ResolvedChange::Upsert {
@@ -680,7 +644,7 @@ mod tests {
         }];
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
 
         // File should be present in the new commit.
         let content = git_file_content(root, commit_oid.as_str(), "src/main.rs");
@@ -702,7 +666,7 @@ mod tests {
 
     #[test]
     fn build_modifies_existing_file() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let resolved = vec![ResolvedChange::Upsert {
@@ -711,7 +675,7 @@ mod tests {
         }];
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
 
         let content = git_file_content(root, commit_oid.as_str(), "README.md");
         assert_eq!(content, "# Updated\n");
@@ -723,7 +687,7 @@ mod tests {
 
     #[test]
     fn build_deletes_file() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let resolved = vec![ResolvedChange::Delete {
@@ -731,7 +695,7 @@ mod tests {
         }];
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
 
         // File should be absent from the new tree.
         let files = git_ls_tree_flat(root, commit_oid.as_str());
@@ -748,14 +712,14 @@ mod tests {
     #[test]
     fn build_mixed_changes() {
         // Set up epoch with two files: README.md and lib.rs
-        let (dir, epoch0) = setup_git_repo();
+        let (dir, _epoch0, _repo0) = setup_git_repo();
         let root = dir.path();
         fs::write(root.join("lib.rs"), "pub fn lib() {}\n").unwrap();
         run_git(root, &["add", "lib.rs"]);
         run_git(root, &["commit", "-m", "add lib.rs"]);
         let epoch_oid = git_oid(root, "HEAD");
         let epoch = EpochId::new(epoch_oid.as_str()).unwrap();
-        drop(epoch0); // epoch0 not used further
+        let repo = open_test_repo(root);
 
         let resolved = vec![
             ResolvedChange::Upsert {
@@ -772,7 +736,7 @@ mod tests {
         ];
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["a", "b"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["a", "b"]), &resolved, None).unwrap();
 
         // README.md modified
         let readme = git_file_content(root, commit_oid.as_str(), "README.md");
@@ -798,11 +762,11 @@ mod tests {
 
     #[test]
     fn build_commit_message_default() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["beta", "alpha"]), &[], None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["beta", "alpha"]), &[], None).unwrap();
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
@@ -817,11 +781,11 @@ mod tests {
 
     #[test]
     fn build_commit_message_custom() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["a"]), &[], Some("custom: my merge"))
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["a"]), &[], Some("custom: my merge"))
                 .unwrap();
 
         let log_out = Command::new("git")
@@ -839,10 +803,10 @@ mod tests {
 
     #[test]
     fn build_commit_parent_is_epoch() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(root, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
 
         // New commit's parent must be the epoch.
         let parent_out = Command::new("git")
@@ -860,7 +824,7 @@ mod tests {
 
     #[test]
     fn build_tree_is_deterministic() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let resolved = vec![
@@ -875,9 +839,9 @@ mod tests {
         ];
 
         let oid1 =
-            build_merge_commit(root, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
         let oid2 =
-            build_merge_commit(root, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
 
         // Tree OIDs must be identical (content-addressed).
         let tree1 = git_oid(root, &format!("{}^{{tree}}", oid1.as_str()));
@@ -891,7 +855,7 @@ mod tests {
 
     #[test]
     fn build_commit_uses_real_timestamp() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let before = std::time::SystemTime::now()
@@ -900,7 +864,7 @@ mod tests {
             .as_secs();
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
 
         let after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -930,7 +894,7 @@ mod tests {
 
     #[test]
     fn build_handles_nested_paths() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let resolved = vec![
@@ -945,7 +909,7 @@ mod tests {
         ];
 
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["ws"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None).unwrap();
 
         let files = git_ls_tree_flat(root, commit_oid.as_str());
         assert!(
@@ -964,10 +928,10 @@ mod tests {
 
     #[test]
     fn build_empty_workspace_list_uses_generic_message() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(root, &epoch, &[], &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &[], &[], None).unwrap();
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
@@ -984,7 +948,7 @@ mod tests {
 
     #[test]
     fn build_delete_nonexistent_file_is_noop() {
-        let (dir, epoch) = setup_git_repo();
+        let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
         let resolved = vec![ResolvedChange::Delete {
@@ -993,7 +957,7 @@ mod tests {
 
         // Should succeed (deleting absent path is harmless)
         let commit_oid =
-            build_merge_commit(root, &epoch, &ws_ids(&["ws"]), &resolved, None).unwrap();
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None).unwrap();
 
         // README.md should still be present
         let files = git_ls_tree_flat(root, commit_oid.as_str());

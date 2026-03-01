@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use maw_git::GitRepo as _;
 
 /// Upgrade a v1 repo (.workspaces/) to v2 bare model (ws/).
 ///
@@ -268,30 +269,20 @@ fn relocate_default_workspace() -> Result<()> {
 
 /// Set git core.bare = true.
 fn set_git_bare() -> Result<()> {
-    let check = Command::new("git").args(["config", "core.bare"]).output();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let repo = maw_git::GixRepo::open(&cwd)
+        .map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
 
-    if let Ok(out) = &check {
-        let val = String::from_utf8_lossy(&out.stdout);
+    if let Ok(Some(val)) = repo.read_config("core.bare") {
         if val.trim() == "true" {
             println!("[OK] git core.bare already true");
             return Ok(());
         }
     }
 
-    let output = Command::new("git")
-        .args(["config", "core.bare", "true"])
-        .output()
-        .context("Failed to set git core.bare")?;
-
-    if output.status.success() {
-        println!("[OK] Set git core.bare = true");
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to set git core.bare: {}\n  Try: git config core.bare true",
-            stderr.trim()
-        );
-    }
+    repo.write_config("core.bare", "true")
+        .map_err(|e| anyhow::anyhow!("Failed to set git core.bare: {e}\n  Try: git config core.bare true"))?;
+    println!("[OK] Set git core.bare = true");
 
     Ok(())
 }
@@ -311,6 +302,8 @@ fn remove_old_workspaces_dir() -> Result<()> {
     Ok(())
 }
 
+// TODO(gix): symbolic-ref HEAD is not available via GitRepo trait.
+// Keep CLI for now.
 fn fix_git_head() -> Result<()> {
     let head = Command::new("git").args(["symbolic-ref", "HEAD"]).output();
     if let Ok(out) = &head
@@ -345,6 +338,8 @@ fn set_conflict_marker_style() {
     println!("[OK] Skipping jj conflict-marker-style (not required in Manifold mode)");
 }
 
+// TODO(gix): `git ls-tree -r --name-only HEAD` requires recursive tree walk.
+// Keep CLI.
 fn clean_root_source_files() -> Result<()> {
     let list = Command::new("git")
         .args(["ls-tree", "-r", "--name-only", "HEAD"])

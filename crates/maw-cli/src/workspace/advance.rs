@@ -15,9 +15,9 @@
 //! 9. Report conflicts if any (working-copy-preserving — left as markers).
 
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use maw_git::GitRepo as _;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
@@ -237,16 +237,11 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
 
 /// Get the HEAD OID of a worktree (the workspace's current base epoch).
 fn get_worktree_head(ws_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to run git rev-parse HEAD")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-parse HEAD failed: {}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let oid = repo.rev_parse("HEAD")
+        .map_err(|e| anyhow::anyhow!("rev_parse HEAD failed: {e}"))?;
+    Ok(oid.to_string())
 }
 
 // ---------------------------------------------------------------------------

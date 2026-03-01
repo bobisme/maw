@@ -30,9 +30,7 @@
 //! ```
 
 use std::fmt;
-use std::io::Write as IoWrite;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::model::types::{GitOid, WorkspaceId};
 use crate::refs as manifold_refs;
@@ -140,54 +138,51 @@ impl From<std::io::Error> for OpLogWriteError {
 
 /// Write an [`Operation`] as a git blob and return its OID.
 ///
-/// Serializes the operation to canonical JSON and pipes it to
-/// `git hash-object -w --stdin`. The returned OID is the operation's
+/// Serializes the operation to canonical JSON and writes it via
+/// `GitRepo::write_blob`. The returned OID is the operation's
 /// content-addressed identity.
 ///
 /// # Arguments
-/// * `root` — absolute path to the git repository root.
+/// * `root` — absolute path to the git repository root (used to open a repo).
 /// * `op` — the operation to store.
 ///
 /// # Errors
-/// Returns an error if serialization fails, if git cannot be spawned,
-/// or if git fails to write the blob.
+/// Returns an error if serialization fails or if the blob write fails.
 pub fn write_operation_blob(root: &Path, op: &Operation) -> Result<GitOid, OpLogWriteError> {
+    let repo = open_repo(root)?;
+    write_operation_blob_via(&*repo, op)
+}
+
+/// Write an [`Operation`] as a git blob using a provided `GitRepo` handle.
+///
+/// This is the underlying implementation; [`write_operation_blob`] is a
+/// convenience wrapper that opens a repo at `root`.
+pub fn write_operation_blob_via(
+    repo: &dyn maw_git::GitRepo,
+    op: &Operation,
+) -> Result<GitOid, OpLogWriteError> {
     // 1. Serialize to canonical JSON.
     let json = op.to_canonical_json().map_err(OpLogWriteError::Serialize)?;
 
-    // 2. Spawn `git hash-object -w --stdin` and pipe JSON in.
-    let mut child = Command::new("git")
-        .args(["hash-object", "-w", "--stdin"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    // 2. Write blob via GitRepo trait.
+    let git_oid = repo.write_blob(&json).map_err(|e| OpLogWriteError::HashObject {
+        stderr: e.to_string(),
+        exit_code: None,
+    })?;
 
-    // Write JSON to stdin then close it so git sees EOF.
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "failed to open git stdin")
-        })?;
-        stdin.write_all(&json)?;
-    } // stdin is dropped here, signalling EOF
+    // 3. Convert maw_git::GitOid → maw_core GitOid.
+    let oid_str = git_oid.to_string();
+    GitOid::new(&oid_str).map_err(|_| OpLogWriteError::InvalidOid { raw: oid_str })
+}
 
-    let output = child.wait_with_output()?;
-
-    if !output.status.success() {
-        return Err(OpLogWriteError::HashObject {
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
-
-    // 3. Parse the OID from stdout.
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let oid_str = raw.trim();
-
-    GitOid::new(oid_str).map_err(|_| OpLogWriteError::InvalidOid {
-        raw: oid_str.to_owned(),
-    })
+/// Open a `GixRepo` at the given path.
+fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, OpLogWriteError> {
+    maw_git::GixRepo::open(root)
+        .map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>)
+        .map_err(|e| OpLogWriteError::HashObject {
+            stderr: format!("failed to open repo: {e}"),
+            exit_code: None,
+        })
 }
 
 // ---------------------------------------------------------------------------

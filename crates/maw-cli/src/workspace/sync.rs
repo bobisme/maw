@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+use maw_git::GitRepo as _;
 use tracing::instrument;
 
 use maw_core::backend::WorkspaceBackend;
@@ -140,6 +141,7 @@ pub fn sync(name: Option<&str>, all: bool) -> Result<()> {
 /// Returns `None` if git fails for any reason (invalid repo, unknown OID, etc.).
 /// Callers MUST treat `None` as "has committed work" (i.e. refuse to sync) to
 /// prevent data loss when the workspace state cannot be determined.
+// TODO(gix): GitRepo doesn't have a rev-list --count equivalent. Keep CLI.
 fn committed_ahead_of_epoch(ws_path: &Path, epoch_oid: &str) -> Option<u32> {
     let range = format!("{epoch_oid}..HEAD");
     let output = Command::new("git")
@@ -171,23 +173,12 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
     // Safety: refuse to sync if the workspace has uncommitted changes.
     // `git checkout --detach` would overwrite tracked files, losing staged,
     // unstaged, and untracked work.
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&ws_path)
-        .output()
-        .with_context(|| {
-            format!("Failed to check dirty state for workspace '{ws_name}'")
-        })?;
+    let repo = maw_git::GixRepo::open(&ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let is_dirty = repo.is_dirty()
+        .map_err(|e| anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}"))?;
 
-    if !status_output.status.success() {
-        let stderr = String::from_utf8_lossy(&status_output.stderr);
-        bail!(
-            "Failed to check dirty state for workspace '{ws_name}': {}",
-            stderr.trim()
-        );
-    }
-
-    if !status_output.stdout.is_empty() {
+    if is_dirty {
         bail!(
             "Workspace '{ws_name}' has uncommitted changes that would be lost by sync. \
              Commit or stash first.\n  \
@@ -196,13 +187,17 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         );
     }
 
-    // Use checkout --detach to move HEAD to the new epoch
+    // Detach HEAD at the new epoch to sync the workspace.
+    // TODO(gix): checkout_tree() does not update HEAD, and write_ref("HEAD")
+    // doesn't reliably create a detached HEAD in linked worktrees. Keep
+    // `git checkout --detach` until gix gains proper worktree HEAD support.
     let output = Command::new("git")
         .args(["checkout", "--detach", epoch_oid])
         .current_dir(&ws_path)
         .output()
-        .with_context(|| format!("Failed to sync workspace '{ws_name}'"))?;
-
+        .map_err(|e| anyhow::anyhow!(
+            "Failed to run git checkout in workspace '{ws_name}': {e}"
+        ))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(

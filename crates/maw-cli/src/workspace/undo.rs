@@ -85,6 +85,8 @@ fn collect_added_paths(patch_set: &PatchSet) -> Vec<PathBuf> {
         .collect()
 }
 
+// TODO(gix): `git restore --source <oid> --staged --worktree -- .` has no direct
+// GitRepo equivalent. checkout_tree() is close but doesn't handle staging.
 fn restore_workspace_to_epoch(ws_path: &Path, base_epoch: &EpochId) -> Result<()> {
     let output = Command::new("git")
         .args([

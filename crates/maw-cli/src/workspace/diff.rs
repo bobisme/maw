@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use glob::Pattern;
+use maw_git::GitRepo as _;
 use serde::Serialize;
 
 use maw_core::backend::WorkspaceBackend;
@@ -380,7 +381,7 @@ where
     }
 
     let ws_path = backend.workspace_path(ws_id);
-    let oid = git_stdout_simple(&ws_path, &["rev-parse", "HEAD"])
+    let oid = resolve_rev_oid(&ws_path, "HEAD")
         .with_context(|| format!("Failed to resolve HEAD for workspace '{}'.", ws_id.as_str()))?;
 
     Ok(ResolvedRev {
@@ -556,24 +557,14 @@ fn parse_name_status_z(raw: &[u8]) -> Result<Vec<DiffEntry>> {
 }
 
 fn resolve_rev_oid(root: &Path, rev: &str) -> Result<String> {
-    git_stdout_simple(root, &["rev-parse", rev])
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let oid = repo.rev_parse(rev)
+        .map_err(|e| anyhow::anyhow!("`rev-parse {rev}` failed: {e}"))?;
+    Ok(oid.to_string())
 }
 
-fn git_stdout_simple(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
-    if !out.status.success() {
-        bail!(
-            "`git {}` failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
+// NOTE: git_stdout_simple was replaced by resolve_rev_oid for rev-parse calls.
 
 fn git_stdout(dir: &Path, args: &[String]) -> Result<String> {
     let out = git_stdout_bytes(dir, args)?;

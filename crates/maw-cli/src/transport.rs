@@ -56,6 +56,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use maw_git::GitRepo as _;
 
 use maw_core::model::types::{GitOid, WorkspaceId};
 use maw_core::oplog::types::{OpPayload, Operation};
@@ -146,13 +147,9 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
     cleanup_staging(root);
 
     // Check whether there are any refs/manifold/* refs to push.
-    let refs_exist = Command::new("git")
-        .args(["for-each-ref", "--format=%(refname)", "refs/manifold/"])
-        .current_dir(root)
-        .output()
-        .context("Failed to list refs/manifold/ refs")?;
+    let manifold_refs = list_refs_with_prefix(root, "refs/manifold/")?;
 
-    if refs_exist.stdout.is_empty() {
+    if manifold_refs.is_empty() {
         println!("  No refs/manifold/* refs found — nothing to push.");
         println!("  Hint: run `maw init` to initialize Manifold metadata.");
         return Ok(());
@@ -775,14 +772,13 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
 /// # Errors
 /// Returns a human-readable reason string if validation fails.
 pub fn validate_remote_op_blob(root: &Path, oid: &GitOid) -> Result<(), String> {
-    // 1. Verify the OID exists in the object store.
-    let cat = Command::new("git")
-        .args(["cat-file", "-e", oid.as_str()])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("Failed to spawn git: {e}"))?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| format!("Failed to open repo: {e}"))?;
+    let git_oid: maw_git::GitOid = oid.as_str().parse()
+        .map_err(|e| format!("Invalid OID {}: {e}", oid.as_str()))?;
 
-    if !cat.status.success() {
+    // 1. Verify the OID exists in the object store by trying to read it as a blob.
+    if repo.read_blob(git_oid).is_err() {
         return Err(format!(
             "OID {} does not exist in local object store — fetch may be incomplete",
             oid.as_str()
@@ -799,13 +795,9 @@ pub fn validate_remote_op_blob(root: &Path, oid: &GitOid) -> Result<(), String> 
 
     // 4. Validate parent OIDs exist in the object store.
     for parent in &op.parent_ids {
-        let parent_check = Command::new("git")
-            .args(["cat-file", "-e", parent.as_str()])
-            .current_dir(root)
-            .output()
-            .map_err(|e| format!("Failed to spawn git: {e}"))?;
-
-        if !parent_check.status.success() {
+        let parent_git: maw_git::GitOid = parent.as_str().parse()
+            .map_err(|e| format!("Invalid parent OID {}: {e}", parent.as_str()))?;
+        if repo.read_blob(parent_git).is_err() {
             return Err(format!(
                 "parent OID {} referenced by op {} does not exist locally — \
                  op log may be incomplete or tampered",
@@ -881,37 +873,28 @@ enum AncestryRelation {
 
 /// Determine the ancestry relationship between `local` and `remote` OIDs.
 ///
-/// Uses `git merge-base --is-ancestor` to check ancestry in both directions.
+/// Uses `is_ancestor()` to check ancestry in both directions.
 fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result<AncestryRelation> {
-    // Check: is local an ancestor of remote? (i.e., remote is ahead or equal)
-    let local_is_ancestor = Command::new("git")
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            local.as_str(),
-            remote.as_str(),
-        ])
-        .current_dir(root)
-        .status()
-        .context("Failed to check git ancestry (local→remote)")?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let local_git: maw_git::GitOid = local.as_str().parse()
+        .map_err(|e| anyhow::anyhow!("invalid local OID: {e}"))?;
+    let remote_git: maw_git::GitOid = remote.as_str().parse()
+        .map_err(|e| anyhow::anyhow!("invalid remote OID: {e}"))?;
 
-    if local_is_ancestor.success() {
+    // Check: is local an ancestor of remote? (i.e., remote is ahead or equal)
+    let local_is_ancestor = repo.is_ancestor(local_git, remote_git)
+        .map_err(|e| anyhow::anyhow!("Failed to check git ancestry (local->remote): {e}"))?;
+
+    if local_is_ancestor {
         return Ok(AncestryRelation::RemoteAhead);
     }
 
     // Check: is remote an ancestor of local? (i.e., local is ahead or equal)
-    let remote_is_ancestor = Command::new("git")
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            remote.as_str(),
-            local.as_str(),
-        ])
-        .current_dir(root)
-        .status()
-        .context("Failed to check git ancestry (remote→local)")?;
+    let remote_is_ancestor = repo.is_ancestor(remote_git, local_git)
+        .map_err(|e| anyhow::anyhow!("Failed to check git ancestry (remote->local): {e}"))?;
 
-    if remote_is_ancestor.success() {
+    if remote_is_ancestor {
         return Ok(AncestryRelation::LocalAheadOrEqual);
     }
 
@@ -924,23 +907,12 @@ fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result
 
 /// List all git refs under `prefix`, returning the full ref names.
 fn list_refs_with_prefix(root: &Path, prefix: &str) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["for-each-ref", "--format=%(refname)", prefix])
-        .current_dir(root)
-        .output()
-        .context("Failed to list refs")?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let refs = repo.list_refs(prefix)
+        .map_err(|e| anyhow::anyhow!("list_refs failed: {e}"))?;
 
-    if !output.status.success() {
-        return Ok(vec![]); // No refs is not an error.
-    }
-
-    let refs = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    Ok(refs)
+    Ok(refs.into_iter().map(|(name, _oid)| name.as_str().to_string()).collect())
 }
 
 /// Return the current UTC timestamp in ISO 8601 format.

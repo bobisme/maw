@@ -36,7 +36,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::path::Path;
-use std::process::Command;
 
 use crate::model::types::{GitOid, WorkspaceId};
 use crate::refs;
@@ -173,33 +172,56 @@ pub fn read_head(
 
 /// Read a single operation blob from the git object store.
 ///
-/// Runs `git cat-file -p <oid>`, deserializes the JSON content to an
-/// [`Operation`].
+/// Uses `GitRepo::read_blob` to fetch the blob content, then deserializes
+/// the JSON to an [`Operation`].
 ///
 /// # Arguments
 /// * `root` — absolute path to the git repository root.
 /// * `oid` — the blob OID of the operation to read.
 ///
 /// # Errors
-/// Returns an error if git cannot read the blob or if the blob content
+/// Returns an error if the blob cannot be read or if the blob content
 /// is not a valid [`Operation`] JSON.
 pub fn read_operation(root: &Path, oid: &GitOid) -> Result<Operation, OpLogReadError> {
-    let output = Command::new("git")
-        .args(["cat-file", "-p", oid.as_str()])
-        .current_dir(root)
-        .output()?;
+    let repo = open_repo(root)?;
+    read_operation_via(&*repo, oid)
+}
 
-    if !output.status.success() {
-        return Err(OpLogReadError::CatFile {
+/// Read a single operation blob using a provided `GitRepo` handle.
+///
+/// This is the underlying implementation; [`read_operation`] is a
+/// convenience wrapper that opens a repo at `root`.
+pub fn read_operation_via(
+    repo: &dyn maw_git::GitRepo,
+    oid: &GitOid,
+) -> Result<Operation, OpLogReadError> {
+    let git_oid = oid.as_str().parse::<maw_git::GitOid>().map_err(|_| {
+        OpLogReadError::CatFile {
             oid: oid.as_str().to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
+            stderr: "invalid OID format".to_owned(),
+            exit_code: None,
+        }
+    })?;
 
-    Operation::from_json(&output.stdout).map_err(|e| OpLogReadError::Deserialize {
+    let data = repo.read_blob(git_oid).map_err(|e| OpLogReadError::CatFile {
+        oid: oid.as_str().to_owned(),
+        stderr: e.to_string(),
+        exit_code: None,
+    })?;
+
+    Operation::from_json(&data).map_err(|e| OpLogReadError::Deserialize {
         oid: oid.as_str().to_owned(),
         source: e,
+    })
+}
+
+/// Open a `GixRepo` at the given path.
+fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, OpLogReadError> {
+    maw_git::GixRepo::open(root).map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>).map_err(|e| {
+        OpLogReadError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("failed to open repo: {e}"),
+        ))
     })
 }
 

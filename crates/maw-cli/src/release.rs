@@ -2,6 +2,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use maw_git::GitRepo as _;
 
 use crate::workspace::{MawConfig, git_cwd, repo_root};
 
@@ -42,34 +43,23 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 
     // Step 1: Ensure branch is aligned safely with the current epoch
     println!("Ensuring {branch} is at current epoch...");
-    let epoch_output = Command::new("git")
-        .args(["rev-parse", "refs/manifold/epoch/current"])
-        .current_dir(&root)
-        .output()
-        .context("Failed to read current epoch")?;
+    let repo = maw_git::GixRepo::open(&root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
-    if !epoch_output.status.success() {
-        bail!(
+    let epoch_oid = match repo.rev_parse_opt("refs/manifold/epoch/current") {
+        Ok(Some(oid)) => oid.to_string(),
+        _ => bail!(
             "No current epoch found.\n  \
              Run `maw init` and `maw ws merge` first."
-        );
-    }
-
-    let epoch_oid = String::from_utf8_lossy(&epoch_output.stdout)
-        .trim()
-        .to_string();
+        ),
+    };
 
     // Read current branch position
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_output = Command::new("git")
-        .args(["rev-parse", &branch_ref])
-        .current_dir(&root)
-        .output();
-
-    let branch_oid = branch_output
+    let branch_oid = repo.rev_parse_opt(&branch_ref)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .flatten()
+        .map(|o| o.to_string())
         .unwrap_or_default();
 
     let release_oid = if branch_oid == epoch_oid {
@@ -77,29 +67,21 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         epoch_oid.clone()
     } else if branch_oid.is_empty() {
         println!("  Creating {branch} at epoch ({})...", &epoch_oid[..12]);
-        let update = Command::new("git")
-            .args(["update-ref", &branch_ref, &epoch_oid])
-            .current_dir(&root)
-            .output()
-            .context("Failed to update branch ref")?;
-
-        if !update.status.success() {
-            let stderr = String::from_utf8_lossy(&update.stderr);
-            bail!("Failed to set {branch}: {}", stderr.trim());
-        }
+        let ref_name = maw_git::RefName::new(&branch_ref)
+            .map_err(|e| anyhow::anyhow!("invalid ref name: {e}"))?;
+        let oid: maw_git::GitOid = epoch_oid.parse()
+            .map_err(|e| anyhow::anyhow!("invalid epoch OID: {e}"))?;
+        repo.write_ref(&ref_name, oid, &format!("release: create {branch}"))
+            .map_err(|e| anyhow::anyhow!("Failed to set {branch}: {e}"))?;
         epoch_oid.clone()
     } else if git_is_ancestor(&root, &branch_oid, &epoch_oid)? {
         println!("  Advancing {branch} to epoch ({})...", &epoch_oid[..12]);
-        let update = Command::new("git")
-            .args(["update-ref", &branch_ref, &epoch_oid])
-            .current_dir(&root)
-            .output()
-            .context("Failed to update branch ref")?;
-
-        if !update.status.success() {
-            let stderr = String::from_utf8_lossy(&update.stderr);
-            bail!("Failed to advance {branch}: {}", stderr.trim());
-        }
+        let ref_name = maw_git::RefName::new(&branch_ref)
+            .map_err(|e| anyhow::anyhow!("invalid ref name: {e}"))?;
+        let oid: maw_git::GitOid = epoch_oid.parse()
+            .map_err(|e| anyhow::anyhow!("invalid epoch OID: {e}"))?;
+        repo.write_ref(&ref_name, oid, &format!("release: advance {branch}"))
+            .map_err(|e| anyhow::anyhow!("Failed to advance {branch}: {e}"))?;
         epoch_oid.clone()
     } else if git_is_ancestor(&root, &epoch_oid, &branch_oid)? {
         println!(
@@ -193,33 +175,28 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 }
 
 fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git merge-base --is-ancestor")?;
-
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
-        }
-    }
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let ancestor_oid: maw_git::GitOid = ancestor.parse()
+        .map_err(|e| anyhow::anyhow!("invalid ancestor OID: {e}"))?;
+    let descendant_oid: maw_git::GitOid = descendant.parse()
+        .map_err(|e| anyhow::anyhow!("invalid descendant OID: {e}"))?;
+    repo.is_ancestor(ancestor_oid, descendant_oid)
+        .map_err(|e| anyhow::anyhow!("is_ancestor failed: {e}"))
 }
 
 /// Get a short commit info line for a commit hash.
 fn get_commit_info(root: &std::path::Path, oid: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["log", "--format=%h %s", "-1", oid])
-        .current_dir(root)
-        .output()
-        .context("Failed to get commit info")?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Ok(oid[..12.min(oid.len())].to_string())
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let git_oid: maw_git::GitOid = oid.parse()
+        .map_err(|e| anyhow::anyhow!("invalid OID: {e}"))?;
+    match repo.read_commit(git_oid) {
+        Ok(info) => {
+            let short_oid = &oid[..12.min(oid.len())];
+            let subject = info.message.lines().next().unwrap_or("").to_string();
+            Ok(format!("{short_oid} {subject}"))
+        }
+        Err(_) => Ok(oid[..12.min(oid.len())].to_string()),
     }
 }

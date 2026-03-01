@@ -25,6 +25,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use maw_git::GitRepo as _;
+
 use maw_core::model::layout;
 use maw_core::model::types::EpochId;
 use maw_core::refs as manifold_refs;
@@ -286,31 +288,44 @@ fn create_initial_commit(root: &Path, branch: &str) -> Result<EpochId, InitError
 
 /// Ensure git user.name and user.email are set (repo-local).
 fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
-    // Check if user.name is set
-    let name_check = Command::new("git")
-        .args(["config", "user.name"])
-        .current_dir(root)
-        .output()?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| InitError::GitCommand {
+            command: "open repo".to_owned(),
+            stderr: format!("failed to open repo: {e}"),
+            exit_code: None,
+        })?;
 
-    if !name_check.status.success()
-        || String::from_utf8_lossy(&name_check.stdout)
-            .trim()
-            .is_empty()
-    {
-        run_git(root, &["config", "user.name", "Manifold"])?;
+    // Check if user.name is set
+    let name = repo.read_config("user.name")
+        .map_err(|e| InitError::GitCommand {
+            command: "git config user.name".to_owned(),
+            stderr: format!("{e}"),
+            exit_code: None,
+        })?;
+
+    if name.as_deref().map_or(true, |v| v.trim().is_empty()) {
+        repo.write_config("user.name", "Manifold")
+            .map_err(|e| InitError::GitCommand {
+                command: "git config user.name Manifold".to_owned(),
+                stderr: format!("{e}"),
+                exit_code: None,
+            })?;
     }
 
-    let email_check = Command::new("git")
-        .args(["config", "user.email"])
-        .current_dir(root)
-        .output()?;
+    let email = repo.read_config("user.email")
+        .map_err(|e| InitError::GitCommand {
+            command: "git config user.email".to_owned(),
+            stderr: format!("{e}"),
+            exit_code: None,
+        })?;
 
-    if !email_check.status.success()
-        || String::from_utf8_lossy(&email_check.stdout)
-            .trim()
-            .is_empty()
-    {
-        run_git(root, &["config", "user.email", "manifold@localhost"])?;
+    if email.as_deref().map_or(true, |v| v.trim().is_empty()) {
+        repo.write_config("user.email", "manifold@localhost")
+            .map_err(|e| InitError::GitCommand {
+                command: "git config user.email manifold@localhost".to_owned(),
+                stderr: format!("{e}"),
+                exit_code: None,
+            })?;
     }
 
     Ok(())

@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +8,7 @@ use clap::Args;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
+use maw_git::GitRepo as _;
 
 use maw_core::backend::WorkspaceBackend;
 use crate::doctor;
@@ -581,32 +581,33 @@ fn collect_status() -> Result<StatusSummary> {
     })
 }
 
-/// Collect changed and untracked files from `git status --porcelain` in a directory.
+/// Collect changed and untracked files from git status in a directory.
 fn collect_git_status(ws_path: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(ws_path)
-        .output()
-        .context("Failed to run git status")?;
+    let repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
+        Err(_) => return Ok((Vec::new(), Vec::new())),
+    };
+    let entries = match repo.status() {
+        Ok(e) => e,
+        Err(_) => return Ok((Vec::new(), Vec::new())),
+    };
 
-    if !output.status.success() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut changed = Vec::new();
     let mut untracked = Vec::new();
 
-    for line in stdout.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let status_xy = &line[..2];
-        let path = &line[3..];
+    for entry in entries {
+        let path = entry.path.clone();
         let path = path
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix('"'))
-            .unwrap_or(path);
+            .unwrap_or(&path);
+        let status_xy = match entry.status {
+            maw_git::FileStatus::Untracked => "??",
+            maw_git::FileStatus::Modified => " M",
+            maw_git::FileStatus::Added => "A ",
+            maw_git::FileStatus::Deleted => " D",
+            maw_git::FileStatus::Renamed => "R ",
+        };
 
         if status_xy == "??" {
             untracked.push(path.to_string());

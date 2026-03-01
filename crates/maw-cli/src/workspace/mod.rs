@@ -1082,6 +1082,8 @@ pub fn repo_root() -> Result<PathBuf> {
     // has a .git gitfile, so if .manifold/ was accidentally created inside a
     // workspace (e.g. by running `maw init` from inside one), the walk would
     // incorrectly return the workspace directory as the repo root.
+    // TODO(gix): replace with a dedicated GitRepo method for repo-root discovery.
+    // rev-parse --git-common-dir is not a simple rev-parse — it's a git CLI option.
     let output = Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output();

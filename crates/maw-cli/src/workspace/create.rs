@@ -1,7 +1,7 @@
 use std::io::{self, Write};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use maw_git::GitRepo as _;
 use serde::Serialize;
 use tracing::instrument;
 
@@ -178,16 +178,11 @@ fn write_template_artifact(
 fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<EpochId> {
     if let Some(rev) = revision {
         // Resolve the user-specified revision to a full OID
-        let output = Command::new("git")
-            .args(["rev-parse", rev])
-            .current_dir(root)
-            .output()
-            .context("Failed to resolve revision")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Cannot resolve revision '{rev}': {}", stderr.trim());
-        }
-        let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let repo = maw_git::GixRepo::open(root)
+            .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+        let git_oid = repo.rev_parse(rev)
+            .map_err(|e| anyhow::anyhow!("Cannot resolve revision '{rev}': {e}"))?;
+        let oid = git_oid.to_string();
         return EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid commit OID: {e}"));
     }
 
@@ -225,30 +220,25 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     // Fall back to configured branch HEAD
     let config = MawConfig::load(root).unwrap_or_default();
     let branch = config.branch();
-    let output = Command::new("git")
-        .args(["rev-parse", branch])
-        .current_dir(root)
-        .output()
-        .with_context(|| format!("Failed to resolve branch '{branch}'"))?;
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
-    if !output.status.success() {
-        // Last resort: try HEAD
-        let head_output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .context("Failed to resolve HEAD")?;
-        if !head_output.status.success() {
-            bail!("No commits found. Run `maw init` first, or specify --revision.");
+    match repo.rev_parse_opt(branch) {
+        Ok(Some(git_oid)) => {
+            let oid = git_oid.to_string();
+            EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
         }
-        let oid = String::from_utf8_lossy(&head_output.stdout)
-            .trim()
-            .to_string();
-        return EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid HEAD OID: {e}"));
+        Ok(None) | Err(_) => {
+            // Last resort: try HEAD
+            match repo.rev_parse_opt("HEAD") {
+                Ok(Some(git_oid)) => {
+                    let oid = git_oid.to_string();
+                    EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid HEAD OID: {e}"))
+                }
+                _ => bail!("No commits found. Run `maw init` first, or specify --revision."),
+            }
+        }
     }
-
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))
 }
 
 #[instrument(fields(workspace = name))]

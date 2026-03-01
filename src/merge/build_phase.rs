@@ -287,7 +287,8 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     )?;
 
     // 6. Build candidate commit
-    let candidate = build_merge_commit(repo_root, epoch, sources, &resolved, None)?;
+    let repo = open_repo(repo_root)?;
+    let candidate = build_merge_commit(&*repo, epoch, sources, &resolved, None)?;
 
     Ok(BuildPhaseOutput {
         candidate,
@@ -296,6 +297,21 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
         unique_count,
         shared_count,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Open a `GixRepo` at the given path.
+fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, BuildPhaseError> {
+    maw_git::GixRepo::open(root)
+        .map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>)
+        .map_err(|e| BuildPhaseError::Build(BuildError::GitCommand {
+            command: format!("open repo at {}", root.display()),
+            stderr: e.to_string(),
+            exit_code: None,
+        }))
 }
 
 // ---------------------------------------------------------------------------
@@ -336,8 +352,9 @@ fn run_pipeline<B: WorkspaceBackend>(
     )?;
 
     // Build the candidate git tree + commit from resolved changes
+    let repo = open_repo(repo_root)?;
     let candidate = build_merge_commit(
-        repo_root,
+        &*repo,
         &state.epoch_before,
         &state.sources,
         &resolved,
@@ -446,8 +463,9 @@ fn apply_merge_drivers(
     if !regenerate_by_driver.is_empty() {
         let provisional_resolved: Vec<ResolvedChange> =
             resolved_by_path.values().cloned().collect();
+        let repo = open_repo(repo_root)?;
         let provisional_candidate =
-            build_merge_commit(repo_root, epoch, sources, &provisional_resolved, None)?;
+            build_merge_commit(&*repo, epoch, sources, &provisional_resolved, None)?;
 
         let regenerated = run_regenerate_drivers(
             repo_root,

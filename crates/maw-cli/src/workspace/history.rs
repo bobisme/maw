@@ -190,6 +190,7 @@ fn summarize_payload(payload: &OpPayload) -> String {
 // ---------------------------------------------------------------------------
 
 /// Fetch commits from git log in the workspace directory.
+// TODO(gix): GitRepo has no log/rev-walk method. Keep CLI.
 fn fetch_workspace_commits(ws_path: &Path, limit: usize) -> Result<Vec<HistoryCommit>> {
     let output = Command::new("git")
         .args(["log", "--format=%H %ai %s", "-n", &limit.to_string()])

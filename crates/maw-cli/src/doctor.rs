@@ -296,6 +296,7 @@ fn is_valid_default_worktree(root: &Path, default_ws: &Path) -> bool {
     is_registered_worktree(root, default_ws)
 }
 
+// TODO(gix): `git rev-parse --is-inside-work-tree` has no GitRepo equivalent. Keep CLI.
 fn is_inside_worktree(path: &Path) -> bool {
     let output = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -313,6 +314,7 @@ fn is_inside_worktree(path: &Path) -> bool {
     String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
+// TODO(gix): could use GitRepo::worktree_list() but would need repo open.
 fn is_registered_worktree(root: &Path, ws_path: &Path) -> bool {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
