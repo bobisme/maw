@@ -623,6 +623,11 @@ pub(crate) fn replay_snapshot(
 
     match repo.stash_apply(oid) {
         Ok(()) => {
+            // Unstage everything so the user sees clean "unstaged modifications"
+            // instead of a confusing mix of staged and unstaged files (bn-1r81).
+            if let Err(e) = repo.unstage_all() {
+                tracing::warn!("failed to unstage after replay: {e}");
+            }
             tracing::info!("snapshot replayed cleanly");
             Ok(SnapshotReplayResult::Clean)
         }

@@ -272,10 +272,9 @@ pub fn run_prepare_phase(
                     });
 
                 if stale_completed {
-                    eprintln!(
-                        "WARNING: stale merge-state found at phase '{}' but epoch ref already \
-                         advanced — previous merge completed without cleanup. Clearing stale state.",
-                        existing.phase
+                    tracing::debug!(
+                        phase = %existing.phase,
+                        "stale merge-state found but epoch ref already advanced — clearing"
                     );
                     // Overwrite stale file
                     state.write_atomic(&state_path)?;

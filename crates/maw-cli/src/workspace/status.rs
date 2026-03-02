@@ -402,14 +402,12 @@ fn compute_global_view_summary(
     let view =
         compute_global_view(root, &workspace_ids, |oid| read_patch_set_blob(root, oid)).ok()?;
 
-    // Use the max epoch from the workspace list (backend.list()), not from
-    // the oplog-materialized view. The backend reads from
-    // refs/manifold/epoch/current which is always authoritative, while the
-    // oplog may lag behind after epoch transitions (bn-22fi).
-    let authoritative_epoch = workspaces
-        .iter()
-        .map(|ws| &ws.epoch)
-        .max_by(|a, b| a.as_str().cmp(b.as_str()))
+    // Read the epoch directly from refs/manifold/epoch/current — this is the
+    // single authoritative source. Previously we took the lexicographic max of
+    // workspace epochs, which could return a stale workspace's epoch (bn-1wqe).
+    let authoritative_epoch = maw_core::refs::read_epoch_current(root)
+        .ok()
+        .flatten()
         .map(|e| e.as_str()[..12].to_string());
 
     Some(GlobalViewSummary {

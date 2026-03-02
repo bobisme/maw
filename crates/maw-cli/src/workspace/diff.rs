@@ -109,11 +109,17 @@ pub fn diff(
     let head = materialize_workspace_state(&backend, &root, &ws_id)?;
     let base = resolve_against(&backend, &root, &ws_id, against)?;
 
+    // Use the workspace directory for diffing so that uncommitted/untracked
+    // changes are included. We diff base_rev against the working tree (no
+    // head_rev) and append untracked files as Added entries (bn-3bo8).
+    let ws_path = backend.workspace_path(&ws_id);
+    let diff_dir = if ws_path.exists() { &ws_path } else { &root };
+
     match format {
-        DiffFormat::Patch => print_patch(&root, &base.rev, &head.rev, &pathspecs)?,
-        DiffFormat::Stat => print_stat(&root, &base.rev, &head.rev, &pathspecs)?,
+        DiffFormat::Patch => print_patch_worktree(diff_dir, &base.rev, &pathspecs)?,
+        DiffFormat::Stat => print_stat_worktree(diff_dir, &base.rev, &pathspecs)?,
         DiffFormat::NameOnly | DiffFormat::NameStatus => {
-            let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
+            let mut entries = collect_diff_entries_worktree(diff_dir, &base.rev, &pathspecs)?;
             entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
             if matches!(format, DiffFormat::NameOnly) {
                 let mut names = BTreeSet::new();
@@ -134,7 +140,7 @@ pub fn diff(
             }
         }
         DiffFormat::Json => {
-            let mut entries = collect_diff_entries(&root, &base.rev, &head.rev, &pathspecs)?;
+            let mut entries = collect_diff_entries_worktree(diff_dir, &base.rev, &pathspecs)?;
             entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
             print_json(&ws_id, &base, &head, &entries)?;
         }
@@ -143,7 +149,9 @@ pub fn diff(
     Ok(())
 }
 
-fn print_stat(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
+/// Like `print_stat` but compares base_rev against the working tree (includes
+/// uncommitted changes).
+fn print_stat_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     let mut args = vec![
@@ -151,7 +159,6 @@ fn print_stat(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String])
         "--stat".to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
-        head_rev.to_string(),
     ];
     if !pathspecs.is_empty() {
         args.push("--".to_string());
@@ -161,7 +168,7 @@ fn print_stat(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String])
     if is_tty {
         let status = Command::new("git")
             .args(&args)
-            .current_dir(root)
+            .current_dir(ws_dir)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -172,21 +179,27 @@ fn print_stat(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String])
         }
     } else {
         args.insert(1, "--color=never".to_string());
-        let out = git_stdout(root, &args)?;
+        let out = git_stdout(ws_dir, &args)?;
         print!("{out}");
+    }
+
+    // Show untracked files in stat output
+    let untracked = collect_untracked_files(ws_dir, pathspecs)?;
+    for path in &untracked {
+        println!(" {path} (untracked)");
     }
 
     Ok(())
 }
 
-fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]) -> Result<()> {
+/// Like `print_patch` but compares base_rev against the working tree.
+fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     let mut diff_args = vec![
         "diff".to_string(),
         "--find-renames".to_string(),
         base_rev.to_string(),
-        head_rev.to_string(),
     ];
     if !pathspecs.is_empty() {
         diff_args.push("--".to_string());
@@ -194,11 +207,9 @@ fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]
     }
 
     if is_tty {
-        // Spawn git with inherited stdio so it uses its configured pager
-        // (core.pager / GIT_PAGER, e.g. delta).
         let status = Command::new("git")
             .args(&diff_args)
-            .current_dir(root)
+            .current_dir(ws_dir)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -208,13 +219,115 @@ fn print_patch(root: &Path, base_rev: &str, head_rev: &str, pathspecs: &[String]
             bail!("git diff exited with status {}", status);
         }
     } else {
-        // No tty — capture output, no pager, no color.
         diff_args.insert(1, "--color=never".to_string());
-        let patch = git_stdout(root, &diff_args)?;
+        let patch = git_stdout(ws_dir, &diff_args)?;
         print!("{patch}");
     }
 
+    // Append untracked file contents as pseudo-patches
+    let untracked = collect_untracked_files(ws_dir, pathspecs)?;
+    for path in &untracked {
+        let full = ws_dir.join(path);
+        if let Ok(content) = std::fs::read_to_string(&full) {
+            println!("diff --git a/{path} b/{path}");
+            println!("new file mode 100644");
+            println!("--- /dev/null");
+            println!("+++ b/{path}");
+            let lines: Vec<&str> = content.lines().collect();
+            println!("@@ -0,0 +1,{} @@", lines.len());
+            for line in &lines {
+                println!("+{line}");
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Like `collect_diff_entries` but compares base_rev against the working tree
+/// and appends untracked files as Added entries.
+fn collect_diff_entries_worktree(
+    ws_dir: &Path,
+    base_rev: &str,
+    pathspecs: &[String],
+) -> Result<Vec<DiffEntry>> {
+    let mut args = vec![
+        "diff".to_string(),
+        "--name-status".to_string(),
+        "-z".to_string(),
+        "--find-renames".to_string(),
+        base_rev.to_string(),
+    ];
+    if !pathspecs.is_empty() {
+        args.push("--".to_string());
+        args.extend(pathspecs.iter().cloned());
+    }
+    let raw = git_stdout_bytes(ws_dir, &args)?;
+    let mut entries = parse_name_status_z(&raw)?;
+
+    for entry in &mut entries {
+        let stats = collect_numstat_for_entry_worktree(ws_dir, base_rev, entry)?;
+        entry.additions = stats.0;
+        entry.deletions = stats.1;
+        entry.binary = stats.2;
+    }
+
+    // Append untracked files as Added entries
+    let existing_paths: BTreeSet<String> = entries.iter().map(|e| e.path.clone()).collect();
+    let untracked = collect_untracked_files(ws_dir, pathspecs)?;
+    for path in untracked {
+        if existing_paths.contains(&path) {
+            continue;
+        }
+        let full = ws_dir.join(&path);
+        let line_count = std::fs::read_to_string(&full)
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
+        entries.push(DiffEntry {
+            path,
+            old_path: None,
+            status: "A".to_string(),
+            additions: u32::try_from(line_count).unwrap_or(u32::MAX),
+            deletions: 0,
+            binary: false,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Like `collect_numstat_for_entry` but compares against working tree.
+fn collect_numstat_for_entry_worktree(
+    ws_dir: &Path,
+    base_rev: &str,
+    entry: &DiffEntry,
+) -> Result<(u32, u32, bool)> {
+    let target_path = entry.path.as_str();
+    let args = vec![
+        "diff".to_string(),
+        "--numstat".to_string(),
+        "--find-renames".to_string(),
+        base_rev.to_string(),
+        "--".to_string(),
+        target_path.to_string(),
+    ];
+    let raw = git_stdout(ws_dir, &args)?;
+    parse_numstat_line(&raw)
+}
+
+/// Collect untracked files in the workspace directory.
+fn collect_untracked_files(ws_dir: &Path, pathspecs: &[String]) -> Result<Vec<String>> {
+    let mut args = vec![
+        "ls-files".to_string(),
+        "--others".to_string(),
+        "--exclude-standard".to_string(),
+    ];
+    if !pathspecs.is_empty() {
+        args.push("--".to_string());
+        args.extend(pathspecs.iter().cloned());
+    }
+    let raw = git_stdout(ws_dir, &args)?;
+    Ok(raw.lines().filter(|l| !l.is_empty()).map(String::from).collect())
 }
 
 fn print_json(
@@ -434,55 +547,8 @@ fn resolve_pathspecs(paths: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn collect_diff_entries(
-    root: &Path,
-    base_rev: &str,
-    head_rev: &str,
-    pathspecs: &[String],
-) -> Result<Vec<DiffEntry>> {
-    let mut args = vec![
-        "diff".to_string(),
-        "--name-status".to_string(),
-        "-z".to_string(),
-        "--find-renames".to_string(),
-        base_rev.to_string(),
-        head_rev.to_string(),
-    ];
-    if !pathspecs.is_empty() {
-        args.push("--".to_string());
-        args.extend(pathspecs.iter().cloned());
-    }
-    let raw = git_stdout_bytes(root, &args)?;
-    let mut entries = parse_name_status_z(&raw)?;
-
-    for entry in &mut entries {
-        let stats = collect_numstat_for_entry(root, base_rev, head_rev, entry)?;
-        entry.additions = stats.0;
-        entry.deletions = stats.1;
-        entry.binary = stats.2;
-    }
-
-    Ok(entries)
-}
-
-fn collect_numstat_for_entry(
-    root: &Path,
-    base_rev: &str,
-    head_rev: &str,
-    entry: &DiffEntry,
-) -> Result<(u32, u32, bool)> {
-    let target_path = entry.path.as_str();
-    let args = vec![
-        "diff".to_string(),
-        "--numstat".to_string(),
-        "--find-renames".to_string(),
-        base_rev.to_string(),
-        head_rev.to_string(),
-        "--".to_string(),
-        target_path.to_string(),
-    ];
-    let out = git_stdout(root, &args)?;
-    let Some(line) = out.lines().next() else {
+fn parse_numstat_line(raw: &str) -> Result<(u32, u32, bool)> {
+    let Some(line) = raw.lines().next() else {
         return Ok((0, 0, false));
     };
 

@@ -282,6 +282,13 @@ pub trait GitRepo {
     /// Replaces: `git stash apply <oid>`.
     fn stash_apply(&self, oid: GitOid) -> Result<(), GitError>;
 
+    /// Reset the index to match HEAD, unstaging all staged changes.
+    ///
+    /// Working tree files are not modified — only the index is reset.
+    ///
+    /// Replaces: `git reset HEAD`.
+    fn unstage_all(&self) -> Result<(), GitError>;
+
     // -----------------------------------------------------------------------
     // Push (~17 call sites)
     //

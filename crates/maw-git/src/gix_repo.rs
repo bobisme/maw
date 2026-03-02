@@ -149,6 +149,10 @@ impl GitRepo for GixRepo {
         crate::stash_impl::stash_apply(self, oid)
     }
 
+    fn unstage_all(&self) -> Result<(), GitError> {
+        crate::index_impl::unstage_all(self)
+    }
+
     // === Push ===
     fn push_branch(
         &self,

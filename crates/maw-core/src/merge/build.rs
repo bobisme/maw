@@ -332,6 +332,56 @@ fn write_blob(repo: &dyn maw_git::GitRepo, content: &[u8]) -> Result<GitOid, Bui
     })
 }
 
+/// Compare two tree entries using git's canonical sort order.
+///
+/// Git sorts tree entries by comparing names byte-by-byte, but directory
+/// entries (mode == Tree) sort as if they have a trailing `/` appended.
+/// This ensures `assurance/` sorts after `assurance-plan.md` (because
+/// `/` 0x2F > `-` 0x2D).
+fn git_tree_entry_cmp(
+    a_name: &str,
+    a_mode: maw_git::EntryMode,
+    b_name: &str,
+    b_mode: maw_git::EntryMode,
+) -> std::cmp::Ordering {
+    let a_bytes = a_name.as_bytes();
+    let b_bytes = b_name.as_bytes();
+    let a_is_tree = a_mode == maw_git::EntryMode::Tree;
+    let b_is_tree = b_mode == maw_git::EntryMode::Tree;
+
+    let common_len = a_bytes.len().min(b_bytes.len());
+    for i in 0..common_len {
+        if a_bytes[i] != b_bytes[i] {
+            return a_bytes[i].cmp(&b_bytes[i]);
+        }
+    }
+
+    // Names match up to common_len. Compare the "virtual" next byte:
+    // directories get `/` (0x2F), blobs get nothing (compare length).
+    let a_next = if a_bytes.len() > common_len {
+        Some(a_bytes[common_len])
+    } else if a_is_tree {
+        Some(b'/')
+    } else {
+        None
+    };
+
+    let b_next = if b_bytes.len() > common_len {
+        Some(b_bytes[common_len])
+    } else if b_is_tree {
+        Some(b'/')
+    } else {
+        None
+    };
+
+    match (a_next, b_next) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(a), Some(b)) => a.cmp(&b),
+    }
+}
+
 /// Build the full git tree hierarchy from a flat path -> (mode, oid) map.
 ///
 /// Uses `GitRepo::write_tree()` to build tree objects bottom-up: deepest
@@ -409,8 +459,11 @@ fn build_tree(repo: &dyn maw_git::GitRepo, flat: &FlatTree) -> Result<GitOid, Bu
             }
         }
 
-        // Sort entries by name for determinism.
-        tree_entries.sort_by(|a, b| a.name.cmp(&b.name));
+        // Sort entries using git's canonical tree sort order: directory entries
+        // sort as if they have a trailing '/' (e.g. "assurance/" > "assurance-plan.md").
+        tree_entries.sort_by(|a, b| {
+            git_tree_entry_cmp(&a.name, a.mode, &b.name, b.mode)
+        });
 
         // Write this tree level.
         let tree_oid = repo.write_tree(&tree_entries).map_err(|e| {

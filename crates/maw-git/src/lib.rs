@@ -27,6 +27,7 @@ mod worktree_impl;
 mod stash_impl;
 mod push_impl;
 mod config_impl;
+mod index_impl;
 
 pub use gix_repo::GixRepo;
 

@@ -39,3 +39,6 @@ tracing-opentelemetry = { version = "0.32", optional = true }
 default = ["otel", "tui"]
 tui = ["dep:maw-tui"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing", "dep:tracing-opentelemetry"]
+
+[lints]
+workspace = true

@@ -2630,6 +2630,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     run_hooks(&maw_config.hooks.post_merge, "post-merge", &root, false)?;
 
     // Generate the merge message for display
+    let user_provided_message = message.is_some();
     let msg = message.unwrap_or({
         if ws_to_merge.len() == 1 {
             "adopt work"
@@ -2637,6 +2638,19 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             "combine work"
         }
     });
+
+    // Build the actual commit subject used by build_merge_commit
+    let commit_subject = if user_provided_message {
+        msg.to_string()
+    } else {
+        let mut names: Vec<&str> = ws_to_merge.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        if names.is_empty() {
+            "epoch: merge".to_string()
+        } else {
+            format!("epoch: merge {}", names.join(" "))
+        }
+    };
 
     if format == OutputFormat::Json {
         let success = MergeSuccessOutput {
@@ -2656,6 +2670,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     } else {
         textln!();
         textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
+        if !user_provided_message {
+            textln!("  Commit message: \"{commit_subject}\"");
+            textln!("  To amend: git -C ws/default commit --amend -m \"your message\"");
+        }
         textln!();
         textln!("Next: push to remote:");
         textln!("  maw push");

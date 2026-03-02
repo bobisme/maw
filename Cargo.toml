@@ -88,11 +88,23 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "workspace_backends"
 harness = false
 
-[lints.rust]
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace.lints.rust]
 unsafe_code = "forbid"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+unnecessary_wraps = "allow"
+
+[lints]
+workspace = true
