@@ -195,19 +195,22 @@ pub fn read_operation_via(
     repo: &dyn maw_git::GitRepo,
     oid: &GitOid,
 ) -> Result<Operation, OpLogReadError> {
-    let git_oid = oid.as_str().parse::<maw_git::GitOid>().map_err(|_| {
-        OpLogReadError::CatFile {
+    let git_oid = oid
+        .as_str()
+        .parse::<maw_git::GitOid>()
+        .map_err(|_| OpLogReadError::CatFile {
             oid: oid.as_str().to_owned(),
             stderr: "invalid OID format".to_owned(),
             exit_code: None,
-        }
-    })?;
+        })?;
 
-    let data = repo.read_blob(git_oid).map_err(|e| OpLogReadError::CatFile {
-        oid: oid.as_str().to_owned(),
-        stderr: e.to_string(),
-        exit_code: None,
-    })?;
+    let data = repo
+        .read_blob(git_oid)
+        .map_err(|e| OpLogReadError::CatFile {
+            oid: oid.as_str().to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
     Operation::from_json(&data).map_err(|e| OpLogReadError::Deserialize {
         oid: oid.as_str().to_owned(),
@@ -217,11 +220,9 @@ pub fn read_operation_via(
 
 /// Open a `GixRepo` at the given path.
 fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, OpLogReadError> {
-    maw_git::GixRepo::open(root).map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>).map_err(|e| {
-        OpLogReadError::Io(std::io::Error::other(
-            format!("failed to open repo: {e}"),
-        ))
-    })
+    maw_git::GixRepo::open(root)
+        .map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>)
+        .map_err(|e| OpLogReadError::Io(std::io::Error::other(format!("failed to open repo: {e}"))))
 }
 
 // ---------------------------------------------------------------------------

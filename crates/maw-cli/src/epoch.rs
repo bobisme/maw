@@ -5,8 +5,8 @@
 
 use anyhow::{Result, bail};
 
-use maw_core::refs as manifold_refs;
 use crate::workspace::{MawConfig, repo_root};
+use maw_core::refs as manifold_refs;
 
 /// Resync the epoch ref to the configured branch HEAD.
 ///

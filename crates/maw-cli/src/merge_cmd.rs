@@ -10,12 +10,12 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
-use maw_core::config::ManifoldConfig;
+use crate::workspace::{MawConfig, get_backend, repo_root};
 use maw::merge::quarantine::{
     PromoteResult, QuarantineError, abandon_quarantine, list_quarantines, promote_quarantine,
     quarantine_workspace_path,
 };
-use crate::workspace::{MawConfig, get_backend, repo_root};
+use maw_core::config::ManifoldConfig;
 
 /// `maw merge` subcommands.
 #[derive(Subcommand)]

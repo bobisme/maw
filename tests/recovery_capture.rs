@@ -8,7 +8,11 @@ use std::time::Duration;
 
 /// Collect all recovery refs for a workspace.
 fn recovery_refs(repo: &TestRepo, workspace: &str) -> Vec<String> {
-    let output = repo.git(&["for-each-ref", "--format=%(refname)", "refs/manifold/recovery/"]);
+    let output = repo.git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/manifold/recovery/",
+    ]);
     output
         .lines()
         .map(str::trim)
@@ -19,8 +23,7 @@ fn recovery_refs(repo: &TestRepo, workspace: &str) -> Vec<String> {
 
 /// Resolve a ref to a full commit SHA.
 fn resolve_ref_oid(repo: &TestRepo, git_ref: &str) -> String {
-    repo
-        .git(&["rev-parse", "--verify", git_ref])
+    repo.git(&["rev-parse", "--verify", git_ref])
         .trim()
         .to_owned()
 }

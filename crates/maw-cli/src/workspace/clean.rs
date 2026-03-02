@@ -2,9 +2,9 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 
+use crate::workspace::{DEFAULT_WORKSPACE, get_backend, validate_workspace_name};
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
-use crate::workspace::{DEFAULT_WORKSPACE, get_backend, validate_workspace_name};
 
 /// Remove `target/` directories from workspace build contexts.
 pub fn clean(name: Option<String>, all: bool) -> Result<()> {
@@ -13,8 +13,8 @@ pub fn clean(name: Option<String>, all: bool) -> Result<()> {
     }
 
     let target = name.unwrap_or_else(|| DEFAULT_WORKSPACE.to_string());
-    let workspace_id =
-        WorkspaceId::new(&target).map_err(|e| anyhow::anyhow!("Invalid workspace name '{target}': {e}"))?;
+    let workspace_id = WorkspaceId::new(&target)
+        .map_err(|e| anyhow::anyhow!("Invalid workspace name '{target}': {e}"))?;
 
     let backend = get_backend()?;
     if !backend.exists(&workspace_id) {
@@ -66,7 +66,10 @@ fn clean_workspace_path(name: &str, path: &std::path::Path) -> Result<CleanOutco
 
     let target_path = path.join("target");
     if !target_path.exists() {
-        println!("No target/ directory in workspace '{name}' ({})", path.display());
+        println!(
+            "No target/ directory in workspace '{name}' ({})",
+            path.display()
+        );
         return Ok(CleanOutcome::Missing);
     }
 

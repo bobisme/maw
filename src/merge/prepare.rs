@@ -259,10 +259,8 @@ pub fn run_prepare_phase(
                 // the epoch ref has already advanced to epoch_candidate.  If
                 // it has, the previous merge finished — the stale file is safe
                 // to overwrite.
-                let is_post_commit = matches!(
-                    existing.phase,
-                    MergePhase::Commit | MergePhase::Cleanup
-                );
+                let is_post_commit =
+                    matches!(existing.phase, MergePhase::Commit | MergePhase::Cleanup);
                 let stale_completed = is_post_commit
                     && existing.epoch_candidate.as_ref().is_some_and(|candidate| {
                         refs::read_epoch_current(repo_root)
@@ -323,7 +321,8 @@ pub fn run_prepare_phase_with_epoch(
 
     // Try exclusive creation (O_CREAT | O_EXCL) — first writer wins
     let state_path = MergeStateFile::default_path(manifold_dir);
-    crate::fp!("FP_PREPARE_BEFORE_STATE_WRITE").map_err(|e| PrepareError::GitError(e.to_string()))?;
+    crate::fp!("FP_PREPARE_BEFORE_STATE_WRITE")
+        .map_err(|e| PrepareError::GitError(e.to_string()))?;
     if !state.write_exclusive(&state_path)? {
         // File already exists — check if it's safe to overwrite
         match MergeStateFile::read(&state_path) {
@@ -336,7 +335,8 @@ pub fn run_prepare_phase_with_epoch(
             }
         }
     }
-    crate::fp!("FP_PREPARE_AFTER_STATE_WRITE").map_err(|e| PrepareError::GitError(e.to_string()))?;
+    crate::fp!("FP_PREPARE_AFTER_STATE_WRITE")
+        .map_err(|e| PrepareError::GitError(e.to_string()))?;
 
     Ok(FrozenInputs { epoch, heads })
 }
@@ -700,13 +700,25 @@ mod tests {
         // Add workspace as a git worktree
         let ws_name = "stale-ws";
         let ws_path = root.join(ws_name);
-        run_git(root, &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"]);
+        run_git(
+            root,
+            &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"],
+        );
 
         let manifold_dir = root.join(".manifold");
-        write_stale_commit_state(&manifold_dir, &epoch_before, &candidate, MergePhase::Commit, ws_name);
+        write_stale_commit_state(
+            &manifold_dir,
+            &epoch_before,
+            &candidate,
+            MergePhase::Commit,
+            ws_name,
+        );
 
         // Advance epoch ref (previous merge completed its COMMIT)
-        run_git(root, &["update-ref", refs::EPOCH_CURRENT, candidate.as_str()]);
+        run_git(
+            root,
+            &["update-ref", refs::EPOCH_CURRENT, candidate.as_str()],
+        );
 
         let ws_id = WorkspaceId::new(ws_name).unwrap();
         let mut workspace_dirs = BTreeMap::new();
@@ -714,7 +726,10 @@ mod tests {
 
         // Should succeed: stale state is auto-cleared
         let result = run_prepare_phase(root, &manifold_dir, &[ws_id], &workspace_dirs);
-        assert!(result.is_ok(), "expected success clearing stale state, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected success clearing stale state, got: {result:?}"
+        );
 
         let new_state = MergeStateFile::read(&MergeStateFile::default_path(&manifold_dir)).unwrap();
         assert_eq!(new_state.phase, MergePhase::Prepare);
@@ -730,19 +745,34 @@ mod tests {
 
         let ws_name = "stale-ws2";
         let ws_path = root.join(ws_name);
-        run_git(root, &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"]);
+        run_git(
+            root,
+            &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"],
+        );
 
         let manifold_dir = root.join(".manifold");
-        write_stale_commit_state(&manifold_dir, &epoch_before, &candidate, MergePhase::Cleanup, ws_name);
+        write_stale_commit_state(
+            &manifold_dir,
+            &epoch_before,
+            &candidate,
+            MergePhase::Cleanup,
+            ws_name,
+        );
 
-        run_git(root, &["update-ref", refs::EPOCH_CURRENT, candidate.as_str()]);
+        run_git(
+            root,
+            &["update-ref", refs::EPOCH_CURRENT, candidate.as_str()],
+        );
 
         let ws_id = WorkspaceId::new(ws_name).unwrap();
         let mut workspace_dirs = BTreeMap::new();
         workspace_dirs.insert(ws_id.clone(), ws_path);
 
         let result = run_prepare_phase(root, &manifold_dir, &[ws_id], &workspace_dirs);
-        assert!(result.is_ok(), "expected success clearing stale cleanup state, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected success clearing stale cleanup state, got: {result:?}"
+        );
     }
 
     #[test]
@@ -755,10 +785,19 @@ mod tests {
 
         let ws_name = "active-ws";
         let ws_path = root.join(ws_name);
-        run_git(root, &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"]);
+        run_git(
+            root,
+            &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"],
+        );
 
         let manifold_dir = root.join(".manifold");
-        write_stale_commit_state(&manifold_dir, &epoch_before, &candidate, MergePhase::Commit, ws_name);
+        write_stale_commit_state(
+            &manifold_dir,
+            &epoch_before,
+            &candidate,
+            MergePhase::Commit,
+            ws_name,
+        );
 
         // Epoch ref is still at epoch_before (commit hasn't completed yet)
         // epoch_before is still in refs/manifold/epoch/current from setup

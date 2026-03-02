@@ -32,12 +32,12 @@ fn write_index_tree(repo: &GixRepo) -> Result<GitOid, GitError> {
     // Use a tree editor starting from an empty tree to build up the tree
     // from index entries.
     let empty_tree = gix::objs::Tree::empty();
-    let empty_tree_id = repo
-        .repo
-        .write_object(&empty_tree)
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to write empty tree: {e}"),
-        })?;
+    let empty_tree_id =
+        repo.repo
+            .write_object(&empty_tree)
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to write empty tree: {e}"),
+            })?;
 
     let tree = repo
         .repo
@@ -58,17 +58,17 @@ fn write_index_tree(repo: &GixRepo) -> Result<GitOid, GitError> {
 
         let kind = match entry.mode {
             gix::index::entry::Mode::FILE => gix::objs::tree::EntryKind::Blob,
-            gix::index::entry::Mode::FILE_EXECUTABLE => {
-                gix::objs::tree::EntryKind::BlobExecutable
-            }
+            gix::index::entry::Mode::FILE_EXECUTABLE => gix::objs::tree::EntryKind::BlobExecutable,
             gix::index::entry::Mode::SYMLINK => gix::objs::tree::EntryKind::Link,
             gix::index::entry::Mode::COMMIT => gix::objs::tree::EntryKind::Commit,
             _ => continue,
         };
 
-        editor.upsert(path, kind, entry.id).map_err(|e| GitError::BackendError {
-            message: format!("tree editor upsert '{path}': {e}"),
-        })?;
+        editor
+            .upsert(path, kind, entry.id)
+            .map_err(|e| GitError::BackendError {
+                message: format!("tree editor upsert '{path}': {e}"),
+            })?;
     }
 
     let tree_id = editor.write().map_err(|e| GitError::BackendError {
@@ -80,12 +80,9 @@ fn write_index_tree(repo: &GixRepo) -> Result<GitOid, GitError> {
 
 pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
     // 1. Check if worktree is dirty. If clean, nothing to stash.
-    let dirty = repo
-        .repo
-        .is_dirty()
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to check dirty state: {e}"),
-        })?;
+    let dirty = repo.repo.is_dirty().map_err(|e| GitError::BackendError {
+        message: format!("failed to check dirty state: {e}"),
+    })?;
     if !dirty {
         return Ok(None);
     }
@@ -193,9 +190,12 @@ pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
 }
 
 pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
-    let workdir = repo.workdir.as_ref().ok_or_else(|| GitError::BackendError {
-        message: "repository has no working directory".to_string(),
-    })?;
+    let workdir = repo
+        .workdir
+        .as_ref()
+        .ok_or_else(|| GitError::BackendError {
+            message: "repository has no working directory".to_string(),
+        })?;
 
     // 1. Read the stash commit and get its tree.
     let stash_gix = to_gix_oid(oid);
@@ -356,12 +356,12 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
     }
 
     // 6. Update the index to match the stash tree.
-    let stash_index = repo
-        .repo
-        .index_from_tree(&stash_tree_oid)
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to create index from stash tree: {e}"),
-        })?;
+    let stash_index =
+        repo.repo
+            .index_from_tree(&stash_tree_oid)
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to create index from stash tree: {e}"),
+            })?;
 
     // Write the stash index state to disk.
     let index_path = repo.repo.index_path();

@@ -130,13 +130,11 @@ pub fn capture_before_destroy(
 fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let entries = repo.status()
+    let entries = repo
+        .status()
         .map_err(|e| anyhow::anyhow!("git status failed: {e}"))?;
 
-    let paths: Vec<String> = entries
-        .into_iter()
-        .map(|entry| entry.path)
-        .collect();
+    let paths: Vec<String> = entries.into_iter().map(|entry| entry.path).collect();
 
     Ok(paths)
 }
@@ -145,7 +143,8 @@ fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
 pub(crate) fn resolve_head(ws_path: &Path) -> Result<GitOid> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let git_oid = repo.rev_parse("HEAD")
+    let git_oid = repo
+        .rev_parse("HEAD")
         .map_err(|e| anyhow::anyhow!("failed to resolve HEAD: {e}"))?;
     let oid_str = git_oid.to_string();
     GitOid::new(&oid_str).map_err(|e| anyhow::anyhow!("invalid HEAD OID: {e}"))
@@ -217,16 +216,15 @@ fn capture_dirty_worktree(
     // Create a stash commit (does not modify HEAD or stash list)
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let stash_result = repo.stash_create()
-        .map_err(|e| {
-            // Restore index state before bailing
-            // TODO(gix): replace git reset with GitRepo trait method
-            let _ = Command::new("git")
-                .args(["reset"])
-                .current_dir(ws_path)
-                .output();
-            anyhow::anyhow!("git stash create failed during capture: {e}")
-        })?;
+    let stash_result = repo.stash_create().map_err(|e| {
+        // Restore index state before bailing
+        // TODO(gix): replace git reset with GitRepo trait method
+        let _ = Command::new("git")
+            .args(["reset"])
+            .current_dir(ws_path)
+            .output();
+        anyhow::anyhow!("git stash create failed during capture: {e}")
+    })?;
 
     let stash_git_oid = match stash_result {
         Some(oid) => oid,
@@ -244,8 +242,8 @@ fn capture_dirty_worktree(
     };
 
     let stash_oid_str = stash_git_oid.to_string();
-    let commit_oid = GitOid::new(&stash_oid_str)
-        .map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
+    let commit_oid =
+        GitOid::new(&stash_oid_str).map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
 
     // Restore the index to its pre-add state (don't leave staged changes
     // behind — the workspace is about to be destroyed, but be clean anyway)
@@ -299,8 +297,7 @@ fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
         bail!("git rev-parse --git-common-dir failed: {}", stderr.trim());
     }
 
-    let common_dir =
-        std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let common_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let mut root = common_dir
         .parent()
         .context("cannot determine repo root from git common dir")?
@@ -362,9 +359,7 @@ pub fn emit_recovery_surface(
     } else {
         eprintln!("  artifact:     (none)");
     }
-    eprintln!(
-        "  recover_cmd:  maw ws recover {workspace_name}"
-    );
+    eprintln!("  recover_cmd:  maw ws recover {workspace_name}");
 }
 
 /// Emit a structured recovery failure notice when capture itself fails.
@@ -477,7 +472,10 @@ mod tests {
     fn capture_clean_at_epoch_returns_none() {
         let (_dir, root, head_oid) = setup_repo();
         let result = capture_before_destroy(&root, "test-ws", &head_oid).unwrap();
-        assert!(result.is_none(), "clean workspace at epoch should return None");
+        assert!(
+            result.is_none(),
+            "clean workspace at epoch should return None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -498,7 +496,11 @@ mod tests {
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
         assert!(!result.dirty_paths.is_empty());
         assert!(result.dirty_paths.iter().any(|p| p == "dirty.txt"));
-        assert!(result.pinned_ref.starts_with("refs/manifold/recovery/test-ws/"));
+        assert!(
+            result
+                .pinned_ref
+                .starts_with("refs/manifold/recovery/test-ws/")
+        );
 
         // Verify the pinned ref exists and resolves
         let ref_oid = refs::read_ref(&root, &result.pinned_ref).unwrap();
@@ -533,12 +535,7 @@ mod tests {
         // content is in the third parent's tree. Access via the commit's
         // tree directly.
         let tree_output = Command::new("git")
-            .args([
-                "ls-tree",
-                "-r",
-                "--name-only",
-                result.commit_oid.as_str(),
-            ])
+            .args(["ls-tree", "-r", "--name-only", result.commit_oid.as_str()])
             .current_dir(&root)
             .output()
             .unwrap();
@@ -546,8 +543,7 @@ mod tests {
         // The stash commit's tree should include the new file
         // (via the index parent or worktree parent)
         assert!(
-            tree_files.contains("new-file.txt")
-                || output.status.success(),
+            tree_files.contains("new-file.txt") || output.status.success(),
             "captured commit should contain untracked file"
         );
     }

@@ -166,25 +166,32 @@ pub(crate) fn destroy_dir(root: &Path, workspace_name: &str) -> PathBuf {
 }
 
 /// Read the latest pointer for a destroyed workspace, if any.
-pub(crate) fn read_latest_pointer(root: &Path, workspace_name: &str) -> Result<Option<LatestPointer>> {
+pub(crate) fn read_latest_pointer(
+    root: &Path,
+    workspace_name: &str,
+) -> Result<Option<LatestPointer>> {
     let latest_path = destroy_dir(root, workspace_name).join("latest.json");
     if !latest_path.exists() {
         return Ok(None);
     }
     let content = fs::read_to_string(&latest_path)
         .with_context(|| format!("read {}", latest_path.display()))?;
-    let pointer: LatestPointer =
-        serde_json::from_str(&content).with_context(|| format!("parse {}", latest_path.display()))?;
+    let pointer: LatestPointer = serde_json::from_str(&content)
+        .with_context(|| format!("parse {}", latest_path.display()))?;
     Ok(Some(pointer))
 }
 
 /// Read a specific destroy record by filename.
-pub(crate) fn read_record(root: &Path, workspace_name: &str, filename: &str) -> Result<DestroyRecord> {
+pub(crate) fn read_record(
+    root: &Path,
+    workspace_name: &str,
+    filename: &str,
+) -> Result<DestroyRecord> {
     let record_path = destroy_dir(root, workspace_name).join(filename);
     let content = fs::read_to_string(&record_path)
         .with_context(|| format!("read {}", record_path.display()))?;
-    let record: DestroyRecord =
-        serde_json::from_str(&content).with_context(|| format!("parse {}", record_path.display()))?;
+    let record: DestroyRecord = serde_json::from_str(&content)
+        .with_context(|| format!("parse {}", record_path.display()))?;
     Ok(record)
 }
 
@@ -213,10 +220,7 @@ pub(crate) fn list_record_files(root: &Path, workspace_name: &str) -> Result<Vec
 /// discovery resilient to partial writes where the record was persisted but
 /// `latest.json` was not (e.g. crash between the two writes).
 pub(crate) fn list_destroyed_workspaces(root: &Path) -> Result<Vec<String>> {
-    let ws_dir = root
-        .join(".manifold")
-        .join("artifacts")
-        .join("ws");
+    let ws_dir = root.join(".manifold").join("artifacts").join("ws");
     if !ws_dir.exists() {
         return Ok(vec![]);
     }
@@ -260,14 +264,18 @@ fn has_any_record_files(destroy_dir: &Path) -> bool {
 /// then falling back to scanning timestamped record files.
 ///
 /// Returns `None` only if no records exist at all.
-pub(crate) fn read_latest_record(root: &Path, workspace_name: &str) -> Result<Option<DestroyRecord>> {
+pub(crate) fn read_latest_record(
+    root: &Path,
+    workspace_name: &str,
+) -> Result<Option<DestroyRecord>> {
     // Fast path: latest.json exists and points to a valid record.
     if let Some(pointer) = read_latest_pointer(root, workspace_name)?
-        && let Ok(record) = read_record(root, workspace_name, &pointer.record) {
-            return Ok(Some(record));
-        }
-        // latest.json exists but points to a missing/corrupt record — fall through
-        // to the directory scan.
+        && let Ok(record) = read_record(root, workspace_name, &pointer.record)
+    {
+        return Ok(Some(record));
+    }
+    // latest.json exists but points to a missing/corrupt record — fall through
+    // to the directory scan.
 
     // Fallback: scan the directory for timestamped record files.
     let files = list_record_files(root, workspace_name)?;
@@ -326,8 +334,15 @@ mod tests {
         let head = GitOid::new(&"b".repeat(40)).unwrap();
 
         // Write a normal destroy record (creates both timestamped + latest.json).
-        write_destroy_record(root, ws.as_str(), &base, &head, None, DestroyReason::Destroy)
-            .unwrap();
+        write_destroy_record(
+            root,
+            ws.as_str(),
+            &base,
+            &head,
+            None,
+            DestroyReason::Destroy,
+        )
+        .unwrap();
 
         // Verify the workspace is listed normally.
         let names = list_destroyed_workspaces(root).unwrap();
@@ -351,8 +366,15 @@ mod tests {
         let base = EpochId::new(&"a".repeat(40)).unwrap();
         let head = GitOid::new(&"b".repeat(40)).unwrap();
 
-        write_destroy_record(root, ws.as_str(), &base, &head, None, DestroyReason::Destroy)
-            .unwrap();
+        write_destroy_record(
+            root,
+            ws.as_str(),
+            &base,
+            &head,
+            None,
+            DestroyReason::Destroy,
+        )
+        .unwrap();
 
         // Delete latest.json.
         let latest = destroy_dir(root, ws.as_str()).join("latest.json");
@@ -383,8 +405,15 @@ mod tests {
         let base = EpochId::new(&"a".repeat(40)).unwrap();
         let head = GitOid::new(&"b".repeat(40)).unwrap();
 
-        write_destroy_record(root, ws.as_str(), &base, &head, None, DestroyReason::Destroy)
-            .unwrap();
+        write_destroy_record(
+            root,
+            ws.as_str(),
+            &base,
+            &head,
+            None,
+            DestroyReason::Destroy,
+        )
+        .unwrap();
 
         // Corrupt latest.json: point it to a nonexistent file.
         let latest_path = destroy_dir(root, ws.as_str()).join("latest.json");
@@ -454,8 +483,15 @@ mod tests {
         // Write a destroy record, then delete latest.json.
         let base = EpochId::new(&"c".repeat(40)).unwrap();
         let head = GitOid::new(&"d".repeat(40)).unwrap();
-        write_destroy_record(root, ws_name, &base, &head, None, DestroyReason::MergeDestroy)
-            .unwrap();
+        write_destroy_record(
+            root,
+            ws_name,
+            &base,
+            &head,
+            None,
+            DestroyReason::MergeDestroy,
+        )
+        .unwrap();
         let latest_path = destroy_dir(root, ws_name).join("latest.json");
         std::fs::remove_file(&latest_path).unwrap();
 
@@ -506,7 +542,10 @@ mod tests {
 
         // Fallback: list_record_files finds the real record.
         let records = list_record_files(root, ws_name).unwrap();
-        assert!(!records.is_empty(), "directory scan should find the real record");
+        assert!(
+            !records.is_empty(),
+            "directory scan should find the real record"
+        );
         // The real record is not the nonexistent one.
         assert!(
             !records.contains(&"nonexistent-9999.json".to_owned()),
@@ -525,10 +564,24 @@ mod tests {
         // Create two destroy records.
         let base = EpochId::new(&"a".repeat(40)).unwrap();
         let head = GitOid::new(&"b".repeat(40)).unwrap();
-        write_destroy_record(root, "ws-complete", &base, &head, None, DestroyReason::Destroy)
-            .unwrap();
-        write_destroy_record(root, "ws-orphan", &base, &head, None, DestroyReason::Destroy)
-            .unwrap();
+        write_destroy_record(
+            root,
+            "ws-complete",
+            &base,
+            &head,
+            None,
+            DestroyReason::Destroy,
+        )
+        .unwrap();
+        write_destroy_record(
+            root,
+            "ws-orphan",
+            &base,
+            &head,
+            None,
+            DestroyReason::Destroy,
+        )
+        .unwrap();
 
         // Remove latest.json from ws-orphan (simulating partial write failure).
         let orphan_latest = destroy_dir(root, "ws-orphan").join("latest.json");
@@ -572,8 +625,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Write second destroy record.
-        write_destroy_record(root, ws_name, &base, &head2, None, DestroyReason::MergeDestroy)
-            .unwrap();
+        write_destroy_record(
+            root,
+            ws_name,
+            &base,
+            &head2,
+            None,
+            DestroyReason::MergeDestroy,
+        )
+        .unwrap();
 
         // Both records should be listed.
         let records = list_record_files(root, ws_name).unwrap();

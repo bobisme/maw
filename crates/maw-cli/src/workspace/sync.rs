@@ -108,12 +108,8 @@ pub fn sync(name: Option<&str>, all: bool) -> Result<()> {
                 "Workspace '{workspace_name}' is stale but has {ahead} committed commit(s) not yet \
                  merged into epoch."
             );
-            println!(
-                "  Merge the workspace first: maw ws merge {workspace_name}"
-            );
-            println!(
-                "  Then sync: maw ws sync {workspace_name}"
-            );
+            println!("  Merge the workspace first: maw ws merge {workspace_name}");
+            println!("  Then sync: maw ws sync {workspace_name}");
             return Ok(());
         }
         Some(_) => {}
@@ -175,8 +171,9 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
     // unstaged, and untracked work.
     let repo = maw_git::GixRepo::open(&ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let is_dirty = repo.is_dirty()
-        .map_err(|e| anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}"))?;
+    let is_dirty = repo.is_dirty().map_err(|e| {
+        anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}")
+    })?;
 
     if is_dirty {
         bail!(
@@ -195,9 +192,7 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         .args(["checkout", "--detach", epoch_oid])
         .current_dir(&ws_path)
         .output()
-        .map_err(|e| anyhow::anyhow!(
-            "Failed to run git checkout in workspace '{ws_name}': {e}"
-        ))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run git checkout in workspace '{ws_name}': {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(

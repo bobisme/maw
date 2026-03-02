@@ -264,10 +264,7 @@ impl Model for MergeModel {
                 // workspaces are either destroyed or have recovery captured.
                 let all_handled = self.workspace_names.iter().all(|name| {
                     state.recovery_captured.contains(name)
-                        || state
-                            .workspaces
-                            .get(name)
-                            .is_none_or(|ws| !ws.exists)
+                        || state.workspaces.get(name).is_none_or(|ws| !ws.exists)
                 });
                 if all_handled {
                     actions.push(Action::Cleanup);
@@ -377,16 +374,12 @@ impl Model for MergeModel {
                 if s.epoch_ref == s.candidate && s.branch_ref == s.candidate {
                     // Both refs moved — already committed. Go to cleanup.
                     s.phase = Phase::Cleanup;
-                } else if s.epoch_ref == s.candidate
-                    && s.branch_ref == self.initial_epoch
-                {
+                } else if s.epoch_ref == s.candidate && s.branch_ref == self.initial_epoch {
                     // Epoch moved, branch didn't — finalize branch ref.
                     // (This is the FinalizedMainRef path in commit.rs.)
                     s.branch_ref = s.candidate;
                     s.phase = Phase::Cleanup;
-                } else if s.epoch_ref == self.initial_epoch
-                    && s.branch_ref == self.initial_epoch
-                {
+                } else if s.epoch_ref == self.initial_epoch && s.branch_ref == self.initial_epoch {
                     // Neither ref moved. Pre-commit crash.
                     // If we were in Prepare or Build, abort safely.
                     // If we were in Validate, re-run validation.
@@ -460,7 +453,10 @@ impl Model for MergeModel {
                     reachable.insert(1); // initial_epoch
                 }
 
-                state.committed_pre.iter().all(|oid| reachable.contains(oid))
+                state
+                    .committed_pre
+                    .iter()
+                    .all(|oid| reachable.contains(oid))
             }),
             // G3: Commit atomicity.
             //

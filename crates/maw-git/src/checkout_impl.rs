@@ -41,12 +41,12 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     };
 
     // Build index from tree using the high-level API (handles protect_options internally).
-    let mut index_file = repo
-        .repo
-        .index_from_tree(&tree_oid)
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to create index from tree {tree_oid}: {e}"),
-        })?;
+    let mut index_file =
+        repo.repo
+            .index_from_tree(&tree_oid)
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to create index from tree {tree_oid}: {e}"),
+            })?;
 
     // Collect all paths in the target tree so we can remove stale files after checkout.
     let tree_paths: HashSet<String> = index_file
@@ -153,12 +153,9 @@ fn remove_stale_files(
 }
 
 pub fn read_index(repo: &GixRepo) -> Result<Vec<IndexEntry>, GitError> {
-    let index = repo
-        .repo
-        .open_index()
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to open index: {e}"),
-        })?;
+    let index = repo.repo.open_index().map_err(|e| GitError::BackendError {
+        message: format!("failed to open index: {e}"),
+    })?;
 
     let entries = index
         .entries()

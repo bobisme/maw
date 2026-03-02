@@ -58,11 +58,11 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use maw_git::GitRepo as _;
 
+use crate::workspace::repo_root;
 use maw_core::model::types::{GitOid, WorkspaceId};
 use maw_core::oplog::types::{OpPayload, Operation};
 use maw_core::oplog::write::write_operation_blob;
 use maw_core::refs;
-use crate::workspace::repo_root;
 
 // ---------------------------------------------------------------------------
 // CLI argument types
@@ -179,8 +179,7 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
         }
 
         // "does not match any" means the local epoch ref doesn't exist yet — OK.
-        if !stderr_trimmed.contains("does not match any")
-            && !stderr_trimmed.contains("src refspec")
+        if !stderr_trimmed.contains("does not match any") && !stderr_trimmed.contains("src refspec")
         {
             bail!("git push epoch ref failed: {stderr_trimmed}");
         }
@@ -199,8 +198,7 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
         let stderr_trimmed = stderr.trim();
 
         // "does not match any" is OK — means no head/* or ws/* refs exist yet.
-        if !stderr_trimmed.contains("does not match any")
-            && !stderr_trimmed.contains("src refspec")
+        if !stderr_trimmed.contains("does not match any") && !stderr_trimmed.contains("src refspec")
         {
             bail!("git push refs/manifold/head/* refs/manifold/ws/* failed: {stderr_trimmed}");
         }
@@ -772,9 +770,10 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
 /// # Errors
 /// Returns a human-readable reason string if validation fails.
 pub fn validate_remote_op_blob(root: &Path, oid: &GitOid) -> Result<(), String> {
-    let repo = maw_git::GixRepo::open(root)
-        .map_err(|e| format!("Failed to open repo: {e}"))?;
-    let git_oid: maw_git::GitOid = oid.as_str().parse()
+    let repo = maw_git::GixRepo::open(root).map_err(|e| format!("Failed to open repo: {e}"))?;
+    let git_oid: maw_git::GitOid = oid
+        .as_str()
+        .parse()
         .map_err(|e| format!("Invalid OID {}: {e}", oid.as_str()))?;
 
     // 1. Verify the OID exists in the object store by trying to read it as a blob.
@@ -795,7 +794,9 @@ pub fn validate_remote_op_blob(root: &Path, oid: &GitOid) -> Result<(), String> 
 
     // 4. Validate parent OIDs exist in the object store.
     for parent in &op.parent_ids {
-        let parent_git: maw_git::GitOid = parent.as_str().parse()
+        let parent_git: maw_git::GitOid = parent
+            .as_str()
+            .parse()
             .map_err(|e| format!("Invalid parent OID {}: {e}", parent.as_str()))?;
         if repo.read_blob(parent_git).is_err() {
             return Err(format!(
@@ -877,13 +878,18 @@ enum AncestryRelation {
 fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result<AncestryRelation> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let local_git: maw_git::GitOid = local.as_str().parse()
+    let local_git: maw_git::GitOid = local
+        .as_str()
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid local OID: {e}"))?;
-    let remote_git: maw_git::GitOid = remote.as_str().parse()
+    let remote_git: maw_git::GitOid = remote
+        .as_str()
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid remote OID: {e}"))?;
 
     // Check: is local an ancestor of remote? (i.e., remote is ahead or equal)
-    let local_is_ancestor = repo.is_ancestor(local_git, remote_git)
+    let local_is_ancestor = repo
+        .is_ancestor(local_git, remote_git)
         .map_err(|e| anyhow::anyhow!("Failed to check git ancestry (local->remote): {e}"))?;
 
     if local_is_ancestor {
@@ -891,7 +897,8 @@ fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result
     }
 
     // Check: is remote an ancestor of local? (i.e., local is ahead or equal)
-    let remote_is_ancestor = repo.is_ancestor(remote_git, local_git)
+    let remote_is_ancestor = repo
+        .is_ancestor(remote_git, local_git)
         .map_err(|e| anyhow::anyhow!("Failed to check git ancestry (remote->local): {e}"))?;
 
     if remote_is_ancestor {
@@ -909,10 +916,14 @@ fn git_ancestry_relation(root: &Path, local: &GitOid, remote: &GitOid) -> Result
 fn list_refs_with_prefix(root: &Path, prefix: &str) -> Result<Vec<String>> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let refs = repo.list_refs(prefix)
+    let refs = repo
+        .list_refs(prefix)
         .map_err(|e| anyhow::anyhow!("list_refs failed: {e}"))?;
 
-    Ok(refs.into_iter().map(|(name, _oid)| name.as_str().to_string()).collect())
+    Ok(refs
+        .into_iter()
+        .map(|(name, _oid)| name.as_str().to_string())
+        .collect())
 }
 
 /// Return the current UTC timestamp in ISO 8601 format.

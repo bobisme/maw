@@ -50,8 +50,8 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use crate::merge::resolve::{
-    ConflictReason, Diff3Result, MergeOutcome, SharedClassification,
-    classify_shared_path, resolve_entries,
+    ConflictReason, Diff3Result, MergeOutcome, SharedClassification, classify_shared_path,
+    resolve_entries,
 };
 use crate::merge::types::ChangeKind;
 
@@ -114,7 +114,6 @@ fn make_contents(kinds: &[ChangeKind], values: &[u8]) -> Vec<Option<u8>> {
         .collect()
 }
 
-
 // =========================================================================
 // PROPERTY: Totality — no panics for any valid input
 // =========================================================================
@@ -148,7 +147,11 @@ fn totality_3_entries() {
     let k2: u8 = kani::any();
     kani::assume(k2 < 3);
 
-    let kinds = [kind_from_index(k0), kind_from_index(k1), kind_from_index(k2)];
+    let kinds = [
+        kind_from_index(k0),
+        kind_from_index(k1),
+        kind_from_index(k2),
+    ];
     let all_have_content: bool = kani::any();
     let all_content_equal: bool = kani::any();
     let has_base: bool = kani::any();
@@ -260,7 +263,10 @@ fn commutativity_3_entries() {
 
     for perm in &perms {
         let r = classify_shared_path(perm, all_have_content, all_content_equal, has_base);
-        assert_eq!(ref_result, r, "3-entry permutation produced different classification");
+        assert_eq!(
+            ref_result, r,
+            "3-entry permutation produced different classification"
+        );
     }
 }
 
@@ -496,402 +502,438 @@ fn exhaustive_2_entry_decision_table() {
 mod resolve_entries_proofs {
     use super::*;
 
-// =========================================================================
-// PROPERTY: Totality — resolve_entries never panics
-// =========================================================================
+    // =========================================================================
+    // PROPERTY: Totality — resolve_entries never panics
+    // =========================================================================
 
-/// resolve_entries handles all valid 2-entry inputs without panicking.
-///
-/// Content values bounded to 0..4 (4 values cover all relationship cases:
-/// base==ours, base==theirs, ours==theirs, all-different, all-same).
-#[kani::proof]
-#[kani::unwind(3)]
-fn re_totality_2_entries() {
-    let k0: u8 = kani::any();
-    kani::assume(k0 < 3);
-    let k1: u8 = kani::any();
-    kani::assume(k1 < 3);
+    /// resolve_entries handles all valid 2-entry inputs without panicking.
+    ///
+    /// Content values bounded to 0..4 (4 values cover all relationship cases:
+    /// base==ours, base==theirs, ours==theirs, all-different, all-same).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn re_totality_2_entries() {
+        let k0: u8 = kani::any();
+        kani::assume(k0 < 3);
+        let k1: u8 = kani::any();
+        kani::assume(k1 < 3);
 
-    let kinds = [kind_from_index(k0), kind_from_index(k1)];
+        let kinds = [kind_from_index(k0), kind_from_index(k1)];
 
-    let v0: u8 = kani::any();
-    kani::assume(v0 < 4);
-    let v1: u8 = kani::any();
-    kani::assume(v1 < 4);
-    let contents = make_contents(&kinds, &[v0, v1]);
+        let v0: u8 = kani::any();
+        kani::assume(v0 < 4);
+        let v1: u8 = kani::any();
+        kani::assume(v1 < 4);
+        let contents = make_contents(&kinds, &[v0, v1]);
 
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
 
-    let _result = resolve_entries(&kinds, &contents, base, stub_diff3);
-}
-
-/// resolve_entries handles all valid 3-entry inputs without panicking.
-#[kani::proof]
-#[kani::unwind(4)]
-fn re_totality_3_entries() {
-    let k0: u8 = kani::any();
-    kani::assume(k0 < 3);
-    let k1: u8 = kani::any();
-    kani::assume(k1 < 3);
-    let k2: u8 = kani::any();
-    kani::assume(k2 < 3);
-
-    let kinds = [kind_from_index(k0), kind_from_index(k1), kind_from_index(k2)];
-
-    let v0: u8 = kani::any();
-    kani::assume(v0 < 4);
-    let v1: u8 = kani::any();
-    kani::assume(v1 < 4);
-    let v2: u8 = kani::any();
-    kani::assume(v2 < 4);
-    let contents = make_contents(&kinds, &[v0, v1, v2]);
-
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
-
-    let _result = resolve_entries(&kinds, &contents, base, stub_diff3);
-}
-
-// =========================================================================
-// PROPERTY: Outcome consistency — every result is Delete, Upsert, or Conflict
-// =========================================================================
-
-/// Every resolve_entries result falls into exactly one outcome category.
-/// Upsert always carries content. Delete and Conflict carry no content.
-#[kani::proof]
-#[kani::unwind(3)]
-fn re_outcome_consistency_2_entries() {
-    let k0: u8 = kani::any();
-    kani::assume(k0 < 3);
-    let k1: u8 = kani::any();
-    kani::assume(k1 < 3);
-
-    let kinds = [kind_from_index(k0), kind_from_index(k1)];
-
-    let v0: u8 = kani::any();
-    kani::assume(v0 < 4);
-    let v1: u8 = kani::any();
-    kani::assume(v1 < 4);
-    let contents = make_contents(&kinds, &[v0, v1]);
-
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
-
-    let result = resolve_entries(&kinds, &contents, base, stub_diff3);
-    assert!(result.is_ok(), "stub_diff3 never returns Err");
-
-    match result.unwrap() {
-        MergeOutcome::Delete => {
-            // Delete requires all entries to be deletions.
-            assert!(kinds.iter().all(|k| is_delete(k)));
-        }
-        MergeOutcome::Upsert(_content) => {
-            // Upsert requires at least one non-delete entry.
-            assert!(kinds.iter().any(|k| !is_delete(k)));
-        }
-        MergeOutcome::Conflict(reason) => {
-            // Conflict reason must be one of the known variants.
-            assert!(matches!(
-                reason,
-                ConflictReason::ModifyDelete
-                    | ConflictReason::AddAddDifferent
-                    | ConflictReason::MissingBase
-                    | ConflictReason::MissingContent
-                    | ConflictReason::Diff3Conflict
-            ));
-        }
-    }
-}
-
-// =========================================================================
-// PROPERTY: K-way fold commutativity — entry order doesn't change outcome
-// =========================================================================
-
-/// Swapping 2 entries produces the same resolve_entries outcome.
-///
-/// This is stronger than classify_shared_path commutativity because it also
-/// verifies that the diff3 fold produces the same merged content regardless
-/// of entry order (given our commutative stub_diff3).
-#[kani::proof]
-#[kani::unwind(3)]
-fn re_commutativity_2_entries() {
-    let k0: u8 = kani::any();
-    kani::assume(k0 < 3);
-    let k1: u8 = kani::any();
-    kani::assume(k1 < 3);
-
-    let v0: u8 = kani::any();
-    kani::assume(v0 < 4);
-    let v1: u8 = kani::any();
-    kani::assume(v1 < 4);
-
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
-
-    let kinds_fwd = [kind_from_index(k0), kind_from_index(k1)];
-    let contents_fwd = make_contents(&kinds_fwd, &[v0, v1]);
-
-    let kinds_rev = [kind_from_index(k1), kind_from_index(k0)];
-    let contents_rev = make_contents(&kinds_rev, &[v1, v0]);
-
-    let r_fwd = resolve_entries(&kinds_fwd, &contents_fwd, base, stub_diff3).unwrap();
-    let r_rev = resolve_entries(&kinds_rev, &contents_rev, base, stub_diff3).unwrap();
-
-    assert_eq!(r_fwd, r_rev, "resolve_entries must be commutative");
-}
-
-/// All 6 permutations of 3 entries produce the same resolve_entries outcome.
-///
-/// Content values bounded to 0..4 to keep the SAT solver tractable.
-/// 4 values suffice: base, plus up to 3 distinct workspace values.
-#[kani::proof]
-#[kani::unwind(8)]
-fn re_commutativity_3_entries() {
-    let k0: u8 = kani::any();
-    kani::assume(k0 < 3);
-    let k1: u8 = kani::any();
-    kani::assume(k1 < 3);
-    let k2: u8 = kani::any();
-    kani::assume(k2 < 3);
-
-    let v0: u8 = kani::any();
-    kani::assume(v0 < 4);
-    let v1: u8 = kani::any();
-    kani::assume(v1 < 4);
-    let v2: u8 = kani::any();
-    kani::assume(v2 < 4);
-
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
-
-    // Reference ordering: [0, 1, 2].
-    let kinds_ref = [kind_from_index(k0), kind_from_index(k1), kind_from_index(k2)];
-    let contents_ref = make_contents(&kinds_ref, &[v0, v1, v2]);
-    let ref_result = resolve_entries(&kinds_ref, &contents_ref, base, stub_diff3).unwrap();
-
-    // Permutation [1, 0, 2].
-    let kinds_p = [kind_from_index(k1), kind_from_index(k0), kind_from_index(k2)];
-    let contents_p = make_contents(&kinds_p, &[v1, v0, v2]);
-    let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
-    assert_eq!(ref_result, r, "3-entry perm [1,0,2] differs");
-
-    // Permutation [0, 2, 1].
-    let kinds_p = [kind_from_index(k0), kind_from_index(k2), kind_from_index(k1)];
-    let contents_p = make_contents(&kinds_p, &[v0, v2, v1]);
-    let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
-    assert_eq!(ref_result, r, "3-entry perm [0,2,1] differs");
-
-    // Permutation [2, 1, 0].
-    let kinds_p = [kind_from_index(k2), kind_from_index(k1), kind_from_index(k0)];
-    let contents_p = make_contents(&kinds_p, &[v2, v1, v0]);
-    let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
-    assert_eq!(ref_result, r, "3-entry perm [2,1,0] differs");
-
-    // Permutation [1, 2, 0].
-    let kinds_p = [kind_from_index(k1), kind_from_index(k2), kind_from_index(k0)];
-    let contents_p = make_contents(&kinds_p, &[v1, v2, v0]);
-    let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
-    assert_eq!(ref_result, r, "3-entry perm [1,2,0] differs");
-
-    // Permutation [2, 0, 1].
-    let kinds_p = [kind_from_index(k2), kind_from_index(k0), kind_from_index(k1)];
-    let contents_p = make_contents(&kinds_p, &[v2, v0, v1]);
-    let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
-    assert_eq!(ref_result, r, "3-entry perm [2,0,1] differs");
-}
-
-// =========================================================================
-// PROPERTY: Idempotence — identical content always resolves to Upsert
-// =========================================================================
-
-/// When all non-delete entries have identical content, resolve_entries
-/// returns Upsert with that content (not Delete, not Conflict).
-#[kani::proof]
-#[kani::unwind(4)]
-fn re_idempotence_identical_content() {
-    let kind: u8 = kani::any();
-    kani::assume(kind < 2); // Added or Modified only.
-
-    let n: u8 = kani::any();
-    kani::assume(n >= 2 && n <= 3);
-
-    let k = kind_from_index(kind);
-    let val: u8 = kani::any();
-    kani::assume(val < 4);
-
-    let mut kinds = Vec::new();
-    let mut contents = Vec::new();
-    for _ in 0..n {
-        kinds.push(k.clone());
-        contents.push(Some(val));
+        let _result = resolve_entries(&kinds, &contents, base, stub_diff3);
     }
 
-    // Base can be anything — identical content short-circuits before diff3.
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
+    /// resolve_entries handles all valid 3-entry inputs without panicking.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn re_totality_3_entries() {
+        let k0: u8 = kani::any();
+        kani::assume(k0 < 3);
+        let k1: u8 = kani::any();
+        kani::assume(k1 < 3);
+        let k2: u8 = kani::any();
+        kani::assume(k2 < 3);
 
-    let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let kinds = [
+            kind_from_index(k0),
+            kind_from_index(k1),
+            kind_from_index(k2),
+        ];
 
-    assert_eq!(
-        result,
-        MergeOutcome::Upsert(val),
-        "Identical non-delete content must resolve to Upsert"
-    );
-}
+        let v0: u8 = kani::any();
+        kani::assume(v0 < 4);
+        let v1: u8 = kani::any();
+        kani::assume(v1 < 4);
+        let v2: u8 = kani::any();
+        kani::assume(v2 < 4);
+        let contents = make_contents(&kinds, &[v0, v1, v2]);
 
-/// When all entries are deletes, resolve_entries returns Delete.
-#[kani::proof]
-#[kani::unwind(4)]
-fn re_idempotence_all_deletes() {
-    let n: u8 = kani::any();
-    kani::assume(n >= 2 && n <= 3);
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
 
-    let mut kinds = Vec::new();
-    let mut contents = Vec::new();
-    for _ in 0..n {
-        kinds.push(ChangeKind::Deleted);
-        contents.push(None);
+        let _result = resolve_entries(&kinds, &contents, base, stub_diff3);
     }
 
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
+    // =========================================================================
+    // PROPERTY: Outcome consistency — every result is Delete, Upsert, or Conflict
+    // =========================================================================
 
-    let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+    /// Every resolve_entries result falls into exactly one outcome category.
+    /// Upsert always carries content. Delete and Conflict carry no content.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn re_outcome_consistency_2_entries() {
+        let k0: u8 = kani::any();
+        kani::assume(k0 < 3);
+        let k1: u8 = kani::any();
+        kani::assume(k1 < 3);
 
-    assert_eq!(result, MergeOutcome::Delete, "All deletes must produce Delete");
-}
+        let kinds = [kind_from_index(k0), kind_from_index(k1)];
 
-// =========================================================================
-// PROPERTY: Conflict monotonicity — pre-diff3 conflicts stay conflicts
-// =========================================================================
+        let v0: u8 = kani::any();
+        kani::assume(v0 < 4);
+        let v1: u8 = kani::any();
+        kani::assume(v1 < 4);
+        let contents = make_contents(&kinds, &[v0, v1]);
 
-/// If classify_shared_path says it's a conflict (not NeedsDiff3), then
-/// resolve_entries also produces a Conflict with the corresponding reason.
-#[kani::proof]
-#[kani::unwind(3)]
-fn re_conflict_monotonicity() {
-    let k0: u8 = kani::any();
-    kani::assume(k0 < 3);
-    let k1: u8 = kani::any();
-    kani::assume(k1 < 3);
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
 
-    let kinds = [kind_from_index(k0), kind_from_index(k1)];
+        let result = resolve_entries(&kinds, &contents, base, stub_diff3);
+        assert!(result.is_ok(), "stub_diff3 never returns Err");
 
-    let v0: u8 = kani::any();
-    kani::assume(v0 < 4);
-    let v1: u8 = kani::any();
-    kani::assume(v1 < 4);
-    let contents = make_contents(&kinds, &[v0, v1]);
+        match result.unwrap() {
+            MergeOutcome::Delete => {
+                // Delete requires all entries to be deletions.
+                assert!(kinds.iter().all(|k| is_delete(k)));
+            }
+            MergeOutcome::Upsert(_content) => {
+                // Upsert requires at least one non-delete entry.
+                assert!(kinds.iter().any(|k| !is_delete(k)));
+            }
+            MergeOutcome::Conflict(reason) => {
+                // Conflict reason must be one of the known variants.
+                assert!(matches!(
+                    reason,
+                    ConflictReason::ModifyDelete
+                        | ConflictReason::AddAddDifferent
+                        | ConflictReason::MissingBase
+                        | ConflictReason::MissingContent
+                        | ConflictReason::Diff3Conflict
+                ));
+            }
+        }
+    }
 
-    let base_val: u8 = kani::any();
-    kani::assume(base_val < 4);
-    let has_base: bool = kani::any();
-    let base = if has_base { Some(&base_val) } else { None };
+    // =========================================================================
+    // PROPERTY: K-way fold commutativity — entry order doesn't change outcome
+    // =========================================================================
 
-    // Compute the classification.
-    let all_have_content = kinds.iter().zip(contents.iter()).all(|(k, c)| {
-        matches!(k, ChangeKind::Deleted) || c.is_some()
-    });
-    let non_delete_contents: Vec<&u8> = contents.iter().filter_map(|c| c.as_ref()).collect();
-    let all_content_equal = if non_delete_contents.len() >= 2 {
-        non_delete_contents.windows(2).all(|w| w[0] == w[1])
-    } else {
-        true
-    };
-    let cls = classify_shared_path(&kinds, all_have_content, all_content_equal, base.is_some());
+    /// Swapping 2 entries produces the same resolve_entries outcome.
+    ///
+    /// This is stronger than classify_shared_path commutativity because it also
+    /// verifies that the diff3 fold produces the same merged content regardless
+    /// of entry order (given our commutative stub_diff3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn re_commutativity_2_entries() {
+        let k0: u8 = kani::any();
+        kani::assume(k0 < 3);
+        let k1: u8 = kani::any();
+        kani::assume(k1 < 3);
 
-    if cls.is_conflict() {
+        let v0: u8 = kani::any();
+        kani::assume(v0 < 4);
+        let v1: u8 = kani::any();
+        kani::assume(v1 < 4);
+
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
+
+        let kinds_fwd = [kind_from_index(k0), kind_from_index(k1)];
+        let contents_fwd = make_contents(&kinds_fwd, &[v0, v1]);
+
+        let kinds_rev = [kind_from_index(k1), kind_from_index(k0)];
+        let contents_rev = make_contents(&kinds_rev, &[v1, v0]);
+
+        let r_fwd = resolve_entries(&kinds_fwd, &contents_fwd, base, stub_diff3).unwrap();
+        let r_rev = resolve_entries(&kinds_rev, &contents_rev, base, stub_diff3).unwrap();
+
+        assert_eq!(r_fwd, r_rev, "resolve_entries must be commutative");
+    }
+
+    /// All 6 permutations of 3 entries produce the same resolve_entries outcome.
+    ///
+    /// Content values bounded to 0..4 to keep the SAT solver tractable.
+    /// 4 values suffice: base, plus up to 3 distinct workspace values.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn re_commutativity_3_entries() {
+        let k0: u8 = kani::any();
+        kani::assume(k0 < 3);
+        let k1: u8 = kani::any();
+        kani::assume(k1 < 3);
+        let k2: u8 = kani::any();
+        kani::assume(k2 < 3);
+
+        let v0: u8 = kani::any();
+        kani::assume(v0 < 4);
+        let v1: u8 = kani::any();
+        kani::assume(v1 < 4);
+        let v2: u8 = kani::any();
+        kani::assume(v2 < 4);
+
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
+
+        // Reference ordering: [0, 1, 2].
+        let kinds_ref = [
+            kind_from_index(k0),
+            kind_from_index(k1),
+            kind_from_index(k2),
+        ];
+        let contents_ref = make_contents(&kinds_ref, &[v0, v1, v2]);
+        let ref_result = resolve_entries(&kinds_ref, &contents_ref, base, stub_diff3).unwrap();
+
+        // Permutation [1, 0, 2].
+        let kinds_p = [
+            kind_from_index(k1),
+            kind_from_index(k0),
+            kind_from_index(k2),
+        ];
+        let contents_p = make_contents(&kinds_p, &[v1, v0, v2]);
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        assert_eq!(ref_result, r, "3-entry perm [1,0,2] differs");
+
+        // Permutation [0, 2, 1].
+        let kinds_p = [
+            kind_from_index(k0),
+            kind_from_index(k2),
+            kind_from_index(k1),
+        ];
+        let contents_p = make_contents(&kinds_p, &[v0, v2, v1]);
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        assert_eq!(ref_result, r, "3-entry perm [0,2,1] differs");
+
+        // Permutation [2, 1, 0].
+        let kinds_p = [
+            kind_from_index(k2),
+            kind_from_index(k1),
+            kind_from_index(k0),
+        ];
+        let contents_p = make_contents(&kinds_p, &[v2, v1, v0]);
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        assert_eq!(ref_result, r, "3-entry perm [2,1,0] differs");
+
+        // Permutation [1, 2, 0].
+        let kinds_p = [
+            kind_from_index(k1),
+            kind_from_index(k2),
+            kind_from_index(k0),
+        ];
+        let contents_p = make_contents(&kinds_p, &[v1, v2, v0]);
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        assert_eq!(ref_result, r, "3-entry perm [1,2,0] differs");
+
+        // Permutation [2, 0, 1].
+        let kinds_p = [
+            kind_from_index(k2),
+            kind_from_index(k0),
+            kind_from_index(k1),
+        ];
+        let contents_p = make_contents(&kinds_p, &[v2, v0, v1]);
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        assert_eq!(ref_result, r, "3-entry perm [2,0,1] differs");
+    }
+
+    // =========================================================================
+    // PROPERTY: Idempotence — identical content always resolves to Upsert
+    // =========================================================================
+
+    /// When all non-delete entries have identical content, resolve_entries
+    /// returns Upsert with that content (not Delete, not Conflict).
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn re_idempotence_identical_content() {
+        let kind: u8 = kani::any();
+        kani::assume(kind < 2); // Added or Modified only.
+
+        let n: u8 = kani::any();
+        kani::assume(n >= 2 && n <= 3);
+
+        let k = kind_from_index(kind);
+        let val: u8 = kani::any();
+        kani::assume(val < 4);
+
+        let mut kinds = Vec::new();
+        let mut contents = Vec::new();
+        for _ in 0..n {
+            kinds.push(k.clone());
+            contents.push(Some(val));
+        }
+
+        // Base can be anything — identical content short-circuits before diff3.
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
+
         let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
-        assert!(
-            matches!(result, MergeOutcome::Conflict(_)),
-            "Pre-diff3 conflict must remain conflict through resolve_entries"
+
+        assert_eq!(
+            result,
+            MergeOutcome::Upsert(val),
+            "Identical non-delete content must resolve to Upsert"
         );
     }
-}
 
-// =========================================================================
-// PROPERTY: Diff3 fold correctness — one-side-changed resolves cleanly
-// =========================================================================
+    /// When all entries are deletes, resolve_entries returns Delete.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn re_idempotence_all_deletes() {
+        let n: u8 = kani::any();
+        kani::assume(n >= 2 && n <= 3);
 
-/// When 2 workspaces modify a file, one matching the base and one changed,
-/// resolve_entries produces Upsert with the changed content (not conflict).
-/// This verifies the diff3 fold correctly picks the non-trivial side.
-#[kani::proof]
-fn re_diff3_one_side_changed() {
-    let base_val: u8 = kani::any();
-    let changed_val: u8 = kani::any();
-    kani::assume(base_val != changed_val);
+        let mut kinds = Vec::new();
+        let mut contents = Vec::new();
+        for _ in 0..n {
+            kinds.push(ChangeKind::Deleted);
+            contents.push(None);
+        }
 
-    let kinds = [ChangeKind::Modified, ChangeKind::Modified];
-    let contents = [Some(base_val), Some(changed_val)];
-    let base = Some(&base_val);
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
 
-    let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
 
-    assert_eq!(
-        result,
-        MergeOutcome::Upsert(changed_val),
-        "One-side-changed must resolve to the changed side"
-    );
-}
+        assert_eq!(
+            result,
+            MergeOutcome::Delete,
+            "All deletes must produce Delete"
+        );
+    }
 
-/// When 3 workspaces modify a file, two matching base and one changed,
-/// resolve_entries picks the changed content.
-#[kani::proof]
-fn re_diff3_one_of_three_changed() {
-    let base_val: u8 = kani::any();
-    let changed_val: u8 = kani::any();
-    kani::assume(base_val != changed_val);
+    // =========================================================================
+    // PROPERTY: Conflict monotonicity — pre-diff3 conflicts stay conflicts
+    // =========================================================================
 
-    let kinds = [ChangeKind::Modified, ChangeKind::Modified, ChangeKind::Modified];
-    let contents = [Some(base_val), Some(changed_val), Some(base_val)];
-    let base = Some(&base_val);
+    /// If classify_shared_path says it's a conflict (not NeedsDiff3), then
+    /// resolve_entries also produces a Conflict with the corresponding reason.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn re_conflict_monotonicity() {
+        let k0: u8 = kani::any();
+        kani::assume(k0 < 3);
+        let k1: u8 = kani::any();
+        kani::assume(k1 < 3);
 
-    let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let kinds = [kind_from_index(k0), kind_from_index(k1)];
 
-    assert_eq!(
-        result,
-        MergeOutcome::Upsert(changed_val),
-        "One-of-three changed must resolve to the changed value"
-    );
-}
+        let v0: u8 = kani::any();
+        kani::assume(v0 < 4);
+        let v1: u8 = kani::any();
+        kani::assume(v1 < 4);
+        let contents = make_contents(&kinds, &[v0, v1]);
 
-/// When both sides changed from base differently, diff3 reports conflict.
-#[kani::proof]
-fn re_diff3_both_sides_changed_conflicts() {
-    let base_val: u8 = kani::any();
-    let val_a: u8 = kani::any();
-    let val_b: u8 = kani::any();
-    kani::assume(base_val != val_a);
-    kani::assume(base_val != val_b);
-    kani::assume(val_a != val_b);
+        let base_val: u8 = kani::any();
+        kani::assume(base_val < 4);
+        let has_base: bool = kani::any();
+        let base = if has_base { Some(&base_val) } else { None };
 
-    let kinds = [ChangeKind::Modified, ChangeKind::Modified];
-    let contents = [Some(val_a), Some(val_b)];
-    let base = Some(&base_val);
+        // Compute the classification.
+        let all_have_content = kinds
+            .iter()
+            .zip(contents.iter())
+            .all(|(k, c)| matches!(k, ChangeKind::Deleted) || c.is_some());
+        let non_delete_contents: Vec<&u8> = contents.iter().filter_map(|c| c.as_ref()).collect();
+        let all_content_equal = if non_delete_contents.len() >= 2 {
+            non_delete_contents.windows(2).all(|w| w[0] == w[1])
+        } else {
+            true
+        };
+        let cls = classify_shared_path(&kinds, all_have_content, all_content_equal, base.is_some());
 
-    let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        if cls.is_conflict() {
+            let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+            assert!(
+                matches!(result, MergeOutcome::Conflict(_)),
+                "Pre-diff3 conflict must remain conflict through resolve_entries"
+            );
+        }
+    }
 
-    assert_eq!(
-        result,
-        MergeOutcome::Conflict(ConflictReason::Diff3Conflict),
-        "Both-sides-changed-differently must conflict"
-    );
-}
+    // =========================================================================
+    // PROPERTY: Diff3 fold correctness — one-side-changed resolves cleanly
+    // =========================================================================
 
+    /// When 2 workspaces modify a file, one matching the base and one changed,
+    /// resolve_entries produces Upsert with the changed content (not conflict).
+    /// This verifies the diff3 fold correctly picks the non-trivial side.
+    #[kani::proof]
+    fn re_diff3_one_side_changed() {
+        let base_val: u8 = kani::any();
+        let changed_val: u8 = kani::any();
+        kani::assume(base_val != changed_val);
+
+        let kinds = [ChangeKind::Modified, ChangeKind::Modified];
+        let contents = [Some(base_val), Some(changed_val)];
+        let base = Some(&base_val);
+
+        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+
+        assert_eq!(
+            result,
+            MergeOutcome::Upsert(changed_val),
+            "One-side-changed must resolve to the changed side"
+        );
+    }
+
+    /// When 3 workspaces modify a file, two matching base and one changed,
+    /// resolve_entries picks the changed content.
+    #[kani::proof]
+    fn re_diff3_one_of_three_changed() {
+        let base_val: u8 = kani::any();
+        let changed_val: u8 = kani::any();
+        kani::assume(base_val != changed_val);
+
+        let kinds = [
+            ChangeKind::Modified,
+            ChangeKind::Modified,
+            ChangeKind::Modified,
+        ];
+        let contents = [Some(base_val), Some(changed_val), Some(base_val)];
+        let base = Some(&base_val);
+
+        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+
+        assert_eq!(
+            result,
+            MergeOutcome::Upsert(changed_val),
+            "One-of-three changed must resolve to the changed value"
+        );
+    }
+
+    /// When both sides changed from base differently, diff3 reports conflict.
+    #[kani::proof]
+    fn re_diff3_both_sides_changed_conflicts() {
+        let base_val: u8 = kani::any();
+        let val_a: u8 = kani::any();
+        let val_b: u8 = kani::any();
+        kani::assume(base_val != val_a);
+        kani::assume(base_val != val_b);
+        kani::assume(val_a != val_b);
+
+        let kinds = [ChangeKind::Modified, ChangeKind::Modified];
+        let contents = [Some(val_a), Some(val_b)];
+        let base = Some(&base_val);
+
+        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+
+        assert_eq!(
+            result,
+            MergeOutcome::Conflict(ConflictReason::Diff3Conflict),
+            "Both-sides-changed-differently must conflict"
+        );
+    }
 } // mod resolve_entries_proofs

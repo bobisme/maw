@@ -40,8 +40,7 @@ use std::process::Command;
 use manifold_common::TestRepo;
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle::{
-    AssuranceState as OracleState,
-    capture_state as capture_oracle_state,
+    AssuranceState as OracleState, capture_state as capture_oracle_state,
     check_all as oracle_check_all,
 };
 use rand::rngs::StdRng;
@@ -132,19 +131,10 @@ impl CrashPhase {
     ];
 
     /// Only the COMMIT-related phases for G3 monotonicity testing.
-    const COMMIT_PHASES: [Self; 3] = [
-        Self::Validate,
-        Self::Commit,
-        Self::Cleanup,
-    ];
+    const COMMIT_PHASES: [Self; 3] = [Self::Validate, Self::Commit, Self::Cleanup];
 
     /// Rewrite-path phases for G2 testing.
-    const REWRITE_PHASES: [Self; 4] = [
-        Self::Prepare,
-        Self::Build,
-        Self::Validate,
-        Self::Cleanup,
-    ];
+    const REWRITE_PHASES: [Self; 4] = [Self::Prepare, Self::Build, Self::Validate, Self::Cleanup];
 
     /// Destroy-path phases for G4 testing.
     const DESTROY_PHASES: [Self; 3] = [
@@ -174,7 +164,6 @@ impl CrashPhase {
     const fn is_pre_commit(self) -> bool {
         matches!(self, Self::Prepare | Self::Build)
     }
-
 }
 
 impl fmt::Display for CrashPhase {
@@ -346,19 +335,20 @@ fn check_g3_monotonicity(
     // If epoch advanced but main did not, that's a partial commit (recoverable),
     // not a violation. The violation would be main > epoch (nonsensical).
     if let (Some(ep), Some(mn)) = (&current_epoch, &current_main)
-        && mn != ep {
-            // Check if main is an ancestor of epoch (ok) or epoch is ancestor of main (ok)
-            // or they diverged (violation)
-            let main_is_ancestor = is_ancestor(root, mn, ep);
-            let epoch_is_ancestor = is_ancestor(root, ep, mn);
-            if !main_is_ancestor && !epoch_is_ancestor {
-                return Err(format!(
-                    "I-G3.2 violated: epoch ({}) and main ({}) diverged",
-                    &ep[..8],
-                    &mn[..8]
-                ));
-            }
+        && mn != ep
+    {
+        // Check if main is an ancestor of epoch (ok) or epoch is ancestor of main (ok)
+        // or they diverged (violation)
+        let main_is_ancestor = is_ancestor(root, mn, ep);
+        let epoch_is_ancestor = is_ancestor(root, ep, mn);
+        if !main_is_ancestor && !epoch_is_ancestor {
+            return Err(format!(
+                "I-G3.2 violated: epoch ({}) and main ({}) diverged",
+                &ep[..8],
+                &mn[..8]
+            ));
         }
+    }
 
     Ok(())
 }
@@ -374,7 +364,9 @@ fn check_git_integrity(root: &Path) -> Result<(), String> {
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        return Err(format!("git fsck failed:\nstdout: {stdout}\nstderr: {stderr}"));
+        return Err(format!(
+            "git fsck failed:\nstdout: {stdout}\nstderr: {stderr}"
+        ));
     }
     Ok(())
 }
@@ -428,11 +420,7 @@ fn read_ref_oid(root: &Path, refname: &str) -> Option<String> {
         .expect("git rev-parse");
 
     if out.status.success() {
-        Some(
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .to_owned(),
-        )
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     } else {
         None
     }
@@ -733,11 +721,9 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
     }
 
     // Base files always preserved
-    if let Err(e) = check_workspace_files_preserved(
-        &repo,
-        "default",
-        &[("base.txt", "base content\n")],
-    ) {
+    if let Err(e) =
+        check_workspace_files_preserved(&repo, "default", &[("base.txt", "base content\n")])
+    {
         violations.push(format!("default workspace: {e}"));
     }
 
@@ -808,7 +794,11 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     ]);
 
     repo.create_workspace("agent-0");
-    repo.add_file("agent-0", "feature.txt", &format!("feature (seed={seed})\n"));
+    repo.add_file(
+        "agent-0",
+        "feature.txt",
+        &format!("feature (seed={seed})\n"),
+    );
 
     let epoch_before = repo.current_epoch();
     let committed_before = collect_reachable_oids(repo.root());
@@ -834,11 +824,7 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     if crash_phase == CrashPhase::Commit && has_candidate {
         // Move epoch ref to candidate (simulating the first CAS succeeding)
         let _ = Command::new("git")
-            .args([
-                "update-ref",
-                "refs/manifold/epoch/current",
-                &candidate,
-            ])
+            .args(["update-ref", "refs/manifold/epoch/current", &candidate])
             .current_dir(repo.root())
             .output();
 
@@ -1285,7 +1271,9 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 
     trace.push(TraceEntry {
         step: 0,
-        action: format!("setup: {ws_count} workspaces, {file_count} files each, crash at {crash_phase}"),
+        action: format!(
+            "setup: {ws_count} workspaces, {file_count} files each, crash at {crash_phase}"
+        ),
         phase: Some(crash_phase),
         outcome: "ok".to_string(),
         epoch_before: epoch_before.clone(),
@@ -1307,7 +1295,9 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
             );
         }
         _ => {
-            violations.push(format!("crash phase {crash_phase} is not a rewrite-path phase"));
+            violations.push(format!(
+                "crash phase {crash_phase} is not a rewrite-path phase"
+            ));
             return TraceResult {
                 trace,
                 invariant_violations: violations,
@@ -1469,7 +1459,9 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
             .ok();
         }
         _ => {
-            violations.push(format!("crash phase {crash_phase} is not a destroy-path phase"));
+            violations.push(format!(
+                "crash phase {crash_phase} is not a destroy-path phase"
+            ));
             return TraceResult {
                 trace,
                 invariant_violations: violations,
@@ -1489,18 +1481,15 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     let oracle_pre = capture_oracle_snapshot(repo.root(), &mut violations, "run_g4_trace pre");
 
     // G4 invariant: workspace MUST still exist after failed destroy
-    if let Err(e) =
-        check_g4_workspace_exists_after_failed_destroy(&repo, ws_name, &workspace_files)
+    if let Err(e) = check_g4_workspace_exists_after_failed_destroy(&repo, ws_name, &workspace_files)
     {
         violations.push(e);
     }
 
     // Default workspace files must also survive
-    if let Err(e) = check_workspace_files_preserved(
-        &repo,
-        "default",
-        &[("shared.txt", "shared base\n")],
-    ) {
+    if let Err(e) =
+        check_workspace_files_preserved(&repo, "default", &[("shared.txt", "shared base\n")])
+    {
         violations.push(format!("default workspace: {e}"));
     }
 
@@ -1700,8 +1689,13 @@ fn dst_nightly_high_volume() {
          Failing seeds: {:?}\n\
          First failure: {:?}",
         failures.len(),
-        failures.iter().map(|(s, g, _)| format!("{g}:{s}")).collect::<Vec<_>>(),
-        failures.first().map(|(s, g, v)| format!("{g} seed={s}: {v:?}")),
+        failures
+            .iter()
+            .map(|(s, g, _)| format!("{g}:{s}"))
+            .collect::<Vec<_>>(),
+        failures
+            .first()
+            .map(|(s, g, v)| format!("{g} seed={s}: {v:?}")),
     );
 }
 
@@ -1717,7 +1711,9 @@ fn incident_replay_corpus() {
     let mut replayed = 0;
     let mut failures = Vec::new();
 
-    let entries: Vec<_> = if let Ok(entries) = fs::read_dir(&corpus_dir) { entries.filter_map(std::result::Result::ok).collect() } else {
+    let entries: Vec<_> = if let Ok(entries) = fs::read_dir(&corpus_dir) {
+        entries.filter_map(std::result::Result::ok).collect()
+    } else {
         eprintln!("corpus dir not found, skipping incident replay");
         return;
     };
@@ -1732,7 +1728,9 @@ fn incident_replay_corpus() {
         let value: serde_json::Value = serde_json::from_str(&contents).expect("parse corpus JSON");
 
         let seed = value["seed"].as_u64().expect("corpus entry needs 'seed'");
-        let phase_str = value["crash_phase"].as_str().expect("corpus entry needs 'crash_phase'");
+        let phase_str = value["crash_phase"]
+            .as_str()
+            .expect("corpus entry needs 'crash_phase'");
         let num_ws = value["num_workspaces"].as_u64().unwrap_or(2) as usize;
         let num_files = value["num_files_per_ws"].as_u64().unwrap_or(1) as usize;
         let create_cand = value["create_candidate"].as_bool().unwrap_or(true);

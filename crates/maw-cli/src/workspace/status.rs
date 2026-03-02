@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use maw_core::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
+use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceMode;
 use maw_core::oplog::global_view::compute_global_view;
 use maw_core::oplog::read::read_head;
@@ -188,7 +188,9 @@ fn print_status_text(
     // Current workspace and stale warning
     println!("workspace: {current_ws}");
     if is_stale {
-        println!("stale: true  (main has moved forward — run `maw ws sync {current_ws}` to rebase)");
+        println!(
+            "stale: true  (main has moved forward — run `maw ws sync {current_ws}` to rebase)"
+        );
     }
 
     // Changes
@@ -291,7 +293,9 @@ fn print_status_pretty(
 
     // Stale warning
     if is_stale {
-        println!("{yellow}\u{25b2} WARNING:{reset} Workspace is behind main — another workspace was merged since this one was created.");
+        println!(
+            "{yellow}\u{25b2} WARNING:{reset} Workspace is behind main — another workspace was merged since this one was created."
+        );
         println!("  {gray}Run `maw ws sync {current_ws}` to rebase onto the latest main.{reset}");
         println!();
     }

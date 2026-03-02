@@ -5,18 +5,19 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde::Deserialize;
 
+use crate::format::OutputFormat;
 use maw_core::backend::platform;
 use maw_core::backend::{AnyBackend, WorkspaceBackend};
 use maw_core::config::{BackendKind, ManifoldConfig};
 use maw_core::model::types::WorkspaceId;
-use crate::format::OutputFormat;
 
 mod advance;
 mod annotate;
 pub(crate) mod capture;
+mod clean;
 mod create;
-pub(crate) mod destroy_record;
 mod describe;
+pub(crate) mod destroy_record;
 mod diff;
 mod history;
 mod list;
@@ -25,7 +26,6 @@ mod metadata;
 mod names;
 mod oplog_runtime;
 mod overlap;
-mod clean;
 mod prune;
 pub(crate) mod recover;
 mod restore;
@@ -796,7 +796,12 @@ pub enum WorkspaceCommands {
         ///
         /// File-level IDs (cf-k7mx) resolve the whole file.
         /// Atom-level IDs (cf-k7mx.0) resolve a specific conflict region (workspace name only).
-        #[arg(long = "resolve", value_name = "ID=STRATEGY", conflicts_with = "check", conflicts_with = "plan")]
+        #[arg(
+            long = "resolve",
+            value_name = "ID=STRATEGY",
+            conflicts_with = "check",
+            conflicts_with = "plan"
+        )]
         resolve: Vec<String>,
 
         /// Resolve all remaining conflicts to this workspace's version.
@@ -804,7 +809,12 @@ pub enum WorkspaceCommands {
         /// Individual --resolve flags take precedence over --resolve-all.
         ///
         ///   maw ws merge alice bob --resolve-all=alice
-        #[arg(long = "resolve-all", value_name = "WORKSPACE", conflicts_with = "check", conflicts_with = "plan")]
+        #[arg(
+            long = "resolve-all",
+            value_name = "WORKSPACE",
+            conflicts_with = "check",
+            conflicts_with = "plan"
+        )]
         resolve_all: Option<String>,
 
         /// Show detailed recovery surface output for each destroyed workspace.
@@ -904,8 +914,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 
             // --ref is mutually exclusive with positional name.
             if recovery_ref.is_some() && name.is_some() {
-                anyhow::bail!("Cannot use both <name> and --ref.
-    Use <name> for destroyed-workspace history, or --ref for an explicit recovery snapshot.")
+                anyhow::bail!(
+                    "Cannot use both <name> and --ref.
+    Use <name> for destroyed-workspace history, or --ref for an explicit recovery snapshot."
+                )
             }
 
             // Search mode (content search across pinned recovery refs).
@@ -934,11 +946,13 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 (None, Some(r), None, Some(target)) => recover::restore_ref_to(&r, &target),
                 // Explicit ref without action
                 (None, Some(_), None, None) => {
-                    anyhow::bail!("--ref requires --show, --to, or --search.
+                    anyhow::bail!(
+                        "--ref requires --show, --to, or --search.
     Examples:
     maw ws recover --ref <ref> --show <path>
     maw ws recover --ref <ref> --to <new-workspace>
-    maw ws recover --ref <ref> --search <pattern>")
+    maw ws recover --ref <ref> --search <pattern>"
+                    )
                 }
 
                 // Destroyed workspace latest snapshot: show file
@@ -952,21 +966,27 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 
                 // Invalid combos
                 (None, None, Some(_), _) => {
-                    anyhow::bail!("--show requires a workspace name or --ref.
+                    anyhow::bail!(
+                        "--show requires a workspace name or --ref.
   Usage:
     maw ws recover <name> --show <path>
-    maw ws recover --ref <ref> --show <path>")
+    maw ws recover --ref <ref> --show <path>"
+                    )
                 }
                 (None, None, _, Some(_)) => {
-                    anyhow::bail!("--to requires a workspace name or --ref.
+                    anyhow::bail!(
+                        "--to requires a workspace name or --ref.
   Usage:
     maw ws recover <name> --to <new-name>
-    maw ws recover --ref <ref> --to <new-name>")
+    maw ws recover --ref <ref> --to <new-name>"
+                    )
                 }
                 (Some(_), Some(_), _, _) => unreachable!(),
                 (Some(_), None, Some(_), Some(_)) | (None, Some(_), Some(_), Some(_)) => {
-                    anyhow::bail!("Cannot use --show and --to together.
-  Use --show to inspect, or --to to restore.")
+                    anyhow::bail!(
+                        "Cannot use --show and --to together.
+  Use --show to inspect, or --to to restore."
+                    )
                 }
             }
         }
@@ -1101,26 +1121,27 @@ pub fn repo_root() -> Result<PathBuf> {
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output();
     if let Ok(output) = output
-        && output.status.success() {
-            let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-            let mut root = common_dir
+        && output.status.success()
+    {
+        let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let mut root = common_dir
+            .parent()
+            .context("Cannot determine repo root from git common dir")?
+            .to_path_buf();
+
+        // Support nested common-dir layouts like <root>/.manifold/git.
+        if root.file_name().is_some_and(|name| name == ".manifold") {
+            root = root
                 .parent()
-                .context("Cannot determine repo root from git common dir")?
+                .context("Cannot determine repo root from nested common dir")?
                 .to_path_buf();
-
-            // Support nested common-dir layouts like <root>/.manifold/git.
-            if root.file_name().is_some_and(|name| name == ".manifold") {
-                root = root
-                    .parent()
-                    .context("Cannot determine repo root from nested common dir")?
-                    .to_path_buf();
-            }
-
-            // repo.git layout: common-dir is <root>/repo.git, so parent is <root>.
-            // Standard layout: common-dir is <root>/.git, so parent is <root>.
-            // Both cases give us the correct root directly.
-            return Ok(root);
         }
+
+        // repo.git layout: common-dir is <root>/repo.git, so parent is <root>.
+        // Standard layout: common-dir is <root>/.git, so parent is <root>.
+        // Both cases give us the correct root directly.
+        return Ok(root);
+    }
 
     // Fallback: ancestor walk for Manifold markers. Used when git is not
     // available or not in a git repo at all.

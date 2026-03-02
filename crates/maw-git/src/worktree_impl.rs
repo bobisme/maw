@@ -27,7 +27,10 @@ pub fn worktree_add(
 
     // 1. Create admin directory
     std::fs::create_dir_all(&admin_dir).map_err(|e| GitError::BackendError {
-        message: format!("failed to create worktree admin dir {}: {e}", admin_dir.display()),
+        message: format!(
+            "failed to create worktree admin dir {}: {e}",
+            admin_dir.display()
+        ),
     })?;
 
     // 2. Write HEAD with target OID (detached HEAD)
@@ -38,20 +41,20 @@ pub fn worktree_add(
     })?;
 
     // 3. Write commondir (relative path back to main .git)
-    std::fs::write(admin_dir.join("commondir"), "../..\n").map_err(|e| {
-        GitError::BackendError {
-            message: format!("failed to write worktree commondir: {e}"),
-        }
+    std::fs::write(admin_dir.join("commondir"), "../..\n").map_err(|e| GitError::BackendError {
+        message: format!("failed to write worktree commondir: {e}"),
     })?;
 
     // 4. Write gitdir (absolute path to worktree's .git file)
     let wt_gitfile = path.join(".git");
-    let abs_path = std::fs::canonicalize(path.parent().unwrap_or(path))
-        .unwrap_or_else(|_| path.to_path_buf());
+    let abs_path =
+        std::fs::canonicalize(path.parent().unwrap_or(path)).unwrap_or_else(|_| path.to_path_buf());
     let abs_gitfile = if path.is_absolute() {
         wt_gitfile.clone()
     } else {
-        abs_path.join(path.file_name().unwrap_or_default()).join(".git")
+        abs_path
+            .join(path.file_name().unwrap_or_default())
+            .join(".git")
     };
     std::fs::write(
         admin_dir.join("gitdir"),
@@ -67,12 +70,10 @@ pub fn worktree_add(
     })?;
 
     // 6. Write .git file in worktree (not a directory, a file pointing back)
-    std::fs::write(
-        &wt_gitfile,
-        format!("gitdir: {}\n", admin_dir.display()),
-    )
-    .map_err(|e| GitError::BackendError {
-        message: format!("failed to write worktree .git file: {e}"),
+    std::fs::write(&wt_gitfile, format!("gitdir: {}\n", admin_dir.display())).map_err(|e| {
+        GitError::BackendError {
+            message: format!("failed to write worktree .git file: {e}"),
+        }
     })?;
 
     // 7. Resolve target OID to a commit, get its tree
@@ -118,12 +119,12 @@ pub fn worktree_add(
         })?;
 
     // 9. Checkout the tree to the worktree path
-    let mut checkout_index = repo
-        .repo
-        .index_from_tree(&tree_oid)
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to create index for checkout: {e}"),
-        })?;
+    let mut checkout_index =
+        repo.repo
+            .index_from_tree(&tree_oid)
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to create index for checkout: {e}"),
+            })?;
 
     let mut opts = repo
         .repo
@@ -191,14 +192,12 @@ pub fn worktree_remove(repo: &GixRepo, name: &str) -> Result<(), GitError> {
         let gitdir_path = std::path::PathBuf::from(gitdir_content.trim());
         // gitdir points to <worktree>/.git, so parent is the worktree root
         if let Some(wt_path) = gitdir_path.parent()
-            && wt_path.exists() {
-                std::fs::remove_dir_all(wt_path).map_err(|e| GitError::BackendError {
-                    message: format!(
-                        "failed to remove worktree dir {}: {e}",
-                        wt_path.display()
-                    ),
-                })?;
-            }
+            && wt_path.exists()
+        {
+            std::fs::remove_dir_all(wt_path).map_err(|e| GitError::BackendError {
+                message: format!("failed to remove worktree dir {}: {e}", wt_path.display()),
+            })?;
+        }
     }
 
     // Remove the admin directory
@@ -220,10 +219,9 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
         return Ok(Vec::new());
     }
 
-    let entries =
-        std::fs::read_dir(&worktrees_dir).map_err(|e| GitError::BackendError {
-            message: format!("failed to read worktrees dir: {e}"),
-        })?;
+    let entries = std::fs::read_dir(&worktrees_dir).map_err(|e| GitError::BackendError {
+        message: format!("failed to read worktrees dir: {e}"),
+    })?;
 
     let mut result = Vec::new();
 
@@ -237,18 +235,13 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
             continue;
         }
 
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .into_owned();
+        let name = entry.file_name().to_string_lossy().into_owned();
 
         // Read HEAD to get current OID and detached state
         let (head_oid, is_detached) = {
             let head_file = entry_path.join("HEAD");
             if head_file.exists() {
-                let content = std::fs::read_to_string(&head_file)
-                    .ok()
-                    .unwrap_or_default();
+                let content = std::fs::read_to_string(&head_file).ok().unwrap_or_default();
                 let trimmed = content.trim();
                 if let Some(ref_target) = trimmed.strip_prefix("ref: ") {
                     // Symbolic ref (e.g., "ref: refs/heads/main") — resolve via repo

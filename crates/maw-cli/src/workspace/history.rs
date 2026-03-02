@@ -4,8 +4,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use maw_core::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
+use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
 use maw_core::oplog::read::{OpLogReadError, walk_chain};
 use maw_core::oplog::types::OpPayload;

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-use maw_core::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
+use maw_core::backend::WorkspaceBackend;
 use maw_core::model::diff::compute_patchset;
 use maw_core::model::patch::{PatchSet, PatchValue};
 use maw_core::model::types::WorkspaceId;
@@ -125,7 +125,10 @@ fn print_touched_text(touched: &WorkspaceTouched) {
             touched.workspace,
             &touched.base_epoch[..12]
         );
-        println!("  Run `maw ws sync {}` to rebase onto the latest main.", touched.workspace);
+        println!(
+            "  Run `maw ws sync {}` to rebase onto the latest main.",
+            touched.workspace
+        );
     }
 
     println!();

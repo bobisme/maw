@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use maw_core::model::types::WorkspaceMode;
 use crate::workspace::templates::{TemplateDefaults, WorkspaceTemplate};
+use maw_core::model::types::WorkspaceMode;
 
 // ---------------------------------------------------------------------------
 // WorkspaceMetadata

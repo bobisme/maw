@@ -43,12 +43,12 @@ use crate::config::{ConfigError, ManifoldConfig, MergeConfig, MergeDriver, Merge
 use crate::merge::build::{BuildError, ResolvedChange, build_merge_commit};
 use crate::merge::collect::{CollectError, collect_snapshots};
 use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
-use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 #[cfg(not(feature = "ast-merge"))]
 use crate::merge::resolve::resolve_partition;
 #[cfg(feature = "ast-merge")]
 use crate::merge::resolve::resolve_partition_with_ast;
 use crate::merge::resolve::{ConflictRecord, ResolveError, ResolveResult};
+use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -223,16 +223,20 @@ pub fn run_build_phase<B: WorkspaceBackend>(
 
     // 2. Advance to BUILD (fsync — crash after this means recovery aborts)
     let now = now_secs();
-    crate::fp!("FP_BUILD_BEFORE_WORKTREE_ADD").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
+    crate::fp!("FP_BUILD_BEFORE_WORKTREE_ADD")
+        .map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
     state.advance(MergePhase::Build, now)?;
     state.write_atomic(&state_path)?;
-    crate::fp!("FP_BUILD_AFTER_WORKTREE_ADD").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
+    crate::fp!("FP_BUILD_AFTER_WORKTREE_ADD")
+        .map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
 
     // Run the pipeline and capture the result. On error, the merge-state
     // stays in Build phase — recovery will abort it.
-    crate::fp!("FP_BUILD_BEFORE_MERGE_COMPUTE").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
+    crate::fp!("FP_BUILD_BEFORE_MERGE_COMPUTE")
+        .map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
     let output = run_pipeline(repo_root, backend, &state, &config.merge)?;
-    crate::fp!("FP_BUILD_AFTER_MERGE_COMPUTE").map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
+    crate::fp!("FP_BUILD_AFTER_MERGE_COMPUTE")
+        .map_err(|e| BuildPhaseError::Driver(e.to_string()))?;
 
     // 8. Record candidate OID in merge-state (fsync)
     state.epoch_candidate = Some(output.candidate.clone());
@@ -308,11 +312,13 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
 fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, BuildPhaseError> {
     maw_git::GixRepo::open(root)
         .map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>)
-        .map_err(|e| BuildPhaseError::Build(BuildError::GitCommand {
-            command: format!("open repo at {}", root.display()),
-            stderr: e.to_string(),
-            exit_code: None,
-        }))
+        .map_err(|e| {
+            BuildPhaseError::Build(BuildError::GitCommand {
+                command: format!("open repo at {}", root.display()),
+                stderr: e.to_string(),
+                exit_code: None,
+            })
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -326,11 +332,7 @@ fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, BuildPhaseError> 
 /// (i.e., the epoch the workspace was originally created from).
 ///
 /// Falls back to `ws_epoch` if merge-base fails or if the two OIDs are equal.
-fn workspace_merge_base(
-    repo_root: &Path,
-    ws_epoch: &EpochId,
-    current_epoch: &EpochId,
-) -> EpochId {
+fn workspace_merge_base(repo_root: &Path, ws_epoch: &EpochId, current_epoch: &EpochId) -> EpochId {
     // Fast path: if they're already equal, no need to shell out.
     if ws_epoch.as_str() == current_epoch.as_str() {
         return current_epoch.clone();
@@ -370,11 +372,13 @@ fn epoch_delta_paths(
         ])
         .current_dir(repo_root)
         .output()
-        .map_err(|e| BuildPhaseError::Build(BuildError::GitCommand {
-            command: format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str()),
-            stderr: e.to_string(),
-            exit_code: None,
-        }))?;
+        .map_err(|e| {
+            BuildPhaseError::Build(BuildError::GitCommand {
+                command: format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str()),
+                stderr: e.to_string(),
+                exit_code: None,
+            })
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -477,10 +481,7 @@ fn inject_epoch_delta(
     }
 
     // Intersect with workspace-touched paths — only overlapping files matter.
-    let overlapping: BTreeSet<PathBuf> = delta_paths
-        .intersection(&all_ws_paths)
-        .cloned()
-        .collect();
+    let overlapping: BTreeSet<PathBuf> = delta_paths.intersection(&all_ws_paths).cloned().collect();
 
     if overlapping.is_empty() {
         return Ok(EpochDeltaResult {
@@ -506,11 +507,7 @@ fn inject_epoch_delta(
             }
             Err(ReadBaseError::NotFound) => {
                 // File was deleted in the epoch delta — represent as deletion.
-                changes.push(FileChange::new(
-                    path.clone(),
-                    ChangeKind::Deleted,
-                    None,
-                ));
+                changes.push(FileChange::new(path.clone(), ChangeKind::Deleted, None));
             }
             Err(ReadBaseError::GitError(detail)) => {
                 return Err(BuildPhaseError::ReadBase {
@@ -540,11 +537,7 @@ fn inject_epoch_delta(
     }
 
     // Create the synthetic PatchSet and append it.
-    let synthetic = PatchSet::new(
-        WorkspaceId::epoch_delta(),
-        current_epoch.clone(),
-        changes,
-    );
+    let synthetic = PatchSet::new(WorkspaceId::epoch_delta(), current_epoch.clone(), changes);
     patch_sets.push(synthetic);
 
     Ok(EpochDeltaResult { base_overrides })
@@ -603,13 +596,8 @@ fn run_pipeline<B: WorkspaceBackend>(
 
     // Build the candidate git tree + commit from resolved changes
     let repo = open_repo(repo_root)?;
-    let candidate = build_merge_commit(
-        &*repo,
-        &state.epoch_before,
-        &state.sources,
-        &resolved,
-        None,
-    )?;
+    let candidate =
+        build_merge_commit(&*repo, &state.epoch_before, &state.sources, &resolved, None)?;
 
     Ok(BuildPhaseOutput {
         candidate,
@@ -2179,7 +2167,11 @@ command = "exit 19"
         assert!(
             has_epoch_side,
             "Expected an epoch-delta side in the conflict, sides: {:?}",
-            conflict.sides.iter().map(|s| s.workspace_id.as_str()).collect::<Vec<_>>()
+            conflict
+                .sides
+                .iter()
+                .map(|s| s.workspace_id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2268,17 +2260,12 @@ command = "exit 19"
 
         // Previous merge changed line 1 only.
         let epoch_version = "LINE 1 CHANGED\nline 2\nline 3\nline 4\nline 5\n";
-        let current_epoch =
-            advance_epoch(root, "multi.txt", epoch_version, "epoch: merge ws-a");
+        let current_epoch = advance_epoch(root, "multi.txt", epoch_version, "epoch: merge ws-a");
 
         // Stale workspace changes line 5 only (non-overlapping).
         let ws_version = b"line 1\nline 2\nline 3\nline 4\nLINE 5 CHANGED\n";
-        let (ws_path, snapshot) = make_workspace_with_modified_file(
-            root,
-            "ws-stale",
-            "multi.txt",
-            ws_version,
-        );
+        let (ws_path, snapshot) =
+            make_workspace_with_modified_file(root, "ws-stale", "multi.txt", ws_version);
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-stale", initial_epoch.clone(), snapshot, ws_path);
 

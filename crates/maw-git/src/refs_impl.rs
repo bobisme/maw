@@ -4,7 +4,7 @@ use std::io::Read as _;
 use std::path::Path;
 
 use gix::refs::transaction::{Change, LogChange, PreviousValue};
-use gix::refs::{Target, FullName};
+use gix::refs::{FullName, Target};
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
@@ -68,12 +68,7 @@ pub fn write_ref(
 ) -> Result<(), GitError> {
     let gix_oid = to_gix_oid(&oid);
     repo.repo
-        .reference(
-            name.as_str(),
-            gix_oid,
-            PreviousValue::Any,
-            log_message,
-        )
+        .reference(name.as_str(), gix_oid, PreviousValue::Any, log_message)
         .map_err(|e| GitError::BackendError {
             message: e.to_string(),
         })?;
@@ -101,21 +96,17 @@ pub fn atomic_ref_update(repo: &GixRepo, edits: &[RefEdit]) -> Result<(), GitErr
     let gix_edits: Vec<gix::refs::transaction::RefEdit> = edits
         .iter()
         .map(|edit| {
-            let name: FullName = edit
-                .name
-                .as_str()
-                .try_into()
-                .map_err(|e: gix::validate::reference::name::Error| GitError::BackendError {
+            let name: FullName = edit.name.as_str().try_into().map_err(
+                |e: gix::validate::reference::name::Error| GitError::BackendError {
                     message: e.to_string(),
-                })?;
+                },
+            )?;
 
             let new_oid = to_gix_oid(&edit.new_oid);
             let expected = if edit.expected_old_oid.is_zero() {
                 PreviousValue::MustNotExist
             } else {
-                PreviousValue::MustExistAndMatch(Target::Object(to_gix_oid(
-                    &edit.expected_old_oid,
-                )))
+                PreviousValue::MustExistAndMatch(Target::Object(to_gix_oid(&edit.expected_old_oid)))
             };
 
             Ok(gix::refs::transaction::RefEdit {
@@ -134,30 +125,28 @@ pub fn atomic_ref_update(repo: &GixRepo, edits: &[RefEdit]) -> Result<(), GitErr
         })
         .collect::<Result<Vec<_>, GitError>>()?;
 
-    repo.repo
-        .edit_references(gix_edits)
-        .map_err(|e| {
-            let msg = e.to_string();
-            // Detect CAS failures from the error message
-            if msg.contains("existing object id")
-                || msg.contains("MustExistAndMatch")
-                || msg.contains("did not match")
-                || msg.contains("mustNotExist")
-                || msg.contains("MustNotExist")
-            {
-                // Try to extract the ref name from the edits for a better error
-                let ref_name = edits
-                    .first()
-                    .map(|e| e.name.as_str().to_string())
-                    .unwrap_or_default();
-                GitError::RefConflict {
-                    ref_name,
-                    message: msg,
-                }
-            } else {
-                GitError::BackendError { message: msg }
+    repo.repo.edit_references(gix_edits).map_err(|e| {
+        let msg = e.to_string();
+        // Detect CAS failures from the error message
+        if msg.contains("existing object id")
+            || msg.contains("MustExistAndMatch")
+            || msg.contains("did not match")
+            || msg.contains("mustNotExist")
+            || msg.contains("MustNotExist")
+        {
+            // Try to extract the ref name from the edits for a better error
+            let ref_name = edits
+                .first()
+                .map(|e| e.name.as_str().to_string())
+                .unwrap_or_default();
+            GitError::RefConflict {
+                ref_name,
+                message: msg,
             }
-        })?;
+        } else {
+            GitError::BackendError { message: msg }
+        }
+    })?;
     let git_dir = repo.repo.git_dir();
     for edit in edits {
         ensure_ref_newline(git_dir, edit.name.as_str());
@@ -166,12 +155,9 @@ pub fn atomic_ref_update(repo: &GixRepo, edits: &[RefEdit]) -> Result<(), GitErr
 }
 
 pub fn list_refs(repo: &GixRepo, prefix: &str) -> Result<Vec<(RefName, GitOid)>, GitError> {
-    let platform = repo
-        .repo
-        .references()
-        .map_err(|e| GitError::BackendError {
-            message: e.to_string(),
-        })?;
+    let platform = repo.repo.references().map_err(|e| GitError::BackendError {
+        message: e.to_string(),
+    })?;
     let refs_iter = platform
         .prefixed(prefix)
         .map_err(|e| GitError::BackendError {
@@ -219,11 +205,7 @@ pub fn rev_parse_opt(repo: &GixRepo, spec: &str) -> Result<Option<GitOid>, GitEr
     }
 }
 
-pub fn is_ancestor(
-    repo: &GixRepo,
-    ancestor: GitOid,
-    descendant: GitOid,
-) -> Result<bool, GitError> {
+pub fn is_ancestor(repo: &GixRepo, ancestor: GitOid, descendant: GitOid) -> Result<bool, GitError> {
     if ancestor == descendant {
         return Ok(true);
     }
@@ -251,11 +233,7 @@ pub fn is_ancestor(
     Ok(false)
 }
 
-pub fn merge_base(
-    repo: &GixRepo,
-    a: GitOid,
-    b: GitOid,
-) -> Result<Option<GitOid>, GitError> {
+pub fn merge_base(repo: &GixRepo, a: GitOid, b: GitOid) -> Result<Option<GitOid>, GitError> {
     let a_gix = to_gix_oid(&a);
     let b_gix = to_gix_oid(&b);
 

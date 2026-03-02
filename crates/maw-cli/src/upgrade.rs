@@ -270,17 +270,19 @@ fn relocate_default_workspace() -> Result<()> {
 /// Set git core.bare = true.
 fn set_git_bare() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let repo = maw_git::GixRepo::open(&cwd)
-        .map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
+    let repo =
+        maw_git::GixRepo::open(&cwd).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
 
     if let Ok(Some(val)) = repo.read_config("core.bare")
-        && val.trim() == "true" {
-            println!("[OK] git core.bare already true");
-            return Ok(());
-        }
+        && val.trim() == "true"
+    {
+        println!("[OK] git core.bare already true");
+        return Ok(());
+    }
 
-    repo.write_config("core.bare", "true")
-        .map_err(|e| anyhow::anyhow!("Failed to set git core.bare: {e}\n  Try: git config core.bare true"))?;
+    repo.write_config("core.bare", "true").map_err(|e| {
+        anyhow::anyhow!("Failed to set git core.bare: {e}\n  Try: git config core.bare true")
+    })?;
     println!("[OK] Set git core.bare = true");
 
     Ok(())
@@ -426,9 +428,7 @@ fn warn_remaining_untracked_root_files() {
         preview,
         more
     );
-    println!(
-        "  To fix: move these into ws/default/ (or remove them), then re-run: maw init"
-    );
+    println!("  To fix: move these into ws/default/ (or remove them), then re-run: maw init");
 }
 
 fn is_ignored_untracked_root_path(path: &str) -> bool {

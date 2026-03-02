@@ -56,7 +56,8 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 
     // Read current branch position
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_oid = repo.rev_parse_opt(&branch_ref)
+    let branch_oid = repo
+        .rev_parse_opt(&branch_ref)
         .ok()
         .flatten()
         .map(|o| o.to_string())
@@ -69,7 +70,8 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         println!("  Creating {branch} at epoch ({})...", &epoch_oid[..12]);
         let ref_name = maw_git::RefName::new(&branch_ref)
             .map_err(|e| anyhow::anyhow!("invalid ref name: {e}"))?;
-        let oid: maw_git::GitOid = epoch_oid.parse()
+        let oid: maw_git::GitOid = epoch_oid
+            .parse()
             .map_err(|e| anyhow::anyhow!("invalid epoch OID: {e}"))?;
         repo.write_ref(&ref_name, oid, &format!("release: create {branch}"))
             .map_err(|e| anyhow::anyhow!("Failed to set {branch}: {e}"))?;
@@ -78,7 +80,8 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         println!("  Advancing {branch} to epoch ({})...", &epoch_oid[..12]);
         let ref_name = maw_git::RefName::new(&branch_ref)
             .map_err(|e| anyhow::anyhow!("invalid ref name: {e}"))?;
-        let oid: maw_git::GitOid = epoch_oid.parse()
+        let oid: maw_git::GitOid = epoch_oid
+            .parse()
             .map_err(|e| anyhow::anyhow!("invalid epoch OID: {e}"))?;
         repo.write_ref(&ref_name, oid, &format!("release: advance {branch}"))
             .map_err(|e| anyhow::anyhow!("Failed to advance {branch}: {e}"))?;
@@ -177,9 +180,11 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let ancestor_oid: maw_git::GitOid = ancestor.parse()
+    let ancestor_oid: maw_git::GitOid = ancestor
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid ancestor OID: {e}"))?;
-    let descendant_oid: maw_git::GitOid = descendant.parse()
+    let descendant_oid: maw_git::GitOid = descendant
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid descendant OID: {e}"))?;
     repo.is_ancestor(ancestor_oid, descendant_oid)
         .map_err(|e| anyhow::anyhow!("is_ancestor failed: {e}"))
@@ -189,7 +194,8 @@ fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> 
 fn get_commit_info(root: &std::path::Path, oid: &str) -> Result<String> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let git_oid: maw_git::GitOid = oid.parse()
+    let git_oid: maw_git::GitOid = oid
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid OID: {e}"))?;
     match repo.read_commit(git_oid) {
         Ok(info) => {

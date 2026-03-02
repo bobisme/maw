@@ -27,10 +27,10 @@ use std::process::Command;
 
 use maw_git::GitRepo as _;
 
+use crate::workspace::MawConfig;
 use maw_core::model::layout;
 use maw_core::model::types::EpochId;
 use maw_core::refs as manifold_refs;
-use crate::workspace::MawConfig;
 
 const REPO_GIT_DIR: &str = "repo.git";
 
@@ -288,15 +288,15 @@ fn create_initial_commit(root: &Path, branch: &str) -> Result<EpochId, InitError
 
 /// Ensure git user.name and user.email are set (repo-local).
 fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
-    let repo = maw_git::GixRepo::open(root)
-        .map_err(|e| InitError::GitCommand {
-            command: "open repo".to_owned(),
-            stderr: format!("failed to open repo: {e}"),
-            exit_code: None,
-        })?;
+    let repo = maw_git::GixRepo::open(root).map_err(|e| InitError::GitCommand {
+        command: "open repo".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
 
     // Check if user.name is set
-    let name = repo.read_config("user.name")
+    let name = repo
+        .read_config("user.name")
         .map_err(|e| InitError::GitCommand {
             command: "git config user.name".to_owned(),
             stderr: format!("{e}"),
@@ -312,7 +312,8 @@ fn ensure_git_identity(root: &Path) -> Result<(), InitError> {
             })?;
     }
 
-    let email = repo.read_config("user.email")
+    let email = repo
+        .read_config("user.email")
         .map_err(|e| InitError::GitCommand {
             command: "git config user.email".to_owned(),
             stderr: format!("{e}"),
@@ -412,7 +413,6 @@ fn create_default_workspace(root: &Path, branch: &str) -> Result<PathBuf, InitEr
 
     Ok(ws_path)
 }
-
 
 // ---------------------------------------------------------------------------
 // Git command helpers
@@ -1698,10 +1698,7 @@ fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitEr
 }
 
 /// Create the default workspace at `ws/default/` using `git worktree add`.
-fn bf_create_default_workspace(
-    root: &Path,
-    ws_path: &Path,
-) -> Result<(), BrownfieldInitError> {
+fn bf_create_default_workspace(root: &Path, ws_path: &Path) -> Result<(), BrownfieldInitError> {
     let branch = bf_configured_branch(root);
     bf_run_git(
         root,
@@ -1819,7 +1816,14 @@ fn bf_warn_remaining_untracked_root_files(root: &Path) {
         ".crit/",
     ];
     let skip_exact = [
-        "ws", ".git", ".manifold", ".agents", ".claude", ".botbus", ".crit", "AGENTS.md",
+        "ws",
+        ".git",
+        ".manifold",
+        ".agents",
+        ".claude",
+        ".botbus",
+        ".crit",
+        "AGENTS.md",
         "CLAUDE.md",
     ];
 
@@ -1858,9 +1862,7 @@ fn bf_warn_remaining_untracked_root_files(root: &Path) {
         preview,
         more
     );
-    println!(
-        "  To fix: move these into ws/default/ (or remove them), then re-run: maw init"
-    );
+    println!("  To fix: move these into ws/default/ (or remove them), then re-run: maw init");
 }
 
 /// Run a git command and check for success.
@@ -2196,7 +2198,6 @@ mod brownfield_tests {
             "src/ should be empty or removed after tracked file cleanup"
         );
     }
-
 
     #[test]
     fn brownfield_is_idempotent() {
@@ -2583,5 +2584,4 @@ mod brownfield_tests {
             "should detect branch from symbolic HEAD"
         );
     }
-
 }

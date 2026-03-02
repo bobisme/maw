@@ -11,10 +11,7 @@ fn to_gix_oid(oid: GitOid) -> gix::ObjectId {
 
 /// Convert a `gix::ObjectId` to our `GitOid`.
 fn from_gix_oid(oid: gix::ObjectId) -> GitOid {
-    let bytes: [u8; 20] = oid
-        .as_bytes()
-        .try_into()
-        .expect("SHA1 is 20 bytes");
+    let bytes: [u8; 20] = oid.as_bytes().try_into().expect("SHA1 is 20 bytes");
     GitOid::from_bytes(bytes)
 }
 
@@ -228,11 +225,11 @@ pub fn edit_tree(repo: &GixRepo, base: GitOid, edits: &[TreeEdit]) -> Result<Git
             TreeEdit::Upsert { path, mode, oid } => {
                 let kind = to_gix_entry_kind(*mode);
                 let gix_oid = to_gix_oid(*oid);
-                editor
-                    .upsert(path.as_str(), kind, gix_oid)
-                    .map_err(|e| GitError::BackendError {
+                editor.upsert(path.as_str(), kind, gix_oid).map_err(|e| {
+                    GitError::BackendError {
                         message: format!("tree edit upsert '{path}': {e}"),
-                    })?;
+                    }
+                })?;
             }
             TreeEdit::Remove { path } => {
                 editor

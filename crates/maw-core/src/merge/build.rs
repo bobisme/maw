@@ -259,19 +259,21 @@ type FlatTree = BTreeMap<PathBuf, (String, String)>;
 /// to `(mode, blob_oid)`.
 fn read_epoch_tree(repo: &dyn maw_git::GitRepo, epoch: &EpochId) -> Result<FlatTree, BuildError> {
     // Resolve the epoch commit to its tree OID.
-    let epoch_oid = epoch.as_str().parse::<maw_git::GitOid>().map_err(|_| {
-        BuildError::InvalidOid {
-            context: "epoch OID parse".to_owned(),
-            raw: epoch.as_str().to_owned(),
-        }
-    })?;
-    let commit_info = repo.read_commit(epoch_oid).map_err(|e| {
-        BuildError::GitCommand {
+    let epoch_oid =
+        epoch
+            .as_str()
+            .parse::<maw_git::GitOid>()
+            .map_err(|_| BuildError::InvalidOid {
+                context: "epoch OID parse".to_owned(),
+                raw: epoch.as_str().to_owned(),
+            })?;
+    let commit_info = repo
+        .read_commit(epoch_oid)
+        .map_err(|e| BuildError::GitCommand {
             command: format!("read_commit {}", epoch.as_str()),
             stderr: e.to_string(),
             exit_code: None,
-        }
-    })?;
+        })?;
 
     let mut tree = FlatTree::new();
     walk_tree_recursive(repo, commit_info.tree_oid, &PathBuf::new(), &mut tree)?;
@@ -285,11 +287,13 @@ fn walk_tree_recursive(
     prefix: &Path,
     flat: &mut FlatTree,
 ) -> Result<(), BuildError> {
-    let entries = repo.read_tree(tree_oid).map_err(|e| BuildError::GitCommand {
-        command: format!("read_tree {tree_oid}"),
-        stderr: e.to_string(),
-        exit_code: None,
-    })?;
+    let entries = repo
+        .read_tree(tree_oid)
+        .map_err(|e| BuildError::GitCommand {
+            command: format!("read_tree {tree_oid}"),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
     for entry in entries {
         let entry_path = if prefix == Path::new("") {
@@ -320,11 +324,13 @@ fn walk_tree_recursive(
 ///
 /// Returns the OID of the written blob.
 fn write_blob(repo: &dyn maw_git::GitRepo, content: &[u8]) -> Result<GitOid, BuildError> {
-    let git_oid = repo.write_blob(content).map_err(|e| BuildError::GitCommand {
-        command: "write_blob".to_owned(),
-        stderr: e.to_string(),
-        exit_code: None,
-    })?;
+    let git_oid = repo
+        .write_blob(content)
+        .map_err(|e| BuildError::GitCommand {
+            command: "write_blob".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
     let oid_str = git_oid.to_string();
     GitOid::new(&oid_str).map_err(|_| BuildError::InvalidOid {
         context: "write_blob output".to_owned(),
@@ -432,12 +438,13 @@ fn build_tree(repo: &dyn maw_git::GitRepo, flat: &FlatTree) -> Result<GitOid, Bu
                     "160000" => maw_git::EntryMode::Commit,
                     _ => maw_git::EntryMode::Blob,
                 };
-                let oid = oid_str.parse::<maw_git::GitOid>().map_err(|_| {
-                    BuildError::InvalidOid {
-                        context: format!("blob OID for {}", path.display()),
-                        raw: oid_str.clone(),
-                    }
-                })?;
+                let oid =
+                    oid_str
+                        .parse::<maw_git::GitOid>()
+                        .map_err(|_| BuildError::InvalidOid {
+                            context: format!("blob OID for {}", path.display()),
+                            raw: oid_str.clone(),
+                        })?;
                 tree_entries.push(maw_git::TreeEntry { name, mode, oid });
             }
         }
@@ -461,29 +468,28 @@ fn build_tree(repo: &dyn maw_git::GitRepo, flat: &FlatTree) -> Result<GitOid, Bu
 
         // Sort entries using git's canonical tree sort order: directory entries
         // sort as if they have a trailing '/' (e.g. "assurance/" > "assurance-plan.md").
-        tree_entries.sort_by(|a, b| {
-            git_tree_entry_cmp(&a.name, a.mode, &b.name, b.mode)
-        });
+        tree_entries.sort_by(|a, b| git_tree_entry_cmp(&a.name, a.mode, &b.name, b.mode));
 
         // Write this tree level.
-        let tree_oid = repo.write_tree(&tree_entries).map_err(|e| {
-            BuildError::GitCommand {
+        let tree_oid = repo
+            .write_tree(&tree_entries)
+            .map_err(|e| BuildError::GitCommand {
                 command: "write_tree".to_owned(),
                 stderr: e.to_string(),
                 exit_code: None,
-            }
-        })?;
+            })?;
         tree_oids.insert(dir.clone(), tree_oid);
     }
 
     // The root directory (PathBuf::new()) holds the root tree OID.
-    let root_git_oid = tree_oids
-        .get(&PathBuf::new())
-        .copied()
-        .ok_or_else(|| BuildError::InvalidOid {
-            context: "root tree OID from write_tree".to_owned(),
-            raw: String::new(),
-        })?;
+    let root_git_oid =
+        tree_oids
+            .get(&PathBuf::new())
+            .copied()
+            .ok_or_else(|| BuildError::InvalidOid {
+                context: "root tree OID from write_tree".to_owned(),
+                raw: String::new(),
+            })?;
 
     let oid_str = root_git_oid.to_string();
     GitOid::new(&oid_str).map_err(|_| BuildError::InvalidOid {
@@ -508,23 +514,30 @@ fn create_commit(
     tree: &GitOid,
     message: &str,
 ) -> Result<GitOid, BuildError> {
-    let tree_git_oid = tree.as_str().parse::<maw_git::GitOid>().map_err(|_| {
-        BuildError::InvalidOid {
-            context: "tree OID parse for create_commit".to_owned(),
-            raw: tree.as_str().to_owned(),
-        }
-    })?;
-    let parent_git_oid = parent.as_str().parse::<maw_git::GitOid>().map_err(|_| {
-        BuildError::InvalidOid {
-            context: "parent OID parse for create_commit".to_owned(),
-            raw: parent.as_str().to_owned(),
-        }
-    })?;
+    let tree_git_oid =
+        tree.as_str()
+            .parse::<maw_git::GitOid>()
+            .map_err(|_| BuildError::InvalidOid {
+                context: "tree OID parse for create_commit".to_owned(),
+                raw: tree.as_str().to_owned(),
+            })?;
+    let parent_git_oid =
+        parent
+            .as_str()
+            .parse::<maw_git::GitOid>()
+            .map_err(|_| BuildError::InvalidOid {
+                context: "parent OID parse for create_commit".to_owned(),
+                raw: parent.as_str().to_owned(),
+            })?;
 
     let commit_git_oid = repo
         .create_commit(tree_git_oid, &[parent_git_oid], message, None)
         .map_err(|e| BuildError::GitCommand {
-            command: format!("create_commit tree={} parent={}", tree.as_str(), parent.as_str()),
+            command: format!(
+                "create_commit tree={} parent={}",
+                tree.as_str(),
+                parent.as_str()
+            ),
             stderr: e.to_string(),
             exit_code: None,
         })?;
@@ -668,7 +681,8 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], None).unwrap();
+        let commit_oid =
+            build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], None).unwrap();
 
         // The new commit should have the same tree as the epoch.
         let epoch_tree = git_oid(root, &format!("{}^{{tree}}", epoch.as_str()));
@@ -834,9 +848,14 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["a"]), &[], Some("custom: my merge"))
-                .unwrap();
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["a"]),
+            &[],
+            Some("custom: my merge"),
+        )
+        .unwrap();
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
@@ -888,10 +907,10 @@ mod tests {
             },
         ];
 
-        let oid1 =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
-        let oid2 =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None).unwrap();
+        let oid1 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None)
+            .unwrap();
+        let oid2 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None)
+            .unwrap();
 
         // Tree OIDs must be identical (content-addressed).
         let tree1 = git_oid(root, &format!("{}^{{tree}}", oid1.as_str()));
@@ -913,8 +932,7 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
 
         let after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

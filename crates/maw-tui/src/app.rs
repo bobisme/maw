@@ -54,7 +54,7 @@ pub enum FileStatus {
 }
 
 impl FileStatus {
-    #[must_use] 
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Modified => "M",
@@ -64,7 +64,7 @@ impl FileStatus {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_char(c: char) -> Self {
         match c {
             'A' => Self::Added,
@@ -91,7 +91,7 @@ pub enum TreeNode {
 }
 
 impl TreeNode {
-    #[must_use] 
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Self::Dir { name, .. } | Self::File { name, .. } => name,
@@ -99,7 +99,7 @@ impl TreeNode {
     }
 
     #[allow(dead_code)]
-    #[must_use] 
+    #[must_use]
     pub const fn is_dir(&self) -> bool {
         matches!(self, Self::Dir { .. })
     }
@@ -107,7 +107,7 @@ impl TreeNode {
 
 /// Build a nested tree from a flat list of (status, path) pairs.
 /// Directories are sorted first, then files, both alphabetical.
-#[must_use] 
+#[must_use]
 pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
     fn build_children(
         dir_path: &str,
@@ -170,17 +170,19 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
                 }
                 ancestor.push_str(part);
                 if known_dirs.insert(ancestor.clone()) {
-                    dir_children
-                        .entry(parent)
-                        .or_default()
-                        .push((part.to_string(), None, ancestor.clone()));
+                    dir_children.entry(parent).or_default().push((
+                        part.to_string(),
+                        None,
+                        ancestor.clone(),
+                    ));
                 }
             } else {
                 // File leaf
-                dir_children
-                    .entry(ancestor.clone())
-                    .or_default()
-                    .push((part.to_string(), Some(*status), path.clone()));
+                dir_children.entry(ancestor.clone()).or_default().push((
+                    part.to_string(),
+                    Some(*status),
+                    path.clone(),
+                ));
             }
         }
     }
@@ -190,7 +192,7 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
 
 /// Flatten a tree into a list of `(depth, &TreeNode)` for rendering.
 /// Skips children of collapsed directories.
-#[must_use] 
+#[must_use]
 pub fn flatten_tree(nodes: &[TreeNode], depth: usize) -> Vec<(usize, &TreeNode)> {
     let mut result = Vec::new();
     for node in nodes {
@@ -370,14 +372,17 @@ impl App {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::missing_const_for_fn)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::missing_const_for_fn
+    )]
     fn cycle_pane(&mut self, direction: i32) {
         if self.workspaces.is_empty() {
             return;
         }
         let len = self.workspaces.len() as i32;
-        self.focused_pane =
-            (self.focused_pane as i32 + direction).rem_euclid(len) as usize;
+        self.focused_pane = (self.focused_pane as i32 + direction).rem_euclid(len) as usize;
         self.selected_row = 0;
     }
 
@@ -388,8 +393,7 @@ impl App {
             return;
         }
         let len = max as i32;
-        self.selected_row =
-            (self.selected_row as i32 + direction).rem_euclid(len) as usize;
+        self.selected_row = (self.selected_row as i32 + direction).rem_euclid(len) as usize;
     }
 
     fn flat_len_for_focused(&self) -> usize {
@@ -435,7 +439,10 @@ impl App {
     }
 
     fn fetch_header_info(&mut self) {
-        let repo_root = self.data_source.repo_root().unwrap_or_else(|_| PathBuf::from("."));
+        let repo_root = self
+            .data_source
+            .repo_root()
+            .unwrap_or_else(|_| PathBuf::from("."));
 
         // Branch name from data source
         if let Ok(branch) = self.data_source.branch_name() {
@@ -555,17 +562,10 @@ impl App {
     }
 
     /// Get commit count and last activity (seconds ago) for a workspace.
-    fn fetch_commit_info(
-        repo_root: &Path,
-        ws_path: &Path,
-    ) -> (u32, Option<u64>) {
+    fn fetch_commit_info(repo_root: &Path, ws_path: &Path) -> (u32, Option<u64>) {
         // Commit count: number of commits between epoch and HEAD
         let count_output = Command::new("git")
-            .args([
-                "rev-list",
-                "--count",
-                "refs/manifold/epoch/current..HEAD",
-            ])
+            .args(["rev-list", "--count", "refs/manifold/epoch/current..HEAD"])
             .current_dir(ws_path)
             .env("GIT_DIR", repo_root.join(".git"))
             .output();
@@ -625,7 +625,10 @@ impl App {
                 continue;
             }
             // Porcelain format: XY path (or XY old -> new for renames)
-            let status_char = line.chars().nth(1).unwrap_or(line.chars().next().unwrap_or('M'));
+            let status_char = line
+                .chars()
+                .nth(1)
+                .unwrap_or(line.chars().next().unwrap_or('M'));
             let status = match status_char {
                 'M' | ' ' => {
                     // Check index status if worktree is unchanged
@@ -669,8 +672,7 @@ impl App {
             for j in (i + 1)..ws_count {
                 let a = &self.workspaces[i];
                 let b = &self.workspaces[j];
-                let a_set: BTreeSet<&str> =
-                    a.file_paths.iter().map(String::as_str).collect();
+                let a_set: BTreeSet<&str> = a.file_paths.iter().map(String::as_str).collect();
 
                 for path in &b.file_paths {
                     if a_set.contains(path.as_str()) {
@@ -696,7 +698,7 @@ impl App {
 }
 
 /// Format seconds-ago into a human readable string.
-#[must_use] 
+#[must_use]
 pub fn format_time_ago(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s ago")

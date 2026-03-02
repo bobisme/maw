@@ -129,10 +129,7 @@ mod tests {
     #[test]
     fn check_sleep_returns_ok() {
         clear_all();
-        set(
-            "FP_SLEEP",
-            FailpointAction::Sleep(Duration::from_millis(1)),
-        );
+        set("FP_SLEEP", FailpointAction::Sleep(Duration::from_millis(1)));
         assert!(check("FP_SLEEP").is_ok());
         clear("FP_SLEEP");
     }

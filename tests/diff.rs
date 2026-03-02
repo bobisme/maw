@@ -12,9 +12,18 @@ fn ws_diff_defaults_to_patch_output() {
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
     let out = repo.maw_ok(&["ws", "diff", "alice"]);
-    assert!(out.contains("diff --git a/src/lib.rs b/src/lib.rs"), "expected patch output, got: {out}");
-    assert!(out.contains("-pub fn answer() -> i32 { 1 }"), "output: {out}");
-    assert!(out.contains("+pub fn answer() -> i32 { 2 }"), "output: {out}");
+    assert!(
+        out.contains("diff --git a/src/lib.rs b/src/lib.rs"),
+        "expected patch output, got: {out}"
+    );
+    assert!(
+        out.contains("-pub fn answer() -> i32 { 1 }"),
+        "output: {out}"
+    );
+    assert!(
+        out.contains("+pub fn answer() -> i32 { 2 }"),
+        "output: {out}"
+    );
 }
 
 #[test]
@@ -77,14 +86,7 @@ fn ws_diff_supports_epoch_target() {
     repo.create_workspace("alice");
     repo.modify_file("alice", "src/lib.rs", "pub fn answer() -> i32 { 2 }\n");
 
-    let out = repo.maw_ok(&[
-        "ws",
-        "diff",
-        "alice",
-        "--against",
-        "epoch",
-        "--json",
-    ]);
+    let out = repo.maw_ok(&["ws", "diff", "alice", "--against", "epoch", "--json"]);
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid JSON output");
     assert_eq!(json["against"]["label"].as_str(), Some("epoch"));
     assert_eq!(json["stats"]["files_changed"].as_u64(), Some(1));

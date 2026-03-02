@@ -33,7 +33,11 @@ use manifold_common::TestRepo;
 
 /// Collect all recovery refs for a workspace.
 fn recovery_refs(repo: &TestRepo, workspace: &str) -> Vec<String> {
-    let output = repo.git(&["for-each-ref", "--format=%(refname)", "refs/manifold/recovery/"]);
+    let output = repo.git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/manifold/recovery/",
+    ]);
     output
         .lines()
         .map(str::trim)
@@ -89,7 +93,11 @@ fn it_g4_001_post_merge_destroy_captures_state_before_deletion() {
 
     // Extra dirty state (untracked files not part of the merge diff)
     repo.add_file("gated-ws", "scratch-notes.txt", "agent wip notes\n");
-    repo.add_file("gated-ws", "debug/trace.log", "trace line 1\ntrace line 2\n");
+    repo.add_file(
+        "gated-ws",
+        "debug/trace.log",
+        "trace line 1\ntrace line 2\n",
+    );
 
     // Merge with --destroy
     repo.maw_ok(&["ws", "merge", "gated-ws", "--destroy"]);
@@ -108,12 +116,24 @@ fn it_g4_001_post_merge_destroy_captures_state_before_deletion() {
     );
 
     // Recovery ref resolves to a valid commit
-    let ref_oid = repo.git(&["rev-parse", "--verify", &refs[0]]).trim().to_owned();
-    assert_eq!(ref_oid.len(), 40, "Recovery OID should be 40-char hex: {}", ref_oid);
+    let ref_oid = repo
+        .git(&["rev-parse", "--verify", &refs[0]])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        ref_oid.len(),
+        40,
+        "Recovery OID should be 40-char hex: {}",
+        ref_oid
+    );
 
     // Captured commit tree includes the workspace files
     let tree_files = repo.git(&["ls-tree", "-r", "--name-only", &ref_oid]);
-    let file_list: Vec<&str> = tree_files.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let file_list: Vec<&str> = tree_files
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
 
     assert!(
         file_list.contains(&"feature.txt"),
@@ -144,14 +164,18 @@ fn it_g4_001_post_merge_destroy_captures_state_before_deletion() {
         .as_array()
         .expect("destroyed_workspaces should be an array");
     assert!(
-        workspaces.iter().any(|w| w["name"].as_str() == Some("gated-ws")),
+        workspaces
+            .iter()
+            .any(|w| w["name"].as_str() == Some("gated-ws")),
         "recover list should include gated-ws: {:?}",
         workspaces
     );
 
     // Verify destroy record has correct reason
     let show = recover_show_json(&repo, "gated-ws");
-    let records = show["records"].as_array().expect("records should be an array");
+    let records = show["records"]
+        .as_array()
+        .expect("records should be an array");
     assert_eq!(records.len(), 1, "Should have exactly one destroy record");
     assert_eq!(
         records[0]["destroy_reason"].as_str(),
@@ -160,9 +184,8 @@ fn it_g4_001_post_merge_destroy_captures_state_before_deletion() {
     );
 
     // Verify file content is recoverable via --show
-    let recovered_content = repo.maw_ok(&[
-        "ws", "recover", "gated-ws", "--show", "scratch-notes.txt",
-    ]);
+    let recovered_content =
+        repo.maw_ok(&["ws", "recover", "gated-ws", "--show", "scratch-notes.txt"]);
     assert_eq!(
         recovered_content, "agent wip notes\n",
         "Recovered scratch-notes.txt should match original content"
@@ -214,7 +237,9 @@ fn it_g4_001_standalone_destroy_refuses_dirty_workspace_without_force() {
         .as_array()
         .expect("destroyed_workspaces should be an array");
     assert!(
-        !workspaces.iter().any(|w| w["name"].as_str() == Some("protected")),
+        !workspaces
+            .iter()
+            .any(|w| w["name"].as_str() == Some("protected")),
         "Refused destroy should not create destroy record"
     );
 }
@@ -254,17 +279,13 @@ fn it_g4_001_standalone_destroy_force_always_captures_before_deletion() {
     );
 
     // Verify content is recoverable
-    let wip_content = repo.maw_ok(&[
-        "ws", "recover", "force-capture", "--show", "wip.txt",
-    ]);
+    let wip_content = repo.maw_ok(&["ws", "recover", "force-capture", "--show", "wip.txt"]);
     assert_eq!(
         wip_content, "work in progress\n",
         "Recovered wip.txt should match original"
     );
 
-    let base_content = repo.maw_ok(&[
-        "ws", "recover", "force-capture", "--show", "base.txt",
-    ]);
+    let base_content = repo.maw_ok(&["ws", "recover", "force-capture", "--show", "base.txt"]);
     assert_eq!(
         base_content, "modified base\n",
         "Recovered base.txt should contain the modification"
@@ -321,7 +342,11 @@ fn it_g4_001_post_merge_destroy_captures_extra_dirty_state() {
 
     // Extra dirty files (these exist in the workspace but are captured by
     // the merge diff as well -- all workspace dirty files are included)
-    repo.add_file("extra-dirty", "notes/research.md", "# Research Notes\n\nFindings...\n");
+    repo.add_file(
+        "extra-dirty",
+        "notes/research.md",
+        "# Research Notes\n\nFindings...\n",
+    );
 
     // Merge with --destroy
     repo.maw_ok(&["ws", "merge", "extra-dirty", "--destroy"]);
@@ -338,7 +363,9 @@ fn it_g4_001_post_merge_destroy_captures_extra_dirty_state() {
 
     // The destroy record should exist
     let show = recover_show_json(&repo, "extra-dirty");
-    let records = show["records"].as_array().expect("records should be an array");
+    let records = show["records"]
+        .as_array()
+        .expect("records should be an array");
     assert!(
         !records.is_empty(),
         "Should have at least one destroy record"

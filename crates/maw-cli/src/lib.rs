@@ -10,11 +10,11 @@ pub mod epoch;
 pub mod epoch_gc;
 #[allow(dead_code)]
 pub mod error;
-pub mod ref_gc;
 pub mod exec;
 pub mod format;
 pub mod merge_cmd;
 pub mod push;
+pub mod ref_gc;
 pub mod release;
 pub mod status;
 pub mod telemetry;

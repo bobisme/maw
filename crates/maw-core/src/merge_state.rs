@@ -284,18 +284,12 @@ impl MergeStateFile {
 
         let json = self.to_json()?;
 
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(mut file) => {
-                file.write_all(json.as_bytes()).map_err(|e| {
-                    MergeStateError::Io(format!("write {}: {e}", path.display()))
-                })?;
-                file.sync_all().map_err(|e| {
-                    MergeStateError::Io(format!("fsync {}: {e}", path.display()))
-                })?;
+                file.write_all(json.as_bytes())
+                    .map_err(|e| MergeStateError::Io(format!("write {}: {e}", path.display())))?;
+                file.sync_all()
+                    .map_err(|e| MergeStateError::Io(format!("fsync {}: {e}", path.display())))?;
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),

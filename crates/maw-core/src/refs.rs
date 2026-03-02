@@ -100,10 +100,12 @@ pub fn workspace_epoch_ref(workspace_name: &str) -> String {
 
 /// Convert a `maw_core` `GitOid` (String-based) to a `maw_git` `GitOid` (byte-based).
 fn to_git_oid(oid: &GitOid) -> Result<maw_git::GitOid, RefError> {
-    oid.as_str().parse::<maw_git::GitOid>().map_err(|e| RefError::InvalidOid {
-        ref_name: String::new(),
-        raw_value: e.to_string(),
-    })
+    oid.as_str()
+        .parse::<maw_git::GitOid>()
+        .map_err(|e| RefError::InvalidOid {
+            ref_name: String::new(),
+            raw_value: e.to_string(),
+        })
 }
 
 /// Convert a `maw_git` `GitOid` (byte-based) to a `maw_core` `GitOid` (String-based).
@@ -289,7 +291,11 @@ pub fn write_ref(root: &Path, name: &str, oid: &GitOid) -> Result<(), RefError> 
 }
 
 /// Write a git ref via a `GitRepo` trait object.
-pub fn write_ref_via(repo: &dyn maw_git::GitRepo, name: &str, oid: &GitOid) -> Result<(), RefError> {
+pub fn write_ref_via(
+    repo: &dyn maw_git::GitRepo,
+    name: &str,
+    oid: &GitOid,
+) -> Result<(), RefError> {
     let ref_name = to_ref_name(name)?;
     let git_oid = to_git_oid(oid)?;
     repo.write_ref(&ref_name, git_oid, "")
@@ -340,11 +346,12 @@ pub fn write_ref_cas_via(
     // exist first. gix's MustNotExist may not reliably reject updates to
     // existing refs in all storage backends.
     if old.is_zero()
-        && let Ok(Some(_)) = repo.read_ref(&ref_name) {
-            return Err(RefError::CasMismatch {
-                ref_name: name.to_owned(),
-            });
-        }
+        && let Ok(Some(_)) = repo.read_ref(&ref_name)
+    {
+        return Err(RefError::CasMismatch {
+            ref_name: name.to_owned(),
+        });
+    }
 
     let edit = maw_git::RefEdit {
         name: ref_name,
@@ -823,10 +830,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2.clone()));
-        assert_eq!(
-            read_ref(root, "refs/heads/test-branch").unwrap(),
-            Some(v2)
-        );
+        assert_eq!(read_ref(root, "refs/heads/test-branch").unwrap(), Some(v2));
     }
 
     #[test]
@@ -857,10 +861,7 @@ mod tests {
 
         // Neither ref should have moved
         assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2));
-        assert_eq!(
-            read_ref(root, "refs/heads/test-branch").unwrap(),
-            Some(v1)
-        );
+        assert_eq!(read_ref(root, "refs/heads/test-branch").unwrap(), Some(v1));
     }
 
     #[test]

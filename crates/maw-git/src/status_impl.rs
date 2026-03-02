@@ -7,26 +7,25 @@ use crate::gix_repo::GixRepo;
 use crate::types::*;
 
 pub fn is_dirty(repo: &GixRepo) -> Result<bool, GitError> {
-    repo.repo
-        .is_dirty()
-        .map_err(|e| GitError::BackendError {
-            message: e.to_string(),
-        })
+    repo.repo.is_dirty().map_err(|e| GitError::BackendError {
+        message: e.to_string(),
+    })
 }
 
 pub fn status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
-    let platform = repo
-        .repo
-        .status(gix::progress::Discard)
-        .map_err(|e| GitError::BackendError {
-            message: e.to_string(),
-        })?;
+    let platform =
+        repo.repo
+            .status(gix::progress::Discard)
+            .map_err(|e| GitError::BackendError {
+                message: e.to_string(),
+            })?;
 
-    let iter = platform
-        .into_index_worktree_iter(Vec::new())
-        .map_err(|e| GitError::BackendError {
-            message: e.to_string(),
-        })?;
+    let iter =
+        platform
+            .into_index_worktree_iter(Vec::new())
+            .map_err(|e| GitError::BackendError {
+                message: e.to_string(),
+            })?;
 
     let mut entries = Vec::new();
     for item in iter {

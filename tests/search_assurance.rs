@@ -15,17 +15,14 @@ use manifold_common::TestRepo;
 // ---------------------------------------------------------------------------
 
 fn search_json(repo: &TestRepo, pattern: &str) -> serde_json::Value {
-    let output = repo.maw_ok(&[
-        "ws", "recover", "--search", pattern, "--format", "json",
-    ]);
-    serde_json::from_str(&output)
-        .unwrap_or_else(|e| panic!("recover --search --format json should be valid JSON: {e}\nraw output: {output}"))
+    let output = repo.maw_ok(&["ws", "recover", "--search", pattern, "--format", "json"]);
+    serde_json::from_str(&output).unwrap_or_else(|e| {
+        panic!("recover --search --format json should be valid JSON: {e}\nraw output: {output}")
+    })
 }
 
 fn search_raw(repo: &TestRepo, pattern: &str) -> std::process::Output {
-    repo.maw_raw(&[
-        "ws", "recover", "--search", pattern, "--format", "json",
-    ])
+    repo.maw_raw(&["ws", "recover", "--search", pattern, "--format", "json"])
 }
 
 // ---------------------------------------------------------------------------
@@ -49,11 +46,7 @@ fn search_finds_tracked_content_in_recovery_snapshot() {
     repo.git_in_workspace("agent", &["commit", "-m", "add config with tracked token"]);
 
     // 3. Add an UNTRACKED file (do NOT commit it)
-    repo.add_file(
-        "agent",
-        "scratch.txt",
-        "untracked_secret_token\n",
-    );
+    repo.add_file("agent", "scratch.txt", "untracked_secret_token\n");
 
     // 4. Merge and destroy the workspace
     //    merge --destroy captures the workspace state (committed content as HEAD,
@@ -66,9 +59,7 @@ fn search_finds_tracked_content_in_recovery_snapshot() {
 
     // 5. Search for the tracked token
     let result = search_json(&repo, "tracked_secret_token");
-    let hits = result["hits"]
-        .as_array()
-        .expect("hits should be an array");
+    let hits = result["hits"].as_array().expect("hits should be an array");
     assert!(
         !hits.is_empty(),
         "search for 'tracked_secret_token' should find at least one hit in recovery snapshot, got: {result}"
@@ -111,8 +102,7 @@ fn search_finds_tracked_content_in_recovery_snapshot() {
 
     // Parse the output to check — if hits exist, great; if not, that's expected.
     let untracked_result: serde_json::Value =
-        serde_json::from_slice(&untracked_output.stdout)
-            .expect("output should be valid JSON");
+        serde_json::from_slice(&untracked_output.stdout).expect("output should be valid JSON");
     let untracked_hits = untracked_result["hits"]
         .as_array()
         .expect("hits should be an array");
@@ -162,9 +152,7 @@ fn show_round_trip_returns_exact_content_for_search_hit() {
 
     // 4. Search for the known token
     let result = search_json(&repo, "tracked_secret_token");
-    let hits = result["hits"]
-        .as_array()
-        .expect("hits should be an array");
+    let hits = result["hits"].as_array().expect("hits should be an array");
     assert!(
         !hits.is_empty(),
         "search should find at least one hit, got: {result}"
@@ -175,16 +163,12 @@ fn show_round_trip_returns_exact_content_for_search_hit() {
     let ref_name = first_hit["ref_name"]
         .as_str()
         .expect("hit should have ref_name");
-    let path = first_hit["path"]
-        .as_str()
-        .expect("hit should have path");
+    let path = first_hit["path"].as_str().expect("hit should have path");
 
     assert_eq!(path, "payload.txt", "hit should be in payload.txt");
 
     // 6. Run --show to retrieve the file content
-    let shown_content = repo.maw_ok(&[
-        "ws", "recover", "--ref", ref_name, "--show", path,
-    ]);
+    let shown_content = repo.maw_ok(&["ws", "recover", "--ref", ref_name, "--show", path]);
 
     // 7. Assert exact byte-for-byte match
     assert_eq!(

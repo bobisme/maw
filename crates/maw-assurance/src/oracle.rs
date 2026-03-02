@@ -202,10 +202,7 @@ impl fmt::Display for AssuranceViolation {
                 command,
                 stderr,
             } => {
-                write!(
-                    f,
-                    "Git error during {check}: `{command}` failed: {stderr}"
-                )
+                write!(f, "Git error during {check}: `{command}` failed: {stderr}")
             }
         }
     }
@@ -284,7 +281,9 @@ fn discover_workspaces(
     let mut workspaces = HashMap::new();
     let ws_dir = root.join("ws");
 
-    if ws_dir.is_dir() && let Ok(entries) = std::fs::read_dir(&ws_dir) {
+    if ws_dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&ws_dir)
+    {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             let ws_path = entry.path();
@@ -310,11 +309,13 @@ fn discover_workspaces(
     // Also check for workspace head refs that might exist without a directory
     for ref_name in refs.keys() {
         if let Some(ws_name) = ref_name.strip_prefix("refs/manifold/head/") {
-            workspaces.entry(ws_name.to_owned()).or_insert(WorkspaceStatus {
-                head_oid: refs.get(ref_name).cloned().unwrap_or_default(),
-                is_dirty: false,
-                exists: false,
-            });
+            workspaces
+                .entry(ws_name.to_owned())
+                .or_insert(WorkspaceStatus {
+                    head_oid: refs.get(ref_name).cloned().unwrap_or_default(),
+                    is_dirty: false,
+                    exists: false,
+                });
         }
     }
 
@@ -345,9 +346,7 @@ fn check_workspace_dirty(ws_path: &Path) -> bool {
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-        }
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         _ => false,
     }
 }
@@ -471,22 +470,17 @@ pub fn check_g2_rewrite_preservation(
         }
 
         // Check for a recovery ref for this workspace
-        let has_recovery = post
-            .recovery_refs
-            .keys()
-            .any(|ref_name| {
-                // Recovery refs are formatted as:
-                // refs/manifold/recovery/<workspace>/<timestamp>
-                ref_name
-                    .strip_prefix("refs/manifold/recovery/")
-                    .is_some_and(|rest| rest.starts_with(&format!("{ws_name}/")))
-            });
+        let has_recovery = post.recovery_refs.keys().any(|ref_name| {
+            // Recovery refs are formatted as:
+            // refs/manifold/recovery/<workspace>/<timestamp>
+            ref_name
+                .strip_prefix("refs/manifold/recovery/")
+                .is_some_and(|rest| rest.starts_with(&format!("{ws_name}/")))
+        });
 
         if !has_recovery {
-            let new_head = post_ws.map_or_else(
-                || "<destroyed>".to_owned(),
-                |pw| pw.head_oid.clone(),
-            );
+            let new_head =
+                post_ws.map_or_else(|| "<destroyed>".to_owned(), |pw| pw.head_oid.clone());
             return Err(AssuranceViolation::RewriteNotPreserved {
                 workspace: ws_name.clone(),
                 old_head: pre_ws.head_oid.clone(),
@@ -546,9 +540,7 @@ pub fn check_g3_commit_monotonicity(
         .output()
         .map_err(|e| AssuranceViolation::GitError {
             check: "check_g3_commit_monotonicity".to_owned(),
-            command: format!(
-                "git merge-base --is-ancestor {pre_epoch} {post_epoch}"
-            ),
+            command: format!("git merge-base --is-ancestor {pre_epoch} {post_epoch}"),
             stderr: e.to_string(),
         })?;
 
@@ -577,24 +569,18 @@ pub fn check_g4_destructive_gate(
             continue;
         }
 
-        let still_exists = post
-            .workspaces
-            .get(ws_name)
-            .is_some_and(|pw| pw.exists);
+        let still_exists = post.workspaces.get(ws_name).is_some_and(|pw| pw.exists);
 
         if still_exists {
             continue;
         }
 
         // Workspace was destroyed — check for recovery ref
-        let has_recovery = post
-            .recovery_refs
-            .keys()
-            .any(|ref_name| {
-                ref_name
-                    .strip_prefix("refs/manifold/recovery/")
-                    .is_some_and(|rest| rest.starts_with(&format!("{ws_name}/")))
-            });
+        let has_recovery = post.recovery_refs.keys().any(|ref_name| {
+            ref_name
+                .strip_prefix("refs/manifold/recovery/")
+                .is_some_and(|rest| rest.starts_with(&format!("{ws_name}/")))
+        });
 
         if !has_recovery {
             return Err(AssuranceViolation::DestructiveWithoutRecovery {
@@ -616,9 +602,7 @@ pub fn check_g4_destructive_gate(
 /// # Errors
 /// Returns `AssuranceViolation::RecoveryNotDiscoverable` if a recovery ref
 /// cannot be resolved.
-pub fn check_g5_discoverability(
-    post: &AssuranceState,
-) -> Result<(), AssuranceViolation> {
+pub fn check_g5_discoverability(post: &AssuranceState) -> Result<(), AssuranceViolation> {
     for (ref_name, expected_oid) in &post.recovery_refs {
         let output = Command::new("git")
             .args(["rev-parse", "--verify", ref_name])
@@ -644,9 +628,7 @@ pub fn check_g5_discoverability(
         if actual_oid != *expected_oid {
             return Err(AssuranceViolation::RecoveryNotDiscoverable {
                 ref_name: ref_name.clone(),
-                reason: format!(
-                    "expected OID {expected_oid} but got {actual_oid}"
-                ),
+                reason: format!("expected OID {expected_oid} but got {actual_oid}"),
             });
         }
     }
@@ -663,9 +645,7 @@ pub fn check_g5_discoverability(
 /// # Errors
 /// Returns `AssuranceViolation::RecoveryNotSearchable` if a recovery ref
 /// points to a non-commit or unreadable object.
-pub fn check_g6_searchability(
-    post: &AssuranceState,
-) -> Result<(), AssuranceViolation> {
+pub fn check_g6_searchability(post: &AssuranceState) -> Result<(), AssuranceViolation> {
     for (ref_name, oid) in &post.recovery_refs {
         let output = Command::new("git")
             .args(["cat-file", "-t", oid])
@@ -713,10 +693,7 @@ pub fn check_g6_searchability(
 ///
 /// # Errors
 /// Returns the first `AssuranceViolation` encountered across G1-G6.
-pub fn check_all(
-    pre: &AssuranceState,
-    post: &AssuranceState,
-) -> Result<(), AssuranceViolation> {
+pub fn check_all(pre: &AssuranceState, post: &AssuranceState) -> Result<(), AssuranceViolation> {
     check_g1_reachability(pre, post)?;
     check_g2_rewrite_preservation(pre, post)?;
     check_g3_commit_monotonicity(pre, post)?;
@@ -773,7 +750,13 @@ mod tests {
         }
     }
 
-    fn add_workspace(state: &mut AssuranceState, name: &str, head: &str, dirty: bool, exists: bool) {
+    fn add_workspace(
+        state: &mut AssuranceState,
+        name: &str,
+        head: &str,
+        dirty: bool,
+        exists: bool,
+    ) {
         state.workspaces.insert(
             name.to_owned(),
             WorkspaceStatus {
@@ -834,7 +817,10 @@ mod tests {
         add_workspace(&mut post, "alice", OID_B, false, true);
 
         let err = check_g2_rewrite_preservation(&pre, &post).unwrap_err();
-        assert!(matches!(err, AssuranceViolation::RewriteNotPreserved { .. }));
+        assert!(matches!(
+            err,
+            AssuranceViolation::RewriteNotPreserved { .. }
+        ));
         let msg = format!("{err}");
         assert!(msg.contains("alice"));
         assert!(msg.contains("G2 violation"));
@@ -863,7 +849,10 @@ mod tests {
         // alice not in post workspaces and no recovery ref
 
         let err = check_g2_rewrite_preservation(&pre, &post).unwrap_err();
-        assert!(matches!(err, AssuranceViolation::RewriteNotPreserved { .. }));
+        assert!(matches!(
+            err,
+            AssuranceViolation::RewriteNotPreserved { .. }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1004,11 +993,14 @@ mod tests {
         let head_oid = git_head_oid(root);
 
         // Create a recovery ref
-        git_cmd(root, &[
-            "update-ref",
-            "refs/manifold/recovery/test/2025-01-01T00-00-00Z",
-            &head_oid,
-        ]);
+        git_cmd(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/recovery/test/2025-01-01T00-00-00Z",
+                &head_oid,
+            ],
+        );
 
         let mut post = empty_state();
         post.repo_root = root.to_path_buf();
@@ -1058,11 +1050,14 @@ mod tests {
         let root = dir.path();
         let head_oid = git_head_oid(root);
 
-        git_cmd(root, &[
-            "update-ref",
-            "refs/manifold/recovery/test/2025-01-01T00-00-00Z",
-            &head_oid,
-        ]);
+        git_cmd(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/recovery/test/2025-01-01T00-00-00Z",
+                &head_oid,
+            ],
+        );
 
         let mut post = empty_state();
         post.repo_root = root.to_path_buf();
@@ -1088,11 +1083,14 @@ mod tests {
         let tree_oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
 
         // Pin recovery ref to the tree OID
-        git_cmd(root, &[
-            "update-ref",
-            "refs/manifold/recovery/test/2025-01-01T00-00-00Z",
-            &tree_oid,
-        ]);
+        git_cmd(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/recovery/test/2025-01-01T00-00-00Z",
+                &tree_oid,
+            ],
+        );
 
         let mut post = empty_state();
         post.repo_root = root.to_path_buf();
@@ -1144,9 +1142,7 @@ mod tests {
 
         let pre = AssuranceState {
             repo_root: root.to_path_buf(),
-            durable_refs: HashMap::from([
-                ("refs/heads/main".to_owned(), head_oid),
-            ]),
+            durable_refs: HashMap::from([("refs/heads/main".to_owned(), head_oid)]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
             merge_state_phase: None,
@@ -1171,9 +1167,7 @@ mod tests {
 
         let pre = AssuranceState {
             repo_root: root.to_path_buf(),
-            durable_refs: HashMap::from([
-                ("refs/heads/main".to_owned(), first_oid),
-            ]),
+            durable_refs: HashMap::from([("refs/heads/main".to_owned(), first_oid)]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
             merge_state_phase: None,
@@ -1181,9 +1175,7 @@ mod tests {
 
         let post = AssuranceState {
             repo_root: root.to_path_buf(),
-            durable_refs: HashMap::from([
-                ("refs/heads/main".to_owned(), second_oid),
-            ]),
+            durable_refs: HashMap::from([("refs/heads/main".to_owned(), second_oid)]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
             merge_state_phase: None,
@@ -1221,9 +1213,7 @@ mod tests {
 
         let post = AssuranceState {
             repo_root: root.to_path_buf(),
-            durable_refs: HashMap::from([
-                ("refs/heads/main".to_owned(), first_oid),
-            ]),
+            durable_refs: HashMap::from([("refs/heads/main".to_owned(), first_oid)]),
             recovery_refs: HashMap::new(),
             workspaces: HashMap::new(),
             merge_state_phase: None,
@@ -1252,11 +1242,14 @@ mod tests {
         git_cmd(root, &["branch", "-D", "temp"]);
 
         // But pin it via recovery ref
-        git_cmd(root, &[
-            "update-ref",
-            "refs/manifold/recovery/temp/2025-01-01T00-00-00Z",
-            &temp_oid,
-        ]);
+        git_cmd(
+            root,
+            &[
+                "update-ref",
+                "refs/manifold/recovery/temp/2025-01-01T00-00-00Z",
+                &temp_oid,
+            ],
+        );
 
         let pre = AssuranceState {
             repo_root: root.to_path_buf(),
@@ -1316,7 +1309,8 @@ mod tests {
 
     #[test]
     fn violation_display_messages() {
-        let violations = [AssuranceViolation::ReachabilityLost {
+        let violations = [
+            AssuranceViolation::ReachabilityLost {
                 oid: OID_A.to_owned(),
                 previous_ref: "refs/heads/main".to_owned(),
             },
@@ -1346,20 +1340,22 @@ mod tests {
                 check: "test".to_owned(),
                 command: "git foo".to_owned(),
                 stderr: "bar".to_owned(),
-            }];
+            },
+        ];
 
         let expected_prefixes = [
-            "G1 violation", "G2 violation", "G3 violation",
-            "G4 violation", "G5 violation", "G6 violation",
+            "G1 violation",
+            "G2 violation",
+            "G3 violation",
+            "G4 violation",
+            "G5 violation",
+            "G6 violation",
             "Git error",
         ];
 
         for (v, prefix) in violations.iter().zip(expected_prefixes.iter()) {
             let msg = format!("{v}");
-            assert!(
-                msg.contains(prefix),
-                "expected '{prefix}' in: {msg}"
-            );
+            assert!(msg.contains(prefix), "expected '{prefix}' in: {msg}");
         }
     }
 

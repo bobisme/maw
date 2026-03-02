@@ -549,7 +549,13 @@ mod tests {
         assert!(!gv.conflicts.is_empty());
         assert_eq!(gv.conflicts[0].path, PathBuf::from("src/main.rs"));
         // The conflict path must NOT be present in the merged set
-        assert!(!gv.merged_patch_set.as_ref().unwrap().patches.contains_key(&PathBuf::from("src/main.rs")));
+        assert!(
+            !gv.merged_patch_set
+                .as_ref()
+                .unwrap()
+                .patches
+                .contains_key(&PathBuf::from("src/main.rs"))
+        );
     }
 
     // -----------------------------------------------------------------------

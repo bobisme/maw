@@ -56,19 +56,20 @@ fn get_git_version() -> Option<(u32, u32, u32)> {
 /// Intended to be called from `maw init` and other entry points as a soft check.
 pub fn warn_git_version_if_old() {
     if let Some(version) = get_git_version()
-        && version < MIN_GIT_VERSION {
-            eprintln!(
-                "WARNING: git {}.{}.{} detected; maw requires git {}.{}.{} or later. \
+        && version < MIN_GIT_VERSION
+    {
+        eprintln!(
+            "WARNING: git {}.{}.{} detected; maw requires git {}.{}.{} or later. \
                  Some features may not work correctly.\n  \
                  Upgrade: https://git-scm.com/downloads",
-                version.0,
-                version.1,
-                version.2,
-                MIN_GIT_VERSION.0,
-                MIN_GIT_VERSION.1,
-                MIN_GIT_VERSION.2,
-            );
-        }
+            version.0,
+            version.1,
+            version.2,
+            MIN_GIT_VERSION.0,
+            MIN_GIT_VERSION.1,
+            MIN_GIT_VERSION.2,
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -186,7 +187,15 @@ fn check_git_version() -> DoctorCheck {
         Some(version) if version >= MIN_GIT_VERSION => DoctorCheck {
             name: "git version".to_string(),
             status: "ok".to_string(),
-            message: format!("git version: {}.{}.{} (>= {}.{}.{})", version.0, version.1, version.2, MIN_GIT_VERSION.0, MIN_GIT_VERSION.1, MIN_GIT_VERSION.2),
+            message: format!(
+                "git version: {}.{}.{} (>= {}.{}.{})",
+                version.0,
+                version.1,
+                version.2,
+                MIN_GIT_VERSION.0,
+                MIN_GIT_VERSION.1,
+                MIN_GIT_VERSION.2
+            ),
             fix: None,
         },
         Some(version) => DoctorCheck {
@@ -194,7 +203,12 @@ fn check_git_version() -> DoctorCheck {
             status: "warn".to_string(),
             message: format!(
                 "git version: {}.{}.{} (minimum {}.{}.{} recommended)",
-                version.0, version.1, version.2, MIN_GIT_VERSION.0, MIN_GIT_VERSION.1, MIN_GIT_VERSION.2
+                version.0,
+                version.1,
+                version.2,
+                MIN_GIT_VERSION.0,
+                MIN_GIT_VERSION.1,
+                MIN_GIT_VERSION.2
             ),
             fix: Some("Upgrade: https://git-scm.com/downloads".to_string()),
         },
@@ -446,7 +460,10 @@ fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
                 "dangling snapshots: {} recovery ref(s) from crashed or completed merges",
                 dangling.len()
             ),
-            fix: Some("Fix: maw ws recover --gc --dry-run  (preview), then: maw ws recover --gc".to_string()),
+            fix: Some(
+                "Fix: maw ws recover --gc --dry-run  (preview), then: maw ws recover --gc"
+                    .to_string(),
+            ),
         },
         Err(_) => DoctorCheck {
             name: "dangling snapshots".to_string(),
@@ -530,19 +547,13 @@ mod tests {
 
     #[test]
     fn parse_standard_git_version() {
-        assert_eq!(
-            parse_git_version("git version 2.47.1"),
-            Some((2, 47, 1))
-        );
+        assert_eq!(parse_git_version("git version 2.47.1"), Some((2, 47, 1)));
     }
 
     #[test]
     fn parse_git_version_two_components() {
         // Some distributions emit "git version 2.40" with no patch
-        assert_eq!(
-            parse_git_version("git version 2.40"),
-            Some((2, 40, 0))
-        );
+        assert_eq!(parse_git_version("git version 2.40"), Some((2, 40, 0)));
     }
 
     #[test]

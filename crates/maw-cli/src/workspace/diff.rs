@@ -327,7 +327,11 @@ fn collect_untracked_files(ws_dir: &Path, pathspecs: &[String]) -> Result<Vec<St
         args.extend(pathspecs.iter().cloned());
     }
     let raw = git_stdout(ws_dir, &args)?;
-    Ok(raw.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    Ok(raw
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 fn print_json(
@@ -625,7 +629,8 @@ fn parse_name_status_z(raw: &[u8]) -> Result<Vec<DiffEntry>> {
 fn resolve_rev_oid(root: &Path, rev: &str) -> Result<String> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let oid = repo.rev_parse(rev)
+    let oid = repo
+        .rev_parse(rev)
         .map_err(|e| anyhow::anyhow!("`rev-parse {rev}` failed: {e}"))?;
     Ok(oid.to_string())
 }

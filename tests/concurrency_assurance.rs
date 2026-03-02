@@ -17,8 +17,8 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use maw::merge::commit::{run_commit_phase, CommitResult, recover_partial_commit, CommitRecovery};
-use maw::merge::prepare::{run_prepare_phase_with_epoch, PrepareError};
+use maw::merge::commit::{CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase};
+use maw::merge::prepare::{PrepareError, run_prepare_phase_with_epoch};
 use maw::merge_state::{MergePhase, MergeStateFile};
 use maw::model::types::{EpochId, GitOid, WorkspaceId};
 use maw::refs;
@@ -129,8 +129,7 @@ fn merge_state_blocks_prepare_during_build_phase() {
     std::fs::create_dir_all(&manifold_dir).unwrap();
 
     // Write a merge-state advanced to Build phase.
-    let mut existing =
-        MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
+    let mut existing = MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
     existing.advance(MergePhase::Build, 1001).unwrap();
     existing
         .write_atomic(&MergeStateFile::default_path(&manifold_dir))
@@ -139,9 +138,8 @@ fn merge_state_blocks_prepare_during_build_phase() {
     // New prepare must fail.
     let mut heads = BTreeMap::new();
     heads.insert(ws("new-ws"), oid('d'));
-    let err =
-        run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads)
-            .unwrap_err();
+    let err = run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads)
+        .unwrap_err();
 
     assert!(
         matches!(err, PrepareError::MergeAlreadyInProgress),
@@ -155,8 +153,7 @@ fn merge_state_blocks_prepare_during_validate_phase() {
     let manifold_dir = dir.path().join(".manifold");
     std::fs::create_dir_all(&manifold_dir).unwrap();
 
-    let mut existing =
-        MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
+    let mut existing = MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
     existing.advance(MergePhase::Build, 1001).unwrap();
     existing.advance(MergePhase::Validate, 1002).unwrap();
     existing
@@ -165,9 +162,8 @@ fn merge_state_blocks_prepare_during_validate_phase() {
 
     let mut heads = BTreeMap::new();
     heads.insert(ws("new-ws"), oid('d'));
-    let err =
-        run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads)
-            .unwrap_err();
+    let err = run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads)
+        .unwrap_err();
 
     assert!(
         matches!(err, PrepareError::MergeAlreadyInProgress),
@@ -182,8 +178,7 @@ fn merge_state_allows_prepare_after_complete() {
     std::fs::create_dir_all(&manifold_dir).unwrap();
 
     // Write a terminal Complete state.
-    let mut existing =
-        MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
+    let mut existing = MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
     existing.advance(MergePhase::Build, 1001).unwrap();
     existing.advance(MergePhase::Validate, 1002).unwrap();
     existing.advance(MergePhase::Commit, 1003).unwrap();
@@ -196,8 +191,7 @@ fn merge_state_allows_prepare_after_complete() {
     // New prepare should succeed (overwriting terminal state).
     let mut heads = BTreeMap::new();
     heads.insert(ws("new-ws"), oid('e'));
-    let result =
-        run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads);
+    let result = run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads);
 
     assert!(
         result.is_ok(),
@@ -217,8 +211,7 @@ fn merge_state_allows_prepare_after_aborted() {
     std::fs::create_dir_all(&manifold_dir).unwrap();
 
     // Write a terminal Aborted state.
-    let mut existing =
-        MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
+    let mut existing = MergeStateFile::new(vec![ws("old-ws")], epoch('a'), 1000);
     existing.abort("test abort", 1001).unwrap();
     existing
         .write_atomic(&MergeStateFile::default_path(&manifold_dir))
@@ -227,8 +220,7 @@ fn merge_state_allows_prepare_after_aborted() {
     // New prepare should succeed.
     let mut heads = BTreeMap::new();
     heads.insert(ws("new-ws"), oid('f'));
-    let result =
-        run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads);
+    let result = run_prepare_phase_with_epoch(&manifold_dir, epoch('a'), &[ws("new-ws")], heads);
 
     assert!(
         result.is_ok(),
@@ -284,7 +276,11 @@ fn commit_phase_advances_both_refs_atomically() {
 
     // Both refs should now point to the new commit.
     let epoch = refs::read_ref(root, refs::EPOCH_CURRENT).unwrap();
-    assert_eq!(epoch, Some(new.clone()), "epoch ref should be at new commit");
+    assert_eq!(
+        epoch,
+        Some(new.clone()),
+        "epoch ref should be at new commit"
+    );
 
     let main = refs::read_ref(root, "refs/heads/main").unwrap();
     assert_eq!(main, Some(new), "main ref should be at new commit");
@@ -298,7 +294,10 @@ fn commit_phase_rejects_stale_epoch() {
     // Create a third commit to use as a "someone else advanced" value.
     let interloper = add_empty_commit(root, "interloper");
     // Advance the epoch ref behind our back.
-    git(root, &["update-ref", refs::EPOCH_CURRENT, interloper.as_str()]);
+    git(
+        root,
+        &["update-ref", refs::EPOCH_CURRENT, interloper.as_str()],
+    );
     // Reset main back to old.
     git(root, &["update-ref", "refs/heads/main", old.as_str()]);
 
@@ -510,8 +509,7 @@ fn full_lifecycle_exclusion_and_cas() {
     let mut heads_a = BTreeMap::new();
     heads_a.insert(ws_a.clone(), old.clone());
 
-    let frozen =
-        run_prepare_phase_with_epoch(&manifold_dir, epoch_a, &[ws_a], heads_a).unwrap();
+    let frozen = run_prepare_phase_with_epoch(&manifold_dir, epoch_a, &[ws_a], heads_a).unwrap();
     assert_eq!(frozen.epoch.as_str(), old.as_str());
 
     // Agent B: tries to prepare — blocked by merge-state.
@@ -520,8 +518,7 @@ fn full_lifecycle_exclusion_and_cas() {
     heads_b.insert(ws_b.clone(), new.clone());
     let epoch_b = EpochId::new(old.as_str()).unwrap();
 
-    let err =
-        run_prepare_phase_with_epoch(&manifold_dir, epoch_b, &[ws_b], heads_b).unwrap_err();
+    let err = run_prepare_phase_with_epoch(&manifold_dir, epoch_b, &[ws_b], heads_b).unwrap_err();
     assert!(
         matches!(err, PrepareError::MergeAlreadyInProgress),
         "agent B blocked by merge-state"
@@ -536,8 +533,5 @@ fn full_lifecycle_exclusion_and_cas() {
         refs::read_epoch_current(root).unwrap(),
         Some(GitOid::new(new.as_str()).unwrap())
     );
-    assert_eq!(
-        refs::read_ref(root, "refs/heads/main").unwrap(),
-        Some(new)
-    );
+    assert_eq!(refs::read_ref(root, "refs/heads/main").unwrap(), Some(new));
 }

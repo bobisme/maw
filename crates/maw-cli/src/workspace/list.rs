@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use serde::Serialize;
 
-use maw_core::backend::WorkspaceBackend;
 use crate::format::OutputFormat;
-use maw_core::model::types::WorkspaceState;
 use crate::workspace::templates::TemplateDefaults;
+use maw_core::backend::WorkspaceBackend;
+use maw_core::model::types::WorkspaceState;
 
 use maw::merge::quarantine::QUARANTINE_NAME_PREFIX;
 
@@ -102,19 +102,25 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             }
             match super::merge::check_merge_result(&[name.clone()]) {
                 Ok(result) => {
-                    checks.insert(name, MergeCheckSummary {
-                        ready: result.ready,
-                        conflict_count: result.conflicts.len(),
-                        stale: result.stale,
-                    });
+                    checks.insert(
+                        name,
+                        MergeCheckSummary {
+                            ready: result.ready,
+                            conflict_count: result.conflicts.len(),
+                            stale: result.stale,
+                        },
+                    );
                 }
                 Err(_) => {
                     // Check failed — mark as not ready with 0 conflicts.
-                    checks.insert(name, MergeCheckSummary {
-                        ready: false,
-                        conflict_count: 0,
-                        stale: false,
-                    });
+                    checks.insert(
+                        name,
+                        MergeCheckSummary {
+                            ready: false,
+                            conflict_count: 0,
+                            stale: false,
+                        },
+                    );
                 }
             }
         }
@@ -273,7 +279,10 @@ fn print_list_text(
         let annotation = if ws.state.contains("stale") {
             " (stale)".to_string()
         } else if ws.commits_ahead > 0 {
-            format!(" (ready to merge){}", check_annotation.as_deref().unwrap_or(""))
+            format!(
+                " (ready to merge){}",
+                check_annotation.as_deref().unwrap_or("")
+            )
         } else if ws.state == "quarantine" {
             " (quarantine)".to_string()
         } else {
@@ -335,17 +344,29 @@ fn print_list_pretty(
         };
 
         let mode_tag = if is_persistent { " [persistent]" } else { "" };
-        let check_tag = ws.merge_check.as_ref().map(|mc| {
-            if mc.stale {
-                if use_color { " \x1b[33m[stale]\x1b[0m".to_string() } else { " [stale]".to_string() }
-            } else if mc.ready {
-                if use_color { " \x1b[32m[clean]\x1b[0m".to_string() } else { " [clean]".to_string() }
-            } else if use_color {
-                format!(" \x1b[31m[{} conflict(s)]\x1b[0m", mc.conflict_count)
-            } else {
-                format!(" [{} conflict(s)]", mc.conflict_count)
-            }
-        }).unwrap_or_default();
+        let check_tag = ws
+            .merge_check
+            .as_ref()
+            .map(|mc| {
+                if mc.stale {
+                    if use_color {
+                        " \x1b[33m[stale]\x1b[0m".to_string()
+                    } else {
+                        " [stale]".to_string()
+                    }
+                } else if mc.ready {
+                    if use_color {
+                        " \x1b[32m[clean]\x1b[0m".to_string()
+                    } else {
+                        " [clean]".to_string()
+                    }
+                } else if use_color {
+                    format!(" \x1b[31m[{} conflict(s)]\x1b[0m", mc.conflict_count)
+                } else {
+                    format!(" [{} conflict(s)]", mc.conflict_count)
+                }
+            })
+            .unwrap_or_default();
         println!(
             "{} {}{}{} {} {}{}{}",
             glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag, check_tag

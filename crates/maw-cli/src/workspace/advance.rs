@@ -25,8 +25,8 @@ use maw_core::model::types::WorkspaceMode;
 use maw_core::refs as manifold_refs;
 
 use super::working_copy::{
-    SnapshotReplayResult, WorkingCopyConflict,
-    checkout_to, cleanup_snapshot, replay_snapshot, snapshot_working_copy,
+    SnapshotReplayResult, WorkingCopyConflict, checkout_to, cleanup_snapshot, replay_snapshot,
+    snapshot_working_copy,
 };
 use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
 
@@ -158,7 +158,9 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
                 snap.oid,
             );
         }
-        return Err(e.context(format!("Failed to checkout new epoch in workspace '{name}'")));
+        return Err(e.context(format!(
+            "Failed to checkout new epoch in workspace '{name}'"
+        )));
     }
 
     // Update the per-workspace epoch ref to the new epoch. After advance,
@@ -239,7 +241,8 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
 fn get_worktree_head(ws_path: &Path) -> Result<String> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let oid = repo.rev_parse("HEAD")
+    let oid = repo
+        .rev_parse("HEAD")
         .map_err(|e| anyhow::anyhow!("rev_parse HEAD failed: {e}"))?;
     Ok(oid.to_string())
 }

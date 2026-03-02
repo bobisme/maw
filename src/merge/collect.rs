@@ -288,9 +288,7 @@ fn workspace_creation_epoch(repo_root: &Path, ws_path: &Path, ws_head: &EpochId)
         .output();
 
     let current_epoch_oid = match epoch_ref_output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
         _ => return ws_head.clone(), // No epoch ref → fall back to ws HEAD
     };
 

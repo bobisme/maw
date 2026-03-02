@@ -39,9 +39,9 @@ use maw_git::GitRepo as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use super::capture::capture_before_destroy;
 use maw_core::model::types::GitOid;
 use maw_core::refs as manifold_refs;
-use super::capture::capture_before_destroy;
 
 // ---------------------------------------------------------------------------
 // Snapshot ref constants
@@ -234,10 +234,7 @@ pub(crate) fn write_rewrite_record(
 
 /// List all rewrite records for a workspace, sorted by timestamp directory name.
 #[allow(dead_code)]
-pub(crate) fn list_rewrite_records(
-    root: &Path,
-    workspace: &str,
-) -> Result<Vec<RewriteRecord>> {
+pub(crate) fn list_rewrite_records(root: &Path, workspace: &str) -> Result<Vec<RewriteRecord>> {
     let dir = rewrite_dir(root, workspace);
     if !dir.exists() {
         return Ok(vec![]);
@@ -275,26 +272,22 @@ pub(crate) fn list_rewrite_records(
 /// Read a single rewrite record from disk.
 #[allow(dead_code)]
 pub(crate) fn read_rewrite_record(path: &Path) -> Result<RewriteRecord> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let record: RewriteRecord = serde_json::from_str(&content)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let record: RewriteRecord =
+        serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))?;
     Ok(record)
 }
 
 /// List all workspace names that have rewrite records.
 #[allow(dead_code)]
 pub(crate) fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
-    let rewrite_root = root
-        .join(".manifold")
-        .join("artifacts")
-        .join("rewrite");
+    let rewrite_root = root.join(".manifold").join("artifacts").join("rewrite");
     if !rewrite_root.exists() {
         return Ok(vec![]);
     }
     let mut names = Vec::new();
-    for entry in
-        fs::read_dir(&rewrite_root).with_context(|| format!("read dir {}", rewrite_root.display()))?
+    for entry in fs::read_dir(&rewrite_root)
+        .with_context(|| format!("read dir {}", rewrite_root.display()))?
     {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -346,7 +339,10 @@ pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
         .context("failed to run git checkout --detach")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout --detach {epoch_oid} failed: {}", stderr.trim());
+        bail!(
+            "git checkout --detach {epoch_oid} failed: {}",
+            stderr.trim()
+        );
     }
     Ok(())
 }
@@ -358,9 +354,7 @@ pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
 /// `git status --porcelain` and parse the two-character status code.
 // TODO(gix): replace with GitRepo trait method when `git stash pop` is supported.
 #[allow(dead_code)]
-pub(crate) fn pop_stash_and_detect_conflicts(
-    ws_path: &Path,
-) -> Result<Vec<WorkingCopyConflict>> {
+pub(crate) fn pop_stash_and_detect_conflicts(ws_path: &Path) -> Result<Vec<WorkingCopyConflict>> {
     let output = Command::new("git")
         .args(["stash", "pop"])
         .current_dir(ws_path)
@@ -395,9 +389,7 @@ pub(crate) fn pop_stash_and_detect_conflicts(
 /// - `DU` / `UD` — deleted/updated conflict
 // TODO(gix): GitRepo::status() does not yet report conflict markers (UU/AA/DD).
 // Keep CLI for conflict detection until gix reports merge conflicts.
-pub(crate) fn detect_conflicts_in_worktree(
-    ws_path: &Path,
-) -> Result<Vec<WorkingCopyConflict>> {
+pub(crate) fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<WorkingCopyConflict>> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(ws_path)
@@ -466,7 +458,8 @@ pub(crate) fn snapshot_working_copy(
     // Step 1: Check for dirty state.
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let is_dirty = repo.is_dirty()
+    let is_dirty = repo
+        .is_dirty()
         .map_err(|e| anyhow::anyhow!("is_dirty check failed: {e}"))?;
 
     if !is_dirty {
@@ -498,16 +491,15 @@ pub(crate) fn snapshot_working_copy(
     }
 
     // Step 3: Create a stash commit (does NOT modify HEAD or stash list).
-    let stash_result = repo.stash_create()
-        .map_err(|e| {
-            // Restore index before bailing.
-            // TODO(gix): replace git reset with GitRepo trait method
-            let _ = Command::new("git")
-                .args(["reset"])
-                .current_dir(ws_path)
-                .output();
-            anyhow::anyhow!("stash_create failed during snapshot: {e}")
-        })?;
+    let stash_result = repo.stash_create().map_err(|e| {
+        // Restore index before bailing.
+        // TODO(gix): replace git reset with GitRepo trait method
+        let _ = Command::new("git")
+            .args(["reset"])
+            .current_dir(ws_path)
+            .output();
+        anyhow::anyhow!("stash_create failed during snapshot: {e}")
+    })?;
 
     let stash_oid = match stash_result {
         Some(oid) => oid.to_string(),
@@ -573,11 +565,7 @@ pub(crate) fn snapshot_working_copy(
 /// use `--force`; a dirty tree will cause `git checkout` to fail, which is
 /// the correct behavior (it means the snapshot step was skipped or broken).
 // TODO(gix): replace with GitRepo trait method when `git checkout` is supported.
-pub(crate) fn checkout_to(
-    ws_path: &Path,
-    target: &str,
-    branch_name: Option<&str>,
-) -> Result<()> {
+pub(crate) fn checkout_to(ws_path: &Path, target: &str, branch_name: Option<&str>) -> Result<()> {
     let checkout_target = branch_name.unwrap_or(target);
     let output = Command::new("git")
         .args(if branch_name.is_some() {
@@ -591,11 +579,7 @@ pub(crate) fn checkout_to(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git checkout {} failed: {}",
-            checkout_target,
-            stderr.trim()
-        );
+        bail!("git checkout {} failed: {}", checkout_target, stderr.trim());
     }
 
     Ok(())
@@ -618,7 +602,9 @@ pub(crate) fn replay_snapshot(
 ) -> Result<SnapshotReplayResult> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let oid: maw_git::GitOid = snapshot.oid.parse()
+    let oid: maw_git::GitOid = snapshot
+        .oid
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
 
     match repo.stash_apply(oid) {
@@ -636,10 +622,7 @@ pub(crate) fn replay_snapshot(
             let conflicts = detect_conflicts_in_worktree(ws_path)?;
             if conflicts.is_empty() {
                 // Something else went wrong (not a merge conflict).
-                bail!(
-                    "stash_apply failed (no conflicts detected): {}",
-                    _e
-                );
+                bail!("stash_apply failed (no conflicts detected): {}", _e);
             }
 
             tracing::info!(
@@ -670,10 +653,7 @@ pub(crate) fn cleanup_snapshot(repo_root: &Path, ws_name: &str) -> Result<()> {
 /// Returns the snapshot ref details if one exists (e.g. from a prior crash).
 /// Callers can use this to offer recovery.
 #[allow(dead_code)]
-pub(crate) fn dangling_snapshot(
-    repo_root: &Path,
-    ws_name: &str,
-) -> Result<Option<SnapshotRef>> {
+pub(crate) fn dangling_snapshot(repo_root: &Path, ws_name: &str) -> Result<Option<SnapshotRef>> {
     let ref_name = snapshot_ref_name(ws_name);
     match manifold_refs::read_ref(repo_root, &ref_name) {
         Ok(Some(oid)) => Ok(Some(SnapshotRef {
@@ -756,7 +736,9 @@ pub(crate) fn preserve_checkout_replay(
         .current_dir(ws_path)
         .output()
         .context("failed to run git ls-files")?;
-    let untracked_empty = String::from_utf8_lossy(&untracked_output.stdout).trim().is_empty();
+    let untracked_empty = String::from_utf8_lossy(&untracked_output.stdout)
+        .trim()
+        .is_empty();
 
     if is_index_clean && is_worktree_clean && untracked_empty {
         tracing::debug!("no user work detected (clean vs base), fast-path checkout");
@@ -820,27 +802,29 @@ pub(crate) fn preserve_checkout_replay(
 
     // Step 5: Replay staged deltas (if non-empty).
     if let Some(ref staged_patch) = deltas.staged_patch_path
-        && let Err(e) = git_apply_patch(ws_path, staged_patch, true) {
-            tracing::warn!("staged patch apply failed: {e}, rolling back");
-            let _ = git_checkout_force(ws_path, &recovery_oid);
-            return Ok(ReplayResult::Rollback {
-                recovery_ref,
-                recovery_oid,
-                reason: format!("staged patch replay failed: {e}"),
-            });
-        }
+        && let Err(e) = git_apply_patch(ws_path, staged_patch, true)
+    {
+        tracing::warn!("staged patch apply failed: {e}, rolling back");
+        let _ = git_checkout_force(ws_path, &recovery_oid);
+        return Ok(ReplayResult::Rollback {
+            recovery_ref,
+            recovery_oid,
+            reason: format!("staged patch replay failed: {e}"),
+        });
+    }
 
     // Step 6: Replay unstaged deltas (if non-empty).
     if let Some(ref unstaged_patch) = deltas.unstaged_patch_path
-        && let Err(e) = git_apply_patch(ws_path, unstaged_patch, false) {
-            tracing::warn!("unstaged patch apply failed: {e}, rolling back");
-            let _ = git_checkout_force(ws_path, &recovery_oid);
-            return Ok(ReplayResult::Rollback {
-                recovery_ref,
-                recovery_oid,
-                reason: format!("unstaged patch replay failed: {e}"),
-            });
-        }
+        && let Err(e) = git_apply_patch(ws_path, unstaged_patch, false)
+    {
+        tracing::warn!("unstaged patch apply failed: {e}, rolling back");
+        let _ = git_checkout_force(ws_path, &recovery_oid);
+        return Ok(ReplayResult::Rollback {
+            recovery_ref,
+            recovery_oid,
+            reason: format!("unstaged patch replay failed: {e}"),
+        });
+    }
 
     // Step 7: Restore untracked files.
     if let Some(ref untracked) = deltas.untracked {
@@ -899,8 +883,8 @@ struct UserDeltas {
 // TODO(gix): replace CLI calls (git diff --cached --binary, git diff --binary,
 // git ls-files --others) with GitRepo trait methods when supported.
 fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
-    let temp_dir = tempfile::TempDir::new()
-        .context("failed to create temp directory for delta extraction")?;
+    let temp_dir =
+        tempfile::TempDir::new().context("failed to create temp directory for delta extraction")?;
 
     // Staged diff.
     let staged_patch_path = {
@@ -919,8 +903,7 @@ fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
             None
         } else {
             let path = temp_dir.path().join("staged.patch");
-            fs::write(&path, &output.stdout)
-                .context("failed to write staged patch")?;
+            fs::write(&path, &output.stdout).context("failed to write staged patch")?;
             Some(path)
         }
     };
@@ -942,8 +925,7 @@ fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
             None
         } else {
             let path = temp_dir.path().join("unstaged.patch");
-            fs::write(&path, &output.stdout)
-                .context("failed to write unstaged patch")?;
+            fs::write(&path, &output.stdout).context("failed to write unstaged patch")?;
             Some(path)
         }
     };
@@ -972,8 +954,7 @@ fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
             None
         } else {
             let untracked_dir = temp_dir.path().join("untracked");
-            fs::create_dir_all(&untracked_dir)
-                .context("failed to create untracked temp dir")?;
+            fs::create_dir_all(&untracked_dir).context("failed to create untracked temp dir")?;
 
             let mut entries = Vec::new();
             for rel_path in &files {
@@ -1116,11 +1097,11 @@ mod tests {
         for (args, _label) in [
             (vec!["init"], "init"),
             (vec!["config", "user.name", "Test"], "config name"),
-            (vec!["config", "user.email", "test@test.com"], "config email"),
             (
-                vec!["config", "commit.gpgsign", "false"],
-                "config gpgsign",
+                vec!["config", "user.email", "test@test.com"],
+                "config email",
             ),
+            (vec!["config", "commit.gpgsign", "false"], "config gpgsign"),
         ] {
             let out = Command::new("git")
                 .args(&args)
@@ -1191,14 +1172,8 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
 
-        let result = preserve_checkout_replay(
-            &root,
-            &base_oid,
-            &target_oid,
-            &root,
-            "test-ws",
-        )
-        .unwrap();
+        let result =
+            preserve_checkout_replay(&root, &base_oid, &target_oid, &root, "test-ws").unwrap();
 
         assert!(
             matches!(result, ReplayResult::Clean),
@@ -1241,14 +1216,8 @@ mod tests {
         // Untracked file
         fs::write(root.join("user-notes.txt"), "my important notes\n").unwrap();
 
-        let result = preserve_checkout_replay(
-            &root,
-            &base_oid,
-            &target_oid,
-            &root,
-            "test-ws",
-        )
-        .unwrap();
+        let result =
+            preserve_checkout_replay(&root, &base_oid, &target_oid, &root, "test-ws").unwrap();
 
         match &result {
             ReplayResult::Replayed {
@@ -1308,9 +1277,7 @@ mod tests {
             timestamp: "2025-06-01T12:00:00Z".to_owned(),
             base_epoch: "a".repeat(40),
             target_ref: "b".repeat(40),
-            recovery_ref: format!(
-                "refs/manifold/recovery/{workspace}/2025-06-01T12-00-00Z"
-            ),
+            recovery_ref: format!("refs/manifold/recovery/{workspace}/2025-06-01T12-00-00Z"),
             recovery_oid: "c".repeat(40),
             replay_outcome: outcome,
             rollback_reason: None,
@@ -1477,7 +1444,10 @@ mod tests {
         checkout_to(&root, &target_oid, None).unwrap();
 
         // Verify target is checked out.
-        assert!(root.join("epoch2.txt").exists(), "epoch2.txt should exist after checkout");
+        assert!(
+            root.join("epoch2.txt").exists(),
+            "epoch2.txt should exist after checkout"
+        );
 
         // Step 3: Replay.
         let replay_result = replay_snapshot(&root, &snapshot).unwrap();
@@ -1504,7 +1474,10 @@ mod tests {
         // Step 4: Cleanup.
         cleanup_snapshot(&root, "test-ws").unwrap();
         let ref_oid = maw_core::refs::read_ref(&root, "refs/manifold/snapshot/test-ws").unwrap();
-        assert!(ref_oid.is_none(), "snapshot ref should be deleted after cleanup");
+        assert!(
+            ref_oid.is_none(),
+            "snapshot ref should be deleted after cleanup"
+        );
     }
 
     #[test]
@@ -1530,7 +1503,9 @@ mod tests {
             .current_dir(&root)
             .output()
             .unwrap();
-        let target_oid = String::from_utf8_lossy(&target_out.stdout).trim().to_owned();
+        let target_oid = String::from_utf8_lossy(&target_out.stdout)
+            .trim()
+            .to_owned();
 
         // Go back to base and create a conflicting modification.
         let out = Command::new("git")
@@ -1554,10 +1529,7 @@ mod tests {
         let replay_result = replay_snapshot(&root, &snapshot).unwrap();
         match replay_result {
             SnapshotReplayResult::Conflicts(conflicts) => {
-                assert!(
-                    !conflicts.is_empty(),
-                    "should have at least one conflict"
-                );
+                assert!(!conflicts.is_empty(), "should have at least one conflict");
                 assert!(
                     conflicts.iter().any(|c| c.path.contains("README.md")),
                     "README.md should be in conflicts list"

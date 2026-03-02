@@ -116,14 +116,8 @@ fn search_json_has_required_top_level_fields_with_correct_types() {
             hit["oid_short"].is_string(),
             "hit[{i}].oid_short should be a string"
         );
-        assert!(
-            hit["path"].is_string(),
-            "hit[{i}].path should be a string"
-        );
-        assert!(
-            hit["line"].is_number(),
-            "hit[{i}].line should be a number"
-        );
+        assert!(hit["path"].is_string(), "hit[{i}].path should be a string");
+        assert!(hit["line"].is_number(), "hit[{i}].line should be a number");
         assert!(
             hit["snippet"].is_array(),
             "hit[{i}].snippet should be an array"
@@ -131,10 +125,7 @@ fn search_json_has_required_top_level_fields_with_correct_types() {
 
         // Validate snippet lines
         let snippet = hit["snippet"].as_array().unwrap();
-        assert!(
-            !snippet.is_empty(),
-            "hit[{i}].snippet should be non-empty"
-        );
+        assert!(!snippet.is_empty(), "hit[{i}].snippet should be non-empty");
         for (j, sl) in snippet.iter().enumerate() {
             assert!(
                 sl["line"].is_number(),
@@ -265,10 +256,7 @@ fn search_json_truncation_with_max_hits() {
 
 #[test]
 fn search_json_empty_results_shape() {
-    let repo = repo_with_destroyed_ws(
-        "empty-test",
-        &[("content.txt", "nothing special here\n")],
-    );
+    let repo = repo_with_destroyed_ws("empty-test", &[("content.txt", "nothing special here\n")]);
 
     let json = search_json(&repo, &["--search", "ZZZNONEXISTENT999"]);
 
@@ -309,10 +297,7 @@ fn search_json_empty_results_shape() {
 
 #[test]
 fn search_json_case_insensitive() {
-    let repo = repo_with_destroyed_ws(
-        "case-test",
-        &[("greeting.txt", "HelloWorld is here\n")],
-    );
+    let repo = repo_with_destroyed_ws("case-test", &[("greeting.txt", "HelloWorld is here\n")]);
 
     // Exact case should find it
     let json_exact = search_json(&repo, &["--search", "HelloWorld"]);
@@ -350,10 +335,7 @@ fn search_json_case_insensitive() {
 
 #[test]
 fn search_json_includes_filter_fields() {
-    let repo = repo_with_destroyed_ws(
-        "filter-test",
-        &[("data.txt", "searchable content\n")],
-    );
+    let repo = repo_with_destroyed_ws("filter-test", &[("data.txt", "searchable content\n")]);
 
     // Without workspace filter: workspace_filter should be null
     let json_all = search_json(&repo, &["--search", "searchable"]);
@@ -367,10 +349,7 @@ fn search_json_includes_filter_fields() {
     );
 
     // With workspace filter
-    let json_filtered = search_json(
-        &repo,
-        &["filter-test", "--search", "searchable"],
-    );
+    let json_filtered = search_json(&repo, &["filter-test", "--search", "searchable"]);
     assert_eq!(
         json_filtered["workspace_filter"].as_str().unwrap(),
         "filter-test",
@@ -403,7 +382,10 @@ fn search_json_snippet_context_includes_surrounding_lines() {
     );
 
     // Verify that exactly one snippet line has is_match=true
-    let match_count = snippet.iter().filter(|sl| sl["is_match"].as_bool() == Some(true)).count();
+    let match_count = snippet
+        .iter()
+        .filter(|sl| sl["is_match"].as_bool() == Some(true))
+        .count();
     assert_eq!(
         match_count, 1,
         "exactly one snippet line should have is_match=true"

@@ -5,9 +5,9 @@ use clap::Args;
 use maw_git::GitRepo as _;
 use tracing::instrument;
 
-use maw_core::merge_state::MergeStateFile;
 use crate::transport::ManifoldPushArgs;
 use crate::workspace::{MawConfig, git_cwd, repo_root};
+use maw_core::merge_state::MergeStateFile;
 
 #[derive(Args)]
 pub struct PushArgs {
@@ -196,7 +196,8 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
-    let epoch_git_oid = repo.rev_parse_opt("refs/manifold/epoch/current")
+    let epoch_git_oid = repo
+        .rev_parse_opt("refs/manifold/epoch/current")
         .map_err(|e| anyhow::anyhow!("Failed to read current epoch: {e}"))?;
 
     let epoch_git_oid = match epoch_git_oid {
@@ -212,7 +213,8 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
 
     // Read the current branch position (this is our CAS "expected" value)
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_git_oid = repo.rev_parse_opt(&branch_ref)
+    let branch_git_oid = repo
+        .rev_parse_opt(&branch_ref)
         .map_err(|e| anyhow::anyhow!("Failed to read branch ref: {e}"))?;
 
     let branch_oid = match branch_git_oid {
@@ -253,15 +255,13 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     // `git update-ref <ref> <new> <old>` only succeeds if the ref still
     // points to <old>. If another process (e.g., a merge COMMIT) moved the
     // ref between our read and this write, the update fails atomically.
-    println!(
-        "Advancing {branch} to current epoch ({})...",
-        epoch_short
-    );
+    println!("Advancing {branch} to current epoch ({})...", epoch_short);
 
     let expected_old = if branch_oid.is_empty() {
         maw_git::GitOid::ZERO
     } else {
-        branch_oid.parse::<maw_git::GitOid>()
+        branch_oid
+            .parse::<maw_git::GitOid>()
             .map_err(|e| anyhow::anyhow!("invalid branch OID '{branch_oid}': {e}"))?
     };
 
@@ -304,9 +304,11 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
 fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> Result<bool> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let ancestor_oid: maw_git::GitOid = ancestor.parse()
+    let ancestor_oid: maw_git::GitOid = ancestor
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid ancestor OID '{ancestor}': {e}"))?;
-    let descendant_oid: maw_git::GitOid = descendant.parse()
+    let descendant_oid: maw_git::GitOid = descendant
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid descendant OID '{descendant}': {e}"))?;
     repo.is_ancestor(ancestor_oid, descendant_oid)
         .map_err(|e| anyhow::anyhow!("is_ancestor check failed: {e}"))
@@ -314,7 +316,9 @@ fn git_is_ancestor(root: &std::path::Path, ancestor: &str, descendant: &str) -> 
 
 /// Suggest --advance if the epoch is ahead of the branch.
 fn suggest_advance(root: &std::path::Path, branch: &str) {
-    let Ok(repo) = maw_git::GixRepo::open(root) else { return };
+    let Ok(repo) = maw_git::GixRepo::open(root) else {
+        return;
+    };
 
     let epoch_oid = match repo.rev_parse_opt("refs/manifold/epoch/current") {
         Ok(Some(oid)) => oid,

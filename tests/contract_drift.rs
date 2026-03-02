@@ -72,8 +72,14 @@ fn parse_failpoint_catalog(root: &Path) -> BTreeSet<String> {
 /// are checked against the catalog. Test-only names (`FP_TEST`_*, `FP_A`, etc.)
 /// are excluded.
 const FP_STANDARD_PREFIXES: &[&str] = &[
-    "FP_PREPARE_", "FP_BUILD_", "FP_VALIDATE_", "FP_COMMIT_",
-    "FP_CAPTURE_", "FP_CLEANUP_", "FP_DESTROY_", "FP_RECOVER_",
+    "FP_PREPARE_",
+    "FP_BUILD_",
+    "FP_VALIDATE_",
+    "FP_COMMIT_",
+    "FP_CAPTURE_",
+    "FP_CLEANUP_",
+    "FP_DESTROY_",
+    "FP_RECOVER_",
 ];
 
 /// Extract all fp!("FP_...") calls from Rust source files under src/.
@@ -158,7 +164,9 @@ fn check1_failpoint_catalog_matches_source() {
     // If no fp!() calls exist yet (framework not implemented), that's OK.
     // We just verify the catalog is non-empty and well-formed.
     if source_ids.is_empty() {
-        println!("  INFO: No fp!() calls found in source (failpoint framework not yet implemented)");
+        println!(
+            "  INFO: No fp!() calls found in source (failpoint framework not yet implemented)"
+        );
         println!("  Verifying catalog is non-empty and well-formed...");
         assert!(
             !catalog_ids.is_empty(),
@@ -189,7 +197,10 @@ fn check1_failpoint_catalog_matches_source() {
             // This is a warning, not a failure — the assurance plan documents
             // proposed failpoints that may use new prefixes.
         }
-        println!("  PASS (catalog-only mode: {} well-formed entries)", catalog_ids.len());
+        println!(
+            "  PASS (catalog-only mode: {} well-formed entries)",
+            catalog_ids.len()
+        );
         return;
     }
 
@@ -251,12 +262,10 @@ fn extract_g_numbers(text: &str) -> BTreeSet<u32> {
                 }
                 // Must NOT be followed by more alphanumeric (e.g., "G1x" is not a G-ref)
                 // But G1.1, G1-001, G1: etc. are fine
-                let followed_ok =
-                    end >= bytes.len() || !bytes[end].is_ascii_alphabetic();
-                if followed_ok
-                    && let Ok(n) = text[start..end].parse::<u32>() {
-                        numbers.insert(n);
-                    }
+                let followed_ok = end >= bytes.len() || !bytes[end].is_ascii_alphabetic();
+                if followed_ok && let Ok(n) = text[start..end].parse::<u32>() {
+                    numbers.insert(n);
+                }
                 i = end;
                 continue;
             }
@@ -288,9 +297,7 @@ fn check2_g_numbering_consistency() {
     let plan_out_of_range: Vec<_> = plan_g_numbers.difference(&valid_range).collect();
     if !plan_out_of_range.is_empty() {
         // G0 or G7+ in the main plan would be a structural problem
-        println!(
-            "  WARNING: Main plan references G-numbers outside G1-G6: {plan_out_of_range:?}"
-        );
+        println!("  WARNING: Main plan references G-numbers outside G1-G6: {plan_out_of_range:?}");
     }
 
     // Scan all subsidiary docs in notes/assurance/
@@ -526,8 +533,8 @@ fn check3_test_matrix_coverage_reality() {
             // Some IDs in the plan use non-standard formats (e.g., "UT-G1/G4-001",
             // "IT-G2-adj", "DST-lite-001") that may not appear in the matrix.
             // Only warn for standard-format IDs.
-            let is_standard = id.contains("-G")
-                && id.chars().last().is_some_and(|c| c.is_ascii_digit());
+            let is_standard =
+                id.contains("-G") && id.chars().last().is_some_and(|c| c.is_ascii_digit());
             if is_standard {
                 warnings.push(format!(
                     "Plan lists {id} as implemented but it's not in test-matrix.md"
@@ -551,9 +558,7 @@ fn check3_test_matrix_coverage_reality() {
         let full_path = root.join(test_file);
         if full_path.exists() {
             // Verify this file is referenced in the plan
-            let referenced = implemented
-                .iter()
-                .any(|e| e.location.contains(test_file));
+            let referenced = implemented.iter().any(|e| e.location.contains(test_file));
             if !referenced {
                 warnings.push(format!(
                     "Test file `{test_file}` exists and appears assurance-relevant (expected {expected_prefix}) \
@@ -641,14 +646,15 @@ fn check2b_invariant_ids_reference_valid_guarantees() {
             if let Some(g_part) = inv_id.strip_prefix("I-G") {
                 let g_num_str: String = g_part.chars().take_while(char::is_ascii_digit).collect();
                 if let Ok(g_num) = g_num_str.parse::<u32>()
-                    && !valid_g_range.contains(&g_num) {
-                        failures.push(format!(
-                            "{}: invariant {} references G{} which is outside valid range G1-G6",
-                            relative.display(),
-                            inv_id,
-                            g_num
-                        ));
-                    }
+                    && !valid_g_range.contains(&g_num)
+                {
+                    failures.push(format!(
+                        "{}: invariant {} references G{} which is outside valid range G1-G6",
+                        relative.display(),
+                        inv_id,
+                        g_num
+                    ));
+                }
             }
         }
     }
@@ -661,11 +667,12 @@ fn check2b_invariant_ids_reference_valid_guarantees() {
             if let Some(g_part) = inv_id.strip_prefix("I-G") {
                 let g_num_str: String = g_part.chars().take_while(char::is_ascii_digit).collect();
                 if let Ok(g_num) = g_num_str.parse::<u32>()
-                    && !valid_g_range.contains(&g_num) {
-                        failures.push(format!(
+                    && !valid_g_range.contains(&g_num)
+                {
+                    failures.push(format!(
                             "notes/assurance-plan.md: invariant {inv_id} references G{g_num} outside valid range"
                         ));
-                    }
+                }
             }
         }
     }

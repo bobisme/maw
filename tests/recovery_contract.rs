@@ -134,7 +134,11 @@ fn merge_destroy_emits_recovery_surface_for_dirty_workspace() {
 
     // In the merge --destroy path, commit should have succeeded
     let commit = extract_field(&stderr, "commit:");
-    assert_eq!(commit, Some("yes"), "merge --destroy should report commit=yes");
+    assert_eq!(
+        commit,
+        Some("yes"),
+        "merge --destroy should report commit=yes"
+    );
 
     let result = extract_field(&stderr, "result:");
     assert_eq!(result, Some("success"), "merge should report success");
@@ -268,10 +272,7 @@ fn recovery_surface_includes_artifact_path() {
     assert_recovery_surface_present(&stderr, "artifact-test");
 
     let artifact = extract_field(&stderr, "artifact:");
-    assert!(
-        artifact.is_some(),
-        "artifact field should be present"
-    );
+    assert!(artifact.is_some(), "artifact field should be present");
 
     let artifact_val = artifact.unwrap();
     // The artifact path should contain the workspace name and end with .json

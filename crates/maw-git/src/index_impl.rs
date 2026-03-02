@@ -15,11 +15,9 @@ pub fn unstage_all(repo: &GixRepo) -> Result<(), GitError> {
             message: format!("failed to resolve HEAD commit: {e}"),
         })?;
 
-    let head_tree_id = head_commit
-        .tree_id()
-        .map_err(|e| GitError::BackendError {
-            message: format!("failed to read HEAD tree id: {e}"),
-        })?;
+    let head_tree_id = head_commit.tree_id().map_err(|e| GitError::BackendError {
+        message: format!("failed to read HEAD tree id: {e}"),
+    })?;
 
     // Build a new index state from the HEAD tree.
     let state = gix::index::State::from_tree(&head_tree_id, &repo.repo.objects, Default::default())

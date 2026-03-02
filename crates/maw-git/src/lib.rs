@@ -17,17 +17,17 @@ pub mod repo;
 pub mod types;
 
 // gix-backed implementation modules
-mod gix_repo;
-mod refs_impl;
-mod objects_impl;
 mod checkout_impl;
-mod status_impl;
-mod diff_impl;
-mod worktree_impl;
-mod stash_impl;
-mod push_impl;
 mod config_impl;
+mod diff_impl;
+mod gix_repo;
 mod index_impl;
+mod objects_impl;
+mod push_impl;
+mod refs_impl;
+mod stash_impl;
+mod status_impl;
+mod worktree_impl;
 
 pub use gix_repo::GixRepo;
 

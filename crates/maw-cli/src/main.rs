@@ -8,10 +8,10 @@ use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
 use maw_cli::exec;
-use maw_cli::ref_gc;
 use maw_cli::format;
 use maw_cli::merge_cmd;
 use maw_cli::push;
+use maw_cli::ref_gc;
 use maw_cli::release;
 use maw_cli::status;
 use maw_cli::telemetry;
@@ -311,22 +311,19 @@ fn main() {
         Commands::Epoch(cmd) => match cmd {
             EpochCommands::Sync => epoch::sync(),
         },
-        Commands::Gc { dry_run, refs, older_than } => {
-            workspace::repo_root().and_then(|root| {
-                epoch_gc::run_cli(&root, dry_run)?;
-                if refs {
-                    ref_gc::run_cli(&root, older_than, dry_run)?;
-                }
-                Ok(())
-            })
-        }
+        Commands::Gc {
+            dry_run,
+            refs,
+            older_than,
+        } => workspace::repo_root().and_then(|root| {
+            epoch_gc::run_cli(&root, dry_run)?;
+            if refs {
+                ref_gc::run_cli(&root, older_than, dry_run)?;
+            }
+            Ok(())
+        }),
         Commands::Completions { shell } => {
-            clap_complete::generate(
-                shell,
-                &mut Cli::command(),
-                "maw",
-                &mut std::io::stdout(),
-            );
+            clap_complete::generate(shell, &mut Cli::command(), "maw", &mut std::io::stdout());
             Ok(())
         }
         Commands::Merge(ref cmd) => merge_cmd::run(cmd),
@@ -346,7 +343,7 @@ fn main() {
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
 mod tests {
-    
+
     use std::fs;
 
     use clap::CommandFactory;

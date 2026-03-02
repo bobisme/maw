@@ -165,10 +165,12 @@ pub fn write_operation_blob_via(
     let json = op.to_canonical_json().map_err(OpLogWriteError::Serialize)?;
 
     // 2. Write blob via GitRepo trait.
-    let git_oid = repo.write_blob(&json).map_err(|e| OpLogWriteError::HashObject {
-        stderr: e.to_string(),
-        exit_code: None,
-    })?;
+    let git_oid = repo
+        .write_blob(&json)
+        .map_err(|e| OpLogWriteError::HashObject {
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
     // 3. Convert maw_git::GitOid → maw_core GitOid.
     let oid_str = git_oid.to_string();

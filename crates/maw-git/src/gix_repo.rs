@@ -17,15 +17,20 @@ pub struct GixRepo {
 impl GixRepo {
     /// Open the git repository at or above `path`.
     pub fn open(path: &Path) -> Result<Self, GitError> {
-        let repo = gix::open(path).map_err(|e| GitError::BackendError { message: e.to_string() })?;
+        let repo = gix::open(path).map_err(|e| GitError::BackendError {
+            message: e.to_string(),
+        })?;
         let workdir = repo.workdir().map(|p| p.to_path_buf());
         Ok(Self { repo, workdir })
     }
 
     /// Open a git repository at exactly `path` (no parent discovery).
     pub fn open_at(path: &Path) -> Result<Self, GitError> {
-        let repo = gix::open_opts(path, gix::open::Options::isolated())
-            .map_err(|e| GitError::BackendError { message: e.to_string() })?;
+        let repo = gix::open_opts(path, gix::open::Options::isolated()).map_err(|e| {
+            GitError::BackendError {
+                message: e.to_string(),
+            }
+        })?;
         let workdir = repo.workdir().map(|p| p.to_path_buf());
         Ok(Self { repo, workdir })
     }

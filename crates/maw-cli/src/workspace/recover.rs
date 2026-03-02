@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use maw_git::GitRepo as _;
 use serde::Serialize;
 
@@ -394,15 +394,15 @@ fn parse_recovery_ref_name(ref_name: &str) -> Option<(String, String)> {
     }
     let rest = &ref_name[RECOVERY_PREFIX.len()..];
     let (ws, ts) = rest.split_once('/')?;
-    
-    
+
     Some((ws.to_string(), ts.to_string()))
 }
 
 fn list_recovery_refs(git_cwd: &Path) -> Result<Vec<RecoveryRef>> {
     let repo = maw_git::GixRepo::open(git_cwd)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", git_cwd.display()))?;
-    let refs = repo.list_refs(RECOVERY_PREFIX)
+    let refs = repo
+        .list_refs(RECOVERY_PREFIX)
         .map_err(|e| anyhow::anyhow!("list_refs failed: {e}"))?;
 
     let mut out: Vec<RecoveryRef> = Vec::new();
@@ -825,7 +825,8 @@ fn resolve_ref_to_oid(git_cwd: &Path, reference: &str) -> Result<String> {
     let repo = maw_git::GixRepo::open(git_cwd)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", git_cwd.display()))?;
     let spec = format!("{reference}^{{commit}}");
-    let oid = repo.rev_parse(&spec)
+    let oid = repo
+        .rev_parse(&spec)
         .map_err(|e| anyhow::anyhow!("Failed to resolve recovery ref '{reference}': {e}"))?;
     Ok(oid.to_string())
 }
@@ -963,9 +964,7 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
     let new_path = workspace_path(new_name)?;
 
     if let Err(e) = populate_from_snapshot(&new_path, &oid) {
-        eprintln!(
-            "Populate failed, rolling back workspace '{new_name}': {e:#}"
-        );
+        eprintln!("Populate failed, rolling back workspace '{new_name}': {e:#}");
         if let Err(cleanup_err) = super::create::destroy(new_name, false, true) {
             eprintln!(
                 "WARNING: rollback destroy also failed: {cleanup_err:#}\n  \
@@ -1022,9 +1021,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     // Step 2: Populate from the snapshot using git read-tree + checkout-index
     let new_ws_path = workspace_path(new_name)?;
     if let Err(e) = populate_from_snapshot(&new_ws_path, &oid) {
-        eprintln!(
-            "Populate failed, rolling back workspace '{new_name}': {e:#}"
-        );
+        eprintln!("Populate failed, rolling back workspace '{new_name}': {e:#}");
         if let Err(cleanup_err) = super::create::destroy(new_name, false, true) {
             eprintln!(
                 "WARNING: rollback destroy also failed: {cleanup_err:#}\n  \
@@ -1056,11 +1053,13 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
 fn populate_from_snapshot(ws_path: &std::path::Path, oid: &str) -> Result<()> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let git_oid: maw_git::GitOid = oid.parse()
+    let git_oid: maw_git::GitOid = oid
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{oid}': {e}"))?;
 
     // Read the commit to get its tree OID, then checkout the tree
-    let commit_info = repo.read_commit(git_oid)
+    let commit_info = repo
+        .read_commit(git_oid)
         .map_err(|e| anyhow::anyhow!("failed to read snapshot commit {oid}: {e}"))?;
     repo.checkout_tree(commit_info.tree_oid, ws_path)
         .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
@@ -1683,7 +1682,11 @@ three
 
         // alice workspace does not exist under ws/
         let result = find_dangling_snapshots(&root).unwrap();
-        assert_eq!(result.len(), 2, "both refs for destroyed ws should be dangling");
+        assert_eq!(
+            result.len(),
+            2,
+            "both refs for destroyed ws should be dangling"
+        );
 
         // Check reasons
         let superseded: Vec<_> = result

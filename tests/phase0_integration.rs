@@ -137,11 +137,7 @@ fn s2_destroy_record_is_valid_json() {
         let entries: Vec<_> = std::fs::read_dir(&destroy_dir)
             .expect("should be able to read destroy dir")
             .filter_map(std::result::Result::ok)
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "json")
-            })
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
             .collect();
 
         assert!(
@@ -169,10 +165,10 @@ fn s2_destroy_record_is_valid_json() {
             latest_path.exists(),
             "latest.json should exist in destroy dir"
         );
-        let latest_content = std::fs::read_to_string(&latest_path)
-            .expect("should read latest.json");
-        let latest: serde_json::Value = serde_json::from_str(&latest_content)
-            .expect("latest.json should be valid JSON");
+        let latest_content =
+            std::fs::read_to_string(&latest_path).expect("should read latest.json");
+        let latest: serde_json::Value =
+            serde_json::from_str(&latest_content).expect("latest.json should be valid JSON");
         assert!(
             latest["record"].as_str().is_some(),
             "latest.json should have a 'record' field pointing to the record filename"
@@ -206,7 +202,11 @@ fn s3_clean_default_merge_succeeds() {
     // Default is clean — no dirty files.
     repo.maw_ok(&["ws", "create", "agent"]);
     repo.add_file("agent", "result.txt", "clean merge output\n");
-    repo.add_file("agent", "src/main.rs", "fn main() { println!(\"hello\"); }\n");
+    repo.add_file(
+        "agent",
+        "src/main.rs",
+        "fn main() { println!(\"hello\"); }\n",
+    );
 
     // Merge should succeed without errors.
     let output = repo.maw_raw(&["ws", "merge", "agent", "--destroy"]);
@@ -304,7 +304,8 @@ fn s4_recovery_ref_contains_pre_destroy_content() {
     }
 
     // Verify the recovery commit is distinct from the current epoch.
-    let current_epoch = repo.git(&["rev-parse", "refs/manifold/epoch/current"])
+    let current_epoch = repo
+        .git(&["rev-parse", "refs/manifold/epoch/current"])
         .trim()
         .to_owned();
     assert_ne!(

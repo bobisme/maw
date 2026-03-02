@@ -31,7 +31,11 @@ use manifold_common::TestRepo;
 
 /// Collect all recovery refs for a workspace.
 fn recovery_refs(repo: &TestRepo, workspace: &str) -> Vec<String> {
-    let output = repo.git(&["for-each-ref", "--format=%(refname)", "refs/manifold/recovery/"]);
+    let output = repo.git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/manifold/recovery/",
+    ]);
     output
         .lines()
         .map(str::trim)
@@ -81,9 +85,17 @@ fn it_g2_001_dirty_default_untracked_files_survive_post_commit_rewrite() {
 
     // Step 3: Create dirty state in ws/default/
     // Untracked file (not in any commit tree)
-    repo.add_file("default", "local-notes.txt", "personal notes that must survive\n");
+    repo.add_file(
+        "default",
+        "local-notes.txt",
+        "personal notes that must survive\n",
+    );
     // Untracked nested file (new directory)
-    repo.add_file("default", "scratch/debug.log", "debug output line 1\nline 2\n");
+    repo.add_file(
+        "default",
+        "scratch/debug.log",
+        "debug output line 1\nline 2\n",
+    );
     // Another untracked file
     repo.add_file("default", "TODO.txt", "- fix bug #123\n- review PR #456\n");
 
@@ -276,26 +288,28 @@ fn it_g2_002_capture_snapshot_is_valid_and_restorable() {
 
     // Add untracked files
     repo.add_file("snapshot-test", "untracked.txt", "untracked data\n");
-    repo.add_file("snapshot-test", "logs/debug.log", "debug line 1\ndebug line 2\n");
+    repo.add_file(
+        "snapshot-test",
+        "logs/debug.log",
+        "debug line 1\ndebug line 2\n",
+    );
 
     // Modify a tracked file (creates unstaged change)
     repo.modify_file("snapshot-test", "tracked.txt", "modified tracked content\n");
 
     // Stage a tracked file modification
-    repo.git_in_workspace(
-        "snapshot-test",
-        &["add", "tracked.txt"],
-    );
+    repo.git_in_workspace("snapshot-test", &["add", "tracked.txt"]);
 
     // Also add a new file and stage it
     repo.add_file("snapshot-test", "staged-new.txt", "staged new content\n");
-    repo.git_in_workspace(
-        "snapshot-test",
-        &["add", "staged-new.txt"],
-    );
+    repo.git_in_workspace("snapshot-test", &["add", "staged-new.txt"]);
 
     // Add another untracked modification AFTER staging (creates unstaged on top of staged)
-    repo.modify_file("snapshot-test", "src/main.rs", "fn main() { println!(\"modified\"); }\n");
+    repo.modify_file(
+        "snapshot-test",
+        "src/main.rs",
+        "fn main() { println!(\"modified\"); }\n",
+    );
 
     // Destroy with --force (captures state)
     let destroy_output = repo.maw_ok(&["ws", "destroy", "snapshot-test", "--force"]);
@@ -316,7 +330,10 @@ fn it_g2_002_capture_snapshot_is_valid_and_restorable() {
     );
 
     // Recovery ref resolves to a valid git object
-    let ref_oid = repo.git(&["rev-parse", "--verify", &refs[0]]).trim().to_owned();
+    let ref_oid = repo
+        .git(&["rev-parse", "--verify", &refs[0]])
+        .trim()
+        .to_owned();
     assert_eq!(
         ref_oid.len(),
         40,
@@ -331,7 +348,11 @@ fn it_g2_002_capture_snapshot_is_valid_and_restorable() {
 
     // Verify the capture commit tree contains the dirty files
     let tree_files = repo.git(&["ls-tree", "-r", "--name-only", &ref_oid]);
-    let file_list: Vec<&str> = tree_files.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let file_list: Vec<&str> = tree_files
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
 
     assert!(
         file_list.contains(&"untracked.txt"),
@@ -352,7 +373,9 @@ fn it_g2_002_capture_snapshot_is_valid_and_restorable() {
     // Verify destroy output mentions capture/snapshot
     let lower = destroy_output.to_lowercase();
     assert!(
-        lower.contains("snapshot") || lower.contains("captured") || lower.contains("recovery")
+        lower.contains("snapshot")
+            || lower.contains("captured")
+            || lower.contains("recovery")
             || lower.contains("destroy"),
         "Destroy output should mention capture/snapshot, got: {}",
         destroy_output
@@ -403,7 +426,11 @@ fn it_g2_002_recovery_ref_survives_gc() {
     repo.maw_ok(&["ws", "destroy", "gc-test", "--force"]);
 
     let refs_before = recovery_refs(&repo, "gc-test");
-    assert_eq!(refs_before.len(), 1, "Should have one recovery ref before GC");
+    assert_eq!(
+        refs_before.len(),
+        1,
+        "Should have one recovery ref before GC"
+    );
 
     // Run aggressive GC
     repo.git(&["gc", "--aggressive", "--prune=now"]);

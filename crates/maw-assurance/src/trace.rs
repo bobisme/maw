@@ -231,9 +231,8 @@ impl TraceLogger {
     /// # Errors
     /// Returns an `io::Error` if serialization or writing fails.
     pub fn record(&mut self, entry: TraceEntry) -> io::Result<()> {
-        let json = serde_json::to_string(&entry).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, e)
-        })?;
+        let json = serde_json::to_string(&entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.writer.write_all(json.as_bytes())?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()
@@ -269,8 +268,7 @@ impl TraceLogger {
 /// partially broken state.
 #[must_use]
 pub fn capture_state(repo_root: &Path) -> StateSnapshot {
-    let epoch_ref = git_rev_parse(repo_root, "refs/manifold/epoch/current")
-        .unwrap_or_default();
+    let epoch_ref = git_rev_parse(repo_root, "refs/manifold/epoch/current").unwrap_or_default();
 
     let branch_ref = read_branch_head(repo_root).unwrap_or_default();
 
@@ -367,9 +365,9 @@ fn discover_workspaces(root: &Path) -> (Vec<String>, BTreeMap<String, bool>) {
     }
 
     names.sort();
-    names
-        .iter()
-        .for_each(|n| { dirty.entry(n.clone()).or_insert(false); });
+    names.iter().for_each(|n| {
+        dirty.entry(n.clone()).or_insert(false);
+    });
 
     (names, dirty)
 }
@@ -382,9 +380,7 @@ fn check_dirty(ws_path: &Path) -> bool {
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-        }
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         _ => false,
     }
 }
@@ -467,9 +463,7 @@ mod tests {
                 ("alice".to_owned(), false),
                 ("bob".to_owned(), false),
             ]),
-            recovery_refs: vec![
-                "refs/manifold/recovery/alice/2026-02-28T05-09-08Z".to_owned(),
-            ],
+            recovery_refs: vec!["refs/manifold/recovery/alice/2026-02-28T05-09-08Z".to_owned()],
         }
     }
 
@@ -675,9 +669,7 @@ mod tests {
                     ("alice".to_owned(), false),
                     ("bob".to_owned(), false),
                 ]),
-                recovery_refs: vec![
-                    "refs/manifold/recovery/alice/2026-02-28T05-09-08Z".to_owned(),
-                ],
+                recovery_refs: vec!["refs/manifold/recovery/alice/2026-02-28T05-09-08Z".to_owned()],
             },
             post_state: StateSnapshot {
                 epoch_ref: "abc123".to_owned(),
@@ -688,9 +680,7 @@ mod tests {
                     ("alice".to_owned(), false),
                     ("bob".to_owned(), false),
                 ]),
-                recovery_refs: vec![
-                    "refs/manifold/recovery/alice/2026-02-28T05-09-08Z".to_owned(),
-                ],
+                recovery_refs: vec!["refs/manifold/recovery/alice/2026-02-28T05-09-08Z".to_owned()],
             },
             invariants: InvariantResults::all_pass(),
         };

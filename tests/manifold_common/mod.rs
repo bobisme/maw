@@ -104,15 +104,12 @@ impl TestRepo {
 
         // 2. Create epoch₀ (including .gitignore)
         let gitignore_content = "# Manifold workspaces\nws/\n\n# Manifold ephemeral data\n.manifold/epochs/\n.manifold/cow/\n.manifold/artifacts/\n";
-        std::fs::write(root.join(".gitignore"), gitignore_content).expect("failed to write .gitignore");
+        std::fs::write(root.join(".gitignore"), gitignore_content)
+            .expect("failed to write .gitignore");
         git_ok(&root, &["add", ".gitignore"]);
         git_ok(
             &root,
-            &[
-                "commit",
-                "-m",
-                "manifold: epoch₀ (initial commit)",
-            ],
+            &["commit", "-m", "manifold: epoch₀ (initial commit)"],
         );
 
         let epoch0 = git_ok(&root, &["rev-parse", "HEAD"]).trim().to_owned();

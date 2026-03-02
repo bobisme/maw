@@ -41,8 +41,8 @@ pub struct RefGcReport {
 ///
 /// Used by `maw doctor` to report stale refs without deleting them.
 pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
-    let repo = maw_git::GixRepo::open(root)
-        .map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
+    let repo =
+        maw_git::GixRepo::open(root).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
     let head_refs = repo
         .list_refs(refs::HEAD_PREFIX)
         .map_err(|e| anyhow::anyhow!("list_refs failed: {e}"))?;
@@ -73,8 +73,8 @@ pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
 /// If `dry_run` is true, nothing is deleted but the report shows what would be.
 #[allow(clippy::missing_errors_doc)]
 pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcReport> {
-    let repo = maw_git::GixRepo::open(root)
-        .map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
+    let repo =
+        maw_git::GixRepo::open(root).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
 
     let mut report = RefGcReport::default();
 
@@ -95,8 +95,9 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
         if !ws_dir.exists() {
             report.stale_head_names.push(ws_name.to_string());
             if !dry_run {
-                refs::delete_ref(root, ref_name.as_str())
-                    .map_err(|e| anyhow::anyhow!("failed to delete ref {}: {e}", ref_name.as_str()))?;
+                refs::delete_ref(root, ref_name.as_str()).map_err(|e| {
+                    anyhow::anyhow!("failed to delete ref {}: {e}", ref_name.as_str())
+                })?;
 
                 // Also clean up associated workspace state and epoch refs.
                 let state_ref = refs::workspace_state_ref(ws_name);
@@ -129,10 +130,7 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
                     .push(ref_name.as_str().to_string());
                 if !dry_run {
                     refs::delete_ref(root, ref_name.as_str()).map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to delete recovery ref {}: {e}",
-                            ref_name.as_str()
-                        )
+                        anyhow::anyhow!("failed to delete recovery ref {}: {e}", ref_name.as_str())
                     })?;
                 }
                 report.recovery_refs_deleted += 1;
@@ -298,18 +296,22 @@ mod tests {
         .unwrap();
 
         // Verify the ref exists
-        assert!(refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
-            .unwrap()
-            .is_some());
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
+                .unwrap()
+                .is_some()
+        );
 
         let report = run(root, 30, false).unwrap();
         assert_eq!(report.head_refs_deleted, 1);
         assert_eq!(report.stale_head_names, vec!["gone-agent"]);
 
         // Ref should be gone
-        assert!(refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
-            .unwrap()
-            .is_none());
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -332,9 +334,11 @@ mod tests {
         assert_eq!(report.head_refs_deleted, 0);
 
         // Ref should still exist
-        assert!(refs::read_ref(root, &refs::workspace_head_ref("active-agent"))
-            .unwrap()
-            .is_some());
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("active-agent"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -353,9 +357,11 @@ mod tests {
         assert_eq!(report.head_refs_deleted, 1);
 
         // Ref should still exist because it was a dry run
-        assert!(refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
-            .unwrap()
-            .is_some());
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

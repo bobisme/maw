@@ -24,11 +24,7 @@ use ratatui::{Terminal, prelude::CrosstermBackend};
 /// to call from a panic hook where we cannot propagate errors.
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(
-        io::stdout(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    );
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
 }
 
 /// Run the TUI application with the given data source.

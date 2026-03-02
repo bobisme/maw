@@ -31,9 +31,7 @@ pub mod trace;
 
 // Re-export key types for convenience.
 pub use oracle::{
-    AssuranceState, AssuranceViolation, WorkspaceStatus,
-    capture_state, check_all,
-    check_g1_reachability, check_g2_rewrite_preservation,
-    check_g3_commit_monotonicity, check_g4_destructive_gate,
-    check_g5_discoverability, check_g6_searchability,
+    AssuranceState, AssuranceViolation, WorkspaceStatus, capture_state, check_all,
+    check_g1_reachability, check_g2_rewrite_preservation, check_g3_commit_monotonicity,
+    check_g4_destructive_gate, check_g5_discoverability, check_g6_searchability,
 };

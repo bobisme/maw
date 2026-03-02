@@ -122,7 +122,13 @@ fn hex_digit(b: u8) -> Option<u8> {
 pub struct RefName(String);
 
 /// Well-known bare ref names that don't start with `refs/`.
-const BARE_REFS: &[&str] = &["HEAD", "FETCH_HEAD", "MERGE_HEAD", "ORIG_HEAD", "CHERRY_PICK_HEAD"];
+const BARE_REFS: &[&str] = &[
+    "HEAD",
+    "FETCH_HEAD",
+    "MERGE_HEAD",
+    "ORIG_HEAD",
+    "CHERRY_PICK_HEAD",
+];
 
 impl RefName {
     /// Create a new `RefName`, validating that it looks like a git ref.

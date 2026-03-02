@@ -163,13 +163,18 @@ where
     C: Eq + Clone,
     F: Fn(&C, &C, &C) -> Result<Diff3Result<C>, E>,
 {
-    assert_eq!(kinds.len(), contents.len(), "kinds and contents must have same length");
+    assert_eq!(
+        kinds.len(),
+        contents.len(),
+        "kinds and contents must have same length"
+    );
 
     // Step 1: classification (same logic as classify_shared_path).
     let classification = {
-        let all_have_content = kinds.iter().zip(contents.iter()).all(|(k, c)| {
-            matches!(k, ChangeKind::Deleted) || c.is_some()
-        });
+        let all_have_content = kinds
+            .iter()
+            .zip(contents.iter())
+            .all(|(k, c)| matches!(k, ChangeKind::Deleted) || c.is_some());
 
         // Gather non-None contents for equality check.
         let non_delete_contents: Vec<&C> = contents.iter().filter_map(|c| c.as_ref()).collect();
@@ -283,7 +288,7 @@ impl SharedClassification {
 /// 5. No base, all adds → [`ConflictAddAddDifferent`](SharedClassification::ConflictAddAddDifferent)
 /// 6. No base, not all adds → [`ConflictMissingBase`](SharedClassification::ConflictMissingBase)
 /// 7. Has base → [`NeedsDiff3`](SharedClassification::NeedsDiff3)
-#[must_use] 
+#[must_use]
 pub fn classify_shared_path(
     kinds: &[ChangeKind],
     all_have_content: bool,
@@ -562,9 +567,7 @@ fn resolve_shared_path(
             match diff3_merge_bytes(base_c, ours_c, theirs_c)? {
                 Diff3Outcome::Clean(out) => Ok(Diff3Result::Clean(out)),
                 Diff3Outcome::Conflict { .. } => {
-                    if let Some(retried) =
-                        retry_with_shifted_alignment(base_c, ours_c, theirs_c)?
-                    {
+                    if let Some(retried) = retry_with_shifted_alignment(base_c, ours_c, theirs_c)? {
                         Ok(Diff3Result::Clean(retried))
                     } else {
                         Ok(Diff3Result::Conflict)

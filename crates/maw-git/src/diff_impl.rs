@@ -38,11 +38,12 @@ pub fn diff_trees(
     // Load old tree data (empty bytes for None → empty tree).
     let old_tree_data = match old {
         Some(oid) => {
-            let obj = gix_repo
-                .find_object(to_gix_oid(oid))
-                .map_err(|e| GitError::BackendError {
-                    message: format!("failed to find old tree {oid}: {e}"),
-                })?;
+            let obj =
+                gix_repo
+                    .find_object(to_gix_oid(oid))
+                    .map_err(|e| GitError::BackendError {
+                        message: format!("failed to find old tree {oid}: {e}"),
+                    })?;
             obj.data.to_vec()
         }
         None => Vec::new(),

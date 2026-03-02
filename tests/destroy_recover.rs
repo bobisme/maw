@@ -47,7 +47,9 @@ fn destroy_force_dirty_workspace_is_recoverable_via_recover() {
         .as_array()
         .expect("destroyed_workspaces should be an array");
     assert!(
-        workspaces.iter().any(|w| w["name"].as_str() == Some("dirty-ws")),
+        workspaces
+            .iter()
+            .any(|w| w["name"].as_str() == Some("dirty-ws")),
         "recover list should include dirty-ws, got: {list}"
     );
 
@@ -443,8 +445,7 @@ fn clean_workspace_destroy_has_no_snapshot() {
         .iter()
         .any(|w| w["name"].as_str() == Some("clean-ws"))
     {
-        let stderr =
-            repo.maw_fails(&["ws", "recover", "clean-ws", "--show", "anything.txt"]);
+        let stderr = repo.maw_fails(&["ws", "recover", "clean-ws", "--show", "anything.txt"]);
         assert!(
             stderr.contains("capture_mode=none")
                 || stderr.contains("No snapshot")

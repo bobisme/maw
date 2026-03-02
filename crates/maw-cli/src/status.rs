@@ -10,11 +10,11 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 use maw_git::GitRepo as _;
 
-use maw_core::backend::WorkspaceBackend;
 use crate::doctor;
 use crate::format::OutputFormat;
 use crate::push::{SyncStatus, main_sync_status_inner};
 use crate::workspace::{self, MawConfig, get_backend};
+use maw_core::backend::WorkspaceBackend;
 use serde::Serialize;
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);

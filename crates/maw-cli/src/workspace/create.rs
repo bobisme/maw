@@ -180,7 +180,8 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
         // Resolve the user-specified revision to a full OID
         let repo = maw_git::GixRepo::open(root)
             .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-        let git_oid = repo.rev_parse(rev)
+        let git_oid = repo
+            .rev_parse(rev)
             .map_err(|e| anyhow::anyhow!("Cannot resolve revision '{rev}': {e}"))?;
         let oid = git_oid.to_string();
         return EpochId::new(&oid).map_err(|e| anyhow::anyhow!("Invalid commit OID: {e}"));
@@ -200,18 +201,19 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
         let branch = config.branch();
         let branch_ref = format!("refs/heads/{branch}");
         if let Ok(Some(branch_oid)) = manifold_refs::read_ref(root, &branch_ref)
-            && oid != branch_oid {
-                let branch_id = EpochId::new(branch_oid.as_str())
-                    .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))?;
-                manifold_refs::write_epoch_current(root, &branch_oid)
-                    .map_err(|e| anyhow::anyhow!("Failed to resync epoch: {e}"))?;
-                eprintln!(
-                    "NOTE: epoch was out of sync with '{branch}' — auto-synced {} → {}",
-                    &oid.as_str()[..12],
-                    &branch_oid.as_str()[..12],
-                );
-                return Ok(branch_id);
-            }
+            && oid != branch_oid
+        {
+            let branch_id = EpochId::new(branch_oid.as_str())
+                .map_err(|e| anyhow::anyhow!("Invalid branch OID: {e}"))?;
+            manifold_refs::write_epoch_current(root, &branch_oid)
+                .map_err(|e| anyhow::anyhow!("Failed to resync epoch: {e}"))?;
+            eprintln!(
+                "NOTE: epoch was out of sync with '{branch}' — auto-synced {} → {}",
+                &oid.as_str()[..12],
+                &branch_oid.as_str()[..12],
+            );
+            return Ok(branch_id);
+        }
 
         return Ok(epoch);
     }
@@ -306,13 +308,15 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
 
     let mut capture_result = None;
     if force {
-        capture_result = super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
-            .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?;
+        capture_result =
+            super::capture::capture_before_destroy(&path, name, status.base_epoch.oid()).map_err(
+                |e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"),
+            )?;
     }
 
     // Determine final head for destroy record before we destroy
-    let final_head = super::capture::resolve_head(&path)
-        .unwrap_or_else(|_| status.base_epoch.oid().clone());
+    let final_head =
+        super::capture::resolve_head(&path).unwrap_or_else(|_| status.base_epoch.oid().clone());
 
     if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &status.base_epoch) {
         tracing::warn!("Failed to record workspace destroy in history: {e}");
@@ -431,8 +435,6 @@ fn ensure_workspace_oplog_head(
     append_operation_with_runtime_checkpoint(root, ws_id, &create_op, None)
         .map_err(|e| anyhow::anyhow!("bootstrap workspace history: {e}"))
 }
-
-
 
 /// Attach (reconnect) an orphaned workspace directory.
 /// In the git worktree model, this means creating a worktree entry
