@@ -4,11 +4,20 @@ default:
 build:
   cargo build --release
 
+fmt:
+  cargo fmt --all
+
+fmt-check:
+  cargo fmt --all -- --check
+
+clippy:
+  cargo clippy --workspace --all-targets -- -D warnings
+
 test:
   cargo test
 
 install:
-  cargo install --locked --path .
+  cargo install --locked --path crates/maw-cli
 
 # Assurance CI gates
 
@@ -41,7 +50,7 @@ kani-full:
   cargo kani --no-default-features --features kani-slow
 
 # All assurance gates combined
-check: test dst-fast contract-drift
+check: fmt-check clippy test dst-fast contract-drift
 
 coverage:
   cargo llvm-cov

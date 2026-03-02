@@ -8,6 +8,41 @@ This project uses **maw** for workspace management, **git** for version control,
 
 ---
 
+## Prime Invariant: No Work Is Ever Lost
+
+**No committed work can ever be lost when using maw.** This is the foundational guarantee. Every safety mechanism in maw exists to uphold it.
+
+What this means in practice:
+
+1. **`maw ws destroy` refuses to destroy workspaces with unmerged changes** unless `--force` is passed. If `--force` is used, it captures a full recovery snapshot first.
+2. **`maw ws sync` refuses to sync workspaces with committed work** ahead of the epoch. It also refuses if the workspace is dirty.
+3. **Every destroyed workspace gets a destroy record** with the final HEAD commit, snapshot OID, and pinned recovery ref under `refs/manifold/recovery/<workspace>/`.
+4. **`maw ws recover`** can list, inspect, search, and restore any destroyed workspace's contents.
+
+**If you think work was lost, it almost certainly wasn't.** Before reopening a bone or starting over:
+
+```bash
+# List all destroyed workspaces with recovery snapshots
+maw ws recover
+
+# Inspect what a destroyed workspace contained
+maw ws recover <name>
+
+# Search destroyed snapshots for specific content
+maw ws recover --search "pattern"
+maw ws recover <name> --search "pattern"
+
+# Show a specific file from the destroyed workspace
+maw ws recover <name> --show <path>
+
+# Restore a destroyed workspace to a new workspace
+maw ws recover <name> --to <new-name>
+```
+
+**Never assume work is gone.** Always check `maw ws recover` first. If recovery truly fails, that is a bug in maw and must be reported.
+
+---
+
 ## Quick Start
 
 ```bash
@@ -338,6 +373,7 @@ maw ws diff <name>                        # diff vs epoch (maw-native)
 - Never merge or destroy `default`.
 - Always `maw ws merge <name> --check` before `--destroy`.
 - Commit workspace changes with `maw exec <name> -- git add -A && maw exec <name> -- git commit -m "..."`.
+- **If you suspect work was lost: run `maw ws recover` BEFORE reopening bones or starting over.** Destroyed workspaces have recovery snapshots. See the "Prime Invariant" section above.
 
 ### Protocol Quick Reference
 
