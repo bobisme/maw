@@ -172,6 +172,38 @@ fn merge_json_success_stdout_is_pure_json() {
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("merge --format json output should be valid JSON");
     assert_eq!(payload["status"].as_str(), Some("success"));
+    let advice = payload["advice"]
+        .as_array()
+        .expect("merge success JSON should include advice array");
+    assert_eq!(
+        advice.len(),
+        1,
+        "expected warning advice for generic message"
+    );
+    assert_eq!(advice[0]["level"].as_str(), Some("warn"));
+    assert_eq!(advice[0]["type"].as_str(), Some("generic-merge-message"));
+}
+
+#[test]
+fn merge_without_message_prints_strong_amend_guidance() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "guidance-a"]);
+    repo.add_file("guidance-a", "note.txt", "content\n");
+
+    let stdout = repo.maw_ok(&["ws", "merge", "guidance-a"]);
+    assert!(
+        stdout.contains("WARNING: merge used auto-generated commit message"),
+        "expected warning in merge output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("IMPORTANT: amend this commit before push"),
+        "expected IMPORTANT guidance in merge output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("git -C ws/default commit --amend -m \"<meaningful message>\""),
+        "expected amend command in merge output, got:\n{stdout}"
+    );
 }
 
 #[test]

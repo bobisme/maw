@@ -9,39 +9,37 @@ use maw_git::GitRepo as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use maw_core::backend::WorkspaceBackend;
-use maw_core::config::{ManifoldConfig, MergeDriverKind};
 use crate::format::OutputFormat;
 use maw::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use maw::merge::collect::collect_snapshots;
-use maw::merge::commit::{
-    CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase,
-};
+use maw::merge::commit::{CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase};
+use maw::merge::prepare::run_prepare_phase;
+use maw::merge::quarantine::create_quarantine_workspace;
+use maw::merge::resolve::{ConflictReason, ConflictRecord};
+use maw::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
+use maw_core::backend::WorkspaceBackend;
+use maw_core::config::{ManifoldConfig, MergeDriverKind};
 use maw_core::merge::partition::partition_by_path;
 use maw_core::merge::plan::{
     DriverInfo, MergePlan, PredictedConflict, ValidationInfo, WorkspaceChange, WorkspaceReport,
     compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
-use maw::merge::prepare::run_prepare_phase;
-use maw::merge::quarantine::create_quarantine_workspace;
-use maw::merge::resolve::{ConflictReason, ConflictRecord};
 use maw_core::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
-use maw::merge::validate::{ValidateOutcome, run_validate_phase, write_validation_artifact};
 use maw_core::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
 use maw_core::model::conflict::ConflictAtom;
-use tracing::instrument;
 use maw_core::model::conflict::Region;
 use maw_core::model::patch::{FileId, PatchSet as ModelPatchSet, PatchValue};
 use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::types::{OpPayload, Operation};
+use tracing::instrument;
 
+use super::capture::capture_before_destroy;
+use super::destroy_record::{DestroyReason, write_destroy_record};
 use super::{
     DEFAULT_WORKSPACE, MawConfig, get_backend,
     oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
 };
-use super::capture::capture_before_destroy;
-use super::destroy_record::{DestroyReason, write_destroy_record};
 
 // ---------------------------------------------------------------------------
 // JSON output types for agent-friendly conflict presentation
@@ -182,6 +180,32 @@ pub struct MergeSuccessOutput {
     pub message: String,
     /// What to do next.
     pub next: String,
+    /// Structured guidance for agents (warnings, follow-up actions).
+    pub advice: Vec<MergeAdvice>,
+}
+
+/// Structured advice entry for merge JSON output.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeAdvice {
+    /// Severity level (`info`, `warn`, `error`).
+    pub level: &'static str,
+    /// Programmatic advice identifier (kebab-case).
+    #[serde(rename = "type")]
+    pub advice_type: &'static str,
+    /// Human-readable recommendation.
+    pub message: String,
+    /// Optional machine-parseable details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<MergeAdviceDetails>,
+}
+
+/// Optional details attached to a merge advice entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeAdviceDetails {
+    /// The auto-generated merge commit subject used.
+    pub commit_subject: String,
+    /// Exact command to amend the commit message.
+    pub amend_command: String,
 }
 
 /// JSON output when `maw ws merge` is blocked by conflicts.
@@ -324,11 +348,7 @@ fn apply_resolutions(
     for conflict in conflicts {
         // Check for file-level resolution first
         if let Some(resolution) = resolutions.get(&conflict.id) {
-            let content = resolve_file_content(
-                resolution,
-                &conflict.record,
-                workspace_dirs,
-            )?;
+            let content = resolve_file_content(resolution, &conflict.record, workspace_dirs)?;
             resolved_contents.insert(conflict.record.path.clone(), content);
             continue;
         }
@@ -347,10 +367,7 @@ fn apply_resolutions(
             }
 
             if all_atoms_resolved {
-                let content = resolve_atoms(
-                    &conflict.record,
-                    &atom_resolutions,
-                )?;
+                let content = resolve_atoms(&conflict.record, &atom_resolutions)?;
                 resolved_contents.insert(conflict.record.path.clone(), content);
                 continue;
             }
@@ -376,14 +393,18 @@ fn apply_resolutions(
 
     // Check for resolution IDs that don't match any conflict
     for res_id in resolutions.keys() {
-        let matches_any = conflicts.iter().any(|c| {
-            c.id == *res_id || c.atom_ids.iter().any(|a| a == res_id)
-        });
+        let matches_any = conflicts
+            .iter()
+            .any(|c| c.id == *res_id || c.atom_ids.iter().any(|a| a == res_id));
         if !matches_any {
             bail!(
                 "Unknown conflict ID in --resolve: '{res_id}'\n  \
                  Valid IDs for this merge: {}",
-                conflicts.iter().map(|c| c.id.as_str()).collect::<Vec<_>>().join(", ")
+                conflicts
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
@@ -406,7 +427,11 @@ fn resolve_file_content(
                 .iter()
                 .find(|s| s.workspace_id == ws_id)
                 .ok_or_else(|| {
-                    let available: Vec<_> = record.sides.iter().map(|s| s.workspace_id.to_string()).collect();
+                    let available: Vec<_> = record
+                        .sides
+                        .iter()
+                        .map(|s| s.workspace_id.to_string())
+                        .collect();
                     anyhow::anyhow!(
                         "Workspace '{name}' is not a side in this conflict.\n  \
                          Available: {}",
@@ -414,7 +439,9 @@ fn resolve_file_content(
                     )
                 })?;
             side.content.clone().ok_or_else(|| {
-                let others: Vec<_> = record.sides.iter()
+                let others: Vec<_> = record
+                    .sides
+                    .iter()
                     .filter(|s| s.workspace_id != ws_id)
                     .map(|s| s.workspace_id.to_string())
                     .collect();
@@ -507,11 +534,18 @@ fn resolve_atoms(
     })?;
 
     // Validate resolutions and collect sorted atoms
-    let mut atoms_sorted: Vec<(u32, u32, &maw_core::model::conflict::ConflictAtom, &Resolution)> =
-        Vec::new();
+    let mut atoms_sorted: Vec<(
+        u32,
+        u32,
+        &maw_core::model::conflict::ConflictAtom,
+        &Resolution,
+    )> = Vec::new();
     for (i, atom) in record.atoms.iter().enumerate() {
         let res = atom_resolutions[i].ok_or_else(|| {
-            anyhow::anyhow!("Missing resolution for atom {i} of {}", record.path.display())
+            anyhow::anyhow!(
+                "Missing resolution for atom {i} of {}",
+                record.path.display()
+            )
         })?;
         match res {
             Resolution::Workspace(_) => {}
@@ -584,12 +618,14 @@ fn patch_candidate_tree(
         let blob_oid = git_hash_object(root, content).ok_or_else(|| {
             anyhow::anyhow!("Failed to hash resolved content for {}", path.display())
         })?;
-        new_blobs.insert(path.to_string_lossy().to_string(), blob_oid.as_str().to_string());
+        new_blobs.insert(
+            path.to_string_lossy().to_string(),
+            blob_oid.as_str().to_string(),
+        );
     }
 
     // 2. Create a temporary index from the candidate tree
-    let tmp_index = tempfile::NamedTempFile::new()
-        .context("Failed to create temp index file")?;
+    let tmp_index = tempfile::NamedTempFile::new().context("Failed to create temp index file")?;
     let tmp_index_path = tmp_index.path().to_string_lossy().to_string();
 
     let read_tree = Command::new("git")
@@ -636,24 +672,30 @@ fn patch_candidate_tree(
             String::from_utf8_lossy(&write_tree.stderr).trim()
         );
     }
-    let new_tree_oid = String::from_utf8_lossy(&write_tree.stdout).trim().to_string();
+    let new_tree_oid = String::from_utf8_lossy(&write_tree.stdout)
+        .trim()
+        .to_string();
 
     // 5. commit-tree with the same parent as the candidate
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
     let parent_spec = format!("{candidate}^");
-    let parent_git_oid = repo.rev_parse(&parent_spec)
+    let parent_git_oid = repo
+        .rev_parse(&parent_spec)
         .map_err(|e| anyhow::anyhow!("Failed to get candidate parent: {e}"))?;
 
-    let new_tree_git_oid: maw_git::GitOid = new_tree_oid.parse()
+    let new_tree_git_oid: maw_git::GitOid = new_tree_oid
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid tree OID '{new_tree_oid}': {e}"))?;
 
-    let new_commit_git_oid = repo.create_commit(
-        new_tree_git_oid,
-        &[parent_git_oid],
-        "epoch: merge with conflict resolutions",
-        None,
-    ).map_err(|e| anyhow::anyhow!("commit-tree failed: {e}"))?;
+    let new_commit_git_oid = repo
+        .create_commit(
+            new_tree_git_oid,
+            &[parent_git_oid],
+            "epoch: merge with conflict resolutions",
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("commit-tree failed: {e}"))?;
 
     let new_commit_oid = new_commit_git_oid.to_string();
     GitOid::new(&new_commit_oid)
@@ -866,10 +908,7 @@ fn conflict_record_to_info(record: &ConflictRecord) -> ConflictInfo {
 }
 
 /// Print detailed conflict information with terseid IDs and resolve commands.
-fn print_conflict_report(
-    conflicts_with_ids: &[ConflictWithId],
-    ws_names: &[String],
-) {
+fn print_conflict_report(conflicts_with_ids: &[ConflictWithId], ws_names: &[String]) {
     print_conflict_report_with_resolve(conflicts_with_ids, ws_names, None);
 }
 
@@ -879,10 +918,7 @@ fn print_conflict_report_with_resolve(
     prebuilt_resolve_args: Option<&[String]>,
 ) {
     println!();
-    println!(
-        "BUILD: {} conflict(s) detected.",
-        conflicts_with_ids.len()
-    );
+    println!("BUILD: {} conflict(s) detected.", conflicts_with_ids.len());
     println!();
 
     for c in conflicts_with_ids {
@@ -893,16 +929,8 @@ fn print_conflict_report_with_resolve(
             .iter()
             .map(|s| workspace_display_name(&s.workspace_id))
             .collect();
-        println!(
-            "  {:<10} {:<40} {}",
-            c.id,
-            c.record.path.display(),
-            reason
-        );
-        println!(
-            "           Workspaces: {}",
-            ws_list.join(", ")
-        );
+        println!("  {:<10} {:<40} {}", c.id, c.record.path.display(), reason);
+        println!("           Workspaces: {}", ws_list.join(", "));
 
         // Show content snippets from each side (up to 5 lines each)
         for side in &c.record.sides {
@@ -918,7 +946,10 @@ fn print_conflict_report_with_resolve(
                     println!("             {line}");
                 }
                 if truncated {
-                    println!("             ... ({} more lines)", lines.len() - preview_lines);
+                    println!(
+                        "             ... ({} more lines)",
+                        lines.len() - preview_lines
+                    );
                 }
             }
         }
@@ -955,11 +986,7 @@ fn print_conflict_report_with_resolve(
         &resolve_args_owned
     };
     println!("To resolve, re-run with --resolve:");
-    println!(
-        "  maw ws merge {} {}",
-        ws_args,
-        resolve_args.join(" ")
-    );
+    println!("  maw ws merge {} {}", ws_args, resolve_args.join(" "));
     println!();
     let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
     println!("Or resolve all at once:");
@@ -1113,7 +1140,10 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
 
     // Try a BUILD phase to detect conflicts (don't COMMIT)
     let manifold_dir = root.join(".manifold");
-    let temp_check_dir = tempfile::Builder::new().prefix("check-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for merge check")?;
+    let temp_check_dir = tempfile::Builder::new()
+        .prefix("check-tmp-")
+        .tempdir_in(&manifold_dir)
+        .context("Failed to create temp dir for merge check")?;
     let check_dir = temp_check_dir.path().to_path_buf();
 
     let sources: Vec<WorkspaceId> = workspaces
@@ -1135,7 +1165,10 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     match prepare_result {
         Ok(_frozen) => {
             // PREPARE succeeded, now try BUILD
-            let temp_build_dir = tempfile::Builder::new().prefix("build-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for build check")?;
+            let temp_build_dir = tempfile::Builder::new()
+                .prefix("build-tmp-")
+                .tempdir_in(&manifold_dir)
+                .context("Failed to create temp dir for build check")?;
             let build_dir = temp_build_dir.path().to_path_buf();
             run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs)
                 .context("prepare phase failed for build check")?;
@@ -1203,8 +1236,13 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                     println!("  Description: {}", result.description);
                 }
             } else if result.stale {
-                println!("[BLOCKED] Workspace is behind main — another workspace was merged since this one was created.");
-                println!("  Run `maw ws sync {}` to rebase onto the latest main, then retry the merge.", result.workspace.name);
+                println!(
+                    "[BLOCKED] Workspace is behind main — another workspace was merged since this one was created."
+                );
+                println!(
+                    "  Run `maw ws sync {}` to rebase onto the latest main, then retry the merge.",
+                    result.workspace.name
+                );
             } else if result.conflicts.is_empty() {
                 println!("[BLOCKED] Merge check failed");
             } else {
@@ -1665,7 +1703,10 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 
     // Run PREPARE + BUILD in a temp dir to detect conflicts without committing
     let manifold_dir = root.join(".manifold");
-    let temp_check_dir = tempfile::Builder::new().prefix("conflicts-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for conflict check")?;
+    let temp_check_dir = tempfile::Builder::new()
+        .prefix("conflicts-tmp-")
+        .tempdir_in(&manifold_dir)
+        .context("Failed to create temp dir for conflict check")?;
     let check_dir = temp_check_dir.path().to_path_buf();
 
     let sources: Vec<WorkspaceId> = workspaces
@@ -1715,7 +1756,10 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         }
         Ok(_frozen) => {
             // Re-run PREPARE + BUILD
-            let temp_build_dir = tempfile::Builder::new().prefix("build-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for build phase")?;
+            let temp_build_dir = tempfile::Builder::new()
+                .prefix("build-tmp-")
+                .tempdir_in(&manifold_dir)
+                .context("Failed to create temp dir for build phase")?;
             let build_dir = temp_build_dir.path().to_path_buf();
             let _ = run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs);
             let result = run_build_phase(&root, &build_dir, &backend);
@@ -2091,7 +2135,15 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 textln!();
                 textln!("No changes to merge. Destroying workspace(s): {ws_list}");
             }
-            handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, &root, text_mode, verbose)?;
+            handle_post_merge_destroy(
+                &ws_to_merge,
+                default_ws,
+                confirm,
+                &backend,
+                &root,
+                text_mode,
+                verbose,
+            )?;
             if format == OutputFormat::Json {
                 let output = serde_json::json!({
                     "status": "empty",
@@ -2117,9 +2169,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             textln!("Nothing to merge. Workspaces were not destroyed.");
         }
 
-        bail!(
-            "No changes detected in workspace(s): {ws_list}. Nothing to merge."
-        );
+        bail!("No changes detected in workspace(s): {ws_list}. Nothing to merge.");
     }
 
     // Check for unresolved conflicts
@@ -2140,22 +2190,20 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             // Expand --resolve-all for any conflict not already covered
             if let Some(ws_name) = resolve_all {
                 for c in &conflicts_with_ids {
-                    parsed.entry(c.id.clone())
+                    parsed
+                        .entry(c.id.clone())
                         .or_insert_with(|| Resolution::Workspace(ws_name.clone()));
                 }
             }
 
-            let (resolved_contents, remaining) = match apply_resolutions(
-                &conflicts_with_ids,
-                &parsed,
-                &workspace_dirs,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    abort_merge(&manifold_dir, &format!("apply resolutions: {e}"));
-                    return Err(e);
-                }
-            };
+            let (resolved_contents, remaining) =
+                match apply_resolutions(&conflicts_with_ids, &parsed, &workspace_dirs) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        abort_merge(&manifold_dir, &format!("apply resolutions: {e}"));
+                        return Err(e);
+                    }
+                };
 
             if remaining.is_empty() {
                 // All conflicts resolved — patch the candidate tree
@@ -2236,7 +2284,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         conflicts_with_ids.len(),
                         remaining.len()
                     );
-                    print_conflict_report_with_resolve(&remaining, &ws_to_merge, Some(&resolve_args));
+                    print_conflict_report_with_resolve(
+                        &remaining,
+                        &ws_to_merge,
+                        Some(&resolve_args),
+                    );
                 }
 
                 bail!(
@@ -2258,9 +2310,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             if format == OutputFormat::Json {
                 let conflict_jsons: Vec<ConflictJson> = conflicts_with_ids
                     .iter()
-                    .map(|c| {
-                        conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids)
-                    })
+                    .map(|c| conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids))
                     .collect();
                 let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
                 let output = MergeConflictOutput {
@@ -2277,10 +2327,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                textln!(
-                    "  {} unresolved conflict(s)",
-                    build_output.conflicts.len()
-                );
+                textln!("  {} unresolved conflict(s)", build_output.conflicts.len());
                 print_conflict_report(&conflicts_with_ids, &ws_to_merge);
 
                 if destroy_after {
@@ -2462,22 +2509,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // ref has already moved, leaving epoch and branch permanently diverged.
     // Detect and abort cleanly before touching any refs.
     if let Ok(Some(current_branch)) = maw_core::refs::read_ref(&root, &branch_ref)
-        && current_branch != epoch_before_oid {
-            abort_merge(
-                &manifold_dir,
-                "branch diverged from epoch since PREPARE (direct commits detected)",
-            );
-            bail!(
-                "Merge COMMIT aborted: branch '{branch}' has diverged from epoch since PREPARE.\n  \
+        && current_branch != epoch_before_oid
+    {
+        abort_merge(
+            &manifold_dir,
+            "branch diverged from epoch since PREPARE (direct commits detected)",
+        );
+        bail!(
+            "Merge COMMIT aborted: branch '{branch}' has diverged from epoch since PREPARE.\n  \
                  Expected: {}\n  \
                  Actual:   {}\n  \
                  Cause: commits were made directly to '{branch}' outside of maw.\n  \
                  Fix: run `maw epoch sync` to resync the epoch ref to the current branch HEAD,\n  \
                  then retry the merge.",
-                &epoch_before_oid.as_str()[..12],
-                &current_branch.as_str()[..12],
-            );
-        }
+            &epoch_before_oid.as_str()[..12],
+            &current_branch.as_str()[..12],
+        );
+    }
 
     match run_commit_phase(&root, branch, &epoch_before_oid, &build_output.candidate) {
         Ok(CommitResult::Committed) => {
@@ -2547,66 +2595,74 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // and record a Snapshot op in the default workspace's oplog (§6.1 Step 1).
     if default_ws_path.exists() {
         // Compute patchset BEFORE the checkout so we capture pre-rewrite state.
-        let pre_checkout_patchset = maw_core::model::diff::compute_patchset(
-            &default_ws_path,
-            &frozen.epoch,
-        )
-        .ok();
+        let pre_checkout_patchset =
+            maw_core::model::diff::compute_patchset(&default_ws_path, &frozen.epoch).ok();
 
         // FP: crash before updating the default workspace to the new epoch.
         // A crash here means COMMIT succeeded but the default workspace
         // still points at the old epoch.
         maw::fp!("FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT")?;
 
-        update_default_workspace(&default_ws_path, branch, epoch_before_oid.as_str(), &root, text_mode)?;
+        update_default_workspace(
+            &default_ws_path,
+            branch,
+            epoch_before_oid.as_str(),
+            &root,
+            text_mode,
+        )?;
 
         // Record a Snapshot op if the default workspace had dirty files.
         if let Some(ref patch_set) = pre_checkout_patchset
-            && !patch_set.is_empty() {
-                let default_ws_id = WorkspaceId::new(DEFAULT_WORKSPACE)
-                    .expect("'default' is a valid workspace name");
+            && !patch_set.is_empty()
+        {
+            let default_ws_id =
+                WorkspaceId::new(DEFAULT_WORKSPACE).expect("'default' is a valid workspace name");
 
-                match write_patch_set_blob(&root, patch_set) {
-                    Ok(patch_set_oid) => {
-                        match ensure_workspace_oplog_head(&root, &default_ws_id, &frozen.epoch) {
-                            Ok(head) => {
-                                let snapshot_op = Operation {
-                                    parent_ids: vec![head.clone()],
-                                    workspace_id: default_ws_id.clone(),
-                                    timestamp: super::now_timestamp_iso8601(),
-                                    payload: OpPayload::Snapshot { patch_set_oid },
-                                };
+            match write_patch_set_blob(&root, patch_set) {
+                Ok(patch_set_oid) => {
+                    match ensure_workspace_oplog_head(&root, &default_ws_id, &frozen.epoch) {
+                        Ok(head) => {
+                            let snapshot_op = Operation {
+                                parent_ids: vec![head.clone()],
+                                workspace_id: default_ws_id.clone(),
+                                timestamp: super::now_timestamp_iso8601(),
+                                payload: OpPayload::Snapshot { patch_set_oid },
+                            };
 
-                                if let Err(e) = append_operation_with_runtime_checkpoint(
-                                    &root,
-                                    &default_ws_id,
-                                    &snapshot_op,
-                                    Some(&head),
-                                ) {
-                                    tracing::warn!(
-                                        "Could not record default workspace snapshot op: {e}"
-                                    );
-                                }
-                            }
-                            Err(e) => {
+                            if let Err(e) = append_operation_with_runtime_checkpoint(
+                                &root,
+                                &default_ws_id,
+                                &snapshot_op,
+                                Some(&head),
+                            ) {
                                 tracing::warn!(
-                                    "Could not bootstrap default workspace oplog: {e}"
+                                    "Could not record default workspace snapshot op: {e}"
                                 );
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Could not write default workspace patch-set blob: {e}"
-                        );
+                        Err(e) => {
+                            tracing::warn!("Could not bootstrap default workspace oplog: {e}");
+                        }
                     }
                 }
+                Err(e) => {
+                    tracing::warn!("Could not write default workspace patch-set blob: {e}");
+                }
             }
+        }
     }
 
     // Destroy source workspaces if requested
     if destroy_after {
-        handle_post_merge_destroy(&ws_to_merge, default_ws, confirm, &backend, &root, text_mode, verbose)?;
+        handle_post_merge_destroy(
+            &ws_to_merge,
+            default_ws,
+            confirm,
+            &backend,
+            &root,
+            text_mode,
+            verbose,
+        )?;
     }
 
     // Remove merge-state file
@@ -2653,6 +2709,22 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     };
 
     if format == OutputFormat::Json {
+        let advice = if user_provided_message {
+            vec![]
+        } else {
+            vec![MergeAdvice {
+                level: "warn",
+                advice_type: "generic-merge-message",
+                message: format!(
+                    "Merge used auto-generated commit subject \"{commit_subject}\". Amend before push so history captures intent."
+                ),
+                details: Some(MergeAdviceDetails {
+                    commit_subject: commit_subject.clone(),
+                    amend_command: "git -C ws/default commit --amend -m \"<meaningful message>\""
+                        .to_string(),
+                }),
+            }]
+        };
         let success = MergeSuccessOutput {
             status: "success".to_string(),
             workspaces: ws_to_merge.clone(),
@@ -2665,14 +2737,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             conflicts: vec![],
             message: format!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", ")),
             next: "maw push".to_string(),
+            advice,
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
         textln!();
         textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
         if !user_provided_message {
-            textln!("  Commit message: \"{commit_subject}\"");
-            textln!("  To amend: git -C ws/default commit --amend -m \"your message\"");
+            textln!("WARNING: merge used auto-generated commit message: \"{commit_subject}\"");
+            textln!("IMPORTANT: amend this commit before push so history captures intent.");
+            textln!("  Run now: git -C ws/default commit --amend -m \"<meaningful message>\"");
         }
         textln!();
         textln!("Next: push to remote:");
@@ -2854,11 +2928,10 @@ fn to_model_patch_set(root: &Path, patch_set: &CollectedPatchSet) -> Result<Mode
                 // If the file doesn't exist at the epoch commit, it was added
                 // then deleted in the workspace (net no-op). Skip it rather
                 // than propagating the error from `git rev-parse`.
-                let previous_blob =
-                    match epoch_blob_oid(root, &patch_set.epoch, &change.path) {
-                        Ok(oid) => oid,
-                        Err(_) => continue,
-                    };
+                let previous_blob = match epoch_blob_oid(root, &patch_set.epoch, &change.path) {
+                    Ok(oid) => oid,
+                    Err(_) => continue,
+                };
                 let file_id = change
                     .file_id
                     .unwrap_or_else(|| file_id_from_blob(&previous_blob));
@@ -2902,7 +2975,8 @@ fn epoch_blob_oid(root: &Path, epoch: &EpochId, path: &Path) -> Result<GitOid> {
     let rev = format!("{}:{}", epoch.as_str(), path.to_string_lossy());
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let git_oid = repo.rev_parse(&rev)
+    let git_oid = repo
+        .rev_parse(&rev)
         .map_err(|e| anyhow::anyhow!("rev-parse '{}' failed: {e}", rev))?;
 
     GitOid::new(&git_oid.to_string())
@@ -2922,8 +2996,6 @@ fn file_id_from_blob(blob: &GitOid) -> FileId {
     let n = u128::from_str_radix(&blob.as_str()[..32], 16).unwrap_or(0);
     FileId::new(n)
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Helpers: merge-state management
@@ -2960,7 +3032,10 @@ fn record_validation_result(
 }
 
 /// Record the `epoch_after` in the merge-state file.
-fn record_epoch_after(manifold_dir: &Path, candidate: &maw_core::model::types::GitOid) -> Result<()> {
+fn record_epoch_after(
+    manifold_dir: &Path,
+    candidate: &maw_core::model::types::GitOid,
+) -> Result<()> {
     let state_path = MergeStateFile::default_path(manifold_dir);
     let mut state =
         MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
@@ -3026,8 +3101,7 @@ fn update_default_workspace(
     text_mode: bool,
 ) -> Result<()> {
     use super::working_copy::{
-        SnapshotReplayResult, checkout_to, cleanup_snapshot,
-        replay_snapshot, snapshot_working_copy,
+        SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot, snapshot_working_copy,
     };
 
     let ws_name = super::DEFAULT_WORKSPACE;
@@ -3156,7 +3230,9 @@ fn update_default_workspace(
                 snapshot.oid,
             );
             if text_mode {
-                println!("  Default workspace updated to new epoch (replay failed, snapshot preserved).");
+                println!(
+                    "  Default workspace updated to new epoch (replay failed, snapshot preserved)."
+                );
             }
         }
     }
@@ -3259,18 +3335,14 @@ fn handle_post_merge_destroy(
         let base_epoch = match backend.status(&ws_id) {
             Ok(status) => status.base_epoch,
             Err(e) => {
-                eprintln!(
-                    "    WARNING: Could not check workspace status before destroy: {e}"
-                );
+                eprintln!("    WARNING: Could not check workspace status before destroy: {e}");
                 eprintln!(
                     "    Workspace '{ws_name}' preserved for manual cleanup. \
                      The merge itself succeeded."
                 );
                 // Emit structured recovery failure for agent parsing
                 super::capture::emit_recovery_surface_failed(
-                    ws_name,
-                    &e,
-                    true, // commit already succeeded before destroy
+                    ws_name, &e, true, // commit already succeeded before destroy
                 );
                 continue;
             }
@@ -3296,17 +3368,15 @@ fn handle_post_merge_destroy(
                 );
                 // Emit structured recovery failure for agent parsing
                 super::capture::emit_recovery_surface_failed(
-                    ws_name,
-                    &e,
-                    true, // commit already succeeded before destroy
+                    ws_name, &e, true, // commit already succeeded before destroy
                 );
                 continue;
             }
         };
 
         // --- Step 3: Write append-only destroy record ---
-        let final_head = super::capture::resolve_head(&ws_path)
-            .unwrap_or_else(|_| base_epoch.oid().clone());
+        let final_head =
+            super::capture::resolve_head(&ws_path).unwrap_or_else(|_| base_epoch.oid().clone());
         let artifact_path_result = write_destroy_record(
             root,
             ws_name,
@@ -3354,7 +3424,9 @@ fn handle_post_merge_destroy(
                 maw::fp!("FP_DESTROY_AFTER_DELETE")?;
                 if text_mode {
                     if capture.is_some() {
-                        println!("    Destroyed: {ws_name} (snapshot saved \u{2192} maw ws recover {ws_name})");
+                        println!(
+                            "    Destroyed: {ws_name} (snapshot saved \u{2192} maw ws recover {ws_name})"
+                        );
                     } else {
                         println!("    Destroyed: {ws_name}");
                     }
@@ -3783,6 +3855,7 @@ mod tests {
             conflicts: vec![],
             message: "Merged to manifold: adopt work from alice".to_string(),
             next: "maw push".to_string(),
+            advice: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&output).unwrap();
@@ -3794,6 +3867,7 @@ mod tests {
         assert_eq!(parsed["branch"], "manifold");
         assert_eq!(parsed["next"], "maw push");
         assert_eq!(parsed["unique_count"], 3);
+        assert!(parsed["advice"].is_array());
     }
 
     #[test]
@@ -3971,7 +4045,10 @@ mod tests {
         ];
         let ids = assign_conflict_ids(&records);
 
-        assert_ne!(ids[0].id, ids[1].id, "different paths should get different IDs");
+        assert_ne!(
+            ids[0].id, ids[1].id,
+            "different paths should get different IDs"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3992,7 +4069,9 @@ mod tests {
         let raw = vec!["cf-abcd=my-workspace".to_string()];
         let parsed = parse_resolutions(&raw).unwrap();
 
-        assert!(matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "my-workspace"));
+        assert!(
+            matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "my-workspace")
+        );
     }
 
     #[test]
@@ -4000,7 +4079,9 @@ mod tests {
         let raw = vec!["cf-abcd=content:/tmp/resolved.rs".to_string()];
         let parsed = parse_resolutions(&raw).unwrap();
 
-        assert!(matches!(&parsed["cf-abcd"], Resolution::Content(p) if p == Path::new("/tmp/resolved.rs")));
+        assert!(
+            matches!(&parsed["cf-abcd"], Resolution::Content(p) if p == Path::new("/tmp/resolved.rs"))
+        );
     }
 
     #[test]
@@ -4057,10 +4138,7 @@ mod tests {
 
         assert!(remaining.is_empty());
         assert_eq!(resolved.len(), 1);
-        assert_eq!(
-            resolved[&PathBuf::from("new.rs")],
-            b"alice's version"
-        );
+        assert_eq!(resolved[&PathBuf::from("new.rs")], b"alice's version");
     }
 
     #[test]
@@ -4075,18 +4153,12 @@ mod tests {
         let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
 
         assert!(remaining.is_empty());
-        assert_eq!(
-            resolved[&PathBuf::from("new.rs")],
-            b"bob's version"
-        );
+        assert_eq!(resolved[&PathBuf::from("new.rs")], b"bob's version");
     }
 
     #[test]
     fn apply_resolutions_unresolved_remains() {
-        let records = vec![
-            add_add_record("a.rs"),
-            add_add_record("b.rs"),
-        ];
+        let records = vec![add_add_record("a.rs"), add_add_record("b.rs")];
         let conflicts = assign_conflict_ids(&records);
         let id_a = conflicts[0].id.clone();
         let mut resolutions = BTreeMap::new();
@@ -4105,7 +4177,10 @@ mod tests {
         let records = vec![add_add_record("a.rs")];
         let conflicts = assign_conflict_ids(&records);
         let mut resolutions = BTreeMap::new();
-        resolutions.insert("cf-zzzz".to_string(), Resolution::Workspace("alice".to_string()));
+        resolutions.insert(
+            "cf-zzzz".to_string(),
+            Resolution::Workspace("alice".to_string()),
+        );
 
         let ws_dirs = BTreeMap::new();
         let result = apply_resolutions(&conflicts, &resolutions, &ws_dirs);
@@ -4126,10 +4201,7 @@ mod tests {
         let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
 
         assert!(remaining.is_empty());
-        assert_eq!(
-            resolved[&PathBuf::from("new.rs")],
-            b"bob's version"
-        );
+        assert_eq!(resolved[&PathBuf::from("new.rs")], b"bob's version");
     }
 
     // -----------------------------------------------------------------------
@@ -4139,7 +4211,8 @@ mod tests {
     #[test]
     fn conflict_json_includes_id_when_provided() {
         let record = content_record("src/lib.rs", "base", "alice", "bob");
-        let json = conflict_record_to_json_with_id(&record, Some("cf-test"), &["cf-test.0".to_string()]);
+        let json =
+            conflict_record_to_json_with_id(&record, Some("cf-test"), &["cf-test.0".to_string()]);
 
         assert_eq!(json.id.as_deref(), Some("cf-test"));
         assert_eq!(json.atom_ids, vec!["cf-test.0"]);
@@ -4155,6 +4228,9 @@ mod tests {
 
         // Verify serialization omits the id field
         let json_str = serde_json::to_string(&json).unwrap();
-        assert!(!json_str.contains("\"id\""), "id should be omitted when None");
+        assert!(
+            !json_str.contains("\"id\""),
+            "id should be omitted when None"
+        );
     }
 }
