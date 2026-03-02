@@ -198,15 +198,23 @@ fn draw_workspace_pane(
     if ws.is_dirty {
         title_parts.push("*".to_string());
     }
-    title_parts.push(format!(
-        "  +{} commit{}",
-        ws.commit_count,
-        if ws.commit_count == 1 { "" } else { "s" }
-    ));
-    if ws.commit_count > 0
-        && let Some(secs) = ws.last_activity_secs {
-            title_parts.push(format!("  {}", format_time_ago(secs)));
+    if ws.is_default {
+        // Default workspace: show dirty file count instead of commit count.
+        let dirty_count = flatten_tree(&ws.file_tree, 0).len();
+        if dirty_count > 0 {
+            title_parts.push(format!("  {dirty_count} dirty file{}", if dirty_count == 1 { "" } else { "s" }));
         }
+    } else {
+        title_parts.push(format!(
+            "  +{} commit{}",
+            ws.commit_count,
+            if ws.commit_count == 1 { "" } else { "s" }
+        ));
+        if ws.commit_count > 0
+            && let Some(secs) = ws.last_activity_secs {
+                title_parts.push(format!("  {}", format_time_ago(secs)));
+            }
+    }
     if ws.is_stale {
         title_parts.push("  stale".to_string());
     }

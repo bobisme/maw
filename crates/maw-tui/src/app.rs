@@ -22,6 +22,7 @@ pub struct WorkspaceEntry {
     pub name: String,
     pub path: PathBuf,
     pub is_stale: bool,
+    pub is_default: bool,
 }
 
 /// Trait that provides repo/workspace data to the TUI.
@@ -35,7 +36,7 @@ pub trait RepoDataSource {
     /// Return the configured branch name (e.g. "main").
     fn branch_name(&self) -> Result<String>;
 
-    /// List active workspaces (excluding "default").
+    /// List all workspaces (including "default").
     fn list_workspaces(&self) -> Result<Vec<WorkspaceEntry>>;
 }
 
@@ -218,6 +219,7 @@ pub struct WorkspacePane {
     pub last_activity_secs: Option<u64>,
     pub is_stale: bool,
     pub is_dirty: bool,
+    pub is_default: bool,
     pub file_tree: Vec<TreeNode>,
     /// Flat list of file paths (for overlap detection).
     pub file_paths: Vec<String>,
@@ -461,31 +463,52 @@ impl App {
         for entry in &entries {
             let ws_path = &entry.path;
 
-            // Get epoch diff: files changed relative to epoch
-            let epoch_files = Self::fetch_epoch_diff(&repo_root, ws_path);
+            if entry.is_default {
+                // Default workspace: show dirty working-copy files (not epoch diff,
+                // since default IS the epoch target).
+                let dirty_files = Self::fetch_dirty_files(ws_path);
+                let is_dirty = !dirty_files.is_empty();
+                let file_paths: Vec<String> = dirty_files.iter().map(|(_, p)| p.clone()).collect();
+                let file_tree = build_file_tree(&dirty_files);
 
-            // Get commit count and last activity
-            let (commit_count, last_activity_secs) =
-                Self::fetch_commit_info(&repo_root, ws_path);
+                panes.push(WorkspacePane {
+                    name: entry.name.clone(),
+                    commit_count: 0,
+                    last_activity_secs: None,
+                    is_stale: false,
+                    is_dirty,
+                    is_default: true,
+                    file_tree,
+                    file_paths,
+                });
+            } else {
+                // Agent workspace: show epoch diff (files changed vs epoch).
+                let epoch_files = Self::fetch_epoch_diff(&repo_root, ws_path);
+                let (commit_count, last_activity_secs) =
+                    Self::fetch_commit_info(&repo_root, ws_path);
+                let is_dirty = Self::check_dirty(ws_path);
+                let file_paths: Vec<String> = epoch_files.iter().map(|(_, p)| p.clone()).collect();
+                let file_tree = build_file_tree(&epoch_files);
 
-            // Check for dirty working copy
-            let is_dirty = Self::check_dirty(ws_path);
-
-            let file_paths: Vec<String> = epoch_files.iter().map(|(_, p)| p.clone()).collect();
-            let file_tree = build_file_tree(&epoch_files);
-
-            panes.push(WorkspacePane {
-                name: entry.name.clone(),
-                commit_count,
-                last_activity_secs,
-                is_stale: entry.is_stale,
-                is_dirty,
-                file_tree,
-                file_paths,
-            });
+                panes.push(WorkspacePane {
+                    name: entry.name.clone(),
+                    commit_count,
+                    last_activity_secs,
+                    is_stale: entry.is_stale,
+                    is_dirty,
+                    is_default: false,
+                    file_tree,
+                    file_paths,
+                });
+            }
         }
 
-        panes.sort_by(|a, b| a.name.cmp(&b.name));
+        // Sort: default first, then alphabetical.
+        panes.sort_by(|a, b| match (a.is_default, b.is_default) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        });
         Ok(panes)
     }
 
@@ -579,6 +602,48 @@ impl App {
             });
 
         (commit_count, last_activity_secs)
+    }
+
+    /// Get dirty (uncommitted) files in a workspace as status entries.
+    fn fetch_dirty_files(ws_path: &Path) -> Vec<(FileStatus, String)> {
+        let output = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(ws_path)
+            .output();
+
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut files = Vec::new();
+        for line in stdout.lines() {
+            if line.len() < 4 {
+                continue;
+            }
+            // Porcelain format: XY path (or XY old -> new for renames)
+            let status_char = line.chars().nth(1).unwrap_or(line.chars().next().unwrap_or('M'));
+            let status = match status_char {
+                'M' | ' ' => {
+                    // Check index status if worktree is unchanged
+                    let idx = line.chars().next().unwrap_or(' ');
+                    FileStatus::from_char(if status_char == ' ' { idx } else { status_char })
+                }
+                '?' => FileStatus::Added,
+                'D' => FileStatus::Deleted,
+                'R' => FileStatus::Renamed,
+                'A' => FileStatus::Added,
+                c => FileStatus::from_char(c),
+            };
+            let path = line[3..].trim().to_string();
+            if !path.is_empty() {
+                files.push((status, path));
+            }
+        }
+        files
     }
 
     /// Check if workspace has uncommitted changes.

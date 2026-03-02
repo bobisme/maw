@@ -27,15 +27,14 @@ impl RepoDataSource for CliDataSource {
         let mut entries = Vec::new();
         for info in &infos {
             let name = info.id.to_string();
-            if name == "default" {
-                continue;
-            }
+            let is_default = name == "default";
             let path = backend.workspace_path(&info.id);
             let is_stale = info.state.is_stale();
             entries.push(WorkspaceEntry {
                 name,
                 path,
                 is_stale,
+                is_default,
             });
         }
         Ok(entries)
