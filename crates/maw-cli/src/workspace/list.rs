@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use serde::Serialize;
 
@@ -29,6 +31,17 @@ pub struct WorkspaceInfo {
     pub(crate) template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) template_defaults: Option<TemplateDefaults>,
+    /// Merge check result (only present when --check is used).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_check: Option<MergeCheckSummary>,
+}
+
+/// Compact merge-check result for ws list output.
+#[derive(Serialize)]
+pub(crate) struct MergeCheckSummary {
+    pub(crate) ready: bool,
+    pub(crate) conflict_count: usize,
+    pub(crate) stale: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -58,7 +71,7 @@ pub struct AdviceDetails {
     pub(crate) fix: String,
 }
 
-pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
+pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
     let backend = get_backend()?;
     let backend_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -78,6 +91,37 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
 
     // Read metadata for all workspaces to get mode (ephemeral/persistent).
     let root = repo_root()?;
+
+    // If --check requested, run merge checks for workspaces with pending commits.
+    let merge_checks: HashMap<String, MergeCheckSummary> = if check {
+        let mut checks = HashMap::new();
+        for ws in &backend_workspaces {
+            let name = ws.id.as_str().to_string();
+            if name == DEFAULT_WORKSPACE || ws.commits_ahead == 0 {
+                continue;
+            }
+            match super::merge::check_merge_result(&[name.clone()]) {
+                Ok(result) => {
+                    checks.insert(name, MergeCheckSummary {
+                        ready: result.ready,
+                        conflict_count: result.conflicts.len(),
+                        stale: result.stale,
+                    });
+                }
+                Err(_) => {
+                    // Check failed — mark as not ready with 0 conflicts.
+                    checks.insert(name, MergeCheckSummary {
+                        ready: false,
+                        conflict_count: 0,
+                        stale: false,
+                    });
+                }
+            }
+        }
+        checks
+    } else {
+        HashMap::new()
+    };
 
     // Convert backend workspace info to display structs
     let mut workspaces: Vec<WorkspaceInfo> = backend_workspaces
@@ -117,6 +161,11 @@ pub fn list(verbose: bool, format: OutputFormat) -> Result<()> {
                 commits_ahead: ws.commits_ahead,
                 template: ws_meta.template.map(|t| t.to_string()),
                 template_defaults: ws_meta.template_defaults,
+                merge_check: merge_checks.get(&name).map(|mc| MergeCheckSummary {
+                    ready: mc.ready,
+                    conflict_count: mc.conflict_count,
+                    stale: mc.stale,
+                }),
                 name,
             }
         })
@@ -212,14 +261,23 @@ fn print_list_text(
 ) {
     for ws in workspaces {
         let path = ws.path.as_deref().unwrap_or("");
+        let check_annotation = ws.merge_check.as_ref().map(|mc| {
+            if mc.stale {
+                " [stale]".to_string()
+            } else if mc.ready {
+                " [clean]".to_string()
+            } else {
+                format!(" [{} conflict(s)]", mc.conflict_count)
+            }
+        });
         let annotation = if ws.state.contains("stale") {
-            " (stale)"
+            " (stale)".to_string()
         } else if ws.commits_ahead > 0 {
-            " (ready to merge)"
+            format!(" (ready to merge){}", check_annotation.as_deref().unwrap_or(""))
         } else if ws.state == "quarantine" {
-            " (quarantine)"
+            " (quarantine)".to_string()
         } else {
-            ""
+            String::new()
         };
         println!("{}\t{}{}", ws.name, path, annotation);
     }
@@ -277,9 +335,20 @@ fn print_list_pretty(
         };
 
         let mode_tag = if is_persistent { " [persistent]" } else { "" };
+        let check_tag = ws.merge_check.as_ref().map(|mc| {
+            if mc.stale {
+                if use_color { " \x1b[33m[stale]\x1b[0m".to_string() } else { " [stale]".to_string() }
+            } else if mc.ready {
+                if use_color { " \x1b[32m[clean]\x1b[0m".to_string() } else { " [clean]".to_string() }
+            } else if use_color {
+                format!(" \x1b[31m[{} conflict(s)]\x1b[0m", mc.conflict_count)
+            } else {
+                format!(" [{} conflict(s)]", mc.conflict_count)
+            }
+        }).unwrap_or_default();
         println!(
-            "{} {}{}{} {} {}{}",
-            glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag
+            "{} {}{}{} {} {}{}{}",
+            glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag, check_tag
         );
 
         if verbose {

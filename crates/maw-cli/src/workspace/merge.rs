@@ -1067,6 +1067,16 @@ pub struct CheckWorkspaceInfo {
 /// Runs PREPARE + BUILD without COMMIT to detect conflicts.
 /// Returns a `CheckResult` with structured info.
 pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
+    let result = check_merge_result(workspaces)?;
+    output_check_result(&result, format)
+}
+
+/// Run a merge pre-flight check and return the structured result.
+///
+/// This is the workhorse behind `maw ws merge --check`. It runs PREPARE + BUILD
+/// without COMMIT to detect conflicts. Also used by `maw ws list --check` to
+/// annotate merge-ready workspaces with conflict counts.
+pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --check");
     }
@@ -1088,18 +1098,17 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     let primary_ws = &workspaces[0];
     let ws_info = CheckWorkspaceInfo {
         name: primary_ws.clone(),
-        change_id: String::new(), // Not surfaced in Manifold check output.
+        change_id: String::new(),
     };
 
     if is_stale {
-        let result = CheckResult {
+        return Ok(CheckResult {
             ready: false,
             conflicts: Vec::new(),
             stale: true,
             workspace: ws_info,
             description: String::new(),
-        };
-        return output_check_result(&result, format);
+        });
     }
 
     // Try a BUILD phase to detect conflicts (don't COMMIT)
@@ -1126,10 +1135,8 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     match prepare_result {
         Ok(_frozen) => {
             // PREPARE succeeded, now try BUILD
-            // Re-create dir for build
             let temp_build_dir = tempfile::Builder::new().prefix("build-tmp-").tempdir_in(&manifold_dir).context("Failed to create temp dir for build check")?;
             let build_dir = temp_build_dir.path().to_path_buf();
-            // Propagate second prepare error so build doesn't run on uninitialized dir.
             run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs)
                 .context("prepare phase failed for build check")?;
             let build_result = run_build_phase(&root, &build_dir, &backend);
@@ -1143,49 +1150,42 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
                         .map(conflict_record_to_info)
                         .collect();
                     let ready = conflicts.is_empty();
-                    let result = CheckResult {
+                    Ok(CheckResult {
                         ready,
                         conflicts,
                         stale: false,
                         workspace: ws_info,
                         description: String::new(),
-                    };
-                    output_check_result(&result, format)
+                    })
                 }
-                Err(e) => {
-                    let result = CheckResult {
-                        ready: false,
-                        conflicts: vec![ConflictInfo {
-                            path: String::new(),
-                            reason: format!("build failed: {e}"),
-                            sides: Vec::new(),
-                            line_start: None,
-                            line_end: None,
-                        }],
-                        stale: false,
-                        workspace: ws_info,
-                        description: String::new(),
-                    };
-                    output_check_result(&result, format)
-                }
+                Err(e) => Ok(CheckResult {
+                    ready: false,
+                    conflicts: vec![ConflictInfo {
+                        path: String::new(),
+                        reason: format!("build failed: {e}"),
+                        sides: Vec::new(),
+                        line_start: None,
+                        line_end: None,
+                    }],
+                    stale: false,
+                    workspace: ws_info,
+                    description: String::new(),
+                }),
             }
         }
-        Err(e) => {
-            let result = CheckResult {
-                ready: false,
-                conflicts: vec![ConflictInfo {
-                    path: String::new(),
-                    reason: format!("prepare failed: {e}"),
-                    sides: Vec::new(),
-                    line_start: None,
-                    line_end: None,
-                }],
-                stale: false,
-                workspace: ws_info,
-                description: String::new(),
-            };
-            output_check_result(&result, format)
-        }
+        Err(e) => Ok(CheckResult {
+            ready: false,
+            conflicts: vec![ConflictInfo {
+                path: String::new(),
+                reason: format!("prepare failed: {e}"),
+                sides: Vec::new(),
+                line_start: None,
+                line_end: None,
+            }],
+            stale: false,
+            workspace: ws_info,
+            description: String::new(),
+        }),
     }
 }
 

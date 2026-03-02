@@ -1,11 +1,35 @@
 //! gix-backed ref, rev-parse, and ancestry operations.
 
+use std::io::Read as _;
+use std::path::Path;
+
 use gix::refs::transaction::{Change, LogChange, PreviousValue};
 use gix::refs::{Target, FullName};
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
 use crate::types::*;
+
+/// Ensure a loose ref file ends with `\n`.
+///
+/// gix writes refs as 40 hex bytes without a trailing newline, but git's
+/// canonical format requires one. `git fsck` warns `refMissingNewline`
+/// for refs that lack it, and some hosting services reject pushes that
+/// contain such refs.
+fn ensure_ref_newline(git_dir: &Path, ref_name: &str) {
+    let ref_path = git_dir.join(ref_name);
+    let Ok(mut f) = std::fs::File::open(&ref_path) else {
+        return; // packed ref or missing — nothing to fix
+    };
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_ok() && !buf.is_empty() && !buf.ends_with(b"\n") {
+        drop(f);
+        // Re-open for append and add the newline
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&ref_path) {
+            let _ = std::io::Write::write_all(&mut f, b"\n");
+        }
+    }
+}
 
 /// Convert a `GitOid` to a `gix::ObjectId`.
 fn to_gix_oid(oid: &GitOid) -> gix::ObjectId {
@@ -53,6 +77,7 @@ pub fn write_ref(
         .map_err(|e| GitError::BackendError {
             message: e.to_string(),
         })?;
+    ensure_ref_newline(repo.repo.git_dir(), name.as_str());
     Ok(())
 }
 
@@ -133,6 +158,10 @@ pub fn atomic_ref_update(repo: &GixRepo, edits: &[RefEdit]) -> Result<(), GitErr
                 GitError::BackendError { message: msg }
             }
         })?;
+    let git_dir = repo.repo.git_dir();
+    for edit in edits {
+        ensure_ref_newline(git_dir, edit.name.as_str());
+    }
     Ok(())
 }
 

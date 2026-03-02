@@ -399,6 +399,16 @@ pub enum WorkspaceCommands {
         #[arg(short, long)]
         verbose: bool,
 
+        /// Check merge readiness for each workspace with pending commits.
+        ///
+        /// Runs the merge engine's conflict detection for every workspace
+        /// that has unmerged work. Results appear as annotations in the
+        /// output (text: "(clean)" / "(N conflicts)"; JSON: merge_check field).
+        ///
+        /// This is slower than a plain list since it simulates each merge.
+        #[arg(long)]
+        check: bool,
+
         /// Output format: text, json, or pretty
         ///
         /// If not specified, auto-detects: pretty for TTY, text for pipes.
@@ -962,10 +972,12 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         }
         WorkspaceCommands::List {
             verbose,
+            check,
             format,
             json,
         } => list::list(
             verbose,
+            check,
             OutputFormat::resolve(OutputFormat::with_json_flag(format, json)),
         ),
         WorkspaceCommands::Status { format, json } => status::status(OutputFormat::resolve(
