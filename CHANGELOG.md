@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.52.0
+
+### Fixed
+- **TUI showed "No workspaces" when no agent workspaces exist** (bn-15od). The TUI now includes the default workspace as a pane showing dirty working-copy files. Default pane sorts first and shows dirty file count in the title.
+- **gix ref writes lacked trailing newline** (bn-3pia). Loose refs written by gix omit the trailing LF that git's canonical format requires, causing `git fsck` `refMissingNewline` warnings. Added `ensure_ref_newline()` post-write fixup.
+
+### Added
+- **`maw ws list --check`** (bn-2iux). Runs the merge engine's conflict detection for each workspace with unmerged commits. Text output shows `[clean]` or `[N conflict(s)]`; JSON adds a `merge_check` field. Opt-in (slower than plain list).
+
 ## v0.51.0
 
 ### Fixed
