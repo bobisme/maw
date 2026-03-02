@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "maw-assurance"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "maw-cli"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "maw-core"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "maw-git",
@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "maw-git"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "gix",
  "tempfile",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "maw-tui"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "maw-workspaces"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "clap",

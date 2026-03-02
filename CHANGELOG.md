@@ -2,6 +2,20 @@
 
 All notable changes to maw.
 
+## v0.51.0
+
+### Fixed
+- **Tree sort order in merge engine** (bn-39r3). `build_tree()` used plain lexicographic sort instead of git's canonical tree sort (directories sort as `name/`). This produced trees rejected by GitHub's `receive.fsckObjects` check when a directory and blob shared a common prefix (e.g., `notes/assurance/` vs `notes/assurance-plan.md`).
+- **Global-view epoch wrong source** (bn-1wqe). `maw ws status` computed the epoch by taking the lexicographic max of workspace epochs instead of reading `refs/manifold/epoch/current` directly.
+- **Stale merge-state warning noise** (bn-2fd1). Downgraded the "stale merge-state found" message from `eprintln!` to `tracing::debug!` — it fires after successful merges and confuses agents.
+- **`ws diff` missed untracked files** (bn-3bo8). Refactored diff to compare base revision against the working tree (not HEAD), and to include untracked files in stat/patch/numstat output.
+- **Mixed staged/unstaged after merge snapshot replay** (bn-1r81). After replaying a dirty-state snapshot, all files are now unstaged via gix index reset (new `unstage_all()` trait method) so `git status` shows a clean staged area.
+- **Merge without `--message` gave no feedback** (bn-1dkl). When no message is provided, merge now shows the auto-generated commit subject and a hint to amend.
+
+### Changed
+- **Workspace lints consolidated**. Lint configuration moved from per-crate `[lints.*]` sections to `[workspace.lints.*]` in root Cargo.toml. All crates use `[lints] workspace = true`.
+- **Release profile optimized**. Added `opt-level = "z"`, LTO, single codegen unit, `panic = "abort"`, and symbol stripping to `[profile.release]`.
+
 ## v0.50.0
 
 ### Fixed
