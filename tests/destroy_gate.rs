@@ -100,7 +100,14 @@ fn it_g4_001_post_merge_destroy_captures_state_before_deletion() {
     );
 
     // Merge with --destroy
-    repo.maw_ok(&["ws", "merge", "gated-ws", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "gated-ws",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Workspace is destroyed
     assert!(
@@ -349,7 +356,14 @@ fn it_g4_001_post_merge_destroy_captures_extra_dirty_state() {
     );
 
     // Merge with --destroy
-    repo.maw_ok(&["ws", "merge", "extra-dirty", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "extra-dirty",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Workspace destroyed
     assert!(!repo.workspace_exists("extra-dirty"));

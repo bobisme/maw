@@ -64,7 +64,14 @@ fn s1_merge_dirty_default_preserves_untracked_and_creates_recovery_ref() {
     repo.add_file("default", "local/draft.md", "draft content\n");
 
     // Merge agent workspace with --destroy.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Assert: recovery ref exists for the agent workspace (the one destroyed).
     let refs = recovery_refs(&repo, "agent");
@@ -120,7 +127,14 @@ fn s2_destroy_record_is_valid_json() {
     repo.modify_file("default", "base.txt", "locally modified\n");
 
     // Merge with --destroy.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Check for destroy record JSON under .manifold/artifacts/ws/agent/destroy/.
     let destroy_dir = repo
@@ -209,7 +223,14 @@ fn s3_clean_default_merge_succeeds() {
     );
 
     // Merge should succeed without errors.
-    let output = repo.maw_raw(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    let output = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -256,7 +277,14 @@ fn s4_recovery_ref_contains_pre_destroy_content() {
     repo.add_file("default", "notes.txt", "human notes\n");
 
     // Merge with --destroy.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Find the recovery ref for the agent workspace.
     let refs = recovery_refs(&repo, "agent");

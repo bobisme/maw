@@ -37,6 +37,13 @@ pub struct WorkspaceEntry {
     pub(crate) epoch: String,
     pub(crate) state: String,
     pub(crate) mode: String,
+    /// Number of unresolved rebase conflicts (0 = none).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) rebase_conflicts: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize)]
@@ -101,23 +108,26 @@ pub fn status(format: OutputFormat) -> Result<()> {
         .iter()
         .map(|ws| {
             let is_default = ws.id.as_str() == default_ws_name;
+            let ws_meta = metadata::read(&root, ws.id.as_str()).unwrap_or_default();
             let ws_mode = if is_default {
                 WorkspaceMode::Persistent
             } else {
-                metadata::read(&root, ws.id.as_str())
-                    .map(|m| m.mode)
-                    .unwrap_or(WorkspaceMode::Ephemeral)
+                ws_meta.mode
             };
+            let rebase_conflicts = ws_meta.rebase_conflict_count;
             WorkspaceEntry {
                 name: ws.id.as_str().to_string(),
                 is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),
                 state: if is_default {
                     "active".to_owned()
+                } else if rebase_conflicts > 0 {
+                    format!("conflicted ({rebase_conflicts} conflict(s))")
                 } else {
                     format!("{}", ws.state)
                 },
                 mode: format!("{ws_mode}"),
+                rebase_conflicts,
             }
         })
         .collect();
@@ -218,6 +228,11 @@ fn print_status_text(
     println!("workspaces:");
     for ws in workspaces {
         let default_marker = if ws.is_default { "  (default)" } else { "" };
+        let conflict_marker = if ws.rebase_conflicts > 0 {
+            format!(" [conflicted: {} rebase conflict(s)]", ws.rebase_conflicts)
+        } else {
+            String::new()
+        };
         let stale_marker = if ws.state.contains("stale") {
             " [stale]"
         } else {
@@ -229,8 +244,8 @@ fn print_status_text(
             ""
         };
         println!(
-            "  {}  epoch:{}{}{}{}",
-            ws.name, ws.epoch, stale_marker, mode_marker, default_marker
+            "  {}  epoch:{}{}{}{}{}",
+            ws.name, ws.epoch, stale_marker, conflict_marker, mode_marker, default_marker
         );
     }
 

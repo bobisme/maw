@@ -50,7 +50,14 @@ fn t1_modified_tracked_file_in_default_survives_merge() {
     repo.modify_file("default", "tracked.txt", "user modified content\n");
 
     // Merge agent work -- this triggers the default workspace update
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Assert: user's modification of tracked.txt is preserved
     assert_eq!(
@@ -88,7 +95,14 @@ fn t2_untracked_file_in_default_survives_merge() {
     repo.add_file("default", "user-notes.txt", "my personal notes\n");
 
     // Merge agent work
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Assert: untracked file in default survives
     assert!(
@@ -135,7 +149,14 @@ fn t3_staged_changes_in_default_survive_merge() {
     repo.git_in_workspace("default", &["add", "config.txt"]);
 
     // Merge agent work
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Assert: staged changes are preserved in file content
     assert_eq!(
@@ -170,7 +191,14 @@ fn t4_clean_default_merge_succeeds() {
     // Default workspace is clean (no user modifications)
 
     // Merge agent work
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Assert: agent work is present
     assert_eq!(
@@ -214,7 +242,14 @@ fn t5_mixed_dirty_files_survive_merge() {
     repo.add_file("default", "scratch.txt", "user scratch work\n");
 
     // Merge agent work
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Assert: non-overlapping user modification preserved
     assert_eq!(
@@ -285,7 +320,14 @@ fn t6_replay_conflict_leaves_markers_and_cleanup_completes() {
     // Merge: this must succeed (non-zero exit is acceptable for the merge
     // command itself since the output may include a warning, but the merge
     // COMMIT must have landed).
-    let out = repo.maw_raw(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -339,7 +381,14 @@ fn t7_merge_cleanup_completes_after_commit_regardless_of_replay() {
     repo.add_file("default", "local-notes.txt", "my notes\n");
 
     // Merge alice (this updates the epoch).
-    repo.maw_ok(&["ws", "merge", "alice", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Alice's workspace should be gone.
     assert!(

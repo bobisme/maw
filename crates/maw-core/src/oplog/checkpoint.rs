@@ -490,6 +490,11 @@ where
         OpPayload::Destroy => {
             view.is_destroyed = true;
         }
+
+        // Rebase ops are informational — they don't change the workspace view.
+        OpPayload::RebaseReplay { .. }
+        | OpPayload::ConflictDetected { .. }
+        | OpPayload::ConflictResolved { .. } => {}
     }
 
     Ok(())

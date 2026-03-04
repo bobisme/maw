@@ -2082,6 +2082,20 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         workspace_dirs.insert(ws_id.clone(), ws_path);
     }
 
+    // Refuse merge if any source workspace has unresolved rebase conflicts.
+    for ws_name in &ws_to_merge {
+        let ws_meta = super::metadata::read(&root, ws_name).unwrap_or_default();
+        if ws_meta.rebase_conflict_count > 0 {
+            bail!(
+                "Workspace '{ws_name}' has {} unresolved rebase conflict(s).\n  \
+                 Resolve conflicts first, then retry the merge.\n  \
+                 To see conflicts: maw ws conflicts {ws_name}\n  \
+                 To force merge anyway: maw ws merge {ws_name} --force (not yet implemented)",
+                ws_meta.rebase_conflict_count
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Phase 1: PREPARE — freeze inputs
     // -----------------------------------------------------------------------

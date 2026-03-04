@@ -548,13 +548,25 @@ pub enum WorkspaceCommands {
     ///
     /// Use --all to sync all workspaces at once, useful after epoch
     /// advancement or when multiple workspaces may be stale.
+    ///
+    /// Use --rebase to replay workspace commits onto the current epoch.
+    /// If the workspace has committed work that hasn't been merged yet,
+    /// normal sync refuses. With --rebase, commits are cherry-picked onto
+    /// the new epoch. Conflicts are recorded as data (not workflow blockers):
+    /// conflict markers are written to the working tree and the workspace
+    /// is marked as 'conflicted'. The agent can then edit conflicted files,
+    /// remove markers, and commit to resolve.
     Sync {
         /// Name of the workspace to sync (defaults to current workspace)
         name: Option<String>,
 
         /// Sync all workspaces instead of just the current one
-        #[arg(long, conflicts_with = "name")]
+        #[arg(long, conflicts_with = "name", conflicts_with = "rebase")]
         all: bool,
+
+        /// Replay workspace commits onto the current epoch (conflict-as-data rebase)
+        #[arg(long, conflicts_with = "all")]
+        rebase: bool,
     },
 
     /// Show commit history for a workspace
@@ -1046,7 +1058,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             overlap::overlap(&ws1, &ws2, fmt)
         }
-        WorkspaceCommands::Sync { name, all } => sync::sync(name.as_deref(), all),
+        WorkspaceCommands::Sync { name, all, rebase } => sync::sync(name.as_deref(), all, rebase),
         WorkspaceCommands::History {
             name,
             limit,
@@ -1106,7 +1118,11 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 &merge::MergeOptions {
                     destroy_after: destroy,
                     confirm,
-                    message: if dry_run { None } else { Some(&resolved_message) },
+                    message: if dry_run {
+                        None
+                    } else {
+                        Some(&resolved_message)
+                    },
                     dry_run,
                     format: fmt,
                     resolve,

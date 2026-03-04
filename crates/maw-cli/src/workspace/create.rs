@@ -79,6 +79,7 @@ pub fn create(
             mode,
             template,
             template_defaults: template_profile.as_ref().map(|p| p.defaults.clone()),
+            rebase_conflict_count: 0,
         };
         metadata::write(&root, name, &meta)
             .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;

@@ -26,7 +26,15 @@ fn basic_merge_destroy_two_workspaces() {
     repo.add_file("alice", "alice.txt", "Alice's work\n");
     repo.add_file("bob", "bob.txt", "Bob's work\n");
 
-    repo.maw_ok(&["ws", "merge", "alice", "bob", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "alice",
+        "bob",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     assert_eq!(
         repo.read_file("default", "alice.txt").as_deref(),
@@ -54,7 +62,15 @@ fn merge_conflict_preserves_source_workspaces() {
     repo.modify_file("alice", "shared.txt", "alice\n");
     repo.modify_file("bob", "shared.txt", "bob\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "alice", "bob", "--destroy", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "bob",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}\n{stderr}").to_lowercase();
@@ -79,7 +95,14 @@ fn merge_preserves_dirty_default_changes() {
 
     repo.add_file("default", "local.txt", "local default edits\n");
 
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     assert_eq!(
         repo.read_file("default", "agent.txt").as_deref(),
@@ -98,7 +121,14 @@ fn merge_captures_source_workspace_edits_without_extra_vcs_commands() {
     repo.maw_ok(&["ws", "create", "worker"]);
     repo.add_file("worker", "result.txt", "worker output\n");
 
-    repo.maw_ok(&["ws", "merge", "worker", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     assert_eq!(
         repo.read_file("default", "result.txt").as_deref(),
@@ -156,7 +186,16 @@ fn merge_json_success_stdout_is_pure_json() {
     repo.add_file("json-a", "a.txt", "a\n");
     repo.add_file("json-b", "b.txt", "b\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "json-a",
+        "json-b",
+        "--format",
+        "json",
+        "--message",
+        "test merge",
+    ]);
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -209,7 +248,16 @@ fn merge_json_conflict_stdout_is_pure_json() {
     repo.modify_file("json-a", "shared.txt", "alpha\n");
     repo.modify_file("json-b", "shared.txt", "beta\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "json-a",
+        "json-b",
+        "--format",
+        "json",
+        "--message",
+        "test merge",
+    ]);
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     assert!(!out.status.success(), "conflicting merge should fail");
@@ -252,7 +300,14 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
 
     // Merging epoch-advancer advances the current epoch to E2, which now has
     // vendor/pkg/.cargo-ok. The worker workspace's base epoch is still E1.
-    repo.maw_ok(&["ws", "merge", "epoch-advancer", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "epoch-advancer",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Worker does some unrelated work. After the epoch advanced, git diff
     // <new_epoch> in the worker shows vendor/pkg/.cargo-ok as D (present in
@@ -261,7 +316,14 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
     repo.add_file("worker", "worker.txt", "worker output\n");
 
     // This must not fail — the phantom deletion is silently skipped.
-    repo.maw_ok(&["ws", "merge", "worker", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Worker's real changes are applied.
     assert_eq!(
@@ -297,7 +359,14 @@ fn merge_with_dirty_default_records_snapshot_op_in_default_oplog() {
     repo.add_file("default", "local-notes.txt", "my local notes\n");
 
     // Merge the agent workspace.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // The default workspace's oplog should contain a Snapshot operation.
     let history = repo.maw_ok(&["ws", "history", "default", "--format", "json"]);
@@ -338,7 +407,14 @@ fn merge_with_clean_default_does_not_record_snapshot_op() {
     // Do NOT add any dirty files to the default workspace.
 
     // Merge the agent workspace.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // The default workspace's oplog should NOT contain a Snapshot operation.
     let history_result = repo.maw_raw(&["ws", "history", "default", "--format", "json"]);
@@ -411,7 +487,15 @@ fn merge_empty_workspace_json_output() {
 
     repo.maw_ok(&["ws", "create", "empty-json"]);
 
-    let out = repo.maw_raw(&["ws", "merge", "empty-json", "--format", "json", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "empty-json",
+        "--format",
+        "json",
+        "--message",
+        "test merge",
+    ]);
     assert!(
         !out.status.success(),
         "merging an empty workspace should fail even with --format json"

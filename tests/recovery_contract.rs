@@ -121,7 +121,15 @@ fn merge_destroy_emits_recovery_surface_for_dirty_workspace() {
     repo.add_file("merge-contract", "leftover.txt", "uncommitted\n");
 
     // --verbose is required to get full RECOVERY_SURFACE output
-    let out = repo.maw_raw(&["ws", "merge", "merge-contract", "--destroy", "--message", "test merge", "--verbose"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "merge-contract",
+        "--destroy",
+        "--message",
+        "test merge",
+        "--verbose",
+    ]);
     assert!(
         out.status.success(),
         "merge --destroy --verbose should succeed.\nstdout: {}\nstderr: {}",
@@ -156,7 +164,14 @@ fn merge_destroy_without_verbose_omits_recovery_surface() {
     repo.add_file("merge-short", "committed.txt", "merged content\n");
     repo.add_file("merge-short", "leftover.txt", "uncommitted\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "merge-short", "--destroy", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "merge-short",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
     assert!(
         out.status.success(),
         "merge --destroy should succeed.\nstdout: {}\nstderr: {}",

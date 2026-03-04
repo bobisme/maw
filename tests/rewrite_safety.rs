@@ -109,7 +109,14 @@ fn it_g2_001_dirty_default_untracked_files_survive_post_commit_rewrite() {
     );
 
     // Step 4: Merge worker --destroy
-    repo.maw_ok(&["ws", "merge", "worker", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Step 5a: Verify merged content appears in default
     assert_eq!(
@@ -183,7 +190,15 @@ fn it_g2_001_dirty_default_survives_multi_workspace_merge() {
     repo.add_file("default", "tmp/cache.dat", "cached data\n");
 
     // Multi-workspace merge
-    repo.maw_ok(&["ws", "merge", "alpha", "beta", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "alpha",
+        "beta",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Merged content present
     assert_eq!(
@@ -232,7 +247,14 @@ fn it_g2_001_dirty_default_does_not_corrupt_merge_result() {
     // Default has untracked files in the same directory tree
     repo.add_file("default", "my-local.txt", "local stuff\n");
 
-    repo.maw_ok(&["ws", "merge", "modifier", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "modifier",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Merge result is correct (worker's modification applied)
     assert_eq!(
@@ -474,7 +496,14 @@ fn it_g2_002_merge_destroy_creates_restorable_recovery_ref() {
     repo.add_file("merge-capture", "leftover.txt", "leftover content\n");
 
     // Merge and destroy
-    repo.maw_ok(&["ws", "merge", "merge-capture", "--destroy", "--message", "test merge"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "merge-capture",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Workspace is gone
     assert!(

@@ -97,6 +97,38 @@ pub enum OpPayload {
         message: String,
     },
 
+    /// A single commit was replayed during a `sync --rebase` operation.
+    RebaseReplay {
+        /// The original commit OID that was cherry-picked.
+        original_commit: GitOid,
+        /// The new commit OID after replay (if successful).
+        new_commit: Option<GitOid>,
+        /// Whether the replay produced conflicts.
+        had_conflicts: bool,
+    },
+
+    /// A conflict was detected during rebase replay.
+    ConflictDetected {
+        /// File path relative to the workspace root.
+        path: String,
+        /// The original commit being replayed when the conflict occurred.
+        original_commit: GitOid,
+        /// Git blob OID of the base content (merge base).
+        base_blob: Option<GitOid>,
+        /// Git blob OID of "ours" (the new epoch version).
+        ours_blob: Option<GitOid>,
+        /// Git blob OID of "theirs" (the workspace commit version).
+        theirs_blob: Option<GitOid>,
+    },
+
+    /// A rebase conflict was resolved (agent edited the file and committed).
+    ConflictResolved {
+        /// File path that was resolved.
+        path: String,
+        /// The commit that resolves this conflict.
+        resolution_commit: GitOid,
+    },
+
     /// An arbitrary annotation attached to the op log (e.g., validation
     /// result, review status, CI outcome).
     Annotate {

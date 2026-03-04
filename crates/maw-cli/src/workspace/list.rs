@@ -34,6 +34,9 @@ pub struct WorkspaceInfo {
     /// Merge check result (only present when --check is used).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) merge_check: Option<MergeCheckSummary>,
+    /// Number of unresolved rebase conflicts (0 = none).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) rebase_conflicts: u32,
 }
 
 /// Compact merge-check result for ws list output.
@@ -147,6 +150,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             } else {
                 ws_meta.mode
             };
+            let rebase_conflicts = ws_meta.rebase_conflict_count;
             WorkspaceInfo {
                 is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),
@@ -156,6 +160,8 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                     "quarantine".to_owned()
                 } else if is_default {
                     "active".to_owned()
+                } else if rebase_conflicts > 0 {
+                    format!("conflicted ({rebase_conflicts} conflict(s))")
                 } else if ws.commits_ahead > 0 {
                     format!("active (+{} to merge)", ws.commits_ahead)
                 } else {
@@ -172,6 +178,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                     conflict_count: mc.conflict_count,
                     stale: mc.stale,
                 }),
+                rebase_conflicts,
                 name,
             }
         })

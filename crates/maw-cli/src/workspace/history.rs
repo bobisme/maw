@@ -142,6 +142,9 @@ const fn op_type(payload: &OpPayload) -> &'static str {
         OpPayload::Compensate { .. } => "compensate",
         OpPayload::Describe { .. } => "describe",
         OpPayload::Annotate { .. } => "annotate",
+        OpPayload::RebaseReplay { .. } => "rebase-replay",
+        OpPayload::ConflictDetected { .. } => "conflict-detected",
+        OpPayload::ConflictResolved { .. } => "conflict-resolved",
     }
 }
 
@@ -185,6 +188,20 @@ fn summarize_payload(payload: &OpPayload) -> String {
             format!("describe: {truncated}")
         }
         OpPayload::Annotate { key, .. } => format!("annotate: {key}"),
+        OpPayload::RebaseReplay {
+            original_commit,
+            had_conflicts,
+            ..
+        } => {
+            let prefix = &original_commit.as_str()[..original_commit.as_str().len().min(8)];
+            if *had_conflicts {
+                format!("rebase replay {prefix} (conflicts)")
+            } else {
+                format!("rebase replay {prefix}")
+            }
+        }
+        OpPayload::ConflictDetected { path, .. } => format!("conflict detected: {path}"),
+        OpPayload::ConflictResolved { path, .. } => format!("conflict resolved: {path}"),
     }
 }
 

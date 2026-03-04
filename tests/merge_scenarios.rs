@@ -917,7 +917,14 @@ fn maw_cli_merge_with_destroy() {
     repo.add_file("agent-1", "feature.txt", "new feature\n");
 
     // Merge with --destroy
-    let out = repo.maw_raw(&["ws", "merge", "agent-1", "--destroy", "--message", "test merge"]);
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent-1",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -1109,7 +1116,16 @@ fn eval_three_agent_parallel_disjoint_files() {
     );
 
     // Step 5: Merge all 3 workspaces with --destroy via maw CLI
-    let merge_out = repo.maw_ok(&["ws", "merge", "agent-1", "agent-2", "agent-3", "--destroy", "--message", "test merge"]);
+    let merge_out = repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent-1",
+        "agent-2",
+        "agent-3",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
 
     // Merge should report success
     assert!(
@@ -1351,7 +1367,14 @@ fn eval_conflict_detection_and_resolution() {
     }
 
     // Step 4: Full merge should fail with a conflict error.
-    let merge_out = repo.maw_raw(&["ws", "merge", "agent-1", "agent-2", "--message", "test merge"]);
+    let merge_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent-1",
+        "agent-2",
+        "--message",
+        "test merge",
+    ]);
     assert!(
         !merge_out.status.success(),
         "merge should fail due to unresolved conflict"
@@ -1403,7 +1426,15 @@ fn eval_conflict_detection_and_resolution() {
     );
 
     // Step 6: Re-merge after resolution — should succeed.
-    let final_merge = repo.maw_ok(&["ws", "merge", "agent-1", "agent-2", "--destroy", "--message", "test merge"]);
+    let final_merge = repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent-1",
+        "agent-2",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
     assert!(
         final_merge.contains("Merged")
             || final_merge.contains("merge")
