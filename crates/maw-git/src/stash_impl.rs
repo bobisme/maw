@@ -302,28 +302,72 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                         message: format!("failed to read blob {oid} for '{path_str}': {e}"),
                     })?;
 
-                // Write file to worktree.
                 let file_path = workdir.join(path_str);
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| GitError::BackendError {
                         message: format!("failed to create directory for '{path_str}': {e}"),
                     })?;
                 }
-                let mut file =
-                    std::fs::File::create(&file_path).map_err(|e| GitError::BackendError {
-                        message: format!("failed to create file '{path_str}': {e}"),
-                    })?;
-                file.write_all(blob.data.as_ref())
-                    .map_err(|e| GitError::BackendError {
-                        message: format!("failed to write file '{path_str}': {e}"),
-                    })?;
 
-                // Set executable bit on Unix if needed.
-                #[cfg(unix)]
-                if entry_mode.kind() == gix::objs::tree::EntryKind::BlobExecutable {
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = std::fs::Permissions::from_mode(0o755);
-                    std::fs::set_permissions(&file_path, perms).ok();
+                // SAFETY: Remove any existing symlink (or file) before writing.
+                // If we skip this, File::create follows existing symlinks and
+                // corrupts the symlink target instead of replacing the symlink.
+                // This was the root cause of the .bones/events shard corruption:
+                // writing symlink target text through a symlink into the real file.
+                if let Ok(meta) = std::fs::symlink_metadata(&file_path) {
+                    if meta.is_symlink() || meta.is_file() {
+                        let _ = std::fs::remove_file(&file_path);
+                    }
+                }
+
+                if entry_mode.kind() == gix::objs::tree::EntryKind::Link {
+                    // Symlink entry: blob content is the target path.
+                    let target = blob.data.as_slice().as_bstr().to_str().map_err(|_| {
+                        GitError::BackendError {
+                            message: format!("symlink target for '{path_str}' is not valid UTF-8"),
+                        }
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        std::os::unix::fs::symlink(target, &file_path).map_err(|e| {
+                            GitError::BackendError {
+                                message: format!(
+                                    "failed to create symlink '{path_str}' -> '{target}': {e}"
+                                ),
+                            }
+                        })?;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        // On non-Unix, fall back to writing the target as a plain file
+                        // (same behavior as git on Windows without symlink support).
+                        let mut file = std::fs::File::create(&file_path).map_err(|e| {
+                            GitError::BackendError {
+                                message: format!("failed to create file '{path_str}': {e}"),
+                            }
+                        })?;
+                        file.write_all(blob.data.as_ref())
+                            .map_err(|e| GitError::BackendError {
+                                message: format!("failed to write file '{path_str}': {e}"),
+                            })?;
+                    }
+                } else {
+                    // Regular file (blob or executable blob).
+                    let mut file =
+                        std::fs::File::create(&file_path).map_err(|e| GitError::BackendError {
+                            message: format!("failed to create file '{path_str}': {e}"),
+                        })?;
+                    file.write_all(blob.data.as_ref())
+                        .map_err(|e| GitError::BackendError {
+                            message: format!("failed to write file '{path_str}': {e}"),
+                        })?;
+
+                    #[cfg(unix)]
+                    if entry_mode.kind() == gix::objs::tree::EntryKind::BlobExecutable {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::Permissions::from_mode(0o755);
+                        std::fs::set_permissions(&file_path, perms).ok();
+                    }
                 }
             }
             gix::diff::tree::recorder::Change::Deletion {
@@ -344,9 +388,11 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                     });
                 }
 
-                // Remove file from worktree.
+                // Remove file (or symlink) from worktree.
+                // Use symlink_metadata instead of exists() so dangling symlinks
+                // are also detected and removed.
                 let file_path = workdir.join(path_str);
-                if file_path.exists() {
+                if std::fs::symlink_metadata(&file_path).is_ok() {
                     std::fs::remove_file(&file_path).map_err(|e| GitError::BackendError {
                         message: format!("failed to remove file '{path_str}': {e}"),
                     })?;
@@ -373,4 +419,168 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
         })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    /// Helper: init a git repo with an initial commit, return (tempdir, GixRepo).
+    fn setup_repo() -> (tempfile::TempDir, GixRepo) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        std::fs::write(root.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let repo = GixRepo::open(root).unwrap();
+        (dir, repo)
+    }
+
+    /// Regression test: stash_apply must create OS symlinks for mode 120000 entries,
+    /// not write the target path as regular file content.
+    ///
+    /// This was the root cause of the .bones/events shard corruption where a 1.6MB
+    /// event log was overwritten with a 14-byte symlink target string.
+    #[cfg(unix)]
+    #[test]
+    fn stash_apply_creates_symlinks_not_regular_files() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+
+        // Add a real file and a symlink as dirty (unstaged) changes.
+        std::fs::write(root.join("real-data.txt"), "important data\n").unwrap();
+        std::os::unix::fs::symlink("real-data.txt", root.join("current.txt")).unwrap();
+
+        // Stage so the stash captures them (stash reads from index).
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        // Create a stash from the dirty state.
+        let stash_oid = stash_create(&repo)
+            .unwrap()
+            .expect("stash should not be empty");
+
+        // Clean the worktree (remove the files we just added).
+        std::fs::remove_file(root.join("current.txt")).unwrap();
+        std::fs::remove_file(root.join("real-data.txt")).unwrap();
+
+        // Reset index to HEAD.
+        Command::new("git")
+            .args(["reset", "HEAD", "--", "."])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        assert!(!root.join("current.txt").exists());
+        assert!(!root.join("real-data.txt").exists());
+
+        // Apply the stash — this should recreate the symlink.
+        stash_apply(&repo, stash_oid).unwrap();
+
+        // Verify: current.txt should be a symlink, not a regular file.
+        let meta = std::fs::symlink_metadata(root.join("current.txt")).unwrap();
+        assert!(
+            meta.is_symlink(),
+            "current.txt should be a symlink, but is type {:?}",
+            meta.file_type()
+        );
+
+        // Verify: symlink target is correct.
+        let target = std::fs::read_link(root.join("current.txt")).unwrap();
+        assert_eq!(target.to_str().unwrap(), "real-data.txt");
+
+        // Verify: real-data.txt is a regular file with correct content.
+        let content = std::fs::read_to_string(root.join("real-data.txt")).unwrap();
+        assert_eq!(content, "important data\n");
+    }
+
+    /// Regression test: writing a regular file where a symlink exists on disk
+    /// must NOT follow the symlink. The symlink must be removed first.
+    ///
+    /// Without the fix, File::create follows the symlink and overwrites the
+    /// target file with the new content.
+    #[cfg(unix)]
+    #[test]
+    fn stash_apply_does_not_follow_existing_symlinks() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+
+        // Set up: a regular file "data.txt" with important content.
+        std::fs::write(root.join("data.txt"), "precious data that must survive\n").unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add data"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        // Now create a stash where "link.txt" is a regular file.
+        std::fs::write(root.join("link.txt"), "regular content\n").unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let stash_oid = stash_create(&repo)
+            .unwrap()
+            .expect("stash should not be empty");
+
+        // But on disk, replace link.txt with a symlink pointing to data.txt.
+        std::fs::remove_file(root.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("data.txt", root.join("link.txt")).unwrap();
+
+        // Apply stash: should replace the symlink with a regular file,
+        // NOT write "regular content" through the symlink into data.txt.
+        stash_apply(&repo, stash_oid).unwrap();
+
+        // Verify: data.txt must NOT be corrupted.
+        let data = std::fs::read_to_string(root.join("data.txt")).unwrap();
+        assert_eq!(
+            data, "precious data that must survive\n",
+            "data.txt was corrupted by symlink following"
+        );
+
+        // Verify: link.txt should now be a regular file.
+        let meta = std::fs::symlink_metadata(root.join("link.txt")).unwrap();
+        assert!(
+            meta.is_file() && !meta.is_symlink(),
+            "link.txt should be a regular file, not a symlink"
+        );
+        let content = std::fs::read_to_string(root.join("link.txt")).unwrap();
+        assert_eq!(content, "regular content\n");
+    }
 }

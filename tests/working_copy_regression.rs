@@ -366,6 +366,74 @@ fn t6_replay_conflict_leaves_markers_and_cleanup_completes() {
 /// just conflicts), the merge cleanup must still complete. The COMMIT
 /// succeeded, so workspace destruction and merge-state cleanup must run.
 #[test]
+/// Regression test: symlinks in the default worktree must not be followed
+/// during post-merge cleanup. This reproduces the exact .bones/events corruption
+/// where a 1.6MB event log was overwritten with a 14-byte symlink target string.
+///
+/// Scenario:
+/// 1. Default has: real-data.txt (large content), current.txt -> real-data.txt (symlink)
+/// 2. Agent workspace has changes (unrelated file)
+/// 3. While the workspace exists, default's symlink is rotated on disk:
+///    new-data.txt created, current.txt -> new-data.txt
+/// 4. Merge the workspace — cleanup must NOT follow the symlink and corrupt data
+#[cfg(unix)]
+fn t8_symlink_in_default_not_corrupted_by_merge_cleanup() {
+    let repo = TestRepo::new();
+
+    // Set up: create real data file and a symlink in default.
+    let default_path = repo.workspace_path("default");
+    std::fs::write(
+        default_path.join("real-data.txt"),
+        "precious event data that must not be lost\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("real-data.txt", default_path.join("current.txt")).unwrap();
+
+    // Commit the symlink setup.
+    repo.git_in_workspace("default", &["add", "-A"]);
+    repo.git_in_workspace("default", &["commit", "-m", "add symlink"]);
+
+    // Advance the epoch to include the symlink.
+    repo.maw_ok(&["epoch", "sync"]);
+
+    // Create an agent workspace (inherits the committed symlink state).
+    repo.maw_ok(&["ws", "create", "worker"]);
+
+    // Agent does some unrelated work.
+    repo.add_file("worker", "agent-output.txt", "agent work\n");
+
+    // Meanwhile, simulate shard rotation on default:
+    // new shard file created, symlink updated to point to it.
+    std::fs::write(default_path.join("new-data.txt"), "new shard content\n").unwrap();
+    std::fs::remove_file(default_path.join("current.txt")).unwrap();
+    std::os::unix::fs::symlink("new-data.txt", default_path.join("current.txt")).unwrap();
+
+    // Merge the workspace — this triggers cleanup which replays default's dirty state.
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
+
+    // CRITICAL: real-data.txt must NOT be corrupted.
+    let data = std::fs::read_to_string(default_path.join("real-data.txt")).unwrap();
+    assert_eq!(
+        data, "precious event data that must not be lost\n",
+        "real-data.txt was corrupted — symlink was followed during merge cleanup"
+    );
+
+    // Agent's work should be present.
+    assert_eq!(
+        repo.read_file("default", "agent-output.txt").as_deref(),
+        Some("agent work\n"),
+        "agent output should be present after merge"
+    );
+}
+
+#[test]
 fn t7_merge_cleanup_completes_after_commit_regardless_of_replay() {
     let repo = TestRepo::new();
 
