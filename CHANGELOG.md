@@ -2,6 +2,17 @@
 
 All notable changes to maw.
 
+## v0.53.0
+
+### Fixed
+- **Symlink following during merge cleanup corrupts data** (bn-1fi2). `stash_apply()` wrote all git tree entries as regular files via `File::create`, which follows existing symlinks and overwrites the target. Symlinks (mode 120000) are now created as OS symlinks, and existing symlinks are removed before writing regular files. This caused 1.6MB of event data loss in bones/botbox.
+
+### Changed
+- **`--message` required for `maw ws merge`** (bn-1rgj). Merge no longer auto-generates commit messages. In a TTY, an editor opens (respects `$VISUAL`/`$EDITOR`). Non-TTY without `--message` errors with clear usage guidance.
+
+### Added
+- **`maw ws sync --rebase`** (bn-14yf). Cherry-pick based rebase for stale workspaces with conflict-as-data support. Conflicts are recorded as JSON metadata, shown in `ws status`/`ws list`, and block merge until resolved.
+
 ## v0.52.0
 
 ### Fixed
