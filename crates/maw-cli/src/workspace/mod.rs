@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1082,12 +1083,30 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             if plan {
                 return merge::plan_merge(&workspaces, fmt);
             }
+
+            // Resolve the commit message: --message flag, editor (TTY), or error.
+            // Deferred until after merge() validates basic preconditions (e.g.
+            // rejecting default workspace, empty list) so those errors surface
+            // before the editor opens or the "no --message" error fires.
+            let resolved_message = if message.is_some() || dry_run {
+                message.unwrap_or_default()
+            } else if std::io::stdin().is_terminal() {
+                edit_merge_message(&workspaces)?
+            } else {
+                bail!(
+                    "No --message provided and stdin is not a terminal.\n  \
+                     Usage: maw ws merge <workspaces> --message \"feat: description of changes\"\n  \
+                     \n  \
+                     A commit message is required so that merge history captures intent."
+                );
+            };
+
             merge::merge(
                 &workspaces,
                 &merge::MergeOptions {
                     destroy_after: destroy,
                     confirm,
-                    message: message.as_deref(),
+                    message: if dry_run { None } else { Some(&resolved_message) },
                     dry_run,
                     format: fmt,
                     resolve,
@@ -1294,4 +1313,57 @@ const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+/// Open `$EDITOR` / `$VISUAL` / `vi` to collect a merge commit message,
+/// exactly like `git commit` does when invoked without `-m`.
+///
+/// Returns the first non-blank, non-comment line (the subject). Lines
+/// starting with `#` are stripped (editor hint comments).
+fn edit_merge_message(workspaces: &[String]) -> Result<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+
+    let dir = std::env::temp_dir();
+    let msg_path = dir.join("MAW_MERGE_MSG");
+
+    // Seed the file with a comment template.
+    let template = format!(
+        "\n\
+         # Enter a merge commit message. Lines starting with '#' are ignored.\n\
+         # Merging workspace(s): {}\n\
+         #\n\
+         # An empty message aborts the merge.\n",
+        workspaces.join(", ")
+    );
+    std::fs::write(&msg_path, &template)
+        .with_context(|| format!("write merge message template to {}", msg_path.display()))?;
+
+    let status = Command::new(&editor)
+        .arg(&msg_path)
+        .status()
+        .with_context(|| format!("launch editor '{editor}'"))?;
+
+    if !status.success() {
+        bail!("Editor exited with non-zero status — merge aborted.");
+    }
+
+    let content = std::fs::read_to_string(&msg_path)
+        .with_context(|| format!("read merge message from {}", msg_path.display()))?;
+    let _ = std::fs::remove_file(&msg_path);
+
+    let message: String = content
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if message.is_empty() {
+        bail!("Empty merge message — merge aborted.");
+    }
+
+    Ok(message)
 }

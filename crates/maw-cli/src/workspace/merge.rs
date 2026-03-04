@@ -2093,6 +2093,18 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         textln!("  {}: {}", ws_id, &head.as_str()[..12]);
     }
 
+    // Persist user-provided commit message into merge-state so the BUILD
+    // phase can use it for the candidate commit.
+    if let Some(msg) = message {
+        let state_path = MergeStateFile::default_path(&manifold_dir);
+        if let Ok(mut state) = MergeStateFile::read(&state_path) {
+            state.commit_message = Some(msg.to_string());
+            if let Err(e) = state.write_atomic(&state_path) {
+                tracing::warn!("Failed to persist commit message to merge-state: {e}");
+            }
+        }
+    }
+
     if let Err(e) = record_snapshot_operations(&root, &backend, &sources) {
         abort_merge(&manifold_dir, &format!("snapshot recording failed: {e}"));
         bail!("Merge PREPARE phase failed: could not record snapshot operations: {e}");
@@ -2685,46 +2697,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     run_hooks(&maw_config.hooks.post_merge, "post-merge", &root, false)?;
 
-    // Generate the merge message for display
-    let user_provided_message = message.is_some();
-    let msg = message.unwrap_or({
-        if ws_to_merge.len() == 1 {
-            "adopt work"
-        } else {
-            "combine work"
-        }
-    });
-
-    // Build the actual commit subject used by build_merge_commit
-    let commit_subject = if user_provided_message {
-        msg.to_string()
-    } else {
-        let mut names: Vec<&str> = ws_to_merge.iter().map(String::as_str).collect();
-        names.sort_unstable();
-        if names.is_empty() {
-            "epoch: merge".to_string()
-        } else {
-            format!("epoch: merge {}", names.join(" "))
-        }
-    };
+    // Message is always provided by the caller (enforced in mod.rs dispatch).
+    let msg = message.expect("merge message must be provided by caller");
 
     if format == OutputFormat::Json {
-        let advice = if user_provided_message {
-            vec![]
-        } else {
-            vec![MergeAdvice {
-                level: "warn",
-                advice_type: "generic-merge-message",
-                message: format!(
-                    "Merge used auto-generated commit subject \"{commit_subject}\". Amend before push so history captures intent."
-                ),
-                details: Some(MergeAdviceDetails {
-                    commit_subject: commit_subject.clone(),
-                    amend_command: "git -C ws/default commit --amend -m \"<meaningful message>\""
-                        .to_string(),
-                }),
-            }]
-        };
         let success = MergeSuccessOutput {
             status: "success".to_string(),
             workspaces: ws_to_merge.clone(),
@@ -2737,17 +2713,12 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             conflicts: vec![],
             message: format!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", ")),
             next: "maw push".to_string(),
-            advice,
+            advice: vec![],
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
         textln!();
         textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
-        if !user_provided_message {
-            textln!("WARNING: merge used auto-generated commit message: \"{commit_subject}\"");
-            textln!("IMPORTANT: amend this commit before push so history captures intent.");
-            textln!("  Run now: git -C ws/default commit --amend -m \"<meaningful message>\"");
-        }
         textln!();
         textln!("Next: push to remote:");
         textln!("  maw push");

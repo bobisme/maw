@@ -737,6 +737,7 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
         for name in &workspace_names {
             merge_args.push(name.as_str());
         }
+        merge_args.extend_from_slice(&["--message", "test merge"]);
         let merge_out = repo.maw_raw(&merge_args);
         let merge_success = merge_out.status.success();
         let merge_stderr = String::from_utf8_lossy(&merge_out.stderr);

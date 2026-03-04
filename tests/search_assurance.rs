@@ -51,7 +51,7 @@ fn search_finds_tracked_content_in_recovery_snapshot() {
     // 4. Merge and destroy the workspace
     //    merge --destroy captures the workspace state (committed content as HEAD,
     //    plus dirty/untracked content in a stash-like snapshot).
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
     assert!(
         !repo.workspace_exists("agent"),
         "workspace should be destroyed after merge --destroy"
@@ -147,7 +147,7 @@ fn show_round_trip_returns_exact_content_for_search_hit() {
     repo.add_file("agent", "scratch.txt", "ephemeral notes\n");
 
     // 3. Merge and destroy
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
     assert!(!repo.workspace_exists("agent"));
 
     // 4. Search for the known token

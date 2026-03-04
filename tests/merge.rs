@@ -26,7 +26,7 @@ fn basic_merge_destroy_two_workspaces() {
     repo.add_file("alice", "alice.txt", "Alice's work\n");
     repo.add_file("bob", "bob.txt", "Bob's work\n");
 
-    repo.maw_ok(&["ws", "merge", "alice", "bob", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "alice", "bob", "--destroy", "--message", "test merge"]);
 
     assert_eq!(
         repo.read_file("default", "alice.txt").as_deref(),
@@ -54,7 +54,7 @@ fn merge_conflict_preserves_source_workspaces() {
     repo.modify_file("alice", "shared.txt", "alice\n");
     repo.modify_file("bob", "shared.txt", "bob\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "alice", "bob", "--destroy"]);
+    let out = repo.maw_raw(&["ws", "merge", "alice", "bob", "--destroy", "--message", "test merge"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}\n{stderr}").to_lowercase();
@@ -79,7 +79,7 @@ fn merge_preserves_dirty_default_changes() {
 
     repo.add_file("default", "local.txt", "local default edits\n");
 
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
 
     assert_eq!(
         repo.read_file("default", "agent.txt").as_deref(),
@@ -98,7 +98,7 @@ fn merge_captures_source_workspace_edits_without_extra_vcs_commands() {
     repo.maw_ok(&["ws", "create", "worker"]);
     repo.add_file("worker", "result.txt", "worker output\n");
 
-    repo.maw_ok(&["ws", "merge", "worker", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "worker", "--destroy", "--message", "test merge"]);
 
     assert_eq!(
         repo.read_file("default", "result.txt").as_deref(),
@@ -113,7 +113,7 @@ fn merge_records_snapshot_and_merge_ops_in_workspace_history() {
     repo.maw_ok(&["ws", "create", "worker"]);
     repo.add_file("worker", "result.txt", "worker output\n");
 
-    repo.maw_ok(&["ws", "merge", "worker"]);
+    repo.maw_ok(&["ws", "merge", "worker", "--message", "test merge"]);
 
     let history = repo.maw_ok(&["ws", "history", "worker", "--format", "json"]);
     let payload: serde_json::Value =
@@ -140,7 +140,7 @@ fn merge_records_snapshot_and_merge_ops_in_workspace_history() {
 fn reject_merge_default_workspace() {
     let repo = TestRepo::new();
 
-    let stderr = repo.maw_fails(&["ws", "merge", "default"]);
+    let stderr = repo.maw_fails(&["ws", "merge", "default", "--message", "test merge"]);
     assert!(
         stderr.contains("default") || stderr.contains("reserved"),
         "Got: {stderr}"
@@ -156,7 +156,7 @@ fn merge_json_success_stdout_is_pure_json() {
     repo.add_file("json-a", "a.txt", "a\n");
     repo.add_file("json-b", "b.txt", "b\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json"]);
+    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json", "--message", "test merge"]);
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -175,34 +175,27 @@ fn merge_json_success_stdout_is_pure_json() {
     let advice = payload["advice"]
         .as_array()
         .expect("merge success JSON should include advice array");
-    assert_eq!(
-        advice.len(),
-        1,
-        "expected warning advice for generic message"
+    assert!(
+        advice.is_empty(),
+        "expected no advice when --message is provided, got: {advice:?}"
     );
-    assert_eq!(advice[0]["level"].as_str(), Some("warn"));
-    assert_eq!(advice[0]["type"].as_str(), Some("generic-merge-message"));
 }
 
 #[test]
-fn merge_without_message_prints_strong_amend_guidance() {
+fn merge_without_message_fails_in_non_tty() {
     let repo = TestRepo::new();
 
     repo.maw_ok(&["ws", "create", "guidance-a"]);
     repo.add_file("guidance-a", "note.txt", "content\n");
 
-    let stdout = repo.maw_ok(&["ws", "merge", "guidance-a"]);
+    let stderr = repo.maw_fails(&["ws", "merge", "guidance-a"]);
     assert!(
-        stdout.contains("WARNING: merge used auto-generated commit message"),
-        "expected warning in merge output, got:\n{stdout}"
+        stderr.contains("No --message provided"),
+        "expected message-required error, got:\n{stderr}"
     );
     assert!(
-        stdout.contains("IMPORTANT: amend this commit before push"),
-        "expected IMPORTANT guidance in merge output, got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("git -C ws/default commit --amend -m \"<meaningful message>\""),
-        "expected amend command in merge output, got:\n{stdout}"
+        stderr.contains("--message"),
+        "expected --message usage hint in error, got:\n{stderr}"
     );
 }
 
@@ -216,7 +209,7 @@ fn merge_json_conflict_stdout_is_pure_json() {
     repo.modify_file("json-a", "shared.txt", "alpha\n");
     repo.modify_file("json-b", "shared.txt", "beta\n");
 
-    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json"]);
+    let out = repo.maw_raw(&["ws", "merge", "json-a", "json-b", "--format", "json", "--message", "test merge"]);
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     assert!(!out.status.success(), "conflicting merge should fail");
@@ -259,7 +252,7 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
 
     // Merging epoch-advancer advances the current epoch to E2, which now has
     // vendor/pkg/.cargo-ok. The worker workspace's base epoch is still E1.
-    repo.maw_ok(&["ws", "merge", "epoch-advancer", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "epoch-advancer", "--destroy", "--message", "test merge"]);
 
     // Worker does some unrelated work. After the epoch advanced, git diff
     // <new_epoch> in the worker shows vendor/pkg/.cargo-ok as D (present in
@@ -268,7 +261,7 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
     repo.add_file("worker", "worker.txt", "worker output\n");
 
     // This must not fail — the phantom deletion is silently skipped.
-    repo.maw_ok(&["ws", "merge", "worker", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "worker", "--destroy", "--message", "test merge"]);
 
     // Worker's real changes are applied.
     assert_eq!(
@@ -304,7 +297,7 @@ fn merge_with_dirty_default_records_snapshot_op_in_default_oplog() {
     repo.add_file("default", "local-notes.txt", "my local notes\n");
 
     // Merge the agent workspace.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
 
     // The default workspace's oplog should contain a Snapshot operation.
     let history = repo.maw_ok(&["ws", "history", "default", "--format", "json"]);
@@ -345,7 +338,7 @@ fn merge_with_clean_default_does_not_record_snapshot_op() {
     // Do NOT add any dirty files to the default workspace.
 
     // Merge the agent workspace.
-    repo.maw_ok(&["ws", "merge", "agent", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "agent", "--destroy", "--message", "test merge"]);
 
     // The default workspace's oplog should NOT contain a Snapshot operation.
     let history_result = repo.maw_raw(&["ws", "history", "default", "--format", "json"]);
@@ -380,19 +373,19 @@ fn merge_empty_workspace_rejects_without_epoch_advance() {
     repo.maw_ok(&["ws", "create", "empty-agent"]);
     // Don't add any files — the workspace has zero changes.
 
-    // Merge should fail (non-zero exit).
-    let out = repo.maw_raw(&["ws", "merge", "empty-agent", "--destroy"]);
+    // Without --destroy: merge should fail (non-zero exit).
+    let out = repo.maw_raw(&["ws", "merge", "empty-agent", "--message", "test merge"]);
     assert!(
         !out.status.success(),
-        "merging an empty workspace should fail"
+        "merging an empty workspace without --destroy should fail"
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}\n{stderr}").to_lowercase();
     assert!(
-        combined.contains("no changes detected"),
-        "expected 'no changes detected' message, got:\n{combined}"
+        combined.contains("no changes"),
+        "expected 'no changes' message, got:\n{combined}"
     );
 
     // HEAD should NOT have advanced.
@@ -402,8 +395,7 @@ fn merge_empty_workspace_rejects_without_epoch_advance() {
         "epoch should not advance for an empty merge"
     );
 
-    // The workspace should NOT have been destroyed (--destroy was passed but
-    // nothing was merged, so workspaces are preserved).
+    // The workspace should still exist (not destroyed).
     let names = workspace_names(&repo);
     assert!(
         names.contains(&"empty-agent".to_owned()),
@@ -419,7 +411,7 @@ fn merge_empty_workspace_json_output() {
 
     repo.maw_ok(&["ws", "create", "empty-json"]);
 
-    let out = repo.maw_raw(&["ws", "merge", "empty-json", "--format", "json"]);
+    let out = repo.maw_raw(&["ws", "merge", "empty-json", "--format", "json", "--message", "test merge"]);
     assert!(
         !out.status.success(),
         "merging an empty workspace should fail even with --format json"

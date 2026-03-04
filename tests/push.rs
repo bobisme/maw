@@ -28,7 +28,7 @@ fn push_after_merge() {
 
     repo.maw_ok(&["ws", "create", "alice"]);
     repo.add_file("alice", "feature.txt", "new feature\n");
-    repo.maw_ok(&["ws", "merge", "alice", "--destroy"]);
+    repo.maw_ok(&["ws", "merge", "alice", "--destroy", "--message", "test merge"]);
 
     let output = repo.maw_ok(&["push"]);
     assert!(output.contains("push") || output.contains("origin"));

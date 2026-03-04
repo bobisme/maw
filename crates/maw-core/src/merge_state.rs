@@ -193,6 +193,10 @@ pub struct MergeStateFile {
     /// Abort reason, if the merge was aborted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abort_reason: Option<String>,
+
+    /// User-provided commit message for the merge commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
 }
 
 impl MergeStateFile {
@@ -215,6 +219,7 @@ impl MergeStateFile {
             started_at: now,
             updated_at: now,
             abort_reason: None,
+            commit_message: None,
         }
     }
 

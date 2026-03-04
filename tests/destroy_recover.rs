@@ -159,7 +159,7 @@ fn merge_destroy_captures_uncommitted_edits_in_destroy_record() {
     repo.add_file("merge-ws", "leftover.txt", "uncommitted leftover\n");
 
     // Merge and destroy
-    let output = repo.maw_ok(&["ws", "merge", "merge-ws", "--destroy"]);
+    let output = repo.maw_ok(&["ws", "merge", "merge-ws", "--destroy", "--message", "test merge"]);
 
     // The merged content should be in default
     assert_eq!(

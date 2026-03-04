@@ -596,8 +596,13 @@ fn run_pipeline<B: WorkspaceBackend>(
 
     // Build the candidate git tree + commit from resolved changes
     let repo = open_repo(repo_root)?;
-    let candidate =
-        build_merge_commit(&*repo, &state.epoch_before, &state.sources, &resolved, None)?;
+    let candidate = build_merge_commit(
+        &*repo,
+        &state.epoch_before,
+        &state.sources,
+        &resolved,
+        state.commit_message.as_deref(),
+    )?;
 
     Ok(BuildPhaseOutput {
         candidate,
