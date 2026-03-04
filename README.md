@@ -3,7 +3,7 @@
 `maw` is a coordination layer for teams running many coding agents in parallel on one repo.
 It gives each agent an isolated workspace, tracks agent lifecycle in Manifold metadata, and merges work back deterministically.
 
-![maw](images/maw-card.webp)
+![maw](images/maw-embed.jpg)
 
 ## Why maw is awesome
 
@@ -110,29 +110,29 @@ maw push
 
 ## Core commands
 
-| Command                              | Description                                      |
-| ------------------------------------ | ------------------------------------------------ |
-| `maw ws create <name>`               | Create isolated workspace for an agent           |
-| `maw ws list`                        | List all workspaces with staleness and commit info|
-| `maw ws status`                      | Show workspace health, staleness, and conflicts  |
-| `maw ws diff <name> [--against ...]` | Compare workspace changes (summary/patch/json)   |
-| `maw exec <name> -- <cmd>`           | Run any command inside a workspace               |
-| `maw ws merge <a> <b> [--destroy]`   | Merge one or more workspaces into default        |
-| `maw ws destroy <name>`              | Remove a workspace (leaves recovery anchor)      |
-| `maw ws restore <name>`              | Restore a previously destroyed workspace         |
-| `maw ws sync`                        | Sync stale workspace to current epoch            |
-| `maw ws advance <name>`              | Rebase persistent workspace onto new epoch       |
-| `maw ws conflicts <name>`            | Inspect merge conflicts before resolving         |
-| `maw ws overlap <a> <b>`             | Check file overlap between workspaces            |
-| `maw ws history <name>`              | View workspace operation history                 |
-| `maw ws undo <name>`                 | Undo local workspace changes                     |
-| `maw ws recover [--search]`          | Find and restore lost snapshots and workspaces   |
-| `maw init`                           | Initialize/repair Manifold repo state            |
-| `maw doctor`                         | Validate repo/tool health and migration state    |
-| `maw status`                         | Quick repo + workspace summary                   |
-| `maw push [--advance]`               | Push configured branch to remote                 |
-| `maw release <tag>`                  | Push and tag a release                           |
-| `maw agents init`                    | Add maw instructions to AGENTS.md                |
+| Command                              | Description                                        |
+| ------------------------------------ | -------------------------------------------------- |
+| `maw ws create <name>`               | Create isolated workspace for an agent             |
+| `maw ws list`                        | List all workspaces with staleness and commit info |
+| `maw ws status`                      | Show workspace health, staleness, and conflicts    |
+| `maw ws diff <name> [--against ...]` | Compare workspace changes (summary/patch/json)     |
+| `maw exec <name> -- <cmd>`           | Run any command inside a workspace                 |
+| `maw ws merge <a> <b> [--destroy]`   | Merge one or more workspaces into default          |
+| `maw ws destroy <name>`              | Remove a workspace (leaves recovery anchor)        |
+| `maw ws restore <name>`              | Restore a previously destroyed workspace           |
+| `maw ws sync`                        | Sync stale workspace to current epoch              |
+| `maw ws advance <name>`              | Rebase persistent workspace onto new epoch         |
+| `maw ws conflicts <name>`            | Inspect merge conflicts before resolving           |
+| `maw ws overlap <a> <b>`             | Check file overlap between workspaces              |
+| `maw ws history <name>`              | View workspace operation history                   |
+| `maw ws undo <name>`                 | Undo local workspace changes                       |
+| `maw ws recover [--search]`          | Find and restore lost snapshots and workspaces     |
+| `maw init`                           | Initialize/repair Manifold repo state              |
+| `maw doctor`                         | Validate repo/tool health and migration state      |
+| `maw status`                         | Quick repo + workspace summary                     |
+| `maw push [--advance]`               | Push configured branch to remote                   |
+| `maw release <tag>`                  | Push and tag a release                             |
+| `maw agents init`                    | Add maw instructions to AGENTS.md                  |
 
 ## Configuration
 
