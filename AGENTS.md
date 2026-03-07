@@ -1,7 +1,7 @@
 # maw
 
 Project type: cli
-Tools: `bones`, `maw`, `crit`, `botbus`, `botty`
+Tools: `bones`, `maw`, `seal`, `rite`, `vessel`
 Reviewer roles: security
 
 This project uses **maw** for workspace management, **git** for version control, and **bones** for issue tracking.
@@ -172,15 +172,15 @@ If the change warrants review before pushing:
 # Verify build and tests
 cargo build --release && cargo test
 
-# Create a crit review (see Crit section below for full details)
-crit reviews create --title "feat: description of change"
+# Create a seal review (see Crit section below for full details)
+seal reviews create --title "feat: description of change"
 ```
 
 After review is approved:
 
 ```bash
-crit reviews approve <review_id>
-crit reviews merge <review_id>
+seal reviews approve <review_id>
+seal reviews merge <review_id>
 ```
 
 ### 3. Version Bump (for releases)
@@ -225,8 +225,8 @@ maw --version
 | Stage                      | Key Commands                                           |
 | -------------------------- | ------------------------------------------------------ |
 | Merge work                 | `maw ws merge <a> <b> --destroy`                       |
-| Create review              | `crit reviews create --title "..."`                    |
-| Approve/merge review       | `crit reviews approve <id> && crit reviews merge <id>` |
+| Create review              | `seal reviews create --title "..."`                    |
+| Approve/merge review       | `seal reviews approve <id> && seal reviews merge <id>` |
 | Bump version               | Edit `Cargo.toml`, then `git commit`                   |
 | Push (after merge)         | `maw push`                                             |
 | Push (after direct commit) | `maw push --advance`                                   |
