@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use maw_git::GitRepo as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -10,7 +10,7 @@ use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
 use maw_core::refs as manifold_refs;
 
-use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, metadata, repo_root};
+use super::{get_backend, metadata, repo_root, MawConfig, DEFAULT_WORKSPACE};
 
 fn is_default_workspace(name: &str) -> bool {
     name == DEFAULT_WORKSPACE
@@ -119,7 +119,7 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
                 "Workspace '{workspace_name}' is stale but has {ahead} committed commit(s) not yet \
                  merged into epoch."
             );
-            println!("  Merge the workspace first: maw ws merge {workspace_name}");
+            println!("  Merge the workspace first: maw ws merge {workspace_name} --into default");
             println!("  Or rebase onto current epoch: maw ws sync {workspace_name} --rebase");
             println!("  Then sync: maw ws sync {workspace_name}");
             return Ok(());
@@ -482,7 +482,11 @@ fn get_commit_message(ws_path: &Path, sha: &str) -> Option<String> {
         .ok()?;
     if output.status.success() {
         let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if msg.is_empty() { None } else { Some(msg) }
+        if msg.is_empty() {
+            None
+        } else {
+            Some(msg)
+        }
     } else {
         None
     }
@@ -780,7 +784,9 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
                 "WARNING: Workspace '{name}' is behind main (another workspace was merged), \
                  but git could not determine commit count. Skipping auto-sync to preserve committed work."
             );
-            eprintln!("  The lead agent should merge this workspace: maw ws merge {name}");
+            eprintln!(
+                "  The lead agent should merge this workspace: maw ws merge {name} --into default"
+            );
             return Ok(());
         }
         Some(ahead) if ahead > 0 => {
@@ -790,7 +796,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
             );
             eprintln!("  Skipping auto-sync to preserve committed work.");
             eprintln!(
-                "  The lead agent should merge or rebase this workspace: maw ws merge {name}  or  maw ws sync {name} --rebase"
+                "  The lead agent should merge or rebase this workspace: maw ws merge {name} --into default  or  maw ws sync {name} --rebase"
             );
             return Ok(());
         }

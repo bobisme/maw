@@ -12,7 +12,10 @@ use sha2::{Digest, Sha256};
 use crate::format::OutputFormat;
 use maw::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use maw::merge::collect::collect_snapshots;
-use maw::merge::commit::{CommitRecovery, CommitResult, recover_partial_commit, run_commit_phase};
+use maw::merge::commit::{
+    CommitRecovery, CommitResult, recover_partial_commit_with_branch_base,
+    run_commit_phase_with_branch_base,
+};
 use maw::merge::prepare::run_prepare_phase;
 use maw::merge::quarantine::create_quarantine_workspace;
 use maw::merge::resolve::{ConflictReason, ConflictRecord};
@@ -37,8 +40,7 @@ use tracing::instrument;
 use super::capture::capture_before_destroy;
 use super::destroy_record::{DestroyReason, write_destroy_record};
 use super::{
-    DEFAULT_WORKSPACE, MawConfig, get_backend,
-    oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
+    MawConfig, get_backend, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
 };
 
 // ---------------------------------------------------------------------------
@@ -908,13 +910,14 @@ fn conflict_record_to_info(record: &ConflictRecord) -> ConflictInfo {
 }
 
 /// Print detailed conflict information with terseid IDs and resolve commands.
-fn print_conflict_report(conflicts_with_ids: &[ConflictWithId], ws_names: &[String]) {
-    print_conflict_report_with_resolve(conflicts_with_ids, ws_names, None);
+fn print_conflict_report(conflicts_with_ids: &[ConflictWithId], ws_names: &[String], into: &str) {
+    print_conflict_report_with_resolve(conflicts_with_ids, ws_names, into, None);
 }
 
 fn print_conflict_report_with_resolve(
     conflicts_with_ids: &[ConflictWithId],
     ws_names: &[String],
+    into: &str,
     prebuilt_resolve_args: Option<&[String]>,
 ) {
     println!();
@@ -986,11 +989,19 @@ fn print_conflict_report_with_resolve(
         &resolve_args_owned
     };
     println!("To resolve, re-run with --resolve:");
-    println!("  maw ws merge {} {}", ws_args, resolve_args.join(" "));
+    println!(
+        "  maw ws merge {} --into {} {}",
+        ws_args,
+        into,
+        resolve_args.join(" ")
+    );
     println!();
     let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
     println!("Or resolve all at once:");
-    println!("  maw ws merge {} --resolve-all={default_ws}", ws_args);
+    println!(
+        "  maw ws merge {} --into {} --resolve-all={default_ws}",
+        ws_args, into
+    );
     println!();
     println!("Options:  ID=WORKSPACE | ID=content:PATH");
     println!();
@@ -1812,7 +1823,11 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
                 workspaces.len(),
                 workspaces.join(", ")
             );
-            println!("To merge: maw ws merge {}", workspaces.join(" "));
+            println!(
+                "To merge: maw ws merge {} --into {}",
+                workspaces.join(" "),
+                default_ws
+            );
         }
         return Ok(());
     }
@@ -1831,7 +1846,11 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
             .iter()
             .map(|c| format!("--resolve {}={default_ws}", c.id))
             .collect();
-        let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
+        let to_fix = format!(
+            "maw ws merge {ws_args} --into {} {}",
+            default_ws,
+            resolve_args.join(" ")
+        );
         let out = ConflictsOutput {
             status: "conflict".to_string(),
             workspaces: workspaces.to_vec(),
@@ -1848,7 +1867,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         // Reuse the same format as merge conflict output
-        print_conflict_report(&conflicts_with_ids, workspaces);
+        print_conflict_report(&conflicts_with_ids, workspaces, default_ws);
     }
 
     Ok(())
@@ -1859,7 +1878,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 // ---------------------------------------------------------------------------
 
 /// Preview what a merge would do without creating any commits.
-fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
+fn preview_merge(workspaces: &[String], root: &Path, into: &str) -> Result<()> {
     let backend = get_backend()?;
 
     println!("=== Merge Preview (dry run) ===");
@@ -1957,7 +1976,7 @@ fn preview_merge(workspaces: &[String], root: &Path) -> Result<()> {
     println!("=== Summary ===");
     println!();
     println!("To perform this merge, run without --dry-run:");
-    println!("  maw ws merge {}", workspaces.join(" "));
+    println!("  maw ws merge {} --into {into}", workspaces.join(" "));
     println!();
 
     let _ = root; // used implicitly via get_backend()
@@ -1981,6 +2000,12 @@ pub struct MergeOptions<'a> {
     /// Output format. `OutputFormat::Json` emits structured JSON for the
     /// conflict report and success summary.
     pub format: OutputFormat,
+    /// Merge destination workspace name.
+    pub target_workspace: &'a str,
+    /// Branch to update for the merge destination.
+    pub target_branch: &'a str,
+    /// Optional change id associated with the merge destination.
+    pub target_change_id: Option<&'a str>,
     /// Inline conflict resolutions. Each entry is `ID=STRATEGY`.
     pub resolve: Vec<String>,
     /// Resolve all remaining conflicts to this workspace name.
@@ -2006,6 +2031,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         message,
         dry_run,
         format,
+        target_workspace,
+        target_branch,
+        target_change_id,
         ref resolve,
         ref resolve_all,
         verbose,
@@ -2028,8 +2056,17 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     let root = repo_root()?;
     let maw_config = MawConfig::load(&root)?;
-    let default_ws = maw_config.default_workspace();
-    let branch = maw_config.branch();
+    let default_ws = target_workspace;
+    let into_target = target_change_id.unwrap_or(default_ws);
+    let branch = target_branch;
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_before_oid = maw_core::refs::read_ref(&root, &branch_ref)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Target branch '{}' does not exist.
+  To fix: create the branch first or repair change metadata, then retry.",
+            branch
+        )
+    })?;
 
     // Reject merging the default workspace
     if ws_to_merge.iter().any(|ws| ws == default_ws) {
@@ -2041,8 +2078,24 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         );
     }
 
+    if let Some(target_change) = target_change_id {
+        for ws_name in &ws_to_merge {
+            let ws_meta = super::metadata::read(&root, ws_name).unwrap_or_default();
+            if let Some(source_change) = ws_meta.change_id
+                && source_change != target_change
+            {
+                bail!(
+                    "Workspace '{}' belongs to change '{}' and cannot merge into change '{}'.\n  To fix: merge it into its own change target, or recreate workspace with the intended --change.",
+                    ws_name,
+                    source_change,
+                    target_change
+                );
+            }
+        }
+    }
+
     if dry_run {
-        return preview_merge(&ws_to_merge, &root);
+        return preview_merge(&ws_to_merge, &root, into_target);
     }
 
     run_hooks(&maw_config.hooks.pre_merge, "pre-merge", &root, true)?;
@@ -2090,7 +2143,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 "Workspace '{ws_name}' has {} unresolved rebase conflict(s).\n  \
                  Resolve conflicts first, then retry the merge.\n  \
                  To see conflicts: maw ws conflicts {ws_name}\n  \
-                 To force merge anyway: maw ws merge {ws_name} --force (not yet implemented)",
+                 To force merge anyway: maw ws merge {ws_name} --into {into_target} --force (not yet implemented)",
                 ws_meta.rebase_conflict_count
             );
         }
@@ -2289,7 +2342,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                             conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids)
                         })
                         .collect();
-                    let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
+                    let to_fix = format!(
+                        "maw ws merge {ws_args} --into {} {}",
+                        into_target,
+                        resolve_args.join(" ")
+                    );
                     let output = MergeConflictOutput {
                         status: "conflict".to_string(),
                         workspaces: ws_to_merge,
@@ -2313,6 +2370,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     print_conflict_report_with_resolve(
                         &remaining,
                         &ws_to_merge,
+                        into_target,
                         Some(&resolve_args),
                     );
                 }
@@ -2338,7 +2396,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     .iter()
                     .map(|c| conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids))
                     .collect();
-                let to_fix = format!("maw ws merge {ws_args} {}", resolve_args.join(" "));
+                let to_fix = format!(
+                    "maw ws merge {ws_args} --into {} {}",
+                    into_target,
+                    resolve_args.join(" ")
+                );
                 let output = MergeConflictOutput {
                     status: "conflict".to_string(),
                     workspaces: ws_to_merge,
@@ -2354,7 +2416,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 textln!("  {} unresolved conflict(s)", build_output.conflicts.len());
-                print_conflict_report(&conflicts_with_ids, &ws_to_merge);
+                print_conflict_report(&conflicts_with_ids, &ws_to_merge, into_target);
 
                 if destroy_after {
                     textln!();
@@ -2527,33 +2589,37 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     advance_merge_state(&manifold_dir, MergePhase::Commit)?;
 
     let epoch_before_oid = frozen.epoch.oid().clone();
-    let branch_ref = format!("refs/heads/{branch}");
-
-    // Pre-flight: verify the branch hasn't diverged from the epoch since
-    // PREPARE. If direct commits were made to the branch outside of maw
-    // between PREPARE and COMMIT, the branch CAS will fail after the epoch
-    // ref has already moved, leaving epoch and branch permanently diverged.
+    // Pre-flight: verify the branch hasn't diverged from the target head
+    // captured before PREPARE. If direct commits were made to the branch
+    // outside of maw between PREPARE and COMMIT, the branch CAS will fail
+    // after the epoch ref has already moved, leaving refs diverged.
     // Detect and abort cleanly before touching any refs.
     if let Ok(Some(current_branch)) = maw_core::refs::read_ref(&root, &branch_ref)
-        && current_branch != epoch_before_oid
+        && current_branch != branch_before_oid
     {
         abort_merge(
             &manifold_dir,
-            "branch diverged from epoch since PREPARE (direct commits detected)",
+            "branch diverged from target head since PREPARE (direct commits detected)",
         );
         bail!(
-            "Merge COMMIT aborted: branch '{branch}' has diverged from epoch since PREPARE.\n  \
+            "Merge COMMIT aborted: branch '{branch}' has diverged from its pre-merge head since PREPARE.\n  \
                  Expected: {}\n  \
                  Actual:   {}\n  \
                  Cause: commits were made directly to '{branch}' outside of maw.\n  \
-                 Fix: run `maw epoch sync` to resync the epoch ref to the current branch HEAD,\n  \
-                 then retry the merge.",
-            &epoch_before_oid.as_str()[..12],
+                 Fix: retry after synchronizing target branch state, then rerun maw ws merge.\n  \
+                 For change branches, `maw changes sync <change-id>` can help before retry.",
+            &branch_before_oid.as_str()[..12],
             &current_branch.as_str()[..12],
         );
     }
 
-    match run_commit_phase(&root, branch, &epoch_before_oid, &build_output.candidate) {
+    match run_commit_phase_with_branch_base(
+        &root,
+        branch,
+        &epoch_before_oid,
+        &branch_before_oid,
+        &build_output.candidate,
+    ) {
         Ok(CommitResult::Committed) => {
             textln!(
                 "  Epoch advanced: {} → {}",
@@ -2565,8 +2631,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         Err(maw::merge::commit::CommitError::PartialCommit) => {
             // Epoch ref moved but branch ref didn't — attempt recovery
             textln!("  WARNING: Partial commit — attempting recovery...");
-            match recover_partial_commit(&root, branch, &epoch_before_oid, &build_output.candidate)
-            {
+            match recover_partial_commit_with_branch_base(
+                &root,
+                branch,
+                &epoch_before_oid,
+                &branch_before_oid,
+                &build_output.candidate,
+            ) {
                 Ok(CommitRecovery::FinalizedMainRef) => {
                     textln!("  Recovery succeeded: branch ref finalized.");
                 }
@@ -2631,6 +2702,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
         update_default_workspace(
             &default_ws_path,
+            default_ws,
             branch,
             epoch_before_oid.as_str(),
             &root,
@@ -2641,8 +2713,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         if let Some(ref patch_set) = pre_checkout_patchset
             && !patch_set.is_empty()
         {
-            let default_ws_id =
-                WorkspaceId::new(DEFAULT_WORKSPACE).expect("'default' is a valid workspace name");
+            let default_ws_id = WorkspaceId::new(default_ws)
+                .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
 
             match write_patch_set_blob(&root, patch_set) {
                 Ok(patch_set_oid) => {
@@ -3080,6 +3152,7 @@ fn now_secs() -> u64 {
 /// destroy, GC, merge-state removal) MUST still run.
 fn update_default_workspace(
     default_ws_path: &Path,
+    ws_name: &str,
     branch: &str,
     epoch_before: &str,
     repo_root: &Path,
@@ -3088,8 +3161,6 @@ fn update_default_workspace(
     use super::working_copy::{
         SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot, snapshot_working_copy,
     };
-
-    let ws_name = super::DEFAULT_WORKSPACE;
 
     // Step 0: ANCHOR — detach HEAD at epoch_before without touching the
     // working tree.
@@ -3304,9 +3375,9 @@ fn handle_post_merge_destroy(
         println!("  Cleaning up workspaces...");
     }
     for ws_name in &ws_to_destroy {
-        if ws_name == DEFAULT_WORKSPACE {
+        if ws_name == default_ws {
             if text_mode {
-                println!("    Skipping default workspace");
+                println!("    Skipping merge target workspace");
             }
             continue;
         }
@@ -3805,7 +3876,7 @@ mod tests {
             conflict_count: conflicts.len(),
             conflicts,
             message: "Merge has 2 unresolved conflict(s). Resolve them and retry.".to_string(),
-            to_fix: "maw ws merge alice bob".to_string(),
+            to_fix: "maw ws merge alice bob --into default".to_string(),
             resolve_command: None,
         };
 
@@ -3866,7 +3937,7 @@ mod tests {
             conflict_count: 1,
             conflicts,
             message: "1 conflict(s) found. Resolve them before merging.".to_string(),
-            to_fix: Some("maw ws merge alice".to_string()),
+            to_fix: Some("maw ws merge alice --into default".to_string()),
         };
 
         let json_str = serde_json::to_string_pretty(&output).unwrap();

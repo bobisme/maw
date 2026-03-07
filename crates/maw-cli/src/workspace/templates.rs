@@ -53,7 +53,7 @@ impl WorkspaceTemplate {
                     merge_policy: "squash-after-checks".to_string(),
                     default_checks: vec!["just check".to_string(), "cargo test".to_string()],
                     recommended_validation: vec![
-                        "maw ws merge <name> --check".to_string(),
+                        "maw ws merge <name> --into default --check".to_string(),
                         "maw ws overlap <name> default --format json".to_string(),
                     ],
                 },
@@ -68,7 +68,7 @@ impl WorkspaceTemplate {
                         "just check".to_string(),
                     ],
                     recommended_validation: vec![
-                        "maw ws merge <name> --check".to_string(),
+                        "maw ws merge <name> --into default --check".to_string(),
                         "maw ws touched <name> --format json".to_string(),
                     ],
                 },
@@ -81,7 +81,7 @@ impl WorkspaceTemplate {
                     default_checks: vec!["just check".to_string(), "cargo test".to_string()],
                     recommended_validation: vec![
                         "cargo clippy --all-targets".to_string(),
-                        "maw ws merge <name> --plan --format json".to_string(),
+                        "maw ws merge <name> --into default --plan --format json".to_string(),
                     ],
                 },
             },
@@ -107,7 +107,7 @@ impl WorkspaceTemplate {
                         "cargo test --release".to_string(),
                     ],
                     recommended_validation: vec![
-                        "maw ws merge <name> --check --format json".to_string(),
+                        "maw ws merge <name> --into default --check --format json".to_string(),
                         "maw status".to_string(),
                     ],
                 },

@@ -45,7 +45,7 @@ concurrently without stomping each other.
 ### Quick Start
 
 ```bash
-maw ws create <your-name>      # Creates workspace + your own commit
+maw ws create <your-name> --from origin/main  # Creates workspace from explicit source
 # Edit files using the absolute workspace path shown by create
 # Save your work in your workspace:
 maw exec <your-name> -- git add -A
@@ -57,11 +57,11 @@ maw ws status                  # See all agent work
 
 | Task | Command |
 |------|---------|
-| Create workspace | `maw ws create <name>` |
+| Create workspace | `maw ws create <name> --from <source>` |
 | Check status | `maw ws status` |
 | Sync stale workspace | `maw ws sync` |
 | Run command in workspace | `maw exec <name> -- <command>` |
-| Merge work | `maw ws merge <a> <b>` |
+| Merge work | `maw ws merge <a> <b> --into default` |
 | Destroy workspace | `maw ws destroy <name>` |
 
 **Note:** Always run commands through `maw exec <name> -- ...` in sandboxed environments

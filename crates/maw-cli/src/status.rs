@@ -10,6 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 use maw_git::GitRepo as _;
 
+use crate::changes::store::ChangesStore;
 use crate::doctor;
 use crate::format::OutputFormat;
 use crate::push::{SyncStatus, main_sync_status_inner};
@@ -77,6 +78,8 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         let summary = collect_status()?;
         let envelope = StatusEnvelope {
             workspaces: summary.workspace_names.clone(),
+            changes: summary.changes.clone(),
+            open_changes: summary.changes.len(),
             changed_files: summary.changed_files.clone(),
             untracked_files: summary.untracked_files.clone(),
             is_stale: summary.is_stale,
@@ -144,6 +147,8 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
 #[derive(Serialize)]
 struct StatusEnvelope {
     workspaces: Vec<String>,
+    changes: Vec<ChangeStatusItem>,
+    open_changes: usize,
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
     is_stale: bool,
@@ -152,9 +157,42 @@ struct StatusEnvelope {
     advice: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ChangeStatusItem {
+    change_id: String,
+    branch: String,
+    pr_number: Option<u64>,
+    pr_state: Option<String>,
+    pr_draft: Option<bool>,
+}
+
+impl ChangeStatusItem {
+    fn display(&self) -> String {
+        let mut s = format!("{} ({})", self.change_id, self.branch);
+        match (self.pr_number, self.pr_state.as_deref(), self.pr_draft) {
+            (Some(number), Some(state), Some(is_draft)) => {
+                if is_draft {
+                    let _ = write!(s, ", PR #{number} {state} draft");
+                } else {
+                    let _ = write!(s, ", PR #{number} {state}");
+                }
+            }
+            (Some(number), Some(state), None) => {
+                let _ = write!(s, ", PR #{number} {state}");
+            }
+            (Some(number), None, _) => {
+                let _ = write!(s, ", PR #{number}");
+            }
+            _ => s.push_str(", no PR"),
+        }
+        s
+    }
+}
+
 #[derive(Debug)]
 struct StatusSummary {
     workspace_names: Vec<String>,
+    changes: Vec<ChangeStatusItem>,
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
     is_stale: bool,
@@ -188,6 +226,7 @@ impl StatusSummary {
         let warn = yellow_warn();
         let stray = self.stray_root_files.len();
         let ws = self.workspace_names.len();
+        let change_sets = self.changes.len();
         let changes = self.changed_files.len();
         let untracked = self.untracked_files.len();
         let mut parts = Vec::new();
@@ -195,6 +234,7 @@ impl StatusSummary {
             parts.push(format!("ROOT-NOT-BARE={stray}{warn}"));
         }
         parts.push(format!("ws={ws}{}", if ws == 0 { &check } else { &warn }));
+        parts.push(format!("chgsets={change_sets}{check}"));
         parts.push(format!(
             "changes={changes}{}",
             if changes == 0 { &check } else { &warn }
@@ -249,6 +289,20 @@ impl StatusSummary {
         ));
         for name in &self.workspace_names {
             let _ = writeln!(out, "  - {name}");
+        }
+
+        let change_count = self.changes.len();
+        out.push_str(&text_status_line(
+            "Open changes",
+            &if change_count == 0 {
+                "none".to_string()
+            } else {
+                change_count.to_string()
+            },
+            true,
+        ));
+        for change in &self.changes {
+            let _ = writeln!(out, "  - {}", change.display());
         }
 
         let change_count = self.changed_files.len();
@@ -375,6 +429,20 @@ impl StatusSummary {
         ));
         for name in &self.workspace_names {
             let _ = writeln!(out, "  - {name}");
+        }
+
+        let change_count = self.changes.len();
+        out.push_str(&status_line(
+            "Open changes",
+            &if change_count == 0 {
+                "none".to_string()
+            } else {
+                change_count.to_string()
+            },
+            true,
+        ));
+        for change in &self.changes {
+            let _ = writeln!(out, "  - {}", change.display());
         }
 
         let change_count = self.changed_files.len();
@@ -553,6 +621,20 @@ fn collect_status() -> Result<StatusSummary> {
                 .collect()
         });
 
+    // Get active changes from metadata store
+    let changes = ChangesStore::open(&root)
+        .list_active_records()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| ChangeStatusItem {
+            change_id: record.change_id,
+            branch: record.git.change_branch,
+            pr_number: record.pr.as_ref().map(|pr| pr.number),
+            pr_state: record.pr.as_ref().map(|pr| pr.state.clone()),
+            pr_draft: record.pr.as_ref().map(|pr| pr.draft),
+        })
+        .collect();
+
     // Get changed/untracked files in the default workspace
     let default_ws_path = root.join("ws").join(default_ws_name);
     let (changed_files, untracked_files) = if default_ws_path.exists() {
@@ -573,6 +655,7 @@ fn collect_status() -> Result<StatusSummary> {
 
     Ok(StatusSummary {
         workspace_names,
+        changes,
         changed_files,
         untracked_files,
         is_stale,

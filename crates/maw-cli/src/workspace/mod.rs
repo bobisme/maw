@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use clap::Subcommand;
+use clap::{ArgGroup, Subcommand};
 use serde::Deserialize;
 
+use crate::changes::store::ChangesStore;
 use crate::format::OutputFormat;
 use maw_core::backend::platform;
 use maw_core::backend::{AnyBackend, WorkspaceBackend};
@@ -16,7 +17,7 @@ mod advance;
 mod annotate;
 pub(crate) mod capture;
 mod clean;
-mod create;
+pub(crate) mod create;
 mod describe;
 pub(crate) mod destroy_record;
 mod diff;
@@ -141,6 +142,86 @@ impl MawConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MergeTarget {
+    workspace: String,
+    branch: String,
+    change_id: Option<String>,
+}
+
+fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
+    let config = MawConfig::load(root)?;
+    let default_workspace = config.default_workspace().to_owned();
+    if into == default_workspace {
+        return Ok(MergeTarget {
+            workspace: default_workspace,
+            branch: config.branch().to_owned(),
+            change_id: None,
+        });
+    }
+
+    let store = ChangesStore::open(root);
+
+    if let Some(change_record) = store.read_active_record(into)? {
+        let workspace = if !change_record.workspaces.primary.trim().is_empty() {
+            change_record.workspaces.primary
+        } else {
+            into.to_owned()
+        };
+        let branch = change_record.git.change_branch;
+        if branch.trim().is_empty() {
+            bail!(
+                "Change '{}' has no configured branch.\n  To fix: repair change metadata before merging.",
+                into
+            );
+        }
+        return Ok(MergeTarget {
+            workspace,
+            branch,
+            change_id: Some(into.to_owned()),
+        });
+    }
+
+    // Workspace-name target: require an explicit change binding for non-default
+    // workspaces so branch destination is unambiguous.
+    validate_workspace_name(into)?;
+    let target_path = root.join("ws").join(into);
+    if target_path.exists() {
+        let meta = metadata::read(root, into)?;
+        let Some(change_id) = meta.change_id else {
+            bail!(
+                "Workspace '{}' is not bound to a change and cannot be used as --into target.\n  Use one of:\n    --into {}\n    --into <change-id>",
+                into,
+                default_workspace
+            );
+        };
+
+        let change_record = store.read_active_record(&change_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Workspace '{}' is bound to change '{}' but that change is not active.",
+                into,
+                change_id
+            )
+        })?;
+
+        if change_record.git.change_branch.trim().is_empty() {
+            bail!("Change '{}' has no configured branch.", change_id);
+        }
+
+        return Ok(MergeTarget {
+            workspace: into.to_owned(),
+            branch: change_record.git.change_branch,
+            change_id: Some(change_id),
+        });
+    }
+
+    bail!(
+        "Unknown merge target '{}'.\n  To fix: use --into {} or --into <active-change-id>.",
+        into,
+        default_workspace
+    )
+}
+
 /// Workspace subcommands
 #[derive(Subcommand)]
 pub enum WorkspaceCommands {
@@ -163,7 +244,10 @@ pub enum WorkspaceCommands {
     ///   Persistent (--persistent): can survive across epoch advances. Use
     ///   `maw ws advance <name>` to rebase onto the latest epoch when stale.
     ///   Suitable for long-running agent tasks that span multiple epochs.
-    #[command(verbatim_doc_comment)]
+    #[command(
+        verbatim_doc_comment,
+        group(ArgGroup::new("source").required(true).args(["from", "change"]))
+    )]
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -173,9 +257,25 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         random: bool,
 
-        /// Base revision to start from (default: main or @)
-        #[arg(short, long)]
-        revision: Option<String>,
+        /// Explicit source for workspace creation.
+        ///
+        /// Accepts workspace name, branch name, revision, or remote-tracking
+        /// source (example: origin/main). When using remote-tracking sources,
+        /// maw fetches first.
+        #[arg(
+            short = 'r',
+            long = "from",
+            alias = "revision",
+            conflicts_with = "change"
+        )]
+        from: Option<String>,
+
+        /// Bind workspace to an existing change id.
+        ///
+        /// The workspace base is resolved from the change branch and binding
+        /// metadata is stored for safer merges.
+        #[arg(long, conflicts_with = "from")]
+        change: Option<String>,
 
         /// Create a persistent workspace that can survive across epoch advances.
         ///
@@ -735,22 +835,26 @@ pub enum WorkspaceCommands {
     /// strategies.
     ///
     /// Examples:
-    ///   maw ws merge alice                       # adopt alice's work
-    ///   maw ws merge alice bob                   # merge alice and bob's work
-    ///   maw ws merge alice bob --destroy         # merge and clean up
-    ///   maw ws merge alice bob --dry-run         # preview merge
-    ///   maw ws merge alice bob --plan            # deterministic plan
-    ///   maw ws merge alice bob --plan --json     # plan as JSON
-    ///   maw ws merge alice --check               # pre-flight check
-    ///   maw ws merge alice --check --format json # structured check
-    ///   maw ws merge alice --format json         # structured result
-    ///   maw ws merge alice bob --resolve cf-k7mx=alice --resolve cf-r3np=bob
-    ///   maw ws merge alice bob --resolve-all=alice
+    ///   maw ws merge alice --into default                       # adopt alice into default
+    ///   maw ws merge alice bob --into default                   # merge alice and bob into default
+    ///   maw ws merge alice bob --into default --destroy         # merge and clean up
+    ///   maw ws merge alice bob --into default --dry-run         # preview merge
+    ///   maw ws merge alice bob --into default --plan            # deterministic plan
+    ///   maw ws merge alice bob --into default --plan --json     # plan as JSON
+    ///   maw ws merge alice --into default --check               # pre-flight check
+    ///   maw ws merge alice --into default --check --format json # structured check
+    ///   maw ws merge alice --into default --format json         # structured result
+    ///   maw ws merge alice bob --into default --resolve cf-k7mx=alice --resolve cf-r3np=bob
+    ///   maw ws merge alice bob --into default --resolve-all=alice
     #[command(verbatim_doc_comment)]
     Merge {
         /// Workspace names to merge
         #[arg(required = true)]
         workspaces: Vec<String>,
+
+        /// Explicit merge target (workspace name or change id).
+        #[arg(long)]
+        into: String,
 
         /// Destroy workspaces after successful merge (non-interactive by default)
         #[arg(long)]
@@ -801,7 +905,7 @@ pub enum WorkspaceCommands {
         /// When a merge produces conflicts, each conflict is assigned a short ID
         /// (e.g., cf-k7mx). Re-run the merge with --resolve flags to resolve them:
         ///
-        ///   maw ws merge alice bob --resolve cf-k7mx=alice --resolve cf-r3np=bob
+        ///   maw ws merge alice bob --into default --resolve cf-k7mx=alice --resolve cf-r3np=bob
         ///
         /// Strategies:
         ///   WORKSPACE    — keep named workspace's version (e.g., alice, bob)
@@ -821,7 +925,7 @@ pub enum WorkspaceCommands {
         ///
         /// Individual --resolve flags take precedence over --resolve-all.
         ///
-        ///   maw ws merge alice bob --resolve-all=alice
+        ///   maw ws merge alice bob --into default --resolve-all=alice
         #[arg(
             long = "resolve-all",
             value_name = "WORKSPACE",
@@ -878,7 +982,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Create {
             name,
             random,
-            revision,
+            from,
+            change,
             persistent,
             template,
         } => {
@@ -887,7 +992,18 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             } else {
                 name.expect("name is required unless --random is set")
             };
-            create::create(&name, revision.as_deref(), persistent, template)
+            if from.is_none() && change.is_none() {
+                bail!(
+                    "Workspace create requires an explicit source.\n  Use one of:\n    maw ws create {name} --from <ws|branch|rev|remote/branch>\n    maw ws create {name} --change <change-id>"
+                );
+            }
+            create::create(
+                &name,
+                from.as_deref(),
+                change.as_deref(),
+                persistent,
+                template,
+            )
         }
         WorkspaceCommands::Describe { name, message } => describe::describe(&name, &message),
         WorkspaceCommands::Annotate {
@@ -1075,6 +1191,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         }
         WorkspaceCommands::Merge {
             workspaces,
+            into,
             destroy,
             confirm,
             message,
@@ -1096,6 +1213,9 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 return merge::plan_merge(&workspaces, fmt);
             }
 
+            let root = repo_root()?;
+            let target = resolve_merge_target(&root, &into)?;
+
             // Resolve the commit message: --message flag, editor (TTY), or error.
             // Deferred until after merge() validates basic preconditions (e.g.
             // rejecting default workspace, empty list) so those errors surface
@@ -1106,8 +1226,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 edit_merge_message(&workspaces)?
             } else {
                 bail!(
-                    "No --message provided and stdin is not a terminal.\n  \
-                     Usage: maw ws merge <workspaces> --message \"feat: description of changes\"\n  \
+                     "No --message provided and stdin is not a terminal.\n  \
+                      Usage: maw ws merge <workspaces> --into <target> --message \"feat: description of changes\"\n  \
                      \n  \
                      A commit message is required so that merge history captures intent."
                 );
@@ -1125,6 +1245,9 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     },
                     dry_run,
                     format: fmt,
+                    target_workspace: &target.workspace,
+                    target_branch: &target.branch,
+                    target_change_id: target.change_id.as_deref(),
                     resolve,
                     resolve_all,
                     verbose,
@@ -1382,4 +1505,86 @@ fn edit_merge_message(workspaces: &[String]) -> Result<String> {
     }
 
     Ok(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_merge_target;
+    use crate::changes::store::{
+        ChangeGit, ChangeRecord, ChangeSource, ChangeState, ChangeWorkspaces, ChangesStore,
+    };
+    use tempfile::tempdir;
+
+    fn sample_change(change_id: &str, branch: &str, primary: &str) -> ChangeRecord {
+        ChangeRecord {
+            schema_version: 1,
+            change_id: change_id.to_string(),
+            title: "sample".to_string(),
+            state: ChangeState::Open,
+            created_at: "2026-03-01T00:00:00.000Z".to_string(),
+            source: ChangeSource {
+                from: "origin/main".to_string(),
+                from_oid: "abc".to_string(),
+            },
+            git: ChangeGit {
+                base_branch: "main".to_string(),
+                change_branch: branch.to_string(),
+            },
+            workspaces: ChangeWorkspaces {
+                primary: primary.to_string(),
+                linked: vec![primary.to_string()],
+            },
+            tracker: None,
+            pr: None,
+        }
+    }
+
+    #[test]
+    fn resolve_merge_target_uses_default_workspace_branch() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ws/default")).unwrap();
+        std::fs::write(
+            root.join("ws/default/.maw.toml"),
+            "[repo]\nbranch = \"trunk\"\ndefault_workspace = \"default\"\n",
+        )
+        .unwrap();
+
+        let target = resolve_merge_target(root, "default").unwrap();
+        assert_eq!(target.workspace, "default");
+        assert_eq!(target.branch, "trunk");
+        assert!(target.change_id.is_none());
+    }
+
+    #[test]
+    fn resolve_merge_target_from_change_id_uses_change_branch() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ws/default")).unwrap();
+
+        let store = ChangesStore::open(root);
+        let record = sample_change("ch-1aa", "changes/ch-1aa-topic", "agent-7");
+        store
+            .with_lock("test write", |locked| locked.write_active_record(&record))
+            .unwrap();
+
+        let target = resolve_merge_target(root, "ch-1aa").unwrap();
+        assert_eq!(target.workspace, "agent-7");
+        assert_eq!(target.branch, "changes/ch-1aa-topic");
+        assert_eq!(target.change_id.as_deref(), Some("ch-1aa"));
+    }
+
+    #[test]
+    fn resolve_merge_target_workspace_without_change_binding_fails() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ws/default")).unwrap();
+        std::fs::create_dir_all(root.join("ws/agent-2")).unwrap();
+
+        let err = resolve_merge_target(root, "agent-2").unwrap_err().to_string();
+        assert!(
+            err.contains("is not bound to a change"),
+            "unexpected error: {err}"
+        );
+    }
 }

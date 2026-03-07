@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use maw_git::GitRepo as _;
@@ -12,6 +13,8 @@ use maw_core::oplog::read::read_head;
 use maw_core::oplog::types::{OpPayload, Operation};
 use maw_core::refs as manifold_refs;
 
+use crate::changes::store::ChangesStore;
+
 use super::{
     DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata,
     oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
@@ -21,7 +24,8 @@ use super::{
 #[instrument(skip(template), fields(workspace = name))]
 pub fn create(
     name: &str,
-    revision: Option<&str>,
+    from: Option<&str>,
+    change: Option<&str>,
     persistent: bool,
     template: Option<WorkspaceTemplate>,
 ) -> Result<()> {
@@ -52,10 +56,11 @@ pub fn create(
         );
     }
 
-    // Determine base epoch.
-    // Use the provided revision, or fall back to refs/manifold/epoch/current,
-    // or HEAD of the configured branch.
-    let epoch = resolve_epoch(&root, revision)?;
+    // Determine source revision and optional change binding.
+    let (source_revision, bound_change_id) = resolve_workspace_source(&root, from, change)?;
+
+    // Determine base epoch from resolved source revision.
+    let epoch = resolve_epoch(&root, source_revision.as_deref())?;
 
     // Create workspace ID
     let ws_id =
@@ -74,15 +79,20 @@ pub fn create(
     // Write workspace metadata (mode + optional template defaults).
     // Keep the common case lean: if mode is ephemeral and no template is set,
     // metadata is omitted and defaults are inferred.
-    if persistent || template_profile.is_some() {
+    if persistent || template_profile.is_some() || bound_change_id.is_some() {
         let meta = metadata::WorkspaceMetadata {
             mode,
             template,
             template_defaults: template_profile.as_ref().map(|p| p.defaults.clone()),
             rebase_conflict_count: 0,
+            change_id: bound_change_id.clone(),
         };
         metadata::write(&root, name, &meta)
             .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;
+    }
+
+    if let Some(change_id) = bound_change_id.as_deref() {
+        bind_workspace_to_change(&root, name, change_id)?;
     }
 
     if let Some(profile) = &template_profile {
@@ -108,6 +118,9 @@ pub fn create(
         println!("  Template: {}", profile.template);
         println!("  Merge policy: {}", profile.defaults.merge_policy);
     }
+    if let Some(change_id) = bound_change_id.as_deref() {
+        println!("  Change: {change_id}");
+    }
     println!("  Epoch:  {short_oid} (base commit for this workspace)");
     println!("  Path:   {}/", info.path.display());
     println!();
@@ -121,6 +134,11 @@ pub fn create(
     println!();
     println!("  # Run commands in the workspace:");
     println!("  maw exec {name} -- cargo test");
+    if let Some(change_id) = bound_change_id.as_deref() {
+        println!("  maw ws merge {name} --into {change_id} --destroy");
+    } else {
+        println!("  maw ws merge {name} --into default --destroy");
+    }
     println!();
     if persistent {
         println!("Note: This is a PERSISTENT workspace. When the epoch advances:");
@@ -132,6 +150,114 @@ pub fn create(
     }
 
     Ok(())
+}
+
+fn resolve_workspace_source(
+    root: &std::path::Path,
+    from: Option<&str>,
+    change: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    if let Some(change_id) = change {
+        let store = ChangesStore::open(root);
+        let record = store.read_active_record(change_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Change '{}' not found.\n  Next: list known changes: maw changes list",
+                change_id
+            )
+        })?;
+        let change_branch = record.git.change_branch.trim();
+        if change_branch.is_empty() {
+            bail!(
+                "Change '{}' has no configured branch in metadata.",
+                change_id
+            );
+        }
+        return Ok((Some(change_branch.to_owned()), Some(change_id.to_owned())));
+    }
+
+    if let Some(from_value) = from {
+        return Ok((Some(resolve_from_source(root, from_value)?), None));
+    }
+
+    Ok((None, None))
+}
+
+fn resolve_from_source(root: &std::path::Path, from: &str) -> Result<String> {
+    // Remote-tracking source: fetch remote branch first.
+    if let Some((remote, branch)) = from.split_once('/')
+        && !remote.is_empty()
+        && !branch.is_empty()
+        && remote_exists(root, remote)?
+    {
+        let fetch = Command::new("git")
+            .args(["fetch", remote, branch, "--no-tags", "--quiet"])
+            .current_dir(root)
+            .output()
+            .context("Failed to run git fetch for workspace source")?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            bail!(
+                "Failed to fetch workspace source '{}': {}",
+                from,
+                stderr.trim()
+            );
+        }
+        return Ok(from.to_owned());
+    }
+
+    // Workspace source shorthand: resolve to refs/manifold/head/<workspace> when present.
+    let workspace_head_ref = manifold_refs::workspace_head_ref(from);
+    if manifold_refs::read_ref(root, &workspace_head_ref)
+        .map_err(|e| anyhow::anyhow!("Failed to read workspace source ref: {e}"))?
+        .is_some()
+    {
+        return Ok(workspace_head_ref);
+    }
+
+    Ok(from.to_owned())
+}
+
+fn remote_exists(root: &std::path::Path, remote: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", remote])
+        .current_dir(root)
+        .output()
+        .context("Failed to run git remote get-url")?;
+    Ok(output.status.success())
+}
+
+fn bind_workspace_to_change(
+    root: &std::path::Path,
+    workspace_name: &str,
+    change_id: &str,
+) -> Result<()> {
+    let store = ChangesStore::open(root);
+    let mut record = store.read_active_record(change_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Change '{}' not found while binding workspace '{}'.",
+            change_id,
+            workspace_name
+        )
+    })?;
+
+    if !record
+        .workspaces
+        .linked
+        .iter()
+        .any(|workspace| workspace == workspace_name)
+    {
+        record.workspaces.linked.push(workspace_name.to_owned());
+    }
+    if record.workspaces.primary.is_empty() {
+        record.workspaces.primary = workspace_name.to_owned();
+    }
+
+    store.with_lock("bind workspace to change", |locked| {
+        let mut index = store.read_index()?;
+        index.set_workspace_mapping(workspace_name, change_id);
+        locked.write_index(&index)?;
+        locked.write_active_record(&record)
+    })
 }
 
 #[derive(Serialize)]
@@ -173,7 +299,7 @@ fn write_template_artifact(
 /// Resolve the epoch (base commit) for a new workspace.
 ///
 /// Priority:
-/// 1. Explicit revision (from --revision flag)
+/// 1. Explicit source revision (from --from or --change)
 /// 2. refs/manifold/epoch/current (if set by `maw init`)
 /// 3. HEAD of the configured branch
 fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<EpochId> {

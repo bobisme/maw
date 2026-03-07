@@ -37,6 +37,9 @@ pub struct WorkspaceMetadata {
     /// Number of unresolved rebase conflicts. Zero means no conflicts.
     #[serde(default)]
     pub rebase_conflict_count: u32,
+    /// Optional bound change id (`maw changes` model).
+    #[serde(default)]
+    pub change_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

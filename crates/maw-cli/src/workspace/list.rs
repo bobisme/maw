@@ -10,7 +10,7 @@ use maw_core::model::types::WorkspaceState;
 
 use maw::merge::quarantine::QUARANTINE_NAME_PREFIX;
 
-use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
+use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
 pub struct WorkspaceInfo {
@@ -308,7 +308,7 @@ fn print_list_text(
     if !mergeable.is_empty() {
         println!();
         for name in &mergeable {
-            println!("Merge ready: maw ws merge {name} --destroy");
+            println!("Merge ready: maw ws merge {name} --into default --destroy");
         }
     }
 }
@@ -424,7 +424,7 @@ fn print_list_pretty(
             "  Ephemeral workspaces should be merged or destroyed — they survived an epoch advance."
         );
         println!(
-            "  Fix: maw ws sync --all  (to sync) or maw ws merge <name> (to merge and destroy)"
+            "  Fix: maw ws sync --all  (to sync) or maw ws merge <name> --into default (to merge and destroy)"
         );
     }
 

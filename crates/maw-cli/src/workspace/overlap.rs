@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
@@ -94,7 +94,7 @@ fn print_overlap_text(output: &OverlapOutput) {
     println!("Risk: {}", output.risk);
     println!();
     println!(
-        "Next: maw ws merge {} {} --check --format json",
+        "Next: maw ws merge {} {} --into default --check --format json",
         output.workspace_a, output.workspace_b
     );
 }

@@ -132,6 +132,20 @@ pub fn run_commit_phase(
     epoch_before: &GitOid,
     epoch_candidate: &GitOid,
 ) -> Result<CommitResult, CommitError> {
+    run_commit_phase_with_branch_base(root, branch, epoch_before, epoch_before, epoch_candidate)
+}
+
+/// Run COMMIT phase when the target branch base differs from epoch.
+///
+/// This is used for explicit `ws merge --into <target>` flows where the target
+/// branch may not currently point at `epoch_before`.
+pub fn run_commit_phase_with_branch_base(
+    root: &Path,
+    branch: &str,
+    epoch_before: &GitOid,
+    branch_before: &GitOid,
+    epoch_candidate: &GitOid,
+) -> Result<CommitResult, CommitError> {
     let mut state = CommitStateFile {
         phase: CommitPhase::Commit,
         epoch_before: epoch_before.clone(),
@@ -151,7 +165,7 @@ pub fn run_commit_phase(
         root,
         &[
             (refs::EPOCH_CURRENT, epoch_before, epoch_candidate),
-            (&branch_ref, epoch_before, epoch_candidate),
+            (&branch_ref, branch_before, epoch_candidate),
         ],
     )?;
 
@@ -178,6 +192,23 @@ pub fn recover_partial_commit(
     epoch_before: &GitOid,
     epoch_candidate: &GitOid,
 ) -> Result<CommitRecovery, CommitError> {
+    recover_partial_commit_with_branch_base(
+        root,
+        branch,
+        epoch_before,
+        epoch_before,
+        epoch_candidate,
+    )
+}
+
+/// Recover COMMIT phase when branch base differs from epoch.
+pub fn recover_partial_commit_with_branch_base(
+    root: &Path,
+    branch: &str,
+    epoch_before: &GitOid,
+    branch_before: &GitOid,
+    epoch_candidate: &GitOid,
+) -> Result<CommitRecovery, CommitError> {
     let branch_ref = format!("refs/heads/{branch}");
     let epoch = refs::read_ref(root, refs::EPOCH_CURRENT)?;
     let branch_head = refs::read_ref(root, &branch_ref)?;
@@ -186,8 +217,8 @@ pub fn recover_partial_commit(
         return Ok(CommitRecovery::AlreadyCommitted);
     }
 
-    if epoch.as_ref() == Some(epoch_candidate) && branch_head.as_ref() == Some(epoch_before) {
-        refs::write_ref_cas(root, &branch_ref, epoch_before, epoch_candidate)?;
+    if epoch.as_ref() == Some(epoch_candidate) && branch_head.as_ref() == Some(branch_before) {
+        refs::write_ref_cas(root, &branch_ref, branch_before, epoch_candidate)?;
 
         let state = CommitStateFile {
             phase: CommitPhase::Committed,
@@ -202,7 +233,7 @@ pub fn recover_partial_commit(
         return Ok(CommitRecovery::FinalizedMainRef);
     }
 
-    if epoch.as_ref() == Some(epoch_before) && branch_head.as_ref() == Some(epoch_before) {
+    if epoch.as_ref() == Some(epoch_before) && branch_head.as_ref() == Some(branch_before) {
         return Ok(CommitRecovery::NotCommitted);
     }
 

@@ -593,8 +593,27 @@ impl TestRepo {
     ///
     /// Returns the raw `Output`.
     pub fn maw_raw(&self, args: &[&str]) -> Output {
+        let mut adjusted: Vec<&str> = args.to_vec();
+        let is_ws_create = adjusted.len() >= 2
+            && (adjusted[0] == "ws" || adjusted[0] == "workspace")
+            && adjusted[1] == "create";
+        let has_explicit_source = adjusted.iter().any(|arg| *arg == "--from" || *arg == "--change");
+        if is_ws_create && !has_explicit_source {
+            adjusted.insert(2, "--from");
+            adjusted.insert(3, "main");
+        }
+
+        let is_ws_merge = adjusted.len() >= 2
+            && (adjusted[0] == "ws" || adjusted[0] == "workspace")
+            && adjusted[1] == "merge";
+        let has_into_target = adjusted.iter().any(|arg| *arg == "--into");
+        if is_ws_merge && !has_into_target {
+            adjusted.insert(2, "--into");
+            adjusted.insert(3, "default");
+        }
+
         Command::new(maw_bin())
-            .args(args)
+            .args(&adjusted)
             .current_dir(&self.root)
             .output()
             .expect("failed to execute maw")

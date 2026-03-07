@@ -4,6 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use maw_cli::agents;
+use maw_cli::changes;
 use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
@@ -30,7 +31,7 @@ use maw_cli::workspace;
 ///
 /// QUICK START:
 ///
-///   maw ws create <your-name>
+///   maw ws create <your-name> --from origin/main
 ///
 ///   # All file operations use the workspace path shown by create.
 ///   # Run tools inside your workspace:
@@ -46,11 +47,11 @@ use maw_cli::workspace;
 ///
 /// WORKFLOW:
 ///
-///   1. Create workspace: maw ws create <name>
+///   1. Create workspace: maw ws create <name> --from <source>
 ///   2. Edit files under ws/<name>/ (use absolute paths)
 ///   3. Save work with git commits in your workspace
 ///   4. Check status: maw ws status
-///   5. Merge work: maw ws merge <name1> <name2>
+///   5. Merge work: maw ws merge <name1> <name2> --into default
 ///   6. Resolve conflicts if needed, then continue
 #[derive(Parser)]
 #[command(name = "maw")]
@@ -75,6 +76,14 @@ enum Commands {
     /// Manage AGENTS.md instructions
     #[command(subcommand)]
     Agents(agents::AgentsCommands),
+
+    /// Manage tracked feature changes (branch + PR + linked workspaces)
+    ///
+    /// A change is an explicit, named unit of work (for example `ch-1xr`).
+    /// Use `maw changes create ... --from ...` to start one, then merge
+    /// workspaces into it with `maw ws merge ... --into <change-id>`.
+    #[command(subcommand, verbatim_doc_comment)]
+    Changes(changes::ChangesCommands),
 
     /// Initialize maw in the current repository
     ///
@@ -296,6 +305,7 @@ fn main() {
     let result = match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(ref cmd) => agents::run(cmd),
+        Commands::Changes(ref cmd) => changes::run(cmd),
         Commands::Init => v2_init::run(),
         Commands::Upgrade => upgrade::run(),
         Commands::Doctor { format, json } => {
@@ -346,10 +356,10 @@ mod tests {
 
     use std::fs;
 
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{Cli, should_emit_migration_notice};
+    use super::{should_emit_migration_notice, Cli};
 
     #[test]
     fn emits_notice_for_jj_only_repo() {
@@ -427,5 +437,42 @@ mod tests {
             offenders.is_empty(),
             "Unexpected jj mentions in help output: {offenders:#?}"
         );
+    }
+
+    #[test]
+    fn changes_subcommand_is_registered() {
+        let cmd = Cli::command();
+        let has_changes = cmd
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "changes");
+        assert!(
+            has_changes,
+            "expected 'changes' subcommand to be registered"
+        );
+    }
+
+    #[test]
+    fn ws_merge_requires_into_flag() {
+        let result = Cli::try_parse_from(["maw", "ws", "merge", "alice"]);
+        assert!(result.is_err(), "merge should require --into");
+        let err = result.err().expect("expected parse error").to_string();
+        assert!(err.contains("--into"), "error should mention --into: {err}");
+    }
+
+    #[test]
+    fn ws_create_requires_explicit_source_flag() {
+        let result = Cli::try_parse_from(["maw", "ws", "create", "alice"]);
+        assert!(result.is_err(), "create should require --from or --change");
+        let err = result.err().expect("expected parse error").to_string();
+        assert!(
+            err.contains("--from") || err.contains("--change"),
+            "error should mention source flags: {err}"
+        );
+    }
+
+    #[test]
+    fn ws_create_accepts_from_source() {
+        let result = Cli::try_parse_from(["maw", "ws", "create", "alice", "--from", "main"]);
+        assert!(result.is_ok(), "create with --from should parse");
     }
 }

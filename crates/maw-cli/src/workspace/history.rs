@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
-use maw_core::oplog::read::{OpLogReadError, walk_chain};
+use maw_core::oplog::read::{walk_chain, OpLogReadError};
 use maw_core::oplog::types::OpPayload;
 
 use super::{get_backend, repo_root};
@@ -335,7 +335,9 @@ fn print_empty_history(name: &str, format: OutputFormat) -> Result<()> {
         OutputFormat::Text => {
             println!("Workspace '{name}' has no history.");
             println!();
-            println!("Next: edit files in the workspace, then merge with maw ws merge {name}");
+            println!(
+                "Next: edit files in the workspace, then merge with maw ws merge {name} --into default"
+            );
         }
         OutputFormat::Pretty => {
             println!("Workspace '{name}' has no history.");
