@@ -344,6 +344,70 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
     );
 }
 
+#[test]
+fn merge_into_default_after_change_target_keeps_default_clean() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-clean",
+        "--workspace",
+        "ch-clean",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-clean", "worker"]);
+    repo.add_file("worker", "src/feature_alpha.rs", "pub fn alpha() -> i32 { 1 }\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: add alpha module"]);
+
+    // Advance epoch by merging into change target; main does not move here.
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-clean",
+        "--destroy",
+        "--message",
+        "merge worker into change",
+    ]);
+
+    // Merge a separate workspace into default/main.
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");
+    repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
+    repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "hotfix",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge hotfix",
+    ]);
+
+    assert_eq!(
+        repo.read_file("default", "src/feature_alpha.rs").as_deref(),
+        Some("pub fn alpha() -> i32 { 1 }\n"),
+        "default workspace should retain files introduced by the new epoch"
+    );
+
+    let default_status = repo.git_in_workspace("default", &["status", "--porcelain"]);
+    assert!(
+        default_status.trim().is_empty(),
+        "default workspace should be clean after merge cleanup, got: {default_status:?}"
+    );
+}
+
 /// When the default workspace has dirty (uncommitted) files at merge time,
 /// the merge should record a Snapshot operation in the default workspace's
 /// oplog capturing those dirty files before the checkout.

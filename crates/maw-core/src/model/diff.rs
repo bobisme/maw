@@ -188,13 +188,41 @@ fn parse_diff_name_status(output: &str) -> Result<Vec<DiffEntry>, DiffError> {
 /// Hash a file and write it to the git object store, returning its blob OID.
 ///
 /// Equivalent to `git hash-object -w -- <abs_path>`.
-fn hash_object_write(workspace_path: &Path, abs_file: &Path) -> Result<GitOid, DiffError> {
+///
+/// Returns `Ok(None)` when the path is a directory or otherwise unhashable as
+/// a regular file (for example embedded git directory entries reported as
+/// `path/` paths).
+fn hash_object_write(workspace_path: &Path, abs_file: &Path) -> Result<Option<GitOid>, DiffError> {
+    if abs_file.is_dir() {
+        return Ok(None);
+    }
+
     let path_str = abs_file.to_string_lossy();
-    let stdout = git_cmd(workspace_path, &["hash-object", "-w", "--", &path_str])?;
+    let stdout = match git_cmd(workspace_path, &["hash-object", "-w", "--", &path_str]) {
+        Ok(out) => out,
+        Err(DiffError::GitCommand {
+            command,
+            stderr,
+            exit_code,
+        }) => {
+            let lower = stderr.to_lowercase();
+            if lower.contains("is a directory") || lower.contains("unable to add") {
+                return Ok(None);
+            }
+            return Err(DiffError::GitCommand {
+                command,
+                stderr,
+                exit_code,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+
     let trimmed = stdout.trim();
-    GitOid::new(trimmed).map_err(|_| DiffError::InvalidOid {
+    let oid = GitOid::new(trimmed).map_err(|_| DiffError::InvalidOid {
         raw: trimmed.to_owned(),
-    })
+    })?;
+    Ok(Some(oid))
 }
 
 /// Look up the blob OID of `path` in the epoch commit's tree.
@@ -305,7 +333,9 @@ pub fn compute_patchset(
         match entry {
             DiffEntry::Added(path) => {
                 let abs = workspace_path.join(&path);
-                let blob = hash_object_write(workspace_path, &abs)?;
+                let Some(blob) = hash_object_write(workspace_path, &abs)? else {
+                    continue;
+                };
                 let file_id = file_id_map
                     .id_for_path(&path)
                     .unwrap_or_else(|| file_id_from_path(&path));
@@ -314,7 +344,9 @@ pub fn compute_patchset(
             DiffEntry::Modified(path) => {
                 let base_blob = epoch_blob_oid(workspace_path, base_epoch, &path)?;
                 let abs = workspace_path.join(&path);
-                let new_blob = hash_object_write(workspace_path, &abs)?;
+                let Some(new_blob) = hash_object_write(workspace_path, &abs)? else {
+                    continue;
+                };
                 let file_id = file_id_map
                     .id_for_path(&path)
                     .unwrap_or_else(|| file_id_from_blob(&base_blob));
@@ -343,7 +375,9 @@ pub fn compute_patchset(
             DiffEntry::Renamed { from, to } => {
                 let base_blob = epoch_blob_oid(workspace_path, base_epoch, &from)?;
                 let abs_to = workspace_path.join(&to);
-                let new_blob_oid = hash_object_write(workspace_path, &abs_to)?;
+                let Some(new_blob_oid) = hash_object_write(workspace_path, &abs_to)? else {
+                    continue;
+                };
                 let file_id = file_id_map
                     .id_for_path(&from)
                     .or_else(|| file_id_map.id_for_path(&to))
@@ -384,7 +418,9 @@ pub fn compute_patchset(
             continue;
         }
         let abs = workspace_path.join(&path);
-        let blob = hash_object_write(workspace_path, &abs)?;
+        let Some(blob) = hash_object_write(workspace_path, &abs)? else {
+            continue;
+        };
         let file_id = file_id_map
             .id_for_path(&path)
             .unwrap_or_else(|| file_id_from_path(&path));
@@ -965,5 +1001,31 @@ mod tests {
         };
 
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn compute_patchset_ignores_unhashable_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        git_init(root);
+        let epoch = make_epoch(root, &[("base.rs", "// base")]);
+
+        let nested = root.join(".tmp/sub");
+        fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init"]);
+        write_file(root, ".tmp/sub/scratch.txt", "nested\n");
+
+        write_file(root, "ok.txt", "ok\n");
+
+        let ps = compute_patchset(root, &epoch).unwrap();
+        assert!(
+            ps.patches.contains_key(&PathBuf::from("ok.txt")),
+            "regular file should still be captured"
+        );
+        assert!(
+            !ps.patches.contains_key(&PathBuf::from(".tmp/sub/")),
+            "directory-like path should not appear in patchset"
+        );
     }
 }

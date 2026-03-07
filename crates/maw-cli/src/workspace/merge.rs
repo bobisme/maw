@@ -2111,6 +2111,25 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let manifold_dir = root.join(".manifold");
     let default_ws_path = root.join("ws").join(default_ws);
     let backend = get_backend()?;
+    let target_base_epoch_before = if default_ws_path.exists() {
+        let target_ws_id = WorkspaceId::new(default_ws)
+            .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
+        Some(
+            backend
+                .status(&target_ws_id)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to inspect target workspace '{}' before merge: {e}",
+                        default_ws
+                    )
+                })?
+                .base_epoch
+                .as_str()
+                .to_owned(),
+        )
+    } else {
+        None
+    };
 
     // Convert workspace names to WorkspaceIds
     let sources: Vec<WorkspaceId> = ws_to_merge
@@ -2706,6 +2725,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             branch,
             epoch_before_oid.as_str(),
             build_output.candidate.as_str(),
+            target_base_epoch_before.as_deref(),
             &root,
             text_mode,
         )?;
@@ -3129,6 +3149,32 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn is_ancestor_commit(ws_path: &Path, maybe_ancestor: &str, maybe_descendant: &str) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            maybe_ancestor,
+            maybe_descendant,
+        ])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git merge-base --is-ancestor")?;
+
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "git merge-base --is-ancestor failed: {}",
+        stderr.trim()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers: workspace management
 // ---------------------------------------------------------------------------
@@ -3157,6 +3203,7 @@ fn update_default_workspace(
     branch: &str,
     epoch_before: &str,
     epoch_after: &str,
+    workspace_base_before: Option<&str>,
     repo_root: &Path,
     text_mode: bool,
 ) -> Result<()> {
@@ -3178,7 +3225,52 @@ fn update_default_workspace(
         }
     };
 
-    // Step 0: ANCHOR — detach HEAD at epoch_before without touching the
+    let fallback_anchor = epoch_before.to_owned();
+    let anchor_epoch = if let Some(base_before) = workspace_base_before {
+        if base_before == epoch_before {
+            base_before.to_owned()
+        } else {
+            match is_ancestor_commit(default_ws_path, base_before, epoch_before) {
+                Ok(true) => base_before.to_owned(),
+                Ok(false) => fallback_anchor.clone(),
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to verify target workspace base ancestry ({} -> {}): {e}",
+                        base_before,
+                        epoch_before
+                    );
+                    fallback_anchor.clone()
+                }
+            }
+        }
+    } else {
+        let ref_name = maw_core::refs::workspace_epoch_ref(ws_name);
+        match maw_core::refs::read_ref(repo_root, &ref_name) {
+            Ok(Some(ws_epoch_oid)) => {
+                let ws_epoch = ws_epoch_oid.as_str();
+                if ws_epoch == epoch_before {
+                    fallback_anchor.clone()
+                } else {
+                    match is_ancestor_commit(default_ws_path, ws_epoch, epoch_before) {
+                        Ok(true) => ws_epoch.to_owned(),
+                        Ok(false) => fallback_anchor.clone(),
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to verify default workspace epoch ancestry ({} -> {}): {e}",
+                                ws_epoch,
+                                epoch_before
+                            );
+                            fallback_anchor.clone()
+                        }
+                    }
+                }
+            }
+            _ => fallback_anchor.clone(),
+        }
+    };
+
+    // Step 0: ANCHOR — detach HEAD at the default workspace base epoch
+    // (or epoch_before fallback) without touching the
     // working tree.
     //
     // The COMMIT phase has already moved the branch ref to the new epoch, but
@@ -3187,8 +3279,13 @@ fn update_default_workspace(
     // relative to the NEW epoch (the branch's current target), which includes
     // spurious "reversions" of the merge results.
     //
-    // We need HEAD at epoch_before so the stash captures only the ACTUAL
-    // user changes relative to the old epoch.
+    // We need HEAD at the default workspace's own base epoch so the stash
+    // captures only the ACTUAL user changes relative to that workspace state.
+    //
+    // When the global epoch advances via a non-default target (for example
+    // merge --into <change-id>), default may legitimately lag behind
+    // epoch_before. Anchoring at epoch_before in that case turns legitimate
+    // missing files into synthetic deletions during replay.
     //
     // We can't use `git checkout --detach` because it updates the working
     // tree (which fails with dirty files or destroys them with --force).
@@ -3208,7 +3305,7 @@ fn update_default_workspace(
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
         let head_path = std::path::Path::new(&git_dir).join("HEAD");
-        std::fs::write(&head_path, format!("{epoch_before}\n"))
+        std::fs::write(&head_path, format!("{anchor_epoch}\n"))
             .with_context(|| format!("failed to write detached HEAD to {}", head_path.display()))?;
 
         // Reset the index to match HEAD (epoch_before) without touching working tree.

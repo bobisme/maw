@@ -402,7 +402,8 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to inspect workspace state: {e}"))?;
     let touched_count = compute_patchset(&path, &status.base_epoch)
         .map(|patch_set| patch_set.len())
-        .map_err(|e| anyhow::anyhow!("Failed to inspect local changes before destroy: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to inspect local changes before destroy: {e}"))?
+        .max(status.dirty_count());
 
     // FP: crash after status check but before any destructive action.
     maw::fp!("FP_DESTROY_AFTER_STATUS")?;

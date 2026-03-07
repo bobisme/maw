@@ -257,6 +257,43 @@ fn post_merge_destroy_handles_uncapturable_embedded_repo_path() {
     );
 }
 
+#[test]
+fn standalone_destroy_force_handles_uncapturable_embedded_repo_path() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "force-embed"]);
+    repo.add_file("force-embed", "NOTE.txt", "keep this\n");
+
+    let nested = repo.workspace_path("force-embed").join(".tmp/sub");
+    std::fs::create_dir_all(&nested).expect("create nested directory");
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(&nested)
+        .output()
+        .expect("run nested git init");
+    assert!(
+        init.status.success(),
+        "nested git init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(nested.join("scratch.txt"), "nested scratch\n").expect("write nested file");
+
+    let out = repo.maw_raw(&["ws", "destroy", "force-embed", "--force"]);
+    assert!(
+        out.status.success(),
+        "destroy --force should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !repo.workspace_exists("force-embed"),
+        "workspace should be destroyed after force destroy"
+    );
+
+    let recovered = repo.maw_ok(&["ws", "recover", "force-embed", "--show", "NOTE.txt"]);
+    assert_eq!(recovered, "keep this\n");
+}
+
 /// Tests that standalone `maw ws destroy` without `--force` refuses to
 /// destroy a dirty workspace. This is the simplest G4 gate: the presence
 /// of unmerged changes prevents destruction without explicit consent.
