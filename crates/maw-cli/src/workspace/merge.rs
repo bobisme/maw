@@ -9,6 +9,7 @@ use maw_git::GitRepo as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::changes::store::ChangesStore;
 use crate::format::OutputFormat;
 use maw::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use maw::merge::collect::collect_snapshots;
@@ -2168,6 +2169,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         }
     }
 
+    if target_change_id.is_none() {
+        guard_unbound_sources_against_active_change_ancestry(&root, branch, &ws_to_merge)?;
+    }
+
     // -----------------------------------------------------------------------
     // Phase 1: PREPARE — freeze inputs
     // -----------------------------------------------------------------------
@@ -3173,6 +3178,112 @@ fn is_ancestor_commit(ws_path: &Path, maybe_ancestor: &str, maybe_descendant: &s
         "git merge-base --is-ancestor failed: {}",
         stderr.trim()
     );
+}
+
+#[derive(Debug, Clone)]
+struct ActiveChangeHead {
+    change_id: String,
+    change_branch: String,
+    head_oid: String,
+}
+
+fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git rev-parse HEAD")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to resolve workspace HEAD: {}", stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn active_change_heads_not_on_branch(root: &Path, target_branch: &str) -> Result<Vec<ActiveChangeHead>> {
+    let store = ChangesStore::open(root);
+    let active_changes = store
+        .list_active_records()
+        .context("Failed to read active changes")?;
+
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let target_ref = format!("refs/heads/{target_branch}");
+    let target_head = repo
+        .rev_parse_opt(&target_ref)
+        .map_err(|e| anyhow::anyhow!("failed to read {target_ref}: {e}"))?
+        .map(|oid| oid.to_string());
+
+    let mut out = Vec::new();
+    for record in active_changes {
+        let change_branch = record.git.change_branch.trim().to_string();
+        if change_branch.is_empty() || change_branch == target_branch {
+            continue;
+        }
+
+        let change_ref = format!("refs/heads/{change_branch}");
+        let Some(change_head) = repo
+            .rev_parse_opt(&change_ref)
+            .map_err(|e| anyhow::anyhow!("failed to read {change_ref}: {e}"))?
+        else {
+            continue;
+        };
+        let change_head_oid = change_head.to_string();
+
+        if let Some(target_head_oid) = target_head.as_deref()
+            && is_ancestor_commit(root, &change_head_oid, target_head_oid)?
+        {
+            // Already landed on target branch; not a cross-target risk.
+            continue;
+        }
+
+        out.push(ActiveChangeHead {
+            change_id: record.change_id,
+            change_branch,
+            head_oid: change_head_oid,
+        });
+    }
+
+    Ok(out)
+}
+
+fn guard_unbound_sources_against_active_change_ancestry(
+    root: &Path,
+    target_branch: &str,
+    source_workspaces: &[String],
+) -> Result<()> {
+    let risky_change_heads = active_change_heads_not_on_branch(root, target_branch)?;
+    if risky_change_heads.is_empty() {
+        return Ok(());
+    }
+
+    for ws_name in source_workspaces {
+        let ws_meta = super::metadata::read(root, ws_name).unwrap_or_default();
+        if ws_meta.change_id.is_some() {
+            continue;
+        }
+
+        let ws_path = root.join("ws").join(ws_name);
+        let ws_head = resolve_workspace_head_oid(&ws_path)?;
+
+        for change in &risky_change_heads {
+            if is_ancestor_commit(root, &change.head_oid, &ws_head)? {
+                bail!(
+                    "Workspace '{}' is not bound to a change, but its HEAD includes active change '{}' (branch '{}') which is not yet on '{}'.\n  \
+                     Refusing merge into '{}' to avoid promoting change-only commits to trunk.\n  \
+                     To fix: merge this workspace into its change target, or recreate it with an explicit source that does not include '{}'.",
+                    ws_name,
+                    change.change_id,
+                    change.change_branch,
+                    target_branch,
+                    target_branch,
+                    change.change_branch
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

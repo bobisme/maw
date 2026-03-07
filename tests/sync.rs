@@ -64,3 +64,116 @@ fn sync_all_updates_multiple_stale_workspaces() {
     assert!(!workspace_state(&repo, "alice").contains("stale"));
     assert!(!workspace_state(&repo, "bob").contains("stale"));
 }
+
+#[test]
+fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# app\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-sync",
+        "--workspace",
+        "ch-sync",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-sync", "worker"]);
+    repo.add_file("worker", "src/feature.rs", "pub fn feature() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: worker change"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-sync",
+        "--destroy",
+        "--message",
+        "merge worker",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    let old_head = repo.workspace_head("hotfix");
+    assert_ne!(old_head, repo.current_epoch());
+
+    let out = repo.maw_raw(&["exec", "hotfix", "--", "git", "rev-parse", "HEAD"]);
+    assert!(
+        out.status.success(),
+        "exec should still run command\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let new_head = repo.workspace_head("hotfix");
+    assert_eq!(
+        new_head, old_head,
+        "auto-sync should be skipped for risky cross-target stale workspace"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Skipping auto-sync for this unbound workspace"),
+        "expected explicit cross-target skip warning, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn sync_refuses_cross_target_update_for_unbound_workspace() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# app\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-sync2",
+        "--workspace",
+        "ch-sync2",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-sync2", "worker"]);
+    repo.add_file("worker", "src/feature.rs", "pub fn feature() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: worker change"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-sync2",
+        "--destroy",
+        "--message",
+        "merge worker",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    let old_head = repo.workspace_head("hotfix");
+
+    let out = repo.maw_raw(&["ws", "sync", "hotfix"]);
+    assert!(
+        out.status.success(),
+        "sync command should return success with safety refusal\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let new_head = repo.workspace_head("hotfix");
+    assert_eq!(
+        new_head, old_head,
+        "cross-target safety should leave workspace base unchanged"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Refusing to sync this unbound workspace"),
+        "expected explicit sync refusal message, got stdout: {stdout}"
+    );
+}

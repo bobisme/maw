@@ -408,6 +408,74 @@ fn merge_into_default_after_change_target_keeps_default_clean() {
     );
 }
 
+#[test]
+fn merge_into_default_blocks_unbound_workspace_with_active_change_ancestry() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-guard",
+        "--workspace",
+        "ch-guard",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-guard", "worker"]);
+    repo.add_file("worker", "src/change_only.rs", "pub fn from_change() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: change work"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-guard",
+        "--destroy",
+        "--message",
+        "merge worker into change",
+    ]);
+
+    // Create an unbound main workspace, then intentionally contaminate it by
+    // moving it to the active change epoch.
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    let change_epoch = repo.current_epoch();
+    repo.git_in_workspace("hotfix", &["checkout", "--detach", &change_epoch]);
+
+    repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");
+    repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
+    repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "hotfix",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge hotfix",
+    ]);
+
+    assert!(
+        !out.status.success(),
+        "merge should be blocked\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not bound to a change") && stderr.contains("Refusing merge into 'main'"),
+        "expected active-change ancestry guard message, got stderr: {stderr}"
+    );
+}
+
 /// When the default workspace has dirty (uncommitted) files at merge time,
 /// the merge should record a Snapshot operation in the default workspace's
 /// oplog capturing those dirty files before the checkout.

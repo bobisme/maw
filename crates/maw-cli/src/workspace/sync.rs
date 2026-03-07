@@ -6,6 +6,7 @@ use maw_git::GitRepo as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use crate::changes::store::ChangesStore;
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
 use maw_core::refs as manifold_refs;
@@ -125,6 +126,29 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
             return Ok(());
         }
         Some(_) => {}
+    }
+
+    if let Some(active_change) = cross_target_sync_risk(
+        &root,
+        &workspace_name,
+        ws_status.base_epoch.as_str(),
+        current_epoch.as_str(),
+    )? {
+        println!(
+            "Workspace '{workspace_name}' is behind current epoch, but that epoch tracks active change '{}' ({}) not yet on trunk.",
+            active_change.change_id, active_change.change_branch
+        );
+        println!(
+            "  Refusing to sync this unbound workspace to avoid pulling change-only commits into a trunk-targeted flow."
+        );
+        println!(
+            "  To continue change work, create/use a change-bound workspace: maw ws create --change {} <name>",
+            active_change.change_id
+        );
+        println!(
+            "  To continue trunk-only work, keep this workspace on its current base and merge with --into default."
+        );
+        return Ok(());
     }
 
     if rebase {
@@ -577,6 +601,132 @@ fn committed_ahead_of_epoch(ws_path: &Path, epoch_oid: &str) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+#[derive(Debug, Clone)]
+struct ActiveChangeEpoch {
+    change_id: String,
+    change_branch: String,
+    head_oid: String,
+}
+
+fn git_is_ancestor(repo_root: &Path, maybe_ancestor: &str, maybe_descendant: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            maybe_ancestor,
+            maybe_descendant,
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run git merge-base --is-ancestor: {e}"))?;
+
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
+}
+
+fn active_change_tracking_epoch(
+    root: &Path,
+    epoch_oid: &str,
+    trunk_branch: &str,
+) -> Result<Option<ActiveChangeEpoch>> {
+    let store = ChangesStore::open(root);
+    let active = store
+        .list_active_records()
+        .map_err(|e| anyhow::anyhow!("Failed to read active changes: {e}"))?;
+
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+
+    let trunk_ref = format!("refs/heads/{trunk_branch}");
+    let trunk_head = repo
+        .rev_parse_opt(&trunk_ref)
+        .map_err(|e| anyhow::anyhow!("failed to read {trunk_ref}: {e}"))?
+        .map(|oid| oid.to_string());
+
+    for record in active {
+        let change_branch = record.git.change_branch.trim().to_string();
+        if change_branch.is_empty() || change_branch == trunk_branch {
+            continue;
+        }
+        let change_ref = format!("refs/heads/{change_branch}");
+        let Some(change_head) = repo
+            .rev_parse_opt(&change_ref)
+            .map_err(|e| anyhow::anyhow!("failed to read {change_ref}: {e}"))?
+        else {
+            continue;
+        };
+
+        let change_head_oid = change_head.to_string();
+        if change_head_oid != epoch_oid {
+            continue;
+        }
+
+        if let Some(trunk_head_oid) = trunk_head.as_deref()
+            && git_is_ancestor(root, &change_head_oid, trunk_head_oid)?
+        {
+            // Already landed on trunk; this is no longer cross-target drift.
+            continue;
+        }
+
+        return Ok(Some(ActiveChangeEpoch {
+            change_id: record.change_id,
+            change_branch,
+            head_oid: change_head_oid,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn cross_target_sync_risk(
+    root: &Path,
+    ws_name: &str,
+    ws_base_epoch: &str,
+    epoch_oid: &str,
+) -> Result<Option<ActiveChangeEpoch>> {
+    let ws_meta = metadata::read(root, ws_name).unwrap_or_default();
+    if ws_meta.change_id.is_some() {
+        return Ok(None);
+    }
+
+    let trunk_branch = MawConfig::load(root)
+        .map(|cfg| cfg.branch().to_string())
+        .unwrap_or_else(|_| "main".to_string());
+
+    let Some(active_change) = active_change_tracking_epoch(root, epoch_oid, &trunk_branch)? else {
+        return Ok(None);
+    };
+
+    let trunk_ref = format!("refs/heads/{trunk_branch}");
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let Some(trunk_head) = repo
+        .rev_parse_opt(&trunk_ref)
+        .map_err(|e| anyhow::anyhow!("failed to read {trunk_ref}: {e}"))?
+    else {
+        return Ok(None);
+    };
+
+    let trunk_head_oid = trunk_head.to_string();
+
+    // Only flag likely trunk-pinned workspaces that don't already include the
+    // active change head.
+    let base_is_on_trunk = git_is_ancestor(root, ws_base_epoch, &trunk_head_oid)?;
+    let base_already_has_change = git_is_ancestor(root, &active_change.head_oid, ws_base_epoch)?;
+    if base_is_on_trunk && !base_already_has_change {
+        return Ok(Some(active_change));
+    }
+
+    Ok(None)
+}
+
 /// Sync a single worktree to the given epoch commit.
 ///
 /// Uses `git checkout --detach <epoch>` inside the worktree to update it.
@@ -681,6 +831,7 @@ fn sync_all() -> Result<()> {
 
     let mut synced = 0;
     let mut skipped_with_work: Vec<String> = Vec::new();
+    let mut skipped_cross_target: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
     for ws in &workspaces {
@@ -708,6 +859,22 @@ fn sync_all() -> Result<()> {
             Some(_) => {}
         }
 
+        let ws_status = backend
+            .status(&ws.id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(active_change) = cross_target_sync_risk(
+            &root,
+            name,
+            ws_status.base_epoch.as_str(),
+            current_epoch.as_str(),
+        )? {
+            skipped_cross_target.push(format!(
+                "{name} (epoch tracks active change '{}' / {})",
+                active_change.change_id, active_change.change_branch
+            ));
+            continue;
+        }
+
         match sync_worktree_to_epoch(&root, name, current_epoch.as_str()) {
             Ok(()) => synced += 1,
             Err(e) => errors.push(format!("{name}: {e}")),
@@ -718,6 +885,14 @@ fn sync_all() -> Result<()> {
         println!();
         println!("Skipped (committed work not yet merged \u{2014} merge first):");
         for s in &skipped_with_work {
+            println!("  - {s}");
+        }
+    }
+
+    if !skipped_cross_target.is_empty() {
+        println!();
+        println!("Skipped (cross-target safety; active change epoch not yet on trunk):");
+        for s in &skipped_cross_target {
             println!("  - {s}");
         }
     }
@@ -801,6 +976,29 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
             return Ok(());
         }
         Some(_) => {}
+    }
+
+    if let Some(active_change) = cross_target_sync_risk(
+        &root,
+        name,
+        ws_status.base_epoch.as_str(),
+        current_epoch.as_str(),
+    )? {
+        eprintln!(
+            "WARNING: Workspace '{name}' is behind current epoch, but epoch tracks active change '{}' ({}) not yet on trunk.",
+            active_change.change_id, active_change.change_branch
+        );
+        eprintln!(
+            "  Skipping auto-sync for this unbound workspace to avoid pulling change-only commits into trunk-targeted work."
+        );
+        eprintln!(
+            "  Use a change-bound workspace instead: maw ws create --change {} <name>",
+            active_change.change_id
+        );
+        eprintln!(
+            "  If this workspace should stay trunk-only, continue without syncing and merge with --into default."
+        );
+        return Ok(());
     }
 
     eprintln!(
