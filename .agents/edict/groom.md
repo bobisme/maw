@@ -29,7 +29,7 @@ Groom a set of ready bones to improve backlog quality. Use this when you need to
    - Create smaller child bones with `maw exec default -- bn create --title "..." --kind task` and `maw exec default -- bn triage dep add <earlier> --blocks <later>`.
    - Add sibling dependencies where order matters (see step 3 patterns).
    - Add a comment to the parent: `maw exec default -- bn bone comment add <parent-id> "Broken down into smaller tasks: <child-id>, ..."`
-5. Announce if you groomed multiple bones: `bus send --agent $AGENT $EDICT_PROJECT "Groomed N bones: <summary>" -L grooming`
+5. Announce if you groomed multiple bones: `rite send --agent $AGENT $EDICT_PROJECT "Groomed N bones: <summary>" -L grooming`
 
 ## Acceptance Criteria
 
@@ -72,7 +72,7 @@ Apply tags during grooming when a bone clearly fits a category. Don't over-tag �
 - `should-fix` — Non-blocking review feedback (nice-to-have improvements)
 
 **Risk**
-- `risk:low` — Typo fixes, doc updates, config tweaks (self-review, no crit review)
+- `risk:low` — Typo fixes, doc updates, config tweaks (self-review, no seal review)
 - `risk:high` — Security-sensitive, data integrity, user-visible changes (security review + checklist)
 - `risk:critical` — Irreversible actions, migrations, regulated changes (human approval required)
 - Note: `risk:medium` is the default — no tag needed for standard work

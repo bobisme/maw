@@ -29,8 +29,8 @@ If the task is already small and clear (one reviewable change), skip planning an
    - **Dependency uncertainty**: New dependencies, breaking changes to upstream APIs, unfamiliar libraries?
 
    Risk levels:
-   - `risk:low` — Typo fixes, doc updates, config tweaks. Self-review only, no crit review needed.
-   - `risk:medium` — Standard feature work, bug fixes. Standard crit review (current default). **This is the default if no risk tag is set — no tag needed.**
+   - `risk:low` — Typo fixes, doc updates, config tweaks. Self-review only, no seal review needed.
+   - `risk:medium` — Standard feature work, bug fixes. Standard seal review (current default). **This is the default if no risk tag is set — no tag needed.**
    - `risk:high` — Security-sensitive, data integrity, user-visible behavior changes. Security review + failure-mode checklist required.
    - `risk:critical` — Irreversible actions, migrations, regulated changes. Human approval required before merge.
 
@@ -47,7 +47,7 @@ If the task is already small and clear (one reviewable change), skip planning an
    - Parallel work is actually parallel (not chained when it doesn't need to be)
    - Dependencies reflect reality (you can't test without implementing)
    - **Phase ordering is present**: If the plan has phases, verify phase goals have dependency edges between them. If all phases have identical triage scores, the phase ordering is likely missing.
-8. **Announce.** `bus send --agent $AGENT $EDICT_PROJECT "Planned <spec-name>: N bones created" -L planning`
+8. **Announce.** `rite send --agent $AGENT $EDICT_PROJECT "Planned <spec-name>: N bones created" -L planning`
 
 ## What Makes a Good Bone
 
