@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
@@ -121,12 +121,12 @@ fn print_touched_text(touched: &WorkspaceTouched) {
     if touched.is_stale {
         println!();
         println!(
-            "WARNING: Workspace '{}' is behind main (created at epoch {}, main has moved forward).",
+            "WARNING: Workspace '{}' is behind the current epoch (created at epoch {}, repository merge state has moved forward).",
             touched.workspace,
             &touched.base_epoch[..12]
         );
         println!(
-            "  Run `maw ws sync {}` to rebase onto the latest main.",
+            "  Run `maw ws sync {}` to rebase onto the latest epoch.",
             touched.workspace
         );
     }

@@ -550,29 +550,21 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let status_output = Self::git_stdout_in(&ws_path, &["status", "--porcelain"])?;
         let dirty_files = parse_porcelain_status(&status_output);
 
-        // Stale = the current epoch is not in the workspace's ancestry.
+        // Stale = the workspace's recorded base epoch is behind/diverged from
+        // the current epoch.
         //
-        // Correct semantics:
-        //   - HEAD == epoch           → not stale (at epoch)
-        //   - epoch is ancestor of HEAD → not stale (workspace has commits on top)
-        //   - epoch is NOT ancestor of HEAD → stale (workspace is behind/diverged)
+        // IMPORTANT: compare against `base_epoch` (workspace creation/sync epoch),
+        // not HEAD. HEAD may have moved to a target branch tip (e.g. explicit
+        // merge target updates) while the workspace base epoch ref still lags.
+        // Using HEAD here can disagree with `list()` state computation and
+        // produce contradictory UX (`status` says stale but `sync` says up to date,
+        // or vice versa).
         let is_stale = self.current_epoch_opt().is_some_and(|current| {
             if base_epoch == current {
                 return false;
             }
-            // Check whether current epoch is an ancestor of HEAD (or equal).
-            // Open a temporary repo handle in the worktree for ancestry check.
-            let Ok(ws_repo) = open_repo_at(&ws_path) else {
-                return true;
-            };
-            let Ok(current_oid) = current.as_str().parse::<maw_git::GitOid>() else {
-                return true;
-            };
-            let Ok(head_oid) = ws_repo.rev_parse("HEAD") else {
-                return true;
-            };
-            // is_ancestor returns true if current is ancestor of HEAD → not stale.
-            !ws_repo.is_ancestor(current_oid, head_oid).unwrap_or(false)
+            // Not stale only when current epoch is ancestor of the workspace base.
+            !self.is_ancestor(current.as_str(), base_epoch.as_str())
         });
 
         // Lazily materialize Level 1 workspace state ref for git inspection.

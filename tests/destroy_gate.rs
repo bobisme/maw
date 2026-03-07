@@ -26,6 +26,7 @@
 mod manifold_common;
 
 use manifold_common::TestRepo;
+use std::process::Command;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -196,6 +197,63 @@ fn it_g4_001_post_merge_destroy_captures_state_before_deletion() {
     assert_eq!(
         recovered_content, "agent wip notes\n",
         "Recovered scratch-notes.txt should match original content"
+    );
+}
+
+#[test]
+fn post_merge_destroy_handles_uncapturable_embedded_repo_path() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# Project\n")]);
+    repo.maw_ok(&["ws", "create", "embedded-git"]);
+
+    // Create merge-ready committed work so merge --destroy has something to merge.
+    repo.add_file("embedded-git", "feature.txt", "feature\n");
+    repo.git_in_workspace("embedded-git", &["add", "feature.txt"]);
+    repo.git_in_workspace("embedded-git", &["commit", "-m", "feat: add feature"]);
+
+    // Create an untracked embedded git directory without a checked-out commit.
+    // This historically caused capture to fail at `git add -A`.
+    let nested = repo.workspace_path("embedded-git").join(".tmp/sub");
+    std::fs::create_dir_all(&nested).expect("create nested directory");
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(&nested)
+        .output()
+        .expect("run nested git init");
+    assert!(
+        init.status.success(),
+        "nested git init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(nested.join("scratch.txt"), "nested scratch\n").expect("write nested file");
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "embedded-git",
+        "--destroy",
+        "--message",
+        "test merge",
+    ]);
+    assert!(
+        out.status.success(),
+        "merge should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Workspace should now be destroyed instead of being preserved due to a
+    // capture failure.
+    assert!(
+        !repo.workspace_exists("embedded-git"),
+        "workspace should be destroyed even with uncapturable embedded git path"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Failed to capture state"),
+        "capture should not fail for embedded git path, stderr: {stderr}"
     );
 }
 

@@ -781,7 +781,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
         None => {
             eprintln!(
-                "WARNING: Workspace '{name}' is behind main (another workspace was merged), \
+                "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state), \
                  but git could not determine commit count. Skipping auto-sync to preserve committed work."
             );
             eprintln!(
@@ -791,7 +791,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         }
         Some(ahead) if ahead > 0 => {
             eprintln!(
-                "WARNING: Workspace '{name}' is behind main (another workspace was merged since \
+                "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state since \
                  this one was created), and has {ahead} committed commit(s) not yet merged."
             );
             eprintln!("  Skipping auto-sync to preserve committed work.");
@@ -803,7 +803,9 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         Some(_) => {}
     }
 
-    eprintln!("Workspace '{name}' is behind main \u{2014} auto-syncing before running command...");
+    eprintln!(
+        "Workspace '{name}' is behind the current epoch \u{2014} auto-syncing before running command..."
+    );
 
     sync_worktree_to_epoch(&root, name, current_epoch.as_str())?;
 

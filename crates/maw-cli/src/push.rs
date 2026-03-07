@@ -1,12 +1,13 @@
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 use maw_git::GitRepo as _;
 use tracing::instrument;
 
+use crate::changes::store::ChangesStore;
 use crate::transport::ManifoldPushArgs;
-use crate::workspace::{MawConfig, git_cwd, repo_root};
+use crate::workspace::{git_cwd, repo_root, MawConfig};
 use maw_core::merge_state::MergeStateFile;
 
 #[derive(Args)]
@@ -211,6 +212,17 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     let epoch_oid = epoch_git_oid.to_string();
     let epoch_short = &epoch_oid[..12.min(epoch_oid.len())];
 
+    if let Some((change_id, change_branch)) = active_change_for_epoch(root, &epoch_oid, branch)? {
+        bail!(
+            "Refusing to advance '{branch}' to epoch {epoch_short}: epoch currently tracks active change '{change_id}' (branch '{change_branch}').\n  \
+             This usually means work was merged into a change target, not trunk.\n  \
+             To land work on {branch}, merge into default explicitly:\n    \
+             maw ws merge <workspace> --into default\n  \
+             Or continue the change workflow:\n    \
+             maw changes show {change_id}"
+        );
+    }
+
     // Read the current branch position (this is our CAS "expected" value)
     let branch_ref = format!("refs/heads/{branch}");
     let branch_git_oid = repo
@@ -332,6 +344,19 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
     };
 
     if epoch_oid != branch_oid {
+        if let Ok(Some((change_id, change_branch))) =
+            active_change_for_epoch(root, &epoch_oid.to_string(), branch)
+        {
+            println!();
+            println!(
+                "Hint: epoch currently tracks active change '{change_id}' ({change_branch}), not '{branch}'."
+            );
+            println!(
+                "  Avoid `maw push --advance` here unless you intentionally want to move '{branch}' to that change commit."
+            );
+            return;
+        }
+
         // Check if epoch is ahead of branch
         // TODO(gix): rev-list --count has no GitRepo equivalent. Keep CLI for count.
         let count = Command::new("git")
@@ -352,6 +377,39 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
             }
         }
     }
+}
+
+fn active_change_for_epoch(
+    root: &std::path::Path,
+    epoch_oid: &str,
+    branch: &str,
+) -> Result<Option<(String, String)>> {
+    let store = ChangesStore::open(root);
+    let active = store
+        .list_active_records()
+        .context("Failed to read active changes for epoch safety check")?;
+
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+
+    for record in active {
+        let change_branch = record.git.change_branch.trim().to_string();
+        if change_branch.is_empty() || change_branch == branch {
+            continue;
+        }
+        let change_ref = format!("refs/heads/{change_branch}");
+        let Some(change_oid) = repo
+            .rev_parse_opt(&change_ref)
+            .map_err(|e| anyhow::anyhow!("failed to read {change_ref}: {e}"))?
+        else {
+            continue;
+        };
+        if change_oid.to_string() == epoch_oid {
+            return Ok(Some((record.change_id, change_branch)));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Push unpushed git tags to origin.
@@ -560,5 +618,128 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
             ahead: a,
             behind: b,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use tempfile::tempdir;
+
+    use super::active_change_for_epoch;
+    use crate::changes::store::{
+        ChangeGit, ChangeRecord, ChangeSource, ChangeState, ChangeWorkspaces, ChangesStore,
+    };
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_oid(root: &Path, rev: &str) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", rev])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "rev-parse {rev} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn sample_change(change_id: &str, branch: &str, primary: &str) -> ChangeRecord {
+        ChangeRecord {
+            schema_version: 1,
+            change_id: change_id.to_string(),
+            title: "sample".to_string(),
+            state: ChangeState::Open,
+            created_at: "2026-03-01T00:00:00.000Z".to_string(),
+            source: ChangeSource {
+                from: "origin/main".to_string(),
+                from_oid: "abc".to_string(),
+            },
+            git: ChangeGit {
+                base_branch: "main".to_string(),
+                change_branch: branch.to_string(),
+            },
+            workspaces: ChangeWorkspaces {
+                primary: primary.to_string(),
+                linked: vec![primary.to_string()],
+            },
+            tracker: None,
+            pr: None,
+        }
+    }
+
+    fn setup_repo() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@test.com"]);
+        run_git(root, &["config", "commit.gpgsign", "false"]);
+
+        fs::write(root.join("README.md"), "hello\n").unwrap();
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "initial"]);
+        run_git(root, &["branch", "-M", "main"]);
+
+        dir
+    }
+
+    #[test]
+    fn active_change_for_epoch_detects_change_branch_epoch() {
+        let dir = setup_repo();
+        let root = dir.path();
+
+        run_git(root, &["checkout", "-b", "feat/ch-1aa-topic"]);
+        fs::write(root.join("README.md"), "topic\n").unwrap();
+        run_git(root, &["add", "README.md"]);
+        run_git(root, &["commit", "-m", "topic"]);
+        let change_head = git_oid(root, "HEAD");
+
+        let store = ChangesStore::open(root);
+        let rec = sample_change("ch-1aa", "feat/ch-1aa-topic", "ch-1aa");
+        store
+            .with_lock("test write", |locked| locked.write_active_record(&rec))
+            .unwrap();
+
+        let detected = active_change_for_epoch(root, &change_head, "main").unwrap();
+        assert_eq!(
+            detected,
+            Some(("ch-1aa".to_string(), "feat/ch-1aa-topic".to_string()))
+        );
+    }
+
+    #[test]
+    fn active_change_for_epoch_ignores_main_branch_target() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let main_head = git_oid(root, "refs/heads/main");
+
+        let store = ChangesStore::open(root);
+        let rec = sample_change("ch-1aa", "feat/ch-1aa-topic", "ch-1aa");
+        store
+            .with_lock("test write", |locked| locked.write_active_record(&rec))
+            .unwrap();
+
+        let detected = active_change_for_epoch(root, &main_head, "main").unwrap();
+        assert!(detected.is_none());
     }
 }

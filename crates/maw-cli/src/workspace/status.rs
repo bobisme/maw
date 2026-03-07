@@ -10,7 +10,7 @@ use maw_core::oplog::global_view::compute_global_view;
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::view::read_patch_set_blob;
 
-use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
+use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
 
 #[derive(Serialize)]
 pub struct WorkspaceStatus {
@@ -264,7 +264,7 @@ fn print_status_text(
     if !stale_persistent.is_empty() {
         println!();
         println!(
-            "Behind main: {} (main moved forward since last sync)",
+            "Behind current epoch: {} (repository merge state moved forward since last sync)",
             stale_persistent.join(", ")
         );
         for ws in &stale_persistent {
@@ -274,7 +274,7 @@ fn print_status_text(
     if !stale_ephemeral.is_empty() {
         println!();
         println!(
-            "Behind main: {} (main moved forward — rebase before merging)",
+            "Behind current epoch: {} (repository merge state moved forward — sync before merging)",
             stale_ephemeral.join(", ")
         );
         for ws in &stale_ephemeral {
@@ -309,9 +309,9 @@ fn print_status_pretty(
     // Stale warning
     if is_stale {
         println!(
-            "{yellow}\u{25b2} WARNING:{reset} Workspace is behind main — another workspace was merged since this one was created."
+            "{yellow}\u{25b2} WARNING:{reset} Workspace is behind the current epoch — another merge advanced repository state since this one was created."
         );
-        println!("  {gray}Run `maw ws sync {current_ws}` to rebase onto the latest main.{reset}");
+        println!("  {gray}Run `maw ws sync {current_ws}` to rebase onto the latest epoch.{reset}");
         println!();
     }
 
@@ -379,7 +379,7 @@ fn print_status_pretty(
     if !stale_persistent.is_empty() {
         println!();
         println!(
-            "{yellow}Behind main:{reset} {} {gray}(main moved forward since last sync){reset}",
+            "{yellow}Behind current epoch:{reset} {} {gray}(repository merge state moved forward since last sync){reset}",
             stale_persistent.join(", ")
         );
         for ws in &stale_persistent {
@@ -389,7 +389,7 @@ fn print_status_pretty(
     if !stale_ephemeral.is_empty() {
         println!();
         println!(
-            "{yellow}Behind main:{reset} {} {gray}(main moved forward — rebase before merging){reset}",
+            "{yellow}Behind current epoch:{reset} {} {gray}(repository merge state moved forward — sync before merging){reset}",
             stale_ephemeral.join(", ")
         );
         for ws in &stale_ephemeral {

@@ -25,7 +25,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use maw_git::GitRepo as _;
 use serde::Serialize;
 use tracing::instrument;
@@ -201,17 +201,10 @@ fn capture_dirty_worktree(
     // TODO(gix): replace git add -A and git reset with GitRepo trait methods
     // when full working-tree staging is available.
 
-    // Stage all files (including untracked)
-    let add_output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git add -A")?;
-
-    if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr);
-        bail!("git add -A failed during capture: {}", stderr.trim());
-    }
+    // Stage all files (including untracked). Embedded git directories can make
+    // `git add -A` fail with "does not have a commit checked out". Retry while
+    // excluding those paths so normal files are still captured.
+    let excluded_paths = stage_all_for_capture(ws_path)?;
 
     // Create a stash commit (does not modify HEAD or stash list)
     let repo = maw_git::GixRepo::open(ws_path)
@@ -253,6 +246,16 @@ fn capture_dirty_worktree(
         .current_dir(ws_path)
         .output();
 
+    let captured_dirty_paths: Vec<String> = dirty_paths
+        .iter()
+        .filter(|path| {
+            !excluded_paths
+                .iter()
+                .any(|excluded| path_is_under_excluded(path, excluded))
+        })
+        .cloned()
+        .collect();
+
     // FP: crash after stash/tree creation but before ref pinning.
     // A crash here means the commit object exists but is unreachable (no ref).
     maw::fp!("FP_CAPTURE_BEFORE_PIN")?;
@@ -268,16 +271,84 @@ fn capture_dirty_worktree(
     tracing::info!(
         ref_name = %ref_name,
         oid = %commit_oid,
-        dirty_count = dirty_paths.len(),
+        dirty_count = captured_dirty_paths.len(),
+        skipped_uncapturable_count = excluded_paths.len(),
         "captured dirty worktree state"
     );
 
     Ok(Some(CaptureResult {
         commit_oid,
         pinned_ref: ref_name,
-        dirty_paths: dirty_paths.to_vec(),
+        dirty_paths: captured_dirty_paths,
         mode: CaptureMode::WorktreeCapture,
     }))
+}
+
+fn stage_all_for_capture(ws_path: &Path) -> Result<Vec<String>> {
+    let add_output = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git add -A")?;
+
+    if add_output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stderr = String::from_utf8_lossy(&add_output.stderr);
+    let excluded_paths = parse_uncapturable_embedded_repo_paths(&stderr);
+    if excluded_paths.is_empty() {
+        bail!("git add -A failed during capture: {}", stderr.trim());
+    }
+
+    let mut retry = Command::new("git");
+    retry.arg("add").arg("-A").arg("--").arg(".");
+    for excluded in &excluded_paths {
+        retry.arg(format!(":(exclude){excluded}"));
+    }
+
+    let retry_output = retry
+        .current_dir(ws_path)
+        .output()
+        .context("failed to retry git add -A with path exclusions")?;
+
+    if !retry_output.status.success() {
+        let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
+        bail!(
+            "git add -A retry failed during capture: {}",
+            retry_stderr.trim()
+        );
+    }
+
+    tracing::warn!(
+        skipped_uncapturable_paths = ?excluded_paths,
+        "capture skipped embedded git directories without checked-out commits"
+    );
+
+    Ok(excluded_paths)
+}
+
+fn parse_uncapturable_embedded_repo_paths(stderr: &str) -> Vec<String> {
+    const PREFIX: &str = "error: '";
+    const SUFFIX: &str = "' does not have a commit checked out";
+
+    let mut paths: Vec<String> = stderr
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix(PREFIX)
+                .and_then(|tail| tail.strip_suffix(SUFFIX))
+                .map(ToOwned::to_owned)
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn path_is_under_excluded(path: &str, excluded: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    let e = excluded.trim_end_matches('/');
+    p == e || p.starts_with(&format!("{e}/"))
 }
 
 /// Resolve the repo root from a worktree path.
@@ -496,11 +567,9 @@ mod tests {
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
         assert!(!result.dirty_paths.is_empty());
         assert!(result.dirty_paths.iter().any(|p| p == "dirty.txt"));
-        assert!(
-            result
-                .pinned_ref
-                .starts_with("refs/manifold/recovery/test-ws/")
-        );
+        assert!(result
+            .pinned_ref
+            .starts_with("refs/manifold/recovery/test-ws/"));
 
         // Verify the pinned ref exists and resolves
         let ref_oid = refs::read_ref(&root, &result.pinned_ref).unwrap();
@@ -611,5 +680,42 @@ mod tests {
         fs::write(root.join("untracked.txt"), "hi\n").unwrap();
         let paths = list_dirty_paths(&root).unwrap();
         assert!(paths.contains(&"untracked.txt".to_string()));
+    }
+
+    #[test]
+    fn parse_uncapturable_embedded_repo_paths_extracts_paths() {
+        let stderr = "error: '.tmp/sub/' does not have a commit checked out\nerror: unable to index file '.tmp/sub/'\nfatal: adding files failed\n";
+        let paths = parse_uncapturable_embedded_repo_paths(stderr);
+        assert_eq!(paths, vec![".tmp/sub/".to_string()]);
+    }
+
+    #[test]
+    fn capture_dirty_workspace_skips_uncapturable_embedded_repo() {
+        let (_dir, root, head_oid) = setup_repo();
+
+        fs::create_dir_all(root.join(".tmp/sub")).unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root.join(".tmp/sub"))
+            .output()
+            .unwrap();
+        fs::write(root.join(".tmp/sub/file.txt"), "nested\n").unwrap();
+        fs::write(root.join("capturable.txt"), "capturable\n").unwrap();
+
+        let result = capture_before_destroy(&root, "test-ws", &head_oid)
+            .unwrap()
+            .expect("capture should succeed with fallback exclusions");
+
+        assert_eq!(result.mode, CaptureMode::WorktreeCapture);
+        assert!(result.dirty_paths.iter().any(|p| p == "capturable.txt"));
+        assert!(!result.dirty_paths.iter().any(|p| p.starts_with(".tmp/sub")));
+
+        let tree_output = Command::new("git")
+            .args(["ls-tree", "-r", "--name-only", result.commit_oid.as_str()])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let tree_files = String::from_utf8_lossy(&tree_output.stdout);
+        assert!(tree_files.contains("capturable.txt"));
     }
 }

@@ -1248,10 +1248,10 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                 }
             } else if result.stale {
                 println!(
-                    "[BLOCKED] Workspace is behind main — another workspace was merged since this one was created."
+                    "[BLOCKED] Workspace is behind the current epoch — another merge advanced repository state since this workspace was created."
                 );
                 println!(
-                    "  Run `maw ws sync {}` to rebase onto the latest main, then retry the merge.",
+                    "  Run `maw ws sync {}` to rebase onto the latest epoch, then retry the merge.",
                     result.workspace.name
                 );
             } else if result.conflicts.is_empty() {
@@ -2705,6 +2705,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             default_ws,
             branch,
             epoch_before_oid.as_str(),
+            build_output.candidate.as_str(),
             &root,
             text_mode,
         )?;
@@ -3155,11 +3156,26 @@ fn update_default_workspace(
     ws_name: &str,
     branch: &str,
     epoch_before: &str,
+    epoch_after: &str,
     repo_root: &Path,
     text_mode: bool,
 ) -> Result<()> {
     use super::working_copy::{
         SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot, snapshot_working_copy,
+    };
+
+    let record_workspace_epoch = || {
+        let Ok(oid) = maw_core::model::types::GitOid::new(epoch_after) else {
+            return;
+        };
+        let epoch_ref = maw_core::refs::workspace_epoch_ref(ws_name);
+        if let Err(e) = maw_core::refs::write_ref(repo_root, &epoch_ref, &oid) {
+            tracing::warn!(
+                "failed to update workspace epoch ref '{}' for '{}': {e}",
+                epoch_ref,
+                ws_name
+            );
+        }
     };
 
     // Step 0: ANCHOR — detach HEAD at epoch_before without touching the
@@ -3219,6 +3235,7 @@ fn update_default_workspace(
             eprintln!("  WARNING: snapshot_working_copy failed: {e:#}");
             eprintln!("  Falling back to force checkout (uncommitted changes may be lost)...");
             force_checkout_fallback(default_ws_path, branch, text_mode);
+            record_workspace_epoch();
             return Ok(());
         }
     };
@@ -3229,12 +3246,14 @@ fn update_default_workspace(
         eprintln!("  WARNING: checkout_to failed: {e:#}");
         eprintln!("  Falling back to force checkout...");
         force_checkout_fallback(default_ws_path, branch, text_mode);
+        record_workspace_epoch();
         return Ok(());
     }
 
     // Step 3: REPLAY — if there was a snapshot, replay it.
     let Some(snapshot) = snapshot else {
         // Clean workspace — checkout was enough.
+        record_workspace_epoch();
         if text_mode {
             println!("  Default workspace updated to new epoch.");
         }
@@ -3292,6 +3311,8 @@ fn update_default_workspace(
             }
         }
     }
+
+    record_workspace_epoch();
 
     Ok(())
 }

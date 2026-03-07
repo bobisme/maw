@@ -200,7 +200,11 @@ fn collect_one<B: WorkspaceBackend>(
 
     // Added files: read content, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
-        let content = read_workspace_file(&ws_path, path, ws_id)?;
+        let Some(content) = read_workspace_file(&ws_path, path, ws_id)? else {
+            // Ignore directory entries (for example untracked nested git dirs)
+            // that can appear in porcelain outputs as "path/".
+            continue;
+        };
         let blob = git_hash_object(repo_root, &content);
         // Assign a fresh FileId for new files. The FileIdMap for the epoch
         // won't have an entry yet; the FileId is minted here and would be
@@ -217,7 +221,11 @@ fn collect_one<B: WorkspaceBackend>(
 
     // Modified files: read current content, look up existing FileId, compute blob OID.
     for path in &snapshot.modified {
-        let content = read_workspace_file(&ws_path, path, ws_id)?;
+        let Some(content) = read_workspace_file(&ws_path, path, ws_id)? else {
+            // Ignore non-file paths to keep collect robust against directory-only
+            // workspace entries.
+            continue;
+        };
         let blob = git_hash_object(repo_root, &content);
         // Modified files existed in the epoch, so their FileId is in the map.
         let file_id = file_id_map.id_for_path(path);
@@ -333,13 +341,22 @@ fn read_workspace_file(
     ws_path: &Path,
     rel_path: &Path,
     ws_id: &WorkspaceId,
-) -> Result<Vec<u8>, CollectError> {
+) -> Result<Option<Vec<u8>>, CollectError> {
     let full_path = ws_path.join(rel_path);
-    std::fs::read(&full_path).map_err(|e| CollectError::ReadFailed {
-        workspace_id: ws_id.clone(),
-        path: rel_path.to_path_buf(),
-        reason: e.to_string(),
-    })
+
+    if full_path.is_dir() {
+        return Ok(None);
+    }
+
+    match std::fs::read(&full_path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Ok(None),
+        Err(e) => Err(CollectError::ReadFailed {
+            workspace_id: ws_id.clone(),
+            path: rel_path.to_path_buf(),
+            reason: e.to_string(),
+        }),
+    }
 }
 
 /// Write `content` to the git object store and return its blob OID.
@@ -380,8 +397,8 @@ fn git_hash_object(repo_root: &Path, content: &[u8]) -> Option<GitOid> {
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::backend::WorkspaceBackend;
     use crate::backend::git::GitWorktreeBackend;
+    use crate::backend::WorkspaceBackend;
     use crate::model::types::{EpochId, WorkspaceId};
     use std::fs;
     use std::process::Command;
@@ -528,6 +545,49 @@ mod tests {
         assert_eq!(change.path, PathBuf::from("new.rs"));
         assert!(matches!(change.kind, ChangeKind::Added));
         assert_eq!(change.content.as_deref(), Some(b"fn main() {}".as_ref()));
+    }
+
+    #[test]
+    fn collect_ignores_untracked_directory_entries() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("dir-entry-ws").unwrap();
+        let info = backend.create(&ws_id, &epoch).unwrap();
+
+        // Create a nested git directory that porcelain can report as a
+        // directory entry (path with trailing slash).
+        let nested = info.path.join(".tmp").join("sub");
+        fs::create_dir_all(&nested).unwrap();
+        let out = Command::new("git")
+            .args(["init"])
+            .current_dir(&nested)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init nested repo failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Also add a normal file so the patch set is non-empty.
+        fs::write(info.path.join("normal.txt"), "ok\n").unwrap();
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let ps = &results[0];
+
+        assert!(
+            ps.changes
+                .iter()
+                .all(|c| !c.path.to_string_lossy().ends_with('/')),
+            "directory entries must be skipped: {:?}",
+            ps.changes
+        );
+        assert!(
+            ps.changes
+                .iter()
+                .any(|c| c.path == PathBuf::from("normal.txt")),
+            "expected regular file to still be collected"
+        );
     }
 
     // -----------------------------------------------------------------------
