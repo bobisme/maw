@@ -345,7 +345,7 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
 }
 
 #[test]
-fn merge_into_default_after_change_target_keeps_default_clean() {
+fn merge_into_default_after_change_target_keeps_trunk_isolated() {
     let repo = TestRepo::new();
 
     repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
@@ -367,7 +367,11 @@ fn merge_into_default_after_change_target_keeps_default_clean() {
     repo.git_in_workspace("worker", &["add", "-A"]);
     repo.git_in_workspace("worker", &["commit", "-m", "feat: add alpha module"]);
 
-    // Advance epoch by merging into change target; main does not move here.
+    let epoch_before = repo.current_epoch();
+    let main_before = repo.git(&["rev-parse", "refs/heads/main"]).trim().to_owned();
+
+    // Merge into change target. This should advance the change branch only;
+    // trunk refs stay put.
     repo.maw_ok(&[
         "ws",
         "merge",
@@ -378,6 +382,17 @@ fn merge_into_default_after_change_target_keeps_default_clean() {
         "--message",
         "merge worker into change",
     ]);
+
+    assert_eq!(
+        repo.current_epoch(),
+        epoch_before,
+        "global epoch should remain trunk-oriented after merge --into change"
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "refs/heads/main"]).trim(),
+        main_before,
+        "main should remain unchanged after merge --into change"
+    );
 
     // Merge a separate workspace into default/main.
     repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
@@ -395,16 +410,94 @@ fn merge_into_default_after_change_target_keeps_default_clean() {
         "merge hotfix",
     ]);
 
+    assert!(
+        repo.read_file("default", "src/feature_alpha.rs").is_none(),
+        "default workspace should not pull change-branch-only files into trunk merges"
+    );
     assert_eq!(
-        repo.read_file("default", "src/feature_alpha.rs").as_deref(),
-        Some("pub fn alpha() -> i32 { 1 }\n"),
-        "default workspace should retain files introduced by the new epoch"
+        repo.read_file("default", "HOTFIX.txt").as_deref(),
+        Some("hotfix\n"),
+        "default workspace should include trunk-targeted hotfix"
     );
 
     let default_status = repo.git_in_workspace("default", &["status", "--porcelain"]);
     assert!(
         default_status.trim().is_empty(),
         "default workspace should be clean after merge cleanup, got: {default_status:?}"
+    );
+}
+
+#[test]
+fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-acc",
+        "--workspace",
+        "ch-acc",
+    ]);
+
+    let epoch_before = repo.current_epoch();
+    let main_before = repo.git(&["rev-parse", "refs/heads/main"]).trim().to_owned();
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-acc", "w1"]);
+    repo.add_file("w1", "src/a.rs", "pub fn a() {}\n");
+    repo.git_in_workspace("w1", &["add", "-A"]);
+    repo.git_in_workspace("w1", &["commit", "-m", "feat: a"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "w1",
+        "--into",
+        "ch-acc",
+        "--destroy",
+        "--message",
+        "merge a",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-acc", "w2"]);
+    repo.add_file("w2", "src/b.rs", "pub fn b() {}\n");
+    repo.git_in_workspace("w2", &["add", "-A"]);
+    repo.git_in_workspace("w2", &["commit", "-m", "feat: b"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "w2",
+        "--into",
+        "ch-acc",
+        "--destroy",
+        "--message",
+        "merge b",
+    ]);
+
+    assert_eq!(
+        repo.current_epoch(),
+        epoch_before,
+        "global epoch must remain unchanged for change-target merges"
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "refs/heads/main"]).trim(),
+        main_before,
+        "main must remain unchanged for change-target merges"
+    );
+
+    let change_head = repo.git(&["rev-parse", "refs/heads/feat/ch-acc-flow"]);
+    let change_tree = repo.git(&["ls-tree", "-r", "--name-only", change_head.trim()]);
+    assert!(
+        change_tree.lines().any(|line| line == "src/a.rs"),
+        "change branch should retain first merged file"
+    );
+    assert!(
+        change_tree.lines().any(|line| line == "src/b.rs"),
+        "change branch should include second merged file"
     );
 }
 
@@ -444,7 +537,10 @@ fn merge_into_default_blocks_unbound_workspace_with_active_change_ancestry() {
     // Create an unbound main workspace, then intentionally contaminate it by
     // moving it to the active change epoch.
     repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
-    let change_epoch = repo.current_epoch();
+    let change_epoch = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-guard-flow"])
+        .trim()
+        .to_owned();
     repo.git_in_workspace("hotfix", &["checkout", "--detach", &change_epoch]);
 
     repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");

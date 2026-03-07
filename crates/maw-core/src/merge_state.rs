@@ -197,6 +197,13 @@ pub struct MergeStateFile {
     /// User-provided commit message for the merge commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_message: Option<String>,
+
+    /// Target branch being updated by this merge.
+    ///
+    /// Stored to support stale merge-state recovery for non-default target
+    /// merges where global epoch may intentionally remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
 }
 
 impl MergeStateFile {
@@ -220,6 +227,7 @@ impl MergeStateFile {
             updated_at: now,
             abort_reason: None,
             commit_message: None,
+            target_branch: None,
         }
     }
 

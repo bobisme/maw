@@ -97,6 +97,18 @@ fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
         "merge worker",
     ]);
 
+    // Simulate legacy drift shape (epoch tracking active change branch) so the
+    // cross-target guard path stays covered even after bn-3092.
+    let change_head = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-sync-flow"])
+        .trim()
+        .to_owned();
+    repo.git(&[
+        "update-ref",
+        "refs/manifold/epoch/current",
+        &change_head,
+    ]);
+
     repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
     let old_head = repo.workspace_head("hotfix");
     assert_ne!(old_head, repo.current_epoch());
@@ -152,6 +164,18 @@ fn sync_refuses_cross_target_update_for_unbound_workspace() {
         "--destroy",
         "--message",
         "merge worker",
+    ]);
+
+    // Simulate legacy drift shape (epoch tracking active change branch) so the
+    // cross-target guard path stays covered even after bn-3092.
+    let change_head = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-sync2-flow"])
+        .trim()
+        .to_owned();
+    repo.git(&[
+        "update-ref",
+        "refs/manifold/epoch/current",
+        &change_head,
     ]);
 
     repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);

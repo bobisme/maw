@@ -263,10 +263,22 @@ pub fn run_prepare_phase(
                     matches!(existing.phase, MergePhase::Commit | MergePhase::Cleanup);
                 let stale_completed = is_post_commit
                     && existing.epoch_candidate.as_ref().is_some_and(|candidate| {
-                        refs::read_epoch_current(repo_root)
+                        let epoch_advanced = refs::read_epoch_current(repo_root)
                             .ok()
                             .flatten()
-                            .is_some_and(|current| &current == candidate)
+                            .is_some_and(|current| &current == candidate);
+
+                        if epoch_advanced {
+                            return true;
+                        }
+
+                        existing.target_branch.as_deref().is_some_and(|branch| {
+                            let branch_ref = format!("refs/heads/{branch}");
+                            refs::read_ref(repo_root, &branch_ref)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|head| &head == candidate)
+                        })
                     });
 
                 if stale_completed {
@@ -349,7 +361,7 @@ pub fn run_prepare_phase_with_epoch(
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::merge_state::{MergePhase, RecoveryOutcome, recover_from_merge_state};
+    use crate::merge_state::{recover_from_merge_state, MergePhase, RecoveryOutcome};
 
     fn test_epoch() -> EpochId {
         EpochId::new(&"a".repeat(40)).unwrap()
@@ -672,6 +684,7 @@ mod tests {
         epoch_candidate: &GitOid,
         phase: MergePhase,
         ws_name: &str,
+        target_branch: Option<&str>,
     ) {
         std::fs::create_dir_all(manifold_dir).unwrap();
         let eb = EpochId::new(epoch_before.as_str()).unwrap();
@@ -680,6 +693,7 @@ mod tests {
         state.advance(MergePhase::Validate, 1002).unwrap();
         state.advance(MergePhase::Commit, 1003).unwrap();
         state.epoch_candidate = Some(epoch_candidate.clone());
+        state.target_branch = target_branch.map(ToOwned::to_owned);
         if phase == MergePhase::Cleanup {
             state.advance(MergePhase::Cleanup, 1004).unwrap();
         }
@@ -712,6 +726,7 @@ mod tests {
             &candidate,
             MergePhase::Commit,
             ws_name,
+            None,
         );
 
         // Advance epoch ref (previous merge completed its COMMIT)
@@ -757,6 +772,7 @@ mod tests {
             &candidate,
             MergePhase::Cleanup,
             ws_name,
+            None,
         );
 
         run_git(
@@ -772,6 +788,56 @@ mod tests {
         assert!(
             result.is_ok(),
             "expected success clearing stale cleanup state, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_clears_stale_commit_phase_when_target_branch_already_advanced() {
+        let (dir, epoch_before) = setup_git_repo_with_epoch();
+        let root = dir.path();
+
+        run_git(root, &["branch", "feat/change"]);
+        run_git(root, &["checkout", "feat/change"]);
+        run_git(root, &["commit", "--allow-empty", "-m", "merge"]);
+        let candidate = git_oid(root, "HEAD");
+
+        // Return to main and keep epoch pinned to trunk.
+        run_git(root, &["checkout", "main"]);
+        run_git(
+            root,
+            &["update-ref", refs::EPOCH_CURRENT, epoch_before.as_str()],
+        );
+
+        let ws_name = "stale-ws3";
+        let ws_path = root.join(ws_name);
+        run_git(
+            root,
+            &[
+                "worktree",
+                "add",
+                ws_path.to_str().unwrap(),
+                "refs/heads/main",
+            ],
+        );
+
+        let manifold_dir = root.join(".manifold");
+        write_stale_commit_state(
+            &manifold_dir,
+            &epoch_before,
+            &candidate,
+            MergePhase::Commit,
+            ws_name,
+            Some("feat/change"),
+        );
+
+        let ws_id = WorkspaceId::new(ws_name).unwrap();
+        let mut workspace_dirs = BTreeMap::new();
+        workspace_dirs.insert(ws_id.clone(), ws_path);
+
+        let result = run_prepare_phase(root, &manifold_dir, &[ws_id], &workspace_dirs);
+        assert!(
+            result.is_ok(),
+            "expected success clearing stale state via target branch head, got: {result:?}"
         );
     }
 
@@ -797,6 +863,7 @@ mod tests {
             &candidate,
             MergePhase::Commit,
             ws_name,
+            None,
         );
 
         // Epoch ref is still at epoch_before (commit hasn't completed yet)

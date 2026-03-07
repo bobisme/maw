@@ -2180,8 +2180,34 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     textln!("  Epoch: {}", &frozen.epoch.as_str()[..12]);
+    if target_change_id.is_some() {
+        textln!("  Target base ({branch}): {}", &branch_before_oid.as_str()[..12]);
+    }
     for (ws_id, head) in &frozen.heads {
         textln!("  {}: {}", ws_id, &head.as_str()[..12]);
+    }
+
+    let merge_base_epoch = if target_change_id.is_some() {
+        EpochId::new(branch_before_oid.as_str()).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid target branch base OID '{}': {e}",
+                branch_before_oid.as_str()
+            )
+        })?
+    } else {
+        frozen.epoch.clone()
+    };
+
+    if let Err(e) = record_merge_target_context(
+        &manifold_dir,
+        branch,
+        (target_change_id.is_some()).then_some(&merge_base_epoch),
+    ) {
+        abort_merge(
+            &manifold_dir,
+            &format!("failed to persist target merge context: {e}"),
+        );
+        bail!("Merge PREPARE phase failed: could not persist target merge context: {e}");
     }
 
     // Persist user-provided commit message into merge-state so the BUILD
@@ -2551,7 +2577,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     &manifold_dir,
                     merge_id,
                     sources,
-                    &frozen.epoch,
+                    &merge_base_epoch,
                     build_output.candidate.clone(),
                     branch,
                     r.clone(),
@@ -2607,12 +2633,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Phase 4: COMMIT — atomically update refs (point of no return)
     // -----------------------------------------------------------------------
     textln!();
-    textln!("COMMIT: Advancing epoch...");
+    if target_change_id.is_some() {
+        textln!("COMMIT: Updating target branch...");
+    } else {
+        textln!("COMMIT: Advancing epoch...");
+    }
 
     // Advance merge-state to Commit phase
     advance_merge_state(&manifold_dir, MergePhase::Commit)?;
 
-    let epoch_before_oid = frozen.epoch.oid().clone();
+    let epoch_before_oid = merge_base_epoch.oid().clone();
     // Pre-flight: verify the branch hasn't diverged from the target head
     // captured before PREPARE. If direct commits were made to the branch
     // outside of maw between PREPARE and COMMIT, the branch CAS will fail
@@ -2637,59 +2667,84 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         );
     }
 
-    match run_commit_phase_with_branch_base(
-        &root,
-        branch,
-        &epoch_before_oid,
-        &branch_before_oid,
-        &build_output.candidate,
-    ) {
-        Ok(CommitResult::Committed) => {
-            textln!(
-                "  Epoch advanced: {} → {}",
-                &epoch_before_oid.as_str()[..12],
-                &build_output.candidate.as_str()[..12]
-            );
-            textln!("  Branch '{branch}' updated.");
-        }
-        Err(maw::merge::commit::CommitError::PartialCommit) => {
-            // Epoch ref moved but branch ref didn't — attempt recovery
-            textln!("  WARNING: Partial commit — attempting recovery...");
-            match recover_partial_commit_with_branch_base(
-                &root,
-                branch,
-                &epoch_before_oid,
-                &branch_before_oid,
-                &build_output.candidate,
-            ) {
-                Ok(CommitRecovery::FinalizedMainRef) => {
-                    textln!("  Recovery succeeded: branch ref finalized.");
-                }
-                Ok(CommitRecovery::AlreadyCommitted) => {
-                    textln!("  Recovery: both refs already updated.");
-                }
-                Ok(CommitRecovery::NotCommitted) => {
-                    abort_merge(&manifold_dir, "commit phase failed: neither ref updated");
-                    bail!("Merge COMMIT phase failed: could not update refs.");
-                }
-                Err(e) => {
-                    // Epoch moved but branch is at an unexpected value —
-                    // abort so the merge-state doesn't stay stuck at "commit".
-                    abort_merge(
-                        &manifold_dir,
-                        &format!("partial commit recovery failed: {e}"),
-                    );
-                    bail!(
-                        "Merge COMMIT phase partially applied and recovery failed: {e}\n  \
-                         The merge-state has been aborted. Check refs manually:\n  \
-                         refs/manifold/epoch/current and refs/heads/{branch}"
-                    );
-                }
+    if target_change_id.is_some() {
+        match maw_core::refs::write_ref_cas(
+            &root,
+            &branch_ref,
+            &branch_before_oid,
+            &build_output.candidate,
+        ) {
+            Ok(()) => {
+                textln!(
+                    "  Branch '{branch}' advanced: {} → {}",
+                    &branch_before_oid.as_str()[..12],
+                    &build_output.candidate.as_str()[..12]
+                );
+                textln!(
+                    "  Epoch unchanged: {}",
+                    &frozen.epoch.as_str()[..12]
+                );
+            }
+            Err(e) => {
+                abort_merge(&manifold_dir, &format!("COMMIT failed (branch-only CAS): {e}"));
+                bail!("Merge COMMIT phase failed: could not update branch '{branch}': {e}");
             }
         }
-        Err(e) => {
-            abort_merge(&manifold_dir, &format!("COMMIT failed: {e}"));
-            bail!("Merge COMMIT phase failed: {e}");
+    } else {
+        match run_commit_phase_with_branch_base(
+            &root,
+            branch,
+            &epoch_before_oid,
+            &branch_before_oid,
+            &build_output.candidate,
+        ) {
+            Ok(CommitResult::Committed) => {
+                textln!(
+                    "  Epoch advanced: {} → {}",
+                    &epoch_before_oid.as_str()[..12],
+                    &build_output.candidate.as_str()[..12]
+                );
+                textln!("  Branch '{branch}' updated.");
+            }
+            Err(maw::merge::commit::CommitError::PartialCommit) => {
+                // Epoch ref moved but branch ref didn't — attempt recovery
+                textln!("  WARNING: Partial commit — attempting recovery...");
+                match recover_partial_commit_with_branch_base(
+                    &root,
+                    branch,
+                    &epoch_before_oid,
+                    &branch_before_oid,
+                    &build_output.candidate,
+                ) {
+                    Ok(CommitRecovery::FinalizedMainRef) => {
+                        textln!("  Recovery succeeded: branch ref finalized.");
+                    }
+                    Ok(CommitRecovery::AlreadyCommitted) => {
+                        textln!("  Recovery: both refs already updated.");
+                    }
+                    Ok(CommitRecovery::NotCommitted) => {
+                        abort_merge(&manifold_dir, "commit phase failed: neither ref updated");
+                        bail!("Merge COMMIT phase failed: could not update refs.");
+                    }
+                    Err(e) => {
+                        // Epoch moved but branch is at an unexpected value —
+                        // abort so the merge-state doesn't stay stuck at "commit".
+                        abort_merge(
+                            &manifold_dir,
+                            &format!("partial commit recovery failed: {e}"),
+                        );
+                        bail!(
+                            "Merge COMMIT phase partially applied and recovery failed: {e}\n  \
+                             The merge-state has been aborted. Check refs manually:\n  \
+                             refs/manifold/epoch/current and refs/heads/{branch}"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                abort_merge(&manifold_dir, &format!("COMMIT failed: {e}"));
+                bail!("Merge COMMIT phase failed: {e}");
+            }
         }
     }
 
@@ -2697,8 +2752,12 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     record_epoch_after(&manifold_dir, &build_output.candidate)?;
 
     // Record merge operations in source workspace histories.
-    for warning in record_merge_operations(&root, &sources, &frozen.epoch, &build_output.candidate)
-    {
+    for warning in record_merge_operations(
+        &root,
+        &sources,
+        &merge_base_epoch,
+        &build_output.candidate,
+    ) {
         tracing::warn!("{warning}");
     }
 
@@ -2717,7 +2776,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     if default_ws_path.exists() {
         // Compute patchset BEFORE the checkout so we capture pre-rewrite state.
         let pre_checkout_patchset =
-            maw_core::model::diff::compute_patchset(&default_ws_path, &frozen.epoch).ok();
+            maw_core::model::diff::compute_patchset(&default_ws_path, &merge_base_epoch).ok();
 
         // FP: crash before updating the default workspace to the new epoch.
         // A crash here means COMMIT succeeded but the default workspace
@@ -2744,7 +2803,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
             match write_patch_set_blob(&root, patch_set) {
                 Ok(patch_set_oid) => {
-                    match ensure_workspace_oplog_head(&root, &default_ws_id, &frozen.epoch) {
+                    match ensure_workspace_oplog_head(&root, &default_ws_id, &merge_base_epoch) {
                         Ok(head) => {
                             let snapshot_op = Operation {
                                 parent_ids: vec![head.clone()],
@@ -2792,7 +2851,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Remove merge-state file
     let merge_state_path = MergeStateFile::default_path(&manifold_dir);
     let state = MergeStateFile::read(&merge_state_path)
-        .unwrap_or_else(|_| MergeStateFile::new(sources, frozen.epoch, now_secs()));
+        .unwrap_or_else(|_| MergeStateFile::new(sources, merge_base_epoch.clone(), now_secs()));
     run_cleanup_phase(&state, &merge_state_path, false, |_ws| Ok(()))
         .map_err(|e| anyhow::anyhow!("cleanup failed: {e}"))?;
 
@@ -3126,6 +3185,25 @@ fn record_epoch_after(
         maw_core::model::types::EpochId::new(candidate.as_str())
             .map_err(|e| anyhow::anyhow!("invalid candidate OID: {e}"))?,
     );
+    state.updated_at = now_secs();
+    state
+        .write_atomic(&state_path)
+        .map_err(|e| anyhow::anyhow!("write merge-state: {e}"))?;
+    Ok(())
+}
+
+fn record_merge_target_context(
+    manifold_dir: &Path,
+    target_branch: &str,
+    epoch_before_override: Option<&EpochId>,
+) -> Result<()> {
+    let state_path = MergeStateFile::default_path(manifold_dir);
+    let mut state =
+        MergeStateFile::read(&state_path).map_err(|e| anyhow::anyhow!("read merge-state: {e}"))?;
+    state.target_branch = Some(target_branch.to_owned());
+    if let Some(epoch_before) = epoch_before_override {
+        state.epoch_before = epoch_before.clone();
+    }
     state.updated_at = now_secs();
     state
         .write_atomic(&state_path)
