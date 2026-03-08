@@ -792,6 +792,62 @@ fn merge_check_guardrail_failures_emit_json_payload_when_requested() {
 }
 
 #[test]
+fn merge_check_missing_workspace_has_actionable_error_text() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&["ws", "merge", "missing", "--into", "default", "--check"]);
+    assert!(
+        !out.status.success(),
+        "check should fail for missing workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not exist at")
+            && stderr.contains("Check available workspaces: maw ws list"),
+        "expected actionable missing-workspace error, got: {stderr}"
+    );
+}
+
+#[test]
+fn merge_check_invalid_target_emits_json_payload_when_requested() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.add_file("agent", "agent.txt", "agent\n");
+    repo.git_in_workspace("agent", &["add", "agent.txt"]);
+    repo.git_in_workspace("agent", &["commit", "-m", "feat: agent"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent",
+        "--into",
+        "does-not-exist",
+        "--check",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "invalid target check should fail\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("invalid target check should emit JSON payload");
+    assert_eq!(payload["ready"].as_bool(), Some(false));
+    assert!(
+        stdout.contains("Unknown merge target 'does-not-exist'"),
+        "JSON payload should include target resolution error, got: {stdout}"
+    );
+}
+
+#[test]
 fn merge_into_default_blocks_unbound_workspace_with_stale_change_tip_ancestry() {
     let repo = TestRepo::new();
 
@@ -1000,13 +1056,12 @@ fn changes_create_json_advice_avoids_invalid_self_merge_instructions() {
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout
-        .rfind("\n{")
-        .map(|idx| idx + 1)
-        .or_else(|| stdout.find('{'))
-        .expect("changes create output should include trailing JSON payload");
-    let payload: serde_json::Value = serde_json::from_str(&stdout[json_start..])
-        .expect("changes create trailing JSON should parse");
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("changes create JSON output should be pure JSON");
+    assert!(
+        !stdout.contains("Creating workspace"),
+        "JSON mode must not include human prose before payload, got: {stdout}"
+    );
     let advice = payload["advice"]
         .as_array()
         .expect("advice should be an array")

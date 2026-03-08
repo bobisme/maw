@@ -1225,7 +1225,16 @@ fn check_merge_result_for_target(
 
     let mut workspace_dirs = BTreeMap::new();
     for ws_id in &sources {
-        workspace_dirs.insert(ws_id.clone(), backend.workspace_path(ws_id));
+        let ws_path = backend.workspace_path(ws_id);
+        if !ws_path.exists() {
+            bail!(
+                "Workspace '{}' does not exist at {}\n  \
+                 Check available workspaces: maw ws list",
+                ws_id,
+                ws_path.display()
+            );
+        }
+        workspace_dirs.insert(ws_id.clone(), ws_path);
     }
 
     // Run PREPARE in the temp dir

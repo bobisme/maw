@@ -29,6 +29,29 @@ pub fn create(
     persistent: bool,
     template: Option<WorkspaceTemplate>,
 ) -> Result<()> {
+    create_with_output(name, from, change, persistent, template, true)
+}
+
+#[instrument(skip(template), fields(workspace = name))]
+pub fn create_quiet(
+    name: &str,
+    from: Option<&str>,
+    change: Option<&str>,
+    persistent: bool,
+    template: Option<WorkspaceTemplate>,
+) -> Result<()> {
+    create_with_output(name, from, change, persistent, template, false)
+}
+
+#[instrument(skip(template), fields(workspace = name, emit_output))]
+fn create_with_output(
+    name: &str,
+    from: Option<&str>,
+    change: Option<&str>,
+    persistent: bool,
+    template: Option<WorkspaceTemplate>,
+    emit_output: bool,
+) -> Result<()> {
     let root = ensure_repo_root()?;
     let backend = get_backend()?;
     let path = workspace_path(name)?;
@@ -49,8 +72,10 @@ pub fn create(
     };
     let template_profile = template.map(WorkspaceTemplate::profile);
 
-    println!("Creating workspace '{name}' at ws/{name} ...");
-    if persistent {
+    if emit_output {
+        println!("Creating workspace '{name}' at ws/{name} ...");
+    }
+    if persistent && emit_output {
         println!(
             "  Mode: persistent (survives epoch advances; use `maw ws advance {name}` to rebase)"
         );
@@ -103,55 +128,57 @@ pub fn create(
     // Get short commit ID for display
     let short_oid = &epoch.as_str()[..12];
 
-    println!();
-    println!("Workspace '{name}' ready!");
-    println!();
-    println!(
-        "  Mode:   {}",
+    if emit_output {
+        println!();
+        println!("Workspace '{name}' ready!");
+        println!();
+        println!(
+            "  Mode:   {}",
+            if persistent {
+                "persistent"
+            } else {
+                "ephemeral"
+            }
+        );
+        if let Some(profile) = &template_profile {
+            println!("  Template: {}", profile.template);
+            println!("  Merge policy: {}", profile.defaults.merge_policy);
+        }
+        if let Some(change_id) = bound_change_id.as_deref() {
+            println!("  Change: {change_id}");
+        }
+        println!("  Epoch:  {short_oid} (base commit for this workspace)");
+        println!("  Path:   {}/", info.path.display());
+        println!();
+        println!("  IMPORTANT: All file reads, writes, and edits must use this path.");
+        println!("  This is your working directory for ALL operations, not just bash.");
+        println!();
+        println!("To start working:");
+        println!();
+        println!("  # Edit files under {}/", info.path.display());
+        println!("  # Changes are detected automatically by the merge engine");
+        println!();
+        println!("  # Run commands in the workspace:");
+        println!("  maw exec {name} -- cargo test");
+        if let Some(change_id) = bound_change_id.as_deref() {
+            if name == change_id {
+                println!("  maw ws create --change {change_id} <agent-workspace>");
+                println!("  maw ws merge <agent-workspace> --into {change_id} --destroy");
+            } else {
+                println!("  maw ws merge {name} --into {change_id} --destroy");
+            }
+        } else {
+            println!("  maw ws merge {name} --into default --destroy");
+        }
+        println!();
         if persistent {
-            "persistent"
+            println!("Note: This is a PERSISTENT workspace. When the epoch advances:");
+            println!("  maw ws advance {name}   # rebase onto latest epoch");
+            println!("  maw ws status           # check staleness");
         } else {
-            "ephemeral"
+            println!("Note: All edits in the workspace are tracked automatically.");
+            println!("The merge engine captures changes when merging.");
         }
-    );
-    if let Some(profile) = &template_profile {
-        println!("  Template: {}", profile.template);
-        println!("  Merge policy: {}", profile.defaults.merge_policy);
-    }
-    if let Some(change_id) = bound_change_id.as_deref() {
-        println!("  Change: {change_id}");
-    }
-    println!("  Epoch:  {short_oid} (base commit for this workspace)");
-    println!("  Path:   {}/", info.path.display());
-    println!();
-    println!("  IMPORTANT: All file reads, writes, and edits must use this path.");
-    println!("  This is your working directory for ALL operations, not just bash.");
-    println!();
-    println!("To start working:");
-    println!();
-    println!("  # Edit files under {}/", info.path.display());
-    println!("  # Changes are detected automatically by the merge engine");
-    println!();
-    println!("  # Run commands in the workspace:");
-    println!("  maw exec {name} -- cargo test");
-    if let Some(change_id) = bound_change_id.as_deref() {
-        if name == change_id {
-            println!("  maw ws create --change {change_id} <agent-workspace>");
-            println!("  maw ws merge <agent-workspace> --into {change_id} --destroy");
-        } else {
-            println!("  maw ws merge {name} --into {change_id} --destroy");
-        }
-    } else {
-        println!("  maw ws merge {name} --into default --destroy");
-    }
-    println!();
-    if persistent {
-        println!("Note: This is a PERSISTENT workspace. When the epoch advances:");
-        println!("  maw ws advance {name}   # rebase onto latest epoch");
-        println!("  maw ws status           # check staleness");
-    } else {
-        println!("Note: All edits in the workspace are tracked automatically.");
-        println!("The merge engine captures changes when merging.");
     }
 
     Ok(())

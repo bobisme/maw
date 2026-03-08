@@ -1207,8 +1207,33 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             let root = repo_root()?;
-            let target = resolve_merge_target(&root, &into)?;
             if check {
+                let target = match resolve_merge_target(&root, &into) {
+                    Ok(target) => target,
+                    Err(err) => {
+                        if fmt == OutputFormat::Json {
+                            let payload = merge::CheckResult {
+                                ready: false,
+                                conflicts: vec![merge::ConflictInfo {
+                                    path: String::new(),
+                                    reason: err.to_string(),
+                                    sides: Vec::new(),
+                                    line_start: None,
+                                    line_end: None,
+                                }],
+                                stale: false,
+                                workspace: merge::CheckWorkspaceInfo {
+                                    name: workspaces.first().cloned().unwrap_or_default(),
+                                    change_id: String::new(),
+                                },
+                                description: String::new(),
+                            };
+                            println!("{}", fmt.serialize(&payload)?);
+                            bail!("merge check: not ready");
+                        }
+                        return Err(err);
+                    }
+                };
                 return merge::check_merge(
                     &workspaces,
                     fmt,
@@ -1220,6 +1245,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             if plan {
                 return merge::plan_merge(&workspaces, fmt);
             }
+
+            let target = resolve_merge_target(&root, &into)?;
 
             // Resolve the commit message: --message flag, editor (TTY), or error.
             // Deferred until after merge() validates basic preconditions (e.g.

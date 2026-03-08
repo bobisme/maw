@@ -363,9 +363,18 @@ fn create_change(args: &CreateArgs) -> Result<()> {
         locked.write_active_record(&record)
     })?;
 
-    if let Err(err) =
+    let create_primary_result = if format == OutputFormat::Json {
+        crate::workspace::create::create_quiet(
+            &primary_workspace,
+            None,
+            Some(&change_id),
+            false,
+            None,
+        )
+    } else {
         crate::workspace::create::create(&primary_workspace, None, Some(&change_id), false, None)
-    {
+    };
+    if let Err(err) = create_primary_result {
         rollback_change_create(&root, &store, &change_id, &branch)?;
         bail!(
             "Failed to create primary workspace '{}': {err}\n  Rollback applied: removed change metadata and branch '{}'.",
