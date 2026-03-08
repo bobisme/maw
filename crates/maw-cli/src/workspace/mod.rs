@@ -1243,7 +1243,14 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 );
             }
             if plan {
-                return merge::plan_merge(&workspaces, fmt);
+                let target = resolve_merge_target(&root, &into)?;
+                return merge::plan_merge(
+                    &workspaces,
+                    fmt,
+                    &target.workspace,
+                    &target.branch,
+                    target.change_id.as_deref(),
+                );
             }
 
             let target = resolve_merge_target(&root, &into)?;

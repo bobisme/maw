@@ -848,6 +848,116 @@ fn merge_check_invalid_target_emits_json_payload_when_requested() {
 }
 
 #[test]
+fn merge_plan_is_target_aware_for_change_target_conflicts() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-plan",
+        "--workspace",
+        "ch-plan",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-plan", "change-worker"]);
+    repo.modify_file(
+        "change-worker",
+        "src/lib.rs",
+        "pub fn hello() { println!(\"from-change\"); }\n",
+    );
+    repo.git_in_workspace("change-worker", &["add", "src/lib.rs"]);
+    repo.git_in_workspace("change-worker", &["commit", "-m", "feat: change-side edit"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "change-worker",
+        "--into",
+        "ch-plan",
+        "--destroy",
+        "--message",
+        "merge change-side edit",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "main-worker"]);
+    repo.modify_file(
+        "main-worker",
+        "src/lib.rs",
+        "pub fn hello() { println!(\"from-main\"); }\n",
+    );
+    repo.git_in_workspace("main-worker", &["add", "src/lib.rs"]);
+    repo.git_in_workspace("main-worker", &["commit", "-m", "feat: main-side edit"]);
+
+    let plan_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "main-worker",
+        "--into",
+        "ch-plan",
+        "--plan",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        plan_out.status.success(),
+        "plan should complete and report predicted conflicts\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&plan_out.stdout),
+        String::from_utf8_lossy(&plan_out.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&plan_out.stdout).expect("plan output should be valid JSON");
+    let predicted = payload["predicted_conflicts"]
+        .as_array()
+        .expect("predicted_conflicts should be an array");
+    assert!(
+        predicted
+            .iter()
+            .any(|entry| entry["path"].as_str() == Some("src/lib.rs")),
+        "plan should predict change-target conflict on src/lib.rs, got: {payload}"
+    );
+}
+
+#[test]
+fn merge_plan_rejects_invalid_target_value() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.add_file("agent", "agent.txt", "agent\n");
+    repo.git_in_workspace("agent", &["add", "agent.txt"]);
+    repo.git_in_workspace("agent", &["commit", "-m", "feat: agent"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent",
+        "--into",
+        "does-not-exist",
+        "--plan",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "plan should fail for invalid target\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Unknown merge target 'does-not-exist'")
+            && stderr.contains("--into default or --into <active-change-id>"),
+        "expected actionable invalid-target error, got: {stderr}"
+    );
+}
+
+#[test]
 fn merge_into_default_blocks_unbound_workspace_with_stale_change_tip_ancestry() {
     let repo = TestRepo::new();
 

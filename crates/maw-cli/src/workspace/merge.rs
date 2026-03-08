@@ -1385,7 +1385,13 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
 /// Produces a deterministic `MergePlan` JSON describing what the merge *would*
 /// do. No refs are updated, no epoch is advanced. Artifacts are written to
 /// `.manifold/artifacts/`.
-pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
+pub fn plan_merge(
+    workspaces: &[String],
+    format: OutputFormat,
+    target_workspace: &str,
+    target_branch: &str,
+    target_change_id: Option<&str>,
+) -> Result<()> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --plan");
     }
@@ -1395,10 +1401,28 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     let default_ws = maw_config.default_workspace();
     let backend = get_backend()?;
 
-    if workspaces.iter().any(|ws| ws == default_ws) {
+    let branch_ref = format!("refs/heads/{target_branch}");
+    let branch_before_oid = maw_core::refs::read_ref(&root, &branch_ref)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Target branch '{}' does not exist.\n  To fix: create the branch first or repair change metadata, then retry.",
+            target_branch
+        )
+    })?;
+
+    if workspaces.iter().any(|ws| ws == target_workspace) {
+        if target_workspace == default_ws {
+            bail!(
+                "Cannot plan a merge of the default workspace — it is the merge target, not a source."
+            );
+        }
         bail!(
-            "Cannot plan a merge of the default workspace — it is the merge target, not a source."
+            "Cannot plan target workspace '{}' as a source — it is the merge destination.",
+            target_workspace
         );
+    }
+
+    if target_change_id.is_none() {
+        guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
     }
 
     let manifold_dir = root.join(".manifold");
@@ -1420,6 +1444,25 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
     let partition = partition_by_path(&patch_sets);
     let (touched_paths, overlaps) = paths_from_partition(&partition);
 
+    let merge_base_epoch = if target_change_id.is_some() {
+        EpochId::new(branch_before_oid.as_str()).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid target branch base OID '{}': {e}",
+                branch_before_oid.as_str()
+            )
+        })?
+    } else {
+        frozen.epoch.clone()
+    };
+    if let Err(e) = record_merge_target_context(
+        &manifold_dir,
+        target_branch,
+        target_change_id.map(|_| &merge_base_epoch),
+    ) {
+        let _ = cleanup_plan_merge_state(&manifold_dir);
+        bail!("failed to persist merge target context for plan: {e}");
+    }
+
     let build_output = match run_build_phase(&root, &manifold_dir, &backend) {
         Ok(out) => out,
         Err(e) => {
@@ -1428,7 +1471,7 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
         }
     };
 
-    let merge_id = compute_merge_id(&frozen.epoch, &sources, &frozen.heads);
+    let merge_id = compute_merge_id(&merge_base_epoch, &sources, &frozen.heads);
     let driver_infos = build_driver_infos(&touched_paths, &manifold_config);
     let predicted_conflicts = build_predicted_conflicts(&build_output, &partition);
     let validation_info = build_validation_info(&manifold_config);
@@ -1447,7 +1490,7 @@ pub fn plan_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
 
     let plan = MergePlan {
         merge_id,
-        epoch_before: frozen.epoch.as_str().to_owned(),
+        epoch_before: merge_base_epoch.as_str().to_owned(),
         sources: {
             let mut sorted: Vec<String> = sources.iter().map(|ws| ws.as_str().to_owned()).collect();
             sorted.sort();
