@@ -1243,6 +1243,37 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 );
             }
             if plan {
+                if fmt == OutputFormat::Json {
+                    let target = match resolve_merge_target(&root, &into) {
+                        Ok(target) => target,
+                        Err(err) => {
+                            let payload = merge::PlanErrorResult {
+                                ok: false,
+                                error: err.to_string(),
+                            };
+                            println!("{}", fmt.serialize(&payload)?);
+                            bail!("merge plan: not ready");
+                        }
+                    };
+                    return match merge::plan_merge(
+                        &workspaces,
+                        fmt,
+                        &target.workspace,
+                        &target.branch,
+                        target.change_id.as_deref(),
+                    ) {
+                        Ok(()) => Ok(()),
+                        Err(err) => {
+                            let payload = merge::PlanErrorResult {
+                                ok: false,
+                                error: err.to_string(),
+                            };
+                            println!("{}", fmt.serialize(&payload)?);
+                            bail!("merge plan: not ready");
+                        }
+                    };
+                }
+
                 let target = resolve_merge_target(&root, &into)?;
                 return merge::plan_merge(
                     &workspaces,

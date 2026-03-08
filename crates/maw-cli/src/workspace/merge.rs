@@ -1094,6 +1094,12 @@ pub struct CheckResult {
     pub description: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PlanErrorResult {
+    pub ok: bool,
+    pub error: String,
+}
+
 /// Workspace info included in check result.
 #[derive(Debug, Serialize)]
 pub struct CheckWorkspaceInfo {
@@ -1186,6 +1192,25 @@ fn check_merge_result_for_target(
         );
     }
 
+    let sources: Vec<WorkspaceId> = workspaces
+        .iter()
+        .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("{e}")))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut workspace_dirs = BTreeMap::new();
+    for ws_id in &sources {
+        let ws_path = backend.workspace_path(ws_id);
+        if !ws_path.exists() {
+            bail!(
+                "Workspace '{}' does not exist at {}\n  \
+                 Check available workspaces: maw ws list",
+                ws_id,
+                ws_path.display()
+            );
+        }
+        workspace_dirs.insert(ws_id.clone(), ws_path);
+    }
+
     if target_change_id.is_none() {
         guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
     }
@@ -1217,25 +1242,6 @@ fn check_merge_result_for_target(
         .tempdir_in(&manifold_dir)
         .context("Failed to create temp dir for merge check")?;
     let check_dir = temp_check_dir.path().to_path_buf();
-
-    let sources: Vec<WorkspaceId> = workspaces
-        .iter()
-        .map(|ws| WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("{e}")))
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut workspace_dirs = BTreeMap::new();
-    for ws_id in &sources {
-        let ws_path = backend.workspace_path(ws_id);
-        if !ws_path.exists() {
-            bail!(
-                "Workspace '{}' does not exist at {}\n  \
-                 Check available workspaces: maw ws list",
-                ws_id,
-                ws_path.display()
-            );
-        }
-        workspace_dirs.insert(ws_id.clone(), ws_path);
-    }
 
     // Run PREPARE in the temp dir
     let prepare_result = run_prepare_phase(&root, &check_dir, &sources, &workspace_dirs);
@@ -1421,15 +1427,15 @@ pub fn plan_merge(
         );
     }
 
-    if target_change_id.is_none() {
-        guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
-    }
-
     let manifold_dir = root.join(".manifold");
     let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let sources = parse_workspace_ids(workspaces)?;
     validate_workspace_dirs(&sources, &backend)?;
+
+    if target_change_id.is_none() {
+        guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
+    }
 
     // PREPARE → COLLECT → PARTITION → BUILD
     let frozen = run_prepare_phase(
@@ -1473,7 +1479,7 @@ pub fn plan_merge(
 
     let merge_id = compute_merge_id(&merge_base_epoch, &sources, &frozen.heads);
     let driver_infos = build_driver_infos(&touched_paths, &manifold_config);
-    let predicted_conflicts = build_predicted_conflicts(&build_output, &partition);
+    let predicted_conflicts = build_predicted_conflicts(&build_output);
     let validation_info = build_validation_info(&manifold_config);
 
     // VALIDATE (optional): run and write artifact, but don't block
@@ -1604,25 +1610,18 @@ fn build_driver_infos(touched_paths: &[PathBuf], config: &ManifoldConfig) -> Vec
 }
 
 /// Build `PredictedConflict` entries from the BUILD output.
-fn build_predicted_conflicts(
-    build_output: &BuildPhaseOutput,
-    partition: &maw_core::merge::partition::PartitionResult,
-) -> Vec<PredictedConflict> {
+fn build_predicted_conflicts(build_output: &BuildPhaseOutput) -> Vec<PredictedConflict> {
     build_output
         .conflicts
         .iter()
         .map(|conflict| {
-            let sides: Vec<String> = partition
-                .shared
+            let mut sides: Vec<String> = conflict
+                .sides
                 .iter()
-                .find(|(p, _)| p == &conflict.path)
-                .map(|(_, entries)| {
-                    entries
-                        .iter()
-                        .map(|e| workspace_display_name(&e.workspace_id))
-                        .collect()
-                })
-                .unwrap_or_default();
+                .map(|s| workspace_display_name(&s.workspace_id))
+                .collect();
+            sides.sort();
+            sides.dedup();
             PredictedConflict {
                 path: conflict.path.clone(),
                 kind: conflict.reason.to_string(),

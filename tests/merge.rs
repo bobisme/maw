@@ -812,6 +812,53 @@ fn merge_check_missing_workspace_has_actionable_error_text() {
 }
 
 #[test]
+fn merge_check_missing_workspace_with_active_change_stays_actionable() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-missing-check",
+        "--workspace",
+        "ch-missing-check",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-missing-check", "worker"]);
+    repo.add_file("worker", "change.txt", "change\n");
+    repo.git_in_workspace("worker", &["add", "change.txt"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: change"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-missing-check",
+        "--destroy",
+        "--message",
+        "merge worker",
+    ]);
+
+    let out = repo.maw_raw(&["ws", "merge", "missing", "--into", "default", "--check"]);
+    assert!(
+        !out.status.success(),
+        "check should fail for missing workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not exist at")
+            && stderr.contains("Check available workspaces: maw ws list")
+            && !stderr.contains("failed to run git rev-parse HEAD"),
+        "expected actionable missing-workspace error even with active changes, got: {stderr}"
+    );
+}
+
+#[test]
 fn merge_check_invalid_target_emits_json_payload_when_requested() {
     let repo = TestRepo::new();
 
@@ -921,6 +968,14 @@ fn merge_plan_is_target_aware_for_change_target_conflicts() {
             .any(|entry| entry["path"].as_str() == Some("src/lib.rs")),
         "plan should predict change-target conflict on src/lib.rs, got: {payload}"
     );
+    assert!(
+        predicted
+            .iter()
+            .find(|entry| entry["path"].as_str() == Some("src/lib.rs"))
+            .and_then(|entry| entry["sides"].as_array())
+            .is_some_and(|sides| sides.iter().any(|s| s.as_str() == Some("main-worker"))),
+        "plan conflict sides should include source workspace attribution, got: {payload}"
+    );
 }
 
 #[test]
@@ -949,11 +1004,147 @@ fn merge_plan_rejects_invalid_target_value() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("plan json mode should emit JSON error payload");
+    assert_eq!(payload["ok"].as_bool(), Some(false));
     assert!(
-        stderr.contains("Unknown merge target 'does-not-exist'")
-            && stderr.contains("--into default or --into <active-change-id>"),
-        "expected actionable invalid-target error, got: {stderr}"
+        payload["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("Unknown merge target 'does-not-exist'")),
+        "expected actionable invalid-target JSON error, got: {payload}"
+    );
+}
+
+#[test]
+fn merge_plan_guardrail_failures_emit_json_payload_when_requested() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-plan-guard",
+        "--workspace",
+        "ch-plan-guard",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-plan-guard", "worker"]);
+    repo.add_file("worker", "src/change_only.rs", "pub fn from_change() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: change work"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-plan-guard",
+        "--destroy",
+        "--message",
+        "merge worker into change",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    let change_head = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-plan-guard-flow"])
+        .trim()
+        .to_owned();
+    repo.git_in_workspace("hotfix", &["checkout", "--detach", &change_head]);
+    repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");
+    repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
+    repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "hotfix",
+        "--into",
+        "default",
+        "--plan",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "plan should fail for contaminated unbound workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("plan guardrail output should be valid JSON");
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    assert!(
+        payload["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("Refusing merge into 'main'")),
+        "plan guardrail JSON should include remediation context, got: {payload}"
+    );
+}
+
+#[test]
+fn merge_plan_missing_workspace_with_active_change_stays_actionable() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-plan-missing",
+        "--workspace",
+        "ch-plan-missing",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-plan-missing", "worker"]);
+    repo.add_file("worker", "change.txt", "change\n");
+    repo.git_in_workspace("worker", &["add", "change.txt"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: change"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-plan-missing",
+        "--destroy",
+        "--message",
+        "merge worker",
+    ]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "missing",
+        "--into",
+        "default",
+        "--plan",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "plan should fail for missing workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("plan json mode should emit JSON error payload");
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    assert!(
+        payload["error"].as_str().is_some_and(|msg| {
+            msg.contains("Workspace 'missing' does not exist at")
+                && msg.contains("Check available workspaces: maw ws list")
+                && !msg.contains("failed to run git rev-parse HEAD")
+        }),
+        "expected actionable missing-workspace JSON error even with active changes, got: {payload}"
     );
 }
 
