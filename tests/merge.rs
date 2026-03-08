@@ -956,6 +956,35 @@ fn merge_check_missing_workspace_has_actionable_error_text() {
 }
 
 #[test]
+fn merge_dry_run_missing_workspace_fails_with_actionable_error_text() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "missing",
+        "--into",
+        "default",
+        "--dry-run",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "dry-run should fail for missing workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not exist at")
+            && stderr.contains("Check available workspaces: maw ws list"),
+        "expected actionable missing-workspace error, got: {stderr}"
+    );
+}
+
+#[test]
 fn merge_check_missing_workspace_with_active_change_stays_actionable() {
     let repo = TestRepo::new();
 

@@ -56,7 +56,7 @@ pub fn run(args: &ExecArgs) -> Result<()> {
         bail!(
             "Workspace '{}' does not exist at {}\n  \
              List workspaces: maw ws list\n  \
-             Create one: maw ws create {}",
+             Create one: maw ws create --from main {}",
             args.workspace,
             path.display(),
             args.workspace

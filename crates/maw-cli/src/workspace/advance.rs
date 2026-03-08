@@ -90,7 +90,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         bail!(
             "Workspace '{name}' is ephemeral (the default mode).\n  \
              Only persistent workspaces can be advanced.\n  \
-             \n  To create a persistent workspace: maw ws create <name> --persistent\n  \
+             \n  To create a persistent workspace: maw ws create --from main <name> --persistent\n  \
              To advance a persistent workspace after epoch change: maw ws advance <name>"
         );
     }

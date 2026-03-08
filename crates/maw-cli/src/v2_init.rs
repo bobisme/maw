@@ -136,7 +136,7 @@ impl fmt::Display for InitResult {
         writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
         writeln!(
             f,
-            "  maw ws create <agent-name>    # create agent workspace"
+            "  maw ws create --from main <agent-name>    # create agent workspace"
         )?;
         writeln!(
             f,
@@ -705,6 +705,7 @@ mod tests {
         assert!(display.contains("ws/default"));
         assert!(display.contains("main"));
         assert!(display.contains("aaaaaaaaaaaa")); // first 12 chars
+        assert!(display.contains("maw ws create --from main <agent-name>"));
     }
 
     #[test]
@@ -882,7 +883,7 @@ impl fmt::Display for BrownfieldInitResult {
         writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
         writeln!(
             f,
-            "  maw ws create <agent-name>    # create agent workspace"
+            "  maw ws create --from main <agent-name>    # create agent workspace"
         )?;
         writeln!(
             f,
@@ -2289,6 +2290,7 @@ mod brownfield_tests {
         assert!(s.contains("ws/default"));
         assert!(s.contains("main"));
         assert!(s.contains("5 file(s)"));
+        assert!(s.contains("maw ws create --from main <agent-name>"));
     }
 
     #[test]

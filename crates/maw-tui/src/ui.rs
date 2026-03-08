@@ -115,9 +115,10 @@ fn draw_pane_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     let ws_count = app.workspaces.len();
     if ws_count == 0 {
         let block = styled_block("No workspaces", false);
-        let text =
-            Paragraph::new("  No agent workspaces found. Create one with: maw ws create <name>")
-                .block(block);
+        let text = Paragraph::new(
+            "  No agent workspaces found. Create one with: maw ws create --from main <name>",
+        )
+        .block(block);
         frame.render_widget(text, area);
         app.pane_areas.clear();
         return;

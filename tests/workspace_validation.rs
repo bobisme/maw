@@ -84,3 +84,22 @@ fn allows_valid_names() {
         );
     }
 }
+
+#[test]
+fn exec_missing_workspace_error_suggests_source_flag() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&["exec", "ghost", "--", "git", "status"]);
+    assert!(
+        !out.status.success(),
+        "exec should fail for missing workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Create one: maw ws create --from main ghost"),
+        "expected source-aware create guidance, got: {stderr}"
+    );
+}

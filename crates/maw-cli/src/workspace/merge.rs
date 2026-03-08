@@ -2118,20 +2118,18 @@ fn preview_merge(
     let mut workspace_files: Vec<(String, Vec<PathBuf>)> = Vec::new();
 
     for ws_name in workspaces {
-        let ws_id = match WorkspaceId::new(ws_name) {
-            Ok(id) => id,
-            Err(e) => {
-                workspace_changes.push(DryRunWorkspaceChanges {
-                    workspace: ws_name.clone(),
-                    added: Vec::new(),
-                    modified: Vec::new(),
-                    deleted: Vec::new(),
-                    change_count: 0,
-                    error: Some(format!("Invalid workspace name: {e}")),
-                });
-                continue;
-            }
-        };
+        let ws_id = WorkspaceId::new(ws_name)
+            .map_err(|e| anyhow::anyhow!("invalid workspace name '{ws_name}': {e}"))?;
+
+        if !backend.exists(&ws_id) {
+            let ws_path = backend.workspace_path(&ws_id);
+            bail!(
+                "Workspace '{}' does not exist at {}\n  \
+                 Check available workspaces: maw ws list",
+                ws_id,
+                ws_path.display()
+            );
+        }
 
         match backend.snapshot(&ws_id) {
             Ok(snapshot) => {
@@ -2163,14 +2161,7 @@ fn preview_merge(
                 });
             }
             Err(e) => {
-                workspace_changes.push(DryRunWorkspaceChanges {
-                    workspace: ws_name.clone(),
-                    added: Vec::new(),
-                    modified: Vec::new(),
-                    deleted: Vec::new(),
-                    change_count: 0,
-                    error: Some(format!("Could not get changes: {e}")),
-                });
+                bail!("Could not preview workspace '{}': {e}", ws_name);
             }
         }
     }
@@ -2404,6 +2395,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         bail!("{}", stale_merge_block_message(&stale_sources));
     }
 
+    let backend = get_backend()?;
+    let sources = parse_workspace_ids(&ws_to_merge)?;
+    validate_workspace_dirs(&sources, &backend)?;
+
     if dry_run {
         return preview_merge(&ws_to_merge, &root, into_target, format);
     }
@@ -2420,7 +2415,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Set up paths
     let manifold_dir = root.join(".manifold");
     let default_ws_path = root.join("ws").join(default_ws);
-    let backend = get_backend()?;
     let target_base_epoch_before = if default_ws_path.exists() {
         let target_ws_id = WorkspaceId::new(default_ws)
             .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
@@ -2440,29 +2434,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     } else {
         None
     };
-
-    // Convert workspace names to WorkspaceIds
-    let sources: Vec<WorkspaceId> = ws_to_merge
-        .iter()
-        .map(|ws| {
-            WorkspaceId::new(ws).map_err(|e| anyhow::anyhow!("invalid workspace name '{ws}': {e}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Build workspace_dirs map for PREPARE
-    let mut workspace_dirs = BTreeMap::new();
-    for ws_id in &sources {
-        let ws_path = backend.workspace_path(ws_id);
-        if !ws_path.exists() {
-            bail!(
-                "Workspace '{}' does not exist at {}\n  \
-                 Check available workspaces: maw ws list",
-                ws_id,
-                ws_path.display()
-            );
-        }
-        workspace_dirs.insert(ws_id.clone(), ws_path);
-    }
+    let workspace_dirs = workspace_dirs_map(&sources, &backend);
 
     // Refuse merge if any source workspace has unresolved rebase conflicts.
     for ws_name in &ws_to_merge {

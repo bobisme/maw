@@ -66,7 +66,7 @@ pub fn run() -> Result<()> {
     println!("  ls ws/                     # should have default/");
     println!("  ls .workspaces/ 2>/dev/null # should not exist");
     println!();
-    println!("Next: maw ws create <agent-name>");
+    println!("Next: maw ws create --from main <agent-name>");
 
     Ok(())
 }
