@@ -925,6 +925,13 @@ fn sync_all() -> Result<()> {
         );
     }
 
+    let skipped_total = skipped_with_work.len() + skipped_cross_target.len();
+    if skipped_total > 0 {
+        bail!(
+            "sync --all incomplete: {skipped_total} workspace(s) were skipped by safety checks; merge or resolve them, then rerun maw ws sync --all"
+        );
+    }
+
     Ok(())
 }
 

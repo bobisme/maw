@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -92,6 +93,16 @@ pub fn run(args: &PushArgs) -> Result<()> {
             true
         }
         SyncStatus::NoRemote => {
+            if origin_remote_url(&root)?.is_none() {
+                bail!(
+                    "No 'origin' remote is configured.\n  \
+                     To fix:\n    \
+                     git -C {} remote add origin <REMOTE_URL>\n  \
+                     Then push:\n    \
+                     maw push",
+                    root.display()
+                );
+            }
             println!("Pushing {branch} to origin (new branch)...");
             true
         }
@@ -162,6 +173,31 @@ pub fn run(args: &PushArgs) -> Result<()> {
 
     let _ = cwd; // used for validation above
     Ok(())
+}
+
+fn origin_remote_url(root: &Path) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root)
+        .output()
+        .context("Failed to inspect origin remote")?;
+
+    if out.status.success() {
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if url.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(url))
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let err = stderr.trim();
+        if err.contains("No such remote") {
+            Ok(None)
+        } else {
+            bail!("Failed to inspect origin remote: {err}");
+        }
+    }
 }
 
 /// Move the local branch ref to the current epoch.

@@ -102,3 +102,25 @@ fn push_advance_does_not_rewind_when_branch_is_ahead_of_epoch() {
     let content = std::fs::read_to_string(&pushed).unwrap();
     assert_eq!(content, "keep branch tip\n");
 }
+
+#[test]
+fn push_without_origin_remote_has_actionable_error() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&["push"]);
+    assert!(
+        !out.status.success(),
+        "push should fail when origin is missing\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("No 'origin' remote is configured")
+            && stderr.contains("git -C")
+            && stderr.contains("remote add origin <REMOTE_URL>")
+            && stderr.contains("maw push"),
+        "expected actionable no-remote guidance, got: {stderr}"
+    );
+}

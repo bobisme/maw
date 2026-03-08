@@ -301,6 +301,58 @@ fn merge_json_conflict_stdout_is_pure_json() {
 }
 
 #[test]
+fn conflicts_json_to_fix_uses_valid_merge_target() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("shared.txt", "base\n")]);
+    repo.maw_ok(&["ws", "create", "c1"]);
+    repo.maw_ok(&["ws", "create", "c2"]);
+    repo.modify_file("c1", "shared.txt", "one\n");
+    repo.modify_file("c2", "shared.txt", "two\n");
+
+    let out = repo.maw_raw(&["ws", "conflicts", "c1", "c2", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "ws conflicts should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("conflicts output should be valid JSON");
+    assert_eq!(payload["status"].as_str(), Some("conflict"));
+
+    let to_fix = payload["to_fix"]
+        .as_str()
+        .expect("conflicts JSON should include to_fix command");
+    assert!(
+        to_fix.contains("--into default"),
+        "expected default target in to_fix command, got: {to_fix}"
+    );
+}
+
+#[test]
+fn conflicts_missing_workspace_error_uses_source_aware_create_hint() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&["ws", "conflicts", "missing"]);
+    assert!(
+        !out.status.success(),
+        "ws conflicts should fail for missing workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Workspace 'missing' does not exist")
+            && stderr.contains("Fix: maw ws create --from main missing"),
+        "expected source-aware create hint, got: {stderr}"
+    );
+}
+
+#[test]
 fn merge_dry_run_json_stdout_is_pure_json() {
     let repo = TestRepo::new();
 

@@ -136,6 +136,52 @@ fn sync_all_returns_non_zero_when_any_workspace_fails_sync() {
 }
 
 #[test]
+fn sync_all_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "ahead"]);
+    repo.maw_ok(&["ws", "create", "advancer"]);
+
+    repo.add_file("ahead", "ahead.txt", "keep me\n");
+    repo.git_in_workspace("ahead", &["add", "ahead.txt"]);
+    repo.git_in_workspace("ahead", &["commit", "-m", "feat: ahead work"]);
+
+    repo.add_file("advancer", "epoch.txt", "epoch advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "feat: advance epoch"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let out = repo.maw_raw(&["ws", "sync", "--all"]);
+    assert!(
+        !out.status.success(),
+        "sync --all should fail when stale workspace is skipped\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Skipped (committed work not yet merged")
+            && stdout.contains("ahead (1 commit(s) ahead)")
+            && stderr.contains("sync --all incomplete"),
+        "expected skipped-work summary + incomplete failure\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    assert!(
+        workspace_state(&repo, "ahead").contains("stale"),
+        "ahead workspace should remain stale after skipped sync"
+    );
+}
+
+#[test]
 fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
     let repo = TestRepo::new();
 

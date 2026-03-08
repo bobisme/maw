@@ -1957,7 +1957,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     for ws_id in &sources {
         if !backend.exists(ws_id) {
             bail!(
-                "Workspace '{}' does not exist\n  Check: maw ws list\n  Fix: maw ws create {}",
+                "Workspace '{}' does not exist\n  Check: maw ws list\n  Fix: maw ws create --from main {}",
                 ws_id,
                 ws_id
             );
@@ -2069,10 +2069,10 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
             .map(|c| conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids))
             .collect();
         let ws_args = workspaces.join(" ");
-        let default_ws = workspaces.first().map_or("WORKSPACE", |s| s.as_str());
+        let resolve_default_ws = workspaces.first().map_or("WORKSPACE", |s| s.as_str());
         let resolve_args: Vec<String> = conflicts_with_ids
             .iter()
-            .map(|c| format!("--resolve {}={default_ws}", c.id))
+            .map(|c| format!("--resolve {}={resolve_default_ws}", c.id))
             .collect();
         let to_fix = format!(
             "maw ws merge {ws_args} --into {} {}",
