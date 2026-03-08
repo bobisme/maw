@@ -597,7 +597,9 @@ impl TestRepo {
         let is_ws_create = adjusted.len() >= 2
             && (adjusted[0] == "ws" || adjusted[0] == "workspace")
             && adjusted[1] == "create";
-        let has_explicit_source = adjusted.iter().any(|arg| *arg == "--from" || *arg == "--change");
+        let has_explicit_source = adjusted
+            .iter()
+            .any(|arg| *arg == "--from" || *arg == "--change");
         if is_ws_create && !has_explicit_source {
             adjusted.insert(2, "--from");
             adjusted.insert(3, "main");

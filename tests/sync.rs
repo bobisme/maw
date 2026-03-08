@@ -98,6 +98,44 @@ fn sync_refuses_stale_workspace_with_untracked_changes() {
 }
 
 #[test]
+fn sync_all_returns_non_zero_when_any_workspace_fails_sync() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "clean"]);
+    repo.maw_ok(&["ws", "create", "dirty"]);
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
+
+    repo.add_file("dirty", "scratch.txt", "untracked\n");
+
+    let out = repo.maw_raw(&["ws", "sync", "--all"]);
+    assert!(
+        !out.status.success(),
+        "sync --all should fail when any workspace fails\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Results:")
+            && stdout.contains("Errors:")
+            && stderr.contains("sync --all failed"),
+        "expected summary + non-zero error reason\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    assert!(
+        !workspace_state(&repo, "clean").contains("stale"),
+        "clean stale workspace should still sync"
+    );
+    assert!(
+        workspace_state(&repo, "dirty").contains("stale"),
+        "dirty stale workspace should remain stale"
+    );
+}
+
+#[test]
 fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
     let repo = TestRepo::new();
 
@@ -135,11 +173,7 @@ fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
         .git(&["rev-parse", "refs/heads/feat/ch-sync-flow"])
         .trim()
         .to_owned();
-    repo.git(&[
-        "update-ref",
-        "refs/manifold/epoch/current",
-        &change_head,
-    ]);
+    repo.git(&["update-ref", "refs/manifold/epoch/current", &change_head]);
 
     repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
     let old_head = repo.workspace_head("hotfix");
@@ -204,11 +238,7 @@ fn sync_refuses_cross_target_update_for_unbound_workspace() {
         .git(&["rev-parse", "refs/heads/feat/ch-sync2-flow"])
         .trim()
         .to_owned();
-    repo.git(&[
-        "update-ref",
-        "refs/manifold/epoch/current",
-        &change_head,
-    ]);
+    repo.git(&["update-ref", "refs/manifold/epoch/current", &change_head]);
 
     repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
     let old_head = repo.workspace_head("hotfix");

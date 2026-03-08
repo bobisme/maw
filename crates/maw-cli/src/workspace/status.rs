@@ -10,7 +10,7 @@ use maw_core::oplog::global_view::compute_global_view;
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::view::read_patch_set_blob;
 
-use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
 
 #[derive(Serialize)]
 pub struct WorkspaceStatus {

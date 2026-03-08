@@ -684,7 +684,7 @@ pub enum WorkspaceCommands {
         /// Name of the workspace
         name: String,
 
-        /// Number of commits to show (default: 20)
+        /// Number of history entries to show (default: 20)
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
 
@@ -1280,7 +1280,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 edit_merge_message(&workspaces)?
             } else {
                 bail!(
-                     "No --message provided and stdin is not a terminal.\n  \
+                    "No --message provided and stdin is not a terminal.\n  \
                       Usage: maw ws merge <workspaces> --into <target> --message \"feat: description of changes\"\n  \
                      \n  \
                      A commit message is required so that merge history captures intent."
@@ -1635,7 +1635,9 @@ mod tests {
         std::fs::create_dir_all(root.join("ws/default")).unwrap();
         std::fs::create_dir_all(root.join("ws/agent-2")).unwrap();
 
-        let err = resolve_merge_target(root, "agent-2").unwrap_err().to_string();
+        let err = resolve_merge_target(root, "agent-2")
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("is not bound to a change"),
             "unexpected error: {err}"

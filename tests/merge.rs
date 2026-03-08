@@ -167,6 +167,35 @@ fn merge_records_snapshot_and_merge_ops_in_workspace_history() {
 }
 
 #[test]
+fn annotate_payload_is_visible_in_history_json() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "worker"]);
+    repo.maw_ok(&[
+        "ws",
+        "annotate",
+        "worker",
+        "test-results",
+        r#"{"passed":42,"failed":0}"#,
+    ]);
+
+    let history = repo.maw_ok(&["ws", "history", "worker", "--format", "json"]);
+    let payload: serde_json::Value =
+        serde_json::from_str(&history).expect("history output should be valid JSON");
+    let operations = payload["operations"]
+        .as_array()
+        .expect("history operations should be an array");
+
+    let annotate = operations
+        .iter()
+        .find(|op| op["op_type"].as_str() == Some("annotate"))
+        .expect("history should include annotate operation");
+    assert_eq!(annotate["annotation_key"].as_str(), Some("test-results"));
+    assert_eq!(annotate["annotation_data"]["passed"].as_u64(), Some(42));
+    assert_eq!(annotate["annotation_data"]["failed"].as_u64(), Some(0));
+}
+
+#[test]
 fn reject_merge_default_workspace() {
     let repo = TestRepo::new();
 
@@ -271,6 +300,47 @@ fn merge_json_conflict_stdout_is_pure_json() {
     assert_eq!(payload["status"].as_str(), Some("conflict"));
 }
 
+#[test]
+fn merge_dry_run_json_stdout_is_pure_json() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "json-dry-run"]);
+    repo.add_file("json-dry-run", "dry.txt", "preview\n");
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "json-dry-run",
+        "--into",
+        "default",
+        "--dry-run",
+        "--format",
+        "json",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    assert!(
+        out.status.success(),
+        "dry-run should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.starts_with('{'),
+        "stdout should be pure JSON, got: {stdout}"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("dry-run --format json output should be valid JSON");
+    assert_eq!(payload["status"].as_str(), Some("dry-run"));
+    assert_eq!(payload["dry_run"].as_bool(), Some(true));
+    assert_eq!(payload["into"].as_str(), Some("default"));
+    assert!(
+        payload["workspace_changes"].is_array(),
+        "expected workspace_changes in dry-run JSON: {payload}"
+    );
+}
+
 /// Regression: stale workspaces must be refreshed before merge so they cannot
 /// accidentally rewrite newer epoch content.
 #[test]
@@ -299,13 +369,7 @@ fn stale_workspace_merge_is_blocked_when_epoch_has_advanced() {
     repo.git_in_workspace("worker", &["commit", "-m", "feat: worker output"]);
 
     // Direct merge from stale workspace is rejected with actionable guidance.
-    let stale_merge = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "worker",
-        "--message",
-        "test merge",
-    ]);
+    let stale_merge = repo.maw_raw(&["ws", "merge", "worker", "--message", "test merge"]);
     assert!(
         !stale_merge.status.success(),
         "stale merge should be blocked\nstdout: {}\nstderr: {}",
@@ -358,14 +422,7 @@ fn stale_workspace_is_blocked_for_check_plan_dry_run_and_merge() {
     repo.git_in_workspace("stale", &["commit", "-m", "feat: stale work"]);
 
     let check = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "stale",
-        "--into",
-        "default",
-        "--check",
-        "--format",
-        "json",
+        "ws", "merge", "stale", "--into", "default", "--check", "--format", "json",
     ]);
     assert!(
         !check.status.success(),
@@ -378,14 +435,7 @@ fn stale_workspace_is_blocked_for_check_plan_dry_run_and_merge() {
     assert_eq!(check_json["stale"].as_bool(), Some(true));
 
     let plan = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "stale",
-        "--into",
-        "default",
-        "--plan",
-        "--format",
-        "json",
+        "ws", "merge", "stale", "--into", "default", "--plan", "--format", "json",
     ]);
     assert!(
         !plan.status.success(),
@@ -396,23 +446,15 @@ fn stale_workspace_is_blocked_for_check_plan_dry_run_and_merge() {
     let plan_json: serde_json::Value =
         serde_json::from_slice(&plan.stdout).expect("plan output should be JSON");
     assert_eq!(plan_json["ready"].as_bool(), Some(false));
+    assert_eq!(plan_json["stale"].as_bool(), Some(true));
     assert!(
         plan_json["conflicts"]
             .as_array()
-            .and_then(|conflicts| conflicts.first())
-            .and_then(|entry| entry["reason"].as_str())
-            .is_some_and(|reason| reason.contains("is stale")),
-        "expected stale reason in plan JSON, got: {plan_json}"
+            .is_some_and(|conflicts| conflicts.is_empty()),
+        "stale plan JSON should not synthesize conflicts, got: {plan_json}"
     );
 
-    let dry_run = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "stale",
-        "--into",
-        "default",
-        "--dry-run",
-    ]);
+    let dry_run = repo.maw_raw(&["ws", "merge", "stale", "--into", "default", "--dry-run"]);
     assert!(
         !dry_run.status.success(),
         "stale dry-run should fail\nstdout: {}\nstderr: {}",
@@ -1005,7 +1047,10 @@ fn merge_check_invalid_target_emits_json_payload_when_requested() {
 fn merge_plan_is_target_aware_for_change_target_conflicts() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -1134,7 +1179,10 @@ fn merge_plan_rejects_invalid_target_value() {
 fn merge_plan_guardrail_failures_emit_json_payload_when_requested() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -1173,14 +1221,7 @@ fn merge_plan_guardrail_failures_emit_json_payload_when_requested() {
     repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
 
     let out = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "hotfix",
-        "--into",
-        "default",
-        "--plan",
-        "--format",
-        "json",
+        "ws", "merge", "hotfix", "--into", "default", "--plan", "--format", "json",
     ]);
     assert!(
         !out.status.success(),
@@ -1239,14 +1280,7 @@ fn merge_plan_missing_workspace_with_active_change_stays_actionable() {
     ]);
 
     let out = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "missing",
-        "--into",
-        "default",
-        "--plan",
-        "--format",
-        "json",
+        "ws", "merge", "missing", "--into", "default", "--plan", "--format", "json",
     ]);
     assert!(
         !out.status.success(),

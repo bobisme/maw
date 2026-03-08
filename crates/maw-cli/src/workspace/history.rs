@@ -1,13 +1,14 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
-use maw_core::oplog::read::{walk_chain, OpLogReadError};
+use maw_core::oplog::read::{OpLogReadError, walk_chain};
 use maw_core::oplog::types::OpPayload;
 
 use super::{get_backend, repo_root};
@@ -41,6 +42,12 @@ pub struct OperationEntry {
     pub(crate) summary: String,
     /// The workspace that performed this operation.
     pub(crate) workspace_id: String,
+    /// Annotation key for `annotate` operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) annotation_key: Option<String>,
+    /// Annotation payload for `annotate` operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) annotation_data: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// A git commit (fallback when no op log exists).
@@ -123,12 +130,21 @@ fn fetch_oplog_history(
 
     Ok(chain
         .into_iter()
-        .map(|(oid, op)| OperationEntry {
-            oid: oid.as_str().to_owned(),
-            op_type: op_type(&op.payload).to_owned(),
-            timestamp: op.timestamp,
-            summary: summarize_payload(&op.payload),
-            workspace_id: op.workspace_id.as_str().to_owned(),
+        .map(|(oid, op)| {
+            let (annotation_key, annotation_data) = match &op.payload {
+                OpPayload::Annotate { key, data } => (Some(key.clone()), Some(data.clone())),
+                _ => (None, None),
+            };
+
+            OperationEntry {
+                oid: oid.as_str().to_owned(),
+                op_type: op_type(&op.payload).to_owned(),
+                timestamp: op.timestamp,
+                summary: summarize_payload(&op.payload),
+                workspace_id: op.workspace_id.as_str().to_owned(),
+                annotation_key,
+                annotation_data,
+            }
         })
         .collect())
 }

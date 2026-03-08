@@ -25,7 +25,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use maw_git::GitRepo as _;
 use serde::Serialize;
 use tracing::instrument;
@@ -567,9 +567,11 @@ mod tests {
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
         assert!(!result.dirty_paths.is_empty());
         assert!(result.dirty_paths.iter().any(|p| p == "dirty.txt"));
-        assert!(result
-            .pinned_ref
-            .starts_with("refs/manifold/recovery/test-ws/"));
+        assert!(
+            result
+                .pinned_ref
+                .starts_with("refs/manifold/recovery/test-ws/")
+        );
 
         // Verify the pinned ref exists and resolves
         let ref_oid = refs::read_ref(&root, &result.pinned_ref).unwrap();

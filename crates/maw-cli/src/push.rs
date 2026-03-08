@@ -1,13 +1,13 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use maw_git::GitRepo as _;
 use tracing::instrument;
 
 use crate::changes::store::ChangesStore;
 use crate::transport::ManifoldPushArgs;
-use crate::workspace::{git_cwd, repo_root, MawConfig};
+use crate::workspace::{MawConfig, git_cwd, repo_root};
 use maw_core::merge_state::MergeStateFile;
 
 #[derive(Args)]

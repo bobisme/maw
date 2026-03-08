@@ -231,6 +231,46 @@ pub struct MergeConflictOutput {
     pub resolve_command: Option<String>,
 }
 
+/// JSON output for `maw ws merge --dry-run --format json`.
+#[derive(Debug, Serialize)]
+pub struct MergeDryRunOutput {
+    /// Always "dry-run".
+    pub status: String,
+    /// Always true for this payload.
+    pub dry_run: bool,
+    /// Source workspaces that would be merged.
+    pub workspaces: Vec<String>,
+    /// Merge destination (`--into` target).
+    pub into: String,
+    /// Per-workspace change summaries.
+    pub workspace_changes: Vec<DryRunWorkspaceChanges>,
+    /// Files changed in more than one workspace.
+    pub potential_conflicts: Vec<DryRunPotentialConflict>,
+    /// Human-readable summary.
+    pub message: String,
+    /// Exact command to run the real merge.
+    pub to_fix: String,
+}
+
+/// Change summary for one workspace in dry-run mode.
+#[derive(Debug, Serialize)]
+pub struct DryRunWorkspaceChanges {
+    pub workspace: String,
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    pub change_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Potential conflict discovered during dry-run (same path changed by multiple workspaces).
+#[derive(Debug, Serialize)]
+pub struct DryRunPotentialConflict {
+    pub path: String,
+    pub workspaces: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Conflict IDs (terseid-based, stateless)
 // ---------------------------------------------------------------------------
@@ -1102,16 +1142,23 @@ pub struct CheckWorkspaceInfo {
 }
 
 pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -> CheckResult {
+    let reason = reason.into();
+    let stale = reason.contains(" is stale (behind current epoch)")
+        || reason.contains("Stale workspaces cannot be merged/planned");
     CheckResult {
         ready: false,
-        conflicts: vec![ConflictInfo {
-            path: String::new(),
-            reason: reason.into(),
-            sides: Vec::new(),
-            line_start: None,
-            line_end: None,
-        }],
-        stale: false,
+        conflicts: if stale {
+            Vec::new()
+        } else {
+            vec![ConflictInfo {
+                path: String::new(),
+                reason,
+                sides: Vec::new(),
+                line_start: None,
+                line_end: None,
+            }]
+        },
+        stale,
         workspace: CheckWorkspaceInfo {
             name: workspaces.first().cloned().unwrap_or_default(),
             change_id: String::new(),
@@ -1186,11 +1233,7 @@ fn check_not_ready_reason(result: &CheckResult) -> String {
         if conflict.path.is_empty() {
             return conflict.reason.clone();
         }
-        return format!(
-            "conflict at '{}': {}",
-            conflict.path,
-            conflict.reason
-        );
+        return format!("conflict at '{}': {}", conflict.path, conflict.reason);
     }
 
     "not ready".to_owned()
@@ -2063,8 +2106,116 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 // ---------------------------------------------------------------------------
 
 /// Preview what a merge would do without creating any commits.
-fn preview_merge(workspaces: &[String], root: &Path, into: &str) -> Result<()> {
+fn preview_merge(
+    workspaces: &[String],
+    root: &Path,
+    into: &str,
+    format: OutputFormat,
+) -> Result<()> {
     let backend = get_backend()?;
+
+    let mut workspace_changes = Vec::new();
+    let mut workspace_files: Vec<(String, Vec<PathBuf>)> = Vec::new();
+
+    for ws_name in workspaces {
+        let ws_id = match WorkspaceId::new(ws_name) {
+            Ok(id) => id,
+            Err(e) => {
+                workspace_changes.push(DryRunWorkspaceChanges {
+                    workspace: ws_name.clone(),
+                    added: Vec::new(),
+                    modified: Vec::new(),
+                    deleted: Vec::new(),
+                    change_count: 0,
+                    error: Some(format!("Invalid workspace name: {e}")),
+                });
+                continue;
+            }
+        };
+
+        match backend.snapshot(&ws_id) {
+            Ok(snapshot) => {
+                let added: Vec<String> = snapshot
+                    .added
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                let modified: Vec<String> = snapshot
+                    .modified
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                let deleted: Vec<String> = snapshot
+                    .deleted
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                let files: Vec<PathBuf> = snapshot.all_changed().into_iter().cloned().collect();
+
+                workspace_files.push((ws_name.clone(), files));
+                workspace_changes.push(DryRunWorkspaceChanges {
+                    workspace: ws_name.clone(),
+                    added,
+                    modified,
+                    deleted,
+                    change_count: snapshot.change_count(),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                workspace_changes.push(DryRunWorkspaceChanges {
+                    workspace: ws_name.clone(),
+                    added: Vec::new(),
+                    modified: Vec::new(),
+                    deleted: Vec::new(),
+                    change_count: 0,
+                    error: Some(format!("Could not get changes: {e}")),
+                });
+            }
+        }
+    }
+
+    let mut conflict_paths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (ws_name, files) in &workspace_files {
+        for path in files {
+            let path_str = path.display().to_string();
+            conflict_paths
+                .entry(path_str)
+                .or_default()
+                .insert(ws_name.clone());
+        }
+    }
+    let potential_conflicts: Vec<DryRunPotentialConflict> = conflict_paths
+        .into_iter()
+        .filter_map(|(path, workspaces)| {
+            if workspaces.len() > 1 {
+                Some(DryRunPotentialConflict {
+                    path,
+                    workspaces: workspaces.into_iter().collect(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if format == OutputFormat::Json {
+        let out = MergeDryRunOutput {
+            status: "dry-run".to_string(),
+            dry_run: true,
+            workspaces: workspaces.to_vec(),
+            into: into.to_string(),
+            workspace_changes,
+            potential_conflicts,
+            message: format!(
+                "Previewed merge of {} workspace(s); no commits were created.",
+                workspaces.len()
+            ),
+            to_fix: format!("maw ws merge {} --into {into}", workspaces.join(" ")),
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     println!("=== Merge Preview (dry run) ===");
     println!();
@@ -2080,39 +2231,29 @@ fn preview_merge(workspaces: &[String], root: &Path, into: &str) -> Result<()> {
     println!("=== Changes by Workspace ===");
     println!();
 
-    for ws_name in workspaces {
+    for ws in &workspace_changes {
+        let ws_name = &ws.workspace;
         println!("--- {ws_name} ---");
-
-        let ws_id = match WorkspaceId::new(ws_name) {
-            Ok(id) => id,
-            Err(e) => {
-                println!("  Invalid workspace name: {e}");
-                println!();
-                continue;
-            }
-        };
-
-        match backend.snapshot(&ws_id) {
-            Ok(snapshot) => {
-                if snapshot.is_empty() {
-                    println!("  (no changes)");
-                } else {
-                    for path in &snapshot.added {
-                        println!("  A {}", path.display());
-                    }
-                    for path in &snapshot.modified {
-                        println!("  M {}", path.display());
-                    }
-                    for path in &snapshot.deleted {
-                        println!("  D {}", path.display());
-                    }
-                    println!("  {} file(s) changed", snapshot.change_count());
-                }
-            }
-            Err(e) => {
-                println!("  Could not get changes: {e}");
-            }
+        if let Some(err) = &ws.error {
+            println!("  {err}");
+            println!();
+            continue;
         }
+        if ws.change_count == 0 {
+            println!("  (no changes)");
+            println!();
+            continue;
+        }
+        for path in &ws.added {
+            println!("  A {path}");
+        }
+        for path in &ws.modified {
+            println!("  M {path}");
+        }
+        for path in &ws.deleted {
+            println!("  D {path}");
+        }
+        println!("  {} file(s) changed", ws.change_count);
         println!();
     }
 
@@ -2121,37 +2262,16 @@ fn preview_merge(workspaces: &[String], root: &Path, into: &str) -> Result<()> {
         println!("=== Potential Conflicts ===");
         println!();
 
-        let mut workspace_files: Vec<(String, Vec<PathBuf>)> = Vec::new();
-
-        for ws_name in workspaces {
-            if let Ok(ws_id) = WorkspaceId::new(ws_name)
-                && let Ok(snapshot) = backend.snapshot(&ws_id)
-            {
-                let files: Vec<PathBuf> = snapshot.all_changed().into_iter().cloned().collect();
-                workspace_files.push((ws_name.clone(), files));
-            }
-        }
-
-        let mut conflict_files: Vec<PathBuf> = Vec::new();
-        for i in 0..workspace_files.len() {
-            for j in (i + 1)..workspace_files.len() {
-                let (ws1, files1) = &workspace_files[i];
-                let (ws2, files2) = &workspace_files[j];
-                for file in files1 {
-                    if files2.contains(file) && !conflict_files.contains(file) {
-                        conflict_files.push(file.clone());
-                        println!(
-                            "  ! {} - modified in both '{ws1}' and '{ws2}'",
-                            file.display()
-                        );
-                    }
-                }
-            }
-        }
-
-        if conflict_files.is_empty() {
+        if potential_conflicts.is_empty() {
             println!("  (no overlapping changes detected)");
         } else {
+            for conflict in &potential_conflicts {
+                println!(
+                    "  ! {} - modified in {}",
+                    conflict.path,
+                    conflict.workspaces.join(", ")
+                );
+            }
             println!();
             println!("  Note: Overlapping files will be resolved via diff3 where possible.");
         }
@@ -2285,7 +2405,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
 
     if dry_run {
-        return preview_merge(&ws_to_merge, &root, into_target);
+        return preview_merge(&ws_to_merge, &root, into_target, format);
     }
 
     run_hooks(&maw_config.hooks.pre_merge, "pre-merge", &root, true)?;

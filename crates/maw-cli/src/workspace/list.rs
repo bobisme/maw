@@ -10,7 +10,7 @@ use maw_core::model::types::WorkspaceState;
 
 use maw::merge::quarantine::QUARANTINE_NAME_PREFIX;
 
-use super::{get_backend, metadata, repo_root, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
 
 #[derive(Serialize)]
 pub struct WorkspaceInfo {

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use maw_git::GitRepo as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -11,7 +11,7 @@ use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
 use maw_core::refs as manifold_refs;
 
-use super::{get_backend, metadata, repo_root, MawConfig, DEFAULT_WORKSPACE};
+use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, metadata, repo_root};
 
 fn is_default_workspace(name: &str) -> bool {
     name == DEFAULT_WORKSPACE
@@ -504,11 +504,7 @@ fn get_commit_message(ws_path: &Path, sha: &str) -> Option<String> {
         .ok()?;
     if output.status.success() {
         let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if msg.is_empty() {
-            None
-        } else {
-            Some(msg)
-        }
+        if msg.is_empty() { None } else { Some(msg) }
     } else {
         None
     }
@@ -796,7 +792,11 @@ fn workspace_has_uncommitted_changes(ws_path: &Path) -> Result<bool> {
         .map_err(|e| anyhow::anyhow!("failed to run git status in {}: {e}", ws_path.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git status failed in {}: {}", ws_path.display(), stderr.trim());
+        bail!(
+            "git status failed in {}: {}",
+            ws_path.display(),
+            stderr.trim()
+        );
     }
 
     Ok(!output.stdout.is_empty())
@@ -869,9 +869,7 @@ fn sync_all() -> Result<()> {
             Some(_) => {}
         }
 
-        let ws_status = backend
-            .status(&ws.id)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ws_status = backend.status(&ws.id).map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(active_change) = cross_target_sync_risk(
             &root,
             name,
@@ -921,6 +919,10 @@ fn sync_all() -> Result<()> {
         for err in &errors {
             println!("  - {err}");
         }
+        bail!(
+            "sync --all failed for {} workspace(s); resolve listed errors and retry",
+            errors.len()
+        );
     }
 
     Ok(())

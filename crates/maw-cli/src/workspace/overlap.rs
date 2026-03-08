@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::format::OutputFormat;
