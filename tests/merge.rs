@@ -271,35 +271,19 @@ fn merge_json_conflict_stdout_is_pure_json() {
     assert_eq!(payload["status"].as_str(), Some("conflict"));
 }
 
-/// Regression test: merging a workspace should not fail when the current epoch
-/// contains files that are absent from the workspace's working tree but also
-/// absent from the workspace's *base* epoch.
-///
-/// Scenario (mirrors the real `cargo vendor` bug):
-///
-/// 1. Epoch advances (via another workspace merge) to include `vendor/pkg/.cargo-ok`.
-/// 2. A stale worker workspace (base epoch = old epoch) never had this file in its
-///    working tree.
-/// 3. `git diff <new_epoch>` in the worker shows `D vendor/pkg/.cargo-ok` because
-///    the file is in the new epoch tree but absent from the working tree.
-/// 4. The patch-set builder previously called `git rev-parse <old_epoch>:vendor/pkg/.cargo-ok`,
-///    which failed with "path does not exist" — crashing the merge.
-/// 5. The fix: skip deletions where the file is absent at the workspace's base epoch
-///    (add-then-delete net no-op from the base epoch's perspective).
+/// Regression: stale workspaces must be refreshed before merge so they cannot
+/// accidentally rewrite newer epoch content.
 #[test]
-fn merge_skips_phantom_deletion_when_epoch_advanced() {
+fn stale_workspace_merge_is_blocked_when_epoch_has_advanced() {
     let repo = TestRepo::new();
 
-    // Create both workspaces before advancing the epoch.
+    // Create both workspaces before advancing epoch.
     repo.maw_ok(&["ws", "create", "epoch-advancer"]);
     repo.maw_ok(&["ws", "create", "worker"]);
 
-    // epoch-advancer brings in vendor/pkg/.cargo-ok and an ordinary file.
+    // Advance epoch with files worker was not based on.
     repo.add_file("epoch-advancer", "vendor/pkg/.cargo-ok", "ok\n");
     repo.add_file("epoch-advancer", "src/lib.rs", "fn lib() {}\n");
-
-    // Merging epoch-advancer advances the current epoch to E2, which now has
-    // vendor/pkg/.cargo-ok. The worker workspace's base epoch is still E1.
     repo.maw_ok(&[
         "ws",
         "merge",
@@ -309,38 +293,156 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
         "test merge",
     ]);
 
-    // Worker does some unrelated work. After the epoch advanced, git diff
-    // <new_epoch> in the worker shows vendor/pkg/.cargo-ok as D (present in
-    // new epoch, absent from worker working tree). But the worker's base epoch
-    // (E1) never had that file, so the old code crashed with "path does not exist".
+    // Worker has committed work on the stale base.
     repo.add_file("worker", "worker.txt", "worker output\n");
+    repo.git_in_workspace("worker", &["add", "worker.txt"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: worker output"]);
 
-    // This must not fail — the phantom deletion is silently skipped.
-    repo.maw_ok(&[
+    // Direct merge from stale workspace is rejected with actionable guidance.
+    let stale_merge = repo.maw_raw(&[
         "ws",
         "merge",
         "worker",
-        "--destroy",
         "--message",
         "test merge",
     ]);
-
-    // Worker's real changes are applied.
-    assert_eq!(
-        repo.read_file("default", "worker.txt").as_deref(),
-        Some("worker output\n"),
-        "worker.txt should be present after merge"
+    assert!(
+        !stale_merge.status.success(),
+        "stale merge should be blocked\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stale_merge.stdout),
+        String::from_utf8_lossy(&stale_merge.stderr)
     );
-    // The epoch-advancer's files are intact (not deleted by the worker merge).
+    let stale_err = String::from_utf8_lossy(&stale_merge.stderr);
+    assert!(
+        stale_err.contains("is stale") && stale_err.contains("maw ws sync worker"),
+        "expected stale remediation guidance, got: {stale_err}"
+    );
+
+    // The epoch-advancer's files stay intact after refused stale merge.
     assert_eq!(
         repo.read_file("default", "vendor/pkg/.cargo-ok").as_deref(),
         Some("ok\n"),
-        "vendor file added by epoch-advancer should survive the worker merge"
+        "vendor file added by epoch-advancer should survive stale-merge refusal"
     );
     assert_eq!(
         repo.read_file("default", "src/lib.rs").as_deref(),
         Some("fn lib() {}\n"),
-        "src/lib.rs added by epoch-advancer should survive the worker merge"
+        "src/lib.rs added by epoch-advancer should survive stale-merge refusal"
+    );
+    assert_eq!(
+        repo.read_file("default", "worker.txt"),
+        None,
+        "stale workspace changes should not be merged when merge is blocked"
+    );
+}
+
+#[test]
+fn stale_workspace_is_blocked_for_check_plan_dry_run_and_merge() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "base-advancer"]);
+    repo.maw_ok(&["ws", "create", "stale"]);
+
+    repo.add_file("base-advancer", "new.txt", "new epoch\n");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "base-advancer",
+        "--destroy",
+        "--message",
+        "advance epoch",
+    ]);
+
+    repo.add_file("stale", "work.txt", "stale work\n");
+    repo.git_in_workspace("stale", &["add", "work.txt"]);
+    repo.git_in_workspace("stale", &["commit", "-m", "feat: stale work"]);
+
+    let check = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "stale",
+        "--into",
+        "default",
+        "--check",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !check.status.success(),
+        "stale check should fail\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let check_json: serde_json::Value =
+        serde_json::from_slice(&check.stdout).expect("check output should be JSON");
+    assert_eq!(check_json["stale"].as_bool(), Some(true));
+
+    let plan = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "stale",
+        "--into",
+        "default",
+        "--plan",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !plan.status.success(),
+        "stale plan should fail\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&plan.stdout),
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan_json: serde_json::Value =
+        serde_json::from_slice(&plan.stdout).expect("plan output should be JSON");
+    assert_eq!(plan_json["ready"].as_bool(), Some(false));
+    assert!(
+        plan_json["conflicts"]
+            .as_array()
+            .and_then(|conflicts| conflicts.first())
+            .and_then(|entry| entry["reason"].as_str())
+            .is_some_and(|reason| reason.contains("is stale")),
+        "expected stale reason in plan JSON, got: {plan_json}"
+    );
+
+    let dry_run = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "stale",
+        "--into",
+        "default",
+        "--dry-run",
+    ]);
+    assert!(
+        !dry_run.status.success(),
+        "stale dry-run should fail\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&dry_run.stdout),
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&dry_run.stderr).contains("is stale"),
+        "expected stale guidance in dry-run stderr"
+    );
+
+    let merge = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "stale",
+        "--into",
+        "default",
+        "--message",
+        "attempt stale merge",
+    ]);
+    assert!(
+        !merge.status.success(),
+        "stale merge should fail\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let merge_err = String::from_utf8_lossy(&merge.stderr);
+    assert!(
+        merge_err.contains("is stale") && merge_err.contains("maw ws sync stale"),
+        "expected stale remediation in merge stderr, got: {merge_err}"
     );
 }
 

@@ -66,6 +66,38 @@ fn sync_all_updates_multiple_stale_workspaces() {
 }
 
 #[test]
+fn sync_refuses_stale_workspace_with_untracked_changes() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
+
+    repo.add_file("alice", "scratch.txt", "untracked\n");
+
+    let out = repo.maw_raw(&["ws", "sync", "alice"]);
+    assert!(
+        !out.status.success(),
+        "sync should fail when stale workspace has untracked changes\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("has uncommitted changes that would be lost by sync")
+            && stderr.contains("git -C")
+            && stderr.contains("status"),
+        "expected actionable dirty-sync refusal, got: {stderr}"
+    );
+
+    assert!(
+        workspace_state(&repo, "alice").contains("stale"),
+        "workspace should remain stale after refused sync"
+    );
+}
+
+#[test]
 fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
     let repo = TestRepo::new();
 

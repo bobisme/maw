@@ -262,9 +262,7 @@ fn rebase_workspace(
     ahead_count: u32,
 ) -> Result<()> {
     // Safety: refuse to rebase if the workspace has uncommitted changes.
-    let repo = maw_git::GixRepo::open(ws_path)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let is_dirty = repo.is_dirty().map_err(|e| {
+    let is_dirty = workspace_has_uncommitted_changes(ws_path).map_err(|e| {
         anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}")
     })?;
 
@@ -740,12 +738,10 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         bail!("Workspace directory does not exist: {}", ws_path.display());
     }
 
-    // Safety: refuse to sync if the workspace has uncommitted changes.
-    // `git checkout --detach` would overwrite tracked files, losing staged,
-    // unstaged, and untracked work.
-    let repo = maw_git::GixRepo::open(&ws_path)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let is_dirty = repo.is_dirty().map_err(|e| {
+    // Safety: refuse to sync if the workspace has any uncommitted changes.
+    // `git checkout --detach` can clobber staged/unstaged tracked edits, and
+    // untracked files may become orphaned or conflict with the new tree.
+    let is_dirty = workspace_has_uncommitted_changes(&ws_path).map_err(|e| {
         anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}")
     })?;
 
@@ -790,6 +786,20 @@ fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result
         &epoch_oid[..12]
     );
     Ok(())
+}
+
+fn workspace_has_uncommitted_changes(ws_path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(ws_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run git status in {}: {e}", ws_path.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git status failed in {}: {}", ws_path.display(), stderr.trim());
+    }
+
+    Ok(!output.stdout.is_empty())
 }
 
 /// Sync all workspaces at once

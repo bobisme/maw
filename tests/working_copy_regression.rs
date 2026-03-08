@@ -437,13 +437,13 @@ fn t8_symlink_in_default_not_corrupted_by_merge_cleanup() {
 fn t7_merge_cleanup_completes_after_commit_regardless_of_replay() {
     let repo = TestRepo::new();
 
-    // Create two agent workspaces.
+    // Create an initial agent workspace.
     repo.maw_ok(&["ws", "create", "alice"]);
-    repo.maw_ok(&["ws", "create", "bob"]);
 
-    // Both workspaces add files.
+    // Alice adds a file.
     repo.add_file("alice", "alice.txt", "alice work\n");
-    repo.add_file("bob", "bob.txt", "bob work\n");
+    repo.git_in_workspace("alice", &["add", "alice.txt"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "feat: alice work"]);
 
     // Add a dirty file in default (untracked).
     repo.add_file("default", "local-notes.txt", "my notes\n");
@@ -464,7 +464,13 @@ fn t7_merge_cleanup_completes_after_commit_regardless_of_replay() {
         "alice workspace should be destroyed after merge"
     );
 
-    // Now merge bob (default has local-notes.txt from before).
+    // Create bob after epoch advancement so it is fresh for the second merge.
+    repo.maw_ok(&["ws", "create", "bob"]);
+    repo.add_file("bob", "bob.txt", "bob work\n");
+    repo.git_in_workspace("bob", &["add", "bob.txt"]);
+    repo.git_in_workspace("bob", &["commit", "-m", "feat: bob work"]);
+
+    // Now merge bob (default still has local-notes.txt from before).
     repo.maw_ok(&["ws", "merge", "bob", "--destroy", "--message", "test merge"]);
 
     // Bob's workspace should be gone (cleanup completed).

@@ -669,14 +669,16 @@ pub enum WorkspaceCommands {
         rebase: bool,
     },
 
-    /// Show commit history for a workspace
+    /// Show operation history for a workspace
     ///
-    /// Displays a timeline of commits made in the specified workspace,
-    /// making it easy to understand what work was done and when.
+    /// Displays a timeline of workspace operations (create/merge/snapshot/
+    /// describe/annotate/undo). This is the primary audit trail for agent work.
+    /// If operation log data is unavailable, maw falls back to git commit
+    /// history for that workspace.
     ///
     /// Examples:
-    ///   maw ws history alice           # show commits in alice workspace
-    ///   maw ws history alice --limit 5 # show only last 5 commits
+    ///   maw ws history alice           # show workspace operations
+    ///   maw ws history alice --limit 5 # show only last 5 entries
     #[command(verbatim_doc_comment)]
     History {
         /// Name of the workspace

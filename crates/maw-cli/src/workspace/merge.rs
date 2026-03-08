@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1120,6 +1120,34 @@ pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -
     }
 }
 
+fn stale_merge_sources(workspaces: &[String]) -> Result<Vec<String>> {
+    let stale_all = super::check_stale_workspaces()?;
+    let stale_set: BTreeSet<String> = stale_all.into_iter().collect();
+    let stale = workspaces
+        .iter()
+        .filter(|ws| stale_set.contains((*ws).as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(stale)
+}
+
+fn stale_merge_block_message(stale_sources: &[String]) -> String {
+    if stale_sources.len() == 1 {
+        let ws = &stale_sources[0];
+        return format!(
+            "Workspace '{ws}' is stale (behind current epoch).\n  \
+             To fix: maw ws sync {ws}\n  \
+             Persistent workspace alternative: maw ws advance {ws}"
+        );
+    }
+
+    let list = stale_sources.join(", ");
+    format!(
+        "Stale workspaces cannot be merged/planned: {list}.\n  \
+         To fix: run `maw ws sync <workspace>` for each stale workspace (or `maw ws advance <workspace>` for persistent workspaces), then retry."
+    )
+}
+
 /// Pre-flight merge check using the new merge engine.
 ///
 /// Runs PREPARE + BUILD without COMMIT to detect conflicts.
@@ -1149,7 +1177,9 @@ pub fn check_merge(
 fn check_not_ready_reason(result: &CheckResult) -> String {
     if result.stale {
         let ws = &result.workspace.name;
-        return format!("workspace '{ws}' is stale; run `maw ws sync {ws}` and retry");
+        return format!(
+            "workspace '{ws}' is stale; run `maw ws sync {ws}` (or `maw ws advance {ws}` if persistent) and retry"
+        );
     }
 
     if let Some(conflict) = result.conflicts.first() {
@@ -1236,8 +1266,8 @@ fn check_merge_result_for_target(
     }
 
     // Check staleness
-    let stale_workspaces = super::check_stale_workspaces()?;
-    let is_stale = workspaces.iter().any(|ws| stale_workspaces.contains(ws));
+    let stale_sources = stale_merge_sources(workspaces)?;
+    let is_stale = !stale_sources.is_empty();
 
     let primary_ws = &workspaces[0];
     let ws_info = CheckWorkspaceInfo {
@@ -1420,6 +1450,11 @@ pub fn plan_merge(
 ) -> Result<()> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --plan");
+    }
+
+    let stale_sources = stale_merge_sources(workspaces)?;
+    if !stale_sources.is_empty() {
+        bail!("{}", stale_merge_block_message(&stale_sources));
     }
 
     let root = repo_root()?;
@@ -2242,6 +2277,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 );
             }
         }
+    }
+
+    let stale_sources = stale_merge_sources(&ws_to_merge)?;
+    if !stale_sources.is_empty() {
+        bail!("{}", stale_merge_block_message(&stale_sources));
     }
 
     if dry_run {
