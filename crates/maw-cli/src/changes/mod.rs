@@ -375,6 +375,7 @@ fn create_change(args: &CreateArgs) -> Result<()> {
     }
 
     let workspace_path = root.join("ws").join(&primary_workspace);
+    let advice = create_change_advice(&primary_workspace, &change_id);
     let envelope = CreateEnvelope {
         change_id: change_id.clone(),
         title: args.title.clone(),
@@ -384,14 +385,7 @@ fn create_change(args: &CreateArgs) -> Result<()> {
         fetched_remote: source.fetched_remote,
         primary_workspace: primary_workspace.clone(),
         primary_workspace_path: workspace_path.display().to_string(),
-        advice: vec![
-            format!("maw exec {} -- git add -A", primary_workspace),
-            format!(
-                "maw ws merge {} --into {} --destroy",
-                primary_workspace, change_id
-            ),
-            format!("maw changes pr {} --draft", change_id),
-        ],
+        advice,
     };
 
     if format == OutputFormat::Json {
@@ -404,16 +398,29 @@ fn create_change(args: &CreateArgs) -> Result<()> {
     println!("  Source: {}", envelope.source);
     println!("  Primary workspace: {}/", envelope.primary_workspace_path);
     println!("Next:");
-    println!(
-        "  maw exec {} -- git add -A && maw exec {} -- git commit -m \"...\"",
-        envelope.primary_workspace, envelope.primary_workspace
-    );
-    println!(
-        "  maw ws merge {} --into {} --destroy",
-        envelope.primary_workspace, envelope.change_id
-    );
-    println!("  maw changes pr {} --draft", envelope.change_id);
+    for command in &envelope.advice {
+        println!("  {command}");
+    }
     Ok(())
+}
+
+fn create_change_advice(primary_workspace: &str, change_id: &str) -> Vec<String> {
+    if primary_workspace == change_id {
+        return vec![
+            format!("maw ws create --change {change_id} <agent-workspace>"),
+            "maw exec <agent-workspace> -- git add -A && maw exec <agent-workspace> -- git commit -m \"...\"".to_owned(),
+            format!("maw ws merge <agent-workspace> --into {change_id} --destroy"),
+            format!("maw changes pr {change_id} --draft"),
+        ];
+    }
+
+    vec![
+        format!(
+            "maw exec {primary_workspace} -- git add -A && maw exec {primary_workspace} -- git commit -m \"...\""
+        ),
+        format!("maw ws merge {primary_workspace} --into {change_id} --destroy"),
+        format!("maw changes pr {change_id} --draft"),
+    ]
 }
 
 fn validate_change_id_for_create(change_id: &str) -> Result<()> {
@@ -1551,11 +1558,11 @@ mod tests {
 
             if with_origin_remote {
                 let remote = root.join("origin.git");
+                run_git(&root, &["init", "--bare", &remote.display().to_string()]);
                 run_git(
                     &root,
-                    &["init", "--bare", &remote.display().to_string()],
+                    &["remote", "add", "origin", &remote.display().to_string()],
                 );
-                run_git(&root, &["remote", "add", "origin", &remote.display().to_string()]);
                 run_git(&root, &["push", "-u", "origin", "main"]);
             }
 
@@ -1704,7 +1711,10 @@ exit 1
                 Some("ch-create")
             );
 
-            assert!(root.join("ws/create-ws").exists(), "primary workspace exists");
+            assert!(
+                root.join("ws/create-ws").exists(),
+                "primary workspace exists"
+            );
         });
     }
 
@@ -1779,7 +1789,10 @@ exit 1
             let new_head = git_rev_parse(root, &branch_ref).expect("new branch head");
             assert_ne!(old_head, new_head, "sync should advance branch head");
             assert!(
-                git_status_ok(root, &["merge-base", "--is-ancestor", &main_head, &new_head]),
+                git_status_ok(
+                    root,
+                    &["merge-base", "--is-ancestor", &main_head, &new_head]
+                ),
                 "synced branch should contain latest main commit"
             );
         });
@@ -1824,7 +1837,10 @@ exit 1
             let new_head = git_rev_parse(root, &branch_ref).expect("new branch head");
             assert_ne!(old_head, new_head, "rebase should advance branch head");
             assert!(
-                git_status_ok(root, &["merge-base", "--is-ancestor", &main_head, &new_head]),
+                git_status_ok(
+                    root,
+                    &["merge-base", "--is-ancestor", &main_head, &new_head]
+                ),
                 "rebased branch should contain latest main commit"
             );
         });
@@ -1863,7 +1879,9 @@ exit 1
             });
             let branch = record.git.change_branch.clone();
             store
-                .with_lock("tests write merged state", |locked| locked.write_active_record(&record))
+                .with_lock("tests write merged state", |locked| {
+                    locked.write_active_record(&record)
+                })
                 .expect("write merged pr metadata");
 
             close_change(&CloseArgs {
@@ -1877,7 +1895,10 @@ exit 1
             .expect("close change");
 
             assert!(
-                store.read_active_record("ch-close").expect("read active").is_none(),
+                store
+                    .read_active_record("ch-close")
+                    .expect("read active")
+                    .is_none(),
                 "active record should be removed"
             );
 
@@ -1939,7 +1960,9 @@ exit 1
             });
             record.git.change_branch = "main".to_string();
             store
-                .with_lock("tests write merged state", |locked| locked.write_active_record(&record))
+                .with_lock("tests write merged state", |locked| {
+                    locked.write_active_record(&record)
+                })
                 .expect("write merged pr metadata");
 
             let err = close_change(&CloseArgs {
@@ -1952,7 +1975,8 @@ exit 1
             })
             .expect_err("branch delete should fail for trunk branch");
             assert!(
-                err.to_string().contains("Refusing to delete configured trunk branch"),
+                err.to_string()
+                    .contains("Refusing to delete configured trunk branch"),
                 "unexpected error: {err}"
             );
 
@@ -2016,7 +2040,9 @@ exit 1
                 "gh list should be called"
             );
             assert!(
-                !log_content.lines().any(|line| line.starts_with("pr create")),
+                !log_content
+                    .lines()
+                    .any(|line| line.starts_with("pr create")),
                 "gh create should not be called when existing PR is found"
             );
         });

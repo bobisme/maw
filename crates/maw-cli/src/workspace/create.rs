@@ -135,7 +135,12 @@ pub fn create(
     println!("  # Run commands in the workspace:");
     println!("  maw exec {name} -- cargo test");
     if let Some(change_id) = bound_change_id.as_deref() {
-        println!("  maw ws merge {name} --into {change_id} --destroy");
+        if name == change_id {
+            println!("  maw ws create --change {change_id} <agent-workspace>");
+            println!("  maw ws merge <agent-workspace> --into {change_id} --destroy");
+        } else {
+            println!("  maw ws merge {name} --into {change_id} --destroy");
+        }
     } else {
         println!("  maw ws merge {name} --into default --destroy");
     }

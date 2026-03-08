@@ -1112,12 +1112,31 @@ pub fn check_merge(
     target_branch: &str,
     target_change_id: Option<&str>,
 ) -> Result<()> {
-    let result = check_merge_result_for_target(
+    let result = match check_merge_result_for_target(
         workspaces,
         target_workspace,
         target_branch,
         target_change_id,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(err) if format == OutputFormat::Json => CheckResult {
+            ready: false,
+            conflicts: vec![ConflictInfo {
+                path: String::new(),
+                reason: err.to_string(),
+                sides: Vec::new(),
+                line_start: None,
+                line_end: None,
+            }],
+            stale: false,
+            workspace: CheckWorkspaceInfo {
+                name: workspaces.first().cloned().unwrap_or_default(),
+                change_id: String::new(),
+            },
+            description: String::new(),
+        },
+        Err(err) => return Err(err),
+    };
     output_check_result(&result, format)
 }
 
@@ -2240,7 +2259,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     textln!("  Epoch: {}", &frozen.epoch.as_str()[..12]);
     if target_change_id.is_some() {
-        textln!("  Target base ({branch}): {}", &branch_before_oid.as_str()[..12]);
+        textln!(
+            "  Target base ({branch}): {}",
+            &branch_before_oid.as_str()[..12]
+        );
     }
     for (ws_id, head) in &frozen.heads {
         textln!("  {}: {}", ws_id, &head.as_str()[..12]);
@@ -2739,13 +2761,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     &branch_before_oid.as_str()[..12],
                     &build_output.candidate.as_str()[..12]
                 );
-                textln!(
-                    "  Epoch unchanged: {}",
-                    &frozen.epoch.as_str()[..12]
-                );
+                textln!("  Epoch unchanged: {}", &frozen.epoch.as_str()[..12]);
             }
             Err(e) => {
-                abort_merge(&manifold_dir, &format!("COMMIT failed (branch-only CAS): {e}"));
+                abort_merge(
+                    &manifold_dir,
+                    &format!("COMMIT failed (branch-only CAS): {e}"),
+                );
                 bail!("Merge COMMIT phase failed: could not update branch '{branch}': {e}");
             }
         }
@@ -2811,12 +2833,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     record_epoch_after(&manifold_dir, &build_output.candidate)?;
 
     // Record merge operations in source workspace histories.
-    for warning in record_merge_operations(
-        &root,
-        &sources,
-        &merge_base_epoch,
-        &build_output.candidate,
-    ) {
+    for warning in
+        record_merge_operations(&root, &sources, &merge_base_epoch, &build_output.candidate)
+    {
         tracing::warn!("{warning}");
     }
 
@@ -3300,7 +3319,11 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn is_ancestor_commit(ws_path: &Path, maybe_ancestor: &str, maybe_descendant: &str) -> Result<bool> {
+fn is_ancestor_commit(
+    ws_path: &Path,
+    maybe_ancestor: &str,
+    maybe_descendant: &str,
+) -> Result<bool> {
     let output = std::process::Command::new("git")
         .args([
             "merge-base",
@@ -3320,10 +3343,29 @@ fn is_ancestor_commit(ws_path: &Path, maybe_ancestor: &str, maybe_descendant: &s
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!(
-        "git merge-base --is-ancestor failed: {}",
-        stderr.trim()
-    );
+    bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
+}
+
+fn merge_base_commit(ws_path: &Path, left: &str, right: &str) -> Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .args(["merge-base", left, right])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git merge-base")?;
+
+    if output.status.success() {
+        let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if oid.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(oid));
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!("git merge-base failed: {}", stderr.trim());
 }
 
 #[derive(Debug, Clone)]
@@ -3346,7 +3388,10 @@ fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn active_change_heads_not_on_branch(root: &Path, target_branch: &str) -> Result<Vec<ActiveChangeHead>> {
+fn active_change_heads_not_on_branch(
+    root: &Path,
+    target_branch: &str,
+) -> Result<Vec<ActiveChangeHead>> {
     let store = ChangesStore::open(root);
     let active_changes = store
         .list_active_records()
@@ -3403,6 +3448,9 @@ fn guard_unbound_sources_against_active_change_ancestry(
         return Ok(());
     }
 
+    let target_ref = format!("refs/heads/{target_branch}");
+    let target_head_oid = maw_core::refs::read_ref(root, &target_ref)?;
+
     for ws_name in source_workspaces {
         let ws_meta = super::metadata::read(root, ws_name).unwrap_or_default();
         if ws_meta.change_id.is_some() {
@@ -3421,6 +3469,30 @@ fn guard_unbound_sources_against_active_change_ancestry(
                     ws_name,
                     change.change_id,
                     change.change_branch,
+                    target_branch,
+                    target_branch,
+                    change.change_branch
+                );
+            }
+
+            let Some(target_head) = target_head_oid.as_ref().map(|oid| oid.as_str()) else {
+                continue;
+            };
+
+            let Some(common_ancestor) = merge_base_commit(root, &change.head_oid, &ws_head)? else {
+                continue;
+            };
+
+            if !is_ancestor_commit(root, &common_ancestor, target_head)? {
+                let short_common = &common_ancestor[..common_ancestor.len().min(12)];
+                bail!(
+                    "Workspace '{}' is not bound to a change, but its HEAD shares unmerged ancestry with active change '{}' (branch '{}') via commit '{}' not yet on '{}'.\n  \
+                     Refusing merge into '{}' to avoid promoting change-only commits to trunk.\n  \
+                     To fix: merge this workspace into its change target, or recreate it with an explicit source that does not include '{}'.",
+                    ws_name,
+                    change.change_id,
+                    change.change_branch,
+                    short_common,
                     target_branch,
                     target_branch,
                     change.change_branch

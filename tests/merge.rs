@@ -348,7 +348,10 @@ fn merge_skips_phantom_deletion_when_epoch_advanced() {
 fn merge_into_default_after_change_target_keeps_trunk_isolated() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -363,12 +366,19 @@ fn merge_into_default_after_change_target_keeps_trunk_isolated() {
     ]);
 
     repo.maw_ok(&["ws", "create", "--change", "ch-clean", "worker"]);
-    repo.add_file("worker", "src/feature_alpha.rs", "pub fn alpha() -> i32 { 1 }\n");
+    repo.add_file(
+        "worker",
+        "src/feature_alpha.rs",
+        "pub fn alpha() -> i32 { 1 }\n",
+    );
     repo.git_in_workspace("worker", &["add", "-A"]);
     repo.git_in_workspace("worker", &["commit", "-m", "feat: add alpha module"]);
 
     let epoch_before = repo.current_epoch();
-    let main_before = repo.git(&["rev-parse", "refs/heads/main"]).trim().to_owned();
+    let main_before = repo
+        .git(&["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_owned();
 
     // Merge into change target. This should advance the change branch only;
     // trunk refs stay put.
@@ -431,7 +441,10 @@ fn merge_into_default_after_change_target_keeps_trunk_isolated() {
 fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -446,7 +459,10 @@ fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
     ]);
 
     let epoch_before = repo.current_epoch();
-    let main_before = repo.git(&["rev-parse", "refs/heads/main"]).trim().to_owned();
+    let main_before = repo
+        .git(&["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_owned();
 
     repo.maw_ok(&["ws", "create", "--change", "ch-acc", "w1"]);
     repo.add_file("w1", "src/a.rs", "pub fn a() {}\n");
@@ -505,7 +521,10 @@ fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
 fn merge_into_default_blocks_unbound_workspace_with_active_change_ancestry() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -576,7 +595,10 @@ fn merge_into_default_blocks_unbound_workspace_with_active_change_ancestry() {
 fn merge_check_is_target_aware_for_change_target_conflicts() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -645,7 +667,10 @@ fn merge_check_is_target_aware_for_change_target_conflicts() {
 fn merge_check_blocks_contaminated_unbound_workspace_for_default_target() {
     let repo = TestRepo::new();
 
-    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
 
     repo.maw_ok(&[
         "changes",
@@ -683,14 +708,7 @@ fn merge_check_blocks_contaminated_unbound_workspace_for_default_target() {
     repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
     repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
 
-    let check_out = repo.maw_raw(&[
-        "ws",
-        "merge",
-        "hotfix",
-        "--into",
-        "default",
-        "--check",
-    ]);
+    let check_out = repo.maw_raw(&["ws", "merge", "hotfix", "--into", "default", "--check"]);
     assert!(
         !check_out.status.success(),
         "check should fail for contaminated unbound workspace\nstdout: {}\nstderr: {}",
@@ -701,6 +719,174 @@ fn merge_check_blocks_contaminated_unbound_workspace_for_default_target() {
     assert!(
         stderr.contains("not bound to a change") && stderr.contains("Refusing merge into 'main'"),
         "expected guardrail message in check failure, got: {stderr}"
+    );
+}
+
+#[test]
+fn merge_check_guardrail_failures_emit_json_payload_when_requested() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[
+        ("README.md", "# App\n"),
+        ("src/lib.rs", "pub fn hello() {}\n"),
+    ]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-json-guard",
+        "--workspace",
+        "ch-json-guard",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-json-guard", "worker"]);
+    repo.add_file("worker", "src/change_only.rs", "pub fn from_change() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: change work"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-json-guard",
+        "--destroy",
+        "--message",
+        "merge worker into change",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    let change_head = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-json-guard-flow"])
+        .trim()
+        .to_owned();
+    repo.git_in_workspace("hotfix", &["checkout", "--detach", &change_head]);
+    repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");
+    repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
+    repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
+
+    let check_out = repo.maw_raw(&[
+        "ws", "merge", "hotfix", "--into", "default", "--check", "--format", "json",
+    ]);
+    assert!(
+        !check_out.status.success(),
+        "check should fail for contaminated unbound workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    let check_stdout = String::from_utf8_lossy(&check_out.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check guardrail output should be valid JSON");
+    assert_eq!(
+        payload["ready"].as_bool(),
+        Some(false),
+        "guardrail JSON should report not-ready: {payload}"
+    );
+    assert!(
+        check_stdout.contains("Refusing merge into 'main'"),
+        "guardrail JSON should include remediation context, got: {check_stdout}"
+    );
+}
+
+#[test]
+fn merge_into_default_blocks_unbound_workspace_with_stale_change_tip_ancestry() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-stale",
+        "--workspace",
+        "ch-stale",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-stale", "w1"]);
+    repo.modify_file("w1", "README.md", "# App\nfrom-change\n");
+    repo.git_in_workspace("w1", &["add", "README.md"]);
+    repo.git_in_workspace("w1", &["commit", "-m", "feat: first change tip"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "w1",
+        "--into",
+        "ch-stale",
+        "--destroy",
+        "--message",
+        "merge w1",
+    ]);
+
+    let stale_change_tip = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-stale-flow"])
+        .trim()
+        .to_owned();
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-stale", "w2"]);
+    repo.add_file("w2", "later.txt", "later change\n");
+    repo.git_in_workspace("w2", &["add", "later.txt"]);
+    repo.git_in_workspace("w2", &["commit", "-m", "feat: advance change tip"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "w2",
+        "--into",
+        "ch-stale",
+        "--destroy",
+        "--message",
+        "merge w2",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    repo.git_in_workspace("hotfix", &["checkout", "--detach", &stale_change_tip]);
+    repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");
+    repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
+    repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
+
+    let check_out = repo.maw_raw(&[
+        "ws", "merge", "hotfix", "--into", "default", "--check", "--format", "json",
+    ]);
+    assert!(
+        !check_out.status.success(),
+        "stale-tip contamination should fail check\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    let check_stdout = String::from_utf8_lossy(&check_out.stdout);
+    assert!(
+        check_stdout.contains("\"ready\": false")
+            && check_stdout.contains("shares unmerged ancestry"),
+        "check should report stale-tip lineage guardrail, got: {check_stdout}"
+    );
+
+    let merge_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "hotfix",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge hotfix",
+    ]);
+    assert!(
+        !merge_out.status.success(),
+        "merge should also be blocked\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&merge_out.stdout),
+        String::from_utf8_lossy(&merge_out.stderr)
+    );
+    let merge_stderr = String::from_utf8_lossy(&merge_out.stderr);
+    assert!(
+        merge_stderr.contains("shares unmerged ancestry")
+            && merge_stderr.contains("Refusing merge into 'main'"),
+        "expected stale-tip guard message, got: {merge_stderr}"
     );
 }
 
@@ -752,6 +938,96 @@ fn merge_into_change_outputs_change_specific_next_steps() {
         !stdout.contains("Next: push to remote:")
             && !stdout.contains("Default workspace updated to new epoch."),
         "should not print trunk/default-epoch guidance for change-target merge, got: {stdout}"
+    );
+}
+
+#[test]
+fn changes_create_guidance_avoids_invalid_self_merge_instructions() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-guide",
+        "--workspace",
+        "ch-guide",
+    ]);
+    assert!(
+        out.status.success(),
+        "changes create should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("maw ws merge ch-guide --into ch-guide --destroy"),
+        "output should not suggest invalid self-merge command, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("maw ws create --change ch-guide <agent-workspace>")
+            && stdout.contains("maw ws merge <agent-workspace> --into ch-guide --destroy"),
+        "output should suggest worker-workspace merge flow, got: {stdout}"
+    );
+}
+
+#[test]
+fn changes_create_json_advice_avoids_invalid_self_merge_instructions() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-guide-json",
+        "--workspace",
+        "ch-guide-json",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        out.status.success(),
+        "changes create json should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json_start = stdout
+        .rfind("\n{")
+        .map(|idx| idx + 1)
+        .or_else(|| stdout.find('{'))
+        .expect("changes create output should include trailing JSON payload");
+    let payload: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .expect("changes create trailing JSON should parse");
+    let advice = payload["advice"]
+        .as_array()
+        .expect("advice should be an array")
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        !advice
+            .iter()
+            .any(|line| *line == "maw ws merge ch-guide-json --into ch-guide-json --destroy"),
+        "JSON advice should not include invalid self-merge command: {payload}"
+    );
+    assert!(
+        advice
+            .iter()
+            .any(|line| *line == "maw ws create --change ch-guide-json <agent-workspace>")
+            && advice.iter().any(
+                |line| *line == "maw ws merge <agent-workspace> --into ch-guide-json --destroy"
+            ),
+        "JSON advice should include worker workspace merge guidance: {payload}"
     );
 }
 
