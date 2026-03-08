@@ -1212,24 +1212,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     Ok(target) => target,
                     Err(err) => {
                         if fmt == OutputFormat::Json {
-                            let payload = merge::CheckResult {
-                                ready: false,
-                                conflicts: vec![merge::ConflictInfo {
-                                    path: String::new(),
-                                    reason: err.to_string(),
-                                    sides: Vec::new(),
-                                    line_start: None,
-                                    line_end: None,
-                                }],
-                                stale: false,
-                                workspace: merge::CheckWorkspaceInfo {
-                                    name: workspaces.first().cloned().unwrap_or_default(),
-                                    change_id: String::new(),
-                                },
-                                description: String::new(),
-                            };
+                            let reason = err.to_string();
+                            let payload = merge::json_not_ready_result(&workspaces, reason.clone());
                             println!("{}", fmt.serialize(&payload)?);
-                            bail!("merge check: not ready");
+                            bail!("merge check: {reason}");
                         }
                         return Err(err);
                     }
@@ -1247,12 +1233,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     let target = match resolve_merge_target(&root, &into) {
                         Ok(target) => target,
                         Err(err) => {
-                            let payload = merge::PlanErrorResult {
-                                ok: false,
-                                error: err.to_string(),
-                            };
+                            let reason = err.to_string();
+                            let payload = merge::json_not_ready_result(&workspaces, reason.clone());
                             println!("{}", fmt.serialize(&payload)?);
-                            bail!("merge plan: not ready");
+                            bail!("merge plan: {reason}");
                         }
                     };
                     return match merge::plan_merge(
@@ -1264,12 +1248,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     ) {
                         Ok(()) => Ok(()),
                         Err(err) => {
-                            let payload = merge::PlanErrorResult {
-                                ok: false,
-                                error: err.to_string(),
-                            };
+                            let reason = err.to_string();
+                            let payload = merge::json_not_ready_result(&workspaces, reason.clone());
                             println!("{}", fmt.serialize(&payload)?);
-                            bail!("merge plan: not ready");
+                            bail!("merge plan: {reason}");
                         }
                     };
                 }

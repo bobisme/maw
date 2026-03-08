@@ -892,6 +892,11 @@ fn merge_check_invalid_target_emits_json_payload_when_requested() {
         stdout.contains("Unknown merge target 'does-not-exist'"),
         "JSON payload should include target resolution error, got: {stdout}"
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge check:") && stderr.contains("Unknown merge target 'does-not-exist'"),
+        "stderr should include actionable reason, got: {stderr}"
+    );
 }
 
 #[test]
@@ -1007,12 +1012,19 @@ fn merge_plan_rejects_invalid_target_value() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("plan json mode should emit JSON error payload");
-    assert_eq!(payload["ok"].as_bool(), Some(false));
+    assert_eq!(payload["ready"].as_bool(), Some(false));
     assert!(
-        payload["error"]
-            .as_str()
+        payload["conflicts"]
+            .as_array()
+            .and_then(|conflicts| conflicts.first())
+            .and_then(|entry| entry["reason"].as_str())
             .is_some_and(|msg| msg.contains("Unknown merge target 'does-not-exist'")),
         "expected actionable invalid-target JSON error, got: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge plan:") && stderr.contains("Unknown merge target 'does-not-exist'"),
+        "stderr should include actionable reason, got: {stderr}"
     );
 }
 
@@ -1078,12 +1090,19 @@ fn merge_plan_guardrail_failures_emit_json_payload_when_requested() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("plan guardrail output should be valid JSON");
-    assert_eq!(payload["ok"].as_bool(), Some(false));
+    assert_eq!(payload["ready"].as_bool(), Some(false));
     assert!(
-        payload["error"]
-            .as_str()
+        payload["conflicts"]
+            .as_array()
+            .and_then(|conflicts| conflicts.first())
+            .and_then(|entry| entry["reason"].as_str())
             .is_some_and(|msg| msg.contains("Refusing merge into 'main'")),
         "plan guardrail JSON should include remediation context, got: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge plan:") && stderr.contains("Refusing merge into 'main'"),
+        "stderr should include actionable reason, got: {stderr}"
     );
 }
 
@@ -1137,14 +1156,23 @@ fn merge_plan_missing_workspace_with_active_change_stays_actionable() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("plan json mode should emit JSON error payload");
-    assert_eq!(payload["ok"].as_bool(), Some(false));
+    assert_eq!(payload["ready"].as_bool(), Some(false));
     assert!(
-        payload["error"].as_str().is_some_and(|msg| {
-            msg.contains("Workspace 'missing' does not exist at")
-                && msg.contains("Check available workspaces: maw ws list")
-                && !msg.contains("failed to run git rev-parse HEAD")
-        }),
+        payload["conflicts"]
+            .as_array()
+            .and_then(|conflicts| conflicts.first())
+            .and_then(|entry| entry["reason"].as_str())
+            .is_some_and(|msg| {
+                msg.contains("Workspace 'missing' does not exist at")
+                    && msg.contains("Check available workspaces: maw ws list")
+                    && !msg.contains("failed to run git rev-parse HEAD")
+            }),
         "expected actionable missing-workspace JSON error even with active changes, got: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge plan:") && stderr.contains("Workspace 'missing' does not exist at"),
+        "stderr should include actionable reason, got: {stderr}"
     );
 }
 

@@ -1094,17 +1094,30 @@ pub struct CheckResult {
     pub description: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct PlanErrorResult {
-    pub ok: bool,
-    pub error: String,
-}
-
 /// Workspace info included in check result.
 #[derive(Debug, Serialize)]
 pub struct CheckWorkspaceInfo {
     pub name: String,
     pub change_id: String,
+}
+
+pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -> CheckResult {
+    CheckResult {
+        ready: false,
+        conflicts: vec![ConflictInfo {
+            path: String::new(),
+            reason: reason.into(),
+            sides: Vec::new(),
+            line_start: None,
+            line_end: None,
+        }],
+        stale: false,
+        workspace: CheckWorkspaceInfo {
+            name: workspaces.first().cloned().unwrap_or_default(),
+            change_id: String::new(),
+        },
+        description: String::new(),
+    }
 }
 
 /// Pre-flight merge check using the new merge engine.
@@ -1125,25 +1138,32 @@ pub fn check_merge(
         target_change_id,
     ) {
         Ok(result) => result,
-        Err(err) if format == OutputFormat::Json => CheckResult {
-            ready: false,
-            conflicts: vec![ConflictInfo {
-                path: String::new(),
-                reason: err.to_string(),
-                sides: Vec::new(),
-                line_start: None,
-                line_end: None,
-            }],
-            stale: false,
-            workspace: CheckWorkspaceInfo {
-                name: workspaces.first().cloned().unwrap_or_default(),
-                change_id: String::new(),
-            },
-            description: String::new(),
-        },
+        Err(err) if format == OutputFormat::Json => {
+            json_not_ready_result(workspaces, err.to_string())
+        }
         Err(err) => return Err(err),
     };
     output_check_result(&result, format)
+}
+
+fn check_not_ready_reason(result: &CheckResult) -> String {
+    if result.stale {
+        let ws = &result.workspace.name;
+        return format!("workspace '{ws}' is stale; run `maw ws sync {ws}` and retry");
+    }
+
+    if let Some(conflict) = result.conflicts.first() {
+        if conflict.path.is_empty() {
+            return conflict.reason.clone();
+        }
+        return format!(
+            "conflict at '{}': {}",
+            conflict.path,
+            conflict.reason
+        );
+    }
+
+    "not ready".to_owned()
 }
 
 /// Run a merge pre-flight check and return the structured result.
@@ -1378,7 +1398,7 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
     if result.ready {
         Ok(())
     } else {
-        bail!("merge check: not ready")
+        bail!("merge check: {}", check_not_ready_reason(result))
     }
 }
 
