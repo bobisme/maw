@@ -702,3 +702,7 @@
 1772992948004737	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEywwI		item.move	bn-qun8	{"state":"doing"}	blake3:1KWhEVBxANTtz0EwWWjTAsEhu9o4S_q76XtDouGigVQ
 1772992948011511	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyxAI		item.assign	bn-qun8	{"action":"assign","agent":"1"}	blake3:to4wWQgXwkMK2K-uY02vLYX7WVBCeDdHBmpukETSMbU
 1772993495321248	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyxQI		item.move	bn-qun8	{"state":"done"}	blake3:oSqwttwuG6N5WHkyq00IHhJJyj3FZNR5Pz6FTjTJn6w
+1773007126538358	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyxgI		item.create	bn-1720	{"description":"Update init/error guidance to include required ws create source flags and make ws merge --dry-run fail when any source workspace is missing.","kind":"task","title":"Fix stale workspace-create guidance and dry-run validation"}	blake3:LcGl0rSWUkrqb7jSq7nUf8mNPlCJFlgZGdVh1LpUEz4
+1773007131705990	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyxwI		item.move	bn-1720	{"state":"doing"}	blake3:ESkVeLJBte-uldZ2tbKLMAfcG303i79GADSG9yBedIw
+1773007131710041	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyyAI		item.assign	bn-1720	{"action":"assign","agent":"1"}	blake3:OJp7KaTJgiwuelk0CrYhfRc5jeZ2JYX3gVxbztz4VNg
+1773007729319266	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyyQI		item.move	bn-1720	{"state":"done"}	blake3:onLF9syIfN2QCobvThm5Pq6uFMGtOOWno04JJ-ZjOjk
