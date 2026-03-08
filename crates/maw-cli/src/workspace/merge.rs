@@ -1105,8 +1105,19 @@ pub struct CheckWorkspaceInfo {
 ///
 /// Runs PREPARE + BUILD without COMMIT to detect conflicts.
 /// Returns a `CheckResult` with structured info.
-pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
-    let result = check_merge_result(workspaces)?;
+pub fn check_merge(
+    workspaces: &[String],
+    format: OutputFormat,
+    target_workspace: &str,
+    target_branch: &str,
+    target_change_id: Option<&str>,
+) -> Result<()> {
+    let result = check_merge_result_for_target(
+        workspaces,
+        target_workspace,
+        target_branch,
+        target_change_id,
+    )?;
     output_check_result(&result, format)
 }
 
@@ -1116,6 +1127,19 @@ pub fn check_merge(workspaces: &[String], format: OutputFormat) -> Result<()> {
 /// without COMMIT to detect conflicts. Also used by `maw ws list --check` to
 /// annotate merge-ready workspaces with conflict counts.
 pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
+    let root = repo_root()?;
+    let maw_config = MawConfig::load(&root)?;
+    let default_ws = maw_config.default_workspace().to_owned();
+    let default_branch = maw_config.branch().to_owned();
+    check_merge_result_for_target(workspaces, &default_ws, &default_branch, None)
+}
+
+fn check_merge_result_for_target(
+    workspaces: &[String],
+    target_workspace: &str,
+    target_branch: &str,
+    target_change_id: Option<&str>,
+) -> Result<CheckResult> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --check");
     }
@@ -1124,10 +1148,27 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     let maw_config = MawConfig::load(&root)?;
     let default_ws = maw_config.default_workspace();
     let backend = get_backend()?;
+    let branch_ref = format!("refs/heads/{target_branch}");
+    let branch_before_oid = maw_core::refs::read_ref(&root, &branch_ref)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Target branch '{}' does not exist.\n  To fix: create the branch first or repair change metadata, then retry.",
+            target_branch
+        )
+    })?;
 
-    // Reject merging the default workspace
-    if workspaces.iter().any(|ws| ws == default_ws) {
-        bail!("Cannot merge the default workspace — it is the merge target, not a source.");
+    // Reject merging the target workspace itself.
+    if workspaces.iter().any(|ws| ws == target_workspace) {
+        if target_workspace == default_ws {
+            bail!("Cannot merge the default workspace — it is the merge target, not a source.");
+        }
+        bail!(
+            "Cannot merge target workspace '{}' as a source — it is the merge destination.",
+            target_workspace
+        );
+    }
+
+    if target_change_id.is_none() {
+        guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
     }
 
     // Check staleness
@@ -1182,8 +1223,26 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
                 .tempdir_in(&manifold_dir)
                 .context("Failed to create temp dir for build check")?;
             let build_dir = temp_build_dir.path().to_path_buf();
-            run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs)
+            let frozen = run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs)
                 .context("prepare phase failed for build check")?;
+
+            let merge_base_epoch = if target_change_id.is_some() {
+                EpochId::new(branch_before_oid.as_str()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "invalid target branch base OID '{}': {e}",
+                        branch_before_oid.as_str()
+                    )
+                })?
+            } else {
+                frozen.epoch
+            };
+            record_merge_target_context(
+                &build_dir,
+                target_branch,
+                target_change_id.map(|_| &merge_base_epoch),
+            )
+            .context("failed to persist merge target context for check")?;
+
             let build_result = run_build_phase(&root, &build_dir, &backend);
             drop(temp_build_dir);
 
@@ -2791,6 +2850,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             build_output.candidate.as_str(),
             target_base_epoch_before.as_deref(),
             &root,
+            target_change_id.is_none(),
             text_mode,
         )?;
 
@@ -2870,6 +2930,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Message is always provided by the caller (enforced in mod.rs dispatch).
     let msg = message.expect("merge message must be provided by caller");
+    let next_command = target_change_id
+        .map(|change_id| format!("maw changes pr {change_id} --draft"))
+        .unwrap_or_else(|| "maw push".to_string());
 
     if format == OutputFormat::Json {
         let success = MergeSuccessOutput {
@@ -2883,7 +2946,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             conflict_count: 0,
             conflicts: vec![],
             message: format!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", ")),
-            next: "maw push".to_string(),
+            next: next_command.clone(),
             advice: vec![],
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
@@ -2891,8 +2954,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         textln!();
         textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
         textln!();
-        textln!("Next: push to remote:");
-        textln!("  maw push");
+        if let Some(change_id) = target_change_id {
+            textln!("Next: open or update PR for this change:");
+            textln!("  maw changes pr {change_id} --draft");
+        } else {
+            textln!("Next: push to remote:");
+            textln!("  maw push");
+        }
     }
 
     Ok(())
@@ -3394,6 +3462,7 @@ fn update_default_workspace(
     epoch_after: &str,
     workspace_base_before: Option<&str>,
     repo_root: &Path,
+    target_updates_epoch: bool,
     text_mode: bool,
 ) -> Result<()> {
     use super::working_copy::{
@@ -3411,6 +3480,18 @@ fn update_default_workspace(
                 epoch_ref,
                 ws_name
             );
+        }
+    };
+
+    let updated_message = || {
+        if target_updates_epoch {
+            if ws_name == "default" {
+                "Default workspace updated to new epoch.".to_string()
+            } else {
+                format!("Workspace '{ws_name}' updated to new epoch.")
+            }
+        } else {
+            format!("Workspace '{ws_name}' updated to branch '{branch}'.")
         }
     };
 
@@ -3520,7 +3601,7 @@ fn update_default_workspace(
             // already succeeded so we must not abort.
             eprintln!("  WARNING: snapshot_working_copy failed: {e:#}");
             eprintln!("  Falling back to force checkout (uncommitted changes may be lost)...");
-            force_checkout_fallback(default_ws_path, branch, text_mode);
+            force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
             record_workspace_epoch();
             return Ok(());
         }
@@ -3531,7 +3612,7 @@ fn update_default_workspace(
         // Checkout failed — fall back to force checkout.
         eprintln!("  WARNING: checkout_to failed: {e:#}");
         eprintln!("  Falling back to force checkout...");
-        force_checkout_fallback(default_ws_path, branch, text_mode);
+        force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
         record_workspace_epoch();
         return Ok(());
     }
@@ -3541,7 +3622,7 @@ fn update_default_workspace(
         // Clean workspace — checkout was enough.
         record_workspace_epoch();
         if text_mode {
-            println!("  Default workspace updated to new epoch.");
+            println!("  {}", updated_message());
         }
         return Ok(());
     };
@@ -3554,7 +3635,7 @@ fn update_default_workspace(
                 tracing::warn!("failed to clean up snapshot ref: {e}");
             }
             if text_mode {
-                println!("  Default workspace updated to new epoch.");
+                println!("  {}", updated_message());
                 println!("  User work replayed successfully.");
             }
         }
@@ -3562,7 +3643,7 @@ fn update_default_workspace(
             // Step 4b: Conflicts — KEEP snapshot ref as recovery anchor.
             // Print WARNING but do NOT abort cleanup.
             eprintln!(
-                "  WARNING: {} file(s) have conflicts after replay onto new epoch:",
+                "  WARNING: {} file(s) have conflicts after replay onto updated target:",
                 conflicts.len()
             );
             for c in &conflicts {
@@ -3576,7 +3657,8 @@ fn update_default_workspace(
             );
             if text_mode {
                 println!(
-                    "  Default workspace updated to new epoch ({} conflict(s) — resolve manually).",
+                    "  {} ({} conflict(s) — resolve manually).",
+                    updated_message(),
                     conflicts.len()
                 );
             }
@@ -3592,7 +3674,8 @@ fn update_default_workspace(
             );
             if text_mode {
                 println!(
-                    "  Default workspace updated to new epoch (replay failed, snapshot preserved)."
+                    "  {} (replay failed, snapshot preserved).",
+                    updated_message()
                 );
             }
         }
@@ -3607,7 +3690,7 @@ fn update_default_workspace(
 ///
 /// This is the nuclear option — it destroys any uncommitted changes.
 /// Only used when the snapshot-based path itself has errored.
-fn force_checkout_fallback(ws_path: &Path, branch: &str, text_mode: bool) {
+fn force_checkout_fallback(ws_path: &Path, ws_name: &str, branch: &str, text_mode: bool) {
     let output = std::process::Command::new("git")
         .args(["checkout", "--force", branch])
         .current_dir(ws_path)
@@ -3616,17 +3699,18 @@ fn force_checkout_fallback(ws_path: &Path, branch: &str, text_mode: bool) {
     match output {
         Ok(o) if o.status.success() => {
             if text_mode {
-                println!("  Default workspace updated to new epoch (force checkout fallback).");
+                println!("  Workspace '{ws_name}' updated via force checkout fallback.");
             }
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             eprintln!(
                 "  WARNING: Fallback checkout also failed: {}\n  \
-                 The merge COMMIT succeeded (refs are updated), but the default workspace \
+                 The merge COMMIT succeeded (refs are updated), but workspace '{}' \
                  working copy could not be checked out.\n  \
                  To fix: git -C {} checkout {branch}",
                 stderr.trim(),
+                ws_name,
                 ws_path.display(),
             );
         }

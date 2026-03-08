@@ -1206,15 +1206,20 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             verbose,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
+            let root = repo_root()?;
+            let target = resolve_merge_target(&root, &into)?;
             if check {
-                return merge::check_merge(&workspaces, fmt);
+                return merge::check_merge(
+                    &workspaces,
+                    fmt,
+                    &target.workspace,
+                    &target.branch,
+                    target.change_id.as_deref(),
+                );
             }
             if plan {
                 return merge::plan_merge(&workspaces, fmt);
             }
-
-            let root = repo_root()?;
-            let target = resolve_merge_target(&root, &into)?;
 
             // Resolve the commit message: --message flag, editor (TTY), or error.
             // Deferred until after merge() validates basic preconditions (e.g.

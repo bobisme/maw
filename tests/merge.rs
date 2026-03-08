@@ -572,6 +572,189 @@ fn merge_into_default_blocks_unbound_workspace_with_active_change_ancestry() {
     );
 }
 
+#[test]
+fn merge_check_is_target_aware_for_change_target_conflicts() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-check",
+        "--workspace",
+        "ch-check",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--change", "ch-check", "change-worker"]);
+    repo.modify_file(
+        "change-worker",
+        "src/lib.rs",
+        "pub fn hello() { println!(\"from-change\"); }\n",
+    );
+    repo.git_in_workspace("change-worker", &["add", "src/lib.rs"]);
+    repo.git_in_workspace("change-worker", &["commit", "-m", "feat: change-side edit"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "change-worker",
+        "--into",
+        "ch-check",
+        "--destroy",
+        "--message",
+        "merge change-side edit",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "main-worker"]);
+    repo.modify_file(
+        "main-worker",
+        "src/lib.rs",
+        "pub fn hello() { println!(\"from-main\"); }\n",
+    );
+    repo.git_in_workspace("main-worker", &["add", "src/lib.rs"]);
+    repo.git_in_workspace("main-worker", &["commit", "-m", "feat: main-side edit"]);
+
+    let check_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "main-worker",
+        "--into",
+        "ch-check",
+        "--check",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !check_out.status.success(),
+        "target-aware check should block conflict\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    let check_stdout = String::from_utf8_lossy(&check_out.stdout);
+    assert!(
+        check_stdout.contains("\"ready\": false") && check_stdout.contains("src/lib.rs"),
+        "check output should report conflict against target branch base, got: {check_stdout}"
+    );
+}
+
+#[test]
+fn merge_check_blocks_contaminated_unbound_workspace_for_default_target() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n"), ("src/lib.rs", "pub fn hello() {}\n")]);
+
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-check-guard",
+        "--workspace",
+        "ch-check-guard",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-check-guard", "worker"]);
+    repo.add_file("worker", "src/change_only.rs", "pub fn from_change() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: change work"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-check-guard",
+        "--destroy",
+        "--message",
+        "merge worker into change",
+    ]);
+
+    repo.maw_ok(&["ws", "create", "--from", "main", "hotfix"]);
+    let change_head = repo
+        .git(&["rev-parse", "refs/heads/feat/ch-check-guard-flow"])
+        .trim()
+        .to_owned();
+    repo.git_in_workspace("hotfix", &["checkout", "--detach", &change_head]);
+    repo.add_file("hotfix", "HOTFIX.txt", "hotfix\n");
+    repo.git_in_workspace("hotfix", &["add", "HOTFIX.txt"]);
+    repo.git_in_workspace("hotfix", &["commit", "-m", "fix: add hotfix"]);
+
+    let check_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "hotfix",
+        "--into",
+        "default",
+        "--check",
+    ]);
+    assert!(
+        !check_out.status.success(),
+        "check should fail for contaminated unbound workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&check_out.stderr);
+    assert!(
+        stderr.contains("not bound to a change") && stderr.contains("Refusing merge into 'main'"),
+        "expected guardrail message in check failure, got: {stderr}"
+    );
+}
+
+#[test]
+fn merge_into_change_outputs_change_specific_next_steps() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# App\n")]);
+    repo.maw_ok(&[
+        "changes",
+        "create",
+        "Flow",
+        "--from",
+        "main",
+        "--id",
+        "ch-msg",
+        "--workspace",
+        "ch-msg",
+    ]);
+    repo.maw_ok(&["ws", "create", "--change", "ch-msg", "worker"]);
+    repo.add_file("worker", "src/msg.rs", "pub fn msg() {}\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "feat: msg"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "ch-msg",
+        "--destroy",
+        "--message",
+        "merge msg",
+    ]);
+    assert!(
+        out.status.success(),
+        "merge into change should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("COMMIT: Updating target branch...")
+            && stdout.contains("maw changes pr ch-msg --draft"),
+        "expected change-specific commit + next-step messaging, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Next: push to remote:")
+            && !stdout.contains("Default workspace updated to new epoch."),
+        "should not print trunk/default-epoch guidance for change-target merge, got: {stdout}"
+    );
+}
+
 /// When the default workspace has dirty (uncommitted) files at merge time,
 /// the merge should record a Snapshot operation in the default workspace's
 /// oplog capturing those dirty files before the checkout.
