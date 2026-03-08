@@ -330,6 +330,23 @@ fn recover_to_restores_snapshot_into_new_workspace() {
         Some("mod important;\n"),
         "recovered workspace should contain nested dirty file"
     );
+
+    // Recovered snapshot files should be tracked, not left as untracked dirtiness.
+    let tracked = repo.git_in_workspace("recovered-ws", &["ls-files", "precious.txt"]);
+    assert_eq!(
+        tracked.trim(),
+        "precious.txt",
+        "recovered file should be tracked in the workspace index"
+    );
+
+    let status = repo.git_in_workspace(
+        "recovered-ws",
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    assert!(
+        status.trim().is_empty(),
+        "recovered workspace should be clean after restore, got: {status}"
+    );
 }
 
 #[test]

@@ -298,6 +298,30 @@ fn merge_json_conflict_stdout_is_pure_json() {
     let payload: serde_json::Value =
         serde_json::from_str(&stdout).expect("merge conflict output should be valid JSON");
     assert_eq!(payload["status"].as_str(), Some("conflict"));
+
+    let to_fix = payload["to_fix"]
+        .as_str()
+        .expect("merge conflict JSON should include to_fix command");
+    assert!(
+        to_fix.contains("--message fix:resolve-merge-conflicts-into-default"),
+        "expected non-interactive --message in to_fix, got: {to_fix}"
+    );
+
+    let mut args: Vec<&str> = to_fix.split_whitespace().collect();
+    assert_eq!(
+        args.first().copied(),
+        Some("maw"),
+        "to_fix should start with maw: {to_fix}"
+    );
+    args.remove(0);
+
+    let apply = repo.maw_raw(&args);
+    assert!(
+        apply.status.success(),
+        "merge conflict to_fix command should execute successfully\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
+    );
 }
 
 #[test]
@@ -329,6 +353,26 @@ fn conflicts_json_to_fix_uses_valid_merge_target() {
     assert!(
         to_fix.contains("--into default"),
         "expected default target in to_fix command, got: {to_fix}"
+    );
+    assert!(
+        to_fix.contains("--message fix:resolve-merge-conflicts-into-default"),
+        "expected non-interactive --message in to_fix command, got: {to_fix}"
+    );
+
+    let mut args: Vec<&str> = to_fix.split_whitespace().collect();
+    assert_eq!(
+        args.first().copied(),
+        Some("maw"),
+        "to_fix should start with maw: {to_fix}"
+    );
+    args.remove(0);
+
+    let apply = repo.maw_raw(&args);
+    assert!(
+        apply.status.success(),
+        "conflicts to_fix command should execute successfully\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
     );
 }
 

@@ -1048,34 +1048,18 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
 
 /// Populate a workspace from a snapshot OID.
 ///
-/// Uses `checkout_tree()` to materialize the snapshot tree into the working
-/// directory, then resets the index back to HEAD so files show as unstaged.
+/// Restores the workspace to the exact snapshot commit with tracked index +
+/// working tree state, so recovered files are not left as untracked dirtiness.
 fn populate_from_snapshot(ws_path: &std::path::Path, oid: &str) -> Result<()> {
-    let repo = maw_git::GixRepo::open(ws_path)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let git_oid: maw_git::GitOid = oid
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{oid}': {e}"))?;
-
-    // Read the commit to get its tree OID, then checkout the tree
-    let commit_info = repo
-        .read_commit(git_oid)
-        .map_err(|e| anyhow::anyhow!("failed to read snapshot commit {oid}: {e}"))?;
-    repo.checkout_tree(commit_info.tree_oid, ws_path)
-        .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
-
-    // Reset the index back to HEAD so the workspace shows snapshot files
-    // as unstaged modifications (not staged additions)
-    // TODO(gix): replace git reset with GitRepo trait method
-    let reset = Command::new("git")
-        .args(["reset"])
+    let checkout = Command::new("git")
+        .args(["checkout", "--detach", oid])
         .current_dir(ws_path)
         .output()
-        .context("git reset failed")?;
+        .context("git checkout --detach failed")?;
 
-    if !reset.status.success() {
-        let stderr = String::from_utf8_lossy(&reset.stderr);
-        tracing::warn!("git reset after populate failed: {}", stderr.trim());
+    if !checkout.status.success() {
+        let stderr = String::from_utf8_lossy(&checkout.stderr);
+        bail!("git checkout --detach {oid} failed: {}", stderr.trim());
     }
 
     Ok(())

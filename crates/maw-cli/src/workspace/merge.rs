@@ -1053,6 +1053,14 @@ fn print_conflict_report_with_resolve(
     println!("Or edit files in a workspace, commit, and re-merge.");
 }
 
+fn conflict_retry_message(into_target: &str) -> String {
+    let sanitized: String = into_target
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("fix:resolve-merge-conflicts-into-{sanitized}")
+}
+
 /// Run pre-merge or post-merge hook commands from .maw.toml.
 fn run_hooks(hooks: &[String], hook_type: &str, root: &Path, abort_on_failure: bool) -> Result<()> {
     if hooks.is_empty() {
@@ -2074,8 +2082,9 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
             .iter()
             .map(|c| format!("--resolve {}={resolve_default_ws}", c.id))
             .collect();
+        let retry_message = conflict_retry_message(default_ws);
         let to_fix = format!(
-            "maw ws merge {ws_args} --into {} {}",
+            "maw ws merge {ws_args} --into {} {} --message {retry_message}",
             default_ws,
             resolve_args.join(" ")
         );
@@ -2676,8 +2685,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                             conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids)
                         })
                         .collect();
+                    let retry_message = conflict_retry_message(into_target);
                     let to_fix = format!(
-                        "maw ws merge {ws_args} --into {} {}",
+                        "maw ws merge {ws_args} --into {} {} --message {retry_message}",
                         into_target,
                         resolve_args.join(" ")
                     );
@@ -2730,8 +2740,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     .iter()
                     .map(|c| conflict_record_to_json_with_id(&c.record, Some(&c.id), &c.atom_ids))
                     .collect();
+                let retry_message = conflict_retry_message(into_target);
                 let to_fix = format!(
-                    "maw ws merge {ws_args} --into {} {}",
+                    "maw ws merge {ws_args} --into {} {} --message {retry_message}",
                     into_target,
                     resolve_args.join(" ")
                 );
