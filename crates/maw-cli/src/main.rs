@@ -460,13 +460,11 @@ mod tests {
     }
 
     #[test]
-    fn ws_create_requires_explicit_source_flag() {
+    fn ws_create_parsing_defers_source_validation_to_runtime() {
         let result = Cli::try_parse_from(["maw", "ws", "create", "alice"]);
-        assert!(result.is_err(), "create should require --from or --change");
-        let err = result.err().expect("expected parse error").to_string();
         assert!(
-            err.contains("--from") || err.contains("--change"),
-            "error should mention source flags: {err}"
+            result.is_ok(),
+            "create parsing should succeed so runtime can emit actionable source guidance"
         );
     }
 

@@ -103,3 +103,45 @@ fn exec_missing_workspace_error_suggests_source_flag() {
         "expected source-aware create guidance, got: {stderr}"
     );
 }
+
+#[test]
+fn create_missing_source_error_is_actionable() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw_exact(&["ws", "create", "agent-a"]);
+    assert!(
+        !out.status.success(),
+        "create should fail without explicit source\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Workspace create requires an explicit source")
+            && stderr.contains("maw ws create --from main agent-a")
+            && stderr.contains("maw ws create --change <change-id> agent-a"),
+        "expected explicit source guidance, got: {stderr}"
+    );
+}
+
+#[test]
+fn create_random_missing_source_error_is_actionable() {
+    let repo = TestRepo::new();
+
+    let out = repo.maw_raw_exact(&["ws", "create", "--random"]);
+    assert!(
+        !out.status.success(),
+        "random create should fail without explicit source\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Workspace create requires an explicit source")
+            && stderr.contains("maw ws create --from main <name>")
+            && stderr.contains("maw ws create --change <change-id> <name>"),
+        "expected explicit source guidance for random create, got: {stderr}"
+    );
+}

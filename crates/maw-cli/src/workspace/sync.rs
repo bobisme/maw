@@ -905,13 +905,20 @@ fn sync_all() -> Result<()> {
         }
     }
 
+    let skipped_total = skipped_with_work.len() + skipped_cross_target.len();
+
     println!();
     println!(
-        "Results: {} synced, {} already current, {} errors",
+        "Results: {} synced, {} already current, {} skipped, {} errors",
         synced,
         workspaces.len() - stale_count,
+        skipped_total,
         errors.len()
     );
+
+    if skipped_total > 0 {
+        println!("Result: INCOMPLETE (safety skips detected; see skipped sections above).");
+    }
 
     if !errors.is_empty() {
         println!();
@@ -925,7 +932,6 @@ fn sync_all() -> Result<()> {
         );
     }
 
-    let skipped_total = skipped_with_work.len() + skipped_cross_target.len();
     if skipped_total > 0 {
         bail!(
             "sync --all incomplete: {skipped_total} workspace(s) were skipped by safety checks; merge or resolve them, then rerun maw ws sync --all"

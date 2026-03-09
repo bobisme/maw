@@ -621,6 +621,15 @@ impl TestRepo {
             .expect("failed to execute maw")
     }
 
+    /// Run the `maw` binary with exact arguments (no test harness argument rewriting).
+    pub fn maw_raw_exact(&self, args: &[&str]) -> Output {
+        Command::new(maw_bin())
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .expect("failed to execute maw")
+    }
+
     /// Run `maw` and assert it succeeds. Returns stdout as a string.
     ///
     /// # Panics

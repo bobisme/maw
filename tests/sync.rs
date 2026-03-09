@@ -171,6 +171,9 @@ fn sync_all_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead()
     assert!(
         stdout.contains("Skipped (committed work not yet merged")
             && stdout.contains("ahead (1 commit(s) ahead)")
+            && stdout.contains("Results:")
+            && stdout.contains("1 skipped")
+            && stdout.contains("Result: INCOMPLETE")
             && stderr.contains("sync --all incomplete"),
         "expected skipped-work summary + incomplete failure\nstdout: {stdout}\nstderr: {stderr}"
     );

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgGroup, Subcommand};
+use clap::Subcommand;
 use serde::Deserialize;
 
 use crate::changes::store::ChangesStore;
@@ -244,10 +244,7 @@ pub enum WorkspaceCommands {
     ///   Persistent (--persistent): can survive across epoch advances. Use
     ///   `maw ws advance <name>` to rebase onto the latest epoch when stale.
     ///   Suitable for long-running agent tasks that span multiple epochs.
-    #[command(
-        verbatim_doc_comment,
-        group(ArgGroup::new("source").required(true).args(["from", "change"]))
-    )]
+    #[command(verbatim_doc_comment)]
     Create {
         /// Name for the workspace (typically the agent's name)
         #[arg(required_unless_present = "random")]
@@ -989,16 +986,21 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             persistent,
             template,
         } => {
+            if from.is_none() && change.is_none() {
+                let name_hint = if random {
+                    "<name>".to_string()
+                } else {
+                    name.clone().unwrap_or_else(|| "<name>".to_string())
+                };
+                bail!(
+                    "Workspace create requires an explicit source.\n  Use one of:\n    maw ws create --from main {name_hint}\n    maw ws create --change <change-id> {name_hint}"
+                );
+            }
             let name = if random {
                 names::generate_workspace_name()
             } else {
                 name.expect("name is required unless --random is set")
             };
-            if from.is_none() && change.is_none() {
-                bail!(
-                    "Workspace create requires an explicit source.\n  Use one of:\n    maw ws create {name} --from <ws|branch|rev|remote/branch>\n    maw ws create {name} --change <change-id>"
-                );
-            }
             create::create(
                 &name,
                 from.as_deref(),
