@@ -1,0 +1,893 @@
+//! Action-level deterministic workflow simulation for maw.
+//!
+//! This complements `workflow_dst.rs` by selecting lower-level stateful actions
+//! from a seed, rather than only pre-baked workflow blocks. Failures print a
+//! replay command and the smallest failing action prefix discovered by a simple
+//! prefix minimizer.
+
+mod manifold_common;
+
+use std::collections::HashSet;
+use std::fmt;
+use std::path::Path;
+use std::process::Command;
+
+use manifold_common::TestRepo;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use serde_json::Value;
+
+const BASE_SEED: u64 = 0xAC71_0A5E_7000_0001;
+
+fn trace_count(default: u64) -> u64 {
+    std::env::var("ACTION_DST_TRACES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn single_seed() -> Option<u64> {
+    std::env::var("ACTION_DST_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+}
+
+fn step_limit() -> Option<usize> {
+    std::env::var("ACTION_DST_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+}
+
+fn replay_command(seed: u64, steps: usize) -> String {
+    format!(
+        "ACTION_DST_SEED={seed} ACTION_DST_STEPS={steps} cargo test --test action_workflow_dst dst_action_sequences_preserve_contracts -- --exact --nocapture"
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ActionKind {
+    CreateWorkspace,
+    CommitWorkspace,
+    AnnotateWorkspace,
+    MergeWorkspace,
+    CreateConflictPair,
+    ResolveConflictPair,
+    CreateRecoverable,
+    RecoverWorkspace,
+    CreateChangeFlow,
+    CreateAheadScenario,
+    SyncAll,
+    PushRemote,
+}
+
+impl ActionKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::CreateWorkspace => "create_workspace",
+            Self::CommitWorkspace => "commit_workspace",
+            Self::AnnotateWorkspace => "annotate_workspace",
+            Self::MergeWorkspace => "merge_workspace",
+            Self::CreateConflictPair => "create_conflict_pair",
+            Self::ResolveConflictPair => "resolve_conflict_pair",
+            Self::CreateRecoverable => "create_recoverable",
+            Self::RecoverWorkspace => "recover_workspace",
+            Self::CreateChangeFlow => "create_change_flow",
+            Self::CreateAheadScenario => "create_ahead_scenario",
+            Self::SyncAll => "sync_all",
+            Self::PushRemote => "push_remote",
+        }
+    }
+}
+
+impl fmt::Display for ActionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+#[derive(Debug)]
+struct TraceEntry {
+    step: usize,
+    action: ActionKind,
+    outcome: String,
+}
+
+impl fmt::Display for TraceEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[step {}] {} => {}",
+            self.step, self.action, self.outcome
+        )
+    }
+}
+
+#[derive(Debug)]
+struct TraceLog {
+    seed: u64,
+    max_steps: usize,
+    entries: Vec<TraceEntry>,
+}
+
+impl TraceLog {
+    fn new(seed: u64, max_steps: usize) -> Self {
+        Self {
+            seed,
+            max_steps,
+            entries: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, step: usize, action: ActionKind, outcome: impl Into<String>) {
+        self.entries.push(TraceEntry {
+            step,
+            action,
+            outcome: outcome.into(),
+        });
+    }
+
+    fn dump(&self) {
+        eprintln!(
+            "=== Action Workflow DST Trace (seed={}, steps={}) ===",
+            self.seed, self.max_steps
+        );
+        for entry in &self.entries {
+            eprintln!("  {entry}");
+        }
+        eprintln!("Replay: {}", replay_command(self.seed, self.max_steps));
+        eprintln!("=== end trace ===");
+    }
+}
+
+#[derive(Default)]
+struct NameGen {
+    ws: usize,
+    file: usize,
+    change: usize,
+    restore: usize,
+}
+
+impl NameGen {
+    fn ws(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}-{}", self.ws);
+        self.ws += 1;
+        name
+    }
+
+    fn path(&mut self, prefix: &str) -> String {
+        let path = format!("sim/{prefix}-{}.txt", self.file);
+        self.file += 1;
+        path
+    }
+
+    fn change_id(&mut self) -> String {
+        let id = format!("ch-act-{}", self.change);
+        self.change += 1;
+        id
+    }
+
+    fn restored(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}-restored-{}", self.restore);
+        self.restore += 1;
+        name
+    }
+}
+
+struct WorkspaceActor {
+    name: String,
+    tracked_path: Option<String>,
+    tracked_content: Option<String>,
+    committed: bool,
+    annotated: bool,
+    merged: bool,
+}
+
+struct ConflictPair {
+    left: String,
+    right: String,
+    shared_path: String,
+    resolved: bool,
+}
+
+struct RecoverCase {
+    source: String,
+    committed_path: String,
+    snapshot_path: String,
+    restored_name: Option<String>,
+}
+
+struct SyncCase {
+    ahead: String,
+    validated: bool,
+}
+
+struct ActionState {
+    names: NameGen,
+    actors: Vec<WorkspaceActor>,
+    conflict_pairs: Vec<ConflictPair>,
+    recover_cases: Vec<RecoverCase>,
+    sync_cases: Vec<SyncCase>,
+    tracked_commit_oids: HashSet<String>,
+    change_only_paths: Vec<String>,
+    remote_configured: bool,
+    remote_pushed: bool,
+    change_flow_done: bool,
+}
+
+impl Default for ActionState {
+    fn default() -> Self {
+        Self {
+            names: NameGen::default(),
+            actors: Vec::new(),
+            conflict_pairs: Vec::new(),
+            recover_cases: Vec::new(),
+            sync_cases: Vec::new(),
+            tracked_commit_oids: HashSet::new(),
+            change_only_paths: Vec::new(),
+            remote_configured: false,
+            remote_pushed: false,
+            change_flow_done: false,
+        }
+    }
+}
+
+fn parse_json(text: &str, context: &str) -> Result<Value, String> {
+    serde_json::from_str(text).map_err(|e| format!("{context}: invalid JSON: {e}\n{text}"))
+}
+
+fn git_output_in(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("git {} failed to spawn: {e}", args.join(" ")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(format!(
+            "git {} failed:\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+fn commit_exists(repo: &TestRepo, oid: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "-e", &format!("{oid}^{{commit}}")])
+        .current_dir(repo.root())
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+fn git_integrity_ok(repo: &TestRepo) -> Result<(), String> {
+    let out = Command::new("git")
+        .args(["fsck", "--no-progress", "--connectivity-only"])
+        .current_dir(repo.root())
+        .output()
+        .map_err(|e| format!("git fsck spawn failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git fsck failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+fn common_invariants(repo: &TestRepo, state: &ActionState, context: &str) -> Result<(), String> {
+    let list = parse_json(&repo.maw_ok(&["ws", "list", "--format", "json"]), "ws list")?;
+    let status = parse_json(
+        &repo.maw_ok(&["ws", "status", "--format", "json"]),
+        "ws status",
+    )?;
+    let _history = parse_json(
+        &repo.maw_ok(&["ws", "history", "default", "--format", "json"]),
+        "ws history default",
+    )?;
+
+    if !list["workspaces"]
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|w| w["name"].as_str() == Some("default")))
+    {
+        return Err(format!("{context}: default missing from ws list JSON"));
+    }
+    if !status["workspaces"]
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|w| w["name"].as_str() == Some("default")))
+    {
+        return Err(format!("{context}: default missing from ws status JSON"));
+    }
+
+    for oid in &state.tracked_commit_oids {
+        if !commit_exists(repo, oid) {
+            return Err(format!(
+                "{context}: tracked commit {oid} is no longer readable"
+            ));
+        }
+    }
+
+    for path in &state.change_only_paths {
+        if repo.read_file("default", path).is_some() {
+            return Err(format!(
+                "{context}: change-only path leaked into default: {path}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
+    if state.conflict_pairs.iter().any(|pair| !pair.resolved) {
+        return vec![ActionKind::ResolveConflictPair];
+    }
+    if state.actors.iter().any(|ws| !ws.merged && ws.committed) {
+        return vec![ActionKind::MergeWorkspace];
+    }
+    if state.actors.iter().any(|ws| !ws.merged && !ws.committed) {
+        let mut early = Vec::new();
+        if state.actors.iter().any(|ws| !ws.merged && !ws.annotated) {
+            early.push(ActionKind::AnnotateWorkspace);
+        }
+        early.push(ActionKind::CommitWorkspace);
+        return early;
+    }
+
+    let mut actions = Vec::new();
+
+    if state.actors.iter().filter(|ws| !ws.merged).count() < 3 {
+        actions.push(ActionKind::CreateWorkspace);
+    }
+    if state.actors.iter().any(|ws| !ws.merged && !ws.committed) {
+        actions.push(ActionKind::CommitWorkspace);
+    }
+    if state.actors.iter().any(|ws| !ws.merged && !ws.annotated) {
+        actions.push(ActionKind::AnnotateWorkspace);
+    }
+    if state.actors.iter().any(|ws| !ws.merged && ws.committed) {
+        actions.push(ActionKind::MergeWorkspace);
+    }
+    if state.conflict_pairs.iter().all(|pair| pair.resolved) {
+        actions.push(ActionKind::CreateConflictPair);
+    }
+    if state.conflict_pairs.iter().any(|pair| !pair.resolved) {
+        actions.push(ActionKind::ResolveConflictPair);
+    }
+    if state
+        .recover_cases
+        .iter()
+        .filter(|case| case.restored_name.is_none())
+        .count()
+        < 2
+    {
+        actions.push(ActionKind::CreateRecoverable);
+    }
+    if state
+        .recover_cases
+        .iter()
+        .any(|case| case.restored_name.is_none())
+    {
+        actions.push(ActionKind::RecoverWorkspace);
+    }
+    if !state.change_flow_done {
+        actions.push(ActionKind::CreateChangeFlow);
+    }
+    if state.sync_cases.is_empty() {
+        actions.push(ActionKind::CreateAheadScenario);
+    }
+    if state.sync_cases.iter().any(|case| !case.validated) {
+        actions.push(ActionKind::SyncAll);
+    }
+    if !state.remote_pushed {
+        actions.push(ActionKind::PushRemote);
+    }
+
+    actions
+}
+
+fn choose_index<T>(rng: &mut StdRng, items: &[T]) -> usize {
+    rng.random_range(0..items.len())
+}
+
+fn run_action(
+    repo: &TestRepo,
+    state: &mut ActionState,
+    rng: &mut StdRng,
+    action: ActionKind,
+) -> Result<String, String> {
+    match action {
+        ActionKind::CreateWorkspace => {
+            let name = state.names.ws("actor");
+            repo.create_workspace(&name);
+            state.actors.push(WorkspaceActor {
+                name: name.clone(),
+                tracked_path: None,
+                tracked_content: None,
+                committed: false,
+                annotated: false,
+                merged: false,
+            });
+            Ok(format!("created {name}"))
+        }
+        ActionKind::CommitWorkspace => {
+            let candidates: Vec<usize> = state
+                .actors
+                .iter()
+                .enumerate()
+                .filter(|(_, ws)| !ws.merged && !ws.committed)
+                .map(|(idx, _)| idx)
+                .collect();
+            let idx = candidates[choose_index(rng, &candidates)];
+            let path = state.names.path("commit");
+            let content = format!("content for {}\n", state.actors[idx].name);
+            let name = state.actors[idx].name.clone();
+            repo.add_file(&name, &path, &content);
+            repo.git_in_workspace(&name, &["add", "-A"]);
+            repo.git_in_workspace(&name, &["commit", "-m", &format!("feat: {name}")]);
+            state.tracked_commit_oids.insert(repo.workspace_head(&name));
+            state.actors[idx].tracked_path = Some(path.clone());
+            state.actors[idx].tracked_content = Some(content.clone());
+            state.actors[idx].committed = true;
+            Ok(format!("committed {path} in {name}"))
+        }
+        ActionKind::AnnotateWorkspace => {
+            let candidates: Vec<usize> = state
+                .actors
+                .iter()
+                .enumerate()
+                .filter(|(_, ws)| !ws.merged && !ws.annotated)
+                .map(|(idx, _)| idx)
+                .collect();
+            let idx = candidates[choose_index(rng, &candidates)];
+            let name = state.actors[idx].name.clone();
+            repo.maw_ok(&["ws", "describe", &name, "wip: action dst"]);
+            repo.maw_ok(&["ws", "annotate", &name, "qa", r#"{"passed":2,"failed":0}"#]);
+            let history = parse_json(
+                &repo.maw_ok(&["ws", "history", &name, "--format", "json"]),
+                "history annotate",
+            )?;
+            let ops = history["operations"]
+                .as_array()
+                .ok_or_else(|| format!("history missing operations: {history}"))?;
+            if !ops
+                .iter()
+                .any(|op| op["op_type"].as_str() == Some("annotate"))
+            {
+                return Err(format!("annotate op missing from history: {history}"));
+            }
+            state.actors[idx].annotated = true;
+            Ok(format!("annotated {name}"))
+        }
+        ActionKind::MergeWorkspace => {
+            let candidates: Vec<usize> = state
+                .actors
+                .iter()
+                .enumerate()
+                .filter(|(_, ws)| !ws.merged && ws.committed)
+                .map(|(idx, _)| idx)
+                .collect();
+            let idx = candidates[choose_index(rng, &candidates)];
+            let ws = &state.actors[idx];
+            let check = parse_json(
+                &repo.maw_ok(&["ws", "merge", &ws.name, "--check", "--format", "json"]),
+                "merge check",
+            )?;
+            if check["ready"].as_bool() != Some(true) {
+                return Err(format!("merge check not ready: {check}"));
+            }
+            repo.maw_ok(&[
+                "ws",
+                "merge",
+                &ws.name,
+                "--destroy",
+                "--message",
+                &format!("feat: merge {}", ws.name),
+            ]);
+            if let (Some(path), Some(content)) = (&ws.tracked_path, &ws.tracked_content)
+                && repo.read_file("default", path).as_deref() != Some(content.as_str())
+            {
+                return Err(format!("default missing merged content for {path}"));
+            }
+            state.actors[idx].merged = true;
+            Ok(format!("merged {}", state.actors[idx].name))
+        }
+        ActionKind::CreateConflictPair => {
+            let shared = state.names.path("shared");
+            repo.seed_files(&[(shared.as_str(), "base\n")]);
+            let left = state.names.ws("left");
+            let right = state.names.ws("right");
+            repo.create_workspace(&left);
+            repo.create_workspace(&right);
+            for (name, content) in [(&left, "left\n"), (&right, "right\n")] {
+                repo.add_file(name, &shared, content);
+                repo.git_in_workspace(name, &["add", &shared]);
+                repo.git_in_workspace(name, &["commit", "-m", &format!("feat: {name}")]);
+                state.tracked_commit_oids.insert(repo.workspace_head(name));
+            }
+            state.conflict_pairs.push(ConflictPair {
+                left: left.clone(),
+                right: right.clone(),
+                shared_path: shared.clone(),
+                resolved: false,
+            });
+            Ok(format!("created conflicting pair {left}/{right}"))
+        }
+        ActionKind::ResolveConflictPair => {
+            let candidates: Vec<usize> = state
+                .conflict_pairs
+                .iter()
+                .enumerate()
+                .filter(|(_, pair)| !pair.resolved)
+                .map(|(idx, _)| idx)
+                .collect();
+            let idx = candidates[choose_index(rng, &candidates)];
+            let left = state.conflict_pairs[idx].left.clone();
+            let right = state.conflict_pairs[idx].right.clone();
+            let shared_path = state.conflict_pairs[idx].shared_path.clone();
+            let conflicts = parse_json(
+                &repo.maw_ok(&["ws", "conflicts", &left, &right, "--format", "json"]),
+                "conflicts json",
+            )?;
+            let to_fix = conflicts["to_fix"]
+                .as_str()
+                .ok_or_else(|| format!("missing to_fix in conflicts JSON: {conflicts}"))?;
+            let mut args: Vec<&str> = to_fix.split_whitespace().collect();
+            if args.first().copied() == Some("maw") {
+                args.remove(0);
+            }
+            repo.maw_ok(&args);
+            if repo.read_file("default", &shared_path).as_deref() != Some("left\n") {
+                return Err(format!(
+                    "default missing resolved conflict content: {to_fix}"
+                ));
+            }
+            state.conflict_pairs[idx].resolved = true;
+            Ok(format!("resolved {left} vs {right}"))
+        }
+        ActionKind::CreateRecoverable => {
+            let source = state.names.ws("recover");
+            let committed_path = state.names.path("recover-committed");
+            let snapshot_path = state.names.path("recover-snapshot");
+            repo.create_workspace(&source);
+            repo.add_file(&source, &committed_path, "baseline\n");
+            repo.git_in_workspace(&source, &["add", "-A"]);
+            repo.git_in_workspace(&source, &["commit", "-m", &format!("feat: {source}")]);
+            state
+                .tracked_commit_oids
+                .insert(repo.workspace_head(&source));
+            repo.add_file(&source, &snapshot_path, "snapshot\n");
+            repo.maw_ok(&["ws", "destroy", &source, "--force"]);
+            state.recover_cases.push(RecoverCase {
+                source: source.clone(),
+                committed_path,
+                snapshot_path,
+                restored_name: None,
+            });
+            Ok(format!("captured recovery snapshot for {source}"))
+        }
+        ActionKind::RecoverWorkspace => {
+            let candidates: Vec<usize> = state
+                .recover_cases
+                .iter()
+                .enumerate()
+                .filter(|(_, case)| case.restored_name.is_none())
+                .map(|(idx, _)| idx)
+                .collect();
+            let idx = candidates[choose_index(rng, &candidates)];
+            let source = state.recover_cases[idx].source.clone();
+            let committed_path = state.recover_cases[idx].committed_path.clone();
+            let snapshot_path = state.recover_cases[idx].snapshot_path.clone();
+            let restored = state.names.restored(&source);
+            let show = repo.maw_ok(&["ws", "recover", &source, "--show", &snapshot_path]);
+            if show != "snapshot\n" {
+                return Err(format!("unexpected recover --show output: {show:?}"));
+            }
+            repo.maw_ok(&["ws", "recover", &source, "--to", &restored]);
+            let restored_path = repo.workspace_path(&restored);
+            let tracked = git_output_in(&restored_path, &["ls-files", &snapshot_path])?;
+            if tracked.trim() != snapshot_path {
+                return Err(format!("restored snapshot path not tracked: {tracked:?}"));
+            }
+            let status = git_output_in(
+                &restored_path,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            )?;
+            if !status.trim().is_empty() {
+                return Err(format!("restored workspace should be clean, got: {status}"));
+            }
+            if repo.read_file(&restored, &committed_path).as_deref() != Some("baseline\n") {
+                return Err(format!(
+                    "restored workspace missing committed file {}",
+                    committed_path
+                ));
+            }
+            state.recover_cases[idx].restored_name = Some(restored.clone());
+            Ok(format!("restored {source} to {restored}"))
+        }
+        ActionKind::CreateChangeFlow => {
+            let change_id = state.names.change_id();
+            let worker = state.names.ws("change-worker");
+            let path = state.names.path("change-only");
+            repo.maw_ok(&[
+                "changes",
+                "create",
+                "Action Flow",
+                "--from",
+                "main",
+                "--id",
+                &change_id,
+                "--workspace",
+                &change_id,
+            ]);
+            repo.maw_ok(&["ws", "create", "--change", &change_id, &worker]);
+            repo.add_file(&worker, &path, "change branch\n");
+            repo.git_in_workspace(&worker, &["add", &path]);
+            repo.git_in_workspace(&worker, &["commit", "-m", "feat: change worker"]);
+            state
+                .tracked_commit_oids
+                .insert(repo.workspace_head(&worker));
+            repo.maw_ok(&[
+                "ws",
+                "merge",
+                &worker,
+                "--into",
+                &change_id,
+                "--destroy",
+                "--message",
+                "feat: merge into change",
+            ]);
+            if repo.read_file("default", &path).is_some() {
+                return Err(format!("change-only file leaked into default: {path}"));
+            }
+            state.change_only_paths.push(path);
+            state.change_flow_done = true;
+            Ok(format!("merged worker into change {change_id}"))
+        }
+        ActionKind::CreateAheadScenario => {
+            let ahead = state.names.ws("ahead");
+            let advancer = state.names.ws("adv");
+            let ahead_path = state.names.path("ahead");
+            let adv_path = state.names.path("adv");
+            repo.create_workspace(&ahead);
+            repo.create_workspace(&advancer);
+            for (name, path, content) in [
+                (&ahead, &ahead_path, "ahead\n"),
+                (&advancer, &adv_path, "advance\n"),
+            ] {
+                repo.add_file(name, path, content);
+                repo.git_in_workspace(name, &["add", path]);
+                repo.git_in_workspace(name, &["commit", "-m", &format!("feat: {name}")]);
+                state.tracked_commit_oids.insert(repo.workspace_head(name));
+            }
+            repo.maw_ok(&[
+                "ws",
+                "merge",
+                &advancer,
+                "--destroy",
+                "--message",
+                "feat: advance epoch",
+            ]);
+            state.sync_cases.push(SyncCase {
+                ahead: ahead.clone(),
+                validated: false,
+            });
+            Ok(format!("created stale-ahead sync case for {ahead}"))
+        }
+        ActionKind::SyncAll => {
+            let out = repo.maw_raw(&["ws", "sync", "--all"]);
+            if out.status.success() {
+                return Err(format!(
+                    "sync --all should fail when stale ahead cases exist\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !(stdout.contains("Result: INCOMPLETE")
+                && stdout.contains("skipped")
+                && stderr.contains("sync --all incomplete"))
+            {
+                return Err(format!(
+                    "sync --all incomplete contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
+                ));
+            }
+            let status = parse_json(
+                &repo.maw_ok(&["ws", "status", "--format", "json"]),
+                "status after sync",
+            )?;
+            for case in &mut state.sync_cases {
+                let ws_state = status["workspaces"]
+                    .as_array()
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find(|w| w["name"].as_str() == Some(case.ahead.as_str()))
+                    })
+                    .and_then(|w| w["state"].as_str())
+                    .unwrap_or_default();
+                if !ws_state.contains("stale") {
+                    return Err(format!(
+                        "{} should remain stale after skipped sync",
+                        case.ahead
+                    ));
+                }
+                case.validated = true;
+            }
+            Ok("validated sync --all incomplete path".to_string())
+        }
+        ActionKind::PushRemote => {
+            unreachable!("push is handled by run_action_dispatch")
+        }
+    }
+}
+
+fn git_output_in_root(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
+    git_output_in(repo.root(), args)
+}
+
+fn run_action_seed(seed: u64, max_steps: usize) -> ActionSeedResult {
+    let repo = TestRepo::new();
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut state = ActionState::default();
+    let mut trace = TraceLog::new(seed, max_steps);
+    let mut violations = Vec::new();
+
+    repo.seed_files(&[("README.md", "# action workflow dst\n")]);
+
+    for step in 0..max_steps {
+        let choices = applicable_actions(&state);
+        if choices.is_empty() {
+            break;
+        }
+        let action = choices[choose_index(&mut rng, &choices)];
+        match run_action_dispatch(&repo, &mut state, &mut rng, action) {
+            Ok(outcome) => {
+                trace.push(step, action, outcome);
+                if let Err(err) = common_invariants(&repo, &state, action.name()) {
+                    violations.push(err);
+                    break;
+                }
+            }
+            Err(err) => {
+                trace.push(step, action, format!("failed: {err}"));
+                violations.push(format!("{}: {err}", action.name()));
+                break;
+            }
+        }
+    }
+
+    if let Err(err) = git_integrity_ok(&repo) {
+        violations.push(err);
+    }
+
+    ActionSeedResult { trace, violations }
+}
+
+fn run_action_dispatch(
+    repo: &TestRepo,
+    state: &mut ActionState,
+    rng: &mut StdRng,
+    action: ActionKind,
+) -> Result<String, String> {
+    if matches!(action, ActionKind::PushRemote) && !state.remote_configured {
+        let out = repo.maw_raw(&["push"]);
+        if out.status.success() {
+            return Err("push should fail before origin exists".to_string());
+        }
+        if !String::from_utf8_lossy(&out.stderr).contains("No 'origin' remote is configured") {
+            return Err(format!(
+                "push stderr missing actionable remote guidance: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let remote_dir = repo.root().join("origin.git");
+        git_output_in_root(repo, &["init", "--bare", remote_dir.to_str().unwrap()])?;
+        git_output_in_root(
+            repo,
+            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        )?;
+        state.remote_configured = true;
+    }
+
+    if matches!(action, ActionKind::PushRemote) {
+        repo.maw_ok(&["push"]);
+        state.remote_pushed = true;
+        return Ok("push succeeded".to_string());
+    }
+
+    run_action(repo, state, rng, action)
+}
+
+struct ActionSeedResult {
+    trace: TraceLog,
+    violations: Vec<String>,
+}
+
+fn minimize_prefix(seed: u64, executed_steps: usize) -> usize {
+    (1..=executed_steps)
+        .find(|steps| !run_action_seed(seed, *steps).violations.is_empty())
+        .unwrap_or(executed_steps)
+}
+
+#[test]
+fn dst_action_sequences_preserve_contracts() {
+    let steps = step_limit().unwrap_or(10);
+    let seeds: Vec<u64> = if let Some(seed) = single_seed() {
+        vec![seed]
+    } else {
+        (0..trace_count(8))
+            .map(|i| BASE_SEED.wrapping_add(i))
+            .collect()
+    };
+
+    let mut failures = Vec::new();
+
+    for seed in seeds {
+        let result = run_action_seed(seed, steps);
+        if !result.violations.is_empty() {
+            result.trace.dump();
+            for violation in &result.violations {
+                eprintln!("  VIOLATION: {violation}");
+            }
+            let min_prefix = minimize_prefix(seed, result.trace.entries.len().max(1));
+            failures.push((seed, min_prefix, result.violations));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Action DST found failing seeds: {:?}. First replay: {}",
+        failures
+            .iter()
+            .map(|(seed, prefix, _)| format!("seed={seed}, prefix={prefix}"))
+            .collect::<Vec<_>>(),
+        failures.first().map_or_else(
+            || replay_command(BASE_SEED, steps),
+            |(seed, prefix, _)| replay_command(*seed, *prefix)
+        )
+    );
+}
+
+#[test]
+#[ignore = "Slow action-sequence sweep. Run with ACTION_DST_TRACES=32 cargo test --test action_workflow_dst -- --ignored --nocapture"]
+fn dst_action_sequences_preserve_contracts_long_run() {
+    let steps = step_limit().unwrap_or(14);
+    let seeds: Vec<u64> = if let Some(seed) = single_seed() {
+        vec![seed]
+    } else {
+        (0..trace_count(32))
+            .map(|i| BASE_SEED.wrapping_add(i))
+            .collect()
+    };
+
+    let mut failures = Vec::new();
+
+    for seed in seeds {
+        let result = run_action_seed(seed, steps);
+        if !result.violations.is_empty() {
+            result.trace.dump();
+            for violation in &result.violations {
+                eprintln!("  VIOLATION: {violation}");
+            }
+            let min_prefix = minimize_prefix(seed, result.trace.entries.len().max(1));
+            failures.push((seed, min_prefix, result.violations));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Action DST long run found failing seeds: {:?}. First replay: {}",
+        failures
+            .iter()
+            .map(|(seed, prefix, _)| format!("seed={seed}, prefix={prefix}"))
+            .collect::<Vec<_>>(),
+        failures.first().map_or_else(
+            || replay_command(BASE_SEED, steps),
+            |(seed, prefix, _)| replay_command(*seed, *prefix)
+        )
+    );
+}
