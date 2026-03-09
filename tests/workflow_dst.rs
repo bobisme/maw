@@ -8,6 +8,7 @@
 //! Replay a single failing seed:
 //! `WORKFLOW_DST_SEED=<seed> cargo test --test workflow_dst dst_seeded_workflows_preserve_contracts -- --exact --nocapture`
 
+mod dst_support;
 mod manifold_common;
 
 use std::collections::HashSet;
@@ -129,6 +130,10 @@ impl TraceLog {
         }
         eprintln!("Replay: {}", replay_command(self.seed));
         eprintln!("=== end trace ===");
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.entries.iter().map(ToString::to_string).collect()
     }
 }
 
@@ -645,6 +650,7 @@ fn run_workflow(
 struct SeedResult {
     trace: TraceLog,
     violations: Vec<String>,
+    artifact_bundle: Option<std::path::PathBuf>,
 }
 
 fn run_seed(seed: u64) -> SeedResult {
@@ -680,7 +686,25 @@ fn run_seed(seed: u64) -> SeedResult {
         violations.push(err);
     }
 
-    SeedResult { trace, violations }
+    let artifact_bundle = if violations.is_empty() {
+        None
+    } else {
+        Some(dst_support::write_failure_bundle(
+            "workflow-dst",
+            seed,
+            replay_command(seed),
+            None,
+            trace.lines(),
+            &violations,
+            &repo,
+        ))
+    };
+
+    SeedResult {
+        trace,
+        violations,
+        artifact_bundle,
+    }
 }
 
 #[test]
@@ -702,6 +726,9 @@ fn dst_seeded_workflows_preserve_contracts() {
             result.trace.dump();
             for violation in &result.violations {
                 eprintln!("  VIOLATION: {violation}");
+            }
+            if let Some(bundle) = &result.artifact_bundle {
+                eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, result.violations));
         }
@@ -739,6 +766,9 @@ fn dst_seeded_workflows_preserve_contracts_long_run() {
             result.trace.dump();
             for violation in &result.violations {
                 eprintln!("  VIOLATION: {violation}");
+            }
+            if let Some(bundle) = &result.artifact_bundle {
+                eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, result.violations));
         }

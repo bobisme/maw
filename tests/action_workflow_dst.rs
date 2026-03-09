@@ -5,6 +5,7 @@
 //! replay command and the smallest failing action prefix discovered by a simple
 //! prefix minimizer.
 
+mod dst_support;
 mod manifold_common;
 
 use std::collections::HashSet;
@@ -49,11 +50,16 @@ enum ActionKind {
     CreateWorkspace,
     CommitWorkspace,
     AnnotateWorkspace,
+    UndoWorkspace,
     MergeWorkspace,
     CreateConflictPair,
     ResolveConflictPair,
     CreateRecoverable,
     RecoverWorkspace,
+    RestoreWorkspace,
+    AttachOrphanDir,
+    CleanTargets,
+    PruneEmpty,
     CreateChangeFlow,
     CreateAheadScenario,
     SyncAll,
@@ -66,11 +72,16 @@ impl ActionKind {
             Self::CreateWorkspace => "create_workspace",
             Self::CommitWorkspace => "commit_workspace",
             Self::AnnotateWorkspace => "annotate_workspace",
+            Self::UndoWorkspace => "undo_workspace",
             Self::MergeWorkspace => "merge_workspace",
             Self::CreateConflictPair => "create_conflict_pair",
             Self::ResolveConflictPair => "resolve_conflict_pair",
             Self::CreateRecoverable => "create_recoverable",
             Self::RecoverWorkspace => "recover_workspace",
+            Self::RestoreWorkspace => "restore_workspace",
+            Self::AttachOrphanDir => "attach_orphan_dir",
+            Self::CleanTargets => "clean_targets",
+            Self::PruneEmpty => "prune_empty",
             Self::CreateChangeFlow => "create_change_flow",
             Self::CreateAheadScenario => "create_ahead_scenario",
             Self::SyncAll => "sync_all",
@@ -136,6 +147,10 @@ impl TraceLog {
         }
         eprintln!("Replay: {}", replay_command(self.seed, self.max_steps));
         eprintln!("=== end trace ===");
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.entries.iter().map(ToString::to_string).collect()
     }
 }
 
@@ -212,6 +227,11 @@ struct ActionState {
     remote_configured: bool,
     remote_pushed: bool,
     change_flow_done: bool,
+    undo_done: bool,
+    restore_done: bool,
+    attach_done: bool,
+    clean_done: bool,
+    prune_done: bool,
 }
 
 impl Default for ActionState {
@@ -227,6 +247,11 @@ impl Default for ActionState {
             remote_configured: false,
             remote_pushed: false,
             change_flow_done: false,
+            undo_done: false,
+            restore_done: false,
+            attach_done: false,
+            clean_done: false,
+            prune_done: false,
         }
     }
 }
@@ -325,6 +350,9 @@ fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
     if state.conflict_pairs.iter().any(|pair| !pair.resolved) {
         return vec![ActionKind::ResolveConflictPair];
     }
+    if state.sync_cases.iter().any(|case| !case.validated) {
+        return vec![ActionKind::SyncAll];
+    }
     if state.actors.iter().any(|ws| !ws.merged && ws.committed) {
         return vec![ActionKind::MergeWorkspace];
     }
@@ -381,6 +409,21 @@ fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
     }
     if state.sync_cases.iter().any(|case| !case.validated) {
         actions.push(ActionKind::SyncAll);
+    }
+    if !state.undo_done {
+        actions.push(ActionKind::UndoWorkspace);
+    }
+    if !state.restore_done {
+        actions.push(ActionKind::RestoreWorkspace);
+    }
+    if !state.attach_done {
+        actions.push(ActionKind::AttachOrphanDir);
+    }
+    if !state.clean_done {
+        actions.push(ActionKind::CleanTargets);
+    }
+    if !state.prune_done {
+        actions.push(ActionKind::PruneEmpty);
     }
     if !state.remote_pushed {
         actions.push(ActionKind::PushRemote);
@@ -608,6 +651,126 @@ fn run_action(
             state.recover_cases[idx].restored_name = Some(restored.clone());
             Ok(format!("restored {source} to {restored}"))
         }
+        ActionKind::RestoreWorkspace => {
+            let name = state.names.ws("restore");
+            let path = state.names.path("restore");
+            repo.create_workspace(&name);
+            repo.add_file(&name, &path, "throwaway\n");
+            repo.maw_ok(&["ws", "destroy", &name, "--force"]);
+            repo.maw_ok(&["ws", "restore", &name]);
+            if !repo.workspace_exists(&name) {
+                return Err(format!("restore should recreate workspace {name}"));
+            }
+            if repo.read_file(&name, &path).is_some() {
+                return Err(format!(
+                    "restore should not replay destroyed local file into fresh workspace: {path}"
+                ));
+            }
+            state.restore_done = true;
+            Ok(format!("restored workspace {name} at current epoch"))
+        }
+        ActionKind::UndoWorkspace => {
+            let name = state.names.ws("undo");
+            let path = state.names.path("undo");
+            repo.create_workspace(&name);
+            repo.add_file(&name, &path, "undo me\n");
+            repo.maw_ok(&["ws", "undo", &name]);
+            if repo.read_file(&name, &path).is_some() {
+                return Err(format!("undo should remove local file {path} from {name}"));
+            }
+            let history = parse_json(
+                &repo.maw_ok(&["ws", "history", &name, "--format", "json"]),
+                "undo history",
+            )?;
+            if !history["operations"].as_array().is_some_and(|ops| {
+                ops.iter()
+                    .any(|op| op["op_type"].as_str() == Some("compensate"))
+            }) {
+                return Err(format!("undo should record compensate op: {history}"));
+            }
+            state.undo_done = true;
+            Ok(format!("undid local changes in {name}"))
+        }
+        ActionKind::AttachOrphanDir => {
+            let name = state.names.ws("attach");
+            let path = state.names.path("attach");
+            let ws_path = repo.workspace_path(&name);
+            std::fs::create_dir_all(ws_path.join("sim"))
+                .map_err(|e| format!("create orphan dir structure failed: {e}"))?;
+            std::fs::write(ws_path.join(&path), "orphaned content\n")
+                .map_err(|e| format!("write orphan file failed: {e}"))?;
+            repo.maw_ok(&["ws", "attach", &name, "-r", "main"]);
+            if !repo.workspace_exists(&name) {
+                return Err(format!("attach should track orphaned directory {name}"));
+            }
+            if repo.read_file(&name, &path).as_deref() != Some("orphaned content\n") {
+                return Err(format!(
+                    "attach should preserve orphaned file contents: {path}"
+                ));
+            }
+            let status = git_output_in(
+                &repo.workspace_path(&name),
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            )?;
+            if status.trim().is_empty() {
+                return Err(format!(
+                    "attached workspace should expose preserved local differences, got clean status"
+                ));
+            }
+            state.attach_done = true;
+            Ok(format!("attached orphaned directory {name}"))
+        }
+        ActionKind::CleanTargets => {
+            let clean_ws = state.names.ws("clean");
+            repo.create_workspace(&clean_ws);
+            let default_target = repo.default_workspace().join("target").join("dummy.txt");
+            let ws_target = repo
+                .workspace_path(&clean_ws)
+                .join("target")
+                .join("dummy.txt");
+            std::fs::create_dir_all(default_target.parent().expect("default target parent"))
+                .map_err(|e| format!("create default target failed: {e}"))?;
+            std::fs::create_dir_all(ws_target.parent().expect("workspace target parent"))
+                .map_err(|e| format!("create workspace target failed: {e}"))?;
+            std::fs::write(&default_target, "x\n")
+                .map_err(|e| format!("write default target file failed: {e}"))?;
+            std::fs::write(&ws_target, "x\n")
+                .map_err(|e| format!("write workspace target file failed: {e}"))?;
+            repo.maw_ok(&["ws", "clean", "--all"]);
+            if default_target
+                .parent()
+                .expect("default target dir")
+                .exists()
+                || ws_target.parent().expect("workspace target dir").exists()
+            {
+                return Err("ws clean --all should remove target directories".to_string());
+            }
+            state.clean_done = true;
+            Ok(format!("cleaned target directories including {clean_ws}"))
+        }
+        ActionKind::PruneEmpty => {
+            let first = state.names.ws("empty");
+            let second = state.names.ws("empty");
+            repo.create_workspace(&first);
+            repo.create_workspace(&second);
+            let preview = repo.maw_ok(&["ws", "prune", "--empty"]);
+            if !(preview.contains(&first) && preview.contains(&second)) {
+                return Err(format!(
+                    "prune preview should include both empty workspaces: {preview}"
+                ));
+            }
+            repo.maw_ok(&["ws", "prune", "--empty", "--force"]);
+            if repo.workspace_exists(&first) || repo.workspace_exists(&second) {
+                return Err(format!(
+                    "prune should delete empty workspaces {first} and {second}"
+                ));
+            }
+            if !repo.workspace_exists("default") {
+                return Err("prune should never remove default workspace".to_string());
+            }
+            state.prune_done = true;
+            Ok(format!("pruned empty workspaces {first} and {second}"))
+        }
         ActionKind::CreateChangeFlow => {
             let change_id = state.names.change_id();
             let worker = state.names.ws("change-worker");
@@ -688,12 +851,14 @@ fn run_action(
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            if !(stdout.contains("Result: INCOMPLETE")
+            if !(stdout.contains("Results:")
                 && stdout.contains("skipped")
-                && stderr.contains("sync --all incomplete"))
+                && (stdout.contains("Result: INCOMPLETE") || stdout.contains("Errors:"))
+                && (stderr.contains("sync --all incomplete")
+                    || stderr.contains("sync --all failed")))
             {
                 return Err(format!(
-                    "sync --all incomplete contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
+                    "sync --all contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
                 ));
             }
             let status = parse_json(
@@ -729,7 +894,12 @@ fn git_output_in_root(repo: &TestRepo, args: &[&str]) -> Result<String, String> 
     git_output_in(repo.root(), args)
 }
 
-fn run_action_seed(seed: u64, max_steps: usize) -> ActionSeedResult {
+fn run_action_seed(
+    seed: u64,
+    max_steps: usize,
+    minimized_replay: Option<String>,
+    capture_bundle: bool,
+) -> ActionSeedResult {
     let repo = TestRepo::new();
     let mut rng = StdRng::seed_from_u64(seed);
     let mut state = ActionState::default();
@@ -764,7 +934,25 @@ fn run_action_seed(seed: u64, max_steps: usize) -> ActionSeedResult {
         violations.push(err);
     }
 
-    ActionSeedResult { trace, violations }
+    let artifact_bundle = if capture_bundle && !violations.is_empty() {
+        Some(dst_support::write_failure_bundle(
+            "action-workflow-dst",
+            seed,
+            replay_command(seed, max_steps),
+            minimized_replay,
+            trace.lines(),
+            &violations,
+            &repo,
+        ))
+    } else {
+        None
+    };
+
+    ActionSeedResult {
+        trace,
+        violations,
+        artifact_bundle,
+    }
 }
 
 fn run_action_dispatch(
@@ -805,11 +993,16 @@ fn run_action_dispatch(
 struct ActionSeedResult {
     trace: TraceLog,
     violations: Vec<String>,
+    artifact_bundle: Option<std::path::PathBuf>,
 }
 
 fn minimize_prefix(seed: u64, executed_steps: usize) -> usize {
     (1..=executed_steps)
-        .find(|steps| !run_action_seed(seed, *steps).violations.is_empty())
+        .find(|steps| {
+            !run_action_seed(seed, *steps, None, false)
+                .violations
+                .is_empty()
+        })
         .unwrap_or(executed_steps)
 }
 
@@ -827,13 +1020,18 @@ fn dst_action_sequences_preserve_contracts() {
     let mut failures = Vec::new();
 
     for seed in seeds {
-        let result = run_action_seed(seed, steps);
+        let result = run_action_seed(seed, steps, None, false);
         if !result.violations.is_empty() {
             result.trace.dump();
             for violation in &result.violations {
                 eprintln!("  VIOLATION: {violation}");
             }
             let min_prefix = minimize_prefix(seed, result.trace.entries.len().max(1));
+            let artifact =
+                run_action_seed(seed, steps, Some(replay_command(seed, min_prefix)), true);
+            if let Some(bundle) = &artifact.artifact_bundle {
+                eprintln!("  ARTIFACT: {}", bundle.display());
+            }
             failures.push((seed, min_prefix, result.violations));
         }
     }
@@ -867,13 +1065,18 @@ fn dst_action_sequences_preserve_contracts_long_run() {
     let mut failures = Vec::new();
 
     for seed in seeds {
-        let result = run_action_seed(seed, steps);
+        let result = run_action_seed(seed, steps, None, false);
         if !result.violations.is_empty() {
             result.trace.dump();
             for violation in &result.violations {
                 eprintln!("  VIOLATION: {violation}");
             }
             let min_prefix = minimize_prefix(seed, result.trace.entries.len().max(1));
+            let artifact =
+                run_action_seed(seed, steps, Some(replay_command(seed, min_prefix)), true);
+            if let Some(bundle) = &artifact.artifact_bundle {
+                eprintln!("  ARTIFACT: {}", bundle.display());
+            }
             failures.push((seed, min_prefix, result.violations));
         }
     }
