@@ -65,9 +65,10 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
   - `cargo test -p maw-workspaces --test workflow_dst -- --ignored --nocapture`
   - `cargo test -p maw-workspaces --test action_workflow_dst -- --ignored --nocapture`
 - Single-seed replay:
-  - `WORKFLOW_DST_SEED=<seed> cargo test -p maw-workspaces --test workflow_dst dst_seeded_workflows_preserve_contracts -- --exact --nocapture`
-  - `ACTION_DST_SEED=<seed> ACTION_DST_STEPS=<prefix> cargo test -p maw-workspaces --test action_workflow_dst dst_action_sequences_preserve_contracts -- --exact --nocapture`
-- Bones-level protocol simulation:
+  - `maw dev sim replay --harness workflow --seed <seed> --print-only`
+  - `maw dev sim replay --harness action --seed <seed> --steps <prefix> --print-only`
+  - `maw dev sim replay --bundle /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
+- Bones-level protocol simulation stays separate:
   - `bn dev sim run --seeds 100 --format pretty`
   - `bn dev sim replay --seed <seed> --format pretty`
 

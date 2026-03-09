@@ -37,3 +37,16 @@ jobs:
           name: maw-dst-artifacts
           path: ${{ env.DST_ARTIFACT_DIR }}
           if-no-files-found: warn
+
+      - name: Publish DST replay summary
+        if: always()
+        run: |
+          {
+            echo "## Deterministic Simulation"
+            echo
+            echo "- Artifact: \\`maw-dst-artifacts\\`"
+            echo "- Workflow replay: \\`maw dev sim replay --harness workflow --seed <seed> --print-only\\`"
+            echo "- Action replay: \\`maw dev sim replay --harness action --seed <seed> --steps <prefix> --print-only\\`"
+            echo "- Bundle replay: \\`maw dev sim replay --bundle /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json\\`"
+            echo "- Bones protocol replay remains: \\`bn dev sim replay --seed <seed>\\`"
+          } >> "$GITHUB_STEP_SUMMARY"

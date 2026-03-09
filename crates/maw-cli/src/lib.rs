@@ -6,6 +6,7 @@
 pub mod agents;
 pub mod audit;
 pub mod changes;
+pub mod dev;
 pub mod doctor;
 pub mod epoch;
 pub mod epoch_gc;

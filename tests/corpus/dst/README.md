@@ -35,8 +35,12 @@ Drop failing trace files here as JSON. Each file is replayed on every CI run.
 ## Replay helpers
 
 - Repo harness failures print exact cargo replay commands and write artifact bundles under `/tmp/maw-dst-artifacts/`.
+- Repo/workspace DST replay now lives under maw itself:
+  - `maw dev sim replay --bundle /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
+  - `maw dev sim replay --harness workflow --seed <seed> --print-only`
+  - `maw dev sim replay --harness action --seed <seed> --steps <prefix> --print-only`
 - Bones protocol simulations use the built-in helper:
   - `bn dev sim run --seeds 100`
   - `bn dev sim replay --seed <seed>`
 
-Use the artifact bundle's replay command first; use `bn dev sim replay` when the failure came from the bones simulator rather than the repo DST harnesses.
+Use `maw dev sim replay` for repo/workspace DST failures. Use `bn dev sim replay` only when the failure came from the bones simulator itself.
