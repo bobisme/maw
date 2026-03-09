@@ -72,6 +72,13 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
 - Failing action-sequence minimization:
   - `maw dev sim shrink --seed <seed> --max-steps <prefix> --print-only`
   - `maw dev sim shrink --bundle /tmp/maw-dst-artifacts/action-workflow-dst/seed-.../bundle.json --print-only`
+- Bundle inspection:
+  - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
+  - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/success-.../summary.json --format json`
+- Machine-readable output:
+  - `maw dev sim run --harness all --format json --print-only`
+  - `maw dev sim replay --bundle <bundle> --format json --print-only`
+  - `maw dev sim shrink --seed <seed> --max-steps <prefix> --format json --print-only`
 - Bones-level protocol simulation stays separate:
   - `bn dev sim run --seeds 100 --format pretty`
   - `bn dev sim replay --seed <seed> --format pretty`

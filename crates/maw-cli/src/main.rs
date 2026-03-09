@@ -510,6 +510,20 @@ mod tests {
     }
 
     #[test]
+    fn dev_sim_inspect_parses_path_argument() {
+        let result = Cli::try_parse_from([
+            "maw",
+            "dev",
+            "sim",
+            "inspect",
+            "/tmp/bundle.json",
+            "--format",
+            "json",
+        ]);
+        assert!(result.is_ok(), "inspect should parse");
+    }
+
+    #[test]
     fn ws_merge_requires_into_flag() {
         let result = Cli::try_parse_from(["maw", "ws", "merge", "alice"]);
         assert!(result.is_err(), "merge should require --into");

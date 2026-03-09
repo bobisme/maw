@@ -191,3 +191,113 @@ fn dev_sim_shrink_prints_minimized_command_from_bundle() {
         "expected minimized command: {stdout}"
     );
 }
+
+#[test]
+fn dev_sim_inspect_prints_failure_bundle_summary() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("bundle.json");
+    fs::write(
+        &bundle,
+        r#"{
+          "harness": "action-workflow-dst",
+          "seed": 42,
+          "replay_command": "FULL",
+          "minimized_replay_command": "MIN",
+          "trace": ["step1", "step2"],
+          "violations": ["bad"],
+          "warnings": ["warning"],
+          "snapshots": {"repo_root": "/tmp/repo"}
+        }"#,
+    )
+    .unwrap();
+
+    let out = Command::new(maw_bin())
+        .args(["dev", "sim", "inspect", bundle.to_str().unwrap()])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "inspect should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("action-workflow-dst"),
+        "expected harness in inspect output: {stdout}"
+    );
+    assert!(
+        stdout.contains("Seed:        42"),
+        "expected seed in inspect output: {stdout}"
+    );
+    assert!(
+        stdout.contains("Min replay:  MIN"),
+        "expected minimized replay in inspect output: {stdout}"
+    );
+}
+
+#[test]
+fn dev_sim_replay_json_output_is_machine_readable() {
+    let dir = tempdir().unwrap();
+    let out = Command::new(maw_bin())
+        .args([
+            "dev",
+            "sim",
+            "replay",
+            "--harness",
+            "workflow",
+            "--seed",
+            "11",
+            "--print-only",
+            "--format",
+            "json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "json replay should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json["print_only"].as_bool(), Some(true));
+    assert!(
+        json["command"]
+            .as_str()
+            .is_some_and(|cmd| cmd.contains("WORKFLOW_DST_SEED=11"))
+    );
+}
+
+#[test]
+fn dev_sim_inspect_json_output_is_machine_readable() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("summary.json");
+    fs::write(
+        &bundle,
+        r#"{
+          "harness": "workflow-dst",
+          "settings": {"trace_count": 4},
+          "seeds": [
+            {"seed": 1, "steps_executed": 4, "warnings": []},
+            {"seed": 2, "steps_executed": 5, "warnings": ["w"]}
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let out = Command::new(maw_bin())
+        .args([
+            "dev",
+            "sim",
+            "inspect",
+            bundle.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "json inspect should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json["bundle_type"].as_str(), Some("success"));
+    assert_eq!(json["seed_count"].as_u64(), Some(2));
+    assert_eq!(json["total_warning_count"].as_u64(), Some(1));
+}

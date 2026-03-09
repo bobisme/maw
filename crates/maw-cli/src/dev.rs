@@ -4,8 +4,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::format::OutputFormat;
 use crate::workspace;
 
 #[derive(Subcommand)]
@@ -19,6 +20,9 @@ pub enum DevCommands {
 pub enum SimCommands {
     /// Run deterministic simulation campaigns for maw repo/workspace harnesses
     Run(RunArgs),
+
+    /// Inspect a DST success or failure bundle without replaying it
+    Inspect(InspectArgs),
 
     /// Replay a deterministic simulation failure from a bundle or explicit seed
     Replay(ReplayArgs),
@@ -48,6 +52,28 @@ pub struct RunArgs {
     /// Override execution directory
     #[arg(long)]
     cwd: Option<PathBuf>,
+
+    /// Output format: text (default) or json
+    #[arg(long)]
+    format: Option<OutputFormat>,
+
+    /// Shorthand for --format json
+    #[arg(long, hide = true, conflicts_with = "format")]
+    json: bool,
+}
+
+#[derive(Args)]
+pub struct InspectArgs {
+    /// DST success or failure bundle JSON
+    bundle: PathBuf,
+
+    /// Output format: text (default) or json
+    #[arg(long)]
+    format: Option<OutputFormat>,
+
+    /// Shorthand for --format json
+    #[arg(long, hide = true, conflicts_with = "format")]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -79,6 +105,14 @@ pub struct ReplayArgs {
     /// Override execution directory for replay commands
     #[arg(long)]
     cwd: Option<PathBuf>,
+
+    /// Output format: text (default) or json
+    #[arg(long)]
+    format: Option<OutputFormat>,
+
+    /// Shorthand for --format json
+    #[arg(long, hide = true, conflicts_with = "format")]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -102,6 +136,14 @@ pub struct ShrinkArgs {
     /// Override execution directory
     #[arg(long)]
     cwd: Option<PathBuf>,
+
+    /// Output format: text (default) or json
+    #[arg(long)]
+    format: Option<OutputFormat>,
+
+    /// Shorthand for --format json
+    #[arg(long, hide = true, conflicts_with = "format")]
+    json: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -125,6 +167,75 @@ struct ReplayBundle {
     minimized_replay_command: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct SuccessBundle {
+    harness: String,
+    settings: serde_json::Value,
+    seeds: Vec<SuccessSeedSummary>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct SuccessSeedSummary {
+    seed: u64,
+    steps_executed: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct InspectFailureBundle {
+    harness: String,
+    seed: u64,
+    replay_command: String,
+    minimized_replay_command: Option<String>,
+    trace: Vec<String>,
+    violations: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RunOutput {
+    commands: Vec<String>,
+    cwd: Option<String>,
+    print_only: bool,
+}
+
+#[derive(Serialize)]
+struct ReplayOutput {
+    command: String,
+    cwd: Option<String>,
+    print_only: bool,
+}
+
+#[derive(Serialize)]
+struct ShrinkOutput {
+    seed: u64,
+    max_steps: usize,
+    min_prefix: usize,
+    replay_command: String,
+    cwd: Option<String>,
+    print_only: bool,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "bundle_type", rename_all = "kebab-case")]
+enum InspectOutput {
+    Failure {
+        harness: String,
+        seed: u64,
+        replay_command: String,
+        minimized_replay_command: Option<String>,
+        trace_steps: usize,
+        violation_count: usize,
+        warning_count: usize,
+    },
+    Success {
+        harness: String,
+        seed_count: usize,
+        settings: serde_json::Value,
+        total_warning_count: usize,
+    },
+}
+
 pub fn run(cmd: &DevCommands) -> Result<()> {
     match cmd {
         DevCommands::Sim(cmd) => run_sim(cmd),
@@ -134,6 +245,7 @@ pub fn run(cmd: &DevCommands) -> Result<()> {
 fn run_sim(cmd: &SimCommands) -> Result<()> {
     match cmd {
         SimCommands::Run(args) => run_campaign(args),
+        SimCommands::Inspect(args) => inspect(args),
         SimCommands::Replay(args) => replay(args),
         SimCommands::Shrink(args) => shrink(args),
     }
@@ -141,6 +253,26 @@ fn run_sim(cmd: &SimCommands) -> Result<()> {
 
 fn run_campaign(args: &RunArgs) -> Result<()> {
     let commands = commands_for_run(args)?;
+    let format = OutputFormat::with_json_flag(args.format, args.json).unwrap_or(OutputFormat::Text);
+    let suggested_cwd = args
+        .cwd
+        .as_deref()
+        .map(Path::to_path_buf)
+        .or_else(|| default_replay_cwd().ok());
+
+    if format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&RunOutput {
+                commands: commands.clone(),
+                cwd: suggested_cwd.as_ref().map(|p| p.display().to_string()),
+                print_only: args.print_only,
+            })?
+        );
+        if args.print_only {
+            return Ok(());
+        }
+    }
 
     if args.print_only {
         println!("Deterministic simulation campaign commands:");
@@ -181,12 +313,106 @@ fn run_campaign(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+fn inspect(args: &InspectArgs) -> Result<()> {
+    let format = OutputFormat::with_json_flag(args.format, args.json).unwrap_or(OutputFormat::Text);
+    let text = std::fs::read_to_string(&args.bundle)
+        .with_context(|| format!("failed to read bundle {}", args.bundle.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("bundle {} is not valid JSON", args.bundle.display()))?;
+
+    let out = if value.get("settings").is_some() && value.get("seeds").is_some() {
+        let bundle: SuccessBundle = serde_json::from_value(value)?;
+        let warning_count: usize = bundle.seeds.iter().map(|seed| seed.warnings.len()).sum();
+        InspectOutput::Success {
+            harness: bundle.harness,
+            seed_count: bundle.seeds.len(),
+            settings: bundle.settings,
+            total_warning_count: warning_count,
+        }
+    } else {
+        let bundle: InspectFailureBundle = serde_json::from_value(value)?;
+        InspectOutput::Failure {
+            harness: bundle.harness,
+            seed: bundle.seed,
+            replay_command: bundle.replay_command,
+            minimized_replay_command: bundle.minimized_replay_command,
+            trace_steps: bundle.trace.len(),
+            violation_count: bundle.violations.len(),
+            warning_count: bundle.warnings.len(),
+        }
+    };
+
+    if format == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    match out {
+        InspectOutput::Failure {
+            harness,
+            seed,
+            replay_command,
+            minimized_replay_command,
+            trace_steps,
+            violation_count,
+            warning_count,
+        } => {
+            println!("Deterministic simulation failure bundle:");
+            println!("  Path:        {}", args.bundle.display());
+            println!("  Harness:     {harness}");
+            println!("  Seed:        {seed}");
+            println!("  Trace steps: {trace_steps}");
+            println!("  Violations:  {violation_count}");
+            println!("  Warnings:    {warning_count}");
+            println!("  Replay:      {replay_command}");
+            if let Some(minimized) = minimized_replay_command {
+                println!("  Min replay:  {minimized}");
+            }
+        }
+        InspectOutput::Success {
+            harness,
+            seed_count,
+            settings,
+            total_warning_count,
+        } => {
+            println!("Deterministic simulation success bundle:");
+            println!("  Path:         {}", args.bundle.display());
+            println!("  Harness:      {harness}");
+            println!("  Seeds:        {seed_count}");
+            println!("  Warnings:     {total_warning_count}");
+            println!("  Settings:     {}", serde_json::to_string(&settings)?);
+        }
+    }
+
+    Ok(())
+}
+
 fn replay(args: &ReplayArgs) -> Result<()> {
     let command = if let Some(bundle_path) = &args.bundle {
         command_from_bundle(bundle_path, args.full)?
     } else {
         command_from_explicit_args(args)?
     };
+    let format = OutputFormat::with_json_flag(args.format, args.json).unwrap_or(OutputFormat::Text);
+    let suggested_cwd = args
+        .cwd
+        .as_deref()
+        .map(Path::to_path_buf)
+        .or_else(|| default_replay_cwd().ok());
+
+    if format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ReplayOutput {
+                command: command.clone(),
+                cwd: suggested_cwd.as_ref().map(|p| p.display().to_string()),
+                print_only: args.print_only,
+            })?
+        );
+        if args.print_only {
+            return Ok(());
+        }
+    }
 
     if args.print_only {
         println!("Deterministic simulation replay command:");
@@ -237,6 +463,7 @@ fn shrink(args: &ShrinkArgs) -> Result<()> {
         let max_steps = args.max_steps.expect("clap requires max_steps with seed");
         (seed, max_steps)
     };
+    let format = OutputFormat::with_json_flag(args.format, args.json).unwrap_or(OutputFormat::Text);
 
     if args.print_only {
         let minimized = if let Some(bundle_path) = &args.bundle {
@@ -245,6 +472,20 @@ fn shrink(args: &ShrinkArgs) -> Result<()> {
             max_steps
         };
         let command = action_replay_command(seed, minimized);
+        if format == OutputFormat::Json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ShrinkOutput {
+                    seed,
+                    max_steps,
+                    min_prefix: minimized,
+                    replay_command: command,
+                    cwd: args.cwd.as_ref().map(|p| p.display().to_string()),
+                    print_only: true,
+                })?
+            );
+            return Ok(());
+        }
         println!("Deterministic simulation shrink result:");
         println!("  Seed:         {seed}");
         println!("  Max steps:    {max_steps}");
@@ -257,6 +498,20 @@ fn shrink(args: &ShrinkArgs) -> Result<()> {
     let cwd = resolve_replay_cwd(args.cwd.as_deref())?;
     let minimized = minimize_action_prefix(&cwd, seed, max_steps)?;
     let command = action_replay_command(seed, minimized);
+
+    if format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ShrinkOutput {
+                seed,
+                max_steps,
+                min_prefix: minimized,
+                replay_command: command.clone(),
+                cwd: Some(cwd.display().to_string()),
+                print_only: false,
+            })?
+        );
+    }
 
     println!("Deterministic simulation shrink result:");
     println!("  Seed:         {seed}");
@@ -546,6 +801,8 @@ mod tests {
             full: false,
             print_only: true,
             cwd: None,
+            format: None,
+            json: false,
         })
         .unwrap_err()
         .to_string();
@@ -561,6 +818,8 @@ mod tests {
             steps: Some(17),
             print_only: true,
             cwd: None,
+            format: None,
+            json: false,
         })
         .unwrap();
 
@@ -600,6 +859,8 @@ mod tests {
             max_steps: None,
             print_only: true,
             cwd: None,
+            format: None,
+            json: false,
         };
         assert_eq!(
             shrink_invocation_hint(&args, 3, 9),

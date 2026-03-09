@@ -41,6 +41,8 @@ Drop failing trace files here as JSON. Each file is replayed on every CI run.
   - `maw dev sim replay --harness workflow --seed <seed> --print-only`
   - `maw dev sim replay --harness action --seed <seed> --steps <prefix> --print-only`
   - `maw dev sim shrink --bundle /tmp/maw-dst-artifacts/action-workflow-dst/seed-.../bundle.json --print-only`
+  - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
+  - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/success-.../summary.json --format json`
 - Bones protocol simulations use the built-in helper:
   - `bn dev sim run --seeds 100`
   - `bn dev sim replay --seed <seed>`
