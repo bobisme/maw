@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::manifold_common::{TestRepo, maw_bin};
 
@@ -15,7 +16,22 @@ struct FailureBundle {
     minimized_replay_command: Option<String>,
     trace: Vec<String>,
     violations: Vec<String>,
+    warnings: Vec<String>,
     snapshots: RepoSnapshots,
+}
+
+#[derive(Serialize)]
+pub struct SuccessSeedSummary {
+    pub seed: u64,
+    pub steps_executed: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SuccessBundle {
+    harness: String,
+    settings: Value,
+    seeds: Vec<SuccessSeedSummary>,
 }
 
 #[derive(Serialize)]
@@ -127,6 +143,7 @@ pub fn write_failure_bundle(
     minimized_replay_command: Option<String>,
     trace_lines: Vec<String>,
     violations: &[String],
+    warnings: &[String],
     repo: &TestRepo,
 ) -> PathBuf {
     let dir = artifact_root()
@@ -141,11 +158,34 @@ pub fn write_failure_bundle(
         minimized_replay_command,
         trace: trace_lines,
         violations: violations.to_vec(),
+        warnings: warnings.to_vec(),
         snapshots: collect_snapshots(repo),
     };
 
     let bundle_json = serde_json::to_string_pretty(&bundle).expect("serialize DST failure bundle");
     let path = dir.join("bundle.json");
     fs::write(&path, bundle_json).expect("write DST failure bundle");
+    path
+}
+
+pub fn write_success_bundle(
+    harness: &str,
+    settings: Value,
+    seeds: Vec<SuccessSeedSummary>,
+) -> PathBuf {
+    let dir = artifact_root()
+        .join(harness)
+        .join(format!("success-{}", timestamp_millis()));
+    fs::create_dir_all(&dir).expect("create DST success artifact directory");
+
+    let bundle = SuccessBundle {
+        harness: harness.to_string(),
+        settings,
+        seeds,
+    };
+
+    let bundle_json = serde_json::to_string_pretty(&bundle).expect("serialize DST success bundle");
+    let path = dir.join("summary.json");
+    fs::write(&path, bundle_json).expect("write DST success bundle");
     path
 }

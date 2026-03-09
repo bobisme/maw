@@ -21,6 +21,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
+use serde_json::json;
 
 const BASE_SEED: u64 = 0x5EED_CAFE_7000_0001;
 
@@ -146,6 +147,7 @@ struct ScenarioState {
     tracked_commit_oids: HashSet<String>,
     change_only_paths: Vec<String>,
     remote_configured: bool,
+    warnings: Vec<String>,
 }
 
 impl ScenarioState {
@@ -176,6 +178,31 @@ impl ScenarioState {
 
 fn parse_json(text: &str, context: &str) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|e| format!("{context}: invalid JSON: {e}\n{text}"))
+}
+
+fn warning_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.trim_start().starts_with("WARNING:"))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn record_actionable_warnings(
+    warnings: &mut Vec<String>,
+    text: &str,
+    context: &str,
+) -> Result<(), String> {
+    let lines = warning_lines(text);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    if !text.contains("To fix:") {
+        return Err(format!(
+            "{context}: warning missing actionable To fix guidance\n{text}"
+        ));
+    }
+    warnings.extend(lines);
+    Ok(())
 }
 
 fn git_output(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
@@ -315,8 +342,10 @@ fn workflow_describe_annotate(
 ) -> Result<String, String> {
     let ws = state.ws_name("note");
     repo.create_workspace(&ws);
-    repo.maw_ok(&["ws", "describe", &ws, "wip: seeded workflow"]);
-    repo.maw_ok(&["ws", "annotate", &ws, "qa", r#"{"passed":1,"failed":0}"#]);
+    let describe = repo.maw_ok(&["ws", "describe", &ws, "wip: seeded workflow"]);
+    record_actionable_warnings(&mut state.warnings, &describe, "describe output")?;
+    let annotate = repo.maw_ok(&["ws", "annotate", &ws, "qa", r#"{"passed":1,"failed":0}"#]);
+    record_actionable_warnings(&mut state.warnings, &annotate, "annotate output")?;
 
     let history = parse_json(
         &repo.maw_ok(&["ws", "history", &ws, "--format", "json"]),
@@ -366,7 +395,7 @@ fn workflow_merge_happy_path(repo: &TestRepo, state: &mut ScenarioState) -> Resu
         "merge dry-run json",
     )?;
 
-    repo.maw_ok(&[
+    let merge_out = repo.maw_ok(&[
         "ws",
         "merge",
         &ws,
@@ -374,6 +403,7 @@ fn workflow_merge_happy_path(repo: &TestRepo, state: &mut ScenarioState) -> Resu
         "--message",
         &format!("feat: merge {ws}"),
     ]);
+    record_actionable_warnings(&mut state.warnings, &merge_out, "merge happy path output")?;
 
     if repo.read_file("default", &path).as_deref() != Some(content.as_str()) {
         return Err(format!("merged file missing from default: {path}"));
@@ -427,7 +457,12 @@ fn workflow_conflict_json_resolution(
         args.remove(0);
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    repo.maw_ok(&arg_refs);
+    let merge_out = repo.maw_ok(&arg_refs);
+    record_actionable_warnings(
+        &mut state.warnings,
+        &merge_out,
+        "conflict resolution output",
+    )?;
 
     if repo.read_file("default", &shared).as_deref() != Some("left\n") {
         return Err(format!(
@@ -529,7 +564,8 @@ fn workflow_recover_fidelity(repo: &TestRepo, state: &mut ScenarioState) -> Resu
     );
     repo.add_file(&ws, &snapshot_path, "recover me\n");
 
-    repo.maw_ok(&["ws", "destroy", &ws, "--force"]);
+    let destroy = repo.maw_ok(&["ws", "destroy", &ws, "--force"]);
+    record_actionable_warnings(&mut state.warnings, &destroy, "destroy output")?;
     let show = repo.maw_ok(&["ws", "recover", &ws, "--show", &snapshot_path]);
     if show != "recover me\n" {
         return Err(format!(
@@ -588,7 +624,7 @@ fn workflow_change_isolation(repo: &TestRepo, state: &mut ScenarioState) -> Resu
         "feat: change worker",
     );
 
-    repo.maw_ok(&[
+    let merge_out = repo.maw_ok(&[
         "ws",
         "merge",
         &worker,
@@ -598,6 +634,7 @@ fn workflow_change_isolation(repo: &TestRepo, state: &mut ScenarioState) -> Resu
         "--message",
         "feat: merge into change",
     ]);
+    record_actionable_warnings(&mut state.warnings, &merge_out, "change merge output")?;
 
     if repo.read_file("default", &path).is_some() {
         return Err(format!("change-only file leaked into default: {path}"));
@@ -651,6 +688,7 @@ struct SeedResult {
     trace: TraceLog,
     violations: Vec<String>,
     artifact_bundle: Option<std::path::PathBuf>,
+    warnings: Vec<String>,
 }
 
 fn run_seed(seed: u64) -> SeedResult {
@@ -696,6 +734,7 @@ fn run_seed(seed: u64) -> SeedResult {
             None,
             trace.lines(),
             &violations,
+            &state.warnings,
             &repo,
         ))
     };
@@ -704,6 +743,7 @@ fn run_seed(seed: u64) -> SeedResult {
         trace,
         violations,
         artifact_bundle,
+        warnings: state.warnings,
     }
 }
 
@@ -719,6 +759,7 @@ fn dst_seeded_workflows_preserve_contracts() {
     let total = seeds.len();
 
     let mut failures = Vec::new();
+    let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_seed(seed);
@@ -731,6 +772,12 @@ fn dst_seeded_workflows_preserve_contracts() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, result.violations));
+        } else {
+            summaries.push(dst_support::SuccessSeedSummary {
+                seed,
+                steps_executed: result.trace.entries.len(),
+                warnings: result.warnings,
+            });
         }
     }
 
@@ -759,6 +806,7 @@ fn dst_seeded_workflows_preserve_contracts_long_run() {
     };
 
     let mut failures = Vec::new();
+    let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_seed(seed);
@@ -771,7 +819,26 @@ fn dst_seeded_workflows_preserve_contracts_long_run() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, result.violations));
+        } else {
+            summaries.push(dst_support::SuccessSeedSummary {
+                seed,
+                steps_executed: result.trace.entries.len(),
+                warnings: result.warnings,
+            });
         }
+    }
+
+    if failures.is_empty() {
+        let summary = dst_support::write_success_bundle(
+            "workflow-dst",
+            json!({
+                "base_seed": BASE_SEED,
+                "trace_count": summaries.len(),
+                "mode": "long_run",
+            }),
+            summaries,
+        );
+        eprintln!("Workflow DST success artifact: {}", summary.display());
     }
 
     assert!(

@@ -17,6 +17,7 @@ use manifold_common::TestRepo;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
+use serde_json::json;
 
 const BASE_SEED: u64 = 0xAC71_0A5E_7000_0001;
 
@@ -232,6 +233,7 @@ struct ActionState {
     attach_done: bool,
     clean_done: bool,
     prune_done: bool,
+    warnings: Vec<String>,
 }
 
 impl Default for ActionState {
@@ -252,12 +254,38 @@ impl Default for ActionState {
             attach_done: false,
             clean_done: false,
             prune_done: false,
+            warnings: Vec::new(),
         }
     }
 }
 
 fn parse_json(text: &str, context: &str) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|e| format!("{context}: invalid JSON: {e}\n{text}"))
+}
+
+fn warning_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.trim_start().starts_with("WARNING:"))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn record_actionable_warnings(
+    warnings: &mut Vec<String>,
+    text: &str,
+    context: &str,
+) -> Result<(), String> {
+    let lines = warning_lines(text);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    if !text.contains("To fix:") {
+        return Err(format!(
+            "{context}: warning missing actionable To fix guidance\n{text}"
+        ));
+    }
+    warnings.extend(lines);
+    Ok(())
 }
 
 fn git_output_in(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -522,7 +550,7 @@ fn run_action(
             if check["ready"].as_bool() != Some(true) {
                 return Err(format!("merge check not ready: {check}"));
             }
-            repo.maw_ok(&[
+            let merge_out = repo.maw_ok(&[
                 "ws",
                 "merge",
                 &ws.name,
@@ -530,6 +558,7 @@ fn run_action(
                 "--message",
                 &format!("feat: merge {}", ws.name),
             ]);
+            record_actionable_warnings(&mut state.warnings, &merge_out, "merge workspace output")?;
             if let (Some(path), Some(content)) = (&ws.tracked_path, &ws.tracked_content)
                 && repo.read_file("default", path).as_deref() != Some(content.as_str())
             {
@@ -582,7 +611,8 @@ fn run_action(
             if args.first().copied() == Some("maw") {
                 args.remove(0);
             }
-            repo.maw_ok(&args);
+            let merge_out = repo.maw_ok(&args);
+            record_actionable_warnings(&mut state.warnings, &merge_out, "resolve conflict output")?;
             if repo.read_file("default", &shared_path).as_deref() != Some("left\n") {
                 return Err(format!(
                     "default missing resolved conflict content: {to_fix}"
@@ -603,7 +633,8 @@ fn run_action(
                 .tracked_commit_oids
                 .insert(repo.workspace_head(&source));
             repo.add_file(&source, &snapshot_path, "snapshot\n");
-            repo.maw_ok(&["ws", "destroy", &source, "--force"]);
+            let destroy = repo.maw_ok(&["ws", "destroy", &source, "--force"]);
+            record_actionable_warnings(&mut state.warnings, &destroy, "destroy output")?;
             state.recover_cases.push(RecoverCase {
                 source: source.clone(),
                 committed_path,
@@ -629,7 +660,8 @@ fn run_action(
             if show != "snapshot\n" {
                 return Err(format!("unexpected recover --show output: {show:?}"));
             }
-            repo.maw_ok(&["ws", "recover", &source, "--to", &restored]);
+            let recover = repo.maw_ok(&["ws", "recover", &source, "--to", &restored]);
+            record_actionable_warnings(&mut state.warnings, &recover, "recover output")?;
             let restored_path = repo.workspace_path(&restored);
             let tracked = git_output_in(&restored_path, &["ls-files", &snapshot_path])?;
             if tracked.trim() != snapshot_path {
@@ -656,8 +688,10 @@ fn run_action(
             let path = state.names.path("restore");
             repo.create_workspace(&name);
             repo.add_file(&name, &path, "throwaway\n");
-            repo.maw_ok(&["ws", "destroy", &name, "--force"]);
-            repo.maw_ok(&["ws", "restore", &name]);
+            let destroy = repo.maw_ok(&["ws", "destroy", &name, "--force"]);
+            record_actionable_warnings(&mut state.warnings, &destroy, "destroy before restore")?;
+            let restore = repo.maw_ok(&["ws", "restore", &name]);
+            record_actionable_warnings(&mut state.warnings, &restore, "restore output")?;
             if !repo.workspace_exists(&name) {
                 return Err(format!("restore should recreate workspace {name}"));
             }
@@ -699,7 +733,8 @@ fn run_action(
                 .map_err(|e| format!("create orphan dir structure failed: {e}"))?;
             std::fs::write(ws_path.join(&path), "orphaned content\n")
                 .map_err(|e| format!("write orphan file failed: {e}"))?;
-            repo.maw_ok(&["ws", "attach", &name, "-r", "main"]);
+            let attach = repo.maw_ok(&["ws", "attach", &name, "-r", "main"]);
+            record_actionable_warnings(&mut state.warnings, &attach, "attach output")?;
             if !repo.workspace_exists(&name) {
                 return Err(format!("attach should track orphaned directory {name}"));
             }
@@ -736,7 +771,8 @@ fn run_action(
                 .map_err(|e| format!("write default target file failed: {e}"))?;
             std::fs::write(&ws_target, "x\n")
                 .map_err(|e| format!("write workspace target file failed: {e}"))?;
-            repo.maw_ok(&["ws", "clean", "--all"]);
+            let clean = repo.maw_ok(&["ws", "clean", "--all"]);
+            record_actionable_warnings(&mut state.warnings, &clean, "clean output")?;
             if default_target
                 .parent()
                 .expect("default target dir")
@@ -754,12 +790,14 @@ fn run_action(
             repo.create_workspace(&first);
             repo.create_workspace(&second);
             let preview = repo.maw_ok(&["ws", "prune", "--empty"]);
+            record_actionable_warnings(&mut state.warnings, &preview, "prune preview output")?;
             if !(preview.contains(&first) && preview.contains(&second)) {
                 return Err(format!(
                     "prune preview should include both empty workspaces: {preview}"
                 ));
             }
-            repo.maw_ok(&["ws", "prune", "--empty", "--force"]);
+            let prune = repo.maw_ok(&["ws", "prune", "--empty", "--force"]);
+            record_actionable_warnings(&mut state.warnings, &prune, "prune output")?;
             if repo.workspace_exists(&first) || repo.workspace_exists(&second) {
                 return Err(format!(
                     "prune should delete empty workspaces {first} and {second}"
@@ -793,7 +831,7 @@ fn run_action(
             state
                 .tracked_commit_oids
                 .insert(repo.workspace_head(&worker));
-            repo.maw_ok(&[
+            let merge_out = repo.maw_ok(&[
                 "ws",
                 "merge",
                 &worker,
@@ -803,6 +841,7 @@ fn run_action(
                 "--message",
                 "feat: merge into change",
             ]);
+            record_actionable_warnings(&mut state.warnings, &merge_out, "change merge output")?;
             if repo.read_file("default", &path).is_some() {
                 return Err(format!("change-only file leaked into default: {path}"));
             }
@@ -826,7 +865,7 @@ fn run_action(
                 repo.git_in_workspace(name, &["commit", "-m", &format!("feat: {name}")]);
                 state.tracked_commit_oids.insert(repo.workspace_head(name));
             }
-            repo.maw_ok(&[
+            let merge_out = repo.maw_ok(&[
                 "ws",
                 "merge",
                 &advancer,
@@ -834,6 +873,7 @@ fn run_action(
                 "--message",
                 "feat: advance epoch",
             ]);
+            record_actionable_warnings(&mut state.warnings, &merge_out, "advance merge output")?;
             state.sync_cases.push(SyncCase {
                 ahead: ahead.clone(),
                 validated: false,
@@ -942,6 +982,7 @@ fn run_action_seed(
             minimized_replay,
             trace.lines(),
             &violations,
+            &state.warnings,
             &repo,
         ))
     } else {
@@ -952,6 +993,7 @@ fn run_action_seed(
         trace,
         violations,
         artifact_bundle,
+        warnings: state.warnings,
     }
 }
 
@@ -982,7 +1024,8 @@ fn run_action_dispatch(
     }
 
     if matches!(action, ActionKind::PushRemote) {
-        repo.maw_ok(&["push"]);
+        let push = repo.maw_ok(&["push"]);
+        record_actionable_warnings(&mut state.warnings, &push, "push output")?;
         state.remote_pushed = true;
         return Ok("push succeeded".to_string());
     }
@@ -994,6 +1037,7 @@ struct ActionSeedResult {
     trace: TraceLog,
     violations: Vec<String>,
     artifact_bundle: Option<std::path::PathBuf>,
+    warnings: Vec<String>,
 }
 
 fn minimize_prefix(seed: u64, executed_steps: usize) -> usize {
@@ -1018,6 +1062,7 @@ fn dst_action_sequences_preserve_contracts() {
     };
 
     let mut failures = Vec::new();
+    let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_action_seed(seed, steps, None, false);
@@ -1033,6 +1078,12 @@ fn dst_action_sequences_preserve_contracts() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, min_prefix, result.violations));
+        } else {
+            summaries.push(dst_support::SuccessSeedSummary {
+                seed,
+                steps_executed: result.trace.entries.len(),
+                warnings: result.warnings,
+            });
         }
     }
 
@@ -1063,6 +1114,7 @@ fn dst_action_sequences_preserve_contracts_long_run() {
     };
 
     let mut failures = Vec::new();
+    let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_action_seed(seed, steps, None, false);
@@ -1078,7 +1130,27 @@ fn dst_action_sequences_preserve_contracts_long_run() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, min_prefix, result.violations));
+        } else {
+            summaries.push(dst_support::SuccessSeedSummary {
+                seed,
+                steps_executed: result.trace.entries.len(),
+                warnings: result.warnings,
+            });
         }
+    }
+
+    if failures.is_empty() {
+        let summary = dst_support::write_success_bundle(
+            "action-workflow-dst",
+            json!({
+                "base_seed": BASE_SEED,
+                "trace_count": summaries.len(),
+                "mode": "long_run",
+                "step_limit": steps,
+            }),
+            summaries,
+        );
+        eprintln!("Action DST success artifact: {}", summary.display());
     }
 
     assert!(
