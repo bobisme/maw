@@ -1,0 +1,39 @@
+name: Deterministic Simulation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  dst:
+    runs-on: ubuntu-latest
+    env:
+      DST_ARTIFACT_DIR: ${{ runner.temp }}/maw-dst-artifacts
+      WORKFLOW_DST_TRACES: "12"
+      ACTION_DST_TRACES: "12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build maw binary for integration harnesses
+        run: cargo build -p maw-cli
+
+      - name: Run workflow-level DST sweep
+        run: cargo test -p maw-workspaces --test workflow_dst dst_seeded_workflows_preserve_contracts_long_run -- --ignored --nocapture
+
+      - name: Run action-level DST sweep
+        run: cargo test -p maw-workspaces --test action_workflow_dst dst_action_sequences_preserve_contracts_long_run -- --ignored --nocapture
+
+      - name: Upload DST artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maw-dst-artifacts
+          path: ${{ env.DST_ARTIFACT_DIR }}
+          if-no-files-found: warn

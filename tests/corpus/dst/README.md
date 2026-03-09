@@ -31,3 +31,12 @@ Drop failing trace files here as JSON. Each file is replayed on every CI run.
 1. Copy the seed and crash phase from a failing DST trace
 2. Create `tests/corpus/dst/<short-name>.json`
 3. Run `just incident-replay` to verify
+
+## Replay helpers
+
+- Repo harness failures print exact cargo replay commands and write artifact bundles under `/tmp/maw-dst-artifacts/`.
+- Bones protocol simulations use the built-in helper:
+  - `bn dev sim run --seeds 100`
+  - `bn dev sim replay --seed <seed>`
+
+Use the artifact bundle's replay command first; use `bn dev sim replay` when the failure came from the bones simulator rather than the repo DST harnesses.

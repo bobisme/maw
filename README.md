@@ -59,6 +59,20 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
 - **Stateright model checking** (`tests/formal_model.rs`): the merge protocol state machine (PREPARE → BUILD → VALIDATE → COMMIT → CLEANUP → DESTROY) is explored exhaustively for deadlock freedom, liveness, and safety invariants.
 - **Deterministic simulation testing**: seeded DST harness replays multi-agent merge traces with invariant oracles checking guarantees G1-G6 (epoch monotonicity, rewrite no-loss, no phantom files, destructive gate, merge atomicity, recovery completeness) on every step.
 
+### Running deterministic simulation
+
+- Repo DST sweeps:
+  - `cargo test -p maw-workspaces --test workflow_dst -- --ignored --nocapture`
+  - `cargo test -p maw-workspaces --test action_workflow_dst -- --ignored --nocapture`
+- Single-seed replay:
+  - `WORKFLOW_DST_SEED=<seed> cargo test -p maw-workspaces --test workflow_dst dst_seeded_workflows_preserve_contracts -- --exact --nocapture`
+  - `ACTION_DST_SEED=<seed> ACTION_DST_STEPS=<prefix> cargo test -p maw-workspaces --test action_workflow_dst dst_action_sequences_preserve_contracts -- --exact --nocapture`
+- Bones-level protocol simulation:
+  - `bn dev sim run --seeds 100 --format pretty`
+  - `bn dev sim replay --seed <seed> --format pretty`
+
+Both DST harnesses write replay artifacts under `/tmp/maw-dst-artifacts` by default, and CI uploads that directory as `maw-dst-artifacts` for seeded sweep jobs.
+
 ## Install
 
 ```bash
