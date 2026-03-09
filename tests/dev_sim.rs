@@ -115,3 +115,79 @@ fn dev_sim_replay_rejects_success_summary_bundle() {
         "expected actionable summary error, got: {stderr}"
     );
 }
+
+#[test]
+fn dev_sim_run_prints_campaign_commands() {
+    let dir = tempdir().unwrap();
+    let out = Command::new(maw_bin())
+        .args([
+            "dev",
+            "sim",
+            "run",
+            "--harness",
+            "all",
+            "--seeds",
+            "5",
+            "--steps",
+            "9",
+            "--print-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "run print-only should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WORKFLOW_DST_TRACES=5"),
+        "missing workflow campaign: {stdout}"
+    );
+    assert!(
+        stdout.contains("ACTION_DST_TRACES=5"),
+        "missing action campaign: {stdout}"
+    );
+    assert!(
+        stdout.contains("ACTION_DST_STEPS=9"),
+        "missing action step limit: {stdout}"
+    );
+}
+
+#[test]
+fn dev_sim_shrink_prints_minimized_command_from_bundle() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("bundle.json");
+    fs::write(
+        &bundle,
+        r#"{
+          "harness": "action-workflow-dst",
+          "seed": 99,
+          "replay_command": "ACTION_DST_SEED=99 ACTION_DST_STEPS=12 cargo test foo",
+          "minimized_replay_command": "ACTION_DST_SEED=99 ACTION_DST_STEPS=4 cargo test foo"
+        }"#,
+    )
+    .unwrap();
+
+    let out = Command::new(maw_bin())
+        .args([
+            "dev",
+            "sim",
+            "shrink",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--print-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "shrink print-only should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Min prefix:   4"),
+        "expected minimized prefix: {stdout}"
+    );
+    assert!(
+        stdout.contains("ACTION_DST_SEED=99 ACTION_DST_STEPS=4"),
+        "expected minimized command: {stdout}"
+    );
+}

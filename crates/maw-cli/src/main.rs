@@ -481,6 +481,35 @@ mod tests {
     }
 
     #[test]
+    fn dev_sim_run_parses_all_harness_mode() {
+        let result = Cli::try_parse_from([
+            "maw",
+            "dev",
+            "sim",
+            "run",
+            "--harness",
+            "all",
+            "--seeds",
+            "5",
+        ]);
+        assert!(result.is_ok(), "run should parse");
+    }
+
+    #[test]
+    fn dev_sim_shrink_parses_bundle_mode() {
+        let result = Cli::try_parse_from([
+            "maw",
+            "dev",
+            "sim",
+            "shrink",
+            "--bundle",
+            "/tmp/bundle.json",
+            "--print-only",
+        ]);
+        assert!(result.is_ok(), "shrink bundle mode should parse");
+    }
+
+    #[test]
     fn ws_merge_requires_into_flag() {
         let result = Cli::try_parse_from(["maw", "ws", "merge", "alice"]);
         assert!(result.is_err(), "merge should require --into");
