@@ -153,6 +153,42 @@ fn dev_sim_run_prints_campaign_commands() {
 }
 
 #[test]
+fn dev_sim_run_json_output_includes_results_array() {
+    let dir = tempdir().unwrap();
+    let out = Command::new(maw_bin())
+        .args([
+            "dev",
+            "sim",
+            "run",
+            "--harness",
+            "all",
+            "--seeds",
+            "5",
+            "--steps",
+            "9",
+            "--print-only",
+            "--format",
+            "json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "json run should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json["print_only"].as_bool(), Some(true));
+    assert!(
+        json["commands"].is_array(),
+        "expected commands array: {stdout}"
+    );
+    assert!(
+        json["results"].is_array(),
+        "expected results array: {stdout}"
+    );
+}
+
+#[test]
 fn dev_sim_shrink_prints_minimized_command_from_bundle() {
     let dir = tempdir().unwrap();
     let bundle = dir.path().join("bundle.json");
@@ -300,4 +336,89 @@ fn dev_sim_inspect_json_output_is_machine_readable() {
     assert_eq!(json["bundle_type"].as_str(), Some("success"));
     assert_eq!(json["seed_count"].as_u64(), Some(2));
     assert_eq!(json["total_warning_count"].as_u64(), Some(1));
+}
+
+#[test]
+fn dev_sim_inspect_latest_uses_newest_artifact() {
+    let dir = tempdir().unwrap();
+    let artifact_root = dir.path().join("artifacts");
+    let older = artifact_root.join("workflow-dst").join("success-1");
+    let newer = artifact_root.join("action-workflow-dst").join("seed-2-999");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::create_dir_all(&newer).unwrap();
+    fs::write(
+        older.join("summary.json"),
+        r#"{"harness":"workflow-dst","settings":{"trace_count":1},"seeds":[]}"#,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    fs::write(
+        newer.join("bundle.json"),
+        r#"{
+          "harness":"action-workflow-dst",
+          "seed":77,
+          "replay_command":"FULL",
+          "minimized_replay_command":"MIN",
+          "trace":[],
+          "violations":["bad"],
+          "warnings":[],
+          "snapshots":{"repo_root":"/tmp/repo"}
+        }"#,
+    )
+    .unwrap();
+
+    let out = Command::new(maw_bin())
+        .env("DST_ARTIFACT_DIR", &artifact_root)
+        .args(["dev", "sim", "inspect", "--latest", "--format", "json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "latest inspect should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json["bundle_type"].as_str(), Some("failure"));
+    assert_eq!(json["seed"].as_u64(), Some(77));
+    assert!(
+        json["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("bundle.json"))
+    );
+}
+
+#[test]
+fn dev_sim_run_json_reports_execution_results_and_artifact() {
+    let dir = tempdir().unwrap();
+    let artifact_root = dir.path().join("artifacts");
+    let out = Command::new(maw_bin())
+        .env("DST_ARTIFACT_DIR", &artifact_root)
+        .args([
+            "dev",
+            "sim",
+            "run",
+            "--harness",
+            "workflow",
+            "--seeds",
+            "1",
+            "--cwd",
+            env!("CARGO_MANIFEST_DIR"),
+            "--format",
+            "json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "json run should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    let results = json["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["harness"].as_str(), Some("workflow"));
+    assert_eq!(results[0]["success"].as_bool(), Some(true));
+    assert!(
+        results[0]["artifact_path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("summary.json"))
+    );
 }

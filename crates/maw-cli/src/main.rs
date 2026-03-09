@@ -524,6 +524,20 @@ mod tests {
     }
 
     #[test]
+    fn dev_sim_inspect_parses_latest_mode() {
+        let result = Cli::try_parse_from([
+            "maw",
+            "dev",
+            "sim",
+            "inspect",
+            "--latest",
+            "--harness",
+            "action",
+        ]);
+        assert!(result.is_ok(), "inspect latest mode should parse");
+    }
+
+    #[test]
     fn ws_merge_requires_into_flag() {
         let result = Cli::try_parse_from(["maw", "ws", "merge", "alice"]);
         assert!(result.is_err(), "merge should require --into");

@@ -1,6 +1,8 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
@@ -65,7 +67,15 @@ pub struct RunArgs {
 #[derive(Args)]
 pub struct InspectArgs {
     /// DST success or failure bundle JSON
-    bundle: PathBuf,
+    bundle: Option<PathBuf>,
+
+    /// Inspect the newest artifact bundle from the default DST artifact root
+    #[arg(long, conflicts_with = "bundle")]
+    latest: bool,
+
+    /// Limit latest-artifact lookup to one harness
+    #[arg(long, value_enum, requires = "latest")]
+    harness: Option<SimHarness>,
 
     /// Output format: text (default) or json
     #[arg(long)]
@@ -197,6 +207,16 @@ struct RunOutput {
     commands: Vec<String>,
     cwd: Option<String>,
     print_only: bool,
+    results: Vec<RunCommandResult>,
+}
+
+#[derive(Serialize)]
+struct RunCommandResult {
+    harness: String,
+    command: String,
+    success: bool,
+    status_code: Option<i32>,
+    artifact_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -220,6 +240,7 @@ struct ShrinkOutput {
 #[serde(tag = "bundle_type", rename_all = "kebab-case")]
 enum InspectOutput {
     Failure {
+        path: String,
         harness: String,
         seed: u64,
         replay_command: String,
@@ -229,6 +250,7 @@ enum InspectOutput {
         warning_count: usize,
     },
     Success {
+        path: String,
         harness: String,
         seed_count: usize,
         settings: serde_json::Value,
@@ -259,19 +281,83 @@ fn run_campaign(args: &RunArgs) -> Result<()> {
         .as_deref()
         .map(Path::to_path_buf)
         .or_else(|| default_replay_cwd().ok());
+    let harnesses = harness_sequence(args.harness);
 
     if format == OutputFormat::Json {
+        if args.print_only {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&RunOutput {
+                    commands: commands.clone(),
+                    cwd: suggested_cwd.as_ref().map(|p| p.display().to_string()),
+                    print_only: true,
+                    results: Vec::new(),
+                })?
+            );
+            return Ok(());
+        }
+
+        let cwd = resolve_replay_cwd(args.cwd.as_deref())?;
+        let before: Vec<Option<PathBuf>> = harnesses
+            .iter()
+            .map(|h| latest_artifact_for_harness(*h))
+            .collect::<Result<_>>()?;
+        let mut results = Vec::new();
+
+        for (idx, command) in commands.iter().enumerate() {
+            let out = Command::new("sh")
+                .args(["-lc", command])
+                .current_dir(&cwd)
+                .output()
+                .context("failed to execute simulation campaign")?;
+            let after = latest_artifact_for_harness(harnesses[idx])?;
+            let artifact_path = after.and_then(|path| {
+                if before[idx].as_ref() == Some(&path) {
+                    None
+                } else {
+                    Some(path.display().to_string())
+                }
+            });
+            results.push(RunCommandResult {
+                harness: harness_label(harnesses[idx]).to_string(),
+                command: command.clone(),
+                success: out.status.success(),
+                status_code: out.status.code(),
+                artifact_path,
+            });
+
+            if !out.status.success() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&RunOutput {
+                        commands: commands.clone(),
+                        cwd: Some(cwd.display().to_string()),
+                        print_only: false,
+                        results,
+                    })?
+                );
+                bail!(
+                    "Simulation campaign exited with status {}.",
+                    out.status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                );
+            }
+        }
+
         println!(
             "{}",
             serde_json::to_string_pretty(&RunOutput {
-                commands: commands.clone(),
-                cwd: suggested_cwd.as_ref().map(|p| p.display().to_string()),
-                print_only: args.print_only,
+                commands,
+                cwd: Some(cwd.display().to_string()),
+                print_only: false,
+                results,
             })?
         );
         if args.print_only {
             return Ok(());
         }
+        return Ok(());
     }
 
     if args.print_only {
@@ -315,15 +401,17 @@ fn run_campaign(args: &RunArgs) -> Result<()> {
 
 fn inspect(args: &InspectArgs) -> Result<()> {
     let format = OutputFormat::with_json_flag(args.format, args.json).unwrap_or(OutputFormat::Text);
-    let text = std::fs::read_to_string(&args.bundle)
-        .with_context(|| format!("failed to read bundle {}", args.bundle.display()))?;
+    let bundle_path = resolve_inspect_bundle(args)?;
+    let text = std::fs::read_to_string(&bundle_path)
+        .with_context(|| format!("failed to read bundle {}", bundle_path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("bundle {} is not valid JSON", args.bundle.display()))?;
+        .with_context(|| format!("bundle {} is not valid JSON", bundle_path.display()))?;
 
     let out = if value.get("settings").is_some() && value.get("seeds").is_some() {
         let bundle: SuccessBundle = serde_json::from_value(value)?;
         let warning_count: usize = bundle.seeds.iter().map(|seed| seed.warnings.len()).sum();
         InspectOutput::Success {
+            path: bundle_path.display().to_string(),
             harness: bundle.harness,
             seed_count: bundle.seeds.len(),
             settings: bundle.settings,
@@ -332,6 +420,7 @@ fn inspect(args: &InspectArgs) -> Result<()> {
     } else {
         let bundle: InspectFailureBundle = serde_json::from_value(value)?;
         InspectOutput::Failure {
+            path: bundle_path.display().to_string(),
             harness: bundle.harness,
             seed: bundle.seed,
             replay_command: bundle.replay_command,
@@ -349,6 +438,7 @@ fn inspect(args: &InspectArgs) -> Result<()> {
 
     match out {
         InspectOutput::Failure {
+            path,
             harness,
             seed,
             replay_command,
@@ -358,7 +448,7 @@ fn inspect(args: &InspectArgs) -> Result<()> {
             warning_count,
         } => {
             println!("Deterministic simulation failure bundle:");
-            println!("  Path:        {}", args.bundle.display());
+            println!("  Path:        {path}");
             println!("  Harness:     {harness}");
             println!("  Seed:        {seed}");
             println!("  Trace steps: {trace_steps}");
@@ -370,13 +460,14 @@ fn inspect(args: &InspectArgs) -> Result<()> {
             }
         }
         InspectOutput::Success {
+            path,
             harness,
             seed_count,
             settings,
             total_warning_count,
         } => {
             println!("Deterministic simulation success bundle:");
-            println!("  Path:         {}", args.bundle.display());
+            println!("  Path:         {path}");
             println!("  Harness:      {harness}");
             println!("  Seeds:        {seed_count}");
             println!("  Warnings:     {total_warning_count}");
@@ -619,6 +710,106 @@ fn commands_for_run(args: &RunArgs) -> Result<Vec<String>> {
         RunHarness::Action => vec![action],
         RunHarness::All => vec![workflow, action],
     })
+}
+
+fn harness_sequence(harness: RunHarness) -> Vec<RunHarness> {
+    match harness {
+        RunHarness::Workflow => vec![RunHarness::Workflow],
+        RunHarness::Action => vec![RunHarness::Action],
+        RunHarness::All => vec![RunHarness::Workflow, RunHarness::Action],
+    }
+}
+
+fn harness_label(harness: RunHarness) -> &'static str {
+    match harness {
+        RunHarness::Workflow => "workflow",
+        RunHarness::Action => "action",
+        RunHarness::All => "all",
+    }
+}
+
+fn harness_dir_name(harness: SimHarness) -> &'static str {
+    match harness {
+        SimHarness::Workflow => "workflow-dst",
+        SimHarness::Action => "action-workflow-dst",
+    }
+}
+
+fn artifact_root() -> PathBuf {
+    env::var_os("DST_ARTIFACT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("maw-dst-artifacts"))
+}
+
+fn latest_artifact_for_harness(harness: RunHarness) -> Result<Option<PathBuf>> {
+    let sim = match harness {
+        RunHarness::Workflow => SimHarness::Workflow,
+        RunHarness::Action => SimHarness::Action,
+        RunHarness::All => return Ok(None),
+    };
+    latest_artifact_path(Some(sim))
+}
+
+fn latest_artifact_path(harness: Option<SimHarness>) -> Result<Option<PathBuf>> {
+    let root = artifact_root();
+    let dirs: Vec<PathBuf> = match harness {
+        Some(h) => vec![root.join(harness_dir_name(h))],
+        None => vec![
+            root.join(harness_dir_name(SimHarness::Workflow)),
+            root.join(harness_dir_name(SimHarness::Action)),
+        ],
+    };
+
+    let mut latest: Option<(SystemTime, PathBuf)> = None;
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed to read artifact directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let candidate = if path.join("bundle.json").is_file() {
+                path.join("bundle.json")
+            } else if path.join("summary.json").is_file() {
+                path.join("summary.json")
+            } else {
+                continue;
+            };
+            let modified = candidate
+                .metadata()
+                .and_then(|m| m.modified())
+                .with_context(|| format!("failed to read metadata for {}", candidate.display()))?;
+            let replace = latest
+                .as_ref()
+                .is_none_or(|(current, _)| modified > *current);
+            if replace {
+                latest = Some((modified, candidate));
+            }
+        }
+    }
+    Ok(latest.map(|(_, path)| path))
+}
+
+fn resolve_inspect_bundle(args: &InspectArgs) -> Result<PathBuf> {
+    if let Some(bundle) = &args.bundle {
+        return Ok(bundle.clone());
+    }
+    if args.latest {
+        return latest_artifact_path(args.harness).and_then(|path| {
+            path.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No DST artifacts found under {}.\n  To fix: run maw dev sim run first, or pass an explicit bundle path.",
+                    artifact_root().display()
+                )
+            })
+        });
+    }
+    bail!("Inspect requires either <bundle> or --latest [--harness <workflow|action>].")
 }
 
 fn workflow_replay_command(seed: u64) -> String {

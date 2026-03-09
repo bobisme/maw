@@ -75,6 +75,8 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
 - Bundle inspection:
   - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
   - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/success-.../summary.json --format json`
+  - `maw dev sim inspect --latest --harness workflow`
+  - `maw dev sim inspect --latest --format json`
 - Machine-readable output:
   - `maw dev sim run --harness all --format json --print-only`
   - `maw dev sim replay --bundle <bundle> --format json --print-only`
