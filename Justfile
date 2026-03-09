@@ -54,3 +54,34 @@ check: fmt-check clippy test dst-fast contract-drift
 
 coverage:
   cargo llvm-cov
+
+# Repo-local deterministic simulation workflows
+sim-run harness='all' seeds='12' steps='14':
+  python3 scripts/dst.py run --harness {{harness}} --seeds {{seeds}} --steps {{steps}}
+
+sim-run-print harness='all' seeds='12' steps='14':
+  python3 scripts/dst.py run --harness {{harness}} --seeds {{seeds}} --steps {{steps}} --print-only
+
+sim-replay-workflow seed:
+  python3 scripts/dst.py replay --harness workflow --seed {{seed}} --print-only
+
+sim-replay-action seed steps:
+  python3 scripts/dst.py replay --harness action --seed {{seed}} --steps {{steps}} --print-only
+
+sim-replay-bundle bundle:
+  python3 scripts/dst.py replay --bundle {{bundle}} --print-only
+
+sim-shrink seed max_steps:
+  python3 scripts/dst.py shrink --seed {{seed}} --max-steps {{max_steps}} --print-only
+
+sim-shrink-bundle bundle:
+  python3 scripts/dst.py shrink --bundle {{bundle}} --print-only
+
+sim-inspect bundle:
+  python3 scripts/dst.py inspect {{bundle}}
+
+sim-inspect-latest:
+  python3 scripts/dst.py inspect --latest
+
+sim-inspect-latest-harness harness:
+  python3 scripts/dst.py inspect --latest --harness {{harness}}

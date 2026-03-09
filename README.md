@@ -62,25 +62,23 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
 ### Running deterministic simulation
 
 - Repo DST sweeps:
-  - `maw dev sim run --harness workflow --seeds 12 --print-only`
-  - `maw dev sim run --harness action --seeds 12 --steps 14 --print-only`
-  - `maw dev sim run --harness all --seeds 12 --steps 14 --print-only`
+  - `just sim-run-print workflow 12 14`
+  - `just sim-run-print action 12 14`
+  - `just sim-run-print all 12 14`
 - Single-seed replay:
-  - `maw dev sim replay --harness workflow --seed <seed> --print-only`
-  - `maw dev sim replay --harness action --seed <seed> --steps <prefix> --print-only`
-  - `maw dev sim replay --bundle /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
+  - `just sim-replay-workflow <seed>`
+  - `just sim-replay-action <seed> <prefix>`
+  - `just sim-replay-bundle /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
 - Failing action-sequence minimization:
-  - `maw dev sim shrink --seed <seed> --max-steps <prefix> --print-only`
-  - `maw dev sim shrink --bundle /tmp/maw-dst-artifacts/action-workflow-dst/seed-.../bundle.json --print-only`
+  - `just sim-shrink <seed> <prefix>`
+  - `just sim-shrink-bundle /tmp/maw-dst-artifacts/action-workflow-dst/seed-.../bundle.json`
 - Bundle inspection:
-  - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
-  - `maw dev sim inspect /tmp/maw-dst-artifacts/<harness>/success-.../summary.json --format json`
-  - `maw dev sim inspect --latest --harness workflow`
-  - `maw dev sim inspect --latest --format json`
-- Machine-readable output:
-  - `maw dev sim run --harness all --format json --print-only`
-  - `maw dev sim replay --bundle <bundle> --format json --print-only`
-  - `maw dev sim shrink --seed <seed> --max-steps <prefix> --format json --print-only`
+  - `just sim-inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
+  - `just sim-inspect-latest`
+  - `just sim-inspect-latest-harness workflow-dst`
+- Advanced usage:
+  - `python3 scripts/dst.py run --harness all --seeds 12 --steps 14 --format json --print-only`
+  - `python3 scripts/dst.py inspect --latest --format json`
 - Bones-level protocol simulation stays separate:
   - `bn dev sim run --seeds 100 --format pretty`
   - `bn dev sim replay --seed <seed> --format pretty`

@@ -19,16 +19,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: taiki-e/install-action@just
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build maw binary for integration harnesses
         run: cargo build -p maw-cli
 
       - name: Run workflow-level DST sweep
-        run: ./target/debug/maw dev sim run --harness workflow --seeds $WORKFLOW_DST_TRACES --print-only && ./target/debug/maw dev sim run --harness workflow --seeds $WORKFLOW_DST_TRACES
+        run: just sim-run-print workflow $WORKFLOW_DST_TRACES 14 && just sim-run workflow $WORKFLOW_DST_TRACES 14
 
       - name: Run action-level DST sweep
-        run: ./target/debug/maw dev sim run --harness action --seeds $ACTION_DST_TRACES --steps 14 --print-only && ./target/debug/maw dev sim run --harness action --seeds $ACTION_DST_TRACES --steps 14
+        run: just sim-run-print action $ACTION_DST_TRACES 14 && just sim-run action $ACTION_DST_TRACES 14
 
       - name: Upload DST artifacts
         if: always()
@@ -45,10 +47,10 @@ jobs:
             echo "## Deterministic Simulation"
             echo
             echo "- Artifact: \\`maw-dst-artifacts\\`"
-            echo "- Run sweeps: \\`maw dev sim run --harness all --seeds 12 --steps 14 --print-only\\`"
-            echo "- Workflow replay: \\`maw dev sim replay --harness workflow --seed <seed> --print-only\\`"
-            echo "- Action replay: \\`maw dev sim replay --harness action --seed <seed> --steps <prefix> --print-only\\`"
-            echo "- Action shrink: \\`maw dev sim shrink --bundle /tmp/maw-dst-artifacts/action-workflow-dst/seed-.../bundle.json --print-only\\`"
-            echo "- Bundle replay: \\`maw dev sim replay --bundle /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json\\`"
+            echo "- Run sweeps: \\`just sim-run-print all 12 14\\`"
+            echo "- Workflow replay: \\`just sim-replay-workflow <seed>\\`"
+            echo "- Action replay: \\`just sim-replay-action <seed> <prefix>\\`"
+            echo "- Action shrink: \\`just sim-shrink-bundle /tmp/maw-dst-artifacts/action-workflow-dst/seed-.../bundle.json\\`"
+            echo "- Bundle inspect: \\`just sim-inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json\\`"
             echo "- Bones protocol replay remains: \\`bn dev sim replay --seed <seed>\\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -5,7 +5,6 @@ use clap_complete::Shell;
 
 use maw_cli::agents;
 use maw_cli::changes;
-use maw_cli::dev;
 use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
@@ -91,10 +90,6 @@ enum Commands {
     /// Ensures .manifold/ directory structure is initialized.
     /// Safe to run multiple times.
     Init,
-
-    /// Developer utilities for deterministic simulation and debugging
-    #[command(subcommand)]
-    Dev(dev::DevCommands),
 
     /// Check system requirements and configuration
     ///
@@ -311,7 +306,6 @@ fn main() {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Changes(ref cmd) => changes::run(cmd),
-        Commands::Dev(ref cmd) => dev::run(cmd),
         Commands::Init => v2_init::run(),
         Commands::Upgrade => upgrade::run(),
         Commands::Doctor { format, json } => {
@@ -455,86 +449,6 @@ mod tests {
             has_changes,
             "expected 'changes' subcommand to be registered"
         );
-    }
-
-    #[test]
-    fn dev_subcommand_is_registered() {
-        let cmd = Cli::command();
-        let has_dev = cmd
-            .get_subcommands()
-            .any(|subcommand| subcommand.get_name() == "dev");
-        assert!(has_dev, "expected 'dev' subcommand to be registered");
-    }
-
-    #[test]
-    fn dev_sim_replay_parses_bundle_mode() {
-        let result = Cli::try_parse_from([
-            "maw",
-            "dev",
-            "sim",
-            "replay",
-            "--bundle",
-            "/tmp/bundle.json",
-            "--print-only",
-        ]);
-        assert!(result.is_ok(), "bundle replay should parse");
-    }
-
-    #[test]
-    fn dev_sim_run_parses_all_harness_mode() {
-        let result = Cli::try_parse_from([
-            "maw",
-            "dev",
-            "sim",
-            "run",
-            "--harness",
-            "all",
-            "--seeds",
-            "5",
-        ]);
-        assert!(result.is_ok(), "run should parse");
-    }
-
-    #[test]
-    fn dev_sim_shrink_parses_bundle_mode() {
-        let result = Cli::try_parse_from([
-            "maw",
-            "dev",
-            "sim",
-            "shrink",
-            "--bundle",
-            "/tmp/bundle.json",
-            "--print-only",
-        ]);
-        assert!(result.is_ok(), "shrink bundle mode should parse");
-    }
-
-    #[test]
-    fn dev_sim_inspect_parses_path_argument() {
-        let result = Cli::try_parse_from([
-            "maw",
-            "dev",
-            "sim",
-            "inspect",
-            "/tmp/bundle.json",
-            "--format",
-            "json",
-        ]);
-        assert!(result.is_ok(), "inspect should parse");
-    }
-
-    #[test]
-    fn dev_sim_inspect_parses_latest_mode() {
-        let result = Cli::try_parse_from([
-            "maw",
-            "dev",
-            "sim",
-            "inspect",
-            "--latest",
-            "--harness",
-            "action",
-        ]);
-        assert!(result.is_ok(), "inspect latest mode should parse");
     }
 
     #[test]
