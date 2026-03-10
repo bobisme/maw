@@ -76,9 +76,12 @@ The merge algebra and protocol aren't just specified -- they're machine-checked:
   - `just sim-inspect /tmp/maw-dst-artifacts/<harness>/seed-.../bundle.json`
   - `just sim-inspect-latest`
   - `just sim-inspect-latest-harness workflow-dst`
+  - `just sim-open-latest`
+  - `just sim-open-latest-harness action-workflow-dst`
 - Advanced usage:
   - `python3 scripts/dst.py run --harness all --seeds 12 --steps 14 --format json --print-only`
   - `python3 scripts/dst.py inspect --latest --format json`
+  - `python3 scripts/dst.py open-latest --harness workflow-dst`
 - Bones-level protocol simulation stays separate:
   - `bn dev sim run --seeds 100 --format pretty`
   - `bn dev sim replay --seed <seed> --format pretty`

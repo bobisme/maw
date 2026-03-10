@@ -200,6 +200,23 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_open_latest(args: argparse.Namespace) -> int:
+    path = latest_artifact(args.harness)
+    editor = os.environ.get("EDITOR")
+    if not editor:
+        print(path)
+        return 0
+
+    code = subprocess.run(["sh", "-lc", f'{editor} "{path}"'], cwd=ROOT).returncode
+    if code != 0:
+        raise SystemExit(
+            f"EDITOR command failed with exit code {code}.\n"
+            f"  To fix: verify $EDITOR works, or unset it to print the path directly.\n"
+            f"  Latest artifact: {path}"
+        )
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -234,6 +251,12 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--harness", choices=["workflow-dst", "action-workflow-dst"])
     inspect.add_argument("--format", choices=["text", "json"], default="text")
     inspect.set_defaults(func=cmd_inspect)
+
+    open_latest = sub.add_parser("open-latest")
+    open_latest.add_argument(
+        "--harness", choices=["workflow-dst", "action-workflow-dst"]
+    )
+    open_latest.set_defaults(func=cmd_open_latest)
     return p
 
 

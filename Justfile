@@ -85,3 +85,9 @@ sim-inspect-latest:
 
 sim-inspect-latest-harness harness:
   python3 scripts/dst.py inspect --latest --harness {{harness}}
+
+sim-open-latest:
+  python3 scripts/dst.py open-latest
+
+sim-open-latest-harness harness:
+  python3 scripts/dst.py open-latest --harness {{harness}}
