@@ -893,3 +893,7 @@
 1773099675196275	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyggQ		item.assign	bn-2eg5	{"action":"assign","agent":"1"}	blake3:7JslxU297cNOsi1FYTNh6bm5W-MPY_JkIuyL8mv55h0
 1773099675220436	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEygwQ		item.move	bn-2eg5	{"state":"done"}	blake3:zHTfQlUncAHd4gWuFrm5uukEEXszqTDoSNNsJ1SyYcY
 1773099675282363	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyhAQ		item.move	bn-2k5x	{"state":"done"}	blake3:qXkTD_qgQAbF_PQrLV7tnlHw-N2QnkLVwp13uY0JWDc
+1773110023682968	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyhQQ		item.create	bn-7j5y	{"description":"Add a repo-local helper that resolves the newest deterministic simulation artifact and either opens it with nvim or prints the path directly. Expose it through Just so contributors can jump to the freshest bundle without manually hunting through /tmp.","kind":"task","title":"Add latest DST artifact opener helper"}	blake3:UP0GmUqh2htal4W5SZKZE0dQ3Hi3_V8XMnuPuZGsrHg
+1773110034711727	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyhgQ		item.move	bn-7j5y	{"state":"doing"}	blake3:qh7Cd5Ocb1nuXzSkS-1eWjPivaYr1Y8FghL5vO42Fjw
+1773110034715769	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyhwQ		item.assign	bn-7j5y	{"action":"assign","agent":"1"}	blake3:zFtTH3QbAjl560U0jeXq1p6FINBuXpjbVZu4qPhKy8M
+1773110404028346	1	itc:v3:AWKTMnkmSTJyZnQAAAAAQa2vVqtdbcAAAAEyiAQ		item.move	bn-7j5y	{"state":"done"}	blake3:dWgHULpZLZIDN83wZKB03ImRP3T_BszmxXvrYTq0Uts
