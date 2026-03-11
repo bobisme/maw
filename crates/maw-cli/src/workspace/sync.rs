@@ -111,6 +111,7 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
                 return rebase_workspace(
                     &root,
                     &workspace_name,
+                    ws_status.base_epoch.as_str(),
                     current_epoch.as_str(),
                     &ws_path,
                     ahead,
@@ -257,6 +258,7 @@ pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
 fn rebase_workspace(
     root: &Path,
     ws_name: &str,
+    old_epoch: &str,
     new_epoch: &str,
     ws_path: &Path,
     ahead_count: u32,
@@ -281,11 +283,8 @@ fn rebase_workspace(
     );
     println!();
 
-    // Get the old epoch (workspace's current base).
-    let old_epoch = get_workspace_head(ws_path)?;
-
     // Collect commit SHAs to replay (oldest first).
-    let commits = list_commits_ahead(ws_path, &old_epoch)?;
+    let commits = list_commits_ahead(ws_path, old_epoch)?;
     if commits.is_empty() {
         println!("No commits to replay. Performing normal sync.");
         sync_worktree_to_epoch(root, ws_name, new_epoch)?;
@@ -425,7 +424,7 @@ fn rebase_workspace(
         // Write conflict metadata file.
         let rebase_meta = RebaseConflicts {
             conflicts,
-            rebase_from: old_epoch,
+            rebase_from: old_epoch.to_string(),
             rebase_to: new_epoch.to_string(),
         };
         write_rebase_conflicts(root, ws_name, &rebase_meta)?;
@@ -461,19 +460,6 @@ fn rebase_workspace(
     }
 
     Ok(())
-}
-
-/// Get the current HEAD OID for a workspace.
-fn get_workspace_head(ws_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run git rev-parse HEAD: {e}"))?;
-    if !output.status.success() {
-        bail!("Failed to get HEAD for workspace at {}", ws_path.display());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// List commits ahead of the epoch, oldest first (for replay order).

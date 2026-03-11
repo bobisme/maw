@@ -185,6 +185,80 @@ fn sync_all_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead()
 }
 
 #[test]
+fn sync_rebase_replays_commits_ahead_of_workspace_epoch() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "kept.txt", "workspace change\n");
+    repo.git_in_workspace("feature", &["add", "kept.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: workspace commit"]);
+    let original_commit = repo.workspace_head("feature");
+
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "epoch advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "feat: advance epoch"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let new_epoch = repo.current_epoch();
+    assert_ne!(original_commit, new_epoch, "epoch should have advanced");
+
+    let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "sync --rebase should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Rebasing workspace 'feature' (1 commit(s)) onto epoch")
+            && !stdout.contains("No commits to replay")
+            && stdout.contains("Replayed")
+            && stdout.contains("Rebase complete: 1 commit(s) replayed cleanly."),
+        "expected rebase replay output, got stdout: {stdout}"
+    );
+
+    let rebased_head = repo.workspace_head("feature");
+    assert_ne!(
+        rebased_head, new_epoch,
+        "rebased workspace head should stay ahead of epoch with replayed commit"
+    );
+    assert_eq!(
+        repo.read_file("feature", "kept.txt").as_deref(),
+        Some("workspace change\n"),
+        "workspace file should still be present after rebase"
+    );
+    assert_eq!(
+        repo.git_in_workspace(
+            "feature",
+            &["rev-list", "--count", &format!("{new_epoch}..HEAD")]
+        )
+        .trim(),
+        "1",
+        "rebased workspace should still have one commit ahead of the new epoch"
+    );
+    assert_eq!(
+        repo.git_in_workspace("feature", &["log", "-1", "--format=%s"])
+            .trim(),
+        "feat: workspace commit",
+        "rebased commit should preserve the original message"
+    );
+    assert!(
+        !workspace_state(&repo, "feature").contains("stale"),
+        "rebased workspace should no longer be stale"
+    );
+}
+
+#[test]
 fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
     let repo = TestRepo::new();
 
