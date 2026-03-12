@@ -50,6 +50,29 @@ fn exec_auto_syncs_stale_workspace_before_running_command() {
 }
 
 #[test]
+fn exec_skips_auto_sync_for_non_git_commands() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
+
+    let old_head = repo.workspace_head("alice");
+    assert_ne!(old_head, repo.current_epoch());
+
+    let out = repo.maw_raw(&["exec", "alice", "--", "cargo", "--version"]);
+    assert!(
+        out.status.success(),
+        "exec should still run non-git command\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let new_head = repo.workspace_head("alice");
+    assert_eq!(new_head, old_head);
+}
+
+#[test]
 fn sync_all_updates_multiple_stale_workspaces() {
     let repo = TestRepo::new();
 

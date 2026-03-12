@@ -130,8 +130,9 @@ enum Commands {
     /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
     /// needing persistent `cd`.
     ///
-    /// The workspace name is validated (no path traversal). Stale
-    /// workspaces are auto-synced before running the command.
+    /// The workspace name is validated (no path traversal). Git
+    /// commands auto-sync stale workspaces before running; other
+    /// commands run without syncing.
     ///
     /// Examples:
     ///   maw exec alice -- cargo test
@@ -359,7 +360,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{Cli, should_emit_migration_notice};
+    use super::{should_emit_migration_notice, Cli};
 
     #[test]
     fn emits_notice_for_jj_only_repo() {

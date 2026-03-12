@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 use tracing::instrument;
 
@@ -25,7 +25,9 @@ impl std::error::Error for ExitCodeError {}
 /// like `br`, `bv`, `crit`, `cargo`, etc. inside a workspace without
 /// needing persistent `cd`.
 ///
-/// The workspace name is validated (no path traversal).
+/// The workspace name is validated (no path traversal). Git commands auto-sync
+/// stale workspaces before execution; other commands run against the workspace
+/// as-is.
 ///
 /// Examples:
 ///   maw exec alice -- cargo test
@@ -39,6 +41,10 @@ pub struct ExecArgs {
     /// Command and arguments to run (after --)
     #[arg(last = true, required = true)]
     pub cmd: Vec<String>,
+}
+
+fn should_auto_sync(cmd: &str) -> bool {
+    matches!(cmd.rsplit(['/', '\\']).next(), Some("git" | "git.exe"))
 }
 
 #[instrument(skip(args), fields(workspace = %args.workspace, cmd = ?args.cmd))]
@@ -63,7 +69,9 @@ pub fn run(args: &ExecArgs) -> Result<()> {
         );
     }
 
-    workspace::auto_sync_if_stale(&args.workspace, &path)?;
+    if should_auto_sync(&args.cmd[0]) {
+        workspace::auto_sync_if_stale(&args.workspace, &path)?;
+    }
 
     let mut cmd = Command::new(&args.cmd[0]);
     cmd.args(&args.cmd[1..]).current_dir(&path);
@@ -82,4 +90,22 @@ pub fn run(args: &ExecArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_auto_sync;
+
+    #[test]
+    fn auto_syncs_git_commands() {
+        assert!(should_auto_sync("git"));
+        assert!(should_auto_sync("/usr/bin/git"));
+        assert!(should_auto_sync("C:\\Program Files\\Git\\bin\\git.exe"));
+    }
+
+    #[test]
+    fn skips_auto_sync_for_non_git_commands() {
+        assert!(!should_auto_sync("cargo"));
+        assert!(!should_auto_sync("sigil"));
+    }
 }
