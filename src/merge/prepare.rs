@@ -361,7 +361,7 @@ pub fn run_prepare_phase_with_epoch(
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::merge_state::{MergePhase, RecoveryOutcome, recover_from_merge_state};
+    use crate::merge_state::{recover_from_merge_state, MergePhase, RecoveryOutcome};
 
     fn test_epoch() -> EpochId {
         EpochId::new(&"a".repeat(40)).unwrap()
@@ -667,7 +667,7 @@ mod tests {
     fn setup_git_repo_with_epoch() -> (tempfile::TempDir, GitOid) {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
-        run_git(root, &["init"]);
+        run_git(root, &["init", "-b", "main"]);
         run_git(root, &["config", "user.name", "Test"]);
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);

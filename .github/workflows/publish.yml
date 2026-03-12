@@ -13,6 +13,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Build maw binary for integration harnesses
+        run: cargo build -p maw-cli --bin maw
+
       - name: Run tests
         run: cargo test
 

@@ -11,7 +11,7 @@ jobs:
   dst:
     runs-on: ubuntu-latest
     env:
-      DST_ARTIFACT_DIR: ${{ runner.temp }}/maw-dst-artifacts
+      DST_ARTIFACT_DIR: /tmp/maw-dst-artifacts
       WORKFLOW_DST_TRACES: "12"
       ACTION_DST_TRACES: "12"
     steps:
