@@ -2,6 +2,23 @@
 
 All notable changes to maw.
 
+## v0.54.0
+
+### Added
+- **Explicit changes workflow targets.** `maw changes` and related workspace flows now support clearer source/target selection so change-bound and trunk-bound work stay separated.
+- **Deterministic simulation tooling.** `maw dev sim` gained run, replay, inspect, shrink, JSON output, and latest-artifact helpers, with CI artifact archival to make seeded failures reproducible.
+- **DST artifact opener helpers.** Added shortcuts for opening the latest deterministic simulation artifacts without manually hunting through `/tmp/maw-dst-artifacts`.
+
+### Fixed
+- **Sync rebase preserves local commits.** `maw ws sync --rebase` now keeps commits ahead of the workspace epoch instead of dropping local work during stale-workspace recovery.
+- **`maw exec` skips stale auto-sync for non-git commands.** Auto-sync now only runs for `git` invocations, so tools like `sigil eval` can run against an existing stale workspace.
+- **Merge, sync, push, and JSON remediation contracts.** Diagnostics are more actionable and machine-readable payloads are more consistent across merge planning, sync failures, push checks, and workspace status/reporting.
+- **Cross-target contamination guards.** Trunk-targeted flows no longer accidentally absorb active change-lineage commits, and merge planning now honors explicit targets more reliably.
+- **Conflict recovery and restore fidelity.** Recovery, remediation, destroy, and mixed-target replay edge cases are handled more safely so agents keep a clearer path back to valid workspace state.
+
+### Changed
+- **Agent workflow docs moved to edict terminology.** Project guidance, prompts, and repo metadata now consistently use the edict/rite/seal/vessel naming scheme.
+
 ## v0.53.0
 
 ### Fixed
