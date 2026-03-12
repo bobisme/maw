@@ -219,6 +219,10 @@ impl TestRepo {
 
         // Push to remote so main exists there
         git_ok(&root, &["push", "-u", "origin", "main"]);
+        git_ok(
+            remote_dir.path(),
+            &["symbolic-ref", "HEAD", "refs/heads/main"],
+        );
 
         // Set bare mode
         git_ok(&root, &["config", "core.bare", "true"]);
