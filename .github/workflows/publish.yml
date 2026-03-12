@@ -19,7 +19,28 @@ jobs:
       - name: Run tests
         run: cargo test
 
-      - name: Publish to crates.io
-        run: cargo publish
+      - name: Publish crates to crates.io
+        run: |
+          wait_for_crate() {
+            crate="$1"
+            version="$2"
+            for _ in $(seq 1 30); do
+              if python -c 'import json, sys, urllib.request; crate, version = sys.argv[1:3]; data = json.load(urllib.request.urlopen(f"https://crates.io/api/v1/crates/{crate}", timeout=10)); raise SystemExit(0 if version in {item["num"] for item in data.get("versions", [])} else 1)' "$crate" "$version"
+              then
+                return 0
+              fi
+              sleep 10
+            done
+            echo "Timed out waiting for $crate $version on crates.io" >&2
+            return 1
+          }
+
+          cargo publish -p maw-git
+          wait_for_crate maw-git 0.54.0
+          cargo publish -p maw-core
+          wait_for_crate maw-core 0.54.0
+          cargo publish -p maw-assurance
+          wait_for_crate maw-assurance 0.54.0
+          cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

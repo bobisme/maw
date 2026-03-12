@@ -2,7 +2,6 @@
 name = "maw-assurance"
 version.workspace = true
 edition.workspace = true
-publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
