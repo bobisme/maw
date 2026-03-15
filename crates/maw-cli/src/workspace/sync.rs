@@ -167,6 +167,11 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
 
     println!();
     println!("Workspace synced successfully.");
+    if !rebase {
+        println!(
+            "  If you expected committed workspace changes to be replayed onto the new epoch, run: maw ws sync {workspace_name} --rebase"
+        );
+    }
 
     Ok(())
 }

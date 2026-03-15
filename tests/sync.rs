@@ -28,7 +28,13 @@ fn stale_workspace_detected_and_sync_clears_it() {
 
     assert!(workspace_state(&repo, "alice").contains("stale"));
 
-    repo.maw_ok(&["ws", "sync", "--all"]);
+    let out = repo.maw_ok(&["ws", "sync", "alice"]);
+    assert!(
+        out.contains("Workspace synced successfully.")
+            && out.contains("maw ws sync alice --rebase"),
+        "expected post-sync rebase hint, got stdout: {out}"
+    );
+
     assert!(!workspace_state(&repo, "alice").contains("stale"));
 }
 
