@@ -263,11 +263,13 @@ fn default_merge_drivers() -> Vec<MergeDriver> {
             match_glob: "Cargo.lock".to_owned(),
             kind: MergeDriverKind::Regenerate,
             command: Some("cargo generate-lockfile".to_owned()),
+            required: false,
         },
         MergeDriver {
             match_glob: "package-lock.json".to_owned(),
             kind: MergeDriverKind::Regenerate,
             command: Some("npm install --package-lock-only".to_owned()),
+            required: false,
         },
     ]
 }
@@ -472,6 +474,18 @@ pub struct MergeDriver {
 
     /// External command for `regenerate` drivers. Ignored for `ours/theirs`.
     pub command: Option<String>,
+
+    /// Whether a failure in this driver should block the merge.
+    ///
+    /// When `true` (the default for user-configured drivers), a regenerate
+    /// command failure is a hard error. When `false` (built-in defaults),
+    /// failures emit a warning and fall back to the normal merge resolution.
+    #[serde(default = "default_driver_required")]
+    pub required: bool,
+}
+
+const fn default_driver_required() -> bool {
+    true
 }
 
 /// Built-in merge driver kinds.

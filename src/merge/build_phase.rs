@@ -844,6 +844,8 @@ fn run_regenerate_drivers(
     create_temp_worktree(repo_root, candidate, worktree_path)?;
 
     let result = (|| -> Result<Vec<ResolvedChange>, BuildPhaseError> {
+        let mut succeeded_indices: BTreeSet<usize> = BTreeSet::new();
+
         for (index, paths) in regenerate_by_driver {
             let Some(driver) = compiled.iter().find(|d| d.index == *index) else {
                 return Err(BuildPhaseError::Driver(format!(
@@ -881,21 +883,36 @@ fn run_regenerate_drivers(
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(BuildPhaseError::Driver(format!(
-                    "regenerate command failed for [{}]: `{command}` (exit {:?}){}; treated as validation failure",
+
+                if driver.driver.required {
+                    return Err(BuildPhaseError::Driver(format!(
+                        "regenerate command failed for [{}]: `{command}` (exit {:?}){}\n  To skip: set required = false on this merge driver",
+                        touched,
+                        output.status.code(),
+                        if stderr.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {stderr}")
+                        }
+                    )));
+                }
+
+                eprintln!(
+                    "  WARNING: regenerate driver `{command}` failed for [{}] (exit {:?}), falling back to normal merge",
                     touched,
                     output.status.code(),
-                    if stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {stderr}")
-                    }
-                )));
+                );
+                continue;
             }
+
+            succeeded_indices.insert(*index);
         }
 
         let mut regenerated = Vec::new();
-        for paths in regenerate_by_driver.values() {
+        for (index, paths) in regenerate_by_driver {
+            if !succeeded_indices.contains(index) {
+                continue;
+            }
             for path in paths {
                 let full = worktree_path.join(path);
                 if full.is_file() {
@@ -2077,7 +2094,14 @@ command = "exit 19"
 
         let err = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("treated as validation failure"));
+        assert!(
+            msg.contains("regenerate command failed"),
+            "expected regenerate failure error, got: {msg}"
+        );
+        assert!(
+            msg.contains("required = false"),
+            "expected hint about required = false, got: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------

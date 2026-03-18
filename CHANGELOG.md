@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.55.0
+
+### Fixed
+- **Non-required merge drivers no longer block merges.** Built-in default regenerate drivers (`Cargo.lock`, `package-lock.json`) now have `required = false`. When the regenerate command fails (e.g., `npm install` unavailable or broken), the merge falls back to normal resolution with a warning instead of aborting. User-configured drivers still default to `required = true`.
+- **Merge rejects diverged default workspace.** When the target branch has direct commits ahead of the epoch (made outside maw), merge now fails early with a clear message to run `maw epoch sync` first. Previously, the merge would silently drop those commits from the epoch and leave their files as unstaged changes in default.
+
 ## v0.54.0
 
 ### Added

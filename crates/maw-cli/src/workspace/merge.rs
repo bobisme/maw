@@ -2373,6 +2373,24 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         )
     })?;
 
+    // Reject merge if default has direct commits ahead of epoch.
+    // Without this check, the merge creates a new epoch from the OLD epoch,
+    // and the direct commits' files appear as unstaged changes in default.
+    if target_change_id.is_none() {
+        if let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root) {
+            if epoch_oid.as_str() != branch_before_oid.as_str() {
+                bail!(
+                    "Target branch '{branch}' has diverged from the current epoch.\n\
+                     \n  Branch:  {}\n  Epoch:   {}\n\
+                     \n  Direct commits were made to {default_ws} outside of maw.\n\
+                     To fix: run `maw epoch sync` to absorb them into the epoch, then retry."
+                    , &branch_before_oid.as_str()[..12]
+                    , &epoch_oid.as_str()[..12]
+                );
+            }
+        }
+    }
+
     // Reject merging the default workspace
     if ws_to_merge.iter().any(|ws| ws == default_ws) {
         bail!(
