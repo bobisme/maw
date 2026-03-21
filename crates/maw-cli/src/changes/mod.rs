@@ -9,6 +9,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use tempfile::Builder;
 
+use maw_git::GitRepo as _;
+
 use crate::format::OutputFormat;
 use crate::workspace::{MawConfig, repo_root};
 
@@ -566,14 +568,23 @@ fn infer_base_branch(root: &Path, from: &str) -> String {
 }
 
 fn resolve_create_source(root: &Path, source_spec: &str) -> Result<ResolvedSource> {
-    // Workspace source shorthand: refs/manifold/head/<workspace>
+    // Workspace source shorthand: if source_spec names an active workspace,
+    // resolve to its current git HEAD commit OID.  The oplog ref
+    // `refs/manifold/head/<workspace>` points to an operation blob, not a
+    // commit, so we must not return it directly.
     let workspace_head_ref = maw_core::refs::workspace_head_ref(source_spec);
     if maw_core::refs::read_ref(root, &workspace_head_ref)
         .map_err(|e| anyhow::anyhow!("Failed to read workspace source ref: {e}"))?
         .is_some()
     {
+        let ws_path = root.join("ws").join(source_spec);
+        let repo = maw_git::GixRepo::open(&ws_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open workspace '{source_spec}': {e}"))?;
+        let head_oid = repo
+            .rev_parse("HEAD")
+            .map_err(|e| anyhow::anyhow!("Failed to resolve HEAD of workspace '{source_spec}': {e}"))?;
         return Ok(ResolvedSource {
-            resolved_ref: workspace_head_ref,
+            resolved_ref: head_oid.to_string(),
             fetched_remote: false,
         });
     }

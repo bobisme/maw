@@ -237,13 +237,23 @@ fn resolve_from_source(root: &std::path::Path, from: &str) -> Result<String> {
         return Ok(from.to_owned());
     }
 
-    // Workspace source shorthand: resolve to refs/manifold/head/<workspace> when present.
+    // Workspace source shorthand: if `from` names an active workspace, resolve
+    // to its current git HEAD commit.  We must NOT return the oplog ref
+    // `refs/manifold/head/<workspace>` — that points to an operation blob, not
+    // a commit, so rev-parse would yield a blob OID and worktree creation
+    // would fail with "expected commit or tree, got blob".
     let workspace_head_ref = manifold_refs::workspace_head_ref(from);
     if manifold_refs::read_ref(root, &workspace_head_ref)
         .map_err(|e| anyhow::anyhow!("Failed to read workspace source ref: {e}"))?
         .is_some()
     {
-        return Ok(workspace_head_ref);
+        let ws_path = root.join("ws").join(from);
+        let repo = maw_git::GixRepo::open(&ws_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open workspace '{from}': {e}"))?;
+        let head_oid = repo
+            .rev_parse("HEAD")
+            .map_err(|e| anyhow::anyhow!("Failed to resolve HEAD of workspace '{from}': {e}"))?;
+        return Ok(head_oid.to_string());
     }
 
     Ok(from.to_owned())
