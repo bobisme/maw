@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## v0.55.1
+
+### Fixed
+- **`ws create --from <workspace>` no longer fails with "expected commit or tree, got blob".** The `--from` resolver was returning the oplog blob ref (`refs/manifold/head/<workspace>`) instead of the workspace's actual git HEAD commit. Also fixed the same bug in `maw changes create --source`.
+
 ## v0.55.0
 
 ### Fixed
