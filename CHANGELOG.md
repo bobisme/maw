@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.56.0
+
+### Added
+- **Workspace descriptions.** `maw ws create -d "..."` / `--description` stores a human-readable purpose label in workspace metadata. Shown in `maw ws list` (text: `# desc` suffix; pretty: dimmed line; JSON: `description` field). Use `maw ws describe <name> <msg>` to add or update a description after creation.
+- **`maw ls` and `maw ws ls` aliases.** Hidden shortcuts for `maw ws list` — less typing for interactive use.
+
 ## v0.55.1
 
 ### Fixed
