@@ -28,8 +28,9 @@ pub fn create(
     change: Option<&str>,
     persistent: bool,
     template: Option<WorkspaceTemplate>,
+    description: Option<&str>,
 ) -> Result<()> {
-    create_with_output(name, from, change, persistent, template, true)
+    create_with_output(name, from, change, persistent, template, description, true)
 }
 
 #[instrument(skip(template), fields(workspace = name))]
@@ -39,8 +40,9 @@ pub fn create_quiet(
     change: Option<&str>,
     persistent: bool,
     template: Option<WorkspaceTemplate>,
+    description: Option<&str>,
 ) -> Result<()> {
-    create_with_output(name, from, change, persistent, template, false)
+    create_with_output(name, from, change, persistent, template, description, false)
 }
 
 #[instrument(skip(template), fields(workspace = name, emit_output))]
@@ -50,6 +52,7 @@ fn create_with_output(
     change: Option<&str>,
     persistent: bool,
     template: Option<WorkspaceTemplate>,
+    description: Option<&str>,
     emit_output: bool,
 ) -> Result<()> {
     let root = ensure_repo_root()?;
@@ -101,16 +104,17 @@ fn create_with_output(
         tracing::warn!("Failed to record workspace create in history: {e}");
     }
 
-    // Write workspace metadata (mode + optional template defaults).
-    // Keep the common case lean: if mode is ephemeral and no template is set,
-    // metadata is omitted and defaults are inferred.
-    if persistent || template_profile.is_some() || bound_change_id.is_some() {
+    // Write workspace metadata (mode + optional template defaults + description).
+    // Keep the common case lean: if mode is ephemeral and no template is set
+    // and no description, metadata is omitted and defaults are inferred.
+    if persistent || template_profile.is_some() || bound_change_id.is_some() || description.is_some() {
         let meta = metadata::WorkspaceMetadata {
             mode,
             template,
             template_defaults: template_profile.as_ref().map(|p| p.defaults.clone()),
             rebase_conflict_count: 0,
             change_id: bound_change_id.clone(),
+            description: description.map(str::to_owned),
         };
         metadata::write(&root, name, &meta)
             .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;
@@ -140,6 +144,9 @@ fn create_with_output(
                 "ephemeral"
             }
         );
+        if let Some(desc) = description {
+            println!("  Description: {desc}");
+        }
         if let Some(profile) = &template_profile {
             println!("  Template: {}", profile.template);
             println!("  Merge policy: {}", profile.defaults.merge_policy);

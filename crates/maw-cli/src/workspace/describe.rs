@@ -7,7 +7,7 @@ use maw_core::model::types::{GitOid, WorkspaceId};
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::types::{OpPayload, Operation};
 
-use super::{get_backend, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root};
+use super::{get_backend, metadata, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root};
 
 /// Describe (label) the current state of a workspace with a human-readable message.
 ///
@@ -58,6 +58,13 @@ pub fn describe(name: &str, message: &str) -> Result<()> {
 
     let op_oid = append_operation_with_runtime_checkpoint(&root, &ws_id, &describe_op, Some(&head))
         .context("Failed to append describe operation")?;
+
+    // Also persist the description to workspace metadata so it appears in `maw ws list`.
+    let mut meta = metadata::read(&root, name).unwrap_or_default();
+    meta.description = Some(message.to_string());
+    if let Err(e) = metadata::write(&root, name, &meta) {
+        tracing::warn!("Failed to persist description to workspace metadata: {e}");
+    }
 
     println!("Described workspace '{name}':");
     println!("  {}", message);

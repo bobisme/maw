@@ -372,9 +372,10 @@ fn create_change(args: &CreateArgs) -> Result<()> {
             Some(&change_id),
             false,
             None,
+            None,
         )
     } else {
-        crate::workspace::create::create(&primary_workspace, None, Some(&change_id), false, None)
+        crate::workspace::create::create(&primary_workspace, None, Some(&change_id), false, None, None)
     };
     if let Err(err) = create_primary_result {
         rollback_change_create(&root, &store, &change_id, &branch)?;
@@ -1755,7 +1756,7 @@ exit 1
             })
             .expect("create change");
 
-            crate::workspace::create::create("bind-extra", None, Some("ch-bind"), false, None)
+            crate::workspace::create::create("bind-extra", None, Some("ch-bind"), false, None, None)
                 .expect("create bound workspace");
 
             let store = store::ChangesStore::open(root);

@@ -40,6 +40,9 @@ pub struct WorkspaceMetadata {
     /// Optional bound change id (`maw changes` model).
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Human-readable description of the workspace's purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

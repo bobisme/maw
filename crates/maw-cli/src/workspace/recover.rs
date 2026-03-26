@@ -960,7 +960,7 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
     let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
 
     // Create new workspace (empty) and then populate it from the snapshot tree.
-    super::create::create(new_name, None, None, false, None)?;
+    super::create::create(new_name, None, None, false, None, None)?;
     let new_path = workspace_path(new_name)?;
 
     if let Err(e) = populate_from_snapshot(&new_path, &oid) {
@@ -1016,7 +1016,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
 
     // Step 1: Create the new workspace via the standard create path
     println!("Creating workspace '{new_name}' from snapshot of '{name}'...");
-    super::create::create(new_name, None, None, false, None)?;
+    super::create::create(new_name, None, None, false, None, None)?;
 
     // Step 2: Populate from the snapshot using git read-tree + checkout-index
     let new_ws_path = workspace_path(new_name)?;

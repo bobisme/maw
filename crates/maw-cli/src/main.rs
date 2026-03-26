@@ -73,6 +73,10 @@ enum Commands {
     #[command(subcommand, name = "ws")]
     Ws(workspace::WorkspaceCommands),
 
+    /// Alias for 'maw ws list'
+    #[command(hide = true, name = "ls")]
+    Ls,
+
     /// Manage AGENTS.md instructions
     #[command(subcommand)]
     Agents(agents::AgentsCommands),
@@ -305,6 +309,12 @@ fn main() {
 
     let result = match cli.command {
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
+        Commands::Ls => workspace::run(workspace::WorkspaceCommands::List {
+            verbose: false,
+            check: false,
+            format: None,
+            json: false,
+        }),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Changes(ref cmd) => changes::run(cmd),
         Commands::Init => v2_init::run(),
@@ -360,7 +370,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{should_emit_migration_notice, Cli};
+    use super::{Cli, should_emit_migration_notice};
 
     #[test]
     fn emits_notice_for_jj_only_repo() {

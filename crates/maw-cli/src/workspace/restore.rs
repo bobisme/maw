@@ -42,7 +42,7 @@ pub fn restore(name: &str) -> Result<()> {
     println!();
 
     // Create a fresh workspace at the current epoch (always ephemeral on restore).
-    create(name, None, None, false, None)?;
+    create(name, None, None, false, None, None)?;
 
     println!();
     println!("Note: Workspace '{name}' was recreated at the current epoch.");

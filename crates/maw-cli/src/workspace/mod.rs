@@ -288,6 +288,17 @@ pub enum WorkspaceCommands {
         /// `.manifold/workspace-template.json` inside the workspace.
         #[arg(long, value_enum)]
         template: Option<templates::WorkspaceTemplate>,
+
+        /// Short description of the workspace's purpose (highly recommended).
+        ///
+        /// Stored in workspace metadata and shown in `maw ws list`.
+        /// Helps humans and agents identify what a workspace is for at a glance.
+        ///
+        /// Examples:
+        ///   maw ws create alice --from main -d "implementing user auth module"
+        ///   maw ws create fix-123 --from main --description "fixing login timeout bug"
+        #[arg(short = 'd', long = "description", value_name = "TEXT")]
+        description: Option<String>,
     },
 
     /// Describe (label) the current workspace state
@@ -515,6 +526,19 @@ pub enum WorkspaceCommands {
         format: Option<OutputFormat>,
 
         /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
+
+    /// Alias for 'list'
+    #[command(hide = true)]
+    Ls {
+        #[arg(short, long)]
+        verbose: bool,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        format: Option<OutputFormat>,
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
     },
@@ -985,6 +1009,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             change,
             persistent,
             template,
+            description,
         } => {
             if from.is_none() && change.is_none() {
                 let name_hint = if random {
@@ -1007,6 +1032,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 change.as_deref(),
                 persistent,
                 template,
+                description.as_deref(),
             )
         }
         WorkspaceCommands::Describe { name, message } => describe::describe(&name, &message),
@@ -1124,6 +1150,12 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             }
         }
         WorkspaceCommands::List {
+            verbose,
+            check,
+            format,
+            json,
+        }
+        | WorkspaceCommands::Ls {
             verbose,
             check,
             format,

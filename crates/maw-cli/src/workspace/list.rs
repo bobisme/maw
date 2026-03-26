@@ -37,6 +37,9 @@ pub struct WorkspaceInfo {
     /// Number of unresolved rebase conflicts (0 = none).
     #[serde(skip_serializing_if = "is_zero")]
     pub(crate) rebase_conflicts: u32,
+    /// Human-readable description of the workspace's purpose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
 }
 
 /// Compact merge-check result for ws list output.
@@ -179,6 +182,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                     stale: mc.stale,
                 }),
                 rebase_conflicts,
+                description: ws_meta.description,
                 name,
             }
         })
@@ -295,7 +299,12 @@ fn print_list_text(
         } else {
             String::new()
         };
-        println!("{}\t{}{}", ws.name, path, annotation);
+        let desc_suffix = ws
+            .description
+            .as_deref()
+            .map(|d| format!("\t# {d}"))
+            .unwrap_or_default();
+        println!("{}\t{}{}{}", ws.name, path, annotation, desc_suffix);
     }
 
     print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
@@ -378,6 +387,14 @@ fn print_list_pretty(
             "{} {}{}{} {} {}{}{}",
             glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag, check_tag
         );
+
+        if let Some(desc) = &ws.description {
+            if use_color {
+                println!("    \x1b[90m{desc}\x1b[0m");
+            } else {
+                println!("    {desc}");
+            }
+        }
 
         if verbose {
             if let Some(path) = &ws.path {
