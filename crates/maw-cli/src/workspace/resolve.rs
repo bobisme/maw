@@ -1,0 +1,973 @@
+//! Resolve working-copy conflicts in a workspace.
+//!
+//! After a merge produces local-vs-merge conflicts (the target workspace had
+//! uncommitted edits overlapping with merged files), this module resolves
+//! them by parsing diff3 conflict markers and replacing file content with the
+//! chosen side.
+//!
+//! Conflict markers use labeled sides (workspace names) so agents and humans
+//! can resolve by name rather than ours/theirs.
+//!
+//! `--keep` accepts three forms:
+//! - `NAME` — resolve all conflicted files to NAME's version
+//! - `PATH=NAME` — resolve one file
+//! - `cf-N=NAME` — resolve one conflict block within a file (see `--list`)
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
+
+use crate::format::OutputFormat;
+
+use super::repo_root;
+
+// ---------------------------------------------------------------------------
+// Parsed conflict block
+// ---------------------------------------------------------------------------
+
+/// One conflict block parsed from diff3 markers in a file.
+#[derive(Debug, Clone)]
+struct ConflictBlock {
+    /// Left side label (from `<<<<<<<`), e.g. "bn-2sc3"
+    left_name: String,
+    /// Left side content
+    left_content: String,
+    /// Base content (from `|||||||`)
+    base_content: String,
+    /// Right side label (from `>>>>>>>`), e.g. "default"
+    right_name: String,
+    /// Right side content
+    right_content: String,
+}
+
+/// A parsed file: interleaved context lines and conflict blocks.
+#[derive(Debug)]
+enum FileChunk {
+    Context(String),
+    Conflict(ConflictBlock),
+}
+
+// ---------------------------------------------------------------------------
+// Keep spec parsing
+// ---------------------------------------------------------------------------
+
+/// Parsed `--keep` value.
+enum KeepSpec {
+    /// `--keep NAME` — resolve all to this side
+    All(String),
+    /// `--keep PATH=NAME` — resolve one file
+    File(PathBuf, String),
+    /// `--keep cf-N=NAME` — resolve one block
+    Block(String, String),
+}
+
+fn parse_keep_specs(raw: &[String]) -> Result<Vec<KeepSpec>> {
+    let mut specs = Vec::new();
+    for s in raw {
+        if let Some((left, right)) = s.split_once('=') {
+            let left = left.trim();
+            let right = right.trim();
+            if right.is_empty() {
+                bail!("Invalid --keep '{s}': empty side name after '='");
+            }
+            if left.starts_with("cf-") {
+                specs.push(KeepSpec::Block(left.to_string(), right.to_string()));
+            } else {
+                specs.push(KeepSpec::File(PathBuf::from(left), right.to_string()));
+            }
+        } else {
+            specs.push(KeepSpec::All(s.clone()));
+        }
+    }
+    Ok(specs)
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+pub fn run(
+    workspace: &str,
+    paths: &[String],
+    keep: &[String],
+    list: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let root = repo_root()?;
+    let ws_path = root.join("ws").join(workspace);
+    if !ws_path.exists() {
+        bail!(
+            "Workspace '{}' not found at {}\n  To fix: check workspace name with `maw ws list`",
+            workspace,
+            ws_path.display()
+        );
+    }
+
+    if list {
+        return list_conflicts(&ws_path, workspace, paths, format);
+    }
+
+    if keep.is_empty() {
+        bail!(
+            "Must specify --keep or --list.\n\
+             \n  Examples:\n\
+             \n    maw ws resolve {workspace} --keep <workspace-name>       # resolve all\n\
+             \n    maw ws resolve {workspace} --keep src/main.rs=<name>     # resolve one file\n\
+             \n    maw ws resolve {workspace} --keep cf-0=<name>            # resolve one block\n\
+             \n    maw ws resolve {workspace} --list                        # list conflicts"
+        );
+    }
+
+    let specs = parse_keep_specs(keep)?;
+
+    // Classify: do we have an All spec, file-level specs, or block-level specs?
+    let mut all_side: Option<&str> = None;
+    let mut file_sides: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut block_sides: BTreeMap<String, String> = BTreeMap::new();
+
+    for spec in &specs {
+        match spec {
+            KeepSpec::All(name) => {
+                if all_side.is_some() {
+                    bail!("Multiple blanket --keep flags. Use one, or use PATH=NAME for per-file.");
+                }
+                all_side = Some(name);
+            }
+            KeepSpec::File(path, name) => {
+                file_sides.insert(path.clone(), name.clone());
+            }
+            KeepSpec::Block(id, name) => {
+                block_sides.insert(id.clone(), name.clone());
+            }
+        }
+    }
+
+    // Find files to process
+    let target_files: Vec<PathBuf> = if !file_sides.is_empty() && all_side.is_none() && block_sides.is_empty() {
+        // Only file-level specs: process just those files
+        file_sides.keys().cloned().collect()
+    } else if !block_sides.is_empty() && all_side.is_none() && file_sides.is_empty() {
+        // Block-level specs only: need a file context. Use paths arg or find all.
+        if !paths.is_empty() {
+            paths.iter().map(PathBuf::from).collect()
+        } else {
+            find_conflicted_files(&ws_path)?
+        }
+    } else {
+        // All or mixed: process all conflicted files
+        find_conflicted_files(&ws_path)?
+    };
+
+    if target_files.is_empty() {
+        if format == OutputFormat::Json {
+            println!(r#"{{"status":"clean","workspace":"{workspace}","message":"No conflicted files found."}}"#);
+        } else {
+            println!("No conflicted files found in '{workspace}'.");
+        }
+        return Ok(());
+    }
+
+    let mut resolved_count = 0;
+    let mut skipped = Vec::new();
+
+    for rel_path in &target_files {
+        let full_path = ws_path.join(rel_path);
+        if !full_path.is_file() {
+            skipped.push((rel_path.clone(), "file not found".to_string()));
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&full_path)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", rel_path.display()))?;
+
+        if !content.contains("<<<<<<<") {
+            skipped.push((rel_path.clone(), "no conflict markers".to_string()));
+            continue;
+        }
+
+        // Determine resolution for this file
+        let file_side = file_sides.get(rel_path).map(|s| s.as_str()).or(all_side);
+
+        let chunks = parse_file_conflicts(&content);
+
+        match resolve_chunks(&chunks, file_side, &block_sides) {
+            Ok(resolved) => {
+                std::fs::write(&full_path, resolved.as_bytes())?;
+                resolved_count += 1;
+                if format != OutputFormat::Json {
+                    println!("  resolved: {}", rel_path.display());
+                }
+            }
+            Err(e) => {
+                skipped.push((rel_path.clone(), e.to_string()));
+            }
+        }
+    }
+
+    if format == OutputFormat::Json {
+        let skipped_json: Vec<String> = skipped
+            .iter()
+            .map(|(p, r)| format!(r#"{{"path":"{}","reason":"{}"}}"#, p.display(), r))
+            .collect();
+        println!(
+            r#"{{"status":"ok","workspace":"{workspace}","resolved":{resolved_count},"skipped":[{}]}}"#,
+            skipped_json.join(",")
+        );
+    } else {
+        if resolved_count > 0 {
+            println!("\n{resolved_count} file(s) resolved.");
+        }
+        if !skipped.is_empty() {
+            eprintln!();
+            for (path, reason) in &skipped {
+                eprintln!("  skipped: {} — {reason}", path.display());
+            }
+        }
+        if resolved_count == 0 && skipped.is_empty() {
+            println!("Nothing to resolve.");
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// List conflicts
+// ---------------------------------------------------------------------------
+
+fn list_conflicts(ws_path: &Path, workspace: &str, filter_paths: &[String], format: OutputFormat) -> Result<()> {
+    let all_files = find_conflicted_files(ws_path)?;
+
+    // If specific paths given, list blocks for those files only
+    let files: Vec<PathBuf> = if filter_paths.is_empty() {
+        all_files
+    } else {
+        let filter_set: std::collections::HashSet<PathBuf> =
+            filter_paths.iter().map(PathBuf::from).collect();
+        all_files.into_iter().filter(|f| filter_set.contains(f)).collect()
+    };
+
+    if format == OutputFormat::Json {
+        let mut file_entries = Vec::new();
+        for f in &files {
+            let full = ws_path.join(f);
+            let blocks = if let Ok(content) = std::fs::read_to_string(&full) {
+                let chunks = parse_file_conflicts(&content);
+                collect_block_info(&chunks)
+            } else {
+                vec![]
+            };
+            let blocks_json: Vec<String> = blocks
+                .iter()
+                .map(|b| {
+                    format!(
+                        r#"{{"id":"{}","left":"{}","right":"{}","preview":"{}"}}"#,
+                        b.id,
+                        b.left_name,
+                        b.right_name,
+                        b.preview.replace('"', "\\\"").replace('\n', "\\n"),
+                    )
+                })
+                .collect();
+            file_entries.push(format!(
+                r#"{{"path":"{}","block_count":{},"blocks":[{}]}}"#,
+                f.display(),
+                blocks.len(),
+                blocks_json.join(",")
+            ));
+        }
+        println!(
+            r#"{{"workspace":"{workspace}","conflict_count":{},"files":[{}]}}"#,
+            files.len(),
+            file_entries.join(",")
+        );
+        return Ok(());
+    }
+
+    if files.is_empty() {
+        println!("No conflicted files in '{workspace}'.");
+        return Ok(());
+    }
+
+    let show_blocks = !filter_paths.is_empty();
+
+    if show_blocks {
+        // Detailed per-block listing for specific files
+        for f in &files {
+            let full = ws_path.join(f);
+            let content = std::fs::read_to_string(&full)?;
+            let chunks = parse_file_conflicts(&content);
+            let blocks = collect_block_info(&chunks);
+
+            println!("{}  ({} conflict block(s))", f.display(), blocks.len());
+            for b in &blocks {
+                println!("  {} — {} vs {}", b.id, b.left_name, b.right_name);
+                // Show a preview (first line of each side)
+                let left_preview = b.left_preview.lines().next().unwrap_or("(empty)");
+                let right_preview = b.right_preview.lines().next().unwrap_or("(empty)");
+                println!("    {}: {}", b.left_name, truncate(left_preview, 60));
+                println!("    {}: {}", b.right_name, truncate(right_preview, 60));
+            }
+        }
+    } else {
+        // Summary listing
+        println!("{} conflicted file(s) in '{workspace}':", files.len());
+        for f in &files {
+            let full = ws_path.join(f);
+            let block_count = if let Ok(content) = std::fs::read_to_string(&full) {
+                let chunks = parse_file_conflicts(&content);
+                chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count()
+            } else {
+                0
+            };
+            if block_count > 1 {
+                println!("  {} ({block_count} blocks)", f.display());
+            } else {
+                println!("  {}", f.display());
+            }
+        }
+
+        // Extract side names for helpful output
+        if let Some(first) = files.first() {
+            let full = ws_path.join(first);
+            if let Ok(content) = std::fs::read_to_string(&full) {
+                let names = extract_side_names(&content);
+                if let Some((left, right)) = names {
+                    println!();
+                    println!("To resolve:");
+                    println!("  maw ws resolve {workspace} --keep {left}    # keep merged version");
+                    println!("  maw ws resolve {workspace} --keep {right}    # keep local edits");
+                    println!("  maw ws resolve {workspace} --keep both    # keep both (concatenated)");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+struct BlockInfo {
+    id: String,
+    left_name: String,
+    right_name: String,
+    preview: String,
+    left_preview: String,
+    right_preview: String,
+}
+
+fn collect_block_info(chunks: &[FileChunk]) -> Vec<BlockInfo> {
+    let mut blocks = Vec::new();
+    let mut idx = 0;
+    for chunk in chunks {
+        if let FileChunk::Conflict(block) = chunk {
+            let preview = format!("{} vs {}", block.left_name, block.right_name);
+            blocks.push(BlockInfo {
+                id: format!("cf-{idx}"),
+                left_name: block.left_name.clone(),
+                right_name: block.right_name.clone(),
+                preview,
+                left_preview: block.left_content.clone(),
+                right_preview: block.right_content.clone(),
+            });
+            idx += 1;
+        }
+    }
+    blocks
+}
+
+// ---------------------------------------------------------------------------
+// Find conflicted files (scan for conflict markers)
+// ---------------------------------------------------------------------------
+
+fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut results = Vec::new();
+    walk_for_conflicts(ws_path, ws_path, &mut results)?;
+    results.sort();
+    Ok(results)
+}
+
+fn walk_for_conflicts(
+    base: &Path,
+    dir: &Path,
+    results: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden dirs, .git, common non-source dirs
+        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+            continue;
+        }
+
+        if path.is_dir() {
+            walk_for_conflicts(base, &path, results)?;
+        } else if path.is_file() {
+            if file_has_conflict_markers(&path) {
+                if let Ok(rel) = path.strip_prefix(base) {
+                    results.push(rel.to_path_buf());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn file_has_conflict_markers(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = vec![0u8; 256 * 1024];
+    let n = file.read(&mut buf).unwrap_or(0);
+    let content = &buf[..n];
+    content.windows(8).any(|w| w.starts_with(b"\n<<<<<<<") || w == b"<<<<<<<\n")
+        || content.starts_with(b"<<<<<<<")
+}
+
+// ---------------------------------------------------------------------------
+// Parse file into chunks
+// ---------------------------------------------------------------------------
+
+fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
+    let mut chunks = Vec::new();
+    let mut context = String::new();
+    let mut lines = content.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        if line.starts_with("<<<<<<<") {
+            // Flush context
+            if !context.is_empty() {
+                chunks.push(FileChunk::Context(std::mem::take(&mut context)));
+            }
+
+            let left_name = extract_name_from_marker(line);
+            let mut left_content = String::new();
+            let mut base_content = String::new();
+            let mut right_content = String::new();
+            let mut right_name = String::new();
+            let mut in_base = false;
+            let mut in_right = false;
+
+            for inner in lines.by_ref() {
+                if inner.starts_with("|||||||") {
+                    in_base = true;
+                } else if inner.starts_with("=======") {
+                    in_base = false;
+                    in_right = true;
+                } else if inner.starts_with(">>>>>>>") {
+                    right_name = extract_name_from_marker(inner);
+                    break;
+                } else if in_right {
+                    if !right_content.is_empty() {
+                        right_content.push('\n');
+                    }
+                    right_content.push_str(inner);
+                } else if in_base {
+                    if !base_content.is_empty() {
+                        base_content.push('\n');
+                    }
+                    base_content.push_str(inner);
+                } else {
+                    if !left_content.is_empty() {
+                        left_content.push('\n');
+                    }
+                    left_content.push_str(inner);
+                }
+            }
+
+            chunks.push(FileChunk::Conflict(ConflictBlock {
+                left_name,
+                left_content,
+                base_content,
+                right_name,
+                right_content,
+            }));
+        } else {
+            if !context.is_empty() {
+                context.push('\n');
+            }
+            context.push_str(line);
+        }
+    }
+
+    // Flush trailing context
+    if !context.is_empty() {
+        chunks.push(FileChunk::Context(context));
+    }
+
+    chunks
+}
+
+// ---------------------------------------------------------------------------
+// Resolve chunks
+// ---------------------------------------------------------------------------
+
+/// Resolve a parsed file's conflict blocks.
+///
+/// - `file_side`: if Some, resolve ALL blocks in this file to this side
+/// - `block_sides`: per-block overrides keyed by "cf-N"
+///
+/// A block is resolved if it has an entry in `block_sides` or if `file_side`
+/// is set. Unresolved blocks are left as conflict markers.
+fn resolve_chunks(
+    chunks: &[FileChunk],
+    file_side: Option<&str>,
+    block_sides: &BTreeMap<String, String>,
+) -> Result<String> {
+    let mut output = String::new();
+    let mut block_idx = 0;
+    let mut any_resolved = false;
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        match chunk {
+            FileChunk::Context(text) => {
+                output.push_str(text);
+                // Add newline between chunks (but not after the last one)
+                if i + 1 < chunks.len() {
+                    output.push('\n');
+                }
+            }
+            FileChunk::Conflict(block) => {
+                let block_id = format!("cf-{block_idx}");
+                let side = block_sides
+                    .get(&block_id)
+                    .map(|s| s.as_str())
+                    .or(file_side);
+
+                if let Some(side_name) = side {
+                    if side_name == "both" {
+                        // Concatenate both sides (left then right)
+                        output.push_str(&block.left_content);
+                        output.push('\n');
+                        output.push_str(&block.right_content);
+                        output.push('\n');
+                    } else {
+                        let chosen = if name_matches(side_name, &block.left_name) {
+                            &block.left_content
+                        } else if name_matches(side_name, &block.right_name) {
+                            &block.right_content
+                        } else {
+                            bail!(
+                                "Side '{}' not found in conflict block {}.\n  \
+                                 Available sides: '{}', '{}', 'both'\n  \
+                                 To fix: use one of the side names shown above.",
+                                side_name,
+                                block_id,
+                                block.left_name,
+                                block.right_name
+                            );
+                        };
+                        output.push_str(chosen);
+                        output.push('\n');
+                    }
+                    any_resolved = true;
+                } else {
+                    // No resolution for this block — re-emit the markers
+                    output.push_str(&format!("<<<<<<< {}\n", block.left_name));
+                    output.push_str(&block.left_content);
+                    output.push('\n');
+                    if !block.base_content.is_empty() {
+                        output.push_str("||||||| base\n");
+                        output.push_str(&block.base_content);
+                        output.push('\n');
+                    }
+                    output.push_str("=======\n");
+                    output.push_str(&block.right_content);
+                    output.push('\n');
+                    output.push_str(&format!(">>>>>>> {}\n", block.right_name));
+                }
+
+                block_idx += 1;
+            }
+        }
+    }
+
+    if !any_resolved {
+        bail!("No conflict blocks were resolved. Check --keep side names.");
+    }
+
+    // Ensure file ends with newline
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Marker helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the workspace name from a conflict marker line.
+///
+/// `<<<<<<< bn-2sc3 (merged workspace)` → `bn-2sc3`
+/// `>>>>>>> default (local edits)` → `default`
+/// `<<<<<<< bn-2sc3, bn-4xyz (merged workspaces)` → `bn-2sc3, bn-4xyz`
+fn extract_name_from_marker(line: &str) -> String {
+    let trimmed = line
+        .trim_start_matches('<')
+        .trim_start_matches('>')
+        .trim_start_matches('|')
+        .trim();
+
+    if let Some(paren_pos) = trimmed.find('(') {
+        trimmed[..paren_pos].trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Check if a keep_name matches a marker label.
+///
+/// For multi-workspace labels like "bn-2sc3, bn-4xyz", the keep_name
+/// matches if it equals the full label OR any individual workspace in it.
+fn name_matches(keep_name: &str, label: &str) -> bool {
+    if keep_name == label {
+        return true;
+    }
+    label.split(',').any(|part| part.trim() == keep_name)
+}
+
+/// Extract the two side names from the first conflict block in a file.
+fn extract_side_names(content: &str) -> Option<(String, String)> {
+    let mut left = None;
+    let mut right = None;
+
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") && left.is_none() {
+            left = Some(extract_name_from_marker(line));
+        }
+        if line.starts_with(">>>>>>>") && right.is_none() {
+            right = Some(extract_name_from_marker(line));
+        }
+        if left.is_some() && right.is_some() {
+            break;
+        }
+    }
+
+    match (left, right) {
+        (Some(l), Some(r)) => Some((l, r)),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_name_simple() {
+        assert_eq!(
+            extract_name_from_marker("<<<<<<< bn-2sc3 (merged workspace)"),
+            "bn-2sc3"
+        );
+        assert_eq!(
+            extract_name_from_marker(">>>>>>> default (local edits)"),
+            "default"
+        );
+    }
+
+    #[test]
+    fn extract_name_multi_workspace() {
+        assert_eq!(
+            extract_name_from_marker("<<<<<<< ws-a, ws-b (merged workspaces)"),
+            "ws-a, ws-b"
+        );
+    }
+
+    #[test]
+    fn extract_name_no_parens() {
+        assert_eq!(extract_name_from_marker("<<<<<<< alice"), "alice");
+    }
+
+    #[test]
+    fn name_matches_exact() {
+        assert!(name_matches("bn-2sc3", "bn-2sc3"));
+        assert!(!name_matches("default", "bn-2sc3"));
+    }
+
+    #[test]
+    fn name_matches_multi() {
+        assert!(name_matches("ws-a", "ws-a, ws-b"));
+        assert!(name_matches("ws-b", "ws-a, ws-b"));
+        assert!(!name_matches("ws-c", "ws-a, ws-b"));
+    }
+
+    #[test]
+    fn parse_keep_spec_all() {
+        let specs = parse_keep_specs(&["bn-2sc3".into()]).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert!(matches!(&specs[0], KeepSpec::All(n) if n == "bn-2sc3"));
+    }
+
+    #[test]
+    fn parse_keep_spec_file() {
+        let specs = parse_keep_specs(&["src/main.rs=bn-2sc3".into()]).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert!(matches!(&specs[0], KeepSpec::File(p, n) if p == Path::new("src/main.rs") && n == "bn-2sc3"));
+    }
+
+    #[test]
+    fn parse_keep_spec_block() {
+        let specs = parse_keep_specs(&["cf-0=bn-2sc3".into()]).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert!(matches!(&specs[0], KeepSpec::Block(id, n) if id == "cf-0" && n == "bn-2sc3"));
+    }
+
+    #[test]
+    fn parse_keep_spec_mixed() {
+        let specs = parse_keep_specs(&[
+            "cf-0=ws-a".into(),
+            "cf-1=default".into(),
+        ]).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert!(matches!(&specs[0], KeepSpec::Block(id, _) if id == "cf-0"));
+        assert!(matches!(&specs[1], KeepSpec::Block(id, _) if id == "cf-1"));
+    }
+
+    #[test]
+    fn resolve_all_keeps_left() {
+        let content = "\
+before
+<<<<<<< ws-a (merged workspace)
+merge line
+||||||| base
+original line
+=======
+local line
+>>>>>>> default (local edits)
+after";
+        let chunks = parse_file_conflicts(content);
+        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
+        assert!(result.contains("merge line"));
+        assert!(!result.contains("local line"));
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+    }
+
+    #[test]
+    fn resolve_all_keeps_right() {
+        let content = "\
+before
+<<<<<<< ws-a (merged workspace)
+merge line
+||||||| base
+original line
+=======
+local line
+>>>>>>> default (local edits)
+after";
+        let chunks = parse_file_conflicts(content);
+        let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new()).unwrap();
+        assert!(!result.contains("merge line"));
+        assert!(result.contains("local line"));
+    }
+
+    #[test]
+    fn resolve_per_block_mixed() {
+        let content = "\
+line 1
+<<<<<<< ws-a (merged workspace)
+merge A
+=======
+local A
+>>>>>>> default (local edits)
+line 2
+<<<<<<< ws-a (merged workspace)
+merge B
+=======
+local B
+>>>>>>> default (local edits)
+line 3";
+        let chunks = parse_file_conflicts(content);
+        let mut block_sides = BTreeMap::new();
+        block_sides.insert("cf-0".into(), "ws-a".into());
+        block_sides.insert("cf-1".into(), "default".into());
+        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        assert!(result.contains("merge A"), "block 0 should keep ws-a");
+        assert!(!result.contains("local A"));
+        assert!(!result.contains("merge B"));
+        assert!(result.contains("local B"), "block 1 should keep default");
+        assert!(result.contains("line 1"));
+        assert!(result.contains("line 2"));
+        assert!(result.contains("line 3"));
+    }
+
+    #[test]
+    fn resolve_partial_leaves_unresolved_markers() {
+        let content = "\
+<<<<<<< ws-a (merged workspace)
+merge A
+=======
+local A
+>>>>>>> default (local edits)
+middle
+<<<<<<< ws-a (merged workspace)
+merge B
+=======
+local B
+>>>>>>> default (local edits)";
+        let chunks = parse_file_conflicts(content);
+        let mut block_sides = BTreeMap::new();
+        block_sides.insert("cf-0".into(), "ws-a".into());
+        // cf-1 left unresolved
+        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        assert!(result.contains("merge A"));
+        assert!(!result.contains("local A"));
+        // Second block should still have markers
+        assert!(result.contains("<<<<<<<"));
+        assert!(result.contains("local B"));
+    }
+
+    #[test]
+    fn resolve_unknown_side_errors() {
+        let content = "\
+<<<<<<< ws-a (merged workspace)
+merge
+=======
+local
+>>>>>>> default (local edits)";
+        let chunks = parse_file_conflicts(content);
+        let result = resolve_chunks(&chunks, Some("nonexistent"), &BTreeMap::new());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("ws-a"));
+        assert!(err.contains("default"));
+    }
+
+    #[test]
+    fn resolve_multi_workspace_label() {
+        let content = "\
+<<<<<<< ws-a, ws-b (merged workspaces)
+merged content
+||||||| base
+base content
+=======
+local content
+>>>>>>> default (local edits)";
+        let chunks = parse_file_conflicts(content);
+        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
+        assert!(result.contains("merged content"));
+    }
+
+    #[test]
+    fn extract_side_names_from_content() {
+        let content = "\
+some code
+<<<<<<< bn-2sc3 (merged workspace)
+merged
+=======
+local
+>>>>>>> default (local edits)
+more code";
+        let (left, right) = extract_side_names(content).unwrap();
+        assert_eq!(left, "bn-2sc3");
+        assert_eq!(right, "default");
+    }
+
+    #[test]
+    fn resolve_both_concatenates() {
+        let content = "\
+before
+<<<<<<< ws-a (merged workspace)
+merge line 1
+merge line 2
+||||||| base
+original
+=======
+local line 1
+local line 2
+>>>>>>> default (local edits)
+after";
+        let chunks = parse_file_conflicts(content);
+        let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new()).unwrap();
+        assert!(result.contains("merge line 1"));
+        assert!(result.contains("merge line 2"));
+        assert!(result.contains("local line 1"));
+        assert!(result.contains("local line 2"));
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+        assert!(!result.contains("<<<<<<<"));
+        assert!(!result.contains(">>>>>>>"));
+        // Left comes before right
+        let merge_pos = result.find("merge line 1").unwrap();
+        let local_pos = result.find("local line 1").unwrap();
+        assert!(merge_pos < local_pos, "left side should come before right side");
+    }
+
+    #[test]
+    fn resolve_both_per_block() {
+        let content = "\
+<<<<<<< ws-a (merged)
+merge A
+=======
+local A
+>>>>>>> default (local)
+mid
+<<<<<<< ws-a (merged)
+merge B
+=======
+local B
+>>>>>>> default (local)";
+        let chunks = parse_file_conflicts(content);
+        let mut block_sides = BTreeMap::new();
+        block_sides.insert("cf-0".into(), "both".into());
+        block_sides.insert("cf-1".into(), "ws-a".into());
+        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        // Block 0: both
+        assert!(result.contains("merge A"));
+        assert!(result.contains("local A"));
+        // Block 1: ws-a only
+        assert!(result.contains("merge B"));
+        assert!(!result.contains("local B"));
+    }
+
+    #[test]
+    fn collect_block_info_counts() {
+        let content = "\
+line
+<<<<<<< ws-a (merged)
+a1
+=======
+b1
+>>>>>>> default (local)
+mid
+<<<<<<< ws-a (merged)
+a2
+=======
+b2
+>>>>>>> default (local)
+end";
+        let chunks = parse_file_conflicts(content);
+        let blocks = collect_block_info(&chunks);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].id, "cf-0");
+        assert_eq!(blocks[1].id, "cf-1");
+        assert_eq!(blocks[0].left_name, "ws-a");
+        assert_eq!(blocks[0].right_name, "default");
+    }
+}

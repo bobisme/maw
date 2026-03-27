@@ -2672,6 +2672,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     shared_count: build_output.shared_count,
                     resolved_count: build_output.resolved_count + conflicts_with_ids.len(),
                     conflicts: vec![],
+                    resolved_paths: build_output.resolved_paths.clone(),
                 };
             } else {
                 // Some conflicts remain unresolved — report them with IDs
@@ -3103,6 +3104,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             &root,
             target_change_id.is_none(),
             text_mode,
+            &build_output.resolved_paths,
+            &ws_to_merge,
         )?;
 
         // Record a Snapshot op if the default workspace had dirty files.
@@ -3768,9 +3771,12 @@ fn update_default_workspace(
     repo_root: &Path,
     target_updates_epoch: bool,
     text_mode: bool,
+    resolved_paths: &[PathBuf],
+    source_workspace_names: &[String],
 ) -> Result<()> {
     use super::working_copy::{
-        SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot, snapshot_working_copy,
+        SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot,
+        replay_snapshot_with_merge_protection, snapshot_working_copy,
     };
 
     let record_workspace_epoch = || {
@@ -3931,7 +3937,22 @@ fn update_default_workspace(
         return Ok(());
     };
 
-    match replay_snapshot(default_ws_path, &snapshot) {
+    let used_merge_protection = !resolved_paths.is_empty();
+    let replay_result = if !used_merge_protection {
+        replay_snapshot(default_ws_path, &snapshot)
+    } else {
+        replay_snapshot_with_merge_protection(
+            default_ws_path,
+            &snapshot,
+            resolved_paths,
+            &anchor_epoch,
+            epoch_after,
+            source_workspace_names,
+            ws_name,
+        )
+    };
+
+    match replay_result {
         Ok(SnapshotReplayResult::Clean) => {
             // Step 4a: CLEANUP — replay was clean, delete snapshot ref.
             if let Err(e) = cleanup_snapshot(repo_root, ws_name) {
@@ -3943,9 +3964,56 @@ fn update_default_workspace(
                 println!("  User work replayed successfully.");
             }
         }
+        Ok(SnapshotReplayResult::Conflicts(conflicts))
+            if used_merge_protection =>
+        {
+            // Step 4b-protected: Conflicts from merge-vs-local overlap.
+            // The merge succeeded and the epoch advanced. These conflicts
+            // are between the merge result and uncommitted local edits that
+            // were in the target workspace before the merge.
+            let source_label = if source_workspace_names.len() == 1 {
+                source_workspace_names[0].clone()
+            } else {
+                source_workspace_names.join(", ")
+            };
+            eprintln!();
+            eprintln!(
+                "  WARNING: {} file(s) in '{}' have local-vs-merge conflicts.",
+                conflicts.len(),
+                ws_name,
+            );
+            eprintln!();
+            eprintln!("  What happened: '{ws_name}' had uncommitted edits to files that");
+            eprintln!("  '{source_label}' also modified. Both versions are in conflict markers:");
+            eprintln!();
+            eprintln!("    <<<<<<< {source_label}   — from the merged workspace");
+            eprintln!("    ||||||| base");
+            eprintln!("    =======");
+            eprintln!("    >>>>>>> {ws_name}   — uncommitted edits in {ws_name}");
+            eprintln!();
+            for c in &conflicts {
+                eprintln!("    [{:>20}] {}", c.conflict_type, c.path);
+            }
+            eprintln!();
+            eprintln!("  To fix (pick one):");
+            eprintln!("    maw ws resolve {ws_name} --keep {source_label}    # keep merged version");
+            eprintln!("    maw ws resolve {ws_name} --keep {ws_name}    # keep local edits");
+            eprintln!("    maw ws resolve {ws_name} --keep both    # keep both sides concatenated");
+            eprintln!("    maw ws resolve {ws_name} --list                  # list conflicted files");
+            eprintln!();
+            eprintln!("  The merge commit is safe — epoch has advanced. These conflicts only");
+            eprintln!("  affect the working copy in ws/{ws_name}/.");
+            if text_mode {
+                println!(
+                    "  {} ({} local-vs-merge conflict(s) — see above to resolve).",
+                    updated_message(),
+                    conflicts.len()
+                );
+            }
+        }
         Ok(SnapshotReplayResult::Conflicts(conflicts)) => {
-            // Step 4b: Conflicts — KEEP snapshot ref as recovery anchor.
-            // Print WARNING but do NOT abort cleanup.
+            // Step 4b: Regular stash-replay conflicts (no merge protection).
+            // KEEP snapshot ref as recovery anchor.
             eprintln!(
                 "  WARNING: {} file(s) have conflicts after replay onto updated target:",
                 conflicts.len()

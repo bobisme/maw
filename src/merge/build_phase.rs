@@ -70,6 +70,12 @@ pub struct BuildPhaseOutput {
     pub unique_count: usize,
     /// Number of shared paths (touched by multiple workspaces).
     pub shared_count: usize,
+    /// Paths that were resolved and applied to the candidate tree.
+    ///
+    /// Used by `update_default_workspace` to detect overlap with local
+    /// uncommitted edits in the target workspace, preventing silent data
+    /// loss during stash replay (see bn-43bc / bn-23zf).
+    pub resolved_paths: Vec<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +299,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
 
     // 6. Build candidate commit
     let repo = open_repo(repo_root)?;
+    let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().to_path_buf()).collect();
     let candidate = build_merge_commit(&*repo, epoch, sources, &resolved, None)?;
 
     Ok(BuildPhaseOutput {
@@ -301,6 +308,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
         resolved_count: resolved.len(),
         unique_count,
         shared_count,
+        resolved_paths,
     })
 }
 
@@ -596,6 +604,7 @@ fn run_pipeline<B: WorkspaceBackend>(
 
     // Build the candidate git tree + commit from resolved changes
     let repo = open_repo(repo_root)?;
+    let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().to_path_buf()).collect();
     let candidate = build_merge_commit(
         &*repo,
         &state.epoch_before,
@@ -610,6 +619,7 @@ fn run_pipeline<B: WorkspaceBackend>(
         resolved_count: resolved.len(),
         unique_count,
         shared_count,
+        resolved_paths,
     })
 }
 

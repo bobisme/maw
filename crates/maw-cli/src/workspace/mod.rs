@@ -29,6 +29,7 @@ mod names;
 mod oplog_runtime;
 mod overlap;
 mod prune;
+mod resolve;
 pub(crate) mod recover;
 mod restore;
 mod status;
@@ -857,6 +858,12 @@ pub enum WorkspaceCommands {
     /// details with workspace attribution, base content, and resolution
     /// strategies.
     ///
+    /// If the target workspace has uncommitted edits overlapping with
+    /// merged files, the merge succeeds but leaves conflict markers in
+    /// the target. Use `maw ws resolve` to resolve them:
+    ///   maw ws resolve default --list
+    ///   maw ws resolve default --keep-all alice
+    ///
     /// Examples:
     ///   maw ws merge alice --into default                       # adopt alice into default
     ///   maw ws merge alice bob --into default                   # merge alice and bob into default
@@ -979,6 +986,10 @@ pub enum WorkspaceCommands {
     ///   - Localized conflict atoms (exact line ranges / AST regions)
     ///   - Suggested resolution strategies
     ///
+    /// Note: this command detects pre-merge conflicts between workspaces.
+    /// For working-copy conflicts after a merge (local-vs-merge), use:
+    ///   maw ws resolve <workspace> --list
+    ///
     /// Examples:
     ///   maw ws conflicts alice               # conflicts for alice
     ///   maw ws conflicts alice bob            # across both workspaces
@@ -996,6 +1007,61 @@ pub enum WorkspaceCommands {
         /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+    },
+
+    /// Resolve working-copy conflicts in a workspace
+    ///
+    /// After a merge produces local-vs-merge conflicts (when the target
+    /// workspace had uncommitted edits overlapping with merged files),
+    /// use this command to resolve them.
+    ///
+    /// Each conflicted file contains diff3 markers with labeled sides
+    /// (the merged workspace name and the target workspace name).
+    /// Use --keep to choose which side to keep.
+    ///
+    /// --keep accepts three forms:
+    ///   NAME              resolve ALL conflicted files to NAME's version
+    ///   PATH=NAME         resolve one file to NAME's version
+    ///   cf-N=NAME         resolve one conflict block to NAME's version
+    ///
+    /// NAME can be a workspace name, or the special value "both" which
+    /// concatenates both sides (left then right, keeping all content).
+    ///
+    /// Multiple --keep flags can be combined for per-file or per-block
+    /// resolution. Use --list to see conflict blocks with their IDs.
+    ///
+    /// Examples:
+    ///   maw ws resolve default --list                          # list all conflicts
+    ///   maw ws resolve default --list src/main.rs              # list blocks in one file
+    ///   maw ws resolve default --keep bn-2sc3                  # resolve all to merged version
+    ///   maw ws resolve default --keep default                  # resolve all to local edits
+    ///   maw ws resolve default --keep both                     # keep both sides concatenated
+    ///   maw ws resolve default --keep src/main.rs=bn-2sc3      # resolve one file
+    ///   maw ws resolve default --keep cf-0=bn-2sc3 --keep cf-1=default  # per-block
+    ///   maw ws resolve default --keep cf-0=both --keep cf-1=bn-2sc3     # mix both + one side
+    #[command(verbatim_doc_comment)]
+    Resolve {
+        /// Workspace containing conflicts
+        workspace: String,
+
+        /// File paths to list blocks for (with --list) or filter (with --keep)
+        #[arg()]
+        paths: Vec<String>,
+
+        /// Resolution strategy (repeatable). Three forms:
+        ///   NAME          — resolve all files to NAME's version
+        ///   PATH=NAME     — resolve one file
+        ///   cf-N=NAME     — resolve one conflict block (see --list for IDs)
+        #[arg(long, conflicts_with = "list")]
+        keep: Vec<String>,
+
+        /// List conflicted files and blocks (with IDs for per-block resolution)
+        #[arg(long)]
+        list: bool,
+
+        /// Output format: text or json
+        #[arg(long)]
+        format: Option<OutputFormat>,
     },
 }
 
@@ -1349,6 +1415,16 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             merge::show_conflicts(&workspaces, fmt)
+        }
+        WorkspaceCommands::Resolve {
+            workspace,
+            paths,
+            keep,
+            list,
+            format,
+        } => {
+            let fmt = OutputFormat::resolve(format);
+            resolve::run(&workspace, &paths, &keep, list, fmt)
         }
     }
 }

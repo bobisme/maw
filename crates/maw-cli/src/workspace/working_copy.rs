@@ -635,6 +635,266 @@ pub(crate) fn replay_snapshot(
     }
 }
 
+/// Replay a snapshot with merge-path protection (bn-23zf).
+///
+/// When the target workspace has uncommitted edits that overlap with files
+/// just merged from a workspace, a plain `git stash apply` can silently
+/// resolve the 3-way merge by reverting the merge result to the pre-merge
+/// state. This function prevents that by:
+///
+/// 1. Computing the overlap between stash paths and resolved merge paths.
+/// 2. If **no overlap**: delegates to [`replay_snapshot()`] (unchanged behavior).
+/// 3. If **overlap exists**:
+///    a. Applies the stash normally (git stash apply).
+///    b. For each overlapping file, checks if the stash apply reverted the
+///       merge result. If so, writes diff3 conflict markers using:
+///       - BASE: content from `anchor_epoch` (the common ancestor)
+///       - OURS: content from `epoch_after` (the merge result)
+///       - THEIRS: content from the stash (the user's local edits)
+///    c. Reports overlapping files as `WorkingCopyConflict` entries.
+///
+/// Non-overlapping stash paths are applied normally by `git stash apply`.
+pub(crate) fn replay_snapshot_with_merge_protection(
+    ws_path: &Path,
+    snapshot: &SnapshotRef,
+    resolved_paths: &[PathBuf],
+    anchor_epoch: &str,
+    _epoch_after: &str,
+    source_workspace_names: &[String],
+    target_workspace_name: &str,
+) -> Result<SnapshotReplayResult> {
+    // Step 1: Get the list of paths changed in the stash.
+    let stash_paths = stash_changed_paths(ws_path, &snapshot.oid)?;
+
+    // Step 2: Compute overlap.
+    let resolved_set: std::collections::HashSet<&Path> =
+        resolved_paths.iter().map(|p| p.as_path()).collect();
+    let overlapping: Vec<PathBuf> = stash_paths
+        .iter()
+        .filter(|p| resolved_set.contains(p.as_path()))
+        .cloned()
+        .collect();
+
+    if overlapping.is_empty() {
+        // No overlap — safe to use normal replay.
+        return replay_snapshot(ws_path, snapshot);
+    }
+
+    tracing::info!(
+        overlap_count = overlapping.len(),
+        "stash overlaps with merged paths — using protected replay"
+    );
+
+    // Step 3: Save the merge versions of overlapping files BEFORE stash apply.
+    // After checkout, these files contain the correct merge result.
+    let mut merge_versions: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for path in &overlapping {
+        let full = ws_path.join(path);
+        if full.is_file() {
+            match std::fs::read(&full) {
+                Ok(content) => merge_versions.push((path.clone(), content)),
+                Err(e) => {
+                    tracing::warn!("failed to read merge version of {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    // Step 4: Apply the stash (this does the 3-way merge for ALL files).
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let oid: maw_git::GitOid = snapshot
+        .oid
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
+
+    // We don't care if stash apply "fails" (conflicts) — we handle overlapping
+    // paths ourselves and detect non-overlap conflicts separately.
+    let _ = repo.stash_apply(oid);
+
+    // Unstage everything for a clean working tree view.
+    if let Err(e) = repo.unstage_all() {
+        tracing::warn!("failed to unstage after stash apply: {e}");
+    }
+
+    // Step 5: For each overlapping file, check if the stash reverted the merge.
+    // If so, write diff3 conflict markers.
+    let mut conflicts = Vec::new();
+    for (path, merge_content) in &merge_versions {
+        let full = ws_path.join(path);
+
+        // Read the current file after stash apply. If the stash deleted it,
+        // that's a delete-vs-modify conflict — use empty content for the
+        // local side.
+        let (current, was_deleted) = match std::fs::read(&full) {
+            Ok(c) => (c, false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true),
+            Err(_) => continue,
+        };
+
+        if !was_deleted && current == *merge_content {
+            // Stash apply kept the merge version — no conflict needed.
+            continue;
+        }
+
+        // The stash apply changed (or deleted) this file from the merge version.
+        // Write diff3 conflict markers.
+        let base_content = read_file_at_commit(ws_path, anchor_epoch, path);
+
+        // Ensure parent directories exist (they should, but be safe).
+        if let Some(parent) = full.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let conflict_type = if was_deleted {
+            "delete_mod_conflict"
+        } else {
+            "content"
+        };
+
+        let merge_label = if source_workspace_names.len() == 1 {
+            format!("{} (merged workspace)", source_workspace_names[0])
+        } else {
+            format!("{} (merged workspaces)", source_workspace_names.join(", "))
+        };
+        let local_label = format!("{target_workspace_name} (local edits)");
+
+        let markers = write_diff3_markers(
+            base_content.as_deref().unwrap_or(b""),
+            merge_content,
+            &current,
+            &merge_label,
+            &local_label,
+        );
+        if let Err(e) = std::fs::write(&full, &markers) {
+            tracing::warn!("failed to write conflict markers for {}: {e}", path.display());
+            continue;
+        }
+
+        conflicts.push(WorkingCopyConflict {
+            path: path.display().to_string(),
+            conflict_type: conflict_type.to_owned(),
+        });
+    }
+
+    // Step 6: Also detect any conflicts from non-overlapping files (normal git
+    // stash apply conflicts).
+    let git_conflicts = detect_conflicts_in_worktree(ws_path)?;
+    for c in git_conflicts {
+        let c_path = PathBuf::from(&c.path);
+        if !overlapping.contains(&c_path) {
+            conflicts.push(c);
+        }
+    }
+
+    if conflicts.is_empty() {
+        Ok(SnapshotReplayResult::Clean)
+    } else {
+        Ok(SnapshotReplayResult::Conflicts(conflicts))
+    }
+}
+
+/// Get the list of file paths changed in a stash commit relative to its parent.
+///
+/// Uses `git diff --name-only <parent>..<stash>` which correctly handles the
+/// multi-parent structure of stash commits. Falls back to `git stash show`
+/// if that fails.
+fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> {
+    // Stash commits have 2-3 parents. Diff against the first parent (the
+    // commit HEAD pointed to when the stash was created).
+    let diff_spec = format!("{stash_oid}^..{stash_oid}");
+    let output = Command::new("git")
+        .args(["diff", "--name-only", &diff_spec])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git diff on stash")?;
+
+    if output.status.success() {
+        let paths: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if !paths.is_empty() {
+            return Ok(paths);
+        }
+    }
+
+    // Fallback: git stash show --name-only
+    let show_output = Command::new("git")
+        .args(["stash", "show", "--name-only", stash_oid])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git stash show")?;
+
+    if !show_output.status.success() {
+        bail!(
+            "cannot list stash paths: {}",
+            String::from_utf8_lossy(&show_output.stderr).trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&show_output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// Read a file's content from a specific git commit.
+fn read_file_at_commit(ws_path: &Path, commit: &str, path: &Path) -> Option<Vec<u8>> {
+    let rev = format!("{commit}:{}", path.display());
+    let output = Command::new("git")
+        .args(["show", &rev])
+        .current_dir(ws_path)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+/// Write diff3-style conflict markers for a file.
+///
+/// Labels use actual workspace names so `maw ws resolve` can match them:
+/// ```text
+/// <<<<<<< bn-2sc3 (merged workspace)
+/// {merge_content}
+/// ||||||| base
+/// {base_content}
+/// =======
+/// {local_content}
+/// >>>>>>> default (local edits)
+/// ```
+fn write_diff3_markers(
+    base: &[u8],
+    merge_content: &[u8],
+    local_content: &[u8],
+    merge_label: &str,
+    local_label: &str,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("<<<<<<< {merge_label}\n").as_bytes());
+    out.extend_from_slice(merge_content);
+    if !merge_content.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b"||||||| base\n");
+    out.extend_from_slice(base);
+    if !base.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b"=======\n");
+    out.extend_from_slice(local_content);
+    if !local_content.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(format!(">>>>>>> {local_label}\n").as_bytes());
+    out
+}
+
 /// Delete the snapshot ref for a workspace.
 ///
 /// Call this after a successful replay to clean up the durable pin.
