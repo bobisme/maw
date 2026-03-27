@@ -63,6 +63,8 @@ enum ActionKind {
     PruneEmpty,
     CreateChangeFlow,
     CreateAheadScenario,
+    DirtyDefault,
+    ResolveDefault,
     SyncAll,
     PushRemote,
 }
@@ -85,6 +87,8 @@ impl ActionKind {
             Self::PruneEmpty => "prune_empty",
             Self::CreateChangeFlow => "create_change_flow",
             Self::CreateAheadScenario => "create_ahead_scenario",
+            Self::DirtyDefault => "dirty_default",
+            Self::ResolveDefault => "resolve_default",
             Self::SyncAll => "sync_all",
             Self::PushRemote => "push_remote",
         }
@@ -217,12 +221,23 @@ struct SyncCase {
     validated: bool,
 }
 
+/// Tracks a file dirtied in default before a merge (bn-3oui).
+struct DirtyDefaultCase {
+    /// Path of the dirtied file in default.
+    path: String,
+    /// Whether the merge has happened (producing conflict markers).
+    merged: bool,
+    /// Whether `maw ws resolve` has been run.
+    resolved: bool,
+}
+
 struct ActionState {
     names: NameGen,
     actors: Vec<WorkspaceActor>,
     conflict_pairs: Vec<ConflictPair>,
     recover_cases: Vec<RecoverCase>,
     sync_cases: Vec<SyncCase>,
+    dirty_default_cases: Vec<DirtyDefaultCase>,
     tracked_commit_oids: HashSet<String>,
     change_only_paths: Vec<String>,
     remote_configured: bool,
@@ -244,6 +259,7 @@ impl Default for ActionState {
             conflict_pairs: Vec::new(),
             recover_cases: Vec::new(),
             sync_cases: Vec::new(),
+            dirty_default_cases: Vec::new(),
             tracked_commit_oids: HashSet::new(),
             change_only_paths: Vec::new(),
             remote_configured: false,
@@ -375,6 +391,14 @@ fn common_invariants(repo: &TestRepo, state: &ActionState, context: &str) -> Res
 }
 
 fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
+    // Resolve dirty-default conflicts before anything else.
+    if state
+        .dirty_default_cases
+        .iter()
+        .any(|c| c.merged && !c.resolved)
+    {
+        return vec![ActionKind::ResolveDefault];
+    }
     if state.conflict_pairs.iter().any(|pair| !pair.resolved) {
         return vec![ActionKind::ResolveConflictPair];
     }
@@ -382,6 +406,21 @@ fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
         return vec![ActionKind::SyncAll];
     }
     if state.actors.iter().any(|ws| !ws.merged && ws.committed) {
+        // If there's a pending dirty-default that hasn't been merged yet,
+        // force the merge so we test the overlap path.
+        if state.dirty_default_cases.iter().any(|c| !c.merged) {
+            return vec![ActionKind::MergeWorkspace];
+        }
+        // Allow DirtyDefault alongside MergeWorkspace when there's a
+        // committed workspace with a tracked path and no pending dirty case.
+        let can_dirty = state.dirty_default_cases.iter().all(|c| c.resolved)
+            && state
+                .actors
+                .iter()
+                .any(|ws| !ws.merged && ws.committed && ws.tracked_path.is_some());
+        if can_dirty {
+            return vec![ActionKind::MergeWorkspace, ActionKind::DirtyDefault];
+        }
         return vec![ActionKind::MergeWorkspace];
     }
     if state.actors.iter().any(|ws| !ws.merged && !ws.committed) {
@@ -452,6 +491,16 @@ fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
     }
     if !state.prune_done {
         actions.push(ActionKind::PruneEmpty);
+    }
+    // DirtyDefault: available when there's a committed, unmerged workspace
+    // with a tracked path and no existing unresolved dirty-default case.
+    if state.dirty_default_cases.iter().all(|c| c.resolved)
+        && state
+            .actors
+            .iter()
+            .any(|ws| !ws.merged && ws.committed && ws.tracked_path.is_some())
+    {
+        actions.push(ActionKind::DirtyDefault);
     }
     if !state.remote_pushed {
         actions.push(ActionKind::PushRemote);
@@ -543,12 +592,19 @@ fn run_action(
                 .collect();
             let idx = candidates[choose_index(rng, &candidates)];
             let ws = &state.actors[idx];
-            let check = parse_json(
-                &repo.maw_ok(&["ws", "merge", &ws.name, "--check", "--format", "json"]),
-                "merge check",
-            )?;
-            if check["ready"].as_bool() != Some(true) {
-                return Err(format!("merge check not ready: {check}"));
+            // Skip --check when default is dirty — the check runs a trial
+            // merge that may interact with dirty state unpredictably.
+            let has_dirty_overlap = ws.tracked_path.as_ref().is_some_and(|path| {
+                state.dirty_default_cases.iter().any(|c| c.path == *path && !c.merged)
+            });
+            if !has_dirty_overlap {
+                let check = parse_json(
+                    &repo.maw_ok(&["ws", "merge", &ws.name, "--check", "--format", "json"]),
+                    "merge check",
+                )?;
+                if check["ready"].as_bool() != Some(true) {
+                    return Err(format!("merge check not ready: {check}"));
+                }
             }
             let merge_out = repo.maw_ok(&[
                 "ws",
@@ -559,10 +615,48 @@ fn run_action(
                 &format!("feat: merge {}", ws.name),
             ]);
             record_actionable_warnings(&mut state.warnings, &merge_out, "merge workspace output")?;
-            if let (Some(path), Some(content)) = (&ws.tracked_path, &ws.tracked_content)
-                && repo.read_file("default", path).as_deref() != Some(content.as_str())
-            {
-                return Err(format!("default missing merged content for {path}"));
+            if let (Some(path), Some(content)) = (&ws.tracked_path, &ws.tracked_content) {
+                let actual = repo.read_file("default", path);
+                // Check if this path was dirtied in default before the merge.
+                let is_dirty_overlap = state
+                    .dirty_default_cases
+                    .iter()
+                    .any(|c| c.path == *path && !c.merged);
+
+                if is_dirty_overlap {
+                    // Conflict markers are expected. Verify they exist.
+                    match &actual {
+                        Some(file_content) if file_content.contains("<<<<<<<") => {
+                            // Good — conflict markers present. Mark the dirty case as merged.
+                            if let Some(case) = state
+                                .dirty_default_cases
+                                .iter_mut()
+                                .find(|c| c.path == *path && !c.merged)
+                            {
+                                case.merged = true;
+                            }
+                        }
+                        Some(file_content) if file_content == content => {
+                            // Also acceptable — stash replay didn't interfere.
+                            if let Some(case) = state
+                                .dirty_default_cases
+                                .iter_mut()
+                                .find(|c| c.path == *path && !c.merged)
+                            {
+                                case.merged = true;
+                                case.resolved = true; // no conflict to resolve
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "dirty-default overlap for {path}: expected conflict markers or merged content, got: {:?}",
+                                actual.as_deref().map(|s| &s[..s.len().min(100)])
+                            ));
+                        }
+                    }
+                } else if actual.as_deref() != Some(content.as_str()) {
+                    return Err(format!("default missing merged content for {path}"));
+                }
             }
             state.actors[idx].merged = true;
             Ok(format!("merged {}", state.actors[idx].name))
@@ -923,6 +1017,71 @@ fn run_action(
                 case.validated = true;
             }
             Ok("validated sync --all incomplete path".to_string())
+        }
+        ActionKind::DirtyDefault => {
+            // Find a committed, unmerged workspace with a tracked path.
+            let candidates: Vec<usize> = state
+                .actors
+                .iter()
+                .enumerate()
+                .filter(|(_, ws)| !ws.merged && ws.committed && ws.tracked_path.is_some())
+                .map(|(idx, _)| idx)
+                .collect();
+            let idx = candidates[choose_index(rng, &candidates)];
+            let ws = &state.actors[idx];
+            let path = ws.tracked_path.as_ref().unwrap().clone();
+
+            // Write a different version of the file to default (uncommitted).
+            let dirty_content = format!("dirty-default-edit for {}\n", ws.name);
+            repo.add_file("default", &path, &dirty_content);
+            // Do NOT git add/commit — leave it uncommitted in default.
+
+            state.dirty_default_cases.push(DirtyDefaultCase {
+                path: path.clone(),
+                merged: false,
+                resolved: false,
+            });
+
+            Ok(format!("dirtied default/{path} (overlaps with {})", ws.name))
+        }
+        ActionKind::ResolveDefault => {
+            // Find an unresolved dirty-default case that has been merged.
+            let case_idx = state
+                .dirty_default_cases
+                .iter()
+                .position(|c| c.merged && !c.resolved)
+                .ok_or_else(|| "no dirty-default case to resolve".to_string())?;
+
+            let path = state.dirty_default_cases[case_idx].path.clone();
+
+            // Verify conflict markers exist before resolving.
+            let content = repo
+                .read_file("default", &path)
+                .ok_or_else(|| format!("dirty-default file missing: {path}"))?;
+            if !content.contains("<<<<<<<") {
+                return Err(format!(
+                    "expected conflict markers in default/{path} but none found"
+                ));
+            }
+
+            // Resolve using "both" — always valid regardless of side labels.
+            let resolve_output = repo.maw_ok(&[
+                "ws", "resolve", "default", "--keep",
+                &format!("{path}=both"),
+            ]);
+
+            // Verify markers are gone.
+            if let Some(after) = repo.read_file("default", &path) {
+                if after.contains("<<<<<<<") {
+                    return Err(format!(
+                        "conflict markers still present after resolve for {path}"
+                    ));
+                }
+            }
+
+            state.dirty_default_cases[case_idx].resolved = true;
+
+            Ok(format!("resolved default/{path}: {resolve_output}"))
         }
         ActionKind::PushRemote => {
             unreachable!("push is handled by run_action_dispatch")

@@ -398,6 +398,14 @@ fn rebase_workspace(
                 });
             }
 
+            // Relabel git's conflict markers with meaningful names so
+            // `maw ws resolve` can match them (bn-aao6).
+            // Before: <<<<<<< HEAD / >>>>>>> abc123 (commit msg)
+            // After:  <<<<<<< epoch (current) / >>>>>>> ws-name (workspace changes)
+            for cf in &conflict_files {
+                relabel_conflict_markers(ws_path, cf, ws_name);
+            }
+
             // Add all conflicted files (with markers) to the index and commit.
             // This preserves the conflict markers in the history so the agent
             // can see and resolve them.
@@ -443,13 +451,21 @@ fn rebase_workspace(
         println!("Rebase complete: {replayed} commit(s) replayed, {conflicted} with conflicts.");
         println!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
         println!();
-        println!("Files with conflict markers are in the working tree.");
+        println!("Conflict markers use labeled sides:");
+        println!("  <<<<<<< epoch   — current epoch version");
+        println!("  ||||||| base");
+        println!("  =======");
+        println!("  >>>>>>> {ws_name}   — workspace changes");
+        println!();
         println!("To resolve:");
-        println!("  1. Edit conflicted files in ws/{ws_name}/ to remove conflict markers");
-        println!(
-            "  2. Commit the resolution: maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\""
-        );
-        println!("  3. Clear conflict state: maw ws sync {ws_name}");
+        println!("  maw ws resolve {ws_name} --list                  # list conflicts");
+        println!("  maw ws resolve {ws_name} --keep epoch            # keep epoch version");
+        println!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
+        println!("  maw ws resolve {ws_name} --keep both             # keep both sides");
+        println!();
+        println!("After resolving, commit and clear conflict state:");
+        println!("  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\"");
+        println!("  maw ws sync {ws_name}");
     } else {
         // No conflicts — clean up any stale conflict metadata.
         let _ = delete_rebase_conflicts(root, ws_name);
@@ -559,6 +575,39 @@ fn read_conflict_stages(
     let ours = read_stage("2");
     let theirs = read_stage("3");
     (base, ours, theirs)
+}
+
+/// Relabel git's conflict markers with meaningful workspace/epoch names.
+///
+/// Git writes markers like:
+///   `<<<<<<< HEAD`
+///   `>>>>>>> abc123 (commit message)`
+///
+/// This rewrites them to:
+///   `<<<<<<< epoch (current)`
+///   `>>>>>>> ws-name (workspace changes)`
+///
+/// so that `maw ws resolve` can match them by name.
+fn relabel_conflict_markers(ws_path: &Path, rel_path: &str, ws_name: &str) {
+    let full_path = ws_path.join(rel_path);
+    let content = match std::fs::read_to_string(&full_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut output = String::with_capacity(content.len());
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            output.push_str("<<<<<<< epoch (current)");
+        } else if line.starts_with(">>>>>>>") {
+            output.push_str(&format!(">>>>>>> {ws_name} (workspace changes)"));
+        } else {
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+
+    let _ = std::fs::write(&full_path, output);
 }
 
 /// Count commits reachable from HEAD but not from `epoch_oid` inside a workspace.
