@@ -796,12 +796,36 @@ pub(crate) fn replay_snapshot_with_merge_protection(
 
 /// Get the list of file paths changed in a stash commit relative to its parent.
 ///
-/// Uses `git diff --name-only <parent>..<stash>` which correctly handles the
-/// multi-parent structure of stash commits. Falls back to `git stash show`
-/// if that fails.
+/// Stash commits have 2-3 parents:
+///   - Parent 1: HEAD at stash time
+///   - Parent 2: index state
+///   - Parent 3 (optional): untracked files
+///
+/// We use `git stash show --include-untracked --name-only` as the primary
+/// method since it handles all three parents. Falls back to `git diff` if
+/// stash show fails.
 fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> {
-    // Stash commits have 2-3 parents. Diff against the first parent (the
-    // commit HEAD pointed to when the stash was created).
+    // Primary: git stash show --include-untracked captures all stash content
+    // including untracked files (third parent).
+    let show_output = Command::new("git")
+        .args(["stash", "show", "--include-untracked", "--name-only", stash_oid])
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git stash show")?;
+
+    if show_output.status.success() {
+        let paths: Vec<PathBuf> = String::from_utf8_lossy(&show_output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if !paths.is_empty() {
+            return Ok(paths);
+        }
+    }
+
+    // Fallback: git diff against first parent (misses untracked files but
+    // better than nothing).
     let diff_spec = format!("{stash_oid}^..{stash_oid}");
     let output = Command::new("git")
         .args(["diff", "--name-only", &diff_spec])
@@ -820,25 +844,7 @@ fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> 
         }
     }
 
-    // Fallback: git stash show --name-only
-    let show_output = Command::new("git")
-        .args(["stash", "show", "--name-only", stash_oid])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git stash show")?;
-
-    if !show_output.status.success() {
-        bail!(
-            "cannot list stash paths: {}",
-            String::from_utf8_lossy(&show_output.stderr).trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&show_output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect())
+    Ok(Vec::new())
 }
 
 /// Read a file's content from a specific git commit.

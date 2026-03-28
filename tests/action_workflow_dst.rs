@@ -411,16 +411,6 @@ fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
         if state.dirty_default_cases.iter().any(|c| !c.merged) {
             return vec![ActionKind::MergeWorkspace];
         }
-        // Allow DirtyDefault alongside MergeWorkspace when there's a
-        // committed workspace with a tracked path and no pending dirty case.
-        let can_dirty = state.dirty_default_cases.iter().all(|c| c.resolved)
-            && state
-                .actors
-                .iter()
-                .any(|ws| !ws.merged && ws.committed && ws.tracked_path.is_some());
-        if can_dirty {
-            return vec![ActionKind::MergeWorkspace, ActionKind::DirtyDefault];
-        }
         return vec![ActionKind::MergeWorkspace];
     }
     if state.actors.iter().any(|ws| !ws.merged && !ws.committed) {
@@ -492,14 +482,9 @@ fn applicable_actions(state: &ActionState) -> Vec<ActionKind> {
     if !state.prune_done {
         actions.push(ActionKind::PruneEmpty);
     }
-    // DirtyDefault: available when there's a committed, unmerged workspace
-    // with a tracked path and no existing unresolved dirty-default case.
-    if state.dirty_default_cases.iter().all(|c| c.resolved)
-        && state
-            .actors
-            .iter()
-            .any(|ws| !ws.merged && ws.committed && ws.tracked_path.is_some())
-    {
+    // DirtyDefault: available when no pending unresolved dirty-default case.
+    // The action creates its own workspace + shared file.
+    if state.dirty_default_cases.iter().all(|c| c.resolved) {
         actions.push(ActionKind::DirtyDefault);
     }
     if !state.remote_pushed {
@@ -1019,30 +1004,49 @@ fn run_action(
             Ok("validated sync --all incomplete path".to_string())
         }
         ActionKind::DirtyDefault => {
-            // Find a committed, unmerged workspace with a tracked path.
-            let candidates: Vec<usize> = state
-                .actors
-                .iter()
-                .enumerate()
-                .filter(|(_, ws)| !ws.merged && ws.committed && ws.tracked_path.is_some())
-                .map(|(idx, _)| idx)
-                .collect();
-            let idx = candidates[choose_index(rng, &candidates)];
-            let ws = &state.actors[idx];
-            let path = ws.tracked_path.as_ref().unwrap().clone();
+            // To trigger the merge protection, we need to dirty a file in
+            // default that ALREADY EXISTS in the epoch (not a new file).
+            // The workspace must also modify this same file.
+            //
+            // Strategy: seed a shared file into the epoch, create a workspace
+            // that modifies it, and dirty default's copy — all in one action.
+            // This is more self-contained than trying to reuse a tracked_path
+            // from a workspace (which adds a NEW file, not modifying existing).
 
-            // Write a different version of the file to default (uncommitted).
-            let dirty_content = format!("dirty-default-edit for {}\n", ws.name);
-            repo.add_file("default", &path, &dirty_content);
-            // Do NOT git add/commit — leave it uncommitted in default.
+            let shared_path = state.names.path("dirty");
+
+            // 1. Seed the file into the epoch.
+            repo.seed_files(&[(shared_path.as_str(), "base content\n")]);
+
+            // 2. Create a workspace that modifies it.
+            let ws_name = state.names.ws("dirty-ws");
+            repo.create_workspace(&ws_name);
+            let ws_content = "modified by workspace\n";
+            repo.add_file(&ws_name, &shared_path, ws_content);
+            repo.git_in_workspace(&ws_name, &["add", "-A"]);
+            repo.git_in_workspace(&ws_name, &["commit", "-m", &format!("feat: {ws_name}")]);
+            state.tracked_commit_oids.insert(repo.workspace_head(&ws_name));
+            state.actors.push(WorkspaceActor {
+                name: ws_name.clone(),
+                tracked_path: Some(shared_path.clone()),
+                tracked_content: Some(ws_content.to_string()),
+                committed: true,
+                annotated: true, // skip annotation for this path
+                merged: false,
+            });
+
+            // 3. Dirty default's copy (uncommitted).
+            // Use content that differs from both base and workspace to force
+            // the protection to detect the stash modifying the merge result.
+            repo.add_file("default", &shared_path, "completely different local content\n");
 
             state.dirty_default_cases.push(DirtyDefaultCase {
-                path: path.clone(),
+                path: shared_path.clone(),
                 merged: false,
                 resolved: false,
             });
 
-            Ok(format!("dirtied default/{path} (overlaps with {})", ws.name))
+            Ok(format!("dirtied default/{shared_path} (overlaps with {ws_name})"))
         }
         ActionKind::ResolveDefault => {
             // Find an unresolved dirty-default case that has been merged.
