@@ -2,6 +2,19 @@
 
 All notable changes to maw.
 
+## v0.57.0
+
+### Added
+- **`maw ws resolve` command.** Resolve working-copy conflicts by name instead of git ours/theirs. Supports `--keep <name>` (all files), `--keep path=name` (per-file), `--keep cf-N=name` (per-block), `--keep both` (concatenate both sides), and `--list` (show conflicts with block IDs). Works for both merge and sync rebase conflicts.
+- **Merge protection for dirty target workspaces.** When the merge target (e.g., default) has uncommitted edits overlapping with merged files, the merge now writes diff3 conflict markers instead of silently dropping changes via stash replay. The merge always succeeds (epoch advances), and conflicts are surfaced as data for resolution.
+- **Named conflict markers.** Conflict markers use actual workspace names (e.g., `<<<<<<< bn-2sc3 (merged workspace)` / `>>>>>>> default (local edits)`) instead of generic labels or git commit hashes.
+- **Sync rebase conflict relabeling.** `maw ws sync --rebase` now relabels git's raw conflict markers (`HEAD` / commit hash) with meaningful names (`epoch (current)` / workspace name) and prints `maw ws resolve` guidance.
+- **DST: DirtyDefault + ResolveDefault actions.** Deterministic simulation testing now covers the dirty-target-workspace scenario, which found and fixed a bug where untracked files in the stash were not detected by the merge protection.
+
+### Fixed
+- **Stash replay no longer silently drops merged file modifications (bn-43bc).** Root cause: `git stash apply`'s 3-way merge could resolve overlapping files by reverting to the pre-merge state. The merge commit was always correct, but the working-tree update lost changes.
+- **Stash path detection now includes untracked files.** `stash_changed_paths` now uses `git stash show --include-untracked` to catch files captured in the stash's third parent, preventing silent data loss for newly-added files.
+
 ## v0.56.0
 
 ### Added
