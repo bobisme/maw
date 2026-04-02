@@ -205,13 +205,29 @@ pub fn run(
         }
     }
 
+    // After resolving, check if all conflicts are gone and update metadata.
+    let remaining_conflicts = find_conflicted_files(&ws_path)?;
+    let conflicts_cleared = remaining_conflicts.is_empty() && resolved_count > 0;
+
+    if conflicts_cleared {
+        // Reset rebase_conflict_count in workspace metadata.
+        let mut ws_meta = super::metadata::read(&root, workspace).unwrap_or_default();
+        if ws_meta.rebase_conflict_count > 0 {
+            ws_meta.rebase_conflict_count = 0;
+            super::metadata::write(&root, workspace, &ws_meta)?;
+        }
+        // Clean up rebase conflict metadata file.
+        let _ = super::sync::delete_rebase_conflicts(&root, workspace);
+    }
+
     if format == OutputFormat::Json {
         let skipped_json: Vec<String> = skipped
             .iter()
             .map(|(p, r)| format!(r#"{{"path":"{}","reason":"{}"}}"#, p.display(), r))
             .collect();
         println!(
-            r#"{{"status":"ok","workspace":"{workspace}","resolved":{resolved_count},"skipped":[{}]}}"#,
+            r#"{{"status":"ok","workspace":"{workspace}","resolved":{resolved_count},"conflicts_remaining":{},"skipped":[{}]}}"#,
+            remaining_conflicts.len(),
             skipped_json.join(",")
         );
     } else {
@@ -226,6 +242,14 @@ pub fn run(
         }
         if resolved_count == 0 && skipped.is_empty() {
             println!("Nothing to resolve.");
+        }
+        if conflicts_cleared {
+            println!("All conflicts resolved — workspace is ready for merge.");
+        } else if !remaining_conflicts.is_empty() {
+            println!(
+                "{} file(s) still have conflict markers.",
+                remaining_conflicts.len()
+            );
         }
     }
 
