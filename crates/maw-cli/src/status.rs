@@ -56,14 +56,22 @@ pub struct StatusArgs {
 }
 
 pub fn run(args: &StatusArgs) -> Result<()> {
-    // Special modes take precedence over format
-    if args.status_bar || args.oneline {
+    // Fast path: --status-bar skips expensive operations (gix status walk,
+    // ChangesStore, full backend init) and uses lightweight alternatives.
+    // This keeps starship prompt updates under ~50ms. (bn-2fk0 follow-up)
+    if args.status_bar {
+        let summary = collect_status_fast()?;
+        print!("{}", summary.render_status_bar(args.mouth));
+        return Ok(());
+    }
+
+    if args.oneline {
         let summary = collect_status()?;
         render(
             &summary,
             &RenderOptions {
-                oneline: args.oneline,
-                status_bar: args.status_bar,
+                oneline: true,
+                status_bar: false,
                 mouth: args.mouth,
                 watching: false,
             },
@@ -662,6 +670,81 @@ fn collect_status() -> Result<StatusSummary> {
         main_sync,
         stray_root_files,
     })
+}
+
+/// Lightweight status collection for `--status-bar`.
+///
+/// Avoids the expensive operations in [`collect_status`]:
+/// - Uses `git status --porcelain` instead of gix status (avoids full worktree walk)
+/// - Counts workspace dirs directly instead of going through the backend
+/// - Skips ChangesStore entirely (not shown in status bar)
+/// - Uses `git rev-list --count` only when local != remote (fast OID comparison first)
+fn collect_status_fast() -> Result<StatusSummary> {
+    let root = workspace::repo_root()?;
+    let config = MawConfig::load(&root)?;
+    let branch = config.branch();
+    let default_ws_name = config.default_workspace();
+
+    // Count non-default workspaces by reading ws/ directory entries.
+    let ws_dir = root.join("ws");
+    let workspace_names = if ws_dir.is_dir() {
+        std::fs::read_dir(&ws_dir)
+            .ok()
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if name != default_ws_name && e.file_type().ok()?.is_dir() {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // For the status bar we only need the COUNT of dirty tracked files —
+    // not file names. We read the git index and stat each entry, comparing
+    // mtime/size against the index cache. This is O(n) stat calls with no
+    // hashing and no gix overhead.
+    let default_ws_path = root.join("ws").join(default_ws_name);
+    let changed_count = if default_ws_path.exists() {
+        count_dirty_tracked_files(&default_ws_path)
+    } else {
+        0
+    };
+    let changed_files: Vec<String> = (0..changed_count).map(|_| String::new()).collect();
+    let untracked_files = Vec::new();
+
+    // Check main branch sync status vs origin.
+    let main_sync = main_sync_status_inner(&root, branch);
+
+    // Check for stray files at repo root.
+    let stray_root_files = doctor::stray_root_entries(&root);
+
+    Ok(StatusSummary {
+        workspace_names,
+        changes: Vec::new(),
+        changed_files,
+        untracked_files,
+        is_stale: false,
+        main_sync,
+        stray_root_files,
+    })
+}
+
+/// Count dirty tracked files using maw-git's fast index-stat check.
+fn count_dirty_tracked_files(ws_path: &Path) -> usize {
+    let repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    repo.count_dirty_tracked().unwrap_or(0)
 }
 
 /// Collect changed and untracked files from git status in a directory.

@@ -127,6 +127,14 @@ impl GitRepo for GixRepo {
         crate::status_impl::status(self)
     }
 
+    fn status_tracked_only(&self) -> Result<Vec<StatusEntry>, GitError> {
+        crate::status_impl::status_tracked_only(self)
+    }
+
+    fn count_dirty_tracked(&self) -> Result<usize, GitError> {
+        crate::status_impl::count_dirty_tracked(self)
+    }
+
     // === Diff ===
     fn diff_trees(&self, old: Option<GitOid>, new: GitOid) -> Result<Vec<DiffEntry>, GitError> {
         crate::diff_impl::diff_trees(self, old, new)

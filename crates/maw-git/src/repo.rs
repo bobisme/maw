@@ -223,6 +223,19 @@ pub trait GitRepo {
     /// Replaces: `git status --porcelain`.
     fn status(&self) -> Result<Vec<StatusEntry>, GitError>;
 
+    /// Fast status: only check tracked files (index vs worktree), skip dirwalk.
+    ///
+    /// Much faster than [`status()`](Self::status) for large repos because it
+    /// skips the directory walk for untracked files. Returns only modifications,
+    /// deletions, and type changes to tracked files.
+    fn status_tracked_only(&self) -> Result<Vec<StatusEntry>, GitError>;
+
+    /// Count dirty tracked files using index stat cache comparison.
+    ///
+    /// The fastest dirty check: reads the index once, does one `stat()` per
+    /// entry comparing mtime + size. No content hashing, no gix status pipeline.
+    fn count_dirty_tracked(&self) -> Result<usize, GitError>;
+
     // -----------------------------------------------------------------------
     // Diff (~20 call sites)
     //
