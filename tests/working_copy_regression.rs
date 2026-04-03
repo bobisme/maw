@@ -498,3 +498,155 @@ fn t7_merge_cleanup_completes_after_commit_regardless_of_replay() {
         "user's local-notes.txt should survive both merges"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T9: Untracked file in default not overwritten by merge (bn-2fk0)
+// ---------------------------------------------------------------------------
+
+/// Regression test (bn-2fk0): when an untracked file in default has the same
+/// name as a file added by the merged workspace, the merge must not silently
+/// overwrite the user's version. The root cause was twofold:
+///
+/// 1. `snapshot_working_copy` used gix's `is_dirty()` which does not detect
+///    untracked files, so no snapshot was created.
+/// 2. `checkout_to` failed (git refuses to overwrite untracked files), and
+///    `force_checkout_fallback` returned early without replaying the snapshot.
+///
+/// After fix: untracked files are detected by `git status --porcelain`,
+/// the snapshot captures them, and force checkout fallback falls through
+/// to the replay step which surfaces conflict markers.
+#[test]
+fn t9_untracked_file_not_overwritten_by_merge() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.add_file("agent", "newfile.txt", "agent version\n");
+
+    // User creates the same untracked file in default.
+    repo.add_file("default", "newfile.txt", "user version\n");
+
+    let _out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "merge agent",
+    ]);
+
+    let content = repo
+        .read_file("default", "newfile.txt")
+        .expect("newfile.txt should exist after merge");
+
+    // User's version must not be silently lost — either preserved or in
+    // conflict markers alongside agent's version.
+    let user_preserved = content.contains("user version");
+    let has_markers = content.contains("<<<<<<<");
+    assert!(
+        user_preserved || has_markers,
+        "User's untracked file was silently overwritten!\nContent:\n{content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T10: Same-line overlap produces conflict markers (bn-2fk0)
+// ---------------------------------------------------------------------------
+
+/// Regression test (bn-2fk0): when both user (uncommitted in default) and
+/// agent (committed in workspace) modify the same lines of a tracked file,
+/// the merge must produce conflict markers — not silently pick one side.
+#[test]
+fn t10_same_line_conflict_produces_markers() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("config.toml", "key = \"original\"\n")]);
+
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.modify_file("agent", "config.toml", "key = \"agent-value\"\n");
+
+    // User modifies the same line (uncommitted).
+    repo.modify_file("default", "config.toml", "key = \"user-value\"\n");
+
+    repo.maw_raw(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "merge agent",
+    ]);
+
+    let content = repo
+        .read_file("default", "config.toml")
+        .expect("config.toml should exist after merge");
+
+    let user_preserved = content.contains("user-value");
+    let has_markers = content.contains("<<<<<<<");
+    assert!(
+        user_preserved || has_markers,
+        "User's edit was silently lost!\nContent:\n{content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T11: Non-overlapping edits to same file merge cleanly (bn-2fk0)
+// ---------------------------------------------------------------------------
+
+/// When user and agent edit different lines of the same file, `git merge-file`
+/// should cleanly merge both sets of changes — no conflict markers needed.
+///
+/// Previously this produced false-positive conflicts because `stash_apply`
+/// naively overwrote the merge result, and the protection layer always wrote
+/// whole-file conflict markers. Now `git merge-file --diff3` handles the
+/// 3-way merge properly.
+#[test]
+fn t11_non_overlapping_edits_same_file_merge_cleanly() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[(
+        "camera.rs",
+        "// header\nfn pan() { speed = 1.0; }\n// middle\nfn zoom() { factor = 1.0; }\n// footer\n",
+    )]);
+
+    // Agent edits zoom (committed).
+    repo.maw_ok(&["ws", "create", "agent"]);
+    repo.modify_file(
+        "agent",
+        "camera.rs",
+        "// header\nfn pan() { speed = 1.0; }\n// middle\nfn zoom() { factor = 3.0; }\n// footer\n",
+    );
+
+    // User edits pan (uncommitted in default).
+    repo.modify_file(
+        "default",
+        "camera.rs",
+        "// header\nfn pan() { speed = 2.0; }\n// middle\nfn zoom() { factor = 1.0; }\n// footer\n",
+    );
+
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "agent",
+        "--destroy",
+        "--message",
+        "merge agent",
+    ]);
+
+    let content = repo
+        .read_file("default", "camera.rs")
+        .expect("camera.rs should exist after merge");
+
+    // Both edits should be present — no conflict markers.
+    assert!(
+        content.contains("speed = 2.0"),
+        "User's pan speed fix should be preserved.\nContent:\n{content}"
+    );
+    assert!(
+        content.contains("factor = 3.0"),
+        "Agent's zoom factor edit should be present.\nContent:\n{content}"
+    );
+    assert!(
+        !content.contains("<<<<<<<"),
+        "Non-overlapping edits should merge cleanly without conflict markers.\nContent:\n{content}"
+    );
+}

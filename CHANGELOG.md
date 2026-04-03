@@ -2,6 +2,16 @@
 
 All notable changes to maw.
 
+## v0.57.3
+
+### Fixed
+- **Untracked files in target workspace no longer silently overwritten by merge (bn-2fk0).** `snapshot_working_copy` used gix's `is_dirty()` which does not detect untracked files, so no snapshot was created. Fixed by using `git status --porcelain` for the dirty check.
+- **Force checkout fallback no longer skips snapshot replay.** When `git checkout` failed (e.g., untracked files blocking it), the fallback used `git checkout --force` and returned early — discarding the captured snapshot. Now falls through to the replay step.
+- **Non-overlapping edits to the same file now merge cleanly.** Previously, the stash replay naively overwrote files and then wrote whole-file conflict markers for any overlap. Now uses gix-merge's built-in text driver (`gix_merge::blob::builtin_driver::text`) for proper 3-way merge — non-overlapping edits combine automatically, only true conflicts get diff3 markers.
+
+### Added
+- **`maw_git::merge::merge_text`** — pure-Rust 3-way text merge via gix-merge. No `git merge-file` subprocess needed.
+
 ## v0.57.0
 
 ### Added

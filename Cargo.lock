@@ -807,6 +807,7 @@ dependencies = [
  "gix-ignore",
  "gix-index",
  "gix-lock",
+ "gix-merge",
  "gix-object",
  "gix-odb",
  "gix-pack",
@@ -1155,6 +1156,31 @@ checksum = "570f8b034659f256366dc90f1a24924902f20acccd6a15be96d44d1269e7a796"
 dependencies = [
  "gix-tempfile",
  "gix-utils",
+ "thiserror",
+]
+
+[[package]]
+name = "gix-merge"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34ffed67f08ea0e59995ccb05e86550b8dfb5a3a6b73e4ede99c0d9209fb36ba"
+dependencies = [
+ "bstr",
+ "gix-command",
+ "gix-diff",
+ "gix-filter",
+ "gix-fs",
+ "gix-hash",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-quote",
+ "gix-revision",
+ "gix-revwalk",
+ "gix-tempfile",
+ "gix-trace",
+ "gix-worktree",
+ "imara-diff",
  "thiserror",
 ]
 
@@ -2125,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "maw-assurance"
-version = "0.57.2"
+version = "0.57.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -2135,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "maw-cli"
-version = "0.57.2"
+version = "0.57.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2164,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "maw-core"
-version = "0.57.2"
+version = "0.57.3"
 dependencies = [
  "anyhow",
  "maw-git",
@@ -2180,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "maw-git"
-version = "0.57.2"
+version = "0.57.3"
 dependencies = [
  "gix",
  "tempfile",
@@ -2189,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "maw-tui"
-version = "0.57.2"
+version = "0.57.3"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2198,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "maw-workspaces"
-version = "0.57.2"
+version = "0.57.3"
 dependencies = [
  "anyhow",
  "clap",

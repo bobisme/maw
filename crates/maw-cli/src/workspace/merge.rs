@@ -3920,11 +3920,14 @@ fn update_default_workspace(
     // Step 2: CHECKOUT — switch to the branch (tree is clean after snapshot).
     if let Err(e) = checkout_to(default_ws_path, branch, Some(branch)) {
         // Checkout failed — fall back to force checkout.
-        eprintln!("  WARNING: checkout_to failed: {e:#}");
-        eprintln!("  Falling back to force checkout...");
+        // This can happen when the merge introduces files that exist as
+        // untracked in the (now-cleaned) working tree. `git checkout`
+        // refuses to overwrite them, but they were already captured in the
+        // snapshot. Force checkout gets us to the right tree; the snapshot
+        // replay below will restore the user's versions and surface
+        // conflicts. (bn-2fk0)
+        tracing::warn!("checkout_to failed, using force checkout: {e:#}");
         force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
-        record_workspace_epoch();
-        return Ok(());
     }
 
     // Step 3: REPLAY — if there was a snapshot, replay it.

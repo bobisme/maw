@@ -19,6 +19,7 @@ gix = { version = "0.72", default-features = false, features = [
     "status",
     "dirwalk",
     "tree-editor",
+    "merge",
 ] }
 
 [dev-dependencies]

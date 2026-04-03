@@ -13,6 +13,7 @@
 //! - [`error`] — the [`GitError`] enum returned by all trait methods.
 
 pub mod error;
+pub mod merge;
 pub mod repo;
 pub mod types;
 

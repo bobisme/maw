@@ -455,12 +455,14 @@ pub(crate) fn snapshot_working_copy(
     repo_root: &Path,
     ws_name: &str,
 ) -> Result<Option<SnapshotRef>> {
-    // Step 1: Check for dirty state.
-    let repo = maw_git::GixRepo::open(ws_path)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let is_dirty = repo
-        .is_dirty()
-        .map_err(|e| anyhow::anyhow!("is_dirty check failed: {e}"))?;
+    // Step 1: Check for dirty state using `git status --porcelain`.
+    //
+    // We use porcelain output instead of gix's `is_dirty()` because gix
+    // does not detect untracked files. Without this, untracked files in
+    // the target workspace are silently destroyed by the checkout step
+    // since no snapshot is created to preserve them. (bn-2fk0)
+    let porcelain = git_status_porcelain(ws_path)?;
+    let is_dirty = !porcelain.trim().is_empty();
 
     if !is_dirty {
         tracing::debug!("working copy is clean, skipping snapshot");
@@ -477,6 +479,10 @@ pub(crate) fn snapshot_working_copy(
             "overwriting existing snapshot ref (prior snapshot not cleaned up)"
         );
     }
+
+    // Open repo for stash_create below.
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
 
     // Step 2: Stage all files (including untracked) so stash captures them.
     let add_output = Command::new("git")
@@ -635,25 +641,22 @@ pub(crate) fn replay_snapshot(
     }
 }
 
-/// Replay a snapshot with merge-path protection (bn-23zf).
+/// Replay a snapshot with merge-aware 3-way merge for overlapping files.
 ///
 /// When the target workspace has uncommitted edits that overlap with files
-/// just merged from a workspace, a plain `git stash apply` can silently
-/// resolve the 3-way merge by reverting the merge result to the pre-merge
-/// state. This function prevents that by:
+/// just merged from a workspace, a plain `stash_apply` would naively overwrite
+/// the merge result with the stash content. This function instead uses
+/// `git merge-file` for proper 3-way merging:
 ///
-/// 1. Computing the overlap between stash paths and resolved merge paths.
-/// 2. If **no overlap**: delegates to [`replay_snapshot()`] (unchanged behavior).
+/// 1. Computes overlap between stash paths and resolved merge paths.
+/// 2. If **no overlap**: delegates to [`replay_snapshot()`].
 /// 3. If **overlap exists**:
-///    a. Applies the stash normally (git stash apply).
-///    b. For each overlapping file, checks if the stash apply reverted the
-///       merge result. If so, writes diff3 conflict markers using:
+///    a. Applies the stash for non-overlapping files (restores user edits).
+///    b. For each overlapping file, runs `git merge-file --diff3` with:
 ///       - BASE: content from `anchor_epoch` (the common ancestor)
-///       - OURS: content from `epoch_after` (the merge result)
+///       - OURS: content from the merge result (current working tree)
 ///       - THEIRS: content from the stash (the user's local edits)
-///    c. Reports overlapping files as `WorkingCopyConflict` entries.
-///
-/// Non-overlapping stash paths are applied normally by `git stash apply`.
+///    c. Clean merges are written directly; conflicts get diff3 markers.
 pub(crate) fn replay_snapshot_with_merge_protection(
     ws_path: &Path,
     snapshot: &SnapshotRef,
@@ -682,7 +685,7 @@ pub(crate) fn replay_snapshot_with_merge_protection(
 
     tracing::info!(
         overlap_count = overlapping.len(),
-        "stash overlaps with merged paths — using protected replay"
+        "stash overlaps with merged paths — using merge-file for overlapping files"
     );
 
     // Step 3: Save the merge versions of overlapping files BEFORE stash apply.
@@ -700,16 +703,15 @@ pub(crate) fn replay_snapshot_with_merge_protection(
         }
     }
 
-    // Step 4: Apply the stash (this does the 3-way merge for ALL files).
+    // Step 4: Apply the stash (restores user edits for non-overlapping files).
+    // stash_apply is a naive overwrite, so overlapping files will get the stash
+    // version — we fix those up in step 5 with a proper 3-way merge.
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let oid: maw_git::GitOid = snapshot
         .oid
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
-
-    // We don't care if stash apply "fails" (conflicts) — we handle overlapping
-    // paths ourselves and detect non-overlap conflicts separately.
     let _ = repo.stash_apply(oid);
 
     // Unstage everything for a clean working tree view.
@@ -717,67 +719,111 @@ pub(crate) fn replay_snapshot_with_merge_protection(
         tracing::warn!("failed to unstage after stash apply: {e}");
     }
 
-    // Step 5: For each overlapping file, check if the stash reverted the merge.
-    // If so, write diff3 conflict markers.
+    // Step 5: For each overlapping file, run a proper 3-way merge using
+    // `git merge-file`. This cleanly merges non-overlapping edits and only
+    // produces conflict markers for true conflicts. (bn-2fk0)
+    let merge_label = if source_workspace_names.len() == 1 {
+        format!("{} (merged workspace)", source_workspace_names[0])
+    } else {
+        format!("{} (merged workspaces)", source_workspace_names.join(", "))
+    };
+    let local_label = format!("{target_workspace_name} (local edits)");
+
     let mut conflicts = Vec::new();
     for (path, merge_content) in &merge_versions {
         let full = ws_path.join(path);
 
-        // Read the current file after stash apply. If the stash deleted it,
-        // that's a delete-vs-modify conflict — use empty content for the
-        // local side.
-        let (current, was_deleted) = match std::fs::read(&full) {
-            Ok(c) => (c, false),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true),
-            Err(_) => continue,
+        // Read the stash version (user's local edits).
+        let stash_content = match read_file_at_commit(ws_path, &snapshot.oid, path) {
+            Some(c) => c,
+            None => {
+                // Stash doesn't have this file — user deleted it.
+                // That's a delete-vs-modify conflict.
+                let markers = write_diff3_markers(
+                    read_file_at_commit(ws_path, anchor_epoch, path)
+                        .as_deref()
+                        .unwrap_or(b""),
+                    merge_content,
+                    b"",
+                    &merge_label,
+                    &local_label,
+                );
+                let _ = std::fs::write(&full, &markers);
+                conflicts.push(WorkingCopyConflict {
+                    path: path.display().to_string(),
+                    conflict_type: "delete_mod_conflict".to_owned(),
+                });
+                continue;
+            }
         };
 
-        if !was_deleted && current == *merge_content {
-            // Stash apply kept the merge version — no conflict needed.
+        // If stash version equals merge version, nothing to do.
+        if stash_content == *merge_content {
+            // Restore merge version (stash_apply may have overwritten).
+            let _ = std::fs::write(&full, merge_content);
             continue;
         }
 
-        // The stash apply changed (or deleted) this file from the merge version.
-        // Write diff3 conflict markers.
-        let base_content = read_file_at_commit(ws_path, anchor_epoch, path);
+        let base_content = read_file_at_commit(ws_path, anchor_epoch, path)
+            .unwrap_or_default();
 
-        // Ensure parent directories exist (they should, but be safe).
+        // Ensure parent directories exist.
         if let Some(parent) = full.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        let conflict_type = if was_deleted {
-            "delete_mod_conflict"
-        } else {
-            "content"
-        };
-
-        let merge_label = if source_workspace_names.len() == 1 {
-            format!("{} (merged workspace)", source_workspace_names[0])
-        } else {
-            format!("{} (merged workspaces)", source_workspace_names.join(", "))
-        };
-        let local_label = format!("{target_workspace_name} (local edits)");
-
-        let markers = write_diff3_markers(
-            base_content.as_deref().unwrap_or(b""),
+        // 3-way text merge (pure Rust via gix-merge). Cleanly merges
+        // non-overlapping edits; produces diff3 markers for true conflicts.
+        match merge_text_three_way(
+            &base_content,
             merge_content,
-            &current,
+            &stash_content,
             &merge_label,
             &local_label,
-        );
-        if let Err(e) = std::fs::write(&full, &markers) {
-            tracing::warn!("failed to write conflict markers for {}: {e}", path.display());
-            continue;
+        ) {
+            Ok((merged, false)) => {
+                // Non-overlapping edits merged cleanly — write the result.
+                if let Err(e) = std::fs::write(&full, &merged) {
+                    tracing::warn!("failed to write merged file {}: {e}", path.display());
+                }
+            }
+            Ok((marker_output, true)) => {
+                // True conflict — write the markers.
+                if let Err(e) = std::fs::write(&full, &marker_output) {
+                    tracing::warn!(
+                        "failed to write conflict markers for {}: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+                conflicts.push(WorkingCopyConflict {
+                    path: path.display().to_string(),
+                    conflict_type: "content".to_owned(),
+                });
+            }
+            Err(e) => {
+                // Merge failed — fall back to whole-file conflict markers.
+                tracing::warn!(
+                    "text merge failed for {}: {e}; falling back to full-file markers",
+                    path.display()
+                );
+                let markers = write_diff3_markers(
+                    &base_content,
+                    merge_content,
+                    &stash_content,
+                    &merge_label,
+                    &local_label,
+                );
+                let _ = std::fs::write(&full, &markers);
+                conflicts.push(WorkingCopyConflict {
+                    path: path.display().to_string(),
+                    conflict_type: "content".to_owned(),
+                });
+            }
         }
-
-        conflicts.push(WorkingCopyConflict {
-            path: path.display().to_string(),
-            conflict_type: conflict_type.to_owned(),
-        });
     }
 
-    // Step 6: Also detect any conflicts from non-overlapping files (normal git
+    // Step 6: Also detect any conflicts from non-overlapping files (normal
     // stash apply conflicts).
     let git_conflicts = detect_conflicts_in_worktree(ws_path)?;
     for c in git_conflicts {
@@ -791,6 +837,23 @@ pub(crate) fn replay_snapshot_with_merge_protection(
         Ok(SnapshotReplayResult::Clean)
     } else {
         Ok(SnapshotReplayResult::Conflicts(conflicts))
+    }
+}
+
+/// Perform a 3-way text merge using gix's built-in text driver (pure Rust).
+///
+/// Returns `Ok((merged_bytes, is_conflict))`.
+fn merge_text_three_way(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    ours_label: &str,
+    theirs_label: &str,
+) -> Result<(Vec<u8>, bool)> {
+    match maw_git::merge::merge_text(base, ours, theirs, ours_label, "base", theirs_label) {
+        Ok(maw_git::merge::MergeResult::Clean(out)) => Ok((out, false)),
+        Ok(maw_git::merge::MergeResult::Conflict(out)) => Ok((out, true)),
+        Err(e) => bail!("text merge failed: {e}"),
     }
 }
 
