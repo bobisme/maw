@@ -471,6 +471,28 @@ fn file_has_conflict_markers(path: &Path) -> bool {
 // Parse file into chunks
 // ---------------------------------------------------------------------------
 
+/// Push a line into the appropriate content buffer based on parser state.
+fn push_content_line(
+    line: &str,
+    in_right: bool,
+    in_base: bool,
+    right_content: &mut String,
+    base_content: &mut String,
+    left_content: &mut String,
+) {
+    let target = if in_right {
+        right_content
+    } else if in_base {
+        base_content
+    } else {
+        left_content
+    };
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    target.push_str(line);
+}
+
 fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
     let mut chunks = Vec::new();
     let mut context = String::new();
@@ -490,16 +512,30 @@ fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
             let mut right_name = String::new();
             let mut in_base = false;
             let mut in_right = false;
+            // Track nested conflict markers so that <<<<<<< / >>>>>>>
+            // pairs inside the content (e.g. from previously unresolved
+            // conflicts in stashed files) don't cause premature break.
+            let mut nested_depth: usize = 0;
 
             for inner in lines.by_ref() {
-                if inner.starts_with("|||||||") {
+                if inner.starts_with("<<<<<<<") {
+                    // Nested conflict marker — track depth and treat as content.
+                    nested_depth += 1;
+                    push_content_line(inner, in_right, in_base, &mut right_content, &mut base_content, &mut left_content);
+                } else if inner.starts_with(">>>>>>>") {
+                    if nested_depth == 0 {
+                        // This is our actual closing marker.
+                        right_name = extract_name_from_marker(inner);
+                        break;
+                    }
+                    // Closing a nested marker — treat as content.
+                    nested_depth -= 1;
+                    push_content_line(inner, in_right, in_base, &mut right_content, &mut base_content, &mut left_content);
+                } else if nested_depth == 0 && inner.starts_with("|||||||") {
                     in_base = true;
-                } else if inner.starts_with("=======") {
+                } else if nested_depth == 0 && inner.starts_with("=======") {
                     in_base = false;
                     in_right = true;
-                } else if inner.starts_with(">>>>>>>") {
-                    right_name = extract_name_from_marker(inner);
-                    break;
                 } else if in_right {
                     if !right_content.is_empty() {
                         right_content.push('\n');
@@ -968,6 +1004,120 @@ local B
         // Block 1: ws-a only
         assert!(result.contains("merge B"));
         assert!(!result.contains("local B"));
+    }
+
+    /// Regression test for bn-27ve: nested conflict markers in content
+    /// caused the parser to break early at the inner >>>>>>> line, leaving
+    /// the actual closing >>>>>>> marker as trailing context.
+    #[test]
+    fn resolve_nested_conflict_markers_no_trailing_marker() {
+        // Simulate a file where the local (stash) content itself contains
+        // old unresolved conflict markers — e.g. from a previous merge.
+        let content = "\
+<<<<<<< bn-1fj7 (merged workspace)
+clean merge result
+||||||| base
+original base
+=======
+some local code
+<<<<<<< old-ws
+old merged
+||||||| old-base
+old original
+=======
+old local
+>>>>>>> default (old conflict)
+more local code
+>>>>>>> default (local edits)";
+        let chunks = parse_file_conflicts(content);
+
+        // Should be exactly ONE conflict block, not split into pieces.
+        let conflict_count = chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count();
+        assert_eq!(conflict_count, 1, "should parse as a single conflict block");
+
+        // No context chunks should contain >>>>>>>
+        for chunk in &chunks {
+            if let FileChunk::Context(text) = chunk {
+                assert!(!text.contains(">>>>>>>"),
+                    "context chunk should not contain >>>>>>> marker, got: {text}");
+            }
+        }
+
+        // Resolving should not leave any >>>>>>> markers in the output.
+        let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new()).unwrap();
+        assert!(!result.contains(">>>>>>> default (local edits)"),
+            "resolved output should not contain trailing >>>>>>> marker");
+        assert!(result.contains("some local code"),
+            "resolved output should contain the local content");
+        assert!(result.contains("more local code"),
+            "resolved output should contain content after nested block");
+        // The nested conflict markers should be preserved as content.
+        assert!(result.contains("<<<<<<< old-ws"),
+            "nested <<<<<<< should be preserved in content");
+        assert!(result.contains(">>>>>>> default (old conflict)"),
+            "nested >>>>>>> should be preserved in content");
+    }
+
+    /// Test that nested markers in the left (merge) side are handled correctly.
+    #[test]
+    fn resolve_nested_markers_in_left_side() {
+        let content = "\
+<<<<<<< ws-a (merged workspace)
+code with nested
+<<<<<<< nested
+nested left
+=======
+nested right
+>>>>>>> nested-end
+end of merge
+||||||| base
+original
+=======
+local content
+>>>>>>> default (local edits)";
+        let chunks = parse_file_conflicts(content);
+        let conflict_count = chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count();
+        assert_eq!(conflict_count, 1, "should parse as a single conflict block");
+
+        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
+        assert!(result.contains("code with nested"));
+        assert!(result.contains("end of merge"));
+        assert!(!result.contains("local content"));
+        assert!(!result.contains(">>>>>>> default (local edits)"));
+    }
+
+    /// Test that ======= lines inside nested markers are treated as content.
+    #[test]
+    fn nested_markers_equals_treated_as_content() {
+        let content = "\
+<<<<<<< ws-a (merged)
+before nested
+<<<<<<< inner
+inner left
+=======
+inner right
+>>>>>>> inner-end
+after nested
+=======
+local side
+>>>>>>> default (local)";
+        let chunks = parse_file_conflicts(content);
+        let conflict_count = chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count();
+        assert_eq!(conflict_count, 1);
+
+        // Verify the left content includes everything up to the real =======
+        if let FileChunk::Conflict(block) = &chunks[0] {
+            assert!(block.left_content.contains("before nested"));
+            assert!(block.left_content.contains("<<<<<<< inner"));
+            assert!(block.left_content.contains("inner left"));
+            assert!(block.left_content.contains("======="));
+            assert!(block.left_content.contains("inner right"));
+            assert!(block.left_content.contains(">>>>>>> inner-end"));
+            assert!(block.left_content.contains("after nested"));
+            assert_eq!(block.right_content, "local side");
+        } else {
+            panic!("expected conflict chunk");
+        }
     }
 
     #[test]
