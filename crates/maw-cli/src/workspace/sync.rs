@@ -1066,6 +1066,19 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    // Safety: don't auto-sync over uncommitted changes — warn and let the
+    // command run against the stale workspace instead of blocking it entirely.
+    let ws_path = root.join("ws").join(name);
+    let is_dirty = workspace_has_uncommitted_changes(&ws_path).unwrap_or(false);
+    if is_dirty {
+        eprintln!(
+            "WARNING: Workspace '{name}' is behind the current epoch, but has uncommitted changes. \
+             Skipping auto-sync to preserve uncommitted work."
+        );
+        eprintln!("  Commit or stash changes, then run: maw ws sync {name}");
+        return Ok(());
+    }
+
     eprintln!(
         "Workspace '{name}' is behind the current epoch \u{2014} auto-syncing before running command..."
     );
