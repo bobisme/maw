@@ -13,6 +13,8 @@ pub mod epoch_gc;
 pub mod error;
 pub mod exec;
 pub mod format;
+#[cfg(feature = "lfs")]
+pub mod lfs_push;
 pub mod merge_cmd;
 pub mod push;
 pub mod ref_gc;

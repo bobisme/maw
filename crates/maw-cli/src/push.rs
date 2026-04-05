@@ -123,6 +123,11 @@ pub fn run(args: &PushArgs) -> Result<()> {
     // Step 3: Push the branch
     // Step 3: Push the branch (only if needed)
     if branch_needs_push {
+        // Pre-push: upload any new LFS objects to the remote's LFS server.
+        // Feature-gated; no-op unless `lfs` is enabled at build time.
+        #[cfg(feature = "lfs")]
+        crate::lfs_push::run(&root, branch, "origin")?;
+
         let push = Command::new("git")
             .args(["push", "origin", branch])
             .current_dir(&root)

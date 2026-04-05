@@ -8,8 +8,13 @@ description = "Git abstraction layer for maw — trait-based interface backed by
 keywords = ["git", "gix", "abstraction", "repository"]
 categories = ["development-tools"]
 
+[features]
+default = ["lfs"]
+lfs = ["dep:maw-lfs"]
+
 [dependencies]
 thiserror = "2"
+tracing = "0.1"
 gix = { version = "0.72", default-features = false, features = [
     "basic",
     "worktree-mutation",
@@ -21,9 +26,11 @@ gix = { version = "0.72", default-features = false, features = [
     "tree-editor",
     "merge",
 ] }
+maw-lfs = { path = "../maw-lfs", version = "0.57.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+sha2 = "0.10"
 
 [lints]
 workspace = true

@@ -24,6 +24,23 @@ impl GixRepo {
         Ok(Self { repo, workdir })
     }
 
+    /// Path to this repository's git directory (`.git` or its common dir for worktrees).
+    ///
+    /// For a worktree, this returns the per-worktree `.git` dir, not the common
+    /// git dir. LFS storage lives under the common dir; use [`Self::common_dir`].
+    pub fn git_dir(&self) -> &Path {
+        self.repo.git_dir()
+    }
+
+    /// Path to the common git directory (shared across all worktrees).
+    ///
+    /// For a worktree, this is the upstream `repo.git/` rather than
+    /// `repo.git/worktrees/<name>/`. For a non-worktree repo, it equals
+    /// [`Self::git_dir`].
+    pub fn common_dir(&self) -> &Path {
+        self.repo.common_dir()
+    }
+
     /// Open a git repository at exactly `path` (no parent discovery).
     pub fn open_at(path: &Path) -> Result<Self, GitError> {
         let repo = gix::open_opts(path, gix::open::Options::isolated()).map_err(|e| {
@@ -83,6 +100,15 @@ impl GitRepo for GixRepo {
     // === Object write ===
     fn write_blob(&self, data: &[u8]) -> Result<GitOid, GitError> {
         crate::objects_impl::write_blob(self, data)
+    }
+
+    #[cfg(feature = "lfs")]
+    fn write_blob_with_path(
+        &self,
+        data: &[u8],
+        rel_path: &str,
+    ) -> Result<GitOid, GitError> {
+        crate::lfs_clean::write_blob_with_path(self, data, rel_path)
     }
 
     fn write_tree(&self, entries: &[TreeEntry]) -> Result<GitOid, GitError> {

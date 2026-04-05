@@ -206,7 +206,8 @@ pub fn build_merge_commit(
     for change in &sorted {
         match change {
             ResolvedChange::Upsert { path, content } => {
-                let blob_oid = write_blob(repo, content)?;
+                let blob_oid =
+                    write_blob_at(repo, content, &path.to_string_lossy())?;
                 // Regular file mode. We preserve original mode if the file
                 // already exists in the tree; otherwise use 100644.
                 let mode = tree
@@ -320,20 +321,23 @@ fn walk_tree_recursive(
     Ok(())
 }
 
-/// Write a blob object to the git object store via `GitRepo::write_blob`.
-///
-/// Returns the OID of the written blob.
-fn write_blob(repo: &dyn maw_git::GitRepo, content: &[u8]) -> Result<GitOid, BuildError> {
-    let git_oid = repo
-        .write_blob(content)
-        .map_err(|e| BuildError::GitCommand {
-            command: "write_blob".to_owned(),
-            stderr: e.to_string(),
-            exit_code: None,
-        })?;
+/// Write a blob via the attribute-aware entry point so LFS-tracked paths
+/// land in `.git/lfs/objects/` and the git blob is a pointer.
+fn write_blob_at(
+    repo: &dyn maw_git::GitRepo,
+    content: &[u8],
+    rel_path: &str,
+) -> Result<GitOid, BuildError> {
+    let git_oid =
+        repo.write_blob_with_path(content, rel_path)
+            .map_err(|e| BuildError::GitCommand {
+                command: "write_blob_with_path".to_owned(),
+                stderr: e.to_string(),
+                exit_code: None,
+            })?;
     let oid_str = git_oid.to_string();
     GitOid::new(&oid_str).map_err(|_| BuildError::InvalidOid {
-        context: "write_blob output".to_owned(),
+        context: "write_blob_with_path output".to_owned(),
         raw: oid_str,
     })
 }

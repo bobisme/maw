@@ -682,3 +682,303 @@ fn merge_base_same_commit() {
     let base = repo.merge_base(commit_oid, commit_oid).unwrap();
     assert_eq!(base, Some(commit_oid));
 }
+
+// ---------------------------------------------------------------------------
+// LFS smudge post-pass (bn-1jdp)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lfs")]
+#[test]
+fn checkout_smudges_lfs_pointer_to_real_content() {
+    // Setup: a repo whose tree contains a .gitattributes (making *.bin LFS)
+    // and a "hero.bin" blob that is a pointer. We pre-populate .git/lfs/objects
+    // with the real content. Checkout must replace the pointer text with
+    // the real bytes on disk.
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+
+    // Real content for the LFS object.
+    let real_content: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    // sha256 of real_content — compute via sha2 the same way maw-lfs does.
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(&real_content);
+    let oid: [u8; 32] = h.finalize().into();
+    let oid_hex: String = oid.iter().map(|b| format!("{b:02x}")).collect();
+
+    // Pre-populate .git/lfs/objects/<xx>/<yy>/<sha>.
+    let lfs_obj_dir = workdir
+        .join(".git")
+        .join("lfs")
+        .join("objects")
+        .join(&oid_hex[0..2])
+        .join(&oid_hex[2..4]);
+    std::fs::create_dir_all(&lfs_obj_dir).unwrap();
+    std::fs::write(lfs_obj_dir.join(&oid_hex), &real_content).unwrap();
+
+    // Build the pointer text that will be the git blob.
+    let pointer_text = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {}\n",
+        oid_hex,
+        real_content.len()
+    );
+
+    // Write blobs: .gitattributes and the pointer for hero.bin.
+    let attrs_blob = repo
+        .write_blob(b"*.bin filter=lfs diff=lfs merge=lfs -text\n")
+        .unwrap();
+    let pointer_blob = repo.write_blob(pointer_text.as_bytes()).unwrap();
+
+    let tree_oid = repo
+        .write_tree(&[
+            TreeEntry {
+                name: ".gitattributes".to_string(),
+                mode: EntryMode::Blob,
+                oid: attrs_blob,
+            },
+            TreeEntry {
+                name: "hero.bin".to_string(),
+                mode: EntryMode::Blob,
+                oid: pointer_blob,
+            },
+        ])
+        .unwrap();
+
+    repo.checkout_tree(tree_oid, workdir).unwrap();
+
+    // .gitattributes should still be its raw content (not LFS-tracked).
+    let attrs_on_disk = std::fs::read(workdir.join(".gitattributes")).unwrap();
+    assert_eq!(
+        attrs_on_disk,
+        b"*.bin filter=lfs diff=lfs merge=lfs -text\n"
+    );
+
+    // hero.bin must now contain the REAL content, not the pointer text.
+    let hero_on_disk = std::fs::read(workdir.join("hero.bin")).unwrap();
+    assert_eq!(
+        hero_on_disk, real_content,
+        "hero.bin should be smudged to real content"
+    );
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn checkout_leaves_pointer_when_object_missing() {
+    // Missing LFS object — checkout must NOT fail, and the pointer must be
+    // left on disk so the user can fetch + re-smudge later.
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+
+    // Don't pre-populate the store — the object is absent.
+    let pointer_text = "version https://git-lfs.github.com/spec/v1\n\
+oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+size 12345\n";
+
+    let attrs_blob = repo.write_blob(b"*.bin filter=lfs\n").unwrap();
+    let pointer_blob = repo.write_blob(pointer_text.as_bytes()).unwrap();
+    let tree_oid = repo
+        .write_tree(&[
+            TreeEntry {
+                name: ".gitattributes".to_string(),
+                mode: EntryMode::Blob,
+                oid: attrs_blob,
+            },
+            TreeEntry {
+                name: "hero.bin".to_string(),
+                mode: EntryMode::Blob,
+                oid: pointer_blob,
+            },
+        ])
+        .unwrap();
+
+    // Should succeed despite the missing object.
+    repo.checkout_tree(tree_oid, workdir).unwrap();
+
+    // Pointer is still on disk.
+    let hero_on_disk = std::fs::read(workdir.join("hero.bin")).unwrap();
+    assert_eq!(hero_on_disk, pointer_text.as_bytes());
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn checkout_leaves_non_lfs_files_alone() {
+    // A tree with .gitattributes but no filter=lfs rules must not touch any files.
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+
+    let attrs_blob = repo.write_blob(b"*.txt text\n").unwrap();
+    let content_blob = repo.write_blob(b"just text\n").unwrap();
+    let tree_oid = repo
+        .write_tree(&[
+            TreeEntry {
+                name: ".gitattributes".to_string(),
+                mode: EntryMode::Blob,
+                oid: attrs_blob,
+            },
+            TreeEntry {
+                name: "readme.txt".to_string(),
+                mode: EntryMode::Blob,
+                oid: content_blob,
+            },
+        ])
+        .unwrap();
+
+    repo.checkout_tree(tree_oid, workdir).unwrap();
+    assert_eq!(
+        std::fs::read(workdir.join("readme.txt")).unwrap(),
+        b"just text\n"
+    );
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn checkout_skips_files_over_1kb_even_if_lfs_tracked() {
+    // If a file is >1KB, it's definitely not a pointer — skip even if LFS-tracked.
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+
+    let large_content: Vec<u8> = vec![b'x'; 2048];
+    let attrs_blob = repo.write_blob(b"*.bin filter=lfs\n").unwrap();
+    let content_blob = repo.write_blob(&large_content).unwrap();
+    let tree_oid = repo
+        .write_tree(&[
+            TreeEntry {
+                name: ".gitattributes".to_string(),
+                mode: EntryMode::Blob,
+                oid: attrs_blob,
+            },
+            TreeEntry {
+                name: "oops.bin".to_string(),
+                mode: EntryMode::Blob,
+                oid: content_blob,
+            },
+        ])
+        .unwrap();
+
+    repo.checkout_tree(tree_oid, workdir).unwrap();
+    // File kept as-is (raw bytes committed directly, not LFS-clean-filtered).
+    assert_eq!(std::fs::read(workdir.join("oops.bin")).unwrap(), large_content);
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn write_blob_with_path_cleans_lfs_content() {
+    // Setting: repo has workdir with .gitattributes listing *.bin as LFS.
+    // write_blob_with_path("hero.bin", real_bytes) should:
+    //   1. Store real_bytes in .git/lfs/objects/<xx>/<yy>/<sha>
+    //   2. Return the OID of the POINTER blob (not of the raw bytes)
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+    std::fs::write(
+        workdir.join(".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .unwrap();
+
+    let real = b"raw binary content bytes";
+    let oid = repo.write_blob_with_path(real, "hero.bin").unwrap();
+
+    // The stored blob should be the POINTER, not the raw bytes.
+    // Read it back via gix and check it parses as a pointer.
+    let blob = repo.read_blob(oid).unwrap();
+    assert!(
+        blob.starts_with(b"version https://git-lfs.github.com/spec/v1\n"),
+        "blob should be an LFS pointer, got {:?}",
+        String::from_utf8_lossy(&blob[..blob.len().min(100)])
+    );
+
+    // Real content lives in the local LFS store under the computed sha.
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(real);
+    let sha: [u8; 32] = h.finalize().into();
+    let sha_hex: String = sha.iter().map(|b| format!("{b:02x}")).collect();
+    let stored = workdir
+        .join(".git")
+        .join("lfs")
+        .join("objects")
+        .join(&sha_hex[0..2])
+        .join(&sha_hex[2..4])
+        .join(&sha_hex);
+    assert!(stored.exists(), "LFS object should be at {stored:?}");
+    assert_eq!(std::fs::read(&stored).unwrap(), real);
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn write_blob_with_path_non_lfs_unchanged() {
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+    std::fs::write(workdir.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+
+    let text = b"hello, world\n";
+    let oid = repo.write_blob_with_path(text, "notes.txt").unwrap();
+    // Non-LFS path: raw content becomes the blob.
+    let blob = repo.read_blob(oid).unwrap();
+    assert_eq!(blob, text);
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn write_blob_with_path_passes_pointer_through() {
+    // Caller hands us pointer bytes for an LFS path — don't double-wrap.
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+    std::fs::write(workdir.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+
+    let pointer = b"version https://git-lfs.github.com/spec/v1\n\
+oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+size 12345\n";
+    let oid = repo.write_blob_with_path(pointer, "hero.bin").unwrap();
+    let blob = repo.read_blob(oid).unwrap();
+    assert_eq!(blob, pointer);
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn write_blob_with_path_without_workdir_falls_through() {
+    // A freshly-constructed repo with no .gitattributes: no LFS attrs
+    // resolve, so behavior matches write_blob.
+    let (_dir, repo) = setup_repo();
+    let data = b"arbitrary bytes";
+    let oid = repo.write_blob_with_path(data, "anything.bin").unwrap();
+    let blob = repo.read_blob(oid).unwrap();
+    assert_eq!(blob, data);
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn full_round_trip_clean_then_smudge() {
+    // Write raw content via clean → pointer blob committed + real content
+    // in .git/lfs/objects/. Checkout that tree → working copy has real bytes.
+    let (dir, repo) = setup_repo();
+    let workdir = dir.path();
+    std::fs::write(workdir.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+
+    let real: Vec<u8> = (0..8192u32).map(|i| (i * 31 % 251) as u8).collect();
+    let attrs_blob = repo.write_blob(b"*.bin filter=lfs\n").unwrap();
+    let pointer_oid = repo.write_blob_with_path(&real, "hero.bin").unwrap();
+    let tree_oid = repo
+        .write_tree(&[
+            TreeEntry {
+                name: ".gitattributes".to_string(),
+                mode: EntryMode::Blob,
+                oid: attrs_blob,
+            },
+            TreeEntry {
+                name: "hero.bin".to_string(),
+                mode: EntryMode::Blob,
+                oid: pointer_oid,
+            },
+        ])
+        .unwrap();
+
+    // Remove hero.bin from workdir before checkout so we can observe smudge.
+    std::fs::remove_file(workdir.join("hero.bin")).ok();
+
+    repo.checkout_tree(tree_oid, workdir).unwrap();
+
+    // Full round trip: real bytes on disk.
+    let on_disk = std::fs::read(workdir.join("hero.bin")).unwrap();
+    assert_eq!(on_disk, real);
+}

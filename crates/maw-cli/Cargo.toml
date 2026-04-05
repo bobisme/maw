@@ -12,6 +12,7 @@ path = "src/main.rs"
 maw = { path = "../..", package = "maw-workspaces" }
 maw-core = { path = "../maw-core" }
 maw-git = { path = "../maw-git" }
+maw-lfs = { path = "../maw-lfs", version = "0.57.3", optional = true }
 maw-tui = { path = "../maw-tui", optional = true }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
@@ -36,7 +37,8 @@ opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
 [features]
-default = ["otel", "tui"]
+default = ["otel", "tui", "lfs"]
+lfs = ["dep:maw-lfs"]
 tui = ["dep:maw-tui"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing", "dep:tracing-opentelemetry"]
 

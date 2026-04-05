@@ -23,6 +23,8 @@ mod config_impl;
 mod diff_impl;
 mod gix_repo;
 mod index_impl;
+#[cfg(feature = "lfs")]
+mod lfs_clean;
 mod objects_impl;
 mod push_impl;
 mod refs_impl;

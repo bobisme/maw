@@ -65,6 +65,15 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     opts.overwrite_existing = true;
     opts.destination_is_initially_empty = false;
 
+    // When the `lfs` feature is on, maw-lfs handles LFS smudge/clean itself
+    // in a post-pass. Clear external filter drivers here so gix does NOT
+    // spawn git-lfs (or any other filter binary) as a subprocess during
+    // checkout. Built-in filters (ident, text, eol) remain available.
+    #[cfg(feature = "lfs")]
+    {
+        opts.filters.options_mut().drivers.clear();
+    }
+
     let objects = repo
         .repo
         .objects
@@ -99,10 +108,137 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
         });
     }
 
+    // LFS smudge post-pass: replace any LFS pointer files with real content
+    // from the local store. Best-effort — logs and continues on errors.
+    // Objects missing from the local store stay as pointer text with a warn.
+    #[cfg(feature = "lfs")]
+    if let Err(e) = smudge_lfs_pointers(&index_file, workdir, repo) {
+        tracing::warn!("lfs smudge post-pass failed: {e}");
+    }
+
     // Remove working-tree files not present in the target tree.
     // This fulfills the trait contract: "Existing working-tree files not in
     // the tree are removed."
     remove_stale_files(workdir, workdir, &tree_paths)?;
+
+    Ok(())
+}
+
+/// LFS smudge: replace pointer files in the working tree with real content
+/// from the local LFS store.
+///
+/// Walks all tree-tracked entries in `index`, checks each against the
+/// `.gitattributes` rules just written to `workdir`, and for any LFS-tracked
+/// path that currently holds a pointer, overwrites with the real bytes.
+/// Objects missing from the local store are left as pointer text with a
+/// tracing warning — checkout itself is not failed.
+#[cfg(feature = "lfs")]
+fn smudge_lfs_pointers(
+    index: &gix::index::File,
+    workdir: &Path,
+    repo: &GixRepo,
+) -> Result<(), GitError> {
+    use std::io::Write;
+
+    let attrs = maw_lfs::AttrsMatcher::from_workdir(workdir).map_err(|e| {
+        GitError::BackendError {
+            message: format!("lfs attrs: {e}"),
+        }
+    })?;
+
+    // Open (or create) the LFS store under the git dir.
+    let git_dir = repo.repo.git_dir();
+    let store = maw_lfs::Store::open(git_dir).map_err(|e| GitError::BackendError {
+        message: format!("lfs store: {e}"),
+    })?;
+
+    for entry in index.entries() {
+        // Only regular files; skip submodules / symlinks / trees.
+        let is_file = matches!(
+            entry.mode,
+            gix::index::entry::Mode::FILE | gix::index::entry::Mode::FILE_EXECUTABLE
+        );
+        if !is_file {
+            continue;
+        }
+        let path_str = match entry.path(index).to_str() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !attrs.is_lfs(path_str) {
+            continue;
+        }
+
+        let full_path = workdir.join(path_str);
+        // Pointer cap is 1024 bytes per spec; anything larger is real content.
+        let meta = match std::fs::metadata(&full_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() > 1024 {
+            continue;
+        }
+
+        let bytes = match std::fs::read(&full_path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if !maw_lfs::looks_like_pointer(&bytes) {
+            continue;
+        }
+        let pointer = match maw_lfs::Pointer::parse(&bytes) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let mut reader = match store.open_object(&pointer.oid) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                tracing::warn!(
+                    path = path_str,
+                    oid = %pointer.oid_hex(),
+                    "lfs object missing from local store — pointer left on disk"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(path = path_str, "lfs store error: {e}");
+                continue;
+            }
+        };
+
+        // Atomic replace: write to sibling tmp file, rename over.
+        let tmp_path = full_path.with_extension("maw-lfs-tmp");
+        let result = (|| -> std::io::Result<()> {
+            let mut out = std::fs::File::create(&tmp_path)?;
+            std::io::copy(&mut reader, &mut out)?;
+            out.flush()?;
+            out.sync_all()?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode_bits =
+                    if entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE {
+                        0o755
+                    } else {
+                        0o644
+                    };
+                std::fs::set_permissions(
+                    &tmp_path,
+                    std::fs::Permissions::from_mode(mode_bits),
+                )?;
+            }
+
+            std::fs::rename(&tmp_path, &full_path)?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&tmp_path);
+            tracing::warn!(path = path_str, "lfs smudge write failed: {e}");
+        }
+    }
 
     Ok(())
 }

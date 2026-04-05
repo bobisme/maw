@@ -141,6 +141,25 @@ pub trait GitRepo {
     /// object database.
     fn write_blob(&self, data: &[u8]) -> Result<GitOid, GitError>;
 
+    /// Write a blob, with the repo-relative path that governs attribute-
+    /// driven filters (currently: LFS clean).
+    ///
+    /// If `rel_path` matches a `filter=lfs` rule in `.gitattributes` AND
+    /// `data` is not already an LFS pointer, this method stores the content
+    /// in `.git/lfs/objects/` and returns the OID of the *pointer blob*.
+    /// Otherwise it is equivalent to [`write_blob`].
+    ///
+    /// Always safe to call in place of `write_blob` when the caller has a
+    /// repo-relative path at hand.
+    fn write_blob_with_path(
+        &self,
+        data: &[u8],
+        rel_path: &str,
+    ) -> Result<GitOid, GitError> {
+        let _ = rel_path;
+        self.write_blob(data)
+    }
+
     /// Write a tree object from a list of entries and return its OID.
     ///
     /// Replaces: `git mktree`.

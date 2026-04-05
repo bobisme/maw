@@ -2,6 +2,25 @@
 
 All notable changes to maw.
 
+## v0.58.0
+
+### Added — native Git LFS support (bn-lyk4)
+maw now handles LFS smudge/clean natively, with no `git` or `git-lfs` subprocess invocations. Working trees in LFS-tracked repos get real binary content after `maw ws create/sync/advance/merge`; `maw ws merge` writes correct pointer blobs (not raw binaries) on LFS paths. Fully interoperable with `git-lfs` on disk: identical pointer format, shared `.git/lfs/objects/` layout.
+
+- **`maw-lfs` crate**: pointer codec (v1 spec), content-addressed object store, `.gitattributes` matcher, HTTPS batch API client, credential provider (env vars + netrc).
+- **Checkout smudge post-pass** replaces LFS pointer files with real content from `.git/lfs/objects/`. Missing objects leave the pointer with a warning (never fails checkout).
+- **`GitRepo::write_blob_with_path`** runs the LFS clean filter when a path matches `filter=lfs`: real bytes → store, git blob becomes the pointer. Used by `maw ws merge` so merged trees carry pointers.
+- **`maw push`** uploads new LFS objects to the remote's batch endpoint before pushing refs. Config key `lfs.push_before_git_push` (default true) to opt out.
+- **`maw doctor`** reports pointer stubs in working trees and LFS object store size.
+- Conformance test suite validates byte-for-byte parity with `git-lfs` 3.7.1.
+
+### Fixed
+- **No more LFS pointer stubs in working trees.** Previously, `maw ws create`/`sync`/`merge` wrote the raw pointer text (~130 bytes) instead of real binary content because gix's checkout doesn't run external filter processes. Agents saw pointers, builds broke.
+- **No more raw binaries in git blobs.** Commits made via `maw ws merge` on LFS-tracked paths now store the correct pointer blob; real bytes go to `.git/lfs/objects/`.
+
+### Migration
+If you have existing corrupted workspaces (pointer stubs on disk from older maw), run `maw doctor` to detect them, then `maw ws sync <name>` on each to re-smudge. `git lfs pull` works as always to populate the local store.
+
 ## v0.57.3
 
 ### Fixed

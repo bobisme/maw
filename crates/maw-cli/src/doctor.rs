@@ -117,6 +117,7 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
 
     checks.push(check_manifold_initialized(root.as_deref()));
     checks.push(check_default_workspace(root.as_deref()));
+    checks.push(check_lfs(root.as_deref()));
     checks.push(check_root_bare(root.as_deref()));
     checks.push(check_ghost_working_copy(root.as_deref()));
     checks.push(check_dangling_snapshots(root.as_deref()));
@@ -538,6 +539,196 @@ fn check_git_head() -> DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// LFS check
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "lfs"))]
+fn check_lfs(_root: Option<&Path>) -> DoctorCheck {
+    DoctorCheck {
+        name: "lfs".to_string(),
+        status: "ok".to_string(),
+        message: "lfs: feature disabled".to_string(),
+        fix: None,
+    }
+}
+
+#[cfg(feature = "lfs")]
+fn check_lfs(root: Option<&Path>) -> DoctorCheck {
+    let Some(root) = root else {
+        return DoctorCheck {
+            name: "lfs".to_string(),
+            status: "ok".to_string(),
+            message: "lfs: could not determine repo root".to_string(),
+            fix: None,
+        };
+    };
+
+    check_lfs_in(root)
+}
+
+#[cfg(feature = "lfs")]
+fn check_lfs_in(root: &Path) -> DoctorCheck {
+    let ws_root = root.join("ws");
+    if !has_any_gitattributes(&ws_root) {
+        return DoctorCheck {
+            name: "lfs".to_string(),
+            status: "ok".to_string(),
+            message: "lfs: no LFS tracked patterns".to_string(),
+            fix: None,
+        };
+    }
+
+    // Count objects in .git/lfs/objects/
+    let object_count = count_lfs_objects(&root.join(".git").join("lfs").join("objects"));
+
+    let mut workspaces = 0usize;
+    let mut files_checked = 0usize;
+    let mut stubs: Vec<String> = Vec::new();
+
+    let Ok(entries) = std::fs::read_dir(&ws_root) else {
+        return DoctorCheck {
+            name: "lfs".to_string(),
+            status: "ok".to_string(),
+            message: "lfs: could not read ws/".to_string(),
+            fix: None,
+        };
+    };
+
+    for entry in entries.flatten() {
+        let ws_path = entry.path();
+        if !ws_path.is_dir() {
+            continue;
+        }
+        let ws_name = entry.file_name().to_string_lossy().to_string();
+        workspaces += 1;
+
+        let Ok(matcher) = maw_lfs::AttrsMatcher::from_workdir(&ws_path) else {
+            continue;
+        };
+
+        scan_for_stubs(&ws_path, &ws_path, &matcher, &mut files_checked, &mut stubs, &ws_name);
+    }
+
+    let stub_count = stubs.len();
+    if stub_count == 0 {
+        DoctorCheck {
+            name: "lfs".to_string(),
+            status: "ok".to_string(),
+            message: format!(
+                "lfs: {workspaces} workspace(s) healthy, {files_checked} LFS files checked, \
+                 {object_count} object(s) in store"
+            ),
+            fix: None,
+        }
+    } else {
+        let sample: Vec<String> = stubs.iter().take(5).cloned().collect();
+        DoctorCheck {
+            name: "lfs".to_string(),
+            status: "warn".to_string(),
+            message: format!(
+                "lfs: {stub_count} pointer stub(s) detected (corrupted checkout), \
+                 {object_count} object(s) in store: {}",
+                sample.join(", ")
+            ),
+            fix: Some(
+                "Run `maw ws sync <name>` on each stale workspace, or recreate the workspace."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "lfs")]
+fn has_any_gitattributes(ws_root: &Path) -> bool {
+    fn walk(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == ".git" || name_str == ".manifold" {
+                continue;
+            }
+            if path.is_file() && name_str == ".gitattributes" {
+                return true;
+            }
+            if path.is_dir() && walk(&path) {
+                return true;
+            }
+        }
+        false
+    }
+    walk(ws_root)
+}
+
+#[cfg(feature = "lfs")]
+fn count_lfs_objects(dir: &Path) -> usize {
+    fn walk(dir: &Path, count: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, count);
+            } else if path.is_file() {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0;
+    walk(dir, &mut count);
+    count
+}
+
+#[cfg(feature = "lfs")]
+fn scan_for_stubs(
+    ws_root: &Path,
+    dir: &Path,
+    matcher: &maw_lfs::AttrsMatcher,
+    files_checked: &mut usize,
+    stubs: &mut Vec<String>,
+    ws_name: &str,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == ".git" || name_str == ".manifold" {
+            continue;
+        }
+        if path.is_dir() {
+            scan_for_stubs(ws_root, &path, matcher, files_checked, stubs, ws_name);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(meta) = path.metadata() else { continue };
+        if meta.len() > 1024 {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(ws_root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !matcher.is_lfs(&rel_str) {
+            continue;
+        }
+        *files_checked += 1;
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        if maw_lfs::looks_like_pointer(&bytes) {
+            stubs.push(format!("{ws_name}/{rel_str}"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -618,5 +809,67 @@ mod tests {
     fn version_comparison_major_above() {
         let v = (3, 0, 0);
         assert!(v >= MIN_GIT_VERSION);
+    }
+
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn check_lfs_detects_pointer_stub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let ws_default = root.join("ws").join("default");
+        std::fs::create_dir_all(&ws_default).unwrap();
+        std::fs::write(
+            ws_default.join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        let pointer = "version https://git-lfs.github.com/spec/v1\n\
+                       oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+                       size 12345\n";
+        std::fs::write(ws_default.join("hero.bin"), pointer).unwrap();
+
+        let check = check_lfs(Some(root));
+        assert_eq!(check.status, "warn", "got: {}", check.message);
+        assert!(
+            check.message.contains("pointer stub"),
+            "message: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("default/hero.bin"),
+            "message: {}",
+            check.message
+        );
+        assert!(check.fix.is_some());
+    }
+
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn check_lfs_no_gitattributes_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("ws").join("default")).unwrap();
+        let check = check_lfs(Some(root));
+        assert_eq!(check.status, "ok");
+        assert!(check.message.contains("no LFS tracked patterns"));
+    }
+
+    #[cfg(feature = "lfs")]
+    #[test]
+    fn check_lfs_healthy_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let ws_default = root.join("ws").join("default");
+        std::fs::create_dir_all(&ws_default).unwrap();
+        std::fs::write(
+            ws_default.join(".gitattributes"),
+            "*.bin filter=lfs -text\n",
+        )
+        .unwrap();
+        // A non-pointer (real binary content) file
+        std::fs::write(ws_default.join("real.bin"), vec![0u8; 2048]).unwrap();
+        let check = check_lfs(Some(root));
+        assert_eq!(check.status, "ok", "message: {}", check.message);
+        assert!(check.message.contains("healthy"));
     }
 }

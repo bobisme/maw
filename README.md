@@ -185,3 +185,28 @@ packs = ["core"]
 semantic_false_positive_budget_pct = 5
 semantic_min_confidence = 70
 ```
+
+## Git LFS
+
+maw is natively LFS-aware — no `git` or `git-lfs` subprocess is spawned in the LFS code path, and everything stays interoperable with `git-lfs` on disk.
+
+**What maw does automatically:**
+- **Checkout smudge**: `maw ws create/sync/advance/merge` leaves real binary content on disk for any path matching `filter=lfs` in `.gitattributes`. Missing objects leave the pointer with a warning — checkout never fails.
+- **Commit clean**: `maw ws merge` writes a pointer blob to git and stores the real bytes in `.git/lfs/objects/` for LFS-tracked paths.
+- **Push upload**: `maw push` uploads new LFS objects to the remote's batch endpoint before pushing refs.
+
+**What you still use `git-lfs` for:**
+- `git lfs pull` to populate `.git/lfs/objects/` from a remote before maw's smudge needs it.
+- `git lfs prune`, `git lfs locks`, `git lfs ls-files`, `git lfs fsck` — all work normally.
+- Configuring filters on fresh clones via `git lfs install`.
+
+**Config keys:**
+| Key | Default | Purpose |
+|---|---|---|
+| `lfs.push_before_git_push` | `true` | Upload LFS objects before `maw push`. Set to `false` if you rely on git-lfs's pre-push hook. |
+
+**Credentials** for the batch API are resolved from:
+1. `MAW_LFS_USERNAME` / `MAW_LFS_PASSWORD` environment variables (all hosts).
+2. `~/.netrc` entries matching the LFS server host.
+
+**Migration.** If you upgraded from an older maw and your workspaces contain LFS pointer stubs (files with `version https://git-lfs.github.com/spec/v1` as their content): run `maw doctor` to spot them, then `maw ws sync <name>` on each affected workspace to re-smudge. If an object isn't in the local store, `git lfs pull` once beforehand.
