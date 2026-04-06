@@ -744,6 +744,24 @@ fn checkout_smudges_lfs_pointer_to_real_content() {
         ])
         .unwrap();
 
+    // Create a commit and point HEAD at it so `git status` has a baseline.
+    let head_ref = RefName::new("refs/heads/main").unwrap();
+    let _commit_oid = repo
+        .create_commit(tree_oid, &[], "lfs test commit", Some(&head_ref))
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+        .current_dir(workdir)
+        .output()
+        .unwrap();
+    // Install git-lfs filters locally so `git update-index --really-refresh`
+    // can run the clean filter (pointer ← real content) and clear stat mismatches.
+    std::process::Command::new("git")
+        .args(["lfs", "install", "--local"])
+        .current_dir(workdir)
+        .output()
+        .unwrap();
+
     repo.checkout_tree(tree_oid, workdir).unwrap();
 
     // .gitattributes should still be its raw content (not LFS-tracked).
@@ -758,6 +776,18 @@ fn checkout_smudges_lfs_pointer_to_real_content() {
     assert_eq!(
         hero_on_disk, real_content,
         "hero.bin should be smudged to real content"
+    );
+
+    // Verify no phantom modifications after smudge
+    let status_output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workdir)
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&status_output.stdout);
+    assert!(
+        status.trim().is_empty(),
+        "git status should be clean after smudge, but got:\n{status}"
     );
 }
 
@@ -981,4 +1011,65 @@ fn full_round_trip_clean_then_smudge() {
     // Full round trip: real bytes on disk.
     let on_disk = std::fs::read(workdir.join("hero.bin")).unwrap();
     assert_eq!(on_disk, real);
+}
+
+#[cfg(feature = "lfs")]
+#[test]
+fn write_blob_with_path_works_on_bare_repo() {
+    // Create a bare repo with .gitattributes in its HEAD tree.
+    // Verify that write_blob_with_path correctly applies the LFS clean
+    // filter even though repo.workdir() returns None.
+    let dir = TempDir::new().unwrap();
+    let bare_path = dir.path().join("bare.git");
+    std::process::Command::new("git")
+        .args(["init", "--bare", bare_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&bare_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&bare_path)
+        .output()
+        .unwrap();
+
+    let repo = GixRepo::open(&bare_path).unwrap();
+
+    // Build an initial commit with .gitattributes tracking *.bin as LFS.
+    let attrs_blob = repo.write_blob(b"*.bin filter=lfs\n").unwrap();
+    let tree_oid = repo
+        .write_tree(&[TreeEntry {
+            name: ".gitattributes".to_string(),
+            mode: EntryMode::Blob,
+            oid: attrs_blob,
+        }])
+        .unwrap();
+    let head_ref = RefName::new("refs/heads/main").unwrap();
+    repo.create_commit(tree_oid, &[], "initial: add .gitattributes", Some(&head_ref))
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+        .current_dir(&bare_path)
+        .output()
+        .unwrap();
+
+    // Write raw binary content through write_blob_with_path.
+    let real: Vec<u8> = (0..4096u32).map(|i| (i * 37 % 251) as u8).collect();
+    let oid = repo.write_blob_with_path(&real, "hero.bin").unwrap();
+
+    // The stored blob should be a pointer, not the raw binary.
+    let blob = repo.read_blob(oid).unwrap();
+    let blob_str = std::str::from_utf8(&blob).expect("pointer should be valid UTF-8");
+    assert!(
+        blob_str.starts_with("version https://git-lfs.github.com/spec/v1\n"),
+        "expected LFS pointer, got: {blob_str}"
+    );
+    assert!(
+        blob.len() < 200,
+        "pointer should be small (~131 bytes), got {} bytes",
+        blob.len()
+    );
 }

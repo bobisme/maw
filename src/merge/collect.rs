@@ -198,9 +198,17 @@ fn collect_one<B: WorkspaceBackend>(
     let capacity = snapshot.change_count();
     let mut changes = Vec::with_capacity(capacity);
 
+    // Check if workspace HEAD has advanced beyond the epoch. If so, the
+    // workspace has committed changes and we should read blobs from HEAD
+    // (which holds pointer bytes for LFS files) rather than the working tree
+    // (which holds smudged binary content).
+    let ws_has_commits = ws_head_differs_from_epoch(&ws_path, &epoch);
+
     // Added files: read content, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
-        let Some(content) = read_workspace_file(&ws_path, path, ws_id)? else {
+        let Some(content) =
+            read_committed_or_workspace_file(&ws_path, path, ws_id, ws_has_commits)?
+        else {
             // Ignore directory entries (for example untracked nested git dirs)
             // that can appear in porcelain outputs as "path/".
             continue;
@@ -221,7 +229,9 @@ fn collect_one<B: WorkspaceBackend>(
 
     // Modified files: read current content, look up existing FileId, compute blob OID.
     for path in &snapshot.modified {
-        let Some(content) = read_workspace_file(&ws_path, path, ws_id)? else {
+        let Some(content) =
+            read_committed_or_workspace_file(&ws_path, path, ws_id, ws_has_commits)?
+        else {
             // Ignore non-file paths to keep collect robust against directory-only
             // workspace entries.
             continue;
@@ -334,6 +344,75 @@ fn path_exists_at_commit(repo_root: &Path, commit: &EpochId, path: &Path) -> boo
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// Read file content for the merge, preferring committed blobs when the
+/// workspace has commits ahead of the epoch.
+///
+/// When `ws_has_commits` is true, the workspace HEAD has advanced beyond the
+/// epoch — meaning the user/agent committed changes. In this case we read
+/// from the committed tree (`HEAD:<path>`) to get the clean (non-smudged)
+/// content. This is critical for LFS correctness: the working tree contains
+/// smudged real binary content, but the committed blob holds the LFS pointer
+/// bytes that the merge must store.
+///
+/// When `ws_has_commits` is false, all changes are uncommitted working-tree
+/// edits, so we read directly from disk.
+fn read_committed_or_workspace_file(
+    ws_path: &Path,
+    rel_path: &Path,
+    ws_id: &WorkspaceId,
+    ws_has_commits: bool,
+) -> Result<Option<Vec<u8>>, CollectError> {
+    if ws_has_commits {
+        if let Some(blob) = read_committed_blob(ws_path, rel_path) {
+            return Ok(Some(blob));
+        }
+    }
+    // Fallback: workspace has no commits, or file not in HEAD (uncommitted).
+    read_workspace_file(ws_path, rel_path, ws_id)
+}
+
+/// Check whether the workspace HEAD has advanced beyond the epoch.
+///
+/// Returns `true` if the workspace has committed changes (HEAD != epoch),
+/// meaning we should read from the committed tree rather than the working
+/// tree to avoid LFS smudge contamination.
+fn ws_head_differs_from_epoch(ws_path: &Path, epoch: &EpochId) -> bool {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(ws_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let head_oid = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+            head_oid != epoch.as_str()
+        }
+        _ => false,
+    }
+}
+
+/// Read a blob from `HEAD:<rel_path>` in the workspace worktree at `ws_path`.
+///
+/// Returns `None` if the file is not in the HEAD tree (e.g., untracked) or
+/// if the git command fails for any reason.
+fn read_committed_blob(ws_path: &Path, rel_path: &Path) -> Option<Vec<u8>> {
+    let path_str = rel_path.to_str()?;
+    let rev = format!("HEAD:{path_str}");
+    let output = Command::new("git")
+        .args(["cat-file", "blob", &rev])
+        .current_dir(ws_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(output.stdout)
+    } else {
+        None
+    }
 }
 
 /// Read the current content of a file from a workspace's working tree.

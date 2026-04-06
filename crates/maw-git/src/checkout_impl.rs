@@ -116,6 +116,41 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
         tracing::warn!("lfs smudge post-pass failed: {e}");
     }
 
+    // Write the index to disk so `git status` sees checked-out files as
+    // tracked. gix::worktree::state::checkout updates stat info in the
+    // in-memory index but does not persist it.
+    {
+        let index_path = repo.repo.index_path();
+        let mut persisted =
+            gix::index::File::from_state(index_file.into(), index_path);
+        persisted
+            .write(Default::default())
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to write index after checkout: {e}"),
+            })?;
+    }
+
+    // After smudging, refresh the git index so the stat cache reflects the
+    // new file sizes/mtimes. Without this, `git status` reports every
+    // smudged LFS file as "modified" (phantom dirty state).
+    //
+    // We run `git add .` which:
+    //  1. Re-stats every tracked file.
+    //  2. For changed files, runs the configured clean filter (git-lfs),
+    //     converting real content back to pointer text for the index blob.
+    //  3. Since clean(real_content) produces the same pointer already in
+    //     the index, the blob is unchanged — but the stat cache is updated.
+    //
+    // This is a one-time post-checkout operation. gix has no stable
+    // equivalent for "refresh stat cache + run clean filters".
+    #[cfg(feature = "lfs")]
+    {
+        let _ = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(workdir)
+            .output();
+    }
+
     // Remove working-tree files not present in the target tree.
     // This fulfills the trait contract: "Existing working-tree files not in
     // the tree are removed."
@@ -132,6 +167,17 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
 /// path that currently holds a pointer, overwrites with the real bytes.
 /// Objects missing from the local store are left as pointer text with a
 /// tracing warning — checkout itself is not failed.
+/// Public entry point for the LFS smudge post-pass, callable from
+/// `worktree_impl::worktree_add` and other checkout paths.
+#[cfg(feature = "lfs")]
+pub(crate) fn smudge_lfs_pointers_public(
+    index: &gix::index::File,
+    workdir: &Path,
+    repo: &GixRepo,
+) -> Result<(), GitError> {
+    smudge_lfs_pointers(index, workdir, repo)
+}
+
 #[cfg(feature = "lfs")]
 fn smudge_lfs_pointers(
     index: &gix::index::File,

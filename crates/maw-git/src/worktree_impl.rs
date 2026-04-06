@@ -135,6 +135,14 @@ pub fn worktree_add(
     opts.overwrite_existing = true;
     opts.destination_is_initially_empty = true;
 
+    // When the `lfs` feature is on, maw-lfs handles LFS smudge itself.
+    // Clear external filter drivers so gix does NOT spawn git-lfs during
+    // the initial worktree checkout (same as checkout_impl.rs).
+    #[cfg(feature = "lfs")]
+    {
+        opts.filters.options_mut().drivers.clear();
+    }
+
     let objects = repo
         .repo
         .objects
@@ -167,6 +175,22 @@ pub fn worktree_add(
                 first.error,
             ),
         });
+    }
+
+    // LFS smudge post-pass: replace pointer files with real content,
+    // then refresh the index so git status doesn't show phantom mods.
+    #[cfg(feature = "lfs")]
+    {
+        if let Err(e) =
+            crate::checkout_impl::smudge_lfs_pointers_public(&checkout_index, path, repo)
+        {
+            tracing::warn!("lfs smudge post-pass failed in worktree_add: {e}");
+        }
+        // Refresh index stat cache after smudge (same as checkout_impl).
+        let _ = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output();
     }
 
     Ok(())
