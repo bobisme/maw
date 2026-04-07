@@ -6,6 +6,8 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+use gix::bstr::ByteSlice;
+
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
 use crate::types::*;
@@ -178,19 +180,44 @@ pub fn worktree_add(
     }
 
     // LFS smudge post-pass: replace pointer files with real content,
-    // then refresh the index so git status doesn't show phantom mods.
+    // then update index stats so git status doesn't show phantom mods.
     #[cfg(feature = "lfs")]
     {
-        if let Err(e) =
-            crate::checkout_impl::smudge_lfs_pointers_public(&checkout_index, path, repo)
-        {
-            tracing::warn!("lfs smudge post-pass failed in worktree_add: {e}");
+        let smudged = match crate::checkout_impl::smudge_lfs_pointers_public(
+            &checkout_index,
+            path,
+            repo,
+        ) {
+            Ok(paths) => paths,
+            Err(e) => {
+                tracing::warn!("lfs smudge post-pass failed in worktree_add: {e}");
+                Vec::new()
+            }
+        };
+        // Update index stat entries for smudged files, then rewrite.
+        for rel_path in &smudged {
+            let full = path.join(rel_path);
+            let meta = match gix::index::fs::Metadata::from_path_no_follow(&full) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let Ok(new_stat) = gix::index::entry::Stat::from_fs(&meta) else {
+                continue;
+            };
+            if let Some(idx) = checkout_index
+                .entries()
+                .iter()
+                .position(|e| e.path(&checkout_index).to_str().ok() == Some(rel_path.as_str()))
+            {
+                checkout_index.entries_mut()[idx].stat = new_stat;
+            }
         }
-        // Refresh index stat cache after smudge (same as checkout_impl).
-        let _ = std::process::Command::new("git")
-            .args(["add", "-u", "."])
-            .current_dir(path)
-            .output();
+        if !smudged.is_empty() {
+            let index_path = admin_dir.join("index");
+            let mut persisted =
+                gix::index::File::from_state(checkout_index.into(), index_path);
+            let _ = persisted.write(Default::default());
+        }
     }
 
     Ok(())

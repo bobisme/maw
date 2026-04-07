@@ -111,14 +111,44 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     // LFS smudge post-pass: replace any LFS pointer files with real content
     // from the local store. Best-effort — logs and continues on errors.
     // Objects missing from the local store stay as pointer text with a warn.
+    //
+    // Returns the repo-relative paths of files that were smudged so we can
+    // update their index stat entries below.
     #[cfg(feature = "lfs")]
-    if let Err(e) = smudge_lfs_pointers(&index_file, workdir, repo) {
-        tracing::warn!("lfs smudge post-pass failed: {e}");
+    let smudged_paths = match smudge_lfs_pointers(&index_file, workdir, repo) {
+        Ok(paths) => paths,
+        Err(e) => {
+            tracing::warn!("lfs smudge post-pass failed: {e}");
+            Vec::new()
+        }
+    };
+
+    // Update index stat entries for smudged files. After smudge, the
+    // on-disk file has different size/mtime than the pointer text that gix
+    // checked out. If we don't update the stat cache, `git status` reports
+    // every smudged LFS file as "modified" (phantom dirty state).
+    #[cfg(feature = "lfs")]
+    for rel_path in &smudged_paths {
+        let full = workdir.join(rel_path);
+        let meta = match gix::index::fs::Metadata::from_path_no_follow(&full) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let Ok(new_stat) = gix::index::entry::Stat::from_fs(&meta) else {
+            continue;
+        };
+        // Find the entry by path and update its stat.
+        if let Some(idx) = index_file
+            .entries()
+            .iter()
+            .position(|e| e.path(&index_file).to_str().ok() == Some(rel_path.as_str()))
+        {
+            index_file.entries_mut()[idx].stat = new_stat;
+        }
     }
 
-    // Write the index to disk so `git status` sees checked-out files as
-    // tracked. gix::worktree::state::checkout updates stat info in the
-    // in-memory index but does not persist it.
+    // Write the index to disk. gix::worktree::state::checkout updates
+    // stat info in the in-memory index but does not persist it.
     {
         let index_path = repo.repo.index_path();
         let mut persisted =
@@ -128,27 +158,6 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
             .map_err(|e| GitError::BackendError {
                 message: format!("failed to write index after checkout: {e}"),
             })?;
-    }
-
-    // After smudging, refresh the git index so the stat cache reflects the
-    // new file sizes/mtimes. Without this, `git status` reports every
-    // smudged LFS file as "modified" (phantom dirty state).
-    //
-    // We run `git add .` which:
-    //  1. Re-stats every tracked file.
-    //  2. For changed files, runs the configured clean filter (git-lfs),
-    //     converting real content back to pointer text for the index blob.
-    //  3. Since clean(real_content) produces the same pointer already in
-    //     the index, the blob is unchanged — but the stat cache is updated.
-    //
-    // This is a one-time post-checkout operation. gix has no stable
-    // equivalent for "refresh stat cache + run clean filters".
-    #[cfg(feature = "lfs")]
-    {
-        let _ = std::process::Command::new("git")
-            .args(["add", "-u", "."])
-            .current_dir(workdir)
-            .output();
     }
 
     // Remove working-tree files not present in the target tree.
@@ -169,22 +178,26 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
 /// tracing warning — checkout itself is not failed.
 /// Public entry point for the LFS smudge post-pass, callable from
 /// `worktree_impl::worktree_add` and other checkout paths.
+/// Returns the repo-relative paths of files that were smudged.
 #[cfg(feature = "lfs")]
 pub(crate) fn smudge_lfs_pointers_public(
     index: &gix::index::File,
     workdir: &Path,
     repo: &GixRepo,
-) -> Result<(), GitError> {
+) -> Result<Vec<String>, GitError> {
     smudge_lfs_pointers(index, workdir, repo)
 }
 
+/// Returns the repo-relative paths of files that were successfully smudged.
 #[cfg(feature = "lfs")]
 fn smudge_lfs_pointers(
     index: &gix::index::File,
     workdir: &Path,
     repo: &GixRepo,
-) -> Result<(), GitError> {
+) -> Result<Vec<String>, GitError> {
     use std::io::Write;
+
+    let mut smudged: Vec<String> = Vec::new();
 
     let attrs = maw_lfs::AttrsMatcher::from_workdir(workdir).map_err(|e| {
         GitError::BackendError {
@@ -280,13 +293,16 @@ fn smudge_lfs_pointers(
             Ok(())
         })();
 
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&tmp_path);
-            tracing::warn!(path = path_str, "lfs smudge write failed: {e}");
+        match result {
+            Ok(()) => smudged.push(path_str.to_owned()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                tracing::warn!(path = path_str, "lfs smudge write failed: {e}");
+            }
         }
     }
 
-    Ok(())
+    Ok(smudged)
 }
 
 /// Walk `dir` and remove any files whose path relative to `workdir` is not in `tree_paths`.
