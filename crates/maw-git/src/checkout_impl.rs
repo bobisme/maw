@@ -146,7 +146,7 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     #[cfg(feature = "lfs")]
     {
         let _ = std::process::Command::new("git")
-            .args(["add", "."])
+            .args(["add", "-u", "."])
             .current_dir(workdir)
             .output();
     }

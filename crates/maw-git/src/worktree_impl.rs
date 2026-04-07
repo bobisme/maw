@@ -188,7 +188,7 @@ pub fn worktree_add(
         }
         // Refresh index stat cache after smudge (same as checkout_impl).
         let _ = std::process::Command::new("git")
-            .args(["add", "."])
+            .args(["add", "-u", "."])
             .current_dir(path)
             .output();
     }
