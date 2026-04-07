@@ -25,25 +25,33 @@ pub fn write_blob_with_path(
 ) -> Result<GitOid, GitError> {
     // Load .gitattributes for LFS pattern matching.
     //
-    // Always read from the HEAD tree first — this gives the correct
-    // repo-relative paths for pattern matching. The workdir approach
-    // fails in maw's bare-repo layout where the project root is the
-    // "workdir" but source files live under ws/default/ (causing wrong
-    // directory prefixes in the matcher).
-    //
-    // Fall back to workdir only when HEAD doesn't exist (fresh repo).
-    let attrs = match load_attrs_from_head(repo) {
-        Ok(a) if !a.is_empty() => a,
-        _ => {
-            let workdir = match repo.repo.workdir() {
-                Some(w) => w.to_owned(),
-                None => return crate::objects_impl::write_blob(repo, data),
-            };
-            match maw_lfs::AttrsMatcher::from_workdir(&workdir) {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::warn!("lfs attrs load failed: {e} — writing raw blob");
-                    return crate::objects_impl::write_blob(repo, data);
+    // Priority:
+    // 1. Pending attrs override (set by merge callers when the merge itself
+    //    modifies .gitattributes — uses the INCOMING attrs, not HEAD's).
+    // 2. HEAD tree (correct repo-relative paths; works for bare repos).
+    // 3. Workdir fallback (fresh repo with no HEAD).
+    let attrs = if let Some(ref entries) = repo.pending_gitattributes {
+        match maw_lfs::AttrsMatcher::from_entries(entries.clone()) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("pending gitattributes parse failed: {e}");
+                return crate::objects_impl::write_blob(repo, data);
+            }
+        }
+    } else {
+        match load_attrs_from_head(repo) {
+            Ok(a) if !a.is_empty() => a,
+            _ => {
+                let workdir = match repo.repo.workdir() {
+                    Some(w) => w.to_owned(),
+                    None => return crate::objects_impl::write_blob(repo, data),
+                };
+                match maw_lfs::AttrsMatcher::from_workdir(&workdir) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!("lfs attrs load failed: {e} — writing raw blob");
+                        return crate::objects_impl::write_blob(repo, data);
+                    }
                 }
             }
         }

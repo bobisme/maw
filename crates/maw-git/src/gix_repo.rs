@@ -12,6 +12,11 @@ use crate::types::*;
 pub struct GixRepo {
     pub(crate) repo: gix::Repository,
     pub(crate) workdir: Option<PathBuf>,
+    /// Override `.gitattributes` entries for LFS pattern matching.
+    /// Set by merge callers when the merge itself modifies `.gitattributes`,
+    /// so `write_blob_with_path` uses the incoming attrs instead of HEAD's.
+    #[cfg(feature = "lfs")]
+    pub(crate) pending_gitattributes: Option<Vec<(String, Vec<u8>)>>,
 }
 
 impl GixRepo {
@@ -21,7 +26,12 @@ impl GixRepo {
             message: e.to_string(),
         })?;
         let workdir = repo.workdir().map(|p| p.to_path_buf());
-        Ok(Self { repo, workdir })
+        Ok(Self {
+            repo,
+            workdir,
+            #[cfg(feature = "lfs")]
+            pending_gitattributes: None,
+        })
     }
 
     /// Path to this repository's git directory (`.git` or its common dir for worktrees).
@@ -49,7 +59,31 @@ impl GixRepo {
             }
         })?;
         let workdir = repo.workdir().map(|p| p.to_path_buf());
-        Ok(Self { repo, workdir })
+        Ok(Self {
+            repo,
+            workdir,
+            #[cfg(feature = "lfs")]
+            pending_gitattributes: None,
+        })
+    }
+
+    /// Set override `.gitattributes` entries for LFS pattern matching.
+    ///
+    /// Call this before passing the repo to `build_merge_commit` when the
+    /// merge itself modifies `.gitattributes`. Each entry is
+    /// `(dir_prefix, file_contents)` — same format as
+    /// [`maw_lfs::AttrsMatcher::from_entries`].
+    ///
+    /// `write_blob_with_path` will use these instead of reading from HEAD.
+    #[cfg(feature = "lfs")]
+    pub fn set_pending_gitattributes(&mut self, entries: Vec<(String, Vec<u8>)>) {
+        self.pending_gitattributes = Some(entries);
+    }
+
+    /// Clear the override set by [`set_pending_gitattributes`].
+    #[cfg(feature = "lfs")]
+    pub fn clear_pending_gitattributes(&mut self) {
+        self.pending_gitattributes = None;
     }
 }
 

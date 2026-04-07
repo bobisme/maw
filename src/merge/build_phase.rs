@@ -298,9 +298,10 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     )?;
 
     // 6. Build candidate commit
-    let repo = open_repo(repo_root)?;
+    let mut repo = open_gix_repo(repo_root)?;
+    set_pending_attrs_from_resolved(&mut repo, &resolved);
     let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().to_path_buf()).collect();
-    let candidate = build_merge_commit(&*repo, epoch, sources, &resolved, None)?;
+    let candidate = build_merge_commit(&repo, epoch, sources, &resolved, None)?;
 
     Ok(BuildPhaseOutput {
         candidate,
@@ -316,17 +317,48 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Open a `GixRepo` at the given path.
-fn open_repo(root: &Path) -> Result<Box<dyn maw_git::GitRepo>, BuildPhaseError> {
-    maw_git::GixRepo::open(root)
-        .map(|r| Box::new(r) as Box<dyn maw_git::GitRepo>)
-        .map_err(|e| {
-            BuildPhaseError::Build(BuildError::GitCommand {
-                command: format!("open repo at {}", root.display()),
-                stderr: e.to_string(),
-                exit_code: None,
-            })
+/// If the resolved changes include a `.gitattributes` modification,
+/// extract the new content and set it as the pending attrs override on
+/// the repo. This ensures `write_blob_with_path` uses the INCOMING
+/// `.gitattributes` instead of HEAD's stale version.
+///
+/// When the `lfs` feature is not compiled into maw-git,
+/// `set_pending_gitattributes` doesn't exist and this is a no-op.
+fn set_pending_attrs_from_resolved(
+    repo: &mut maw_git::GixRepo,
+    resolved: &[ResolvedChange],
+) {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    for change in resolved {
+        if let ResolvedChange::Upsert { path, content } = change {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == ".gitattributes" {
+                let prefix = path
+                    .parent()
+                    .map(|p| {
+                        let s = p.to_string_lossy().replace('\\', "/");
+                        if s.is_empty() { s.to_string() } else { format!("{s}/") }
+                    })
+                    .unwrap_or_default();
+                entries.push((prefix, content.clone()));
+            }
+        }
+    }
+    if !entries.is_empty() {
+        repo.set_pending_gitattributes(entries);
+    }
+}
+
+/// Open a concrete `GixRepo` (needed when callers must call
+/// `set_pending_gitattributes` before upcasting to the trait).
+fn open_gix_repo(root: &Path) -> Result<maw_git::GixRepo, BuildPhaseError> {
+    maw_git::GixRepo::open(root).map_err(|e| {
+        BuildPhaseError::Build(BuildError::GitCommand {
+            command: format!("open repo at {}", root.display()),
+            stderr: e.to_string(),
+            exit_code: None,
         })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -603,10 +635,11 @@ fn run_pipeline<B: WorkspaceBackend>(
     )?;
 
     // Build the candidate git tree + commit from resolved changes
-    let repo = open_repo(repo_root)?;
+    let mut repo = open_gix_repo(repo_root)?;
+    set_pending_attrs_from_resolved(&mut repo, &resolved);
     let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().to_path_buf()).collect();
     let candidate = build_merge_commit(
-        &*repo,
+        &repo,
         &state.epoch_before,
         &state.sources,
         &resolved,
@@ -716,9 +749,10 @@ fn apply_merge_drivers(
     if !regenerate_by_driver.is_empty() {
         let provisional_resolved: Vec<ResolvedChange> =
             resolved_by_path.values().cloned().collect();
-        let repo = open_repo(repo_root)?;
+        let mut repo = open_gix_repo(repo_root)?;
+        set_pending_attrs_from_resolved(&mut repo, &provisional_resolved);
         let provisional_candidate =
-            build_merge_commit(&*repo, epoch, sources, &provisional_resolved, None)?;
+            build_merge_commit(&repo, epoch, sources, &provisional_resolved, None)?;
 
         let regenerated = run_regenerate_drivers(
             repo_root,
