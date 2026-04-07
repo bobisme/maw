@@ -69,6 +69,11 @@ impl AttrsMatcher {
         Self { files: Vec::new() }
     }
 
+    /// True if no `.gitattributes` files were loaded (no rules to match).
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
     /// Load all `.gitattributes` files under `workdir`.
     pub fn from_workdir(workdir: &Path) -> Result<Self, AttrsError> {
         let mut files = Vec::new();
@@ -443,5 +448,22 @@ mod interop_tests {
         assert!(m.is_lfs("music.ogg"));
         assert!(!m.is_lfs("src/main.rs"));
         assert!(m.is_lfs("assets/sub/foo.png"));
+    }
+}
+
+#[cfg(test)]
+mod bare_repo_tests {
+    use super::*;
+
+    #[test]
+    fn from_entries_assets_glob_star_star() {
+        let entries = vec![
+            ("".to_owned(), b"assets/**/*.bin filter=lfs diff=lfs merge=lfs -text\n*.dat filter=lfs\n".to_vec()),
+        ];
+        let m = AttrsMatcher::from_entries(entries).unwrap();
+        assert!(m.is_lfs("assets/sprites/debug-test.bin"), "assets/**/*.bin should match");
+        assert!(m.is_lfs("assets/hero.bin"), "assets/hero.bin should match");
+        assert!(m.is_lfs("level.dat"), "*.dat should match");
+        assert!(!m.is_lfs("src/main.rs"), "*.rs should not match");
     }
 }

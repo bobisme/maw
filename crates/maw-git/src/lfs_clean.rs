@@ -23,22 +23,28 @@ pub fn write_blob_with_path(
     data: &[u8],
     rel_path: &str,
 ) -> Result<GitOid, GitError> {
-    // Attrs matcher driven by the repo's workdir. If the repo is bare
-    // (no workdir), load attrs from the HEAD tree instead.
-    let attrs = if let Some(workdir) = repo.repo.workdir() {
-        match maw_lfs::AttrsMatcher::from_workdir(&workdir.to_owned()) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!("lfs attrs load failed: {e} — writing raw blob");
-                return crate::objects_impl::write_blob(repo, data);
-            }
-        }
-    } else {
-        match load_attrs_from_head(repo) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::debug!("bare repo: no attrs from HEAD: {e} — writing raw blob");
-                return crate::objects_impl::write_blob(repo, data);
+    // Load .gitattributes for LFS pattern matching.
+    //
+    // Always read from the HEAD tree first — this gives the correct
+    // repo-relative paths for pattern matching. The workdir approach
+    // fails in maw's bare-repo layout where the project root is the
+    // "workdir" but source files live under ws/default/ (causing wrong
+    // directory prefixes in the matcher).
+    //
+    // Fall back to workdir only when HEAD doesn't exist (fresh repo).
+    let attrs = match load_attrs_from_head(repo) {
+        Ok(a) if !a.is_empty() => a,
+        _ => {
+            let workdir = match repo.repo.workdir() {
+                Some(w) => w.to_owned(),
+                None => return crate::objects_impl::write_blob(repo, data),
+            };
+            match maw_lfs::AttrsMatcher::from_workdir(&workdir) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("lfs attrs load failed: {e} — writing raw blob");
+                    return crate::objects_impl::write_blob(repo, data);
+                }
             }
         }
     };
