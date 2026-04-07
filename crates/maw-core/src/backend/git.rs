@@ -617,14 +617,22 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // `git diff <epoch>` compares the epoch tree against the current working
         // tree, capturing both committed and uncommitted modifications.
         // TODO(gix): replace with GitRepo trait method when working-tree diff is available
-        let diff_output = Self::git_stdout_in(&ws_path, &["diff", "--name-status", &base_oid])?;
+        // -c core.quotePath=false: output raw UTF-8 paths without escaping
+        // non-ASCII characters (default git behavior wraps them in quotes
+        // with octal escapes like \303\251, breaking PathBuf::from).
+        let diff_output = Self::git_stdout_in(
+            &ws_path,
+            &["-c", "core.quotePath=false", "diff", "--name-status", &base_oid],
+        )?;
 
         parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
 
         // 2. Untracked files (not in .gitignore)
         // TODO(gix): replace with GitRepo trait method when untracked file detection is available
-        let untracked_output =
-            Self::git_stdout_in(&ws_path, &["ls-files", "--others", "--exclude-standard"])?;
+        let untracked_output = Self::git_stdout_in(
+            &ws_path,
+            &["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"],
+        )?;
 
         for line in untracked_output.lines() {
             let path = line.trim();
