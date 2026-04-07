@@ -52,6 +52,12 @@ pub fn write_blob_with_path(
         return crate::objects_impl::write_blob(repo, data);
     }
 
+    // Empty files: store as empty git blobs, not pointers. git-lfs does
+    // the same — `git lfs fsck` flags empty-file pointers as non-canonical.
+    if data.is_empty() {
+        return crate::objects_impl::write_blob(repo, data);
+    }
+
     // Already a pointer? Write as-is (don't double-wrap).
     if maw_lfs::looks_like_pointer(data) {
         return crate::objects_impl::write_blob(repo, data);
