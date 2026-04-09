@@ -2172,14 +2172,14 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
 name = "libredox"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ddbf48fd451246b1f8c2610bd3b4ac0cc6e149d89832867093ab69a17194f08"
+checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "bitflags",
  "libc",
  "plain",
- "redox_syscall 0.7.3",
+ "redox_syscall 0.7.4",
 ]
 
 [[package]]
@@ -2241,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "maw-assurance"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "maw-cli"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "maw-core"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "anyhow",
  "maw-git",
@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "maw-git"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "gix",
  "maw-lfs",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "maw-lfs"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "gix",
  "maw-git",
@@ -2324,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "maw-tui"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2333,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "maw-workspaces"
-version = "0.58.0"
+version = "0.58.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2942,9 +2942,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.7.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce70a74e890531977d37e532c34d45e9055d2409ed08ddba14529471ed0be16"
+checksum = "f450ad9c3b1da563fb6948a8e0fb0fb9269711c9c73d9ea1de5058c79c8d643a"
 dependencies = [
  "bitflags",
 ]

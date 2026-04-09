@@ -94,8 +94,12 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     // Safety: don't sync over committed work. If the workspace has commits not
     // yet in epoch (diverged after a concurrent merge), syncing would wipe them.
     // The lead agent must merge the workspace first — unless --rebase is used.
+    // NOTE: We compare against the workspace's *original* base epoch, not the
+    // current epoch. The workspace HEAD is based on the old epoch, so comparing
+    // against the new epoch would report 0 commits ahead (HEAD is behind it),
+    // causing us to skip the rebase and fast-forward — silently dropping commits.
     let ws_path = root.join("ws").join(&workspace_name);
-    match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
+    match committed_ahead_of_epoch(&ws_path, ws_status.base_epoch.as_str()) {
         None => {
             // Could not determine commit count — refuse to sync to prevent data loss.
             println!(
@@ -329,37 +333,48 @@ fn rebase_workspace(
             .map_err(|e| anyhow::anyhow!("Failed to run git cherry-pick: {e}"))?;
 
         if cp_output.status.success() {
-            // Cherry-pick succeeded — create a new commit preserving the original message.
+            // Cherry-pick succeeded — check if there are staged changes to commit.
             let msg = commit_msg.unwrap_or_else(|| format!("rebase: replay {short_sha}"));
-            let commit_output = Command::new("git")
-                .args(["commit", "--no-verify", "-m", &msg])
-                .current_dir(ws_path)
-                .output()
-                .map_err(|e| anyhow::anyhow!("Failed to commit replayed changes: {e}"))?;
 
-            if commit_output.status.success() {
-                replayed += 1;
+            // Check for staged changes. If none, the original was an empty commit
+            // or the changes were already applied.
+            let diff_output = Command::new("git")
+                .args(["diff", "--cached", "--quiet"])
+                .current_dir(ws_path)
+                .output();
+            let has_staged_changes = diff_output
+                .as_ref()
+                .map(|o| !o.status.success())
+                .unwrap_or(true); // assume changes if we can't tell
+
+            if !has_staged_changes {
                 println!(
-                    "  [{}/{}] Replayed {short_sha}: {}",
+                    "  [{}/{}] Skipped {short_sha} (no changes to apply)",
                     i + 1,
-                    commits.len(),
-                    msg.lines().next().unwrap_or("(no message)")
+                    commits.len()
                 );
+                // Reset any index state for the next cherry-pick.
+                let _ = Command::new("git")
+                    .args(["reset", "HEAD"])
+                    .current_dir(ws_path)
+                    .output();
             } else {
-                // Commit may fail if cherry-pick resulted in no changes (already applied).
-                let stderr = String::from_utf8_lossy(&commit_output.stderr);
-                if stderr.contains("nothing to commit") {
+                let commit_output = Command::new("git")
+                    .args(["commit", "--no-verify", "-m", &msg])
+                    .current_dir(ws_path)
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("Failed to commit replayed changes: {e}"))?;
+
+                if commit_output.status.success() {
+                    replayed += 1;
                     println!(
-                        "  [{}/{}] Skipped {short_sha} (already applied)",
+                        "  [{}/{}] Replayed {short_sha}: {}",
                         i + 1,
-                        commits.len()
+                        commits.len(),
+                        msg.lines().next().unwrap_or("(no message)")
                     );
-                    // Reset for next cherry-pick.
-                    let _ = Command::new("git")
-                        .args(["reset", "HEAD"])
-                        .current_dir(ws_path)
-                        .output();
                 } else {
+                    let stderr = String::from_utf8_lossy(&commit_output.stderr);
                     println!(
                         "  [{}/{}] Warning: commit after cherry-pick failed for {short_sha}: {}",
                         i + 1,
@@ -894,8 +909,12 @@ fn sync_all() -> Result<()> {
         // Safety: skip workspaces with committed work not yet in epoch.
         // Syncing over them would wipe those commits.
         // If git fails (None), treat as "has work" to prevent data loss.
+        // NOTE: Compare against the workspace's base epoch, not current epoch.
+        // The workspace HEAD is based on the old epoch — comparing against the
+        // new epoch would report 0 ahead (HEAD is behind it), missing local commits.
         let ws_path = root.join("ws").join(name);
-        match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
+        let ws_status = backend.status(&ws.id).map_err(|e| anyhow::anyhow!("{e}"))?;
+        match committed_ahead_of_epoch(&ws_path, ws_status.base_epoch.as_str()) {
             None => {
                 skipped_with_work.push(format!(
                     "{name} (could not determine commit count \u{2014} skipped for safety)"
@@ -909,7 +928,6 @@ fn sync_all() -> Result<()> {
             Some(_) => {}
         }
 
-        let ws_status = backend.status(&ws.id).map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(active_change) = cross_target_sync_risk(
             &root,
             name,
@@ -1017,8 +1035,9 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     // (another workspace merged while this one has commits), the workspace is
     // stale AND has diverged commits. Syncing would wipe those commits.
     // The lead agent must merge this workspace first.
+    // NOTE: Compare against base epoch, not current — see bn-18dj.
     let ws_path = root.join("ws").join(name);
-    match committed_ahead_of_epoch(&ws_path, current_epoch.as_str()) {
+    match committed_ahead_of_epoch(&ws_path, ws_status.base_epoch.as_str()) {
         None => {
             eprintln!(
                 "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state), \

@@ -287,6 +287,284 @@ fn sync_rebase_replays_commits_ahead_of_workspace_epoch() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Regression tests for bn-18dj: committed_ahead_of_epoch must compare against
+// the workspace's *base* epoch, not the current epoch. Otherwise stale
+// workspaces with local commits silently fast-forward (dropping commits).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_without_rebase_refuses_stale_workspace_with_commits_and_preserves_head() {
+    // bn-18dj regression: when a workspace is stale AND has local commits,
+    // `sync` (without --rebase) must detect the commits and refuse, not
+    // silently fast-forward and drop them.
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "work.txt", "precious work\n");
+    repo.git_in_workspace("feature", &["add", "work.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: precious work"]);
+    let original_head = repo.workspace_head("feature");
+
+    // Advance epoch via another workspace.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    // sync WITHOUT --rebase should refuse.
+    let out = repo.maw_raw(&["ws", "sync", "feature"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("commit(s) not yet merged"),
+        "sync should warn about unmerged commits, got: {stdout}"
+    );
+
+    // HEAD must not have changed.
+    let head_after = repo.workspace_head("feature");
+    assert_eq!(
+        head_after, original_head,
+        "sync without --rebase must not change workspace HEAD"
+    );
+
+    // File must still exist.
+    assert_eq!(
+        repo.read_file("feature", "work.txt").as_deref(),
+        Some("precious work\n"),
+        "local file must survive refused sync"
+    );
+}
+
+#[test]
+fn sync_rebase_preserves_commits_after_epoch_advance() {
+    // bn-18dj regression: sync --rebase on a stale workspace with local
+    // commits must rebase them onto the new epoch, not drop them.
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "work.txt", "keep me\n");
+    repo.git_in_workspace("feature", &["add", "work.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: local work"]);
+
+    // Advance epoch.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let new_epoch = repo.current_epoch();
+
+    let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "sync --rebase should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Local file must survive.
+    assert_eq!(
+        repo.read_file("feature", "work.txt").as_deref(),
+        Some("keep me\n"),
+        "workspace file must survive rebase"
+    );
+
+    // Epoch file must be present (from the epoch advance).
+    assert_eq!(
+        repo.read_file("feature", "epoch.txt").as_deref(),
+        Some("advance\n"),
+        "epoch file must be present after rebase"
+    );
+
+    // Should have 1 commit ahead of new epoch.
+    assert_eq!(
+        repo.git_in_workspace(
+            "feature",
+            &["rev-list", "--count", &format!("{new_epoch}..HEAD")]
+        )
+        .trim(),
+        "1",
+        "rebased workspace should have 1 commit ahead of new epoch"
+    );
+
+    // Should no longer be stale.
+    assert!(
+        !workspace_state(&repo, "feature").contains("stale"),
+        "workspace should not be stale after rebase"
+    );
+}
+
+#[test]
+fn sync_rebase_preserves_multiple_commits_after_multiple_epoch_advances() {
+    // bn-18dj extended: multiple local commits survive rebase across
+    // multiple epoch advances.
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "a.txt", "commit 1\n");
+    repo.git_in_workspace("feature", &["add", "a.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: commit 1"]);
+    repo.add_file("feature", "b.txt", "commit 2\n");
+    repo.git_in_workspace("feature", &["add", "b.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: commit 2"]);
+
+    // Advance epoch twice.
+    for i in 1..=2 {
+        let name = format!("adv{i}");
+        repo.maw_ok(&["ws", "create", &name]);
+        repo.add_file(&name, &format!("epoch{i}.txt"), &format!("epoch {i}\n"));
+        repo.git_in_workspace(&name, &["add", "-A"]);
+        repo.git_in_workspace(&name, &["commit", "-m", &format!("chore: epoch {i}")]);
+        repo.maw_ok(&[
+            "ws",
+            "merge",
+            &name,
+            "--destroy",
+            "--message",
+            &format!("merge adv{i}"),
+        ]);
+    }
+
+    let new_epoch = repo.current_epoch();
+
+    let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "sync --rebase should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Both local files survive.
+    assert_eq!(repo.read_file("feature", "a.txt").as_deref(), Some("commit 1\n"));
+    assert_eq!(repo.read_file("feature", "b.txt").as_deref(), Some("commit 2\n"));
+
+    // Both epoch files present.
+    assert!(repo.read_file("feature", "epoch1.txt").is_some());
+    assert!(repo.read_file("feature", "epoch2.txt").is_some());
+
+    // 2 commits ahead of new epoch.
+    assert_eq!(
+        repo.git_in_workspace(
+            "feature",
+            &["rev-list", "--count", &format!("{new_epoch}..HEAD")]
+        )
+        .trim(),
+        "2",
+        "rebased workspace should have 2 commits ahead of new epoch"
+    );
+}
+
+#[test]
+fn auto_sync_does_not_drop_commits_on_stale_workspace() {
+    // bn-18dj regression: maw exec triggers auto-sync. When a workspace is
+    // stale with local commits, auto-sync must skip (not fast-forward).
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "work.txt", "auto-sync test\n");
+    repo.git_in_workspace("feature", &["add", "work.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: work"]);
+    let original_head = repo.workspace_head("feature");
+
+    // Advance epoch.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    // maw exec triggers auto-sync internally.
+    repo.maw_raw(&["exec", "feature", "--", "git", "status"]);
+
+    // HEAD must not have changed — auto-sync should have skipped.
+    let head_after = repo.workspace_head("feature");
+    assert_eq!(
+        head_after, original_head,
+        "auto-sync must not change HEAD when workspace has local commits"
+    );
+
+    // File must still exist.
+    assert_eq!(
+        repo.read_file("feature", "work.txt").as_deref(),
+        Some("auto-sync test\n"),
+        "local file must survive auto-sync skip"
+    );
+}
+
+#[test]
+fn batch_sync_all_does_not_drop_commits_on_stale_workspace() {
+    // bn-18dj regression: sync --all must skip workspaces with local commits,
+    // not fast-forward them.
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "with-commits"]);
+    repo.maw_ok(&["ws", "create", "clean"]);
+
+    repo.add_file("with-commits", "work.txt", "keep me\n");
+    repo.git_in_workspace("with-commits", &["add", "work.txt"]);
+    repo.git_in_workspace("with-commits", &["commit", "-m", "feat: work"]);
+    let original_head = repo.workspace_head("with-commits");
+
+    // Advance epoch.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    // Sync all.
+    repo.maw_raw(&["ws", "sync", "--all"]);
+
+    // with-commits must be untouched.
+    let head_after = repo.workspace_head("with-commits");
+    assert_eq!(
+        head_after, original_head,
+        "batch sync must not change HEAD of workspace with local commits"
+    );
+    assert_eq!(
+        repo.read_file("with-commits", "work.txt").as_deref(),
+        Some("keep me\n"),
+        "local file must survive batch sync"
+    );
+
+    // clean should have been synced.
+    assert!(
+        !workspace_state(&repo, "clean").contains("stale"),
+        "clean workspace should have been synced"
+    );
+}
+
 #[test]
 fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
     let repo = TestRepo::new();

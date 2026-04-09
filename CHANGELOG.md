@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.58.1
+
+### Fixed
+- **`ws sync --rebase` no longer silently drops local commits on stale workspaces (bn-18dj).** `committed_ahead_of_epoch` was comparing against the *current* epoch instead of the workspace's *base* epoch. Since the workspace HEAD is behind the new epoch, the check always returned 0 commits ahead, bypassing the rebase and fast-forwarding — permanently discarding local commits. Fixed all three call sites: single-workspace sync, batch `sync --all`, and `maw exec` auto-sync.
+- **Empty commits no longer produce truncated warning during rebase (bn-3en5).** Cherry-picking an empty commit (from `git commit --allow-empty`) now cleanly reports "Skipped (no changes to apply)" instead of a garbled warning with an empty message.
+
 ## v0.58.0
 
 ### Added — native Git LFS support (bn-lyk4)
