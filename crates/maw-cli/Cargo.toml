@@ -12,7 +12,7 @@ path = "src/main.rs"
 maw = { path = "../..", package = "maw-workspaces" }
 maw-core = { path = "../maw-core" }
 maw-git = { path = "../maw-git" }
-maw-lfs = { path = "../maw-lfs", version = "0.57.3", optional = true }
+maw-lfs = { path = "../maw-lfs", version = "0.58.0", optional = true }
 maw-tui = { path = "../maw-tui", optional = true }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"

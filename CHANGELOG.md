@@ -17,6 +17,11 @@ maw now handles LFS smudge/clean natively, with no `git` or `git-lfs` subprocess
 ### Fixed
 - **No more LFS pointer stubs in working trees.** Previously, `maw ws create`/`sync`/`merge` wrote the raw pointer text (~130 bytes) instead of real binary content because gix's checkout doesn't run external filter processes. Agents saw pointers, builds broke.
 - **No more raw binaries in git blobs.** Commits made via `maw ws merge` on LFS-tracked paths now store the correct pointer blob; real bytes go to `.git/lfs/objects/`.
+- **Merge uses incoming `.gitattributes`**, not HEAD's stale version. Adding or removing LFS patterns takes effect in the same merge.
+- **LFS files with missing objects no longer silently vanish** from the working tree after merge. They appear as pointer stubs (ready for `git lfs pull`).
+- **Empty (0-byte) LFS files** stored as empty git blobs (matching git-lfs behavior), fixing `git lfs fsck` "nonCanonicalPointer" warnings and workspace recovery failures.
+- **Non-ASCII filenames** (unicode, accented characters) no longer break the merge collect phase. Fixed `git diff`/`ls-files` path escaping.
+- **Index stat refresh after smudge** uses gix directly — no `git` subprocess. Zero git/git-lfs subprocess calls in any LFS code path.
 
 ### Migration
 If you have existing corrupted workspaces (pointer stubs on disk from older maw), run `maw doctor` to detect them, then `maw ws sync <name>` on each to re-smudge. `git lfs pull` works as always to populate the local store.
