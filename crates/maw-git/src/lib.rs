@@ -34,6 +34,20 @@ mod worktree_impl;
 
 pub use gix_repo::GixRepo;
 
+/// Run the LFS smudge post-pass on a worktree at `ws_path`, using
+/// `target_commit` as the tree to check for missing files (instead of HEAD,
+/// which may be stale if checkout failed).
+///
+/// This is the public entry point for callers outside maw-git (e.g. maw-cli
+/// merge code that needs to smudge after a `git checkout` CLI call).
+#[cfg(feature = "lfs")]
+pub fn lfs_smudge_worktree_at(
+    ws_path: &std::path::Path,
+    target_commit: &str,
+) -> Result<(), GitError> {
+    checkout_impl::lfs_smudge_worktree_at(ws_path, target_commit)
+}
+
 // Re-export the main trait and commonly used types at the crate root for
 // ergonomic imports: `use maw_git::{GitRepo, GitOid, GitError};`
 pub use error::GitError;

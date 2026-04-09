@@ -3930,6 +3930,16 @@ fn update_default_workspace(
         force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
     }
 
+    // LFS post-checkout pass: `checkout_to` uses `git checkout` CLI which
+    // invokes git-lfs smudge. If git-lfs can't find an object (missing from
+    // local store, no remote), the file may silently vanish. Run our native
+    // smudge post-pass to ensure every LFS-tracked file has SOMETHING on
+    // disk (real content if object exists, pointer text if not).
+    //
+    // Pass the target commit (epoch_after) because HEAD may still be at the
+    // old epoch if checkout failed due to git-lfs errors.
+    lfs_post_checkout(default_ws_path, epoch_after);
+
     // Step 3: REPLAY — if there was a snapshot, replay it.
     let Some(snapshot) = snapshot else {
         // Clean workspace — checkout was enough.
@@ -4098,6 +4108,18 @@ fn force_checkout_fallback(ws_path: &Path, ws_name: &str, branch: &str, text_mod
         }
     }
 }
+
+/// Run the native LFS smudge post-pass on a workspace after a `git checkout`
+/// CLI call. Best-effort: logs and continues on error.
+#[cfg(feature = "lfs")]
+fn lfs_post_checkout(ws_path: &std::path::Path, target_commit: &str) {
+    if let Err(e) = maw_git::lfs_smudge_worktree_at(ws_path, target_commit) {
+        tracing::debug!("lfs post-checkout: {e}");
+    }
+}
+
+#[cfg(not(feature = "lfs"))]
+fn lfs_post_checkout(_ws_path: &std::path::Path, _target_commit: &str) {}
 
 /// Handle post-merge workspace destruction with confirmation check.
 fn handle_post_merge_destroy(

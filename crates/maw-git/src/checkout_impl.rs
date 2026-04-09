@@ -168,16 +168,167 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     Ok(())
 }
 
-/// LFS smudge: replace pointer files in the working tree with real content
-/// from the local LFS store.
+/// Self-contained LFS smudge for an existing worktree: open repo, smudge
+/// pointer files, restore any LFS files that are in the HEAD tree but
+/// missing from disk (happens when git-lfs smudge fails on `git checkout`),
+/// update index stats, rewrite index.
 ///
-/// Walks all tree-tracked entries in `index`, checks each against the
-/// `.gitattributes` rules just written to `workdir`, and for any LFS-tracked
-/// path that currently holds a pointer, overwrites with the real bytes.
-/// Objects missing from the local store are left as pointer text with a
-/// tracing warning — checkout itself is not failed.
-/// Public entry point for the LFS smudge post-pass, callable from
-/// `worktree_impl::worktree_add` and other checkout paths.
+/// Used by maw-cli after `git checkout` CLI calls where git-lfs may have
+/// failed to smudge files with missing objects.
+#[cfg(feature = "lfs")]
+pub fn lfs_smudge_worktree_at(ws_path: &Path, target_commit: &str) -> Result<(), GitError> {
+    let repo = GixRepo::open(ws_path)?;
+
+    // Resolve the target commit to its tree. This is the tree we WANT on
+    // disk, which may differ from HEAD if checkout failed.
+    let target_oid = gix::ObjectId::from_hex(target_commit.as_bytes())
+        .map_err(|e| GitError::BackendError {
+            message: format!("bad target OID '{target_commit}': {e}"),
+        })?;
+
+    // First: restore LFS files that are in the target tree but missing from
+    // disk. `git checkout` + git-lfs may skip files entirely when the LFS
+    // object isn't in the local store.
+    let mut restored: Vec<String> = Vec::new();
+    if let Ok(obj) = repo.repo.find_object(target_oid) {
+        let tree_id = match obj.kind {
+            gix::object::Kind::Commit => obj.into_commit().tree_id().ok().map(|t| t.detach()),
+            gix::object::Kind::Tree => Some(target_oid),
+            _ => None,
+        };
+        if let Some(tid) = tree_id {
+            if let Ok(tree) = repo.repo.find_tree(tid) {
+                let attrs = maw_lfs::AttrsMatcher::from_workdir(ws_path)
+                    .unwrap_or_else(|_| maw_lfs::AttrsMatcher::empty());
+                restore_missing_lfs_from_tree(&repo, &tree, ws_path, &attrs, String::new(), &mut restored);
+            }
+        }
+    }
+
+    // Second: normal smudge pass on files that ARE on disk (replace pointers
+    // with real content when the object is in the local store).
+    let index = repo.repo.open_index().map_err(|e| GitError::BackendError {
+        message: format!("failed to open index: {e}"),
+    })?;
+    let smudged = smudge_lfs_pointers(&index, ws_path, &repo)?;
+
+    let all_changed: Vec<String> = smudged.into_iter().chain(restored).collect();
+    if all_changed.is_empty() {
+        return Ok(());
+    }
+
+    // Re-read index (may have changed after git add from restores),
+    // update stat cache, rewrite.
+    let index = repo.repo.open_index().map_err(|e| GitError::BackendError {
+        message: format!("failed to re-open index: {e}"),
+    })?;
+    let mut index_state: gix::index::State = index.into();
+    for rel_path in &all_changed {
+        let full = ws_path.join(rel_path);
+        let Ok(meta) = gix::index::fs::Metadata::from_path_no_follow(&full) else {
+            continue;
+        };
+        let Ok(new_stat) = gix::index::entry::Stat::from_fs(&meta) else {
+            continue;
+        };
+        if let Some(idx) = index_state
+            .entries()
+            .iter()
+            .position(|e| e.path(&index_state).to_str().ok() == Some(rel_path.as_str()))
+        {
+            index_state.entries_mut()[idx].stat = new_stat;
+        }
+    }
+    let index_path = repo.repo.index_path();
+    let mut persisted = gix::index::File::from_state(index_state, index_path);
+    persisted
+        .write(Default::default())
+        .map_err(|e| GitError::BackendError {
+            message: format!("failed to rewrite index after smudge: {e}"),
+        })?;
+    Ok(())
+}
+
+/// Walk the HEAD tree and restore any LFS-tracked files that are missing
+/// from the working directory. Writes the pointer text from the committed
+/// blob to disk and runs `git add <path>` to update the index.
+#[cfg(feature = "lfs")]
+fn restore_missing_lfs_from_tree(
+    repo: &GixRepo,
+    tree: &gix::Tree<'_>,
+    workdir: &Path,
+    attrs: &maw_lfs::AttrsMatcher,
+    prefix: String,
+    restored: &mut Vec<String>,
+) {
+    use gix::bstr::ByteSlice;
+
+    for entry_result in tree.iter() {
+        let Ok(entry) = entry_result else { continue };
+        let name = entry.inner.filename.to_str().unwrap_or("");
+
+        if entry.inner.mode.is_tree() {
+            let subtree_id = gix::ObjectId::from(entry.inner.oid);
+            if let Ok(subtree) = repo.repo.find_tree(subtree_id) {
+                let sub_prefix = if prefix.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                restore_missing_lfs_from_tree(repo, &subtree, workdir, attrs, sub_prefix, restored);
+            }
+            continue;
+        }
+
+        if !entry.inner.mode.is_blob() {
+            continue;
+        }
+
+        let rel_path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        if !attrs.is_lfs(&rel_path) {
+            continue;
+        }
+
+        let full_path = workdir.join(&rel_path);
+        if full_path.exists() {
+            continue; // Already on disk — the normal smudge pass handles it.
+        }
+
+        // File missing from disk. Read the committed blob and write it.
+        let blob_id = gix::ObjectId::from(entry.inner.oid);
+        let Ok(obj) = repo.repo.find_object(blob_id) else {
+            continue;
+        };
+        let data = obj.data.to_vec();
+        if data.is_empty() {
+            // Empty file — just touch it.
+            if let Some(parent) = full_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&full_path, &data);
+            restored.push(rel_path);
+            continue;
+        }
+
+        // Write whatever the blob contains (pointer text, or raw content
+        // if the file was un-LFS'd).
+        if let Some(parent) = full_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&full_path, &data).is_ok() {
+            tracing::warn!(path = %rel_path, "lfs: restored missing file from tree");
+            restored.push(rel_path);
+        }
+    }
+}
+
+/// Crate-internal entry point for the LFS smudge post-pass, callable from
+/// `worktree_impl::worktree_add` and `checkout_tree`.
 /// Returns the repo-relative paths of files that were smudged.
 #[cfg(feature = "lfs")]
 pub(crate) fn smudge_lfs_pointers_public(
@@ -229,11 +380,36 @@ fn smudge_lfs_pointers(
         }
 
         let full_path = workdir.join(path_str);
+
+        // If the file doesn't exist on disk (e.g. git-lfs smudge failed
+        // during `git checkout` because the object was missing), read the
+        // blob from the ODB and write the pointer text to disk. This
+        // ensures LFS-tracked files always have SOMETHING on disk.
+        let meta = std::fs::metadata(&full_path);
+        if meta.is_err() {
+            // File missing — read the committed blob (should be pointer text).
+            let blob_oid = gix::ObjectId::from(entry.id);
+            if let Ok(obj) = repo.repo.find_object(blob_oid) {
+                let data = obj.data.to_vec();
+                if maw_lfs::looks_like_pointer(&data) {
+                    // Ensure parent directory exists.
+                    if let Some(parent) = full_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if std::fs::write(&full_path, &data).is_ok() {
+                        smudged.push(path_str.to_owned());
+                        tracing::warn!(
+                            path = path_str,
+                            "lfs: restored missing file as pointer stub"
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+
         // Pointer cap is 1024 bytes per spec; anything larger is real content.
-        let meta = match std::fs::metadata(&full_path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let meta = meta.unwrap();
         if meta.len() > 1024 {
             continue;
         }
