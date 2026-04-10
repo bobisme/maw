@@ -91,60 +91,7 @@ pub fn write_blob_with_path(
 /// `.gitattributes`, and builds an [`maw_lfs::AttrsMatcher`] from their
 /// blob contents.
 fn load_attrs_from_head(repo: &GixRepo) -> Result<maw_lfs::AttrsMatcher, GitError> {
-    let head_commit = repo
-        .repo
-        .head_commit()
-        .map_err(|e| GitError::BackendError {
-            message: format!("bare repo: cannot resolve HEAD commit: {e}"),
-        })?;
-    let tree = head_commit
-        .tree()
-        .map_err(|e| GitError::BackendError {
-            message: format!("bare repo: cannot read HEAD tree: {e}"),
-        })?;
-
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    collect_gitattributes_from_tree(repo, &tree, String::new(), &mut entries)?;
-
-    maw_lfs::AttrsMatcher::from_entries(entries).map_err(|e| GitError::BackendError {
-        message: format!("bare repo: failed to parse .gitattributes: {e}"),
+    maw_lfs::AttrsMatcher::from_gix_head(&repo.repo).map_err(|e| GitError::BackendError {
+        message: format!("bare repo: failed to load .gitattributes from HEAD: {e}"),
     })
-}
-
-/// Recursively walk a tree, collecting `.gitattributes` blobs.
-///
-/// `prefix` is the repo-relative directory path with trailing slash (empty
-/// for the root tree).
-fn collect_gitattributes_from_tree(
-    repo: &GixRepo,
-    tree: &gix::Tree<'_>,
-    prefix: String,
-    out: &mut Vec<(String, Vec<u8>)>,
-) -> Result<(), GitError> {
-    for entry_result in tree.iter() {
-        let entry = entry_result.map_err(|e| GitError::BackendError {
-            message: format!("tree entry decode: {e}"),
-        })?;
-        let name = entry.inner.filename.to_string();
-
-        if entry.inner.mode.is_tree() {
-            // Recurse into subtree.
-            let subtree_id = gix::ObjectId::from(entry.inner.oid);
-            let subtree = repo.repo.find_tree(subtree_id).map_err(|e| {
-                GitError::BackendError {
-                    message: format!("find subtree {subtree_id}: {e}"),
-                }
-            })?;
-            let sub_prefix = format!("{prefix}{name}/");
-            collect_gitattributes_from_tree(repo, &subtree, sub_prefix, out)?;
-        } else if name == ".gitattributes" {
-            let blob_id = gix::ObjectId::from(entry.inner.oid);
-            let mut blob =
-                repo.repo.find_blob(blob_id).map_err(|e| GitError::BackendError {
-                    message: format!("read .gitattributes blob {blob_id}: {e}"),
-                })?;
-            out.push((prefix.clone(), blob.take_data()));
-        }
-    }
-    Ok(())
 }

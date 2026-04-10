@@ -85,6 +85,24 @@ impl GixRepo {
     pub fn clear_pending_gitattributes(&mut self) {
         self.pending_gitattributes = None;
     }
+
+    /// Load a `.gitattributes` matcher from the tree at the given commit.
+    ///
+    /// Use this to look up merge drivers (`merge=union`, `merge=binary`,
+    /// etc.) for files during a merge. Typically called with the merge-base
+    /// epoch commit so the resulting matcher reflects the `.gitattributes`
+    /// state *at the merge base* — matching git's semantics for merge driver
+    /// selection.
+    ///
+    /// Returns `None` on any error (invalid OID, missing commit, parse error)
+    /// so callers can degrade to default-text-merge behavior without aborting.
+    #[cfg(feature = "lfs")]
+    pub fn load_gitattributes_at_commit(&self, commit_hex: &str) -> Option<maw_lfs::AttrsMatcher> {
+        let oid = gix::ObjectId::from_hex(commit_hex.as_bytes()).ok()?;
+        let commit = self.repo.find_commit(oid).ok()?;
+        let tree = commit.tree().ok()?;
+        maw_lfs::AttrsMatcher::from_gix_tree(&self.repo, &tree).ok()
+    }
 }
 
 impl GitRepo for GixRepo {

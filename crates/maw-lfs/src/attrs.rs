@@ -1,11 +1,20 @@
-//! LFS attributes matcher — resolves `filter=lfs` for a repo-relative path.
+//! Gitattributes matcher — resolves `filter=lfs` and `merge=<driver>` for a
+//! repo-relative path.
 //!
 //! Reads `.gitattributes` files from the working directory (or from a git
-//! tree, for checkout-time use) and answers "is this path LFS-tracked?"
-//! following git's attribute precedence rules:
+//! tree, for checkout-time use) and answers two questions:
+//!
+//! - "Is this path LFS-tracked?" (via `is_lfs`)
+//! - "What merge driver applies to this path?" (via `merge_driver`)
+//!
+//! Follows git's attribute precedence rules:
 //!
 //! - Within a single `.gitattributes` file, later patterns override earlier ones.
 //! - `.gitattributes` in subdirectories override parent directories.
+//!
+//! Despite living in the `maw-lfs` crate, the matcher is general-purpose —
+//! it's the single source of truth for `.gitattributes` resolution across maw
+//! (LFS clean/smudge, merge driver selection, etc.).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,10 +51,22 @@ enum FilterDecision {
     NoChange,
 }
 
+/// Per-line decision about the `merge` attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MergeDecision {
+    /// `merge=<name>` assigned (e.g., `union`, `binary`, `ours`, or a custom name).
+    Set(String),
+    /// `-merge` or `!merge` — resets to unspecified (default text merge).
+    Unset,
+    /// Line doesn't mention `merge` at all.
+    NoChange,
+}
+
 #[derive(Debug, Clone)]
 struct Rule {
     pattern: Pattern,
-    decision: FilterDecision,
+    filter: FilterDecision,
+    merge: MergeDecision,
 }
 
 /// One parsed `.gitattributes` file with its directory prefix.
@@ -99,6 +120,39 @@ impl AttrsMatcher {
         Ok(Self { files })
     }
 
+    /// Build a matcher by walking a gix tree and collecting every
+    /// `.gitattributes` file.
+    ///
+    /// Works for bare repos where there's no working directory — reads the
+    /// attributes blobs directly from the tree. Use this when merging
+    /// workspace content: pass the target epoch's tree so the matcher
+    /// reflects the `.gitattributes` state *at the merge base*.
+    pub fn from_gix_tree(
+        repo: &gix::Repository,
+        tree: &gix::Tree<'_>,
+    ) -> Result<Self, AttrsError> {
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        collect_gitattributes_from_gix_tree(repo, tree, String::new(), &mut entries)?;
+        Self::from_entries(entries)
+    }
+
+    /// Build a matcher from a gix repository's current HEAD tree.
+    ///
+    /// Convenience wrapper around [`Self::from_gix_tree`]. Returns an empty
+    /// matcher if the repo has no HEAD (fresh repo) or if the HEAD tree
+    /// cannot be resolved.
+    pub fn from_gix_head(repo: &gix::Repository) -> Result<Self, AttrsError> {
+        let head_commit = match repo.head_commit() {
+            Ok(c) => c,
+            Err(_) => return Ok(Self::empty()),
+        };
+        let tree = match head_commit.tree() {
+            Ok(t) => t,
+            Err(_) => return Ok(Self::empty()),
+        };
+        Self::from_gix_tree(repo, &tree)
+    }
+
     /// Returns true if `filter=lfs` applies to the given repo-relative path
     /// (forward-slash separated, no leading slash).
     pub fn is_lfs(&self, rel_path: &str) -> bool {
@@ -110,16 +164,86 @@ impl AttrsMatcher {
             }
             let rel_to_file = &rel_path[file.dir_prefix.len()..];
             for rule in &file.rules {
-                if rule.decision == FilterDecision::NoChange {
+                if rule.filter == FilterDecision::NoChange {
                     continue;
                 }
                 if pattern_matches(&rule.pattern, rel_to_file) {
-                    current = matches!(rule.decision, FilterDecision::SetLfs);
+                    current = matches!(rule.filter, FilterDecision::SetLfs);
                 }
             }
         }
         current
     }
+
+    /// Returns the merge driver name for the given repo-relative path, if any.
+    ///
+    /// Returns `Some("union")`, `Some("binary")`, `Some("ours")`, or a custom
+    /// driver name if the path matches a rule like `merge=union`. Returns
+    /// `None` if no rule assigns a merge driver, or if the most recent matching
+    /// rule is `-merge` / `!merge` (reset to default text merge).
+    pub fn merge_driver(&self, rel_path: &str) -> Option<String> {
+        let mut current: Option<String> = None;
+        for file in &self.files {
+            if !rel_path.starts_with(&file.dir_prefix) {
+                continue;
+            }
+            let rel_to_file = &rel_path[file.dir_prefix.len()..];
+            for rule in &file.rules {
+                if matches!(rule.merge, MergeDecision::NoChange) {
+                    continue;
+                }
+                if pattern_matches(&rule.pattern, rel_to_file) {
+                    current = match &rule.merge {
+                        MergeDecision::Set(name) => Some(name.clone()),
+                        MergeDecision::Unset => None,
+                        MergeDecision::NoChange => current,
+                    };
+                }
+            }
+        }
+        current
+    }
+}
+
+/// Recursively walk a gix tree, collecting the blob contents of every
+/// `.gitattributes` file keyed by their directory prefix.
+///
+/// `prefix` is the repo-relative directory path with trailing slash (empty
+/// for the root tree).
+fn collect_gitattributes_from_gix_tree(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    prefix: String,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), AttrsError> {
+    for entry_result in tree.iter() {
+        let entry = entry_result.map_err(|e| AttrsError::Parse {
+            path: PathBuf::from(&prefix),
+            line: 0,
+            message: format!("tree entry decode: {e}"),
+        })?;
+        let name = entry.inner.filename.to_string();
+
+        if entry.inner.mode.is_tree() {
+            let subtree_id = gix::ObjectId::from(entry.inner.oid);
+            let subtree = repo.find_tree(subtree_id).map_err(|e| AttrsError::Parse {
+                path: PathBuf::from(format!("{prefix}{name}/")),
+                line: 0,
+                message: format!("find subtree {subtree_id}: {e}"),
+            })?;
+            let sub_prefix = format!("{prefix}{name}/");
+            collect_gitattributes_from_gix_tree(repo, &subtree, sub_prefix, out)?;
+        } else if name == ".gitattributes" {
+            let blob_id = gix::ObjectId::from(entry.inner.oid);
+            let mut blob = repo.find_blob(blob_id).map_err(|e| AttrsError::Parse {
+                path: PathBuf::from(format!("{prefix}.gitattributes")),
+                line: 0,
+                message: format!("read .gitattributes blob {blob_id}: {e}"),
+            })?;
+            out.push((prefix.clone(), blob.take_data()));
+        }
+    }
+    Ok(())
 }
 
 fn pattern_matches(pattern: &Pattern, rel_path: &str) -> bool {
@@ -211,8 +335,9 @@ fn parse_rules(bytes: &[u8], source_prefix: &str) -> Result<Vec<Rule>, AttrsErro
                 message: "negated pattern not allowed in .gitattributes".to_string(),
             });
         }
-        let decision = extract_filter_decision(attrs_bytes);
-        rules.push(Rule { pattern, decision });
+        let filter = extract_filter_decision(attrs_bytes);
+        let merge = extract_merge_decision(attrs_bytes);
+        rules.push(Rule { pattern, filter, merge });
     }
     Ok(rules)
 }
@@ -278,6 +403,46 @@ fn extract_filter_decision(attrs: &[u8]) -> FilterDecision {
                 Some(v) if v == b"lfs" => FilterDecision::SetLfs,
                 Some(_) => FilterDecision::NotLfs,
                 None => FilterDecision::NotLfs, // bare `filter` — no value
+            }
+        };
+    }
+    decision
+}
+
+fn extract_merge_decision(attrs: &[u8]) -> MergeDecision {
+    // Attributes are whitespace-separated; a merge decision may appear as:
+    //   merge=union       → Set("union")
+    //   merge=binary      → Set("binary")
+    //   merge=<name>      → Set("<name>")
+    //   -merge / !merge   → Unset
+    //   merge (bare)      → Set("text") (git's default: bare `merge` means enable)
+    // If multiple `merge` tokens appear, LAST wins.
+    let mut decision = MergeDecision::NoChange;
+    for token in attrs.split(|b| *b == b' ' || *b == b'\t') {
+        if token.is_empty() {
+            continue;
+        }
+        let (attr_name, assigned) = match token.iter().position(|b| *b == b'=') {
+            Some(i) => (&token[..i], Some(&token[i + 1..])),
+            None => (token, None),
+        };
+        let (name_bytes, is_reset) = match attr_name.first() {
+            Some(b'-') => (&attr_name[1..], true),
+            Some(b'!') => (&attr_name[1..], true),
+            _ => (attr_name, false),
+        };
+        if name_bytes != b"merge" {
+            continue;
+        }
+        decision = if is_reset {
+            MergeDecision::Unset
+        } else {
+            match assigned {
+                Some(v) => match std::str::from_utf8(v) {
+                    Ok(s) => MergeDecision::Set(s.to_owned()),
+                    Err(_) => MergeDecision::NoChange,
+                },
+                None => MergeDecision::Set("text".to_owned()),
             }
         };
     }
@@ -399,6 +564,68 @@ mod tests {
     fn empty_matcher() {
         let m = AttrsMatcher::empty();
         assert!(!m.is_lfs("anything.png"));
+        assert_eq!(m.merge_driver("anything.txt"), None);
+    }
+
+    #[test]
+    fn merge_union_driver_matches() {
+        let dir = tmp_repo_with(&[(".gitattributes", "*.events merge=union\n")]);
+        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
+        assert_eq!(m.merge_driver("nested/bar.events"), Some("union".to_owned()));
+        assert_eq!(m.merge_driver("foo.txt"), None);
+    }
+
+    #[test]
+    fn merge_binary_and_custom_drivers() {
+        let dir = tmp_repo_with(&[(
+            ".gitattributes",
+            "*.bin merge=binary\n*.lock merge=ours\n*.custom merge=my-driver\n",
+        )]);
+        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        assert_eq!(m.merge_driver("file.bin"), Some("binary".to_owned()));
+        assert_eq!(m.merge_driver("Cargo.lock"), Some("ours".to_owned()));
+        assert_eq!(m.merge_driver("x.custom"), Some("my-driver".to_owned()));
+    }
+
+    #[test]
+    fn merge_driver_reset_with_dash() {
+        let dir = tmp_repo_with(&[(
+            ".gitattributes",
+            "*.events merge=union\nspecial.events -merge\n",
+        )]);
+        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
+        assert_eq!(m.merge_driver("special.events"), None);
+    }
+
+    #[test]
+    fn merge_and_filter_coexist_on_same_line() {
+        let dir = tmp_repo_with(&[(
+            ".gitattributes",
+            "*.png filter=lfs diff=lfs merge=binary -text\n",
+        )]);
+        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        assert!(m.is_lfs("foo.png"));
+        assert_eq!(m.merge_driver("foo.png"), Some("binary".to_owned()));
+    }
+
+    #[test]
+    fn nested_gitattributes_overrides_merge_driver() {
+        let dir = tmp_repo_with(&[
+            (".gitattributes", "*.events merge=union\n"),
+            ("sub/.gitattributes", "*.events merge=ours\n"),
+        ]);
+        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
+        assert_eq!(m.merge_driver("sub/foo.events"), Some("ours".to_owned()));
+    }
+
+    #[test]
+    fn bare_merge_defaults_to_text() {
+        let dir = tmp_repo_with(&[(".gitattributes", "*.txt merge\n")]);
+        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        assert_eq!(m.merge_driver("foo.txt"), Some("text".to_owned()));
     }
 
     #[test]

@@ -729,6 +729,10 @@ pub(crate) fn replay_snapshot_with_merge_protection(
     };
     let local_label = format!("{target_workspace_name} (local edits)");
 
+    // Load `.gitattributes` at the anchor epoch for merge driver selection.
+    // Use the base (anchor_epoch) state — same semantics as the BUILD phase.
+    let attrs = load_stash_replay_attrs(ws_path, anchor_epoch);
+
     let mut conflicts = Vec::new();
     for (path, merge_content) in &merge_versions {
         let full = ws_path.join(path);
@@ -772,14 +776,21 @@ pub(crate) fn replay_snapshot_with_merge_protection(
             let _ = std::fs::create_dir_all(parent);
         }
 
+        // Look up the merge driver for this path.
+        let rel = path.to_string_lossy().replace('\\', "/");
+        let driver = attrs.as_ref().and_then(|m| m.merge_driver(&rel));
+
         // 3-way text merge (pure Rust via gix-merge). Cleanly merges
         // non-overlapping edits; produces diff3 markers for true conflicts.
+        // If the path has a merge driver (union, ours, binary), that takes
+        // precedence over the default diff3 behavior.
         match merge_text_three_way(
             &base_content,
             merge_content,
             &stash_content,
             &merge_label,
             &local_label,
+            driver.as_deref(),
         ) {
             Ok((merged, false)) => {
                 // Non-overlapping edits merged cleanly — write the result.
@@ -842,6 +853,11 @@ pub(crate) fn replay_snapshot_with_merge_protection(
 
 /// Perform a 3-way text merge using gix's built-in text driver (pure Rust).
 ///
+/// When `driver` is `Some("union")`, `Some("ours")`, or similar, the merge
+/// uses the corresponding gix conflict resolution strategy instead of the
+/// default diff3-with-markers. `Some("binary")` returns an immediate conflict
+/// without attempting a text merge.
+///
 /// Returns `Ok((merged_bytes, is_conflict))`.
 fn merge_text_three_way(
     base: &[u8],
@@ -849,12 +865,39 @@ fn merge_text_three_way(
     theirs: &[u8],
     ours_label: &str,
     theirs_label: &str,
+    driver: Option<&str>,
 ) -> Result<(Vec<u8>, bool)> {
-    match maw_git::merge::merge_text(base, ours, theirs, ours_label, "base", theirs_label) {
-        Ok(maw_git::merge::MergeResult::Clean(out)) => Ok((out, false)),
-        Ok(maw_git::merge::MergeResult::Conflict(out)) => Ok((out, true)),
+    use maw_git::merge::{merge_text_with_style, resolution_for_driver, MergeResult};
+
+    let Some(resolution) = resolution_for_driver(driver) else {
+        // `merge=binary` (or `-text`) — no text merge, always a conflict.
+        // Return the merge version as-is along with a conflict flag so the
+        // caller knows not to auto-resolve.
+        return Ok((ours.to_vec(), true));
+    };
+
+    match merge_text_with_style(
+        base,
+        ours,
+        theirs,
+        ours_label,
+        "base",
+        theirs_label,
+        resolution,
+    ) {
+        Ok(MergeResult::Clean(out)) => Ok((out, false)),
+        Ok(MergeResult::Conflict(out)) => Ok((out, true)),
         Err(e) => bail!("text merge failed: {e}"),
     }
+}
+
+/// Load a `.gitattributes` matcher from the anchor epoch commit for stash
+/// replay merge driver selection.
+///
+/// Returns `None` on any error so merges fall back to default diff3 behavior.
+fn load_stash_replay_attrs(ws_path: &Path, anchor_epoch: &str) -> Option<maw_lfs::AttrsMatcher> {
+    let repo = maw_git::GixRepo::open(ws_path).ok()?;
+    repo.load_gitattributes_at_commit(anchor_epoch)
 }
 
 /// Get the list of file paths changed in a stash commit relative to its parent.

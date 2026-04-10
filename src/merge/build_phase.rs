@@ -46,7 +46,6 @@ use crate::merge::partition::{PartitionResult, PathEntry, partition_by_path};
 #[cfg(not(feature = "ast-merge"))]
 use crate::merge::resolve::resolve_partition;
 #[cfg(feature = "ast-merge")]
-use crate::merge::resolve::resolve_partition_with_ast;
 use crate::merge::resolve::{ConflictRecord, ResolveError, ResolveResult};
 use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};
@@ -283,8 +282,12 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     // Merge settings used by resolve + deterministic drivers.
     let merge_config = MergeConfig::default();
 
+    // Load .gitattributes at the merge base for merge-driver selection.
+    let attrs = load_attrs_at_epoch(repo_root, epoch);
+
     // 4. Resolve shared paths via hash equality / diff3 / AST merge fallback
-    let resolve_result = resolve_partition_for_build(&partition, &base_contents, &merge_config)?;
+    let resolve_result =
+        resolve_partition_for_build(&partition, &base_contents, &merge_config, Some(&attrs))?;
 
     // 5. Apply deterministic merge drivers
     let (resolved, conflicts) = apply_merge_drivers(
@@ -620,8 +623,12 @@ fn run_pipeline<B: WorkspaceBackend>(
         base_contents.insert(path, content);
     }
 
+    // Load .gitattributes at the merge base for merge-driver selection.
+    let attrs = load_attrs_at_epoch(repo_root, &state.epoch_before);
+
     // Resolve shared paths via hash equality / diff3 / AST merge fallback
-    let resolve_result = resolve_partition_for_build(&partition, &base_contents, merge_config)?;
+    let resolve_result =
+        resolve_partition_for_build(&partition, &base_contents, merge_config, Some(&attrs))?;
 
     // Apply deterministic merge drivers
     let (resolved, conflicts) = apply_merge_drivers(
@@ -660,19 +667,44 @@ fn resolve_partition_for_build(
     partition: &PartitionResult,
     base_contents: &BTreeMap<PathBuf, Vec<u8>>,
     merge_config: &MergeConfig,
+    attrs: Option<&maw_lfs::AttrsMatcher>,
 ) -> Result<ResolveResult, BuildPhaseError> {
     #[cfg(feature = "ast-merge")]
     {
+        use crate::merge::resolve::resolve_partition_with_ast_and_attrs;
         let ast_config = crate::merge::ast_merge::AstMergeConfig::from_config(&merge_config.ast);
-        resolve_partition_with_ast(partition, base_contents, &ast_config)
+        resolve_partition_with_ast_and_attrs(partition, base_contents, &ast_config, attrs)
             .map_err(BuildPhaseError::from)
     }
 
     #[cfg(not(feature = "ast-merge"))]
     {
+        use crate::merge::resolve::resolve_partition_with_attrs;
         let _ = merge_config;
-        resolve_partition(partition, base_contents).map_err(BuildPhaseError::from)
+        resolve_partition_with_attrs(partition, base_contents, attrs).map_err(BuildPhaseError::from)
     }
+}
+
+/// Load a `.gitattributes` matcher at the given epoch commit.
+///
+/// The matcher reflects the `.gitattributes` state *at the merge base*, which
+/// is what git uses to decide merge drivers during `git merge`. If the merge
+/// itself modifies `.gitattributes`, the incoming attrs are NOT applied to
+/// this merge (matching git's semantics — you'd have to merge `.gitattributes`
+/// first, then re-merge the other files).
+///
+/// Returns an empty matcher on any error — a failed attrs load should never
+/// break a merge, just degrade to the default diff3 behavior.
+fn load_attrs_at_epoch(repo_root: &Path, epoch: &EpochId) -> maw_lfs::AttrsMatcher {
+    let repo = match maw_git::GixRepo::open(repo_root) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("load_attrs_at_epoch: failed to open repo: {e}");
+            return maw_lfs::AttrsMatcher::empty();
+        }
+    };
+    repo.load_gitattributes_at_commit(epoch.as_str())
+        .unwrap_or_else(maw_lfs::AttrsMatcher::empty)
 }
 
 // ---------------------------------------------------------------------------

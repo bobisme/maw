@@ -2,6 +2,29 @@
 
 All notable changes to maw.
 
+## v0.58.2
+
+### Fixed — `.gitattributes` merge drivers now honored
+Files with `merge=union`, `merge=ours`, or `merge=binary` set in `.gitattributes` are now merged correctly. Previously, all 3-way text merges ran through diff3 regardless of `.gitattributes`, producing conflict markers for append-only files (`.bones/events/*.events`, changelogs, event logs) that were marked `merge=union`. Maw had never consulted `.gitattributes` merge drivers in either the BUILD phase (via `git merge-file -p --diff3`) or the stash replay path (via gix's default text driver). Both paths now load `.gitattributes` from the merge base and dispatch per-path:
+
+- **`merge=union`** — lines from both sides are concatenated cleanly, no conflict markers (the same semantics as git's built-in `union` driver). Ideal for append-only event logs, changelogs, NOTES files.
+- **`merge=ours`** — the first workspace's side is always kept for conflicting hunks.
+- **`merge=binary`** — no text merge attempted; any divergence from base is reported as a conflict.
+- **Unknown custom drivers** (e.g., `merge=my-thing`) — safely fall back to default diff3 behavior, so unrecognized drivers don't break merges.
+
+Nested `.gitattributes` in subdirectories override parent rules (matching git's precedence). Consistent with git, merge drivers are resolved against the `.gitattributes` at the **merge base**, not the incoming side — changes to `.gitattributes` within the merge itself don't affect the current merge.
+
+Both the BUILD phase (normal merges) and the stash replay path (when the target workspace has uncommitted edits) honor the drivers.
+
+### Changed
+- `maw-lfs` is now an unconditional dependency of `maw-cli` and the root crate. The `lfs` cargo feature is preserved as a no-op for backward compatibility.
+- The attributes matcher in `maw-lfs` is now a general-purpose `.gitattributes` query engine, not just LFS-specific. New public API: `AttrsMatcher::merge_driver(path)`, `AttrsMatcher::from_gix_tree()`, `AttrsMatcher::from_gix_head()`.
+- New `GixRepo::load_gitattributes_at_commit()` for loading the attrs matcher at any commit — used by both the BUILD phase and stash replay.
+
+### Added
+- `maw_git::merge::merge_text_with_style()` — pure-Rust 3-way text merge with selectable conflict-resolution strategy (`Diff3`, `Union`, `Ours`, `Theirs`).
+- `maw_git::merge::resolution_for_driver()` — maps a `.gitattributes` `merge=<name>` driver to a `ConflictResolution`.
+
 ## v0.58.1
 
 ### Fixed

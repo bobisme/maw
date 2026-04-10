@@ -412,6 +412,20 @@ pub fn resolve_partition(
     partition: &PartitionResult,
     base_contents: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ResolveResult, ResolveError> {
+    resolve_partition_with_attrs(partition, base_contents, None)
+}
+
+/// Resolve all paths in a partition result, honoring `.gitattributes` merge
+/// drivers (`union`, `ours`, `binary`) for shared paths when an attrs matcher
+/// is provided.
+///
+/// Pass `None` for `attrs` to get the default diff3-only behavior.
+#[allow(clippy::missing_errors_doc)]
+pub fn resolve_partition_with_attrs(
+    partition: &PartitionResult,
+    base_contents: &BTreeMap<PathBuf, Vec<u8>>,
+    attrs: Option<&maw_lfs::AttrsMatcher>,
+) -> Result<ResolveResult, ResolveError> {
     let mut resolved: Vec<ResolvedChange> = Vec::new();
     let mut conflicts: Vec<ConflictRecord> = Vec::new();
 
@@ -441,10 +455,10 @@ pub fn resolve_partition(
         }
     }
 
-    // Shared paths: apply hash-equality / diff3 strategy.
+    // Shared paths: apply hash-equality / diff3 / gitattr-driver strategy.
     for (path, entries) in &partition.shared {
         let base = base_contents.get(path).cloned();
-        match resolve_shared_path(path, entries, base.as_deref())? {
+        match resolve_shared_path(path, entries, base.as_deref(), attrs)? {
             SharedOutcome::Resolved(change) => resolved.push(change),
             SharedOutcome::Conflict(conflict) => conflicts.push(conflict),
         }
@@ -476,6 +490,19 @@ pub fn resolve_partition_with_ast(
     base_contents: &BTreeMap<PathBuf, Vec<u8>>,
     ast_config: &AstMergeConfig,
 ) -> Result<ResolveResult, ResolveError> {
+    resolve_partition_with_ast_and_attrs(partition, base_contents, ast_config, None)
+}
+
+/// Like [`resolve_partition_with_ast`] but also honors `.gitattributes` merge
+/// drivers (`union`, `ours`, `binary`) when an attrs matcher is provided.
+#[cfg(feature = "ast-merge")]
+#[allow(clippy::missing_errors_doc)]
+pub fn resolve_partition_with_ast_and_attrs(
+    partition: &PartitionResult,
+    base_contents: &BTreeMap<PathBuf, Vec<u8>>,
+    ast_config: &AstMergeConfig,
+    attrs: Option<&maw_lfs::AttrsMatcher>,
+) -> Result<ResolveResult, ResolveError> {
     let mut resolved: Vec<ResolvedChange> = Vec::new();
     let mut conflicts: Vec<ConflictRecord> = Vec::new();
 
@@ -505,10 +532,10 @@ pub fn resolve_partition_with_ast(
         }
     }
 
-    // Shared paths: apply hash-equality / diff3 / AST merge strategy.
+    // Shared paths: apply hash-equality / gitattr-driver / diff3 / AST merge.
     for (path, entries) in &partition.shared {
         let base = base_contents.get(path).cloned();
-        match resolve_shared_path_with_ast(path, entries, base.as_deref(), ast_config)? {
+        match resolve_shared_path_with_ast(path, entries, base.as_deref(), ast_config, attrs)? {
             SharedOutcome::Resolved(change) => resolved.push(change),
             SharedOutcome::Conflict(conflict) => conflicts.push(conflict),
         }
@@ -528,11 +555,168 @@ enum SharedOutcome {
     Conflict(ConflictRecord),
 }
 
+/// A strategy for merging shared paths, derived from `.gitattributes`
+/// merge drivers on a per-path basis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathMergeStrategy {
+    /// Default: 3-way diff3 merge with fallback to shifted-alignment retry,
+    /// producing diff3 conflict markers on irreconcilable overlap.
+    Diff3,
+    /// `merge=union`: concatenate both sides' lines in conflict hunks.
+    Union,
+    /// `merge=ours`: pick the first workspace's side of each conflict hunk.
+    ///
+    /// For a k-way merge, "ours" is the first workspace in sorted order
+    /// (same order used by the rest of the resolve pipeline).
+    Ours,
+    /// `merge=binary` / `-text`: refuse to attempt a text merge. Any
+    /// divergence from base is a hard conflict.
+    Binary,
+}
+
+#[cfg(not(kani))]
+fn path_merge_strategy(
+    path: &Path,
+    attrs: Option<&maw_lfs::AttrsMatcher>,
+) -> PathMergeStrategy {
+    let Some(matcher) = attrs else {
+        return PathMergeStrategy::Diff3;
+    };
+    let rel = path.to_string_lossy().replace('\\', "/");
+    match matcher.merge_driver(&rel).as_deref() {
+        Some("union") => PathMergeStrategy::Union,
+        Some("ours") => PathMergeStrategy::Ours,
+        Some("binary") => PathMergeStrategy::Binary,
+        _ => PathMergeStrategy::Diff3,
+    }
+}
+
+#[cfg(kani)]
+fn path_merge_strategy(
+    _path: &Path,
+    _attrs: Option<&maw_lfs::AttrsMatcher>,
+) -> PathMergeStrategy {
+    PathMergeStrategy::Diff3
+}
+
+/// Perform a non-default merge for a shared path (union/ours) as a direct
+/// 3-way text merge using gix-merge. Bypasses the generic merge algebra —
+/// these drivers are always clean resolutions by construction.
+#[cfg(not(kani))]
+fn gitattr_driver_merge(
+    base: Option<&[u8]>,
+    entries: &[PathEntry],
+    strategy: PathMergeStrategy,
+) -> Result<Option<Vec<u8>>, ResolveError> {
+    use maw_git::merge::{merge_text_with_style, ConflictResolution, MergeResult};
+
+    // Need at least 2 entries with content to run a 3-way merge.
+    let with_content: Vec<&PathEntry> = entries.iter().filter(|e| e.content.is_some()).collect();
+    if with_content.len() < 2 {
+        return Ok(None);
+    }
+
+    let resolution = match strategy {
+        PathMergeStrategy::Union => ConflictResolution::Union,
+        PathMergeStrategy::Ours => ConflictResolution::Ours,
+        _ => return Ok(None),
+    };
+
+    let base_bytes = base.unwrap_or(b"");
+
+    // k-way fold: start with the first workspace's content as "ours", fold
+    // each additional workspace in as "theirs". Ordering is deterministic
+    // because the caller sorted entries by workspace_id.
+    let mut acc = with_content[0]
+        .content
+        .clone()
+        .expect("filtered to entries with content");
+
+    for theirs_entry in &with_content[1..] {
+        let theirs_bytes = theirs_entry
+            .content
+            .as_ref()
+            .expect("filtered to entries with content");
+        let result = merge_text_with_style(
+            base_bytes,
+            &acc,
+            theirs_bytes,
+            "ours",
+            "base",
+            "theirs",
+            resolution,
+        )
+        .map_err(|e| ResolveError::GitCommand {
+            command: format!("merge_text_with_style({resolution:?})"),
+            stderr: format!("{e}"),
+            exit_code: None,
+        })?;
+
+        acc = match result {
+            MergeResult::Clean(out) => out,
+            MergeResult::Conflict(_) => {
+                // Union and Ours should never return Conflict from gix, but
+                // if they somehow do, surface it so we fall back to diff3.
+                return Ok(None);
+            }
+        };
+    }
+
+    Ok(Some(acc))
+}
+
+#[cfg(kani)]
+fn gitattr_driver_merge(
+    _base: Option<&[u8]>,
+    _entries: &[PathEntry],
+    _strategy: PathMergeStrategy,
+) -> Result<Option<Vec<u8>>, ResolveError> {
+    Ok(None)
+}
+
 fn resolve_shared_path(
     path: &Path,
     entries: &[PathEntry],
     base: Option<&[u8]>,
+    attrs: Option<&maw_lfs::AttrsMatcher>,
 ) -> Result<SharedOutcome, ResolveError> {
+    // Check .gitattributes merge driver before running the generic algebra.
+    // For union/ours, we short-circuit through gix-merge directly since the
+    // result is always a clean resolution.
+    let strategy = path_merge_strategy(path, attrs);
+
+    if matches!(strategy, PathMergeStrategy::Union | PathMergeStrategy::Ours) {
+        // Short-circuit only when every entry is a modification (no delete
+        // mixed in). For delete/modify cases, fall through to the generic
+        // algebra which correctly emits a ModifyDelete conflict.
+        let has_delete = entries.iter().any(PathEntry::is_deletion);
+        if !has_delete {
+            if let Some(merged) = gitattr_driver_merge(base, entries, strategy)? {
+                return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+                    path: path.to_path_buf(),
+                    content: merged,
+                }));
+            }
+        }
+    }
+
+    if matches!(strategy, PathMergeStrategy::Binary) {
+        // `merge=binary` / `-text`: no text merge attempted. If base is
+        // present and all sides equal base, fall through to normal resolve
+        // which will detect hash equality. Otherwise emit a conflict.
+        let all_equal = all_blobs_equal(entries);
+        if !all_equal {
+            return Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                base,
+                ConflictReason::Diff3Conflict,
+                vec![],
+            )));
+        }
+    }
+
+    // Default diff3 path.
     // Use blob OID equality as a fast path before falling into the generic
     // algebra. The generic resolve_entries only sees content bytes, so we
     // check OID equality here and feed the result through.
@@ -626,6 +810,7 @@ fn resolve_shared_path_with_ast(
     entries: &[PathEntry],
     base: Option<&[u8]>,
     ast_config: &AstMergeConfig,
+    attrs: Option<&maw_lfs::AttrsMatcher>,
 ) -> Result<SharedOutcome, ResolveError> {
     // delete/delete[/...] => resolved delete
     if entries.iter().all(PathEntry::is_deletion) {
@@ -668,6 +853,33 @@ fn resolve_shared_path_with_ast(
             path: path.to_path_buf(),
             content: variants[0].clone(),
         }));
+    }
+
+    // Check .gitattributes merge driver before any line/AST merging.
+    // `merge=union` and `merge=ours` are always clean by construction;
+    // `merge=binary` refuses text merging entirely.
+    let strategy = path_merge_strategy(path, attrs);
+    match strategy {
+        PathMergeStrategy::Union | PathMergeStrategy::Ours => {
+            if let Some(merged) = gitattr_driver_merge(base, entries, strategy)? {
+                return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+                    path: path.to_path_buf(),
+                    content: merged,
+                }));
+            }
+            // If the driver merge returned None (shouldn't normally happen),
+            // fall through to the default pipeline.
+        }
+        PathMergeStrategy::Binary => {
+            return Ok(SharedOutcome::Conflict(conflict_record(
+                path,
+                entries,
+                base,
+                ConflictReason::Diff3Conflict,
+                vec![],
+            )));
+        }
+        PathMergeStrategy::Diff3 => {}
     }
 
     // Without base, differing non-delete variants are add/add.
