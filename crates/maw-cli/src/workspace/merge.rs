@@ -2318,6 +2318,13 @@ pub struct MergeOptions<'a> {
     pub resolve_all: Option<String>,
     /// Show verbose output (full recovery surface details on destroy).
     pub verbose: bool,
+    /// Bypass the stale-rebase-conflict-counter safety check (bn-3h90).
+    ///
+    /// Normally `maw ws merge` refuses to proceed if a source workspace
+    /// has `rebase_conflict_count > 0` in its metadata. Worktree state is
+    /// reconciled against that counter automatically, but if reconciliation
+    /// is wrong for some reason, `--force` lets the user override.
+    pub force: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2342,7 +2349,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         ref resolve,
         ref resolve_all,
         verbose,
+        force: _force,
     } = *opts;
+    // `_force` is not used here — the check site reads `opts.force` directly
+    // to avoid a shadowing conflict with the local `force` elsewhere.
     let ws_to_merge = workspaces.to_vec();
     let text_mode = format != OutputFormat::Json;
 
@@ -2464,16 +2474,30 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let workspace_dirs = workspace_dirs_map(&sources, &backend);
 
     // Refuse merge if any source workspace has unresolved rebase conflicts.
-    for ws_name in &ws_to_merge {
-        let ws_meta = super::metadata::read(&root, ws_name).unwrap_or_default();
-        if ws_meta.rebase_conflict_count > 0 {
-            bail!(
-                "Workspace '{ws_name}' has {} unresolved rebase conflict(s).\n  \
-                 Resolve conflicts first, then retry the merge.\n  \
-                 To see conflicts: maw ws conflicts {ws_name}\n  \
-                 To force merge anyway: maw ws merge {ws_name} --into {into_target} --force (not yet implemented)",
-                ws_meta.rebase_conflict_count
-            );
+    //
+    // bn-3h90 Bug 1 fix: Reconcile the persistent counter against the actual
+    // worktree state before trusting it. If the user resolved conflicts with
+    // plain git (edit, add, commit) instead of `maw ws resolve`, the counter
+    // goes stale. `reconcile_rebase_conflict_count` auto-clears it when the
+    // worktree has no markers.
+    //
+    // `--force` bypasses the check entirely as a belt-and-suspenders escape
+    // hatch for cases where reconciliation gets it wrong.
+    if !opts.force {
+        for ws_name in &ws_to_merge {
+            let live_count = super::resolve::reconcile_rebase_conflict_count(&root, ws_name)
+                .unwrap_or_else(|e| {
+                    tracing::debug!("reconcile_rebase_conflict_count failed for {ws_name}: {e}");
+                    0
+                });
+            if live_count > 0 {
+                bail!(
+                    "Workspace '{ws_name}' has {live_count} unresolved rebase conflict(s).\n  \
+                     Resolve conflicts first, then retry the merge.\n  \
+                     To see conflicts: maw ws conflicts {ws_name}\n  \
+                     To force merge anyway: maw ws merge {ws_name} --into {into_target} --force"
+                );
+            }
         }
     }
 

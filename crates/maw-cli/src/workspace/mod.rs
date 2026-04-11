@@ -785,6 +785,39 @@ pub enum WorkspaceCommands {
         all: bool,
     },
 
+    /// Repair a workspace's op log head (bn-3h90)
+    ///
+    /// Resets `refs/manifold/head/<name>` so future operations append to a
+    /// fresh chain. Use this if you see persistent warnings like:
+    ///
+    ///   WARNING: op log chain for workspace '<name>' has a dangling blob reference
+    ///
+    /// These warnings appear in repos that were affected by the pre-v0.58.3
+    /// destroy bug: `ws destroy` did not clean up `refs/manifold/head/<name>`,
+    /// so a later `ws create` with the same name inherited a stale oplog chain
+    /// containing references to blobs that had been garbage-collected.
+    ///
+    /// This command is DESTRUCTIVE to the workspace's op log history:
+    /// - The old head ref is archived under `refs/manifold/archive/head/<name>/<timestamp>`
+    ///   so you can inspect it later if needed.
+    /// - The workspace metadata, worktree contents, and git commit history
+    ///   are NOT touched — only the oplog chain is reset.
+    /// - Recovery snapshots under `refs/manifold/recovery/` are not affected.
+    ///
+    /// Examples:
+    ///   maw ws repair-oplog default        # repair default's op log
+    ///   maw ws repair-oplog alice          # repair alice's op log
+    ///   maw ws repair-oplog default --dry-run  # preview without changes
+    #[command(verbatim_doc_comment, name = "repair-oplog")]
+    RepairOplog {
+        /// Workspace name whose op log should be reset.
+        name: String,
+
+        /// Preview the change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Reconnect an orphaned workspace directory as a git worktree
     ///
     /// Use this to recover a workspace where the worktree tracking was lost
@@ -971,6 +1004,15 @@ pub enum WorkspaceCommands {
         /// OID, capture mode, artifact path, and recovery command).
         #[arg(short, long)]
         verbose: bool,
+
+        /// Bypass the stale rebase-conflict-counter safety check (bn-3h90).
+        ///
+        /// Use this if a workspace metadata counter is incorrectly reporting
+        /// unresolved rebase conflicts even though the worktree is clean.
+        /// Normally `maw ws merge` auto-reconciles the counter against the
+        /// worktree, but `--force` bypasses the check entirely.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Show detailed conflict information for workspace(s)
@@ -1286,6 +1328,9 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Undo { name } => undo::undo(&name),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
         WorkspaceCommands::Clean { name, all } => clean::clean(name, all),
+        WorkspaceCommands::RepairOplog { name, dry_run } => {
+            oplog_runtime::repair_oplog(&name, dry_run)
+        }
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
         WorkspaceCommands::Advance { name, format, json } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
@@ -1306,6 +1351,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             resolve,
             resolve_all,
             verbose,
+            force,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             let root = repo_root()?;
@@ -1405,6 +1451,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     resolve,
                     resolve_all,
                     verbose,
+                    force,
                 },
             )
         }

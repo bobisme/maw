@@ -379,6 +379,16 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
         let _ = manifold_refs::delete_ref(&self.root, &epoch_ref);
 
+        // Prune oplog head ref (bn-3h90). Leaving this behind causes a
+        // recreate with the same name to inherit the destroyed workspace's
+        // op-log chain, including checkpoint annotations that reference
+        // patch-set blobs from the now-dead snapshot. Subsequent merges then
+        // spam "op log read error: not found: blob <oid>" warnings. Recovery
+        // is unaffected — destroy records and snapshots live under the
+        // separate `refs/manifold/recovery/<name>` namespace.
+        let head_ref = manifold_refs::workspace_head_ref(name.as_str());
+        let _ = manifold_refs::delete_ref(&self.root, &head_ref);
+
         Ok(())
     }
 

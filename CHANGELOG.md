@@ -2,6 +2,33 @@
 
 All notable changes to maw.
 
+## v0.58.3
+
+### Fixed — `ws merge` phantom rebase conflict (bn-3h90 Bug 1)
+
+`maw ws merge` refused to proceed when a source workspace had a stale `rebase_conflict_count > 0` in its metadata, even after the user had resolved the conflict via plain git (`git add`, `git commit`). `maw ws conflicts`, `maw ws resolve --list`, and `maw ws sync` all reported the workspace clean — only `maw ws merge` trusted the stale counter. The counter was set by `maw ws sync --rebase` when a rebase hit a conflict, but nothing reset it when the conflict was resolved outside of `maw ws resolve`.
+
+**Fix**: `maw ws merge` now reconciles the persistent counter against the worktree before blocking. If the worktree has no conflict markers, the counter is auto-cleared and the merge proceeds. `maw ws resolve --list` does the same reconciliation as a side effect, so running it on a clean workspace also clears the stale state.
+
+The previously-advertised `--force` flag on `maw ws merge` is now actually implemented as a belt-and-suspenders escape hatch for cases where auto-reconciliation gets it wrong.
+
+### Fixed — `ws destroy` leaves orphaned oplog head ref (bn-3h90 Bug 2)
+
+`maw ws destroy` deleted `refs/manifold/ws/<name>` and `refs/manifold/epoch/ws/<name>` but **not** `refs/manifold/head/<name>` (the oplog head ref). When a workspace was destroyed and then recreated with the same name, the new workspace inherited the destroyed workspace's oplog chain, including checkpoint annotations that referenced patch-set blobs from the dead snapshot. Subsequent merges printed a persistent warning on every invocation:
+
+```
+WARNING: checkpoint write skipped for workspace 'default':
+checkpoint: op log read error: `git cat-file -p <blob>` failed: not found
+```
+
+**Fix**: `ws destroy` now deletes `refs/manifold/head/<name>` too. Recovery is unaffected because recovery data lives under the separate `refs/manifold/recovery/<name>/` namespace. Fresh `ws create` after `ws destroy` now starts with a clean oplog chain.
+
+### Added — `ws repair-oplog <name>` recovery command
+
+For repos that are already corrupted by the pre-v0.58.3 destroy bug (i.e., already have a stale oplog chain referencing dead blobs), `maw ws repair-oplog <name>` archives the current head ref to `refs/manifold/archive/head/<name>/<timestamp>` and deletes `refs/manifold/head/<name>` so the next operation starts a fresh chain. Supports `--dry-run` for previewing the change. Worktree contents, git history, and recovery snapshots are unchanged.
+
+Also downgrades the "damaged op log chain" warning to log once per workspace per session (instead of on every merge) when the chain is already broken.
+
 ## v0.58.2
 
 ### Fixed — `.gitattributes` merge drivers now honored
