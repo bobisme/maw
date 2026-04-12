@@ -155,7 +155,12 @@ impl AttrsMatcher {
 
     /// Returns true if `filter=lfs` applies to the given repo-relative path
     /// (forward-slash separated, no leading slash).
+    ///
+    /// Absolute paths (starting with `/`) are normalized by stripping the
+    /// leading slash. This prevents a panic in `gix-glob` which requires
+    /// relative paths (bn-3t55).
     pub fn is_lfs(&self, rel_path: &str) -> bool {
+        let rel_path = rel_path.trim_start_matches('/');
         let mut current = false;
         for file in &self.files {
             // Only apply rules from files whose directory is an ancestor of the path.
@@ -181,7 +186,10 @@ impl AttrsMatcher {
     /// driver name if the path matches a rule like `merge=union`. Returns
     /// `None` if no rule assigns a merge driver, or if the most recent matching
     /// rule is `-merge` / `!merge` (reset to default text merge).
+    ///
+    /// Absolute paths are normalized (bn-3t55).
     pub fn merge_driver(&self, rel_path: &str) -> Option<String> {
+        let rel_path = rel_path.trim_start_matches('/');
         let mut current: Option<String> = None;
         for file in &self.files {
             if !rel_path.starts_with(&file.dir_prefix) {

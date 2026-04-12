@@ -19,15 +19,16 @@ fn pt_config() -> ProptestConfig {
     }
 }
 
-/// Known failure — see bn-3t55. `AttrsMatcher::is_lfs` panics in
-/// `gix-glob`'s `matches_repo_relative_path` when given an absolute path.
-/// Left ignored here as a repro so the fix can flip this to `#[test]`.
+/// Regression test for bn-3t55: absolute paths no longer panic.
+/// Previously `gix-glob`'s `matches_repo_relative_path` asserted on
+/// leading `/`. Fix: `is_lfs` and `merge_driver` strip the leading slash.
 #[test]
-#[ignore = "bn-3t55: AttrsMatcher panics on absolute paths"]
-fn bn_3t55_absolute_path_panics() {
+fn bn_3t55_absolute_path_no_longer_panics() {
     let entries = vec![(String::new(), b"0 filter=lfs\n".to_vec())];
     let m = AttrsMatcher::from_entries(entries).unwrap();
+    // Should not panic — the leading slash is stripped internally.
     let _ = m.is_lfs("/abs/path");
+    let _ = m.merge_driver("/abs/path");
 }
 
 proptest! {
@@ -54,10 +55,8 @@ proptest! {
     #[test]
     fn queries_are_deterministic(
         attrs_bytes in proptest::collection::vec(any::<u8>(), 0..512),
-        // Non-slash first char: absolute paths trigger bn-3t55 (gix-glob
-        // panics on absolute input). Query paths in maw are always
-        // repo-relative, so matching that contract here.
-        path in "[a-zA-Z0-9._-][a-zA-Z0-9/._-]{0,59}",
+        // Include absolute paths now that bn-3t55 is fixed.
+        path in "[/a-zA-Z0-9._-][a-zA-Z0-9/._-]{0,59}",
     ) {
         let entries = vec![(String::new(), attrs_bytes)];
         if let Ok(m) = AttrsMatcher::from_entries(entries) {
@@ -75,10 +74,8 @@ proptest! {
     #[test]
     fn printable_attrs_never_panic(
         content in "([a-zA-Z0-9*./_-]{1,12} (filter=lfs|filter=other|-filter|merge=union|merge=binary|merge=ours|merge=my-driver|-merge|merge|diff=lfs|-text)\n){0,10}",
-        // Non-slash first char: absolute paths trigger bn-3t55 (gix-glob
-        // panics on absolute input). Query paths in maw are always
-        // repo-relative, so matching that contract here.
-        path in "[a-zA-Z0-9._-][a-zA-Z0-9/._-]{0,59}",
+        // Include absolute paths now that bn-3t55 is fixed.
+        path in "[/a-zA-Z0-9._-][a-zA-Z0-9/._-]{0,59}",
     ) {
         let entries = vec![(String::new(), content.into_bytes())];
         if let Ok(m) = AttrsMatcher::from_entries(entries) {
