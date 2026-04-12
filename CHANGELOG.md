@@ -2,6 +2,32 @@
 
 All notable changes to maw.
 
+## v0.58.5
+
+### Fixed — conflict-marker detector false-positive on source fixtures
+
+v0.58.4's pre-flight conflict-marker check walked the full worktree and flagged any file whose content had a line starting with `<<<<<<<`. This was a false positive for source files that contain conflict-marker literals in test fixtures — notably `crates/maw-cli/src/workspace/resolve.rs` has raw-string fixtures with `<<<<<<<` at column 0 inside string literals. The result: **every `maw ws merge` in the maw repo itself failed the pre-flight check**, blocking merges of legitimate work.
+
+**Fix**: The detector now scans the diff between the workspace's base and current state (HEAD + working tree) for *newly added* marker lines, rather than scanning full file contents. Pre-existing markers in unchanged files — including test fixtures — are invisible to the scan because they aren't in the diff. Real rebase-introduced markers are still caught because they appear as added lines in the diff.
+
+Falls back to a full worktree walk only when the base ref can't be resolved.
+
+### Added — hardening work from the bn-opm7 goal
+
+This release includes the first batch of tasks from the bn-opm7 refactoring/testing goal:
+
+- **bn-1jso**: Type-safe `BaseEpoch` and `CurrentEpoch` newtypes in `maw-core::model::types`. The `committed_ahead_of_epoch` function now takes `&BaseEpoch` instead of `&str`, making the v0.58.1 bn-18dj class of bug (wrong-argument-type) a compile error. `WorkspaceStatus.base_epoch` is now `BaseEpoch` rather than `EpochId`, cascading the type safety to all callers.
+- **bn-3kcp**: Centralized `workspace_owned_refs()` helper in `maw-core::refs`. `ws destroy` and `ref_gc` now iterate this list instead of hand-listing refs. Adding a new workspace-scoped ref kind is now a one-line change — every cleanup operation picks it up automatically. Paired integration test: `destroy_deletes_all_workspace_owned_refs`.
+- **bn-3o7w**: Property-based tests for `ws sync` decision gate invariants (`tests/sync_proptest.rs`). 4 proptests × 32 cases each, verifying that `sync` without `--rebase` never changes HEAD when local commits exist, `sync --rebase` preserves commit count and content, and `sync --all` doesn't drop commits across multiple workspaces.
+- **bn-19tb**: Proptest fuzz harnesses for small-input parsers:
+  - `crates/maw-lfs/tests/attrs_proptest.rs` — `AttrsMatcher::is_lfs`/`merge_driver` determinism, round-trip properties, panic-free behavior.
+  - `crates/maw-core/tests/workspace_id_proptest.rs` — `WorkspaceId::new` validation round-trips.
+  - Inline proptest module in `crates/maw-cli/src/workspace/resolve.rs` — `parse_file_conflicts` marker handling, deterministic block IDs, malformed-input safety.
+
+### Filed — bn-3t55: AttrsMatcher panics on absolute paths
+
+The bn-19tb fuzz harness discovered that `AttrsMatcher::is_lfs` and `merge_driver` panic (via `gix-glob`) when passed paths starting with `/`. Minimal repro captured as an `#[ignore]`'d test. The matcher should either reject absolute paths or strip the leading slash. Filed for a follow-up release.
+
 ## v0.58.4
 
 ### Fixed — conflict detection silently missed large files (bn-3h90 follow-up)
