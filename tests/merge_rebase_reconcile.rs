@@ -415,3 +415,74 @@ fn destroy_then_create_same_name_starts_fresh_oplog_chain() {
         "recreated workspace should have a fresh oplog chain, not inherit the destroyed one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-3kcp: destroy iterates the `workspace_owned_refs` set so every ref
+// kind a workspace owns is cleaned up — not just the three kinds that
+// happened to exist when destroy was first written.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn destroy_deletes_all_workspace_owned_refs() {
+    use maw_core::refs::workspace_owned_refs;
+
+    let repo = TestRepo::new();
+
+    // Create a workspace and perform operations that should populate every
+    // ref kind a workspace owns:
+    //   - refs/manifold/ws/alice         (materialized state, written on snapshot)
+    //   - refs/manifold/epoch/ws/alice   (creation epoch, written at create time)
+    //   - refs/manifold/head/alice       (oplog head, written on commits)
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("alice", "a.txt", "content\n");
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "alice touches a.txt"]);
+
+    // Before destroy: every owned ref exists. (Some may be absent if that
+    // particular ref kind hasn't been materialized yet — we only assert at
+    // least one exists, because this test's primary goal is the "after"
+    // assertion. The `destroy_cleans_up_oplog_head_ref` test already covers
+    // the head ref specifically.)
+    let owned = workspace_owned_refs("alice");
+    assert!(
+        owned.len() >= 3,
+        "workspace_owned_refs must contain at least 3 entries"
+    );
+
+    let mut existed_before = 0;
+    for ref_name in &owned {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", ref_name])
+            .current_dir(repo.root())
+            .output()
+            .unwrap();
+        if out.status.success() {
+            existed_before += 1;
+        }
+    }
+    assert!(
+        existed_before >= 1,
+        "at least one owned ref must exist before destroy (got 0 of {}): {:?}",
+        owned.len(),
+        owned
+    );
+
+    // Destroy with --force.
+    repo.maw_ok(&["ws", "destroy", "alice", "--force"]);
+
+    // After destroy: every owned ref must be gone, regardless of kind.
+    for ref_name in &owned {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", ref_name])
+            .current_dir(repo.root())
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "owned ref {ref_name} still exists after destroy \
+             (stdout={}, stderr={})",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+}

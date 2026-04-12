@@ -95,15 +95,15 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
         if !ws_dir.exists() {
             report.stale_head_names.push(ws_name.to_string());
             if !dry_run {
-                refs::delete_ref(root, ref_name.as_str()).map_err(|e| {
-                    anyhow::anyhow!("failed to delete ref {}: {e}", ref_name.as_str())
-                })?;
-
-                // Also clean up associated workspace state and epoch refs.
-                let state_ref = refs::workspace_state_ref(ws_name);
-                let _ = refs::delete_ref(root, &state_ref);
-                let epoch_ref = refs::workspace_epoch_ref(ws_name);
-                let _ = refs::delete_ref(root, &epoch_ref);
+                // Delete every ref owned by this (gone) workspace. Iterates
+                // the single source of truth in `workspace_owned_refs` so a
+                // new ref kind is a one-line change there (bn-3kcp). The
+                // head ref we discovered via list_refs is one of the entries
+                // in that set — delete_ref is idempotent so re-deleting it
+                // is harmless.
+                for owned in refs::workspace_owned_refs(ws_name) {
+                    let _ = refs::delete_ref(root, &owned);
+                }
             }
             report.head_refs_deleted += 1;
         }

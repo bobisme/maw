@@ -371,23 +371,28 @@ impl WorkspaceBackend for GitWorktreeBackend {
             .current_dir(&self.root)
             .output();
 
-        // Prune Level 1 materialized workspace ref if present.
-        let ws_ref = manifold_refs::workspace_state_ref(name.as_str());
-        let _ = manifold_refs::delete_ref(&self.root, &ws_ref);
-
-        // Prune per-workspace creation epoch ref if present.
-        let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
-        let _ = manifold_refs::delete_ref(&self.root, &epoch_ref);
-
-        // Prune oplog head ref (bn-3h90). Leaving this behind causes a
-        // recreate with the same name to inherit the destroyed workspace's
-        // op-log chain, including checkpoint annotations that reference
-        // patch-set blobs from the now-dead snapshot. Subsequent merges then
-        // spam "op log read error: not found: blob <oid>" warnings. Recovery
-        // is unaffected — destroy records and snapshots live under the
-        // separate `refs/manifold/recovery/<name>` namespace.
-        let head_ref = manifold_refs::workspace_head_ref(name.as_str());
-        let _ = manifold_refs::delete_ref(&self.root, &head_ref);
+        // Prune every ref owned by this workspace. Iterates the single
+        // source of truth in `manifold_refs::workspace_owned_refs` so that
+        // adding a new ref kind is a one-line change there — not a hunt
+        // through every lifecycle callsite (bn-3kcp).
+        //
+        // What this covers today:
+        //   - Level 1 materialized workspace state ref (`refs/manifold/ws/<name>`)
+        //   - Per-workspace creation epoch ref (`refs/manifold/epoch/ws/<name>`)
+        //   - Oplog head ref (`refs/manifold/head/<name>`) — bn-3h90. Leaving
+        //     this behind causes a recreate with the same name to inherit the
+        //     destroyed workspace's op-log chain, including checkpoint
+        //     annotations that reference patch-set blobs from the now-dead
+        //     snapshot. Subsequent merges then spam "op log read error: not
+        //     found: blob <oid>" warnings.
+        //
+        // Recovery is unaffected — destroy records and snapshots live under
+        // the separate `refs/manifold/recovery/<name>/` namespace
+        // (`workspace_recovery_refs_prefix`), which is intentionally
+        // excluded from `workspace_owned_refs`.
+        for ref_name in manifold_refs::workspace_owned_refs(name.as_str()) {
+            let _ = manifold_refs::delete_ref(&self.root, &ref_name);
+        }
 
         Ok(())
     }

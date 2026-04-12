@@ -94,6 +94,58 @@ pub fn workspace_epoch_ref(workspace_name: &str) -> String {
     format!("{WORKSPACE_EPOCH_PREFIX}{workspace_name}")
 }
 
+/// Every ref name owned by the workspace `name`, in deterministic order.
+///
+/// This is the single source of truth for "what refs belong to a workspace".
+/// Lifecycle operations (destroy, audit, doctor, ref GC) should iterate this
+/// list instead of hand-enumerating ref kinds.
+///
+/// **Adding a new workspace-scoped ref kind is a one-line change here** —
+/// and every lifecycle operation picks it up automatically. Before this
+/// existed (bn-3h90), `ws destroy` forgot to delete `refs/manifold/head/<name>`
+/// when the oplog was introduced, silently corrupting the next `ws create`
+/// of the same name.
+///
+/// Recovery refs are intentionally **not** included here: they live under
+/// [`workspace_recovery_refs_prefix`] and must SURVIVE `ws destroy`.
+///
+/// # Example
+/// ```
+/// let refs = maw_core::refs::workspace_owned_refs("alice");
+/// assert!(refs.contains(&"refs/manifold/ws/alice".to_string()));
+/// assert!(refs.contains(&"refs/manifold/epoch/ws/alice".to_string()));
+/// assert!(refs.contains(&"refs/manifold/head/alice".to_string()));
+/// ```
+#[must_use]
+pub fn workspace_owned_refs(workspace_name: &str) -> Vec<String> {
+    vec![
+        workspace_state_ref(workspace_name), // refs/manifold/ws/<name>
+        workspace_epoch_ref(workspace_name), // refs/manifold/epoch/ws/<name>
+        workspace_head_ref(workspace_name),  // refs/manifold/head/<name>
+        // Future additions go here — automatically covered by destroy,
+        // doctor, audit, ref GC, and invariant tests.
+    ]
+}
+
+/// Prefix for pinned recovery refs belonging to workspace `name`.
+///
+/// Recovery refs are listed **separately** from [`workspace_owned_refs`]
+/// because they must SURVIVE destroy operations: they hold the recovery
+/// snapshot captured on destruction so the user can restore a workspace
+/// whose data would otherwise be lost.
+///
+/// # Example
+/// ```
+/// assert_eq!(
+///     maw_core::refs::workspace_recovery_refs_prefix("alice"),
+///     "refs/manifold/recovery/alice/"
+/// );
+/// ```
+#[must_use]
+pub fn workspace_recovery_refs_prefix(workspace_name: &str) -> String {
+    format!("refs/manifold/recovery/{workspace_name}/")
+}
+
 // ---------------------------------------------------------------------------
 // OID conversion helpers
 // ---------------------------------------------------------------------------
@@ -583,6 +635,70 @@ mod tests {
             workspace_epoch_ref("default"),
             "refs/manifold/epoch/ws/default"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // workspace_owned_refs (bn-3kcp)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn workspace_owned_refs_has_at_least_three_entries() {
+        // Guard rail: if someone accidentally empties this list, every
+        // lifecycle operation that iterates it becomes a silent no-op.
+        let owned = workspace_owned_refs("foo");
+        assert!(
+            owned.len() >= 3,
+            "workspace_owned_refs must contain at least 3 ref kinds \
+             (state, epoch, head); got {}: {:?}",
+            owned.len(),
+            owned
+        );
+    }
+
+    #[test]
+    fn workspace_owned_refs_all_under_manifold_and_contain_name() {
+        let owned = workspace_owned_refs("foo");
+        for name in &owned {
+            assert!(
+                name.starts_with("refs/manifold/"),
+                "every owned ref must live under refs/manifold/: {name}"
+            );
+            assert!(
+                name.contains("foo"),
+                "every owned ref must be scoped to the workspace name: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_owned_refs_includes_state_epoch_and_head() {
+        let owned = workspace_owned_refs("alice");
+        assert!(owned.contains(&workspace_state_ref("alice")));
+        assert!(owned.contains(&workspace_epoch_ref("alice")));
+        assert!(owned.contains(&workspace_head_ref("alice")));
+    }
+
+    #[test]
+    fn workspace_recovery_refs_prefix_format() {
+        assert_eq!(
+            workspace_recovery_refs_prefix("alice"),
+            "refs/manifold/recovery/alice/"
+        );
+    }
+
+    #[test]
+    fn recovery_refs_are_not_part_of_owned_set() {
+        // Recovery refs must SURVIVE destroy. If they accidentally ended up
+        // in workspace_owned_refs, destroy would nuke the user's recovery
+        // snapshot.
+        let owned = workspace_owned_refs("alice");
+        let recovery = workspace_recovery_refs_prefix("alice");
+        for name in &owned {
+            assert!(
+                !name.starts_with(&recovery),
+                "recovery refs must not be in the owned set: {name}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
