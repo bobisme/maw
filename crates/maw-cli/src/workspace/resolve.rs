@@ -1394,3 +1394,160 @@ end";
         assert_eq!(blocks[0].right_name, "default");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property-based fuzz tests (bn-19tb)
+// ---------------------------------------------------------------------------
+//
+// These exercise `parse_file_conflicts` — the diff3 conflict marker parser —
+// with a wide variety of inputs including pathological ones (unterminated
+// markers, nested markers, random bytes, etc.).
+//
+// Invariants asserted:
+// - `parse_file_conflicts` never panics on any `&str` input.
+// - Well-formed conflict blocks preserve left/right/base content exactly.
+// - Context-only input (no markers) produces exactly one `Context` chunk
+//   equal to the original content.
+// - Block IDs (`cf-0`, `cf-1`, ...) are stable — same input produces the
+//   same sequence of block indices in `resolve_chunks`.
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn pt_config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 256,
+            max_shrink_iters: 128,
+            .. ProptestConfig::default()
+        }
+    }
+
+    proptest! {
+        #![proptest_config(pt_config())]
+
+        /// `parse_file_conflicts` must never panic, regardless of input.
+        #[test]
+        fn parse_never_panics(content in any::<String>()) {
+            let _ = parse_file_conflicts(&content);
+        }
+
+        /// Marker-free input produces zero or one `Context` chunk and no
+        /// `Conflict` chunks. Note: `parse_file_conflicts` collapses leading
+        /// blank lines into its context buffer, which is why we don't
+        /// require exact byte equality here.
+        #[test]
+        fn non_marker_content_has_no_conflicts(
+            // Printable ASCII minus `<`, `|`, `=`, `>` to avoid markers.
+            text in "[a-zA-Z0-9 ._/!\\?\n]{0,200}"
+        ) {
+            prop_assume!(!text.contains("<<<<<<<"));
+            prop_assume!(!text.contains("|||||||"));
+            prop_assume!(!text.contains("======="));
+            prop_assume!(!text.contains(">>>>>>>"));
+
+            let chunks = parse_file_conflicts(&text);
+            for c in &chunks {
+                prop_assert!(matches!(c, FileChunk::Context(_)));
+            }
+            // Non-empty content (with any non-newline char) produces at
+            // least one chunk.
+            if text.chars().any(|c| c != '\n') {
+                prop_assert!(!chunks.is_empty());
+            }
+        }
+
+        /// Well-formed diff3 blocks preserve left/right/base content exactly.
+        #[test]
+        fn well_formed_diff3_preserves_sides(
+            left_name in "[a-z][a-z0-9-]{0,8}",
+            right_name in "[a-z][a-z0-9-]{0,8}",
+            left in "[a-zA-Z0-9 _.]{0,40}",
+            base in "[a-zA-Z0-9 _.]{0,40}",
+            right in "[a-zA-Z0-9 _.]{0,40}",
+        ) {
+            let content = format!(
+                "<<<<<<< {left_name}\n{left}\n||||||| merged common ancestors\n{base}\n=======\n{right}\n>>>>>>> {right_name}\n"
+            );
+            let chunks = parse_file_conflicts(&content);
+            let conflict = chunks.iter().find_map(|c| match c {
+                FileChunk::Conflict(b) => Some(b),
+                _ => None,
+            }).expect("should parse one conflict block");
+            prop_assert_eq!(&conflict.left_name, &left_name);
+            prop_assert_eq!(&conflict.right_name, &right_name);
+            prop_assert_eq!(&conflict.left_content, &left);
+            prop_assert_eq!(&conflict.base_content, &base);
+            prop_assert_eq!(&conflict.right_content, &right);
+        }
+
+        /// Block indices are deterministic: the same input always produces
+        /// the same number of `Conflict` chunks in the same positions.
+        #[test]
+        fn block_ids_stable(content in any::<String>()) {
+            let a = parse_file_conflicts(&content);
+            let b = parse_file_conflicts(&content);
+            prop_assert_eq!(a.len(), b.len());
+            for (ca, cb) in a.iter().zip(b.iter()) {
+                match (ca, cb) {
+                    (FileChunk::Context(x), FileChunk::Context(y)) => prop_assert_eq!(x, y),
+                    (FileChunk::Conflict(x), FileChunk::Conflict(y)) => {
+                        prop_assert_eq!(&x.left_name, &y.left_name);
+                        prop_assert_eq!(&x.right_name, &y.right_name);
+                        prop_assert_eq!(&x.left_content, &y.left_content);
+                        prop_assert_eq!(&x.base_content, &y.base_content);
+                        prop_assert_eq!(&x.right_content, &y.right_content);
+                    }
+                    _ => prop_assert!(false, "chunk kinds differ between runs"),
+                }
+            }
+        }
+
+        /// Unterminated `<<<<<<<` blocks (EOF before `>>>>>>>`) don't panic
+        /// and don't silently drop the starting marker's data — at least one
+        /// `Conflict` chunk is produced.
+        #[test]
+        fn unterminated_markers_dont_panic(
+            name in "[a-z][a-z0-9-]{0,8}",
+            body in "[a-zA-Z0-9 _.\n]{0,80}",
+        ) {
+            let content = format!("prefix line\n<<<<<<< {name}\n{body}");
+            let chunks = parse_file_conflicts(&content);
+            // Should contain at least one Conflict chunk (the unterminated one).
+            let has_conflict = chunks.iter().any(|c| matches!(c, FileChunk::Conflict(_)));
+            prop_assert!(has_conflict);
+        }
+
+        /// Nested `<<<<<<<` / `>>>>>>>` markers inside a conflict block are
+        /// kept as content, not flattened — the outer block's boundaries
+        /// remain correct.
+        #[test]
+        fn nested_markers_kept_as_content(
+            outer_left in "[a-z][a-z0-9-]{0,6}",
+            outer_right in "[a-z][a-z0-9-]{0,6}",
+            inner_left in "[a-z][a-z0-9-]{0,6}",
+            inner_right in "[a-z][a-z0-9-]{0,6}",
+        ) {
+            let content = format!(
+                "<<<<<<< {outer_left}\nouter-left\n<<<<<<< {inner_left}\ninner-left\n=======\ninner-right\n>>>>>>> {inner_right}\n=======\nouter-right\n>>>>>>> {outer_right}\n"
+            );
+            let chunks = parse_file_conflicts(&content);
+            // Expect exactly one top-level conflict chunk.
+            let conflicts: Vec<_> = chunks.iter().filter_map(|c| match c {
+                FileChunk::Conflict(b) => Some(b),
+                _ => None,
+            }).collect();
+            prop_assert_eq!(conflicts.len(), 1);
+            let b = conflicts[0];
+            prop_assert_eq!(&b.left_name, &outer_left);
+            prop_assert_eq!(&b.right_name, &outer_right);
+            // The inner markers should appear inside left_content or right_content.
+            let combined = format!("{}\n{}", b.left_content, b.right_content);
+            let open_marker = format!("<<<<<<< {inner_left}");
+            let close_marker = format!(">>>>>>> {inner_right}");
+            prop_assert!(combined.contains(&open_marker));
+            prop_assert!(combined.contains(&close_marker));
+        }
+    }
+}

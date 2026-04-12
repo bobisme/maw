@@ -29,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 [dev-dependencies]
 tempfile = "3"
 maw-git = { path = "../maw-git", default-features = false, features = ["lfs"] }
+proptest = "1"
 
 [lints]
 workspace = true

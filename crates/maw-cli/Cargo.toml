@@ -36,6 +36,9 @@ opentelemetry-otlp = { version = "0.31", optional = true, default-features = fal
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
+[dev-dependencies]
+proptest = "1"
+
 [features]
 default = ["otel", "tui", "lfs"]
 # `lfs` is kept as a no-op feature — maw-lfs is an unconditional dep now,
