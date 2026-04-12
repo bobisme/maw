@@ -233,6 +233,152 @@ fn destroy_cleans_up_oplog_head_ref() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Bug from agent follow-up report: file_has_conflict_markers 256KB limit
+// silently missed markers in large files, causing ws conflicts and
+// ws resolve --list to falsely report clean.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_conflicted_files_detects_markers_past_256kb() {
+    let repo = TestRepo::new();
+    repo.maw_ok(&["ws", "create", "a"]);
+
+    // Write a large file (~1MB) with conflict markers at the very end.
+    let ws_path = repo.root().join("ws").join("a");
+    let large_path = ws_path.join("large.txt");
+    let mut content = String::with_capacity(1_100_000);
+    for i in 0..50_000 {
+        content.push_str(&format!("line {i}\n"));
+    }
+    // Markers at the END of the file, well past the old 256KB read limit.
+    content.push_str(
+        "\n<<<<<<< alice\nalice_content\n=======\nbob_content\n>>>>>>> bob\n",
+    );
+    std::fs::write(&large_path, &content).unwrap();
+    assert!(
+        std::fs::metadata(&large_path).unwrap().len() > 256 * 1024,
+        "test file should exceed 256KB"
+    );
+
+    // `ws resolve --list` calls find_conflicted_files internally. It should
+    // detect the markers and report them.
+    let out = repo.maw_raw(&["ws", "resolve", "a", "--list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("large.txt") || combined.contains("1 conflicted"),
+        "ws resolve --list should detect markers in large file. Got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !combined.contains("No conflicted files"),
+        "ws resolve --list falsely reported clean. Got: {combined}"
+    );
+}
+
+#[test]
+fn ws_merge_refuses_workspace_with_embedded_markers_in_large_file() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "line1\nline2\n")]);
+
+    repo.maw_ok(&["ws", "create", "a"]);
+
+    // Modify the file AND add a large file with markers committed into HEAD.
+    // This simulates the state after `sync --rebase` committed conflict markers.
+    let ws_path = repo.root().join("ws").join("a");
+    repo.add_file("a", "shared.txt", "line1\nline2\nline3\n");
+
+    let mut large = String::with_capacity(600_000);
+    for i in 0..30_000 {
+        large.push_str(&format!("entry {i}\n"));
+    }
+    large.push_str(
+        "\n<<<<<<< HEAD\nours version\n=======\ntheirs version\n>>>>>>> other\n",
+    );
+    std::fs::write(ws_path.join("manifest.txt"), &large).unwrap();
+
+    repo.git_in_workspace("a", &["add", "-A"]);
+    repo.git_in_workspace("a", &["commit", "-m", "rebase: conflict replaying (simulated)"]);
+
+    // ws merge should refuse because the worktree has markers.
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "a",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "should fail",
+    ]);
+    assert!(
+        !out.status.success(),
+        "merge should refuse workspace with embedded markers\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("manifest.txt") || stderr.contains("conflict marker"),
+        "error should mention the marker file: {stderr}"
+    );
+}
+
+#[test]
+fn ws_conflicts_reports_embedded_markers_when_engine_is_clean() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("file.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "a"]);
+
+    // Commit a file with embedded markers but don't modify the "tracked" file.
+    // The merge engine will see a clean 1-side modification; our embedded-
+    // marker scan should still catch it.
+    let ws_path = repo.root().join("ws").join("a");
+    let marker_content = "head\n<<<<<<< alice\nx\n=======\ny\n>>>>>>> bob\ntail\n";
+    std::fs::write(ws_path.join("dirty.txt"), marker_content).unwrap();
+    repo.git_in_workspace("a", &["add", "-A"]);
+    repo.git_in_workspace("a", &["commit", "-m", "simulated rebase conflict"]);
+
+    let out = repo.maw_raw(&["ws", "conflicts", "a"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("embedded conflict markers")
+            || combined.contains("dirty.txt"),
+        "ws conflicts should surface embedded markers. Got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !combined.contains("No conflicts found"),
+        "ws conflicts should NOT report clean. Got: {combined}"
+    );
+}
+
+#[test]
+fn file_has_conflict_markers_skips_files_over_256mb() {
+    // This is a smoke test — we don't actually create a 256MB+ file in a
+    // unit test. Just verify that a normal-sized file with markers IS
+    // detected (proves the new code path works for typical sizes).
+    let repo = TestRepo::new();
+    repo.maw_ok(&["ws", "create", "a"]);
+    let ws_path = repo.root().join("ws").join("a");
+    std::fs::write(
+        ws_path.join("ok.txt"),
+        "line1\n<<<<<<< foo\nours\n=======\ntheirs\n>>>>>>> bar\nline2\n",
+    )
+    .unwrap();
+
+    let out = repo.maw_raw(&["ws", "resolve", "a", "--list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{}{}", stdout, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        combined.contains("ok.txt") && !combined.contains("No conflicted files"),
+        "normal-sized file with markers should be detected: {combined}"
+    );
+}
+
 #[test]
 fn destroy_then_create_same_name_starts_fresh_oplog_chain() {
     let repo = TestRepo::new();

@@ -508,16 +508,47 @@ fn walk_for_conflicts(
 }
 
 fn file_has_conflict_markers(path: &Path) -> bool {
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path) {
+    use std::io::{BufRead, BufReader};
+
+    // Stream the file line-by-line so the whole file is scanned regardless
+    // of size. Conflict markers are always at the start of a line, so a
+    // line-prefix check is sufficient and efficient.
+    //
+    // Previously this read only the first 256KB, which silently missed
+    // markers in large files like `tests/cve-registry/manifest.toml` with
+    // thousands of entries (bn-3h90 follow-up).
+    let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return false,
     };
-    let mut buf = vec![0u8; 256 * 1024];
-    let n = file.read(&mut buf).unwrap_or(0);
-    let content = &buf[..n];
-    content.windows(8).any(|w| w.starts_with(b"\n<<<<<<<") || w == b"<<<<<<<\n")
-        || content.starts_with(b"<<<<<<<")
+
+    // Upper-bound extremely large files so we don't hang on giant binaries
+    // that can't realistically contain git conflict markers.
+    if let Ok(meta) = file.metadata()
+        && meta.len() > 256 * 1024 * 1024
+    {
+        tracing::debug!(
+            "file_has_conflict_markers: skipping {} ({} bytes, over 256MB cap)",
+            path.display(),
+            meta.len()
+        );
+        return false;
+    }
+
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::with_capacity(256);
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return false, // EOF
+            Ok(_) => {
+                if line.starts_with(b"<<<<<<<") {
+                    return true;
+                }
+            }
+            Err(_) => return false, // I/O error — best-effort false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -2037,7 +2037,21 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 
     let has_conflicts = !build_output.conflicts.is_empty();
 
-    if !has_conflicts {
+    // bn-3h90 follow-up: Even when the merge engine reports no conflicts,
+    // a source workspace may have embedded conflict markers committed into
+    // its HEAD from a prior `sync --rebase` that the user hasn't finished
+    // resolving. The merge engine treats marker text as ordinary content,
+    // so it wouldn't flag these. Scan each workspace's worktree explicitly.
+    let mut workspaces_with_markers: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+    for ws_name in workspaces {
+        let ws_path = root.join("ws").join(ws_name);
+        let marker_files = super::resolve::find_conflicted_files(&ws_path).unwrap_or_default();
+        if !marker_files.is_empty() {
+            workspaces_with_markers.push((ws_name.clone(), marker_files));
+        }
+    }
+
+    if !has_conflicts && workspaces_with_markers.is_empty() {
         if format == OutputFormat::Json {
             let out = ConflictsOutput {
                 status: "clean".to_string(),
@@ -2066,6 +2080,61 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
             );
         }
         return Ok(());
+    }
+
+    // Embedded-marker branch: merge engine is clean but at least one
+    // workspace has committed conflict markers in its worktree.
+    if !workspaces_with_markers.is_empty() && !has_conflicts {
+        if format == OutputFormat::Json {
+            let marker_msg = workspaces_with_markers
+                .iter()
+                .map(|(ws, files)| format!("{ws}: {} file(s)", files.len()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let out = ConflictsOutput {
+                status: "embedded_markers".to_string(),
+                workspaces: workspaces.to_vec(),
+                has_conflicts: true,
+                conflict_count: workspaces_with_markers
+                    .iter()
+                    .map(|(_, f)| f.len())
+                    .sum(),
+                conflicts: vec![],
+                message: format!(
+                    "Merge engine reports clean, but embedded conflict markers \
+                     detected in workspace HEADs: {marker_msg}"
+                ),
+                to_fix: Some(
+                    "Strip markers from the affected files and commit the \
+                     resolution, then retry. See `maw ws resolve <name> --list`."
+                        .to_string(),
+                ),
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else {
+            println!(
+                "WARNING: No merge conflicts detected, BUT the following workspace(s) \
+                 have unresolved conflict markers committed into HEAD (probably from \
+                 a prior `maw ws sync --rebase`):"
+            );
+            for (ws_name, marker_files) in &workspaces_with_markers {
+                println!("  {ws_name}:");
+                for f in marker_files {
+                    println!("    - {}", f.display());
+                }
+            }
+            println!();
+            println!(
+                "To fix: open each file, remove the <<<<<<<, =======, and >>>>>>> \
+                 markers (keeping the sides you want), then:"
+            );
+            for (ws_name, _) in &workspaces_with_markers {
+                println!("  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m 'resolve conflicts'");
+            }
+            println!();
+            println!("Then retry the merge.");
+        }
+        bail!("embedded conflict markers detected in workspace HEAD(s)");
     }
 
     // Assign terseid IDs to conflicts
@@ -2475,16 +2544,50 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Refuse merge if any source workspace has unresolved rebase conflicts.
     //
-    // bn-3h90 Bug 1 fix: Reconcile the persistent counter against the actual
-    // worktree state before trusting it. If the user resolved conflicts with
-    // plain git (edit, add, commit) instead of `maw ws resolve`, the counter
-    // goes stale. `reconcile_rebase_conflict_count` auto-clears it when the
-    // worktree has no markers.
+    // bn-3h90: There are two independent signals — (1) the persistent
+    // `rebase_conflict_count` counter in metadata, and (2) actual conflict
+    // markers present in the worktree's HEAD. They can disagree in either
+    // direction:
     //
-    // `--force` bypasses the check entirely as a belt-and-suspenders escape
-    // hatch for cases where reconciliation gets it wrong.
+    //   - Counter > 0 but worktree clean: user resolved via plain git;
+    //     reconcile the counter against ground truth.
+    //   - Counter == 0 but worktree has markers: user (or tooling) cleared
+    //     the counter incorrectly, or the rebase committed markers into HEAD
+    //     and the counter drifted.
+    //
+    // The authoritative check is always the worktree scan. Always scan first;
+    // treat the counter as advisory metadata.
+    //
+    // `--force` bypasses both checks as an escape hatch for cases where
+    // scanning is wrong (e.g., a legitimate `<<<<<<<` line in a test fixture).
     if !opts.force {
         for ws_name in &ws_to_merge {
+            let ws_path = root.join("ws").join(ws_name);
+            let marker_files = super::resolve::find_conflicted_files(&ws_path)
+                .unwrap_or_default();
+            if !marker_files.is_empty() {
+                // Ground truth: worktree has markers. Update the counter to
+                // match and refuse the merge.
+                let mut meta = super::metadata::read(&root, ws_name).unwrap_or_default();
+                if meta.rebase_conflict_count as usize != marker_files.len() {
+                    meta.rebase_conflict_count = marker_files.len() as u32;
+                    let _ = super::metadata::write(&root, ws_name, &meta);
+                }
+                let file_list = marker_files
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!(
+                    "Workspace '{ws_name}' has {} unresolved conflict marker(s) in its worktree:\n\
+                     {file_list}\n  \
+                     Resolve them first (strip <<<<<<<, =======, >>>>>>> markers and commit), then retry.\n  \
+                     To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                    marker_files.len()
+                );
+            }
+
+            // Worktree is clean — reconcile any stale counter.
             let live_count = super::resolve::reconcile_rebase_conflict_count(&root, ws_name)
                 .unwrap_or_else(|e| {
                     tracing::debug!("reconcile_rebase_conflict_count failed for {ws_name}: {e}");

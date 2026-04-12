@@ -2,6 +2,24 @@
 
 All notable changes to maw.
 
+## v0.58.4
+
+### Fixed — conflict detection silently missed large files (bn-3h90 follow-up)
+
+`file_has_conflict_markers` only read the first 256KB of each file, silently missing any `<<<<<<<` markers past that offset. For repos with large append-only files (e.g., `tests/cve-registry/manifest.toml` with thousands of entries), `maw ws resolve --list` and `maw ws conflicts` reported the workspace clean even when the worktree had real, committed conflict markers from a prior `maw ws sync --rebase`. The v0.58.3 reconcile logic made this worse by silently clearing the `rebase_conflict_count` counter based on the broken detector.
+
+**Fix**: The detector now streams the entire file line-by-line (bounded at 256MB for safety), so markers anywhere in the file are reliably detected.
+
+### Fixed — `ws conflicts` ignored embedded conflict markers in a single workspace
+
+`maw ws conflicts <ws>` ran the merge engine's PREPARE+BUILD phases in a temp dir. With only one workspace under inspection, the engine sees a clean 1-side modification — it has nothing to conflict *with* — so marker-laden content (from a prior rebase that committed markers into HEAD) looked like ordinary content and was reported "no conflicts found". Users saw three tools agree the workspace was clean while the worktree actually had unresolved markers.
+
+**Fix**: `ws conflicts` now ALSO scans each workspace's worktree for embedded markers and surfaces them as a separate category ("embedded conflict markers detected in workspace HEAD(s)"). `ws merge` now uses the same scan as an unconditional pre-flight check (not just when the metadata counter is > 0), so the authoritative signal is always ground truth from the worktree.
+
+### Changed — worktree scan is now authoritative over the counter
+
+`ws merge`'s rebase-conflict check now always runs the worktree scan first and reconciles the persistent `rebase_conflict_count` in metadata to match. The counter is treated as advisory; the worktree is the source of truth. This closes the drift window where the counter could be stale (in either direction) and the merge would silently proceed or falsely block.
+
 ## v0.58.3
 
 ### Fixed — `ws merge` phantom rebase conflict (bn-3h90 Bug 1)
