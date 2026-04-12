@@ -2,6 +2,54 @@
 
 All notable changes to maw.
 
+## v0.59.0 — Hardening release (bn-opm7)
+
+This release completes the bn-opm7 goal: eliminate the three bug classes that produced 5 patch releases in a single week (v0.58.1–v0.58.5).
+
+### Refactored — `rebase_conflict_count` field deleted (bn-2r57)
+
+The `rebase_conflict_count: u32` field in workspace metadata has been removed entirely. This field caused 3 consecutive patch releases (v0.58.3, v0.58.4, v0.58.5) because it drifted from worktree ground truth whenever users resolved conflicts via plain git instead of `maw ws resolve`. All callers now derive conflict state directly from a worktree scan via `find_conflicted_files` — there is no cache to drift.
+
+Remaining metadata fields were audited and documented in `notes/cached-fields-audit.md`. All surviving fields are declarative user intent (description, change_id, mode), not derived state.
+
+### Refactored — `sync.rs` split into submodules (bn-23go)
+
+`crates/maw-cli/src/workspace/sync.rs` (1170 LOC) split into 4 focused files under `sync/`:
+
+| File | LOC | Contents |
+|------|-----|---------|
+| `mod.rs` | 414 | Entry points: `sync()`, `sync_all()`, `auto_sync_if_stale()` |
+| `rebase.rs` | 480 | Cherry-pick replay, conflict metadata I/O |
+| `cross_target.rs` | 134 | Cross-target safety guard |
+| `checks.rs` | 182 | `committed_ahead_of_epoch()`, dirty checks, worktree sync |
+
+Pure organizational refactor — zero behavior changes. No file over 500 LOC.
+
+### Testing — lifecycle invariant harness (bn-3fy4)
+
+New property-based test suite `tests/lifecycle_properties.rs` with 6 invariants checked after randomized workspace operations:
+
+- **I1**: No zombie refs after destroy
+- **I2**: Clean sync-rebase means no markers in worktree
+- **I3**: Merge preserves committed content
+- **I4**: Create-after-destroy starts with a fresh oplog chain
+- **I5**: Sync --rebase preserves commit count
+- **I6**: `merge=union` produces no conflict markers
+
+32 cases per invariant, 20s total runtime. Every recent bug (bn-18dj, bn-3h90 ×3, v0.58.4 detector regression) would have been caught by at least one of these invariants.
+
+### Summary of bn-opm7 completion
+
+| Task | What it delivered |
+|------|------------------|
+| bn-1jso | Type-safe `BaseEpoch`/`CurrentEpoch` newtypes — wrong-arg class is a compile error |
+| bn-3kcp | `workspace_owned_refs()` — one-line change to add new ref kinds |
+| bn-3o7w | 4 sync proptests — fuzzes sync decision gate |
+| bn-19tb | 17 parser fuzz tests — found bn-3t55 (abs-path panic) |
+| bn-3fy4 | 6 lifecycle invariants — the safety net for all future work |
+| bn-2r57 | Deleted `rebase_conflict_count` — no cache to drift |
+| bn-23go | Split sync.rs (1170 LOC) → 4 files (all <500 LOC) |
+
 ## v0.58.5
 
 ### Fixed — conflict-marker detector false-positive on source fixtures
