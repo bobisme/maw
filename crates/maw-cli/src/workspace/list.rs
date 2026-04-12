@@ -153,7 +153,12 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             } else {
                 ws_meta.mode
             };
-            let rebase_conflicts = ws_meta.rebase_conflict_count;
+            let rebase_conflicts = {
+                let ws_path = root.join("ws").join(ws.id.as_str());
+                super::resolve::find_conflicted_files(&ws_path)
+                    .map(|f| f.len() as u32)
+                    .unwrap_or(0)
+            };
             WorkspaceInfo {
                 is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),

@@ -2387,12 +2387,12 @@ pub struct MergeOptions<'a> {
     pub resolve_all: Option<String>,
     /// Show verbose output (full recovery surface details on destroy).
     pub verbose: bool,
-    /// Bypass the stale-rebase-conflict-counter safety check (bn-3h90).
+    /// Bypass the conflict-marker worktree scan (bn-3h90, bn-2r57).
     ///
     /// Normally `maw ws merge` refuses to proceed if a source workspace
-    /// has `rebase_conflict_count > 0` in its metadata. Worktree state is
-    /// reconciled against that counter automatically, but if reconciliation
-    /// is wrong for some reason, `--force` lets the user override.
+    /// has conflict markers in its worktree (detected by
+    /// `find_conflicted_files`). `--force` lets the user override when
+    /// markers are false positives (e.g., a test fixture with `<<<<<<<`).
     pub force: bool,
 }
 
@@ -2544,21 +2544,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Refuse merge if any source workspace has unresolved rebase conflicts.
     //
-    // bn-3h90: There are two independent signals — (1) the persistent
-    // `rebase_conflict_count` counter in metadata, and (2) actual conflict
-    // markers present in the worktree's HEAD. They can disagree in either
-    // direction:
+    // The authoritative check is the worktree scan — we derive conflict
+    // status directly from `find_conflicted_files` (ground truth) rather
+    // than trusting any cached counter in metadata.
     //
-    //   - Counter > 0 but worktree clean: user resolved via plain git;
-    //     reconcile the counter against ground truth.
-    //   - Counter == 0 but worktree has markers: user (or tooling) cleared
-    //     the counter incorrectly, or the rebase committed markers into HEAD
-    //     and the counter drifted.
-    //
-    // The authoritative check is always the worktree scan. Always scan first;
-    // treat the counter as advisory metadata.
-    //
-    // `--force` bypasses both checks as an escape hatch for cases where
+    // `--force` bypasses the check as an escape hatch for cases where
     // scanning is wrong (e.g., a legitimate `<<<<<<<` line in a test fixture).
     if !opts.force {
         for ws_name in &ws_to_merge {
@@ -2566,13 +2556,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             let marker_files = super::resolve::find_conflicted_files(&ws_path)
                 .unwrap_or_default();
             if !marker_files.is_empty() {
-                // Ground truth: worktree has markers. Update the counter to
-                // match and refuse the merge.
-                let mut meta = super::metadata::read(&root, ws_name).unwrap_or_default();
-                if meta.rebase_conflict_count as usize != marker_files.len() {
-                    meta.rebase_conflict_count = marker_files.len() as u32;
-                    let _ = super::metadata::write(&root, ws_name, &meta);
-                }
                 let file_list = marker_files
                     .iter()
                     .map(|p| format!("  - {}", p.display()))
@@ -2584,21 +2567,6 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                      Resolve them first (strip <<<<<<<, =======, >>>>>>> markers and commit), then retry.\n  \
                      To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
                     marker_files.len()
-                );
-            }
-
-            // Worktree is clean — reconcile any stale counter.
-            let live_count = super::resolve::reconcile_rebase_conflict_count(&root, ws_name)
-                .unwrap_or_else(|e| {
-                    tracing::debug!("reconcile_rebase_conflict_count failed for {ws_name}: {e}");
-                    0
-                });
-            if live_count > 0 {
-                bail!(
-                    "Workspace '{ws_name}' has {live_count} unresolved rebase conflict(s).\n  \
-                     Resolve conflicts first, then retry the merge.\n  \
-                     To see conflicts: maw ws conflicts {ws_name}\n  \
-                     To force merge anyway: maw ws merge {ws_name} --into {into_target} --force"
                 );
             }
         }

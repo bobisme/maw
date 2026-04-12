@@ -1,14 +1,12 @@
-//! Regression tests for bn-3h90.
+//! Regression tests for bn-3h90 and bn-2r57.
 //!
-//! Bug 1: `maw ws merge` was refusing to proceed when the workspace metadata
-//! had a stale `rebase_conflict_count > 0`, even after the user resolved the
-//! conflict manually via `git add` + `git commit`. `maw ws conflicts`,
-//! `maw ws resolve --list`, and `maw ws sync` all reported the workspace
-//! clean — only `maw ws merge` trusted the stale counter.
+//! Bug 1 (bn-3h90): `maw ws merge` was refusing to proceed when the workspace
+//! metadata had a stale `rebase_conflict_count > 0`, even after the user
+//! resolved the conflict manually via `git add` + `git commit`.
 //!
-//! The fix: reconcile the persistent counter against the worktree before
-//! blocking. If the worktree has no conflict markers, auto-clear the counter
-//! and proceed.
+//! The definitive fix (bn-2r57): delete the `rebase_conflict_count` field
+//! entirely and derive conflict status from a live worktree scan via
+//! `find_conflicted_files`. No counter means no drift.
 //!
 //! Bug 2: `maw ws destroy` didn't delete `refs/manifold/head/<name>`, so a
 //! later `maw ws create` with the same name inherited a stale oplog chain.
@@ -48,8 +46,8 @@ fn setup_rebase_conflict(repo: &TestRepo) -> String {
         "merge a",
     ]);
 
-    // Run sync --rebase on "b" — this should hit a conflict and write
-    // rebase_conflict_count > 0 to b's metadata.
+    // Run sync --rebase on "b" — this should hit a conflict and leave
+    // conflict markers in the worktree.
     let out = repo.maw_raw(&["ws", "sync", "b", "--rebase"]);
     let combined = format!(
         "{}{}",
@@ -64,16 +62,15 @@ fn setup_rebase_conflict(repo: &TestRepo) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Bug 1: stale rebase_conflict_count reconciles against worktree
+// Bug 1: merge succeeds after manual conflict resolution
 // ---------------------------------------------------------------------------
 
 #[test]
-fn merge_reconciles_stale_rebase_conflict_counter_after_manual_resolve() {
+fn merge_succeeds_after_manual_conflict_resolve() {
     let repo = TestRepo::new();
     setup_rebase_conflict(&repo);
 
-    // At this point, b has rebase_conflict_count > 0 in its metadata and
-    // the worktree has conflict markers.
+    // At this point, b's worktree has conflict markers.
 
     // Simulate the user manually resolving: strip markers, keep both sides.
     let ws_path = repo.root().join("ws").join("b");
@@ -89,8 +86,8 @@ fn merge_reconciles_stale_rebase_conflict_counter_after_manual_resolve() {
     repo.git_in_workspace("b", &["add", "-A"]);
     repo.git_in_workspace("b", &["commit", "-m", "manual: keep both"]);
 
-    // Now the worktree is clean but b's metadata counter is still stale.
-    // `maw ws merge` should reconcile and proceed.
+    // Now the worktree is clean. `maw ws merge` derives conflict status
+    // from the worktree scan and should proceed.
     let out = repo.maw_raw(&[
         "ws",
         "merge",
@@ -103,7 +100,7 @@ fn merge_reconciles_stale_rebase_conflict_counter_after_manual_resolve() {
     ]);
     assert!(
         out.status.success(),
-        "merge should auto-reconcile and proceed\nstdout: {}\nstderr: {}",
+        "merge should proceed when worktree is clean\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -116,13 +113,13 @@ fn merge_reconciles_stale_rebase_conflict_counter_after_manual_resolve() {
 }
 
 #[test]
-fn merge_force_bypasses_rebase_conflict_counter() {
+fn merge_force_bypasses_marker_scan() {
     let repo = TestRepo::new();
     setup_rebase_conflict(&repo);
 
-    // Resolve manually but leave markers deliberately. Even so, `--force`
-    // should let the merge proceed (the downstream merge engine will still
-    // detect any actual content conflicts via its own diff3).
+    // Resolve manually. Even so, `--force` should let the merge proceed
+    // (the downstream merge engine will still detect any actual content
+    // conflicts via its own diff3).
     let shared = repo.root().join("ws/b/shared.txt");
     // Just write a clean value without committing markers.
     std::fs::write(&shared, "alice_forced\n").unwrap();
@@ -142,14 +139,14 @@ fn merge_force_bypasses_rebase_conflict_counter() {
     ]);
     assert!(
         out.status.success(),
-        "merge --force should bypass stale counter\nstdout: {}\nstderr: {}",
+        "merge --force should bypass marker scan\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
 #[test]
-fn ws_resolve_list_clears_stale_counter_on_clean_worktree() {
+fn ws_resolve_list_reports_clean_and_merge_proceeds() {
     let repo = TestRepo::new();
     setup_rebase_conflict(&repo);
 
@@ -159,7 +156,7 @@ fn ws_resolve_list_clears_stale_counter_on_clean_worktree() {
     repo.git_in_workspace("b", &["add", "-A"]);
     repo.git_in_workspace("b", &["commit", "-m", "manual"]);
 
-    // `ws resolve b --list` should report clean AND clear the stale counter.
+    // `ws resolve b --list` should report clean.
     let _ = repo.maw_raw(&["ws", "resolve", "b", "--list"]);
 
     // A subsequent merge should now succeed without `--force`.
@@ -175,7 +172,7 @@ fn ws_resolve_list_clears_stale_counter_on_clean_worktree() {
     ]);
     assert!(
         out.status.success(),
-        "merge should succeed after resolve --list auto-clears counter\nstdout: {}\nstderr: {}",
+        "merge should succeed when worktree is clean\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

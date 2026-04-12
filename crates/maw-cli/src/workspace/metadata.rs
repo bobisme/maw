@@ -34,9 +34,6 @@ pub struct WorkspaceMetadata {
     /// Effective defaults materialized from the selected template.
     #[serde(default)]
     pub template_defaults: Option<TemplateDefaults>,
-    /// Number of unresolved rebase conflicts. Zero means no conflicts.
-    #[serde(default)]
-    pub rebase_conflict_count: u32,
     /// Optional bound change id (`maw changes` model).
     #[serde(default)]
     pub change_id: Option<String>,

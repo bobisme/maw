@@ -457,11 +457,6 @@ fn rebase_workspace(
         };
         write_rebase_conflicts(root, ws_name, &rebase_meta)?;
 
-        // Update workspace metadata with conflict count.
-        let mut ws_meta = metadata::read(root, ws_name).unwrap_or_default();
-        ws_meta.rebase_conflict_count = conflict_count;
-        metadata::write(root, ws_name, &ws_meta)?;
-
         println!();
         println!("Rebase complete: {replayed} commit(s) replayed, {conflicted} with conflicts.");
         println!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
@@ -484,11 +479,6 @@ fn rebase_workspace(
     } else {
         // No conflicts — clean up any stale conflict metadata.
         let _ = delete_rebase_conflicts(root, ws_name);
-        let mut ws_meta = metadata::read(root, ws_name).unwrap_or_default();
-        if ws_meta.rebase_conflict_count > 0 {
-            ws_meta.rebase_conflict_count = 0;
-            metadata::write(root, ws_name, &ws_meta)?;
-        }
 
         println!();
         println!("Rebase complete: {replayed} commit(s) replayed cleanly.");

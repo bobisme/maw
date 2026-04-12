@@ -160,9 +160,6 @@ pub fn run(
     };
 
     if target_files.is_empty() {
-        // bn-3h90 Bug 1: If the workspace metadata still has a stale
-        // rebase_conflict_count > 0, reconcile it against the (clean) worktree.
-        let _ = reconcile_rebase_conflict_count(&root, workspace);
         if format == OutputFormat::Json {
             println!(r#"{{"status":"clean","workspace":"{workspace}","message":"No conflicted files found."}}"#);
         } else {
@@ -242,12 +239,6 @@ pub fn run(
     let conflicts_cleared = remaining_conflicts.is_empty() && resolved_count > 0;
 
     if conflicts_cleared {
-        // Reset rebase_conflict_count in workspace metadata.
-        let mut ws_meta = super::metadata::read(&root, workspace).unwrap_or_default();
-        if ws_meta.rebase_conflict_count > 0 {
-            ws_meta.rebase_conflict_count = 0;
-            super::metadata::write(&root, workspace, &ws_meta)?;
-        }
         // Clean up rebase conflict metadata file.
         let _ = super::sync::delete_rebase_conflicts(&root, workspace);
     }
@@ -320,13 +311,6 @@ pub fn run(
 
 fn list_conflicts(ws_path: &Path, workspace: &str, filter_paths: &[String], format: OutputFormat) -> Result<()> {
     let all_files = find_conflicted_files(ws_path)?;
-
-    // bn-3h90 Bug 1: When the worktree is clean, reconcile any stale
-    // rebase_conflict_count so `maw ws merge` doesn't falsely block.
-    if all_files.is_empty()
-        && let Some(root) = ws_path.parent().and_then(Path::parent) {
-        let _ = reconcile_rebase_conflict_count(root, workspace);
-    }
 
     // If specific paths given, list blocks for those files only
     let files: Vec<PathBuf> = if filter_paths.is_empty() {
@@ -649,48 +633,6 @@ fn resolve_workspace_base_ref(ws_path: &Path) -> Option<String> {
     None
 }
 
-/// Verify the `rebase_conflict_count` field against the actual worktree state.
-///
-/// Reads the workspace metadata. If the counter is > 0 but the worktree has
-/// no conflict markers, the counter is stale — clears it in metadata and
-/// returns 0. Otherwise returns the current count.
-///
-/// This fixes bn-3h90 Bug 1: `maw ws sync --rebase` sets the counter when a
-/// rebase hits a conflict, but if the user resolves the conflict with plain
-/// git (edit, `git add`, `git commit`) instead of `maw ws resolve`, the
-/// counter never gets cleared. The worktree is clean but `maw ws merge`
-/// refuses to proceed. This helper auto-heals by trusting the worktree.
-///
-/// Returns the conflict count *after* potential auto-healing.
-pub(crate) fn reconcile_rebase_conflict_count(
-    root: &Path,
-    ws_name: &str,
-) -> Result<u32> {
-    let ws_meta = super::metadata::read(root, ws_name).unwrap_or_default();
-    if ws_meta.rebase_conflict_count == 0 {
-        return Ok(0);
-    }
-
-    // Counter says "unresolved conflicts", but the worktree might already
-    // be clean. Check ground truth.
-    let ws_path = root.join("ws").join(ws_name);
-    let conflicted = find_conflicted_files(&ws_path).unwrap_or_default();
-
-    if conflicted.is_empty() {
-        // Worktree is clean — the user resolved via plain git. Clear stale state.
-        let mut updated = ws_meta;
-        updated.rebase_conflict_count = 0;
-        let _ = super::metadata::write(root, ws_name, &updated);
-        // Also delete the rebase metadata file if it exists.
-        let _ = super::sync::delete_rebase_conflicts(root, ws_name);
-        tracing::debug!(
-            "cleared stale rebase_conflict_count for '{ws_name}' (worktree has no markers)"
-        );
-        Ok(0)
-    } else {
-        Ok(conflicted.len() as u32)
-    }
-}
 
 fn walk_for_conflicts(
     base: &Path,

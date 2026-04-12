@@ -112,7 +112,6 @@ fn create_with_output(
             mode,
             template,
             template_defaults: template_profile.as_ref().map(|p| p.defaults.clone()),
-            rebase_conflict_count: 0,
             change_id: bound_change_id.clone(),
             description: description.map(str::to_owned),
         };

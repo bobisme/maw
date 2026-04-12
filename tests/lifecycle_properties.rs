@@ -9,7 +9,7 @@
 //! # Invariants
 //!
 //! - **I1**: No zombie refs after destroy.
-//! - **I2**: Counter coherence — clean sync --rebase means counter = 0.
+//! - **I2**: Clean sync --rebase means no conflict markers in worktree.
 //! - **I3**: Merge never silently drops content.
 //! - **I4**: Create-after-destroy starts fresh (different oplog head OID).
 //! - **I5**: Sync --rebase preserves commit count.
@@ -152,7 +152,7 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// I2: Counter coherence — clean sync --rebase means conflict counter = 0.
+// I2: Clean sync --rebase means no conflict markers in worktree.
 // ---------------------------------------------------------------------------
 
 proptest! {
