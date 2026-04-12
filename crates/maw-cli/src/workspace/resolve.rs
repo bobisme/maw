@@ -172,6 +172,7 @@ pub fn run(
     }
 
     let mut resolved_count = 0;
+    let mut partially_resolved = Vec::new();
     let mut skipped = Vec::new();
 
     for rel_path in &target_files {
@@ -193,13 +194,41 @@ pub fn run(
         let file_side = file_sides.get(rel_path).map(|s| s.as_str()).or(all_side);
 
         let chunks = parse_file_conflicts(&content);
+        let total_blocks = chunks
+            .iter()
+            .filter(|c| matches!(c, FileChunk::Conflict(_)))
+            .count();
 
         match resolve_chunks(&chunks, file_side, &block_sides) {
             Ok(resolved) => {
                 std::fs::write(&full_path, resolved.as_bytes())?;
-                resolved_count += 1;
-                if format != OutputFormat::Json {
-                    println!("  resolved: {}", rel_path.display());
+
+                // Count blocks that were NOT resolved (re-emitted as markers).
+                // This catches the bn-2wnt case: --keep with per-block flags
+                // can leave some blocks as markers even though resolve_chunks
+                // returns Ok.
+                let remaining_markers = resolved
+                    .lines()
+                    .filter(|l| l.starts_with("<<<<<<<"))
+                    .count();
+
+                if remaining_markers == 0 {
+                    resolved_count += 1;
+                    if format != OutputFormat::Json {
+                        println!("  resolved: {}", rel_path.display());
+                    }
+                } else {
+                    let done = total_blocks.saturating_sub(remaining_markers);
+                    partially_resolved.push((rel_path.clone(), done, remaining_markers));
+                    if format != OutputFormat::Json {
+                        println!(
+                            "  partial:  {} ({} of {} blocks resolved, {} still marked)",
+                            rel_path.display(),
+                            done,
+                            total_blocks,
+                            remaining_markers
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -228,8 +257,18 @@ pub fn run(
             .iter()
             .map(|(p, r)| format!(r#"{{"path":"{}","reason":"{}"}}"#, p.display(), r))
             .collect();
+        let partial_json: Vec<String> = partially_resolved
+            .iter()
+            .map(|(p, done, remaining)| {
+                format!(
+                    r#"{{"path":"{}","blocks_resolved":{done},"blocks_remaining":{remaining}}}"#,
+                    p.display()
+                )
+            })
+            .collect();
         println!(
-            r#"{{"status":"ok","workspace":"{workspace}","resolved":{resolved_count},"conflicts_remaining":{},"skipped":[{}]}}"#,
+            r#"{{"status":"ok","workspace":"{workspace}","resolved":{resolved_count},"partially_resolved":[{}],"conflicts_remaining":{},"skipped":[{}]}}"#,
+            partial_json.join(","),
             remaining_conflicts.len(),
             skipped_json.join(",")
         );
@@ -237,13 +276,29 @@ pub fn run(
         if resolved_count > 0 {
             println!("\n{resolved_count} file(s) resolved.");
         }
+        if !partially_resolved.is_empty() {
+            println!(
+                "\n{} file(s) partially resolved (some blocks still have markers):",
+                partially_resolved.len()
+            );
+            for (path, done, remaining) in &partially_resolved {
+                println!(
+                    "  {} — resolved {done} block(s), {remaining} still marked",
+                    path.display()
+                );
+            }
+            println!(
+                "\n  To finish: re-run `maw ws resolve {workspace} --keep ...` for the remaining blocks,"
+            );
+            println!("  or edit the files directly and commit.");
+        }
         if !skipped.is_empty() {
             eprintln!();
             for (path, reason) in &skipped {
                 eprintln!("  skipped: {} — {reason}", path.display());
             }
         }
-        if resolved_count == 0 && skipped.is_empty() {
+        if resolved_count == 0 && skipped.is_empty() && partially_resolved.is_empty() {
             println!("Nothing to resolve.");
         }
         if conflicts_cleared {
@@ -1226,6 +1281,95 @@ after";
         let merge_pos = result.find("merge line 1").unwrap();
         let local_pos = result.find("local line 1").unwrap();
         assert!(merge_pos < local_pos, "left side should come before right side");
+    }
+
+    /// Regression test for bn-2wnt (partial-resolution reporting bug).
+    ///
+    /// When `--keep cf-0=alice` is used on a file with 2 conflict blocks,
+    /// resolve_chunks returns Ok with block 1 as alice content and block 2
+    /// re-emitted as markers. The run() function would write the half-
+    /// resolved file and count it as "resolved" (+1 to `resolved_count`),
+    /// then re-scan and see "1 file still has conflict markers", producing
+    /// confusing output.
+    ///
+    /// The fix (v0.58.6): run() inspects the resolved string for remaining
+    /// `<<<<<<<` lines and reports partial resolutions separately from fully
+    /// resolved ones.
+    #[test]
+    fn resolve_chunks_partial_resolution_preserves_unresolved_blocks() {
+        let content = "\
+<<<<<<< alice
+aaa
+=======
+bbb
+>>>>>>> bob
+middle
+<<<<<<< alice
+ccc
+=======
+ddd
+>>>>>>> bob";
+        let chunks = parse_file_conflicts(content);
+        let mut block_sides = BTreeMap::new();
+        block_sides.insert("cf-0".into(), "alice".into());
+        // cf-1 is NOT specified — should remain as markers
+        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        assert!(result.contains("aaa"), "block 0 alice content missing");
+        assert!(!result.contains("bbb"), "block 0 bob content should be gone");
+        // block 1 should still have markers
+        assert!(result.contains("<<<<<<< alice"), "block 1 marker missing");
+        assert!(result.contains("ccc"), "block 1 alice content missing");
+        assert!(result.contains("ddd"), "block 1 bob content missing");
+        assert!(result.contains(">>>>>>> bob"), "block 1 closing marker missing");
+
+        // Count remaining `<<<<<<<` markers in the resolved output — the run()
+        // function uses this exact check to detect partial resolution.
+        let remaining = result
+            .lines()
+            .filter(|l| l.starts_with("<<<<<<<"))
+            .count();
+        assert_eq!(
+            remaining, 1,
+            "partial resolution should leave exactly 1 marker"
+        );
+    }
+
+    /// Regression test for bn-2wnt (the multi-block --keep both path).
+    ///
+    /// Sanity check that resolve_chunks with Some("both") on a 2-block file
+    /// fully resolves ALL blocks in a single pass. If this test fails, the
+    /// original bn-2wnt agent report is a real parser/resolver bug.
+    #[test]
+    fn resolve_both_handles_multiple_blocks_in_one_pass() {
+        let content = "\
+before
+<<<<<<< alice
+aaa
+=======
+bbb
+>>>>>>> bob
+middle
+<<<<<<< alice
+ccc
+=======
+ddd
+>>>>>>> bob
+after";
+        let chunks = parse_file_conflicts(content);
+        let conflict_count = chunks
+            .iter()
+            .filter(|c| matches!(c, FileChunk::Conflict(_)))
+            .count();
+        assert_eq!(conflict_count, 2, "parser should see 2 conflict blocks, got {conflict_count}");
+
+        let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new()).unwrap();
+        assert!(
+            !result.contains("<<<<<<<"),
+            "all markers should be gone in one pass, got:\n{result}"
+        );
+        assert!(result.contains("aaa") && result.contains("bbb"), "block 1 missing content:\n{result}");
+        assert!(result.contains("ccc") && result.contains("ddd"), "block 2 missing content:\n{result}");
+        assert!(result.contains("before") && result.contains("middle") && result.contains("after"));
     }
 
     #[test]
