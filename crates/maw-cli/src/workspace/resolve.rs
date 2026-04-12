@@ -423,10 +423,149 @@ fn collect_block_info(chunks: &[FileChunk]) -> Vec<BlockInfo> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
-    let mut results = Vec::new();
-    walk_for_conflicts(ws_path, ws_path, &mut results)?;
+    // Only scan files that have been touched by a commit in this workspace
+    // since its base. An unchanged source file can't contain conflict markers
+    // introduced by a rebase — but it CAN contain `<<<<<<<` literals in test
+    // fixtures (e.g., resolve.rs itself has raw-string conflict fixtures).
+    // Restricting the scan to modified files eliminates that false-positive
+    // class without losing real-conflict detection.
+    //
+    // bn-3h90 follow-up (v0.58.5): the previous implementation walked the
+    // entire worktree and would flag `resolve.rs` as "unresolved" because its
+    // test raw strings start with `<<<<<<<` at column 0 inside the string
+    // literal. That blocked every merge in the maw repo itself.
+    let modified = modified_files_since_base(ws_path).unwrap_or_default();
+
+    // Fallback: if we can't get a modified-file list (e.g., the base ref is
+    // missing), fall back to scanning the whole worktree. This is the old
+    // behavior — noisier but safer for the unknown-state case.
+    let files_to_check = if modified.is_empty() && !base_ref_known(ws_path) {
+        let mut all = Vec::new();
+        walk_for_conflicts(ws_path, ws_path, &mut all)?;
+        all
+    } else {
+        modified
+            .into_iter()
+            .filter(|rel| {
+                let full = ws_path.join(rel);
+                full.is_file() && file_has_conflict_markers(&full)
+            })
+            .collect()
+    };
+
+    let mut results = files_to_check;
     results.sort();
+    results.dedup();
     Ok(results)
+}
+
+/// Returns the set of files modified in the workspace since its base.
+///
+/// Includes both committed changes (`git diff <base>..HEAD`) and uncommitted
+/// working-tree changes (`git status --porcelain`). The union is the
+/// complete set of files the workspace has "touched" since creation.
+///
+/// Returns `None` (distinct from an empty list) when we can't resolve the
+/// base ref — callers fall back to a full worktree walk in that case.
+fn modified_files_since_base(ws_path: &Path) -> Option<Vec<PathBuf>> {
+    use std::collections::BTreeSet;
+    use std::process::Command;
+
+    let base = resolve_workspace_base_ref(ws_path)?;
+    let mut files: BTreeSet<PathBuf> = BTreeSet::new();
+
+    // 1. Committed changes since base: `git diff --name-only <base>..HEAD`
+    if let Ok(out) = Command::new("git")
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            &format!("{base}..HEAD"),
+        ])
+        .current_dir(ws_path)
+        .output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if !line.is_empty() {
+                files.insert(PathBuf::from(line));
+            }
+        }
+    }
+
+    // 2. Uncommitted working-tree changes: `git status --porcelain`.
+    // Porcelain format: two-char status + space + path (or renames with `->`).
+    if let Ok(out) = Command::new("git")
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
+        .current_dir(ws_path)
+        .output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if line.len() < 4 {
+                continue;
+            }
+            // Skip the 2-char status code + space.
+            let rest = &line[3..];
+            // Handle renames: "oldname -> newname" — take the newname.
+            let path = rest
+                .rfind(" -> ")
+                .map(|i| &rest[i + 4..])
+                .unwrap_or(rest);
+            if !path.is_empty() {
+                files.insert(PathBuf::from(path));
+            }
+        }
+    }
+
+    Some(files.into_iter().collect())
+}
+
+/// True if we could resolve a workspace base ref — used to disambiguate
+/// "modified list is empty" (workspace has no new commits) from "we don't
+/// know the base" (falls back to full worktree scan).
+fn base_ref_known(ws_path: &Path) -> bool {
+    resolve_workspace_base_ref(ws_path).is_some()
+}
+
+/// Best-effort resolution of the workspace's base commit.
+///
+/// Order of preference:
+/// 1. `refs/manifold/epoch/ws/<ws_name>` — the per-workspace creation epoch
+/// 2. `refs/manifold/epoch/current` — the repo's current epoch
+/// 3. The first commit on HEAD's history — fallback
+fn resolve_workspace_base_ref(ws_path: &Path) -> Option<String> {
+    use std::process::Command;
+
+    let ws_name = ws_path.file_name()?.to_str()?;
+
+    // Walk up to the repo root to run ref queries against the common git dir.
+    let repo_root = ws_path.parent()?.parent()?;
+
+    for candidate in [
+        format!("refs/manifold/epoch/ws/{ws_name}"),
+        "refs/manifold/epoch/current".to_owned(),
+    ] {
+        if let Ok(out) = Command::new("git")
+            .args(["rev-parse", "--verify", &candidate])
+            .current_dir(repo_root)
+            .output()
+            && out.status.success()
+        {
+            let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !oid.is_empty() {
+                return Some(oid);
+            }
+        }
+    }
+    None
 }
 
 /// Verify the `rebase_conflict_count` field against the actual worktree state.
