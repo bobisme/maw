@@ -585,7 +585,11 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // Lazily materialize Level 1 workspace state ref for git inspection.
         self.refresh_workspace_state_ref(name, &ws_path)?;
 
-        Ok(WorkspaceStatus::new(base_epoch, dirty_files, is_stale))
+        Ok(WorkspaceStatus::new(
+            base_epoch.into(),
+            dirty_files,
+            is_stale,
+        ))
     }
 
     /// Scan a workspace's working directory for changes relative to the base epoch.
@@ -1655,7 +1659,8 @@ mod tests {
 
         let status = backend.status(&ws_name).unwrap();
         assert_eq!(
-            status.base_epoch, epoch,
+            status.base_epoch.as_str(),
+            epoch.as_str(),
             "base epoch should match creation epoch"
         );
         assert!(
@@ -1776,7 +1781,11 @@ mod tests {
             status.is_stale,
             "workspace should be stale after epoch advance"
         );
-        assert_eq!(status.base_epoch, epoch0, "base epoch unchanged");
+        assert_eq!(
+            status.base_epoch.as_str(),
+            epoch0.as_str(),
+            "base epoch unchanged"
+        );
     }
 
     // -- parse_worktree_porcelain tests --
@@ -1887,7 +1896,8 @@ mod tests {
         // original creation epoch
         let status = backend.status(&ws_name).unwrap();
         assert_eq!(
-            status.base_epoch, epoch,
+            status.base_epoch.as_str(),
+            epoch.as_str(),
             "base_epoch should be the creation epoch, not HEAD"
         );
 

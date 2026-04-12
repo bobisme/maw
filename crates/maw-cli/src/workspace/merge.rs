@@ -4304,7 +4304,7 @@ fn handle_post_merge_destroy(
         // --- Step 1: Get workspace metadata (path + base epoch) ---
         let ws_path = backend.workspace_path(&ws_id);
         let base_epoch = match backend.status(&ws_id) {
-            Ok(status) => status.base_epoch,
+            Ok(status) => status.base_epoch.to_epoch_id(),
             Err(e) => {
                 eprintln!("    WARNING: Could not check workspace status before destroy: {e}");
                 eprintln!(

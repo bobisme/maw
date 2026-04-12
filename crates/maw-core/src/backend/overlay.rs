@@ -683,7 +683,7 @@ impl WorkspaceBackend for OverlayBackend {
         // Collect dirty files by scanning the upper directory.
         let dirty_files = scan_upper_dir_for_dirty(&self.upper_dir(name))?;
 
-        Ok(WorkspaceStatus::new(epoch, dirty_files, false))
+        Ok(WorkspaceStatus::new(epoch.into(), dirty_files, false))
     }
 
     fn snapshot(&self, name: &WorkspaceId) -> Result<SnapshotResult, Self::Error> {

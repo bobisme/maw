@@ -75,7 +75,8 @@ where
 
     let status = backend.status(ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
     let ws_path = backend.workspace_path(ws_id);
-    let patch_set = compute_patchset(&ws_path, &status.base_epoch).map_err(|e| {
+    let base_epoch = status.base_epoch.to_epoch_id();
+    let patch_set = compute_patchset(&ws_path, &base_epoch).map_err(|e| {
         anyhow::anyhow!(
             "Failed to compute touched set for '{}': {e}",
             ws_id.as_str()

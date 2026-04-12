@@ -46,7 +46,8 @@ pub fn annotate(name: &str, key: &str, json_value: &str) -> Result<()> {
     let status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Ensure workspace has an oplog head.
-    let head = ensure_workspace_oplog_head(&root, &ws_id, &status.base_epoch)
+    let base_epoch = status.base_epoch.to_epoch_id();
+    let head = ensure_workspace_oplog_head(&root, &ws_id, &base_epoch)
         .context("Failed to initialize workspace oplog")?;
 
     // Create the Annotate operation

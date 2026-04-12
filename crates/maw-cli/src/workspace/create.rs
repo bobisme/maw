@@ -449,7 +449,8 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     let status = backend
         .status(&ws_id)
         .map_err(|e| anyhow::anyhow!("Failed to inspect workspace state: {e}"))?;
-    let touched_count = compute_patchset(&path, &status.base_epoch)
+    let base_epoch = status.base_epoch.to_epoch_id();
+    let touched_count = compute_patchset(&path, &base_epoch)
         .map(|patch_set| patch_set.len())
         .map_err(|e| anyhow::anyhow!("Failed to inspect local changes before destroy: {e}"))?
         .max(status.dirty_count());
@@ -495,14 +496,14 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     let final_head =
         super::capture::resolve_head(&path).unwrap_or_else(|_| status.base_epoch.oid().clone());
 
-    if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &status.base_epoch) {
+    if let Err(e) = record_workspace_destroy_op(&root, &ws_id, &base_epoch) {
         tracing::warn!("Failed to record workspace destroy in history: {e}");
     }
 
     let artifact_path_result = super::destroy_record::write_destroy_record(
         &root,
         name,
-        &status.base_epoch,
+        &base_epoch,
         &final_head,
         capture_result.as_ref(),
         super::destroy_record::DestroyReason::Destroy,

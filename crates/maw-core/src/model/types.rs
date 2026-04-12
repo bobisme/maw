@@ -150,6 +150,165 @@ impl From<EpochId> for String {
 }
 
 // ---------------------------------------------------------------------------
+// BaseEpoch / CurrentEpoch
+// ---------------------------------------------------------------------------
+//
+// These newtypes distinguish the two distinct "epoch" concepts that otherwise
+// get passed around as bare `&str` or generic `EpochId`:
+//
+// - `BaseEpoch` — the workspace's ORIGINAL base epoch (what it branched from
+//   at creation time). Stable for the lifetime of the workspace.
+// - `CurrentEpoch` — the live/advancing epoch ref
+//   (`refs/manifold/epoch/current`). Advances on every merge.
+//
+// Historically both flowed through the same type, which led to bn-18dj:
+// `committed_ahead_of_epoch` was called with the current epoch instead of the
+// base epoch, silently dropping local commits on stale workspaces. These
+// newtypes intentionally have NO `From`/`Into` conversions between each other,
+// so swapping them at a call site is a compile error.
+//
+// The newtypes do NOT appear in serialized formats (TOML/JSON) — I/O boundaries
+// continue to use `String`/`EpochId` and construct the newtype on read.
+
+/// The workspace's original base epoch — the commit it branched from at
+/// creation time.
+///
+/// Stable for the lifetime of the workspace unless explicitly advanced.
+/// Used by `committed_ahead_of_epoch` and related sync logic to detect
+/// local commits that need rebasing onto a newer current epoch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BaseEpoch(GitOid);
+
+impl BaseEpoch {
+    /// Create a new `BaseEpoch` from a hex string, validating format.
+    ///
+    /// # Errors
+    /// Returns an error if the string is not a valid git OID.
+    pub fn new(s: impl Into<String>) -> Result<Self, ValidationError> {
+        let s = s.into();
+        let oid = GitOid::new(&s).map_err(|mut e| {
+            e.kind = ErrorKind::EpochId;
+            e
+        })?;
+        Ok(Self(oid))
+    }
+
+    /// Create a `BaseEpoch` directly from a validated [`GitOid`].
+    #[must_use]
+    pub const fn from_oid(oid: GitOid) -> Self {
+        Self(oid)
+    }
+
+    /// Return the inner [`GitOid`].
+    #[must_use]
+    pub const fn oid(&self) -> &GitOid {
+        &self.0
+    }
+
+    /// Return the hex string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Convert to a generic [`EpochId`] (by clone).
+    ///
+    /// Useful when passing to functions that accept `&EpochId` and don't
+    /// care whether it's a base or current epoch.
+    #[must_use]
+    pub fn to_epoch_id(&self) -> EpochId {
+        EpochId(self.0.clone())
+    }
+}
+
+impl fmt::Display for BaseEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl AsRef<str> for BaseEpoch {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<EpochId> for BaseEpoch {
+    fn from(e: EpochId) -> Self {
+        Self(e.0)
+    }
+}
+
+/// The current / live epoch ref — `refs/manifold/epoch/current`.
+///
+/// Advances on every merge. Distinct from [`BaseEpoch`] by design: a
+/// workspace may be behind the current epoch, and operations that want to
+/// know "what did this workspace branch from" must use `BaseEpoch`, not
+/// `CurrentEpoch`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CurrentEpoch(GitOid);
+
+impl CurrentEpoch {
+    /// Create a new `CurrentEpoch` from a hex string, validating format.
+    ///
+    /// # Errors
+    /// Returns an error if the string is not a valid git OID.
+    pub fn new(s: impl Into<String>) -> Result<Self, ValidationError> {
+        let s = s.into();
+        let oid = GitOid::new(&s).map_err(|mut e| {
+            e.kind = ErrorKind::EpochId;
+            e
+        })?;
+        Ok(Self(oid))
+    }
+
+    /// Create a `CurrentEpoch` directly from a validated [`GitOid`].
+    #[must_use]
+    pub const fn from_oid(oid: GitOid) -> Self {
+        Self(oid)
+    }
+
+    /// Return the inner [`GitOid`].
+    #[must_use]
+    pub const fn oid(&self) -> &GitOid {
+        &self.0
+    }
+
+    /// Return the hex string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Convert to a generic [`EpochId`] (by clone).
+    #[must_use]
+    pub fn to_epoch_id(&self) -> EpochId {
+        EpochId(self.0.clone())
+    }
+}
+
+impl fmt::Display for CurrentEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl AsRef<str> for CurrentEpoch {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<EpochId> for CurrentEpoch {
+    fn from(e: EpochId) -> Self {
+        Self(e.0)
+    }
+}
+
+// NOTE: Intentionally NO `From<BaseEpoch> for CurrentEpoch` or vice versa.
+// The whole point of these newtypes is that swapping them is a compile error.
+
+// ---------------------------------------------------------------------------
 // WorkspaceId
 // ---------------------------------------------------------------------------
 
@@ -553,6 +712,78 @@ mod tests {
         let json = serde_json::to_string(&epoch).unwrap();
         let decoded: EpochId = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, epoch);
+    }
+
+    // -- BaseEpoch / CurrentEpoch --
+
+    #[test]
+    fn base_epoch_valid() {
+        let hex = "a".repeat(40);
+        let base = BaseEpoch::new(hex.clone()).unwrap();
+        assert_eq!(base.as_str(), hex);
+        assert_eq!(base.oid().as_str(), hex);
+    }
+
+    #[test]
+    fn base_epoch_rejects_invalid() {
+        assert!(BaseEpoch::new("nope").is_err());
+        assert!(BaseEpoch::new("A".repeat(40)).is_err());
+        assert!(BaseEpoch::new("a".repeat(41)).is_err());
+    }
+
+    #[test]
+    fn base_epoch_display() {
+        let hex = "b".repeat(40);
+        let base = BaseEpoch::new(hex.clone()).unwrap();
+        assert_eq!(format!("{base}"), hex);
+    }
+
+    #[test]
+    fn base_epoch_as_ref() {
+        let hex = "c".repeat(40);
+        let base = BaseEpoch::new(hex.clone()).unwrap();
+        let s: &str = base.as_ref();
+        assert_eq!(s, hex);
+    }
+
+    #[test]
+    fn base_epoch_from_epoch_id() {
+        let hex = "d".repeat(40);
+        let epoch = EpochId::new(&hex).unwrap();
+        let base: BaseEpoch = epoch.into();
+        assert_eq!(base.as_str(), hex);
+    }
+
+    #[test]
+    fn current_epoch_valid() {
+        let hex = "e".repeat(40);
+        let cur = CurrentEpoch::new(hex.clone()).unwrap();
+        assert_eq!(cur.as_str(), hex);
+    }
+
+    #[test]
+    fn current_epoch_rejects_invalid() {
+        assert!(CurrentEpoch::new("").is_err());
+        assert!(CurrentEpoch::new("g".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn current_epoch_display() {
+        let hex = "1".repeat(40);
+        let cur = CurrentEpoch::new(hex.clone()).unwrap();
+        assert_eq!(format!("{cur}"), hex);
+    }
+
+    #[test]
+    fn base_and_current_are_distinct_types() {
+        // This is a compile-time property, not a runtime one. We assert it by
+        // constructing both and observing that there is no `From` between them.
+        let hex = "2".repeat(40);
+        let base = BaseEpoch::new(hex.clone()).unwrap();
+        let cur = CurrentEpoch::new(hex.clone()).unwrap();
+        // They share the same underlying string but are distinct types.
+        assert_eq!(base.as_str(), cur.as_str());
+        // If you try to do `let _: BaseEpoch = cur;` — compile error. Good.
     }
 
     // -- WorkspaceId --

@@ -10,7 +10,7 @@ pub mod reflink;
 
 use std::path::PathBuf;
 
-use crate::model::types::{EpochId, WorkspaceId, WorkspaceInfo};
+use crate::model::types::{BaseEpoch, EpochId, WorkspaceId, WorkspaceInfo};
 
 /// A workspace backend implementation.
 ///
@@ -151,8 +151,12 @@ pub trait WorkspaceBackend {
 /// whether it is stale, and which files have been modified.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceStatus {
-    /// The epoch this workspace is based on.
-    pub base_epoch: EpochId,
+    /// The epoch this workspace was branched from (its original base).
+    ///
+    /// This is a [`BaseEpoch`] newtype to prevent accidental confusion with
+    /// the current / live epoch (`CurrentEpoch`). See bn-18dj for the bug
+    /// that motivated this distinction.
+    pub base_epoch: BaseEpoch,
     /// Paths to all dirty (modified) files in the working copy,
     /// relative to the workspace root.
     pub dirty_files: Vec<PathBuf>,
@@ -168,7 +172,7 @@ impl WorkspaceStatus {
     /// * `dirty_files` - List of modified file paths (relative to workspace root)
     /// * `is_stale` - Whether the workspace is behind the current epoch
     #[must_use]
-    pub const fn new(base_epoch: EpochId, dirty_files: Vec<PathBuf>, is_stale: bool) -> Self {
+    pub const fn new(base_epoch: BaseEpoch, dirty_files: Vec<PathBuf>, is_stale: bool) -> Self {
         Self {
             base_epoch,
             dirty_files,
@@ -250,7 +254,7 @@ mod tests {
 
     #[test]
     fn workspace_status_is_clean() {
-        let status = WorkspaceStatus::new(EpochId::new(&"a".repeat(40)).unwrap(), vec![], false);
+        let status = WorkspaceStatus::new(BaseEpoch::new("a".repeat(40)).unwrap(), vec![], false);
         assert!(status.is_clean());
         assert_eq!(status.dirty_count(), 0);
     }
@@ -259,7 +263,7 @@ mod tests {
     fn workspace_status_dirty() {
         let dirty_files = vec![PathBuf::from("file1.rs"), PathBuf::from("file2.rs")];
         let status = WorkspaceStatus::new(
-            EpochId::new(&"b".repeat(40)).unwrap(),
+            BaseEpoch::new("b".repeat(40)).unwrap(),
             dirty_files.clone(),
             false,
         );
@@ -270,7 +274,7 @@ mod tests {
 
     #[test]
     fn workspace_status_stale() {
-        let status = WorkspaceStatus::new(EpochId::new(&"c".repeat(40)).unwrap(), vec![], true);
+        let status = WorkspaceStatus::new(BaseEpoch::new("c".repeat(40)).unwrap(), vec![], true);
         assert!(status.is_stale);
         assert!(status.is_clean());
     }

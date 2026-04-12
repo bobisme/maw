@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use crate::changes::store::ChangesStore;
 use maw_core::backend::WorkspaceBackend;
-use maw_core::model::types::WorkspaceId;
+use maw_core::model::types::{BaseEpoch, WorkspaceId};
 use maw_core::refs as manifold_refs;
 
 use super::{DEFAULT_WORKSPACE, MawConfig, get_backend, metadata, repo_root};
@@ -99,7 +99,7 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     // against the new epoch would report 0 commits ahead (HEAD is behind it),
     // causing us to skip the rebase and fast-forward — silently dropping commits.
     let ws_path = root.join("ws").join(&workspace_name);
-    match committed_ahead_of_epoch(&ws_path, ws_status.base_epoch.as_str()) {
+    match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
         None => {
             // Could not determine commit count — refuse to sync to prevent data loss.
             println!(
@@ -635,8 +635,13 @@ fn relabel_conflict_markers(ws_path: &Path, rel_path: &str, ws_name: &str) {
 /// Callers MUST treat `None` as "has committed work" (i.e. refuse to sync) to
 /// prevent data loss when the workspace state cannot be determined.
 // TODO(gix): GitRepo doesn't have a rev-list --count equivalent. Keep CLI.
-fn committed_ahead_of_epoch(ws_path: &Path, epoch_oid: &str) -> Option<u32> {
-    let range = format!("{epoch_oid}..HEAD");
+//
+// Takes a [`BaseEpoch`] explicitly (not a bare `&str` or `CurrentEpoch`) so
+// that the compiler catches accidental swaps. See bn-18dj for the bug this
+// newtype is meant to prevent: passing the current epoch here would silently
+// return 0 on stale workspaces and wipe their local commits on sync.
+fn committed_ahead_of_epoch(ws_path: &Path, base: &BaseEpoch) -> Option<u32> {
+    let range = format!("{}..HEAD", base.as_str());
     let output = Command::new("git")
         .args(["rev-list", "--count", &range])
         .current_dir(ws_path)
@@ -914,7 +919,7 @@ fn sync_all() -> Result<()> {
         // new epoch would report 0 ahead (HEAD is behind it), missing local commits.
         let ws_path = root.join("ws").join(name);
         let ws_status = backend.status(&ws.id).map_err(|e| anyhow::anyhow!("{e}"))?;
-        match committed_ahead_of_epoch(&ws_path, ws_status.base_epoch.as_str()) {
+        match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
             None => {
                 skipped_with_work.push(format!(
                     "{name} (could not determine commit count \u{2014} skipped for safety)"
@@ -1037,7 +1042,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     // The lead agent must merge this workspace first.
     // NOTE: Compare against base epoch, not current — see bn-18dj.
     let ws_path = root.join("ws").join(name);
-    match committed_ahead_of_epoch(&ws_path, ws_status.base_epoch.as_str()) {
+    match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
         None => {
             eprintln!(
                 "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state), \

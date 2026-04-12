@@ -438,7 +438,11 @@ impl WorkspaceBackend for RefLinkBackend {
             .current_epoch_opt()
             .is_some_and(|current| base_epoch != current);
 
-        Ok(WorkspaceStatus::new(base_epoch, dirty_files, is_stale))
+        Ok(WorkspaceStatus::new(
+            base_epoch.into(),
+            dirty_files,
+            is_stale,
+        ))
     }
 
     /// Snapshot (diff) the workspace against its base epoch snapshot.
@@ -959,7 +963,7 @@ mod tests {
         backend.create(&ws_name, &epoch).unwrap();
 
         let status = backend.status(&ws_name).unwrap();
-        assert_eq!(status.base_epoch, epoch);
+        assert_eq!(status.base_epoch.as_str(), epoch.as_str());
         assert!(
             status.is_clean(),
             "expected clean: {:?}",

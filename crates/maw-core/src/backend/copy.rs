@@ -339,7 +339,11 @@ impl WorkspaceBackend for CopyBackend {
         // Determine staleness: check if current epoch ref is ahead of base epoch.
         let is_stale = self.check_stale(&base_epoch);
 
-        Ok(WorkspaceStatus::new(base_epoch, dirty_files, is_stale))
+        Ok(WorkspaceStatus::new(
+            base_epoch.into(),
+            dirty_files,
+            is_stale,
+        ))
     }
 
     fn snapshot(&self, name: &WorkspaceId) -> Result<SnapshotResult, Self::Error> {

@@ -1270,7 +1270,10 @@ mod tests {
         ) {
             self.snapshots.insert(name.to_owned(), snapshot);
             self.statuses
-                .insert(name.to_owned(), WorkspaceStatus::new(epoch, vec![], false));
+                .insert(
+                    name.to_owned(),
+                    WorkspaceStatus::new(epoch.into(), vec![], false),
+                );
             self.paths.insert(name.to_owned(), ws_path);
         }
     }

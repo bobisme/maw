@@ -25,8 +25,9 @@ pub fn undo(name: &str) -> Result<()> {
 
     let status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
     let ws_path = backend.workspace_path(&ws_id);
+    let base_epoch = status.base_epoch.to_epoch_id();
 
-    let patch_set = compute_patchset(&ws_path, &status.base_epoch).map_err(|e| {
+    let patch_set = compute_patchset(&ws_path, &base_epoch).map_err(|e| {
         anyhow::anyhow!(
             "Failed to compute workspace changes for undo in '{}': {e}",
             ws_id.as_str()
@@ -40,11 +41,11 @@ pub fn undo(name: &str) -> Result<()> {
     }
 
     let added_paths = collect_added_paths(&patch_set);
-    restore_workspace_to_epoch(&ws_path, &status.base_epoch)?;
+    restore_workspace_to_epoch(&ws_path, &base_epoch)?;
     remove_added_paths(&ws_path, &added_paths)?;
 
     // Sanity check: undo should leave no local delta against the base epoch.
-    let remaining = compute_patchset(&ws_path, &status.base_epoch).map_err(|e| {
+    let remaining = compute_patchset(&ws_path, &base_epoch).map_err(|e| {
         anyhow::anyhow!(
             "Failed to verify workspace state after undo in '{}': {e}",
             ws_id.as_str()
@@ -60,13 +61,13 @@ pub fn undo(name: &str) -> Result<()> {
     }
 
     let root = repo_root()?;
-    let op_oid = record_compensation_op(&root, &ws_id, &status.base_epoch, patch_set.len())?;
+    let op_oid = record_compensation_op(&root, &ws_id, &base_epoch, patch_set.len())?;
 
     println!("Undid local changes in workspace '{name}'.");
     println!(
         "  Reverted {} path(s) to base epoch {}.",
         patch_set.len(),
-        &status.base_epoch.as_str()[..12]
+        &base_epoch.as_str()[..12]
     );
     println!("  Logged compensate op: {}", &op_oid.as_str()[..12]);
     println!("Next: maw ws touched {name} --format json");

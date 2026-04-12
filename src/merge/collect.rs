@@ -186,7 +186,9 @@ fn collect_one<B: WorkspaceBackend>(
             workspace_id: ws_id.clone(),
             reason: e.to_string(),
         })?;
-    let epoch = status.base_epoch;
+    // status.base_epoch is a BaseEpoch; the downstream merge APIs (PatchSet,
+    // phantom-deletion check) still operate on generic EpochId, so convert.
+    let epoch = status.base_epoch.to_epoch_id();
 
     // Step 3: Short-circuit for empty workspaces.
     if snapshot.is_empty() {
