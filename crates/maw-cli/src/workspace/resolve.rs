@@ -423,116 +423,142 @@ fn collect_block_info(chunks: &[FileChunk]) -> Vec<BlockInfo> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
-    // Only scan files that have been touched by a commit in this workspace
-    // since its base. An unchanged source file can't contain conflict markers
-    // introduced by a rebase — but it CAN contain `<<<<<<<` literals in test
-    // fixtures (e.g., resolve.rs itself has raw-string conflict fixtures).
-    // Restricting the scan to modified files eliminates that false-positive
-    // class without losing real-conflict detection.
+    // We're looking for conflict markers that a rebase (or similar op)
+    // INTRODUCED to files in this workspace — not pre-existing marker
+    // literals in source fixtures. The reliable signal is: the workspace
+    // diff against its base contains added lines starting with `<<<<<<<`.
     //
-    // bn-3h90 follow-up (v0.58.5): the previous implementation walked the
-    // entire worktree and would flag `resolve.rs` as "unresolved" because its
-    // test raw strings start with `<<<<<<<` at column 0 inside the string
-    // literal. That blocked every merge in the maw repo itself.
-    let modified = modified_files_since_base(ws_path).unwrap_or_default();
+    // A file like `crates/maw-cli/src/workspace/resolve.rs` that has raw
+    // string fixtures containing `<<<<<<<` at column 0 is not a false
+    // positive under this definition — the diff shows only the lines the
+    // workspace actually added, and the fixtures predate the workspace.
+    //
+    // This evolved through bn-3h90:
+    //   v0.58.3: reconcile cached counter against worktree scan
+    //   v0.58.4: full-file scan (but 256KB limit → missed large files)
+    //            fix was streaming scan (but false-positived on fixtures)
+    //   v0.58.5: scan only modified files (but false-positived on files
+    //            the workspace legitimately edited that still contained
+    //            pre-existing fixtures — e.g. bn-19tb editing resolve.rs)
+    //   v0.58.5 final: scan the DIFF for newly-added marker lines only
+    if let Some(base) = resolve_workspace_base_ref(ws_path) {
+        return Ok(find_files_with_new_conflict_markers(ws_path, &base));
+    }
 
-    // Fallback: if we can't get a modified-file list (e.g., the base ref is
-    // missing), fall back to scanning the whole worktree. This is the old
-    // behavior — noisier but safer for the unknown-state case.
-    let files_to_check = if modified.is_empty() && !base_ref_known(ws_path) {
-        let mut all = Vec::new();
-        walk_for_conflicts(ws_path, ws_path, &mut all)?;
-        all
-    } else {
-        modified
-            .into_iter()
-            .filter(|rel| {
-                let full = ws_path.join(rel);
-                full.is_file() && file_has_conflict_markers(&full)
-            })
-            .collect()
-    };
-
-    let mut results = files_to_check;
+    // Fallback: if we can't resolve the base, walk the worktree and do a
+    // full-content scan. Noisier, but safe for the unknown-state case.
+    let mut results = Vec::new();
+    walk_for_conflicts(ws_path, ws_path, &mut results)?;
     results.sort();
     results.dedup();
     Ok(results)
 }
 
-/// Returns the set of files modified in the workspace since its base.
+/// Scan the diff between the workspace base and the current state (HEAD +
+/// working tree) for added lines that look like conflict markers.
 ///
-/// Includes both committed changes (`git diff <base>..HEAD`) and uncommitted
-/// working-tree changes (`git status --porcelain`). The union is the
-/// complete set of files the workspace has "touched" since creation.
-///
-/// Returns `None` (distinct from an empty list) when we can't resolve the
-/// base ref — callers fall back to a full worktree walk in that case.
-fn modified_files_since_base(ws_path: &Path) -> Option<Vec<PathBuf>> {
+/// Returns the set of files where at least one `<<<<<<<` line is NEW in the
+/// workspace. Files whose existing content contained marker literals (e.g.
+/// test fixtures) are not flagged because those lines aren't in the diff.
+fn find_files_with_new_conflict_markers(ws_path: &Path, base: &str) -> Vec<PathBuf> {
     use std::collections::BTreeSet;
     use std::process::Command;
 
-    let base = resolve_workspace_base_ref(ws_path)?;
     let mut files: BTreeSet<PathBuf> = BTreeSet::new();
 
-    // 1. Committed changes since base: `git diff --name-only <base>..HEAD`
+    // Committed changes since base.
+    run_diff_and_collect_marker_files(
+        ws_path,
+        &["diff", "-U0", "--no-color", &format!("{base}..HEAD")],
+        &mut files,
+    );
+    // Uncommitted changes (staged + unstaged).
+    run_diff_and_collect_marker_files(
+        ws_path,
+        &["diff", "-U0", "--no-color", "HEAD"],
+        &mut files,
+    );
+    // Untracked files: scan their full content, since there's no diff base.
     if let Ok(out) = Command::new("git")
         .args([
             "-c",
             "core.quotePath=false",
-            "diff",
-            "--name-only",
-            &format!("{base}..HEAD"),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
         ])
         .current_dir(ws_path)
         .output()
         && out.status.success()
     {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if !line.is_empty() {
+            if line.is_empty() {
+                continue;
+            }
+            let full = ws_path.join(line);
+            if full.is_file() && file_has_conflict_markers(&full) {
                 files.insert(PathBuf::from(line));
             }
         }
     }
 
-    // 2. Uncommitted working-tree changes: `git status --porcelain`.
-    // Porcelain format: two-char status + space + path (or renames with `->`).
-    if let Ok(out) = Command::new("git")
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ])
-        .current_dir(ws_path)
-        .output()
-        && out.status.success()
-    {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if line.len() < 4 {
-                continue;
-            }
-            // Skip the 2-char status code + space.
-            let rest = &line[3..];
-            // Handle renames: "oldname -> newname" — take the newname.
-            let path = rest
-                .rfind(" -> ")
-                .map(|i| &rest[i + 4..])
-                .unwrap_or(rest);
-            if !path.is_empty() {
-                files.insert(PathBuf::from(path));
-            }
-        }
-    }
-
-    Some(files.into_iter().collect())
+    let mut vec: Vec<_> = files.into_iter().collect();
+    vec.sort();
+    vec
 }
 
-/// True if we could resolve a workspace base ref — used to disambiguate
-/// "modified list is empty" (workspace has no new commits) from "we don't
-/// know the base" (falls back to full worktree scan).
-fn base_ref_known(ws_path: &Path) -> bool {
-    resolve_workspace_base_ref(ws_path).is_some()
+/// Run `git diff` with the given args and look for added lines that start
+/// with `<<<<<<<`. Files with such lines get added to `out`.
+///
+/// Parses unified-diff output:
+///   `diff --git a/<path> b/<path>` — starts a file block
+///   `+++ b/<path>` — confirms the target path for the block
+///   `+<<<<<<<` — an added marker line
+///
+/// Skips the `+++ b/<path>` header (3 pluses + space) so it isn't mistaken
+/// for content. Marker pattern starts with `<`, so `+<<<<<<<` doesn't
+/// collide with `+++ ` anyway, but we're explicit.
+fn run_diff_and_collect_marker_files(
+    ws_path: &Path,
+    args: &[&str],
+    out: &mut std::collections::BTreeSet<PathBuf>,
+) {
+    use std::process::Command;
+
+    let output = match Command::new("git")
+        .arg("-c")
+        .arg("core.quotePath=false")
+        .args(args)
+        .current_dir(ws_path)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_file: Option<PathBuf> = None;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            // `diff --git a/<path> b/<path>`
+            if let Some(sep) = rest.find(" b/") {
+                current_file = Some(PathBuf::from(&rest[..sep]));
+            } else {
+                current_file = None;
+            }
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            // File header lines — not content.
+            continue;
+        }
+        if line.starts_with("+<<<<<<<")
+            && let Some(ref path) = current_file
+        {
+            out.insert(path.clone());
+        }
+    }
 }
 
 /// Best-effort resolution of the workspace's base commit.
