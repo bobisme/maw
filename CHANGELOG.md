@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.59.2
+
+### Fixed — `AttrsMatcher` panics on absolute paths (bn-3t55)
+
+`AttrsMatcher::is_lfs` and `merge_driver` panicked via `gix-glob`'s `matches_repo_relative_path` when passed paths starting with `/`. Found by proptest in bn-19tb. Fix: `trim_start_matches('/')` at both entry points. The previously-ignored proptest repro is now an active regression test, and the proptest strategies now include leading-slash paths for ongoing coverage.
+
 ## v0.59.0 — Hardening release (bn-opm7)
 
 This release completes the bn-opm7 goal: eliminate the three bug classes that produced 5 patch releases in a single week (v0.58.1–v0.58.5).
