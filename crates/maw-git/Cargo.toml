@@ -31,6 +31,7 @@ maw-lfs = { path = "../maw-lfs", version = "0.59.2", optional = true }
 [dev-dependencies]
 tempfile = "3"
 sha2 = "0.10"
+filetime = "0.2"
 
 [lints]
 workspace = true

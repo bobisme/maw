@@ -887,7 +887,10 @@ fn checkout_skips_files_over_1kb_even_if_lfs_tracked() {
 
     repo.checkout_tree(tree_oid, workdir).unwrap();
     // File kept as-is (raw bytes committed directly, not LFS-clean-filtered).
-    assert_eq!(std::fs::read(workdir.join("oops.bin")).unwrap(), large_content);
+    assert_eq!(
+        std::fs::read(workdir.join("oops.bin")).unwrap(),
+        large_content
+    );
 }
 
 #[cfg(feature = "lfs")]
@@ -1048,8 +1051,13 @@ fn write_blob_with_path_works_on_bare_repo() {
         }])
         .unwrap();
     let head_ref = RefName::new("refs/heads/main").unwrap();
-    repo.create_commit(tree_oid, &[], "initial: add .gitattributes", Some(&head_ref))
-        .unwrap();
+    repo.create_commit(
+        tree_oid,
+        &[],
+        "initial: add .gitattributes",
+        Some(&head_ref),
+    )
+    .unwrap();
     std::process::Command::new("git")
         .args(["symbolic-ref", "HEAD", "refs/heads/main"])
         .current_dir(&bare_path)
@@ -1071,5 +1079,56 @@ fn write_blob_with_path_works_on_bare_repo() {
         blob.len() < 200,
         "pointer should be small (~131 bytes), got {} bytes",
         blob.len()
+    );
+}
+
+// ===========================================================================
+// count_dirty_tracked — stat-mismatch content-hash fallback (bn-3o8k)
+// ===========================================================================
+
+/// After mtime skew (e.g. touch, checkout, FS remount) the fast path must
+/// not count content-identical files as dirty. Regression test for the bug
+/// where `maw status --status-bar` showed thousands of "changed" files that
+/// `git status` later showed as clean because git refreshed the stat cache.
+#[test]
+fn count_dirty_tracked_ignores_mtime_skew_when_content_matches() {
+    let (dir, repo) = setup_repo();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello\n").unwrap();
+
+    // Stage and commit so the index has a fresh stat for a.txt.
+    std::process::Command::new("git")
+        .args(["add", "a.txt"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add a.txt"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        repo.count_dirty_tracked().unwrap(),
+        0,
+        "fresh commit should be clean"
+    );
+
+    // Simulate mtime skew without changing content.
+    let mtime = filetime::FileTime::from_unix_time(946_684_800, 0);
+    filetime::set_file_mtime(&file, mtime).unwrap();
+
+    assert_eq!(
+        repo.count_dirty_tracked().unwrap(),
+        0,
+        "mtime skew with unchanged content must not be reported dirty"
+    );
+
+    // Real content change must still be detected.
+    std::fs::write(&file, b"changed\n").unwrap();
+    assert_eq!(
+        repo.count_dirty_tracked().unwrap(),
+        1,
+        "actual content change must be reported dirty"
     );
 }

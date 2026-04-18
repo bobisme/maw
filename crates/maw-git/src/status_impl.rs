@@ -74,22 +74,29 @@ pub fn status_tracked_only(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError>
 
 /// Count dirty tracked files by reading the index and stat-checking entries.
 ///
-/// Much faster than [`status()`] or [`status_tracked_only()`] for large repos:
-/// reads the index once, does one `stat()` per entry comparing mtime + size
-/// against the cached stat data. No content hashing, no gix status pipeline.
+/// Reads the index once, does one `stat()` per entry comparing mtime + size
+/// against the cached stat data. On stat mismatch, falls back to hashing the
+/// file and comparing to the index entry's blob OID — matching git's behavior
+/// and avoiding spurious dirty counts after mtime skew (checkout, touch, FS
+/// remount).
 ///
-/// Returns the count of tracked files whose on-disk stat differs from the index.
+/// Returns the count of tracked files whose content differs from the index.
 #[cfg(unix)]
 pub fn count_dirty_tracked(repo: &GixRepo) -> Result<usize, GitError> {
     use std::os::unix::fs::MetadataExt;
 
-    let workdir = repo.workdir.as_ref().ok_or_else(|| GitError::BackendError {
-        message: "repository has no working directory".to_string(),
-    })?;
+    let workdir = repo
+        .workdir
+        .as_ref()
+        .ok_or_else(|| GitError::BackendError {
+            message: "repository has no working directory".to_string(),
+        })?;
 
     let index = repo.repo.index().map_err(|e| GitError::BackendError {
         message: format!("failed to read index: {e}"),
     })?;
+
+    let hash_kind = repo.repo.object_hash();
 
     let mut dirty = 0;
     for entry in index.entries() {
@@ -105,24 +112,62 @@ pub fn count_dirty_tracked(repo: &GixRepo) -> Result<usize, GitError> {
         };
 
         let full_path = workdir.join(path_str);
-        match std::fs::symlink_metadata(&full_path) {
-            Ok(meta) => {
-                let stat = entry.stat;
-                if meta.len() != stat.size as u64 {
-                    dirty += 1;
-                } else if meta.mtime() as u32 != stat.mtime.secs
-                    || meta.mtime_nsec() as u32 != stat.mtime.nsecs
-                {
-                    dirty += 1;
-                }
-            }
+        let meta = match std::fs::symlink_metadata(&full_path) {
+            Ok(m) => m,
             Err(_) => {
                 dirty += 1;
+                continue;
             }
+        };
+
+        let stat = entry.stat;
+        let size_matches = meta.len() == stat.size as u64;
+        let mtime_matches =
+            meta.mtime() as u32 == stat.mtime.secs && meta.mtime_nsec() as u32 == stat.mtime.nsecs;
+
+        if size_matches && mtime_matches {
+            continue;
         }
+
+        // Stat mismatch — fall back to content hashing to avoid spurious
+        // positives when mtime drifted but content is unchanged. This is what
+        // `git status` does (and why running it "refreshes" the stat cache).
+        if stat_matches_by_content(&full_path, &meta, entry.id, hash_kind) {
+            continue;
+        }
+
+        dirty += 1;
     }
 
     Ok(dirty)
+}
+
+/// Return true if the file's contents hash to `expected_oid` as a blob.
+/// Symlinks hash their link target text. Files that can't be read are
+/// treated as mismatched (dirty).
+#[cfg(unix)]
+fn stat_matches_by_content(
+    path: &std::path::Path,
+    meta: &std::fs::Metadata,
+    expected_oid: gix::hash::ObjectId,
+    hash_kind: gix::hash::Kind,
+) -> bool {
+    let data = if meta.file_type().is_symlink() {
+        match std::fs::read_link(path) {
+            Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
+            Err(_) => return false,
+        }
+    } else {
+        match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        }
+    };
+
+    match gix::objs::compute_hash(hash_kind, gix::objs::Kind::Blob, &data) {
+        Ok(actual) => actual == expected_oid,
+        Err(_) => false,
+    }
 }
 
 fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<StatusEntry> {
