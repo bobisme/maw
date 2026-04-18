@@ -2,6 +2,12 @@
 
 All notable changes to maw.
 
+## v0.59.3
+
+### Fixed — `maw status --status-bar` false dirty counts after mtime skew (bn-3o8k)
+
+`count_dirty_tracked` (the fast path used by `maw status --status-bar`) only compared mtime+size against the index stat cache. Any mtime skew — checkout, `touch`, FS remount — produced thousands of spurious "changed" files until `git status` ran and refreshed the cache. Fix: on stat mismatch, hash the file and compare to the index entry's blob OID (matching git's own behavior). Fast case is unchanged; the slow path only runs for stat-mismatched entries.
+
 ## v0.59.2
 
 ### Fixed — `AttrsMatcher` panics on absolute paths (bn-3t55)
