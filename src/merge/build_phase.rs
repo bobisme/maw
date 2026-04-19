@@ -1334,6 +1334,29 @@ mod tests {
         }
     }
 
+    /// Create the workspace directory and isolate it from the outer test repo.
+    ///
+    /// The test repos created by [`setup_repo`] put their workspaces under
+    /// `<root>/ws/<name>/`, which is a subdirectory of the outer git repo.
+    /// Without isolation, `git rev-parse HEAD` inside the workspace walks up
+    /// and finds the OUTER repo's HEAD — which `collect_one` then interprets
+    /// as "the workspace has committed changes", causing it to read file
+    /// content from `HEAD:<path>` in the outer repo instead of from the
+    /// workspace's working tree.
+    ///
+    /// Dropping an empty `git init` inside the workspace path stops the
+    /// upward discovery: `HEAD` becomes unborn, `rev-parse HEAD` fails,
+    /// and the collect path correctly falls through to reading the
+    /// working-tree bytes we wrote.
+    fn isolate_ws_dir(ws_path: &Path) {
+        fs::create_dir_all(ws_path).unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(ws_path)
+            .output()
+            .expect("git init for ws isolation");
+    }
+
     /// Helper: create a workspace directory with files and return the
     /// appropriate `SnapshotResult`.
     fn make_workspace_with_added_file(
@@ -1343,8 +1366,7 @@ mod tests {
         content: &[u8],
     ) -> (PathBuf, SnapshotResult) {
         let ws_path = base.join(format!("ws/{ws_name}"));
-        fs::create_dir_all(&ws_path).unwrap();
-        // Create parent dirs if needed
+        isolate_ws_dir(&ws_path);
         let full_path = ws_path.join(file_name);
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -1366,7 +1388,7 @@ mod tests {
         content: &[u8],
     ) -> (PathBuf, SnapshotResult) {
         let ws_path = base.join(format!("ws/{ws_name}"));
-        fs::create_dir_all(&ws_path).unwrap();
+        isolate_ws_dir(&ws_path);
         let full_path = ws_path.join(file_name);
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -1387,7 +1409,7 @@ mod tests {
         file_name: &str,
     ) -> (PathBuf, SnapshotResult) {
         let ws_path = base.join(format!("ws/{ws_name}"));
-        fs::create_dir_all(&ws_path).unwrap();
+        isolate_ws_dir(&ws_path);
         let snapshot = SnapshotResult::new(
             vec![],                         // added
             vec![],                         // modified
