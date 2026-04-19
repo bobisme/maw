@@ -70,6 +70,9 @@ fn history_includes_workspace_lifecycle_events_after_restore() {
     repo.maw_ok(&["ws", "destroy", "hist-a"]);
     repo.maw_ok(&["ws", "restore", "hist-a"]);
 
+    // `ws history` walks the LIVE oplog chain. Per bn-3h90 destroy clears
+    // the head ref so a same-named restore starts a fresh chain — we should
+    // see the restore's create op, nothing stale from the destroyed instance.
     let raw = repo.maw_ok(&[
         "ws", "history", "hist-a", "--format", "json", "--limit", "20",
     ]);
@@ -86,10 +89,20 @@ fn history_includes_workspace_lifecycle_events_after_restore() {
 
     assert!(
         op_types.contains(&"create"),
-        "history should include at least one create operation"
+        "live history should include a create op for the restored workspace"
     );
+
+    // The destroyed instance's lifecycle lives under the recovery namespace
+    // (`.manifold/artifacts/ws/<name>/destroy/` + recovery refs). Verify the
+    // destroy is surfaced there.
+    let recover = repo.maw_ok(&["ws", "recover", "hist-a", "--format", "json"]);
+    let recover_json: serde_json::Value =
+        serde_json::from_str(&recover).expect("ws recover --format json should be valid JSON");
+    let destroy_records = recover_json["records"]
+        .as_array()
+        .map_or(0, Vec::len);
     assert!(
-        op_types.contains(&"destroy"),
-        "history should include destroy operation"
+        destroy_records >= 1,
+        "recovery surface should retain a destroy record from the destroyed instance"
     );
 }

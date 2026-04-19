@@ -141,21 +141,20 @@ fn repeated_destroy_cycles_preserve_capture_history() {
         "Second captured commit should include second-cycle.txt"
     );
 
-    // Recreate the workspace so we can read history after captures.
-    repo.create_workspace("repeat-cycle");
-    let history = repo.maw_ok(&["ws", "history", "repeat-cycle", "--format", "json"]);
-    let history_json: serde_json::Value =
-        serde_json::from_str(&history).expect("ws history --format json should parse");
-    let destroy_count = history_json["operations"]
+    // Durable destroy history is exposed by `ws recover`, not `ws history`.
+    // Per bn-3h90 the oplog head is deliberately cleared on destroy so a
+    // same-named recreate starts a fresh chain; long-term history lives in
+    // `.manifold/artifacts/ws/<name>/destroy/` and the recovery ref namespace.
+    let recover = repo.maw_ok(&["ws", "recover", "repeat-cycle", "--format", "json"]);
+    let recover_json: serde_json::Value =
+        serde_json::from_str(&recover).expect("ws recover --format json should parse");
+    let destroy_count = recover_json["records"]
         .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .filter(|op| op["op_type"] == "destroy")
-        .count();
+        .map_or(0, Vec::len);
 
     assert!(
         destroy_count >= 2,
-        "Expected at least two destroy history entries, got: {destroy_count}"
+        "Expected at least two destroy records, got: {destroy_count}"
     );
 }
 
