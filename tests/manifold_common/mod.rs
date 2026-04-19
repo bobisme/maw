@@ -161,6 +161,15 @@ impl TestRepo {
             ],
         );
 
+        // Record the per-workspace creation epoch for `default`, matching
+        // what `maw ws create` / `update_default_workspace` do in production.
+        // Missing this ref makes `status()` fall back to HEAD for base_epoch,
+        // which breaks the sync safety check and anchor logic downstream.
+        git_ok(
+            &root,
+            &["update-ref", "refs/manifold/epoch/ws/default", &epoch0],
+        );
+
         Self {
             _dir: dir,
             root,
@@ -333,6 +342,15 @@ impl TestRepo {
                 &epoch,
             ],
         );
+
+        // Record the per-workspace creation-epoch ref, matching what
+        // `maw ws create` (GitWorkspaceBackend::create) does in production.
+        // Without this, WorkspaceStatus falls back to HEAD as base_epoch,
+        // which makes `committed_ahead_of_epoch(HEAD, HEAD) = 0` — silently
+        // defeating the safety check that prevents `maw ws sync --all` from
+        // clobbering committed work in stale-ahead workspaces.
+        let epoch_ref = format!("refs/manifold/epoch/ws/{name}");
+        git_ok(&self.root, &["update-ref", &epoch_ref, &epoch]);
 
         ws_path
     }
@@ -572,6 +590,19 @@ impl TestRepo {
         // The merge COMMIT phase CAS uses: main (epoch_before) → candidate.
         // Without this, the CAS fails because main lags behind the epoch.
         git_ok(&self.root, &["update-ref", "refs/heads/main", &new_oid]);
+
+        // Keep the per-workspace epoch ref for `default` in sync with its
+        // actual HEAD. The real `maw` pipeline writes this ref whenever it
+        // advances default's HEAD (see `update_default_workspace`); test
+        // helpers must do the same, otherwise the next merge anchors at
+        // a stale pre-seed epoch, treating files committed by `seed_files`
+        // as "untracked" in the anchor step — which causes them to be
+        // stashed into the snapshot and later replayed on top of the merge
+        // result, overwriting resolved conflicts.
+        git_ok(
+            &self.root,
+            &["update-ref", "refs/manifold/epoch/ws/default", &new_oid],
+        );
 
         new_oid
     }
