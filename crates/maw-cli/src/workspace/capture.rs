@@ -222,15 +222,37 @@ fn capture_dirty_worktree(
     let stash_git_oid = match stash_result {
         Some(oid) => oid,
         None => {
-            // `stash_create` returns None if there's nothing to stash
-            // (shouldn't happen since we checked dirty_paths, but be defensive)
+            // `stash_create` returned None even though `list_dirty_paths`
+            // reported uncommitted changes. This "shouldn't happen" branch
+            // previously returned `Ok(None)`, but that silently violated the
+            // `capture_before_destroy` contract (which reserves `Ok(None)`
+            // for genuinely-clean-at-epoch workspaces). Callers such as
+            // `working_copy::capture_or_rewrite_workspace_head` treat
+            // `Ok(None)` as "nothing to preserve" and immediately overwrite
+            // the working tree with `git_checkout_force`, silently losing
+            // the dirty work. Return an error instead so the destroy/
+            // checkout path aborts rather than blowing away user changes.
+            //
+            // NOTE: This path is difficult to trigger in a real test —
+            // `git stash create` only returns empty when the index and
+            // worktree both match HEAD, which contradicts a non-empty
+            // dirty-paths list. It can still occur in pathological cases
+            // (races, unusual sparse checkouts, or stash plumbing bugs),
+            // so we guard it explicitly.
             // TODO(gix): replace git reset with GitRepo trait method
             let _ = Command::new("git")
                 .args(["reset"])
                 .current_dir(ws_path)
                 .output();
-            tracing::warn!("stash_create returned None despite dirty paths");
-            return Ok(None);
+            tracing::warn!(
+                dirty_paths = ?dirty_paths,
+                "stash_create returned None despite dirty paths"
+            );
+            return Err(anyhow::anyhow!(
+                "capture aborted to avoid silent data loss: dirty paths were \
+                 detected but `git stash create` refused to produce a stash \
+                 commit (dirty_paths = {dirty_paths:?})"
+            ));
         }
     };
 
