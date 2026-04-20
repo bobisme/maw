@@ -30,6 +30,7 @@ mod oplog_runtime;
 mod overlap;
 mod prune;
 mod resolve;
+mod resolve_structured;
 pub(crate) mod recover;
 mod restore;
 mod status;

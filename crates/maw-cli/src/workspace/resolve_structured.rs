@@ -1,0 +1,1032 @@
+//! Structured conflict resolution — consumes `conflict-tree.json`.
+//!
+//! After rebase, a workspace may have two conflict sidecars:
+//!
+//! * `.manifold/artifacts/ws/<name>/rebase-conflicts.json` — legacy flat
+//!   schema read by the marker-scanning resolver in [`super::resolve`].
+//! * `.manifold/artifacts/ws/<name>/conflict-tree.json` — the structured
+//!   [`ConflictTree`] written by `maw-core::merge::materialize`.
+//!
+//! When the structured sidecar is present, this module takes over. It walks
+//! `ConflictTree.conflicts`, applies a user-specified `--keep` decision to
+//! each entry (or to a single path via `PATH=NAME`), reads the chosen side's
+//! blob content via [`GitRepo::read_blob`], overwrites the worktree file, and
+//! rewrites (or deletes) the sidecar to reflect the remaining state.
+//!
+//! V1 scope:
+//! * `--keep epoch` — pick the side whose `workspace == "epoch"` (see
+//!   [`crates/maw-cli/src/workspace/sync/rebase.rs`] `promote_overlaps_to_conflicts`
+//!   which seeds that literal label).
+//! * `--keep <ws-name>` — pick the side whose `workspace == <ws-name>`.
+//! * `--keep both` — concatenate all sides in their sidecar-declared order,
+//!   separated by a newline when needed. No markers emitted.
+//! * `PATH=NAME` forms — resolve one path only.
+//!
+//! Per-atom resolution (`--atom <id>`) is **deferred**. A file-wide `--keep`
+//! covers every atom in a `Conflict::Content`; partial atom resolution will
+//! land in a follow-up bone — the structured sidecar already has enough
+//! information to support it.
+//!
+//! When the sidecar is absent or unparseable, callers fall back to the legacy
+//! marker-scanning path.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
+
+use maw_core::merge::types::ConflictTree;
+use maw_core::model::conflict::{Conflict, ConflictSide};
+use maw_core::model::types::GitOid;
+use maw_git::{self as git, GitRepo};
+
+use crate::format::OutputFormat;
+
+/// Literal workspace label used by rebase's epoch-delta seed side (see
+/// `sync::rebase::promote_overlaps_to_conflicts` — the "ours" side is
+/// constructed with `workspace = "epoch"`). Kept `pub(crate)` so tests and
+/// documentation consumers can reference the canonical name.
+#[allow(dead_code)]
+pub(crate) const EPOCH_LABEL: &str = "epoch";
+
+// ---------------------------------------------------------------------------
+// Sidecar paths & I/O
+// ---------------------------------------------------------------------------
+
+/// Directory holding sidecars for `ws_name` under `root`.
+fn sidecar_dir(root: &Path, ws_name: &str) -> PathBuf {
+    root.join(".manifold")
+        .join("artifacts")
+        .join("ws")
+        .join(ws_name)
+}
+
+/// Path to `conflict-tree.json` for `ws_name`.
+pub(crate) fn structured_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
+    sidecar_dir(root, ws_name).join("conflict-tree.json")
+}
+
+/// Path to the legacy flat sidecar.
+pub(crate) fn legacy_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
+    sidecar_dir(root, ws_name).join("rebase-conflicts.json")
+}
+
+/// Read and deserialize `conflict-tree.json` for `ws_name`, if present.
+///
+/// Returns `None` when the file is missing, unreadable, or can't be parsed as
+/// a [`ConflictTree`]. Callers should fall back to the legacy marker-scan
+/// path in that case — this keeps pre-gjm8 workspaces working unchanged.
+pub(crate) fn read_conflict_tree_sidecar(root: &Path, ws_name: &str) -> Option<ConflictTree> {
+    let path = structured_sidecar_path(root, ws_name);
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<ConflictTree>(&text).ok()
+}
+
+/// Write an updated `ConflictTree` back to the sidecar. If the tree has no
+/// remaining conflicts (and no remaining clean entries), delete the file.
+fn write_conflict_tree_sidecar(root: &Path, ws_name: &str, tree: &ConflictTree) -> Result<()> {
+    let path = structured_sidecar_path(root, ws_name);
+    if tree.conflicts.is_empty() && tree.clean.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| anyhow::anyhow!("failed to delete {}: {e}", path.display()))?;
+        }
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(tree)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --list over the structured sidecar
+// ---------------------------------------------------------------------------
+
+/// Render a structured `--list` view, matching the shape of the legacy text
+/// and JSON output but driven by `ConflictTree.conflicts`.
+///
+/// Only paths in `filter_paths` (if non-empty) are shown; otherwise all.
+pub(crate) fn list_conflicts(
+    tree: &ConflictTree,
+    workspace: &str,
+    filter_paths: &[String],
+    format: OutputFormat,
+) -> Result<()> {
+    let filter: Option<std::collections::HashSet<PathBuf>> = if filter_paths.is_empty() {
+        None
+    } else {
+        Some(filter_paths.iter().map(PathBuf::from).collect())
+    };
+
+    // Gather candidates respecting filter.
+    let entries: Vec<(&PathBuf, &Conflict)> = tree
+        .conflicts
+        .iter()
+        .filter(|(p, _)| filter.as_ref().is_none_or(|f| f.contains(*p)))
+        .collect();
+
+    if format == OutputFormat::Json {
+        let items: Vec<String> = entries
+            .iter()
+            .map(|(path, conflict)| {
+                let shape = conflict.variant_name();
+                let side_count = conflict.side_count();
+                let workspaces: Vec<String> = conflict
+                    .workspaces()
+                    .iter()
+                    .map(|w| format!("\"{}\"", w.replace('"', "\\\"")))
+                    .collect();
+                let atom_count = match conflict {
+                    Conflict::Content { atoms, .. } => atoms.len(),
+                    _ => 0,
+                };
+                format!(
+                    r#"{{"path":"{}","shape":"{}","sides":{},"atoms":{},"workspaces":[{}]}}"#,
+                    path.display(),
+                    shape,
+                    side_count,
+                    atom_count,
+                    workspaces.join(","),
+                )
+            })
+            .collect();
+        println!(
+            r#"{{"workspace":"{workspace}","conflict_count":{},"structured":true,"conflicts":[{}]}}"#,
+            entries.len(),
+            items.join(","),
+        );
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("No structured conflicts in '{workspace}'.");
+        return Ok(());
+    }
+
+    println!(
+        "{} structured conflict(s) in '{workspace}':",
+        entries.len()
+    );
+    for (path, conflict) in &entries {
+        let shape = conflict.variant_name();
+        let sides_desc = conflict.workspaces().join(", ");
+        match conflict {
+            Conflict::Content { atoms, .. } => {
+                if atoms.is_empty() {
+                    println!(
+                        "  {}  [{shape}] sides=[{sides_desc}]",
+                        path.display()
+                    );
+                } else {
+                    println!(
+                        "  {}  [{shape}] sides=[{sides_desc}] atoms={}",
+                        path.display(),
+                        atoms.len()
+                    );
+                }
+            }
+            _ => {
+                println!(
+                    "  {}  [{shape}] sides=[{sides_desc}]",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    println!();
+    println!("To resolve:");
+    println!("  maw ws resolve {workspace} --keep epoch            # keep epoch version");
+    println!("  maw ws resolve {workspace} --keep <ws-name>        # keep a specific workspace side");
+    println!("  maw ws resolve {workspace} --keep both             # keep all sides (concatenated)");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Keep-spec resolution
+// ---------------------------------------------------------------------------
+
+/// Per-path decision parsed from the flat `--keep` strings.
+///
+/// * `All(name)` — applies to every path with a matching side.
+/// * `File(path, name)` — applies only to `path`.
+#[derive(Debug)]
+pub(crate) enum Decision {
+    All(String),
+    File(PathBuf, String),
+}
+
+/// Parse flat `--keep` arguments into structured decisions.
+///
+/// Block-level (`cf-N=NAME`) keep-specs are not supported on the structured
+/// path in V1 — the structured sidecar uses atoms/paths, not cf-IDs. Such
+/// specs are rejected with an error so the CLI surface is predictable.
+pub(crate) fn parse_decisions(raw: &[String]) -> Result<Vec<Decision>> {
+    let mut out = Vec::new();
+    for s in raw {
+        if let Some((left, right)) = s.split_once('=') {
+            let left = left.trim();
+            let right = right.trim();
+            if right.is_empty() {
+                bail!("Invalid --keep '{s}': empty side name after '='");
+            }
+            if left.starts_with("cf-") {
+                bail!(
+                    "Per-block `cf-N=NAME` keep-specs are not supported with the structured \
+                     sidecar. Use `--keep <ws-name>` or `PATH=<ws-name>`. Per-atom resolution \
+                     is tracked as a follow-up."
+                );
+            }
+            out.push(Decision::File(PathBuf::from(left), right.to_owned()));
+        } else {
+            out.push(Decision::All(s.clone()));
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Side picking
+// ---------------------------------------------------------------------------
+
+/// Find the `ConflictSide` whose `workspace` matches `target`.
+///
+/// Uses the same looseness as the legacy path: an exact match wins; otherwise
+/// we try comma-separated multi-workspace labels (e.g. `"ws-a, ws-b"`).
+fn pick_side<'a>(sides: &'a [ConflictSide], target: &str) -> Option<&'a ConflictSide> {
+    for s in sides {
+        if s.workspace == target {
+            return Some(s);
+        }
+        if s.workspace.split(',').any(|p| p.trim() == target) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Return all side OIDs for `--keep both`, in declared order.
+fn all_sides(conflict: &Conflict) -> Vec<GitOid> {
+    match conflict {
+        Conflict::Content { sides, .. } | Conflict::AddAdd { sides, .. } => {
+            sides.iter().map(|s| s.content.clone()).collect()
+        }
+        Conflict::ModifyDelete {
+            modifier, deleter, ..
+        } => vec![modifier.content.clone(), deleter.content.clone()],
+        Conflict::DivergentRename { destinations, .. } => destinations
+            .iter()
+            .map(|(_, s)| s.content.clone())
+            .collect(),
+    }
+}
+
+/// Pick a single side's blob OID for a `Conflict`.
+///
+/// * For `Content` / `AddAdd`: searches `sides`.
+/// * For `ModifyDelete`: the `deleter` has no real content, so picking it
+///   signals "accept the delete" (returns `None`).
+/// * For `DivergentRename`: V1 cannot express a single-path resolution.
+fn pick_single_side_oid(conflict: &Conflict, target: &str) -> Result<Option<GitOid>> {
+    match conflict {
+        Conflict::Content { sides, .. } | Conflict::AddAdd { sides, .. } => {
+            if let Some(side) = pick_side(sides, target) {
+                Ok(Some(side.content.clone()))
+            } else {
+                let available: Vec<&str> =
+                    sides.iter().map(|s| s.workspace.as_str()).collect();
+                bail!(
+                    "Side '{}' not found for path. Available: [{}], plus 'both'.",
+                    target,
+                    available.join(", ")
+                );
+            }
+        }
+        Conflict::ModifyDelete {
+            modifier, deleter, ..
+        } => {
+            if modifier.workspace == target
+                || modifier.workspace.split(',').any(|p| p.trim() == target)
+            {
+                Ok(Some(modifier.content.clone()))
+            } else if deleter.workspace == target
+                || deleter.workspace.split(',').any(|p| p.trim() == target)
+            {
+                // Deleter side: caller interprets `None` as "delete the path".
+                Ok(None)
+            } else {
+                bail!(
+                    "Side '{}' not found. Available: [{}, {}] (modifier, deleter).",
+                    target,
+                    modifier.workspace,
+                    deleter.workspace
+                );
+            }
+        }
+        Conflict::DivergentRename { .. } => {
+            bail!(
+                "DivergentRename conflicts cannot be resolved via --keep in V1. Resolve by \
+                 manually renaming the file in the worktree and committing."
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resolution dispatch
+// ---------------------------------------------------------------------------
+
+/// Outcome of applying `--keep` to a single path.
+enum PathOutcome {
+    /// Wrote `bytes` to the worktree file.
+    Wrote(Vec<u8>),
+    /// Removed the file from the worktree (modify/delete → accept delete).
+    Deleted,
+    /// Caller asked for a side that doesn't exist / can't resolve. The
+    /// carried message is logged by the caller into the skipped list.
+    Skipped(#[allow(dead_code)] String),
+}
+
+/// Apply a resolution for a single `(path, conflict)` and produce the output.
+fn apply_decision(
+    repo: &dyn GitRepo,
+    conflict: &Conflict,
+    target: &str,
+) -> Result<PathOutcome> {
+    if target == "both" {
+        let oids = all_sides(conflict);
+        if oids.is_empty() {
+            return Ok(PathOutcome::Skipped("no sides to concatenate".into()));
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        for (i, oid) in oids.iter().enumerate() {
+            let git_oid: git::GitOid = oid
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid blob oid {oid}: {e}"))?;
+            let bytes = repo
+                .read_blob(git_oid)
+                .map_err(|e| anyhow::anyhow!("read_blob({oid}) failed: {e}"))?;
+            if i > 0 && !buf.ends_with(b"\n") {
+                buf.push(b'\n');
+            }
+            buf.extend_from_slice(&bytes);
+        }
+        return Ok(PathOutcome::Wrote(buf));
+    }
+
+    // Single side. Translate `epoch` synonym through a canonical label.
+    // The sidecar seeds the epoch side with `workspace == "epoch"` (see
+    // `sync::rebase::promote_overlaps_to_conflicts`), so no aliasing required.
+    match pick_single_side_oid(conflict, target)? {
+        Some(oid) => {
+            let git_oid: git::GitOid = oid
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid blob oid {oid}: {e}"))?;
+            let bytes = repo
+                .read_blob(git_oid)
+                .map_err(|e| anyhow::anyhow!("read_blob({oid}) failed: {e}"))?;
+            Ok(PathOutcome::Wrote(bytes))
+        }
+        None => Ok(PathOutcome::Deleted),
+    }
+}
+
+/// Apply `PathOutcome` to the worktree at `ws_path.join(rel)`.
+fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<bool> {
+    match outcome {
+        PathOutcome::Wrote(bytes) => {
+            let full = ws_path.join(rel);
+            if let Some(dir) = full.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&full, &bytes)
+                .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
+            Ok(true)
+        }
+        PathOutcome::Deleted => {
+            let full = ws_path.join(rel);
+            if full.is_file() {
+                std::fs::remove_file(&full)
+                    .map_err(|e| anyhow::anyhow!("remove {}: {e}", full.display()))?;
+            }
+            Ok(true)
+        }
+        PathOutcome::Skipped(_) => Ok(false),
+    }
+}
+
+/// Main entry point. Called by `super::resolve::run` when the structured
+/// sidecar is present.
+///
+/// Returns `Ok(true)` on normal completion (the caller must NOT fall back to
+/// the legacy path). Returns `Ok(false)` only when the caller should still
+/// fall back — currently never, but kept as a signal channel for future
+/// additions.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_structured(
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    paths: &[String],
+    keep: &[String],
+    list: bool,
+    format: OutputFormat,
+    mut tree: ConflictTree,
+) -> Result<bool> {
+    if list {
+        list_conflicts(&tree, workspace, paths, format)?;
+        return Ok(true);
+    }
+
+    if keep.is_empty() {
+        bail!(
+            "Must specify --keep or --list.\n\
+             \n  Examples:\n\
+             \n    maw ws resolve {workspace} --keep epoch              # keep epoch side\n\
+             \n    maw ws resolve {workspace} --keep <ws-name>          # keep specific workspace\n\
+             \n    maw ws resolve {workspace} --keep both               # keep all sides\n\
+             \n    maw ws resolve {workspace} --keep PATH=<name>        # resolve one file\n\
+             \n    maw ws resolve {workspace} --list                    # list conflicts"
+        );
+    }
+
+    let decisions = parse_decisions(keep)?;
+    let mut all_side: Option<String> = None;
+    let mut file_sides: BTreeMap<PathBuf, String> = BTreeMap::new();
+    for d in decisions {
+        match d {
+            Decision::All(n) => {
+                if all_side.is_some() {
+                    bail!(
+                        "Multiple blanket --keep flags. Use one, or use PATH=NAME per-file."
+                    );
+                }
+                all_side = Some(n);
+            }
+            Decision::File(p, n) => {
+                file_sides.insert(p, n);
+            }
+        }
+    }
+
+    // Open repo at ws_path — matches what sync::rebase does.
+    let repo = git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open git repo at {}: {e}", ws_path.display()))?;
+    let repo_dyn: &dyn GitRepo = &repo;
+
+    // Determine the set of paths to process.
+    let target_paths: Vec<PathBuf> = if !file_sides.is_empty() && all_side.is_none() {
+        file_sides.keys().cloned().collect()
+    } else if !paths.is_empty() {
+        paths.iter().map(PathBuf::from).collect()
+    } else {
+        tree.conflicts.keys().cloned().collect()
+    };
+
+    if target_paths.is_empty() {
+        if format == OutputFormat::Json {
+            println!(r#"{{"status":"clean","workspace":"{workspace}","structured":true,"message":"No structured conflicts found."}}"#);
+        } else {
+            println!("No structured conflicts found in '{workspace}'.");
+        }
+        return Ok(true);
+    }
+
+    let mut resolved = Vec::<PathBuf>::new();
+    let mut skipped = Vec::<(PathBuf, String)>::new();
+
+    // Iterate over a snapshot of target paths; mutate `tree` as we go.
+    for rel in &target_paths {
+        let Some(conflict) = tree.conflicts.get(rel).cloned() else {
+            skipped.push((rel.clone(), "not in structured sidecar".into()));
+            continue;
+        };
+        let Some(target) = file_sides.get(rel).cloned().or_else(|| all_side.clone()) else {
+            skipped.push((rel.clone(), "no --keep side chosen for path".into()));
+            continue;
+        };
+        match apply_decision(repo_dyn, &conflict, &target) {
+            Ok(outcome) => match apply_outcome(ws_path, rel, outcome)? {
+                true => {
+                    tree.conflicts.remove(rel);
+                    resolved.push(rel.clone());
+                }
+                false => {
+                    skipped.push((rel.clone(), "decision produced no output".into()));
+                }
+            },
+            Err(e) => {
+                skipped.push((rel.clone(), e.to_string()));
+            }
+        }
+    }
+
+    // Persist updated sidecar (or delete if tree is fully empty).
+    write_conflict_tree_sidecar(root, workspace, &tree)?;
+
+    // If the sidecar now has no more conflicts, also sweep the legacy
+    // sidecar so later `find_conflicted_files` runs don't see stale state.
+    if tree.conflicts.is_empty() {
+        let legacy = legacy_sidecar_path(root, workspace);
+        if legacy.exists() {
+            let _ = std::fs::remove_file(&legacy);
+        }
+    }
+
+    // Reporting
+    if format == OutputFormat::Json {
+        let resolved_json: Vec<String> = resolved
+            .iter()
+            .map(|p| format!("\"{}\"", p.display()))
+            .collect();
+        let skipped_json: Vec<String> = skipped
+            .iter()
+            .map(|(p, r)| {
+                format!(
+                    r#"{{"path":"{}","reason":"{}"}}"#,
+                    p.display(),
+                    r.replace('"', "\\\"")
+                )
+            })
+            .collect();
+        println!(
+            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]}}"#,
+            resolved_json.join(","),
+            tree.conflicts.len(),
+            skipped_json.join(",")
+        );
+    } else {
+        for p in &resolved {
+            println!("  resolved: {}", p.display());
+        }
+        for (p, r) in &skipped {
+            eprintln!("  skipped: {} — {r}", p.display());
+        }
+        if resolved.is_empty() && skipped.is_empty() {
+            println!("Nothing to resolve.");
+        } else if tree.conflicts.is_empty() {
+            println!("\nAll structured conflicts resolved — workspace is ready for merge.");
+        } else {
+            println!(
+                "\n{} structured conflict(s) remaining.",
+                tree.conflicts.len()
+            );
+        }
+    }
+
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use maw_core::model::conflict::{ConflictSide};
+    use maw_core::model::ordering::OrderingKey;
+    use maw_core::model::patch::FileId;
+    use maw_core::model::types::{EpochId, WorkspaceId};
+
+    fn epoch() -> EpochId {
+        EpochId::new(&"e".repeat(40)).unwrap()
+    }
+    fn oid(c: char) -> GitOid {
+        GitOid::new(&c.to_string().repeat(40)).unwrap()
+    }
+    fn ord(ws: &str) -> OrderingKey {
+        OrderingKey::new(epoch(), WorkspaceId::new(ws).unwrap(), 1, 1_700_000_000_000)
+    }
+    fn side(ws: &str, c: char) -> ConflictSide {
+        ConflictSide::new(ws.to_owned(), oid(c), ord(ws))
+    }
+
+    #[test]
+    fn parse_decisions_rejects_cf_specs() {
+        let err = parse_decisions(&["cf-0=alice".into()]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cf-"), "msg={msg}");
+    }
+
+    #[test]
+    fn parse_decisions_parses_all_and_file() {
+        let specs =
+            parse_decisions(&["epoch".into(), "src/main.rs=bn-abc".into()]).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert!(matches!(&specs[0], Decision::All(n) if n == "epoch"));
+        assert!(matches!(
+            &specs[1],
+            Decision::File(p, n) if p == Path::new("src/main.rs") && n == "bn-abc"
+        ));
+    }
+
+    #[test]
+    fn parse_decisions_rejects_empty_side() {
+        let err = parse_decisions(&["src/x=".into()]).unwrap_err();
+        assert!(err.to_string().contains("empty side"));
+    }
+
+    #[test]
+    fn pick_single_side_oid_content_picks_by_name() {
+        let c = Conflict::Content {
+            path: PathBuf::from("a.rs"),
+            file_id: FileId::new(1),
+            base: Some(oid('0')),
+            sides: vec![side(EPOCH_LABEL, 'a'), side("bn-abc", 'b')],
+            atoms: vec![],
+        };
+        let got = pick_single_side_oid(&c, EPOCH_LABEL).unwrap();
+        assert_eq!(got, Some(oid('a')));
+        let got2 = pick_single_side_oid(&c, "bn-abc").unwrap();
+        assert_eq!(got2, Some(oid('b')));
+    }
+
+    #[test]
+    fn pick_single_side_oid_unknown_name_errors() {
+        let c = Conflict::Content {
+            path: PathBuf::from("a.rs"),
+            file_id: FileId::new(1),
+            base: None,
+            sides: vec![side("alice", 'a'), side("bob", 'b')],
+            atoms: vec![],
+        };
+        let err = pick_single_side_oid(&c, "nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("nonexistent"));
+        assert!(msg.contains("alice"));
+        assert!(msg.contains("bob"));
+    }
+
+    #[test]
+    fn pick_single_side_modify_delete_deleter_returns_none() {
+        let c = Conflict::ModifyDelete {
+            path: PathBuf::from("x"),
+            file_id: FileId::new(2),
+            modifier: side("alice", 'a'),
+            deleter: side("bob", 'b'),
+            modified_content: oid('a'),
+        };
+        let mod_side = pick_single_side_oid(&c, "alice").unwrap();
+        assert_eq!(mod_side, Some(oid('a')));
+        let del_side = pick_single_side_oid(&c, "bob").unwrap();
+        assert!(del_side.is_none(), "deleter side should return None");
+    }
+
+    #[test]
+    fn all_sides_content_returns_every_side() {
+        let c = Conflict::Content {
+            path: PathBuf::from("a.rs"),
+            file_id: FileId::new(1),
+            base: Some(oid('0')),
+            sides: vec![side("a", 'a'), side("b", 'b'), side("c", 'c')],
+            atoms: vec![],
+        };
+        let oids = all_sides(&c);
+        assert_eq!(oids, vec![oid('a'), oid('b'), oid('c')]);
+    }
+
+    #[test]
+    fn read_conflict_tree_sidecar_missing_returns_none() {
+        let td = tempfile::tempdir().unwrap();
+        let got = read_conflict_tree_sidecar(td.path(), "no-such-ws");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn read_conflict_tree_sidecar_malformed_returns_none() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = sidecar_dir(td.path(), "broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("conflict-tree.json"), "not json").unwrap();
+        let got = read_conflict_tree_sidecar(td.path(), "broken");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn read_conflict_tree_sidecar_roundtrip() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = sidecar_dir(td.path(), "ok");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(
+            PathBuf::from("src/x.rs"),
+            Conflict::AddAdd {
+                path: PathBuf::from("src/x.rs"),
+                sides: vec![side(EPOCH_LABEL, 'a'), side("ws-b", 'b')],
+            },
+        );
+        let json = serde_json::to_string_pretty(&tree).unwrap();
+        std::fs::write(dir.join("conflict-tree.json"), json).unwrap();
+
+        let got = read_conflict_tree_sidecar(td.path(), "ok").expect("parsed");
+        assert_eq!(got, tree);
+    }
+
+    #[test]
+    fn write_conflict_tree_sidecar_deletes_when_empty() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = sidecar_dir(td.path(), "wipe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conflict-tree.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        let tree = ConflictTree::new(epoch());
+        assert!(tree.is_empty());
+        write_conflict_tree_sidecar(td.path(), "wipe", &tree).unwrap();
+        assert!(!path.exists(), "empty tree should have removed sidecar");
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end tests using a real git repo
+    //
+    // These set up a tmp git repo that looks workspace-shaped:
+    //   <root>/         — bare-ish container (just `git init` + a `ws/` dir)
+    //   <root>/ws/<w>/  — the workspace worktree we pass as `ws_path`
+    //
+    // The workspace itself is the same repo (so `GixRepo::open(ws_path)` walks
+    // up and finds `<root>/.git`). That's enough for `read_blob` to work — we
+    // only need OID lookups, not HEAD/worktree semantics.
+    // -----------------------------------------------------------------------
+
+    /// Init a git repo inside the ws_path directory (so `GixRepo::open(ws_path)`
+    /// finds it without ancestor discovery). Returns
+    /// `(root_tempdir, root_path, ws_path, repo_handle)`.
+    ///
+    /// Real maw workspaces have a `.git` gitfile pointing to the common dir;
+    /// for unit tests we initialize a standalone repo inside the workspace
+    /// directory, which is enough for `read_blob` / `write_blob` round-trips.
+    fn setup_ws_repo(ws_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf, maw_git::GixRepo) {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().to_path_buf();
+
+        let ws_path = root.join("ws").join(ws_name);
+        std::fs::create_dir_all(&ws_path).unwrap();
+
+        std::process::Command::new("git")
+            .args(["init", ws_path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+
+        let repo = maw_git::GixRepo::open(&ws_path).unwrap();
+        (td, root, ws_path, repo)
+    }
+
+    /// Write a blob into the repo and return its `GitOid` (maw-core flavor).
+    fn write_blob(repo: &maw_git::GixRepo, bytes: &[u8]) -> GitOid {
+        use maw_git::GitRepo;
+        let git_oid = repo.write_blob(bytes).unwrap();
+        GitOid::new(&git_oid.to_string()).unwrap()
+    }
+
+    /// Build an epoch-vs-workspace content conflict with real blobs.
+    fn make_content_conflict(
+        path: &str,
+        epoch_bytes: &[u8],
+        ws_bytes: &[u8],
+        ws_name: &str,
+        repo: &maw_git::GixRepo,
+    ) -> (PathBuf, Conflict) {
+        let epoch_oid = write_blob(repo, epoch_bytes);
+        let ws_oid = write_blob(repo, ws_bytes);
+        let p = PathBuf::from(path);
+        (
+            p.clone(),
+            Conflict::Content {
+                path: p,
+                file_id: FileId::new(1),
+                base: None,
+                sides: vec![
+                    ConflictSide::new(EPOCH_LABEL.to_owned(), epoch_oid, ord("ws")),
+                    ConflictSide::new(ws_name.to_owned(), ws_oid, ord(ws_name)),
+                ],
+                atoms: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn resolve_structured_keep_epoch_applies_epoch_side() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-a");
+        let (rel, conflict) =
+            make_content_conflict("src/a.rs", b"EPOCH_CONTENT\n", b"WS_CONTENT\n", "ws-a", &repo);
+        // Write initial worktree file with marker soup
+        std::fs::create_dir_all(ws_path.join("src")).unwrap();
+        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-a",
+            &ws_path,
+            &[],
+            &["epoch".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        let after = std::fs::read(ws_path.join(&rel)).unwrap();
+        assert_eq!(after, b"EPOCH_CONTENT\n");
+        // Sidecar should be gone (tree empty).
+        let sp = structured_sidecar_path(&root, "ws-a");
+        assert!(!sp.exists(), "sidecar should be removed when empty");
+    }
+
+    #[test]
+    fn resolve_structured_keep_workspace_applies_ws_side() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-b");
+        let (rel, conflict) =
+            make_content_conflict("x.rs", b"EPOCH\n", b"WS_SIDE\n", "ws-b", &repo);
+        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-b",
+            &ws_path,
+            &[],
+            &["ws-b".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        let after = std::fs::read(ws_path.join(&rel)).unwrap();
+        assert_eq!(after, b"WS_SIDE\n");
+    }
+
+    #[test]
+    fn resolve_structured_keep_both_concatenates() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-c");
+        let (rel, conflict) =
+            make_content_conflict("y.rs", b"EPOCH_A\n", b"WS_B\n", "ws-c", &repo);
+        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-c",
+            &ws_path,
+            &[],
+            &["both".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(ws_path.join(&rel)).unwrap();
+        // Order: epoch side first (as seeded), then workspace side.
+        assert!(after.contains("EPOCH_A"), "missing epoch content: {after}");
+        assert!(after.contains("WS_B"), "missing workspace content: {after}");
+        let epoch_pos = after.find("EPOCH_A").unwrap();
+        let ws_pos = after.find("WS_B").unwrap();
+        assert!(
+            epoch_pos < ws_pos,
+            "epoch side should come first, got: {after}"
+        );
+        // No conflict markers should appear.
+        assert!(!after.contains("<<<<<<<"), "unexpected marker: {after}");
+    }
+
+    #[test]
+    fn resolve_structured_updates_sidecar_after_keep() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-d");
+        let (rel_a, c_a) =
+            make_content_conflict("a.rs", b"EPOCH_A\n", b"WS_A\n", "ws-d", &repo);
+        let (rel_b, c_b) =
+            make_content_conflict("b.rs", b"EPOCH_B\n", b"WS_B\n", "ws-d", &repo);
+        std::fs::write(ws_path.join(&rel_a), b"<<<<<<< markers\n").unwrap();
+        std::fs::write(ws_path.join(&rel_b), b"<<<<<<< markers\n").unwrap();
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel_a.clone(), c_a);
+        tree.conflicts.insert(rel_b.clone(), c_b.clone());
+
+        // Persist sidecar, then only resolve `a.rs`.
+        write_conflict_tree_sidecar(&root, "ws-d", &tree).unwrap();
+
+        run_structured(
+            &root,
+            "ws-d",
+            &ws_path,
+            &[rel_a.display().to_string()],
+            &[format!("{}=epoch", rel_a.display())],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        // Structured sidecar should now only contain b.rs.
+        let after = read_conflict_tree_sidecar(&root, "ws-d").expect("sidecar still present");
+        assert_eq!(after.conflicts.len(), 1);
+        assert!(after.conflicts.contains_key(&rel_b));
+        assert!(!after.conflicts.contains_key(&rel_a));
+
+        // a.rs was written from epoch side.
+        let a_bytes = std::fs::read(ws_path.join(&rel_a)).unwrap();
+        assert_eq!(a_bytes, b"EPOCH_A\n");
+        // b.rs left untouched (still has our marker placeholder).
+        let b_bytes = std::fs::read(ws_path.join(&rel_b)).unwrap();
+        assert_eq!(b_bytes, b"<<<<<<< markers\n");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_legacy_when_structured_sidecar_missing() {
+        // Verified at the dispatch level: `read_conflict_tree_sidecar` returns
+        // None if the file doesn't exist, so `resolve::run` skips the
+        // structured branch. Here we just assert the reader's None behavior
+        // on a fully-shaped workspace to lock the invariant in place.
+        let (_td, root, _ws_path, _repo) = setup_ws_repo("ws-e");
+        // No conflict-tree.json written.
+        let got = read_conflict_tree_sidecar(&root, "ws-e");
+        assert!(
+            got.is_none(),
+            "missing sidecar must trigger legacy fallback"
+        );
+
+        // And once a malformed sidecar is present the reader still returns
+        // None (i.e. falls back to legacy rather than raising).
+        let dir = sidecar_dir(&root, "ws-e");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("conflict-tree.json"), "not-json").unwrap();
+        assert!(read_conflict_tree_sidecar(&root, "ws-e").is_none());
+    }
+
+    #[test]
+    fn resolve_structured_list_json_reports_paths() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-f");
+        let (rel_a, c_a) =
+            make_content_conflict("a.rs", b"E\n", b"W\n", "ws-f", &repo);
+        let (rel_b, c_b) =
+            make_content_conflict("b.rs", b"E\n", b"W\n", "ws-f", &repo);
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel_a.clone(), c_a);
+        tree.conflicts.insert(rel_b.clone(), c_b);
+
+        // List mode — should not touch worktree.
+        std::fs::write(ws_path.join(&rel_a), b"original-a").unwrap();
+        std::fs::write(ws_path.join(&rel_b), b"original-b").unwrap();
+
+        run_structured(
+            &root,
+            "ws-f",
+            &ws_path,
+            &[],
+            &[],
+            true,
+            OutputFormat::Json,
+            tree,
+        )
+        .unwrap();
+
+        // Worktree content unchanged.
+        assert_eq!(std::fs::read(ws_path.join(&rel_a)).unwrap(), b"original-a");
+        assert_eq!(std::fs::read(ws_path.join(&rel_b)).unwrap(), b"original-b");
+    }
+
+    #[test]
+    fn resolve_structured_per_atom_deferred_documented() {
+        // Per-atom resolution is intentionally deferred in V1. This test
+        // locks the current behavior: a `cf-N=NAME` spec on the structured
+        // path is rejected with an error pointing to the atom follow-up.
+        //
+        // When per-atom lands, replace this test with a positive one.
+        let err = parse_decisions(&["cf-0=alice".into()]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Per-block") || msg.contains("cf-"),
+            "expected cf-N rejection, got: {msg}"
+        );
+        assert!(
+            msg.contains("follow-up") || msg.contains("structured"),
+            "error should hint at deferred atom support, got: {msg}"
+        );
+    }
+}

@@ -104,6 +104,16 @@ pub fn run(
         );
     }
 
+    // bn-3rah: prefer the structured sidecar when present. Falls back to the
+    // legacy marker-scan below when absent or unparseable. This keeps
+    // pre-gjm8 workspaces working unchanged.
+    if let Some(tree) = super::resolve_structured::read_conflict_tree_sidecar(&root, workspace) {
+        return super::resolve_structured::run_structured(
+            &root, workspace, &ws_path, paths, keep, list, format, tree,
+        )
+        .map(|_| ());
+    }
+
     if list {
         return list_conflicts(&ws_path, workspace, paths, format);
     }
