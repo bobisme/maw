@@ -165,9 +165,19 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
 
     // Update the per-workspace epoch ref to the new epoch. After advance,
     // HEAD points to the new epoch, so status() must know the new base.
+    // Silent failure here leaves a stale ref → downstream misreports state
+    // (bn-3pkx). Warn and continue; the worktree is already at the new epoch.
     if let Ok(oid) = maw_core::model::types::GitOid::new(&new_epoch) {
         let epoch_ref = manifold_refs::workspace_epoch_ref(name);
-        let _ = manifold_refs::write_ref(&root, &epoch_ref, &oid);
+        if let Err(e) = manifold_refs::write_ref(&root, &epoch_ref, &oid) {
+            tracing::warn!(
+                workspace = %name,
+                epoch_ref = %epoch_ref,
+                oid = %oid,
+                error = %e,
+                "failed to update workspace epoch ref after advance — downstream commands may see a stale epoch"
+            );
+        }
     }
 
     // Step 3: Replay the snapshot if there was one.

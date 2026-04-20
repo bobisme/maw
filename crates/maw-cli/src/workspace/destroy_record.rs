@@ -63,7 +63,7 @@ pub fn write_destroy_record(
     capture: Option<&CaptureResult>,
     destroy_reason: DestroyReason,
 ) -> Result<PathBuf> {
-    let destroyed_at = super::now_timestamp_iso8601();
+    let destroyed_at = super::now_timestamp_iso8601_precise();
     let filename_ts = destroyed_at.replace(':', "-");
 
     let destroy_dir = root
@@ -620,9 +620,8 @@ mod tests {
         // Write first destroy record.
         write_destroy_record(root, ws_name, &base, &head1, None, DestroyReason::Destroy).unwrap();
 
-        // The timestamp uses second-level granularity, so we must wait at
-        // least one second for the filenames to differ.
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // The timestamp uses nanosecond-level granularity (bn-2dy4), so no
+        // sleep is needed between writes to avoid filename collision.
 
         // Write second destroy record.
         write_destroy_record(
@@ -655,5 +654,31 @@ mod tests {
         // First record is still readable.
         let first_record = read_record(root, ws_name, &records[0]).unwrap();
         assert_eq!(first_record.final_head, "1".repeat(40));
+    }
+
+    /// Regression test for bn-2dy4: rapid back-to-back destroy records must
+    /// use distinct timestamp-based filenames (no collision even within the
+    /// same millisecond).
+    #[test]
+    fn back_to_back_destroys_produce_distinct_filenames() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let ws_name = "rapid-destroy";
+
+        let base = EpochId::new(&"a".repeat(40)).unwrap();
+        let head = GitOid::new(&"b".repeat(40)).unwrap();
+
+        // Write 10 destroy records in a tight loop — no sleep.
+        for _ in 0..10 {
+            write_destroy_record(root, ws_name, &base, &head, None, DestroyReason::Destroy)
+                .unwrap();
+        }
+
+        let records = list_record_files(root, ws_name).unwrap();
+        assert_eq!(
+            records.len(),
+            10,
+            "expected 10 distinct destroy records, got: {records:?}"
+        );
     }
 }

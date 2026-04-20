@@ -1494,6 +1494,10 @@ mod tests {
             assert!(out.status.success(), "git {args:?} failed");
         }
 
+        // Create `.manifold/` so `repo_root_from_worktree`'s layout validation
+        // (bn-2bow) recognizes this as a maw repo root.
+        fs::create_dir_all(root.join(".manifold")).unwrap();
+
         fs::write(root.join("README.md"), "# Test\n").unwrap();
         let out = Command::new("git")
             .args(["add", "README.md"])

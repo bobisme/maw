@@ -1651,6 +1651,30 @@ pub(crate) fn now_timestamp_iso8601() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
 }
 
+/// Nanosecond-precision variant of `now_timestamp_iso8601`.
+///
+/// Use this when the timestamp is embedded in a filename or git ref name
+/// that must be unique across rapid back-to-back calls (e.g., destroy
+/// records and recovery refs). Standard millisecond precision is not
+/// sufficient for tests or scripts that create two artifacts in quick
+/// succession (bn-2dy4).
+pub(crate) fn now_timestamp_iso8601_precise() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    let total_secs = dur.as_secs();
+    let nanos = dur.subsec_nanos();
+
+    let sec = total_secs % 60;
+    let min = (total_secs / 60) % 60;
+    let hour = (total_secs / 3_600) % 24;
+    let days = total_secs / 86_400;
+
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{nanos:09}Z")
+}
+
 const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468;
     let era = z / 146_097;

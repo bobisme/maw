@@ -136,9 +136,19 @@ pub(super) fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str
     // Update the per-workspace creation epoch ref to the new epoch.
     // After sync, the workspace is rebased onto the new epoch, so
     // the epoch ref should reflect the new base.
+    // Silent failure here leaves a stale ref → downstream misreports state
+    // (bn-3pkx). Warn and continue; the worktree is already at the new epoch.
     if let Ok(oid) = maw_core::model::types::GitOid::new(epoch_oid) {
         let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
-        let _ = manifold_refs::write_ref(root, &epoch_ref, &oid);
+        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &oid) {
+            tracing::warn!(
+                workspace = %ws_name,
+                epoch_ref = %epoch_ref,
+                oid = %oid,
+                error = %e,
+                "failed to update workspace epoch ref after sync — downstream commands may see a stale epoch"
+            );
+        }
     }
 
     println!(

@@ -237,10 +237,33 @@ pub(super) fn rebase_workspace(
                     commits.len()
                 );
                 // Reset any index state for the next cherry-pick.
-                let _ = Command::new("git")
+                // Warn on failure (bn-2blj) so a silent dirty index doesn't
+                // poison the next cherry-pick in the loop.
+                match Command::new("git")
                     .args(["reset", "HEAD"])
                     .current_dir(ws_path)
-                    .output();
+                    .output()
+                {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        tracing::warn!(
+                            commit = %short_sha,
+                            ws_path = %ws_path.display(),
+                            exit = ?out.status.code(),
+                            stderr = %stderr.trim(),
+                            "git reset HEAD failed between cherry-picks — next replay may see a dirty index"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            commit = %short_sha,
+                            ws_path = %ws_path.display(),
+                            error = %e,
+                            "failed to invoke git reset HEAD between cherry-picks"
+                        );
+                    }
+                }
             } else {
                 let commit_output = Command::new("git")
                     .args(["commit", "--no-verify", "-m", &msg])
@@ -382,9 +405,20 @@ pub(super) fn rebase_workspace(
     }
 
     // Step 3: Update workspace epoch ref.
+    // Silent failure here leaves a stale ref and makes downstream commands
+    // misreport the workspace state (bn-3pkx). Surface as warn; we continue
+    // because Step 4 still records conflict metadata on disk.
     if let Ok(oid) = maw_core::model::types::GitOid::new(new_epoch) {
         let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
-        let _ = manifold_refs::write_ref(root, &epoch_ref, &oid);
+        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &oid) {
+            tracing::warn!(
+                workspace = %ws_name,
+                epoch_ref = %epoch_ref,
+                oid = %oid,
+                error = %e,
+                "failed to update workspace epoch ref after rebase — downstream commands may see a stale epoch"
+            );
+        }
     }
 
     // Step 4: Record conflict metadata and update workspace metadata.
@@ -675,7 +709,18 @@ pub(super) fn relabel_conflict_markers(ws_path: &Path, rel_path: &str, ws_name: 
     let full_path = ws_path.join(rel_path);
     let content = match std::fs::read_to_string(&full_path) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            // bn-lc1j: surface read failure so `maw ws resolve --keep epoch`
+            // not matching markers on this file can be debugged.
+            tracing::warn!(
+                path = %full_path.display(),
+                workspace = %ws_name,
+                error = %e,
+                "failed to read conflicted file for marker relabel — \
+                 `maw ws resolve` may not match markers on this file"
+            );
+            return;
+        }
     };
 
     let mut output = String::with_capacity(content.len());
@@ -690,7 +735,17 @@ pub(super) fn relabel_conflict_markers(ws_path: &Path, rel_path: &str, ws_name: 
         output.push('\n');
     }
 
-    let _ = std::fs::write(&full_path, output);
+    if let Err(e) = std::fs::write(&full_path, output) {
+        // bn-lc1j: surface write failure. File keeps git's default markers,
+        // so `maw ws resolve --keep epoch` won't match them.
+        tracing::warn!(
+            path = %full_path.display(),
+            workspace = %ws_name,
+            error = %e,
+            "failed to write relabeled conflict markers — \
+             `maw ws resolve` may not match markers on this file"
+        );
+    }
 }
 
 #[cfg(test)]

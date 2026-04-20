@@ -156,7 +156,7 @@ fn pin_head_only(
     ws_name: &str,
     head_oid: &GitOid,
 ) -> Result<Option<CaptureResult>> {
-    let timestamp = super::now_timestamp_iso8601();
+    let timestamp = super::now_timestamp_iso8601_precise();
     let ref_name = recovery_ref(ws_name, &timestamp);
 
     // Pin the ref in the repo (use the repo root, not the worktree)
@@ -212,10 +212,7 @@ fn capture_dirty_worktree(
     let stash_result = repo.stash_create().map_err(|e| {
         // Restore index state before bailing
         // TODO(gix): replace git reset with GitRepo trait method
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
+        warn_on_reset_failure(ws_path, "capture-stash-create-failure");
         anyhow::anyhow!("git stash create failed during capture: {e}")
     })?;
 
@@ -240,10 +237,7 @@ fn capture_dirty_worktree(
             // (races, unusual sparse checkouts, or stash plumbing bugs),
             // so we guard it explicitly.
             // TODO(gix): replace git reset with GitRepo trait method
-            let _ = Command::new("git")
-                .args(["reset"])
-                .current_dir(ws_path)
-                .output();
+            warn_on_reset_failure(ws_path, "capture-stash-create-none");
             tracing::warn!(
                 dirty_paths = ?dirty_paths,
                 "stash_create returned None despite dirty paths"
@@ -263,10 +257,7 @@ fn capture_dirty_worktree(
     // Restore the index to its pre-add state (don't leave staged changes
     // behind — the workspace is about to be destroyed, but be clean anyway)
     // TODO(gix): replace git reset with GitRepo trait method
-    let _ = Command::new("git")
-        .args(["reset"])
-        .current_dir(ws_path)
-        .output();
+    warn_on_reset_failure(ws_path, "capture-restore-index");
 
     let captured_dirty_paths: Vec<String> = dirty_paths
         .iter()
@@ -283,7 +274,7 @@ fn capture_dirty_worktree(
     maw::fp!("FP_CAPTURE_BEFORE_PIN")?;
 
     // Pin the commit under a recovery ref
-    let timestamp = super::now_timestamp_iso8601();
+    let timestamp = super::now_timestamp_iso8601_precise();
     let ref_name = recovery_ref(ws_name, &timestamp);
 
     let repo_root = repo_root_from_worktree(ws_path)?;
@@ -304,6 +295,39 @@ fn capture_dirty_worktree(
         dirty_paths: captured_dirty_paths,
         mode: CaptureMode::WorktreeCapture,
     }))
+}
+
+/// Run `git reset` and surface any failure via `tracing::warn!` rather than
+/// silently swallowing it (bn-2blj). We're always in a cleanup path here so
+/// the caller continues regardless, but a visible warning is needed to debug
+/// cases where the index is left dirty for the next operation.
+fn warn_on_reset_failure(ws_path: &Path, context: &str) {
+    // TODO(gix): replace git reset with GitRepo trait method
+    match Command::new("git")
+        .args(["reset"])
+        .current_dir(ws_path)
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                context = %context,
+                ws_path = %ws_path.display(),
+                exit = ?out.status.code(),
+                stderr = %stderr.trim(),
+                "git reset failed during capture cleanup — index may be dirty"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                context = %context,
+                ws_path = %ws_path.display(),
+                error = %e,
+                "failed to invoke git reset during capture cleanup"
+            );
+        }
+    }
 }
 
 fn stage_all_for_capture(ws_path: &Path) -> Result<Vec<String>> {
@@ -402,6 +426,20 @@ fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
             .parent()
             .context("cannot determine repo root from nested common dir")?
             .to_path_buf();
+    }
+
+    // Validate that the derived root looks like a real maw repo root.
+    // Without this check, a non-standard layout silently returns a wrong
+    // path and recovery refs get pinned under an unrelated repo's
+    // namespace (bn-2bow).
+    let has_ws_dir = root.join("ws").is_dir();
+    let has_manifold_dir = root.join(".manifold").is_dir();
+    if !has_ws_dir && !has_manifold_dir {
+        bail!(
+            "derived repo root {} does not contain `ws/` or `.manifold/` — \
+             refusing to pin recovery ref under an unrecognized layout",
+            root.display()
+        );
     }
 
     Ok(root)
@@ -518,6 +556,10 @@ mod tests {
             .output()
             .unwrap();
 
+        // Create a `.manifold/` directory so `repo_root_from_worktree`'s
+        // layout validation (bn-2bow) recognizes this as a maw repo root.
+        fs::create_dir_all(root.join(".manifold")).unwrap();
+
         fs::write(root.join("README.md"), "# Test\n").unwrap();
         Command::new("git")
             .args(["add", "README.md"])
@@ -544,6 +586,65 @@ mod tests {
     // -----------------------------------------------------------------------
     // recovery_ref formatting
     // -----------------------------------------------------------------------
+
+    /// Regression test for bn-2bow: a git repo that looks nothing like a
+    /// maw layout (no `ws/`, no `.manifold/`) must be rejected by
+    /// `repo_root_from_worktree` rather than silently returning a wrong path.
+    #[test]
+    fn repo_root_validation_rejects_non_maw_layout() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+
+        // No .manifold/ or ws/ dir → should error
+        let result = repo_root_from_worktree(&root);
+        assert!(
+            result.is_err(),
+            "expected error when layout lacks ws/ and .manifold/, got {result:?}"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("does not contain `ws/` or `.manifold/`"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn repo_root_validation_accepts_manifold_dir() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        fs::create_dir_all(root.join(".manifold")).unwrap();
+
+        let result = repo_root_from_worktree(&root).unwrap();
+        assert_eq!(result, root);
+    }
+
+    #[test]
+    fn repo_root_validation_accepts_ws_dir() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        fs::create_dir_all(root.join("ws")).unwrap();
+
+        let result = repo_root_from_worktree(&root).unwrap();
+        assert_eq!(result, root);
+    }
 
     #[test]
     fn recovery_ref_format() {
