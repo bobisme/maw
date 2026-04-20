@@ -526,6 +526,51 @@ fn remove_stale_files(
     Ok(())
 }
 
+/// Update HEAD to point directly at `oid` (detached HEAD).
+///
+/// For a linked worktree, this updates the per-worktree HEAD file under
+/// `.git/worktrees/<name>/HEAD` — the common-dir HEAD is untouched. For a
+/// non-worktree repo, it updates `.git/HEAD`.
+///
+/// Writes the canonical detached-HEAD format: 40 hex bytes followed by a
+/// single `\n`. Uses an atomic write (create temp file + rename) so a
+/// concurrent reader never sees a partial HEAD.
+pub fn set_head(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
+    use std::io::Write as _;
+
+    let git_dir = repo.repo.git_dir();
+    let head_path = git_dir.join("HEAD");
+    let tmp_path = git_dir.join("HEAD.maw-tmp");
+
+    let contents = format!("{oid}\n");
+
+    // Atomic write: write temp then rename.
+    {
+        let mut f = std::fs::File::create(&tmp_path).map_err(|e| GitError::BackendError {
+            message: format!("failed to create temp HEAD at {}: {e}", tmp_path.display()),
+        })?;
+        f.write_all(contents.as_bytes())
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to write temp HEAD: {e}"),
+            })?;
+        f.sync_all().map_err(|e| GitError::BackendError {
+            message: format!("failed to fsync temp HEAD: {e}"),
+        })?;
+    }
+    std::fs::rename(&tmp_path, &head_path).map_err(|e| {
+        // Best-effort cleanup; swallow the unlink error to surface the rename failure.
+        let _ = std::fs::remove_file(&tmp_path);
+        GitError::BackendError {
+            message: format!(
+                "failed to rename temp HEAD into place at {}: {e}",
+                head_path.display()
+            ),
+        }
+    })?;
+
+    Ok(())
+}
+
 pub fn read_index(repo: &GixRepo) -> Result<Vec<IndexEntry>, GitError> {
     let index = repo.repo.open_index().map_err(|e| GitError::BackendError {
         message: format!("failed to open index: {e}"),

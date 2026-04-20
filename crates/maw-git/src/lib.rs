@@ -28,6 +28,7 @@ mod lfs_clean;
 mod objects_impl;
 mod push_impl;
 mod refs_impl;
+mod rev_walk_impl;
 mod stash_impl;
 mod status_impl;
 mod worktree_impl;

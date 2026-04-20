@@ -218,6 +218,15 @@ impl GitRepo for GixRepo {
         crate::diff_impl::diff_trees(self, old, new)
     }
 
+    fn diff_trees_with_renames(
+        &self,
+        old: Option<GitOid>,
+        new: GitOid,
+        similarity_pct: u32,
+    ) -> Result<Vec<DiffEntry>, GitError> {
+        crate::diff_impl::diff_trees_with_renames(self, old, new, similarity_pct)
+    }
+
     // === Worktrees ===
     fn worktree_add(&self, name: &str, target: GitOid, path: &Path) -> Result<(), GitError> {
         crate::worktree_impl::worktree_add(self, name, target, path)
@@ -275,5 +284,19 @@ impl GitRepo for GixRepo {
 
     fn merge_base(&self, a: GitOid, b: GitOid) -> Result<Option<GitOid>, GitError> {
         crate::refs_impl::merge_base(self, a, b)
+    }
+
+    fn walk_commits(
+        &self,
+        from: GitOid,
+        to: GitOid,
+        reverse: bool,
+    ) -> Result<Vec<GitOid>, GitError> {
+        crate::rev_walk_impl::walk_commits(self, from, to, reverse)
+    }
+
+    // === HEAD ===
+    fn set_head(&self, oid: GitOid) -> Result<(), GitError> {
+        crate::checkout_impl::set_head(self, oid)
     }
 }

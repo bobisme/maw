@@ -269,6 +269,25 @@ pub trait GitRepo {
     /// Replaces: `git diff-tree -r <old> <new>`.
     fn diff_trees(&self, old: Option<GitOid>, new: GitOid) -> Result<Vec<DiffEntry>, GitError>;
 
+    /// Diff two trees with rename detection.
+    ///
+    /// Like [`diff_trees`](Self::diff_trees) but matching delete+add pairs
+    /// with similarity >= `similarity_pct` are collapsed into a single
+    /// [`ChangeType::Renamed`] entry, preserving the original path in
+    /// `from`.
+    ///
+    /// `similarity_pct` is clamped to `0..=100`. `100` requires exact content
+    /// match (pure renames / mode-only changes). A value of `50` mirrors
+    /// git's built-in rename-threshold default.
+    ///
+    /// Replaces: `git diff-tree -M<similarity> -r <old> <new>`.
+    fn diff_trees_with_renames(
+        &self,
+        old: Option<GitOid>,
+        new: GitOid,
+        similarity_pct: u32,
+    ) -> Result<Vec<DiffEntry>, GitError>;
+
     // -----------------------------------------------------------------------
     // Worktrees (~20 call sites)
     //
@@ -381,4 +400,39 @@ pub trait GitRepo {
     ///
     /// Replaces: `git merge-base <a> <b>`.
     fn merge_base(&self, a: GitOid, b: GitOid) -> Result<Option<GitOid>, GitError>;
+
+    /// Walk commits in the range `from..to`.
+    ///
+    /// Returns commits reachable from `to` that are NOT reachable from
+    /// `from` — matching `git rev-list from..to` semantics. When
+    /// `from == to`, the range is empty.
+    ///
+    /// `reverse = true` returns oldest-first (suitable for rebase replay
+    /// order). `reverse = false` returns newest-first.
+    ///
+    /// Replaces: `git rev-list [--reverse] from..to`.
+    fn walk_commits(
+        &self,
+        from: GitOid,
+        to: GitOid,
+        reverse: bool,
+    ) -> Result<Vec<GitOid>, GitError>;
+
+    // -----------------------------------------------------------------------
+    // HEAD manipulation
+    // -----------------------------------------------------------------------
+
+    /// Set HEAD to point directly at `oid` (detached HEAD).
+    ///
+    /// Writes a detached-HEAD reference to the current working repository
+    /// (for a linked worktree, this updates the worktree's own HEAD, not
+    /// the common-dir HEAD).
+    ///
+    /// Does NOT update the working tree or the index — pair with
+    /// [`checkout_tree`](Self::checkout_tree) if worktree materialization
+    /// is required.
+    ///
+    /// Replaces: `git update-ref --no-deref HEAD <oid>` /
+    /// `git checkout --detach <oid>` (without the worktree update).
+    fn set_head(&self, oid: GitOid) -> Result<(), GitError>;
 }

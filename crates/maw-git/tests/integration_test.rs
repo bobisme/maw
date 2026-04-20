@@ -1132,3 +1132,504 @@ fn count_dirty_tracked_ignores_mtime_skew_when_content_matches() {
         "actual content change must be reported dirty"
     );
 }
+
+// ===========================================================================
+// walk_commits (bn-22zz / gjm8 Phase 6)
+// ===========================================================================
+
+/// Build a linear chain: commit each tree-entry produced by `files[i]` on top
+/// of the previous, starting from the single-commit `setup_repo_with_commit`
+/// baseline. Returns the list of produced commit OIDs in order (oldest first).
+fn build_linear_chain(
+    repo: &GixRepo,
+    base: GitOid,
+    files: &[(&str, &[u8])],
+) -> Vec<GitOid> {
+    let mut parent = base;
+    let mut out = Vec::new();
+    for (name, content) in files {
+        let blob = repo.write_blob(content).unwrap();
+        let tree = repo
+            .write_tree(&[TreeEntry {
+                name: (*name).to_string(),
+                mode: EntryMode::Blob,
+                oid: blob,
+            }])
+            .unwrap();
+        let commit = repo
+            .create_commit(tree, &[parent], &format!("commit {name}"), None)
+            .unwrap();
+        out.push(commit);
+        parent = commit;
+    }
+    out
+}
+
+#[test]
+fn walk_commits_empty_range_when_from_equals_to() {
+    let (_dir, repo, head, _) = setup_repo_with_commit();
+    let forward = repo.walk_commits(head, head, false).unwrap();
+    let reverse = repo.walk_commits(head, head, true).unwrap();
+    assert!(forward.is_empty(), "empty range should yield empty Vec");
+    assert!(reverse.is_empty(), "empty range should yield empty Vec");
+}
+
+#[test]
+fn walk_commits_linear_history_reverse_true_is_oldest_first() {
+    let (_dir, repo, base, _) = setup_repo_with_commit();
+    // Build three commits on top of base.
+    let chain = build_linear_chain(
+        &repo,
+        base,
+        &[("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")],
+    );
+    let tip = *chain.last().unwrap();
+
+    let walk = repo.walk_commits(base, tip, true).unwrap();
+    assert_eq!(
+        walk, chain,
+        "reverse=true should yield commits oldest-first matching creation order"
+    );
+}
+
+#[test]
+fn walk_commits_linear_history_reverse_false_is_newest_first() {
+    let (_dir, repo, base, _) = setup_repo_with_commit();
+    let chain = build_linear_chain(
+        &repo,
+        base,
+        &[("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")],
+    );
+    let tip = *chain.last().unwrap();
+
+    let walk = repo.walk_commits(base, tip, false).unwrap();
+    let mut expected = chain.clone();
+    expected.reverse();
+    assert_eq!(
+        walk, expected,
+        "reverse=false should yield commits newest-first"
+    );
+}
+
+#[test]
+fn walk_commits_excludes_the_from_commit_itself() {
+    // git rev-list from..to never includes `from` in the result.
+    let (_dir, repo, base, _) = setup_repo_with_commit();
+    let chain = build_linear_chain(&repo, base, &[("a.txt", b"a")]);
+    let tip = chain[0];
+
+    let walk = repo.walk_commits(base, tip, true).unwrap();
+    assert_eq!(walk, vec![tip]);
+    assert!(
+        !walk.contains(&base),
+        "from commit must not appear in from..to result"
+    );
+}
+
+#[test]
+fn walk_commits_includes_merge_commit_in_range() {
+    let (_dir, repo, base, _tree) = setup_repo_with_commit();
+
+    // Branch A: base -> a
+    let blob_a = repo.write_blob(b"A").unwrap();
+    let tree_a = repo
+        .write_tree(&[TreeEntry {
+            name: "a.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob_a,
+        }])
+        .unwrap();
+    let commit_a = repo
+        .create_commit(tree_a, &[base], "branch a", None)
+        .unwrap();
+
+    // Branch B: base -> b
+    let blob_b = repo.write_blob(b"B").unwrap();
+    let tree_b = repo
+        .write_tree(&[TreeEntry {
+            name: "b.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob_b,
+        }])
+        .unwrap();
+    let commit_b = repo
+        .create_commit(tree_b, &[base], "branch b", None)
+        .unwrap();
+
+    // Merge commit with two parents (tree can be either branch's tree).
+    let merge_commit = repo
+        .create_commit(tree_a, &[commit_a, commit_b], "merge b into a", None)
+        .unwrap();
+
+    let walk = repo.walk_commits(base, merge_commit, true).unwrap();
+    // Should include commit_a, commit_b, and merge_commit, but not base.
+    assert!(walk.contains(&commit_a), "walk missing commit_a");
+    assert!(walk.contains(&commit_b), "walk missing commit_b");
+    assert!(walk.contains(&merge_commit), "walk missing merge commit");
+    assert!(!walk.contains(&base), "walk must exclude base");
+}
+
+#[test]
+fn walk_commits_from_not_ancestor_of_to() {
+    // Two branches diverging from a common base: walk ^branch-a branch-b
+    // should yield commits on branch-b that are not reachable from branch-a.
+    let (_dir, repo, base, _) = setup_repo_with_commit();
+
+    let blob_a = repo.write_blob(b"A").unwrap();
+    let tree_a = repo
+        .write_tree(&[TreeEntry {
+            name: "a.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob_a,
+        }])
+        .unwrap();
+    let commit_a = repo
+        .create_commit(tree_a, &[base], "branch a", None)
+        .unwrap();
+
+    let blob_b1 = repo.write_blob(b"B1").unwrap();
+    let tree_b1 = repo
+        .write_tree(&[TreeEntry {
+            name: "b.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob_b1,
+        }])
+        .unwrap();
+    let commit_b1 = repo
+        .create_commit(tree_b1, &[base], "branch b1", None)
+        .unwrap();
+
+    let blob_b2 = repo.write_blob(b"B2").unwrap();
+    let tree_b2 = repo
+        .write_tree(&[TreeEntry {
+            name: "b.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob_b2,
+        }])
+        .unwrap();
+    let commit_b2 = repo
+        .create_commit(tree_b2, &[commit_b1], "branch b2", None)
+        .unwrap();
+
+    // from = commit_a (not an ancestor of commit_b2)
+    // Expected: only commits on branch b that are not reachable from commit_a.
+    // base *is* reachable from commit_a, so it must be excluded.
+    let walk = repo.walk_commits(commit_a, commit_b2, true).unwrap();
+    assert!(walk.contains(&commit_b1));
+    assert!(walk.contains(&commit_b2));
+    assert!(!walk.contains(&base), "base is reachable from commit_a, must be excluded");
+    assert!(!walk.contains(&commit_a), "commit_a itself must be excluded");
+}
+
+// ===========================================================================
+// diff_trees_with_renames (bn-22zz / gjm8 Phase 6)
+// ===========================================================================
+
+#[test]
+fn diff_trees_with_renames_pure_rename_100pct() {
+    // Same blob OID at old path and new path — pure rename.
+    let (_dir, repo) = setup_repo();
+    let blob = repo.write_blob(b"the quick brown fox jumps over the lazy dog\n").unwrap();
+
+    let old_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "foo.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob,
+        }])
+        .unwrap();
+    let new_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "bar.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob,
+        }])
+        .unwrap();
+
+    let diff = repo
+        .diff_trees_with_renames(Some(old_tree), new_tree, 100)
+        .unwrap();
+    assert_eq!(diff.len(), 1, "expected a single rename entry, got {diff:?}");
+    let e = &diff[0];
+    assert_eq!(e.path, "bar.txt");
+    match &e.change_type {
+        ChangeType::Renamed { from } => assert_eq!(from, "foo.txt"),
+        other => panic!("expected Renamed, got {other:?}"),
+    }
+    assert_eq!(e.old_oid, blob);
+    assert_eq!(e.new_oid, blob);
+}
+
+#[test]
+fn diff_trees_with_renames_small_edit_detected_at_50pct() {
+    // ~80% similar content → rename at 50pct threshold.
+    let (_dir, repo) = setup_repo();
+    // 10 long lines, edit 2 of them → ~80% similarity.
+    let old_content = b"line one longer here\n\
+line two longer here\n\
+line three longer here\n\
+line four longer here\n\
+line five longer here\n\
+line six longer here\n\
+line seven longer here\n\
+line eight longer here\n\
+line nine longer here\n\
+line ten longer here\n";
+    let new_content = b"line ONE longer here\n\
+line two longer here\n\
+line three longer here\n\
+line four longer here\n\
+line five longer here\n\
+line six longer here\n\
+line seven longer here\n\
+line eight longer here\n\
+line NINE longer here\n\
+line ten longer here\n";
+
+    let old_blob = repo.write_blob(old_content).unwrap();
+    let new_blob = repo.write_blob(new_content).unwrap();
+    let old_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "foo.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: old_blob,
+        }])
+        .unwrap();
+    let new_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "bar.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: new_blob,
+        }])
+        .unwrap();
+
+    // At 50pct threshold, should detect rename.
+    let diff = repo
+        .diff_trees_with_renames(Some(old_tree), new_tree, 50)
+        .unwrap();
+    assert_eq!(diff.len(), 1, "expected a rename, got {diff:?}");
+    let e = &diff[0];
+    assert_eq!(e.path, "bar.txt");
+    match &e.change_type {
+        ChangeType::Renamed { from } => assert_eq!(from, "foo.txt"),
+        other => panic!("expected Renamed at 50pct similarity, got {other:?}"),
+    }
+}
+
+#[test]
+fn diff_trees_with_renames_small_edit_falls_back_at_95pct() {
+    // Same ~80% similar content but stricter threshold → delete+add.
+    let (_dir, repo) = setup_repo();
+    let old_content = b"line one longer here\n\
+line two longer here\n\
+line three longer here\n\
+line four longer here\n\
+line five longer here\n\
+line six longer here\n\
+line seven longer here\n\
+line eight longer here\n\
+line nine longer here\n\
+line ten longer here\n";
+    let new_content = b"line ONE longer here\n\
+line two longer here\n\
+line three longer here\n\
+line four longer here\n\
+line five longer here\n\
+line six longer here\n\
+line seven longer here\n\
+line eight longer here\n\
+line NINE longer here\n\
+line ten longer here\n";
+
+    let old_blob = repo.write_blob(old_content).unwrap();
+    let new_blob = repo.write_blob(new_content).unwrap();
+    let old_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "foo.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: old_blob,
+        }])
+        .unwrap();
+    let new_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "bar.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: new_blob,
+        }])
+        .unwrap();
+
+    let diff = repo
+        .diff_trees_with_renames(Some(old_tree), new_tree, 95)
+        .unwrap();
+    // At 95pct the rename shouldn't match — expect Deleted foo + Added bar.
+    let has_rename = diff
+        .iter()
+        .any(|e| matches!(e.change_type, ChangeType::Renamed { .. }));
+    assert!(
+        !has_rename,
+        "95pct similarity should NOT detect a rename for ~80pct similar content; got {diff:?}"
+    );
+    let kinds: Vec<&ChangeType> = diff.iter().map(|e| &e.change_type).collect();
+    assert!(
+        kinds.iter().any(|c| matches!(c, ChangeType::Deleted)),
+        "expected Deleted entry, got {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|c| matches!(c, ChangeType::Added)),
+        "expected Added entry, got {kinds:?}"
+    );
+}
+
+#[test]
+fn diff_trees_with_renames_heavy_edit_no_rename() {
+    // <50% similar content → delete + add even at 50pct threshold.
+    let (_dir, repo) = setup_repo();
+    let old_blob = repo.write_blob(b"completely different original content here\n").unwrap();
+    let new_blob = repo.write_blob(b"totally unrelated brand new text goes here\n").unwrap();
+
+    let old_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "foo.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: old_blob,
+        }])
+        .unwrap();
+    let new_tree = repo
+        .write_tree(&[TreeEntry {
+            name: "bar.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: new_blob,
+        }])
+        .unwrap();
+
+    let diff = repo
+        .diff_trees_with_renames(Some(old_tree), new_tree, 50)
+        .unwrap();
+    let has_rename = diff
+        .iter()
+        .any(|e| matches!(e.change_type, ChangeType::Renamed { .. }));
+    assert!(
+        !has_rename,
+        "heavy edit must not be detected as rename at 50pct, got {diff:?}"
+    );
+}
+
+#[test]
+fn diff_trees_with_renames_preserves_non_rename_changes() {
+    // A tree with one modification and one unrelated file should yield a Modified
+    // entry like the existing diff_trees path does.
+    let (_dir, repo) = setup_repo();
+    let kept_blob = repo.write_blob(b"keep me\n").unwrap();
+    let mod_old = repo.write_blob(b"old\n").unwrap();
+    let mod_new = repo.write_blob(b"new\n").unwrap();
+
+    let old_tree = repo
+        .write_tree(&[
+            TreeEntry {
+                name: "kept.txt".to_string(),
+                mode: EntryMode::Blob,
+                oid: kept_blob,
+            },
+            TreeEntry {
+                name: "mod.txt".to_string(),
+                mode: EntryMode::Blob,
+                oid: mod_old,
+            },
+        ])
+        .unwrap();
+    let new_tree = repo
+        .write_tree(&[
+            TreeEntry {
+                name: "kept.txt".to_string(),
+                mode: EntryMode::Blob,
+                oid: kept_blob,
+            },
+            TreeEntry {
+                name: "mod.txt".to_string(),
+                mode: EntryMode::Blob,
+                oid: mod_new,
+            },
+        ])
+        .unwrap();
+
+    let diff = repo
+        .diff_trees_with_renames(Some(old_tree), new_tree, 50)
+        .unwrap();
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].path, "mod.txt");
+    assert_eq!(diff[0].change_type, ChangeType::Modified);
+}
+
+#[test]
+fn diff_trees_with_renames_none_old_yields_additions() {
+    // Sanity: `None` old tree (empty tree) with a single file → Added.
+    let (_dir, repo) = setup_repo();
+    let blob = repo.write_blob(b"hi\n").unwrap();
+    let tree = repo
+        .write_tree(&[TreeEntry {
+            name: "a.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob,
+        }])
+        .unwrap();
+
+    let diff = repo.diff_trees_with_renames(None, tree, 50).unwrap();
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].change_type, ChangeType::Added);
+    assert_eq!(diff[0].path, "a.txt");
+}
+
+// ===========================================================================
+// set_head (bn-22zz / gjm8 Phase 6)
+// ===========================================================================
+
+#[test]
+fn set_head_writes_detached_oid_to_head_file() {
+    let (dir, repo, commit_oid, _) = setup_repo_with_commit();
+
+    repo.set_head(commit_oid).unwrap();
+
+    let head_contents = std::fs::read_to_string(dir.path().join(".git").join("HEAD")).unwrap();
+    assert_eq!(
+        head_contents,
+        format!("{commit_oid}\n"),
+        "HEAD should contain exactly <oid>\\n (detached)"
+    );
+}
+
+#[test]
+fn set_head_rev_parse_roundtrip() {
+    let (_dir, repo, commit_oid, _) = setup_repo_with_commit();
+
+    // set_head writes a detached HEAD. gix rev-parse("HEAD") must follow it
+    // back to the same OID.
+    repo.set_head(commit_oid).unwrap();
+    let resolved = repo.rev_parse("HEAD").unwrap();
+    assert_eq!(resolved, commit_oid);
+}
+
+#[test]
+fn set_head_repeated_calls_update_correctly() {
+    let (_dir, repo, first_commit, tree) = setup_repo_with_commit();
+
+    // Make a second commit.
+    let blob = repo.write_blob(b"second\n").unwrap();
+    let tree2 = repo
+        .write_tree(&[TreeEntry {
+            name: "hello.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob,
+        }])
+        .unwrap();
+    // Use a different tree to ensure the OID is distinct.
+    assert_ne!(tree, tree2);
+    let second_commit = repo
+        .create_commit(tree2, &[first_commit], "second", None)
+        .unwrap();
+
+    repo.set_head(first_commit).unwrap();
+    assert_eq!(repo.rev_parse("HEAD").unwrap(), first_commit);
+
+    repo.set_head(second_commit).unwrap();
+    assert_eq!(repo.rev_parse("HEAD").unwrap(), second_commit);
+}
