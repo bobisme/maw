@@ -712,7 +712,18 @@ pub(crate) fn replay_snapshot_with_merge_protection(
         .oid
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid snapshot OID '{}': {e}", snapshot.oid))?;
-    let _ = repo.stash_apply(oid);
+    // If stash_apply fails, user edits to non-overlapping files are NOT
+    // restored — they aren't tracked in `merge_versions` (built only from
+    // `overlapping`), so step 5's 3-way merge cannot rescue them. Treat this
+    // as fatal so the caller preserves the snapshot ref for manual recovery
+    // rather than silently advancing with missing edits. (bn-1psp)
+    if let Err(e) = repo.stash_apply(oid) {
+        return Err(anyhow::anyhow!(
+            "failed to apply recovery stash during merge replay: {e}; \
+             non-overlapping local edits would be lost — aborting so the \
+             snapshot ref is preserved for manual recovery"
+        ));
+    }
 
     // Unstage everything for a clean working tree view.
     if let Err(e) = repo.unstage_all() {
