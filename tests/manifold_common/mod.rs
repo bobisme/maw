@@ -710,6 +710,65 @@ impl TestRepo {
         let ws_path = self.workspace_path(workspace);
         git_ok(&ws_path, args)
     }
+
+    // -----------------------------------------------------------------------
+    // Tree introspection
+    // -----------------------------------------------------------------------
+
+    /// Parse `git ls-tree -r <rev>` in a workspace and return `(mode, path)`
+    /// tuples for every blob/symlink/submodule entry.
+    ///
+    /// Useful for mode-preservation tests (exec bit, symlink, etc.): the mode
+    /// is returned exactly as git prints it, e.g. `"100644"`, `"100755"`,
+    /// `"120000"`.
+    #[must_use]
+    pub fn git_ls_tree(&self, workspace: &str, rev: &str) -> Vec<(String, String)> {
+        let ws_path = self.workspace_path(workspace);
+        let output = git_ok(&ws_path, &["ls-tree", "-r", rev]);
+        let mut out = Vec::new();
+        for line in output.lines() {
+            // Format: <mode> SP <type> SP <oid> TAB <path>
+            let (meta, path) = match line.split_once('\t') {
+                Some(p) => p,
+                None => continue,
+            };
+            let mut parts = meta.split_whitespace();
+            let mode = match parts.next() {
+                Some(m) => m.to_owned(),
+                None => continue,
+            };
+            out.push((mode, path.to_owned()));
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // Conflict sidecars
+    // -----------------------------------------------------------------------
+
+    /// Read `.manifold/artifacts/ws/<workspace>/conflict-tree.json` as a
+    /// parsed `serde_json::Value`.
+    ///
+    /// Returns `None` if the sidecar file does not exist; panics on any
+    /// other I/O error or on JSON parse failure.
+    #[must_use]
+    pub fn read_conflict_tree_sidecar(&self, workspace: &str) -> Option<serde_json::Value> {
+        let path = self
+            .root
+            .join(".manifold")
+            .join("artifacts")
+            .join("ws")
+            .join(workspace)
+            .join("conflict-tree.json");
+        if !path.exists() {
+            return None;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("conflict-tree.json is not valid JSON: {e}\n{text}"));
+        Some(value)
+    }
 }
 
 // ---------------------------------------------------------------------------
