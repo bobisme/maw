@@ -40,6 +40,20 @@ pub fn undo(name: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Prime Invariant: no work is ever lost. Before restoring tracked files
+    // to the base epoch and deleting untracked Add paths, pin the current
+    // workspace state under refs/manifold/recovery/<ws>/<ts> so the pre-undo
+    // state can be surfaced via `maw ws recover --ref <ref>`.
+    //
+    // Mirrors the safety pattern used by `destroy --force` (create.rs) and
+    // `merge --destroy` (merge.rs).
+    let capture_result = super::capture::capture_before_destroy(
+        &ws_path,
+        name,
+        status.base_epoch.oid(),
+    )
+    .context("Failed to capture recovery snapshot before undo")?;
+
     let added_paths = collect_added_paths(&patch_set);
     restore_workspace_to_epoch(&ws_path, &base_epoch)?;
     remove_added_paths(&ws_path, &added_paths)?;
@@ -70,7 +84,26 @@ pub fn undo(name: &str) -> Result<()> {
         &base_epoch.as_str()[..12]
     );
     println!("  Logged compensate op: {}", &op_oid.as_str()[..12]);
+    if let Some(ref capture) = capture_result {
+        let short_oid = &capture.commit_oid.as_str()[..12];
+        println!("  Snapshot saved: {short_oid}");
+        println!("  Recover with: maw ws recover --ref {}", capture.pinned_ref);
+    }
     println!("Next: maw ws touched {name} --format json");
+
+    // Emit full recovery surface contract so agents can parse and act on
+    // the pre-undo snapshot location. Only emit when we actually captured
+    // state (capture returns None for a clean-at-epoch workspace, which we
+    // already filtered via patch_set.is_empty() above — but be defensive).
+    if let Some(ref capture) = capture_result {
+        super::capture::emit_recovery_surface(
+            name,
+            capture,
+            None,  // no destroy-record artifact for undo
+            false, // no merge commit
+            true,  // undo operation succeeded
+        );
+    }
 
     Ok(())
 }
