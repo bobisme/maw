@@ -3,8 +3,12 @@
 //! Defines the data structures that flow through the collect → partition →
 //! resolve → build pipeline.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
+use crate::model::conflict::Conflict;
 use crate::model::patch::FileId;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
@@ -214,6 +218,135 @@ impl PatchSet {
 }
 
 // ---------------------------------------------------------------------------
+// EntryMode
+// ---------------------------------------------------------------------------
+
+/// Domain-neutral mirror of [`maw_git::EntryMode`].
+///
+/// Lives here rather than referencing `maw_git` directly because `maw-core` is
+/// the domain layer that owns structured-merge types, and this type needs
+/// `Serialize`/`Deserialize` so it can round-trip through JSON as part of
+/// [`MaterializedEntry`] and [`ConflictTree`]. Adding `serde` to `maw-git`
+/// purely for this would pull serde into the git abstraction layer; mirroring
+/// the (tiny) enum here is the lighter-touch choice and follows the same
+/// pattern as the two `GitOid` types (one in `maw-git`, one in `maw-core`).
+///
+/// Conversions are provided via `From` in both directions, so callers at the
+/// `maw-core` ↔ `maw-git` boundary can freely convert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryMode {
+    /// Regular file (`100644`).
+    Blob,
+    /// Executable file (`100755`).
+    BlobExecutable,
+    /// Subdirectory (`040000`).
+    Tree,
+    /// Symbolic link (`120000`).
+    Link,
+    /// Gitlink / submodule (`160000`).
+    Commit,
+}
+
+impl From<maw_git::EntryMode> for EntryMode {
+    fn from(m: maw_git::EntryMode) -> Self {
+        match m {
+            maw_git::EntryMode::Blob => Self::Blob,
+            maw_git::EntryMode::BlobExecutable => Self::BlobExecutable,
+            maw_git::EntryMode::Tree => Self::Tree,
+            maw_git::EntryMode::Link => Self::Link,
+            maw_git::EntryMode::Commit => Self::Commit,
+        }
+    }
+}
+
+impl From<EntryMode> for maw_git::EntryMode {
+    fn from(m: EntryMode) -> Self {
+        match m {
+            EntryMode::Blob => Self::Blob,
+            EntryMode::BlobExecutable => Self::BlobExecutable,
+            EntryMode::Tree => Self::Tree,
+            EntryMode::Link => Self::Link,
+            EntryMode::Commit => Self::Commit,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MaterializedEntry
+// ---------------------------------------------------------------------------
+
+/// A concrete, cleanly-resolved entry in a tree — a `(mode, oid)` pair.
+///
+/// `MaterializedEntry` is what appears at a path in the `clean` map of a
+/// [`ConflictTree`]: the merge engine has decided exactly what mode and blob
+/// OID that path should have. Conflicted paths are represented by a
+/// [`Conflict`] in a separate map and are not materialized until resolved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializedEntry {
+    /// The file mode of this entry.
+    pub mode: EntryMode,
+    /// The git blob (or tree/commit) OID for the entry's content.
+    pub oid: GitOid,
+}
+
+impl MaterializedEntry {
+    /// Create a new materialized entry.
+    #[must_use]
+    pub const fn new(mode: EntryMode, oid: GitOid) -> Self {
+        Self { mode, oid }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConflictTree
+// ---------------------------------------------------------------------------
+
+/// A partially-resolved tree produced by the N-way merge engine.
+///
+/// Rebase (and future multi-way merges) operate by folding `PatchSet`s into a
+/// `ConflictTree`: cleanly-resolved paths live in `clean`, unresolved paths
+/// live in `conflicts`. The `base_epoch` pins the ancestor commit all patches
+/// are expressed against — a `PatchSet` whose `epoch` does not match this
+/// base is rejected by [`crate::merge::apply::apply_unilateral_patchset`].
+///
+/// `clean` and `conflicts` are partitioned: a given path appears in exactly
+/// one of them (or neither, if untouched).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictTree {
+    /// Paths the merge engine has resolved to a single `(mode, oid)` entry.
+    pub clean: BTreeMap<PathBuf, MaterializedEntry>,
+    /// Paths with unresolved structured conflicts.
+    pub conflicts: BTreeMap<PathBuf, Conflict>,
+    /// The epoch every patch applied to this tree must be based on.
+    pub base_epoch: EpochId,
+}
+
+impl ConflictTree {
+    /// Create an empty `ConflictTree` pinned to `base_epoch`.
+    #[must_use]
+    pub const fn new(base_epoch: EpochId) -> Self {
+        Self {
+            clean: BTreeMap::new(),
+            conflicts: BTreeMap::new(),
+            base_epoch,
+        }
+    }
+
+    /// Returns `true` if there are neither clean entries nor conflicts.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.clean.is_empty() && self.conflicts.is_empty()
+    }
+
+    /// Returns `true` if the tree has any unresolved conflicts.
+    #[must_use]
+    pub fn has_conflicts(&self) -> bool {
+        !self.conflicts.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -312,5 +445,103 @@ mod tests {
         assert_eq!(ps.modified_count(), 1);
         assert_eq!(ps.deleted_count(), 1);
         assert_eq!(ps.change_count(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // EntryMode ↔ maw_git::EntryMode conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn entry_mode_roundtrips_through_maw_git() {
+        let variants = [
+            EntryMode::Blob,
+            EntryMode::BlobExecutable,
+            EntryMode::Tree,
+            EntryMode::Link,
+            EntryMode::Commit,
+        ];
+        for mode in variants {
+            let git_mode: maw_git::EntryMode = mode.into();
+            let back: EntryMode = git_mode.into();
+            assert_eq!(back, mode);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ConflictTree
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conflict_tree_new_is_empty() {
+        let tree = ConflictTree::new(make_epoch());
+        assert!(tree.is_empty());
+        assert!(!tree.has_conflicts());
+        assert_eq!(tree.base_epoch, make_epoch());
+    }
+
+    #[test]
+    fn conflict_tree_serde_roundtrip() {
+        use crate::model::conflict::{Conflict, ConflictSide};
+        use crate::model::ordering::OrderingKey;
+
+        let base_epoch = make_epoch();
+        // Build the OrderingKey first (consumes a clone of base_epoch) so the
+        // final `ConflictTree::new(base_epoch)` below moves instead of clones.
+        let ord_key = OrderingKey::new(
+            base_epoch.clone(),
+            "ws-1".parse().unwrap(),
+            1,
+            1_700_000_000_000,
+        );
+        let mut tree = ConflictTree::new(base_epoch);
+
+        // A couple of clean entries.
+        tree.clean.insert(
+            PathBuf::from("src/lib.rs"),
+            MaterializedEntry::new(EntryMode::Blob, GitOid::new(&"a".repeat(40)).unwrap()),
+        );
+        tree.clean.insert(
+            PathBuf::from("scripts/build.sh"),
+            MaterializedEntry::new(
+                EntryMode::BlobExecutable,
+                GitOid::new(&"b".repeat(40)).unwrap(),
+            ),
+        );
+        tree.clean.insert(
+            PathBuf::from("link"),
+            MaterializedEntry::new(EntryMode::Link, GitOid::new(&"c".repeat(40)).unwrap()),
+        );
+
+        // One conflict.
+        let side_a = ConflictSide::new(
+            "ws-1".into(),
+            GitOid::new(&"1".repeat(40)).unwrap(),
+            ord_key.clone(),
+        );
+        let side_b = ConflictSide::new(
+            "ws-2".into(),
+            GitOid::new(&"2".repeat(40)).unwrap(),
+            ord_key,
+        );
+        tree.conflicts.insert(
+            PathBuf::from("src/new.rs"),
+            Conflict::AddAdd {
+                path: PathBuf::from("src/new.rs"),
+                sides: vec![side_a, side_b],
+            },
+        );
+
+        let json = serde_json::to_string(&tree).unwrap();
+        let decoded: ConflictTree = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, tree);
+    }
+
+    #[test]
+    fn materialized_entry_serde_roundtrip() {
+        let entry =
+            MaterializedEntry::new(EntryMode::Blob, GitOid::new(&"f".repeat(40)).unwrap());
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: MaterializedEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, entry);
     }
 }

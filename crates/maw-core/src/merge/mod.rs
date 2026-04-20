@@ -7,6 +7,7 @@
 //! ref-management remain in the main `maw` crate and will move here once
 //! those dependencies are also in `maw-core`.
 
+pub mod apply;
 pub mod build;
 pub mod partition;
 pub mod plan;
