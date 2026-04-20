@@ -216,36 +216,54 @@ fn capture_dirty_worktree(
         anyhow::anyhow!("git stash create failed during capture: {e}")
     })?;
 
+    // Paths that remained "capturable" after embedded-repo exclusions — these
+    // are the paths we'd actually expect the stash to preserve.
+    let capturable_dirty_paths: Vec<String> = dirty_paths
+        .iter()
+        .filter(|path| {
+            !excluded_paths
+                .iter()
+                .any(|excluded| path_is_under_excluded(path, excluded))
+        })
+        .cloned()
+        .collect();
+
     let stash_git_oid = match stash_result {
         Some(oid) => oid,
         None => {
-            // `stash_create` returned None even though `list_dirty_paths`
-            // reported uncommitted changes. This "shouldn't happen" branch
-            // previously returned `Ok(None)`, but that silently violated the
-            // `capture_before_destroy` contract (which reserves `Ok(None)`
-            // for genuinely-clean-at-epoch workspaces). Callers such as
-            // `working_copy::capture_or_rewrite_workspace_head` treat
-            // `Ok(None)` as "nothing to preserve" and immediately overwrite
-            // the working tree with `git_checkout_force`, silently losing
-            // the dirty work. Return an error instead so the destroy/
-            // checkout path aborts rather than blowing away user changes.
+            // `stash_create` returned None. Two legitimate shapes:
             //
-            // NOTE: This path is difficult to trigger in a real test —
-            // `git stash create` only returns empty when the index and
-            // worktree both match HEAD, which contradicts a non-empty
-            // dirty-paths list. It can still occur in pathological cases
-            // (races, unusual sparse checkouts, or stash plumbing bugs),
-            // so we guard it explicitly.
+            // 1. All dirty paths were uncapturable embedded git dirs that
+            //    `stage_all_for_capture` excluded. After the excludes, there
+            //    is genuinely no capturable content — returning `Ok(None)`
+            //    is correct (matches "clean at epoch" semantics from the
+            //    caller's perspective).
+            //
+            // 2. At least one dirty path WAS capturable, and yet
+            //    `stash_create` still refused. This is the silent-data-loss
+            //    scenario guarded by bn-3mpx — return `Err` so callers
+            //    abort rather than proceed over user work.
+            //
             // TODO(gix): replace git reset with GitRepo trait method
             warn_on_reset_failure(ws_path, "capture-stash-create-none");
+            if capturable_dirty_paths.is_empty() {
+                tracing::debug!(
+                    excluded_paths = ?excluded_paths,
+                    "stash_create returned None; all dirty paths were uncapturable \
+                     embedded repos, treating as no-op capture"
+                );
+                return Ok(None);
+            }
             tracing::warn!(
                 dirty_paths = ?dirty_paths,
-                "stash_create returned None despite dirty paths"
+                capturable = ?capturable_dirty_paths,
+                excluded = ?excluded_paths,
+                "stash_create returned None despite capturable dirty paths"
             );
             return Err(anyhow::anyhow!(
-                "capture aborted to avoid silent data loss: dirty paths were \
-                 detected but `git stash create` refused to produce a stash \
-                 commit (dirty_paths = {dirty_paths:?})"
+                "capture aborted to avoid silent data loss: capturable dirty paths \
+                 were detected but `git stash create` refused to produce a stash \
+                 commit (capturable = {capturable_dirty_paths:?})"
             ));
         }
     };
@@ -259,15 +277,7 @@ fn capture_dirty_worktree(
     // TODO(gix): replace git reset with GitRepo trait method
     warn_on_reset_failure(ws_path, "capture-restore-index");
 
-    let captured_dirty_paths: Vec<String> = dirty_paths
-        .iter()
-        .filter(|path| {
-            !excluded_paths
-                .iter()
-                .any(|excluded| path_is_under_excluded(path, excluded))
-        })
-        .cloned()
-        .collect();
+    let captured_dirty_paths = capturable_dirty_paths;
 
     // FP: crash after stash/tree creation but before ref pinning.
     // A crash here means the commit object exists but is unreachable (no ref).

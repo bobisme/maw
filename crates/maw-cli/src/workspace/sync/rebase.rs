@@ -1,15 +1,59 @@
+//! Rebase a workspace's committed commits onto a newer epoch, routed
+//! through the structured-merge engine (`maw-core::merge`).
+//!
+//! # Pipeline
+//!
+//! 1. Seed a [`ConflictTree`] with the new epoch's tree contents (clean map)
+//!    but tag the tree's `base_epoch` as the **old** epoch, so patches
+//!    extracted from `old_epoch..HEAD` can be applied.
+//! 2. Walk workspace commits `old_epoch..HEAD` (oldest first).
+//! 3. For each commit, compute the parent→commit delta via
+//!    [`diff_patchset`] and fold it into the `ConflictTree` via
+//!    [`apply_unilateral_patchset`]. Merge commits (multi-parent) are
+//!    handled by applying the first-parent delta AND injecting an
+//!    explicit `Conflict::Content` entry for every path touched by the
+//!    non-first parents (V1 simplification documented inline).
+//! 4. After each fold, [`materialize`] the tree to obtain a final
+//!    `(mode, oid_or_content)` per path. Rendered marker blobs are
+//!    written via `GitRepo::write_blob`; the resulting tree is built by
+//!    [`GitRepo::edit_tree`] against the new-epoch tree.
+//! 5. A new commit is created per step (`create_commit`) preserving the
+//!    original commit message — this keeps commit-count parity so
+//!    `find_conflicted_files` (which diffs against the workspace base)
+//!    still sees the `+<<<<<<<` lines added by this rebase, tripping
+//!    the merge-time marker gate when conflicts exist.
+//! 6. HEAD is moved via `GitRepo::set_head` and the worktree is
+//!    synchronized via `GitRepo::checkout_tree`.
+//! 7. Both sidecars (`rebase-conflicts.json`, `conflict-tree.json`) are
+//!    written by `materialize::write_legacy_sidecar` and
+//!    `materialize::write_structured_sidecar`.
+//!
+//! This module does **no** shelling out to `git` — all git operations
+//! flow through the [`GitRepo`] trait.
+
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use maw_core::merge::apply::apply_unilateral_patchset;
+use maw_core::merge::diff_extract::diff_patchset;
+use maw_core::merge::materialize::{
+    materialize, write_legacy_sidecar, write_structured_sidecar,
+};
+use maw_core::merge::types::{ConflictTree, EntryMode, MaterializedEntry};
+use maw_core::model::conflict::{Conflict, ConflictSide};
+use maw_core::model::ordering::OrderingKey;
+use maw_core::model::patch::FileId;
+use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
 use maw_core::refs as manifold_refs;
+use maw_git::{self as git, GitRepo, TreeEdit};
 
 use super::checks::{sync_worktree_to_epoch, workspace_has_uncommitted_changes};
 
 // ---------------------------------------------------------------------------
-// Rebase conflict metadata
+// Legacy sidecar types (kept public for `maw ws resolve` / callers in
+// `super::*`)
 // ---------------------------------------------------------------------------
 
 /// A single rebase conflict recorded as data.
@@ -60,16 +104,6 @@ pub fn read_rebase_conflicts(root: &Path, ws_name: &str) -> Option<RebaseConflic
     serde_json::from_str(&content).ok()
 }
 
-/// Write rebase conflicts for a workspace.
-fn write_rebase_conflicts(root: &Path, ws_name: &str, conflicts: &RebaseConflicts) -> Result<()> {
-    let path = rebase_conflicts_path(root, ws_name);
-    let dir = path.parent().expect("path always has parent");
-    std::fs::create_dir_all(dir)?;
-    let content = serde_json::to_string_pretty(conflicts)?;
-    std::fs::write(&path, content)?;
-    Ok(())
-}
-
 /// Delete rebase conflicts file for a workspace (called on resolution).
 pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
     let path = rebase_conflicts_path(root, ws_name);
@@ -80,18 +114,11 @@ pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Rebase implementation
+// Rebase implementation — routed through maw-core::merge
 // ---------------------------------------------------------------------------
 
-/// Replay workspace commits onto the current epoch via cherry-pick.
-///
-/// This is the core of `maw ws sync --rebase`. For each workspace commit
-/// ahead of the old epoch:
-/// 1. First, checkout the new epoch in the worktree (detached HEAD)
-/// 2. For each commit in order, run `git cherry-pick --no-commit <sha>`
-/// 3. If cherry-pick succeeds: stage changes, create new commit
-/// 4. If cherry-pick conflicts: write conflict markers, record metadata, continue
-/// 5. After all commits replayed: update workspace epoch ref
+/// Replay workspace commits onto the current epoch via the structured-merge
+/// engine. Zero shell-outs — everything goes through [`GitRepo`].
 pub(super) fn rebase_workspace(
     root: &Path,
     ws_name: &str,
@@ -120,8 +147,37 @@ pub(super) fn rebase_workspace(
     );
     println!();
 
-    // Collect commit SHAs to replay (oldest first).
-    let commits = list_commits_ahead(ws_path, old_epoch)?;
+    // Open the repo **at the workspace path**. For a linked worktree this
+    // makes `set_head` update the workspace's own HEAD (not the common-dir
+    // HEAD), matching the old `git checkout --detach` behavior.
+    let repo = git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open git repo at {}: {e}", ws_path.display()))?;
+    let repo_dyn: &dyn GitRepo = &repo;
+
+    // Parse epoch OIDs (both `maw-git` and `maw-core` flavors).
+    let old_core = GitOid::new(old_epoch)
+        .map_err(|e| anyhow::anyhow!("invalid old epoch {old_epoch}: {e}"))?;
+    let new_core = GitOid::new(new_epoch)
+        .map_err(|e| anyhow::anyhow!("invalid new epoch {new_epoch}: {e}"))?;
+    let old_git: git::GitOid = old_epoch
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid old epoch OID: {e}"))?;
+    let new_git: git::GitOid = new_epoch
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid new epoch OID: {e}"))?;
+
+    let ws_id = WorkspaceId::new(ws_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let base_epoch_id = EpochId::new(old_epoch)
+        .map_err(|e| anyhow::anyhow!("invalid old epoch id: {e}"))?;
+
+    // Enumerate commits old_epoch..HEAD (oldest first).
+    let head_git = repo_dyn
+        .rev_parse("HEAD")
+        .map_err(|e| anyhow::anyhow!("Failed to rev-parse HEAD: {e}"))?;
+    let commits = repo_dyn
+        .walk_commits(old_git, head_git, true)
+        .map_err(|e| anyhow::anyhow!("Failed to walk commits {old_epoch}..HEAD: {e}"))?;
+
     if commits.is_empty() {
         println!("No commits to replay. Performing normal sync.");
         sync_worktree_to_epoch(root, ws_name, new_epoch)?;
@@ -130,311 +186,214 @@ pub(super) fn rebase_workspace(
         return Ok(());
     }
 
-    // Step 1: Checkout the new epoch (detached HEAD).
-    let output = Command::new("git")
-        .args(["checkout", "--detach", new_epoch])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run git checkout: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to checkout new epoch in workspace '{ws_name}': {}",
-            stderr.trim()
-        );
-    }
+    // Read the new epoch's tree OID — we'll use it as the base for `edit_tree`.
+    let new_epoch_commit = repo_dyn
+        .read_commit(new_git)
+        .map_err(|e| anyhow::anyhow!("Failed to read new epoch commit {new_epoch}: {e}"))?;
+    let new_epoch_tree = new_epoch_commit.tree_oid;
 
-    // Step 2: Replay each commit via cherry-pick.
-    let mut conflicts: Vec<RebaseConflict> = Vec::new();
-    let mut replayed = 0;
-    let mut conflicted = 0;
+    // Seed the ConflictTree: clean map populated from the new-epoch tree;
+    // `base_epoch` is set to the **old** epoch so `diff_patchset` produces
+    // patches that `apply_unilateral_patchset` will accept.
+    let mut state = seed_conflict_tree_from_epoch(repo_dyn, new_git, base_epoch_id.clone())?;
 
-    for (i, commit_sha) in commits.iter().enumerate() {
-        let short_sha = &commit_sha[..std::cmp::min(12, commit_sha.len())];
-        let commit_msg = get_commit_message(ws_path, commit_sha);
+    // Pre-compute the epoch delta (old → new) so we can detect three-way
+    // overlap: if a workspace commit modifies a path that the epoch also
+    // changed, we must synthesize a `Conflict::Content` rather than silently
+    // overwriting the epoch version. See the doc for
+    // `promote_overlaps_to_conflicts` for the full rationale.
+    let epoch_delta = build_epoch_delta_map(repo_dyn, old_git, new_git)?;
 
-        // Detect merge commits upfront. `git cherry-pick` without `-m <parent>`
-        // refuses merge commits and exits non-zero with nothing in the index —
-        // the old code path then committed an empty "conflict" commit and
-        // silently dropped the merge's content.
-        //
-        // We don't try to cherry-pick merge commits (picking one parent loses
-        // the other side). Instead, mark the workspace as conflicted by
-        // writing a stub file with marker syntax, and record an explicit
-        // RebaseConflict entry in the sidecar so `find_conflicted_files` and
-        // the merge-time marker gate catch the problem (bn-372v).
-        let parents = commit_parent_shas(ws_path, commit_sha);
-        if parents.len() > 1 {
-            conflicted += 1;
-            let (stub_rel_path, stub_content) = record_merge_commit_drop(
-                ws_path,
-                ws_name,
-                commit_sha,
-                &parents,
-            )?;
+    let total = commits.len();
+    let mut parent_git = new_git;
+    let mut replayed = 0usize;
+    let mut conflicted_steps = 0usize;
 
+    for (i, commit_git) in commits.iter().copied().enumerate() {
+        let commit_hex = commit_git.to_string();
+        let short_sha = &commit_hex[..std::cmp::min(12, commit_hex.len())];
+        let commit_core = GitOid::new(&commit_hex)
+            .map_err(|e| anyhow::anyhow!("malformed commit OID {commit_hex}: {e}"))?;
+        let commit_info = repo_dyn
+            .read_commit(commit_git)
+            .map_err(|e| anyhow::anyhow!("Failed to read commit {short_sha}: {e}"))?;
+
+        let parent_oids = &commit_info.parents;
+        if parent_oids.is_empty() {
+            // Root commit appearing in an old_epoch..HEAD range would mean
+            // old_epoch is unrelated. Skip defensively.
             println!(
-                "  [{}/{}] CONFLICT: {short_sha} is a merge commit \
-                 ({} parents) — cannot cherry-pick; marked workspace conflicted",
+                "  [{}/{}] skipping root commit {short_sha} (no parents)",
                 i + 1,
-                commits.len(),
-                parents.len(),
+                total
             );
-            println!("    - {stub_rel_path}");
-
-            conflicts.push(RebaseConflict {
-                path: stub_rel_path.clone(),
-                original_commit: commit_sha.clone(),
-                base: None,
-                ours: None,
-                theirs: Some(stub_content),
-            });
-
-            // Commit the stub so the markers live in HEAD and
-            // `find_conflicted_files` (which diffs workspace..HEAD) sees the
-            // added marker lines.
-            let _ = Command::new("git")
-                .args(["add", "--all"])
-                .current_dir(ws_path)
-                .output();
-            let msg = format!(
-                "rebase: dropped merge commit {short_sha} ({} parents) — resolve manually",
-                parents.len(),
-            );
-            let _ = Command::new("git")
-                .args(["commit", "--no-verify", "--allow-empty", "-m", &msg])
-                .current_dir(ws_path)
-                .output();
             continue;
         }
 
-        // Try cherry-pick --no-commit to apply changes without auto-committing.
-        let cp_output = Command::new("git")
-            .args(["cherry-pick", "--no-commit", commit_sha])
-            .current_dir(ws_path)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run git cherry-pick: {e}"))?;
+        let first_parent_core = GitOid::new(&parent_oids[0].to_string())
+            .map_err(|e| anyhow::anyhow!("malformed parent OID: {e}"))?;
+        let first_parent_patch = diff_patchset(
+            repo_dyn,
+            &first_parent_core,
+            &commit_core,
+            &ws_id,
+            &base_epoch_id,
+            50,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to extract patchset for {short_sha}: {e}"))?;
 
-        if cp_output.status.success() {
-            // Cherry-pick succeeded — check if there are staged changes to commit.
-            let msg = commit_msg.unwrap_or_else(|| format!("rebase: replay {short_sha}"));
+        let conflicts_before = state.conflicts.len();
 
-            // Check for staged changes. If none, the original was an empty commit
-            // or the changes were already applied.
-            let diff_output = Command::new("git")
-                .args(["diff", "--cached", "--quiet"])
-                .current_dir(ws_path)
-                .output();
-            let has_staged_changes = diff_output
-                .as_ref()
-                .map(|o| !o.status.success())
-                .unwrap_or(true); // assume changes if we can't tell
+        // Pre-pass: for every Add/Modify in the workspace patch that also hits
+        // a path changed by the epoch (alice's side), install a
+        // `Conflict::Content` on the clean entry so `apply_unilateral_patchset`
+        // enters its conflict-propagation branch. The V1 propagation
+        // replaces-and-collapses, but we `materialize` BEFORE the next fold,
+        // and we inspect the conflicts pre-apply to surface them here.
+        promote_overlaps_to_conflicts(
+            &mut state,
+            &first_parent_patch,
+            &epoch_delta,
+            ws_name,
+            &base_epoch_id,
+        );
 
-            if !has_staged_changes {
-                println!(
-                    "  [{}/{}] Skipped {short_sha} (no changes to apply)",
-                    i + 1,
-                    commits.len()
-                );
-                // Reset any index state for the next cherry-pick.
-                // Warn on failure (bn-2blj) so a silent dirty index doesn't
-                // poison the next cherry-pick in the loop.
-                match Command::new("git")
-                    .args(["reset", "HEAD"])
-                    .current_dir(ws_path)
-                    .output()
-                {
-                    Ok(out) if out.status.success() => {}
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        tracing::warn!(
-                            commit = %short_sha,
-                            ws_path = %ws_path.display(),
-                            exit = ?out.status.code(),
-                            stderr = %stderr.trim(),
-                            "git reset HEAD failed between cherry-picks — next replay may see a dirty index"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            commit = %short_sha,
-                            ws_path = %ws_path.display(),
-                            error = %e,
-                            "failed to invoke git reset HEAD between cherry-picks"
-                        );
-                    }
-                }
-            } else {
-                let commit_output = Command::new("git")
-                    .args(["commit", "--no-verify", "-m", &msg])
-                    .current_dir(ws_path)
-                    .output()
-                    .map_err(|e| anyhow::anyhow!("Failed to commit replayed changes: {e}"))?;
-
-                if commit_output.status.success() {
-                    replayed += 1;
-                    println!(
-                        "  [{}/{}] Replayed {short_sha}: {}",
-                        i + 1,
-                        commits.len(),
-                        msg.lines().next().unwrap_or("(no message)")
-                    );
-                } else {
-                    let stderr = String::from_utf8_lossy(&commit_output.stderr);
-                    println!(
-                        "  [{}/{}] Warning: commit after cherry-pick failed for {short_sha}: {}",
-                        i + 1,
-                        commits.len(),
-                        stderr.trim()
-                    );
-                }
-            }
+        // Snapshot for sidecar before apply_unilateral_patchset's V1 "modifed
+        // replaces/collapses" semantics collapse the newly-injected conflicts
+        // back into clean. The commit's rendered-marker tree is what lands on
+        // disk, but the sidecar gets the pre-collapse state so
+        // `find_conflicted_files` + `ws resolve` can see the per-side detail.
+        let snapshot_with_conflicts = if state.has_conflicts() {
+            Some(state.clone())
         } else {
-            // Cherry-pick failed. Two cases we care about:
-            //   (a) A real content conflict — the index has unmerged entries
-            //       and the worktree has `<<<<<<<` markers. Handle via the
-            //       original flow: record stage content, relabel markers.
-            //   (b) `git cherry-pick` refused to run (e.g., a corner case we
-            //       didn't detect as a merge commit upfront, or some other
-            //       structural refusal). `list_conflicted_files` comes back
-            //       empty, the worktree is clean, and committing would hide
-            //       the dropped content from every downstream gate. Promote
-            //       this to an explicit "dropped" stub — same shape as the
-            //       merge-commit path above (bn-372v).
-            conflicted += 1;
+            None
+        };
 
-            // Find which files have conflict markers.
-            let conflict_files = list_conflicted_files(ws_path);
+        // Apply first-parent delta.
+        state = apply_unilateral_patchset(state, first_parent_patch.clone())
+            .map_err(|e| anyhow::anyhow!("apply_unilateral_patchset failed for {short_sha}: {e}"))?;
 
-            if conflict_files.is_empty() {
-                let stderr = String::from_utf8_lossy(&cp_output.stderr);
-                let (stub_rel_path, stub_content) = record_cherry_pick_refusal(
-                    ws_path,
+        // V1 multi-parent handling: for merge commits, synthesize an explicit
+        // `Conflict::Content` at every path touched by the non-first parents.
+        // This ensures merge-commit content isn't silently dropped (bn-372v).
+        if parent_oids.len() > 1 {
+            for (idx, side_parent) in parent_oids.iter().enumerate().skip(1) {
+                let side_parent_core = GitOid::new(&side_parent.to_string())
+                    .map_err(|e| anyhow::anyhow!("malformed merge parent OID: {e}"))?;
+                let side_patch = diff_patchset(
+                    repo_dyn,
+                    &side_parent_core,
+                    &commit_core,
+                    &ws_id,
+                    &base_epoch_id,
+                    50,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to extract merge-side patchset for {short_sha} (parent #{idx}): {e}"
+                    )
+                })?;
+
+                inject_merge_side_conflicts(
+                    &mut state,
                     ws_name,
-                    commit_sha,
-                    stderr.trim(),
-                )?;
-
-                println!(
-                    "  [{}/{}] CONFLICT: cherry-pick refused for {short_sha} \
-                     (no unmerged entries) — marking workspace conflicted",
-                    i + 1,
-                    commits.len(),
+                    &commit_core,
+                    idx,
+                    &side_patch,
                 );
-                println!("    - {stub_rel_path}");
-                if !stderr.trim().is_empty() {
-                    println!("    cherry-pick stderr: {}", stderr.trim());
+            }
+        }
+
+        // If we captured a conflict-bearing snapshot before the V1 collapse,
+        // restore its conflicts now so they survive to the sidecar. The clean
+        // map from the post-apply state is still authoritative for everything
+        // not in that snapshot's conflicts.
+        if let Some(snap) = snapshot_with_conflicts {
+            for (path, conflict) in snap.conflicts {
+                if !state.conflicts.contains_key(&path) {
+                    state.conflicts.insert(path.clone(), conflict);
+                    // Evict any collapsed-to-clean entry so the conflict wins.
+                    state.clean.remove(&path);
                 }
-
-                conflicts.push(RebaseConflict {
-                    path: stub_rel_path.clone(),
-                    original_commit: commit_sha.clone(),
-                    base: None,
-                    ours: None,
-                    theirs: Some(stub_content),
-                });
-
-                // Clear any partial cherry-pick state so the next iteration
-                // has a clean index to work against.
-                let _ = Command::new("git")
-                    .args(["cherry-pick", "--abort"])
-                    .current_dir(ws_path)
-                    .output();
-
-                let _ = Command::new("git")
-                    .args(["add", "--all"])
-                    .current_dir(ws_path)
-                    .output();
-                let msg = format!(
-                    "rebase: dropped {short_sha} (cherry-pick refused) — resolve manually",
-                );
-                let _ = Command::new("git")
-                    .args(["commit", "--no-verify", "--allow-empty", "-m", &msg])
-                    .current_dir(ws_path)
-                    .output();
-                continue;
             }
+        }
 
+        let step_introduced_conflicts = state.conflicts.len() > conflicts_before;
+        if step_introduced_conflicts {
+            conflicted_steps += 1;
+        }
+
+        // Materialize, write blobs, build tree, commit.
+        let output = materialize(&state).map_err(|e| {
+            anyhow::anyhow!("materialize failed after replaying {short_sha}: {e}")
+        })?;
+        let tree_oid = write_blobs_and_build_tree(repo_dyn, new_epoch_tree, output)
+            .map_err(|e| anyhow::anyhow!("failed to build tree for {short_sha}: {e}"))?;
+
+        let commit_msg = if commit_info.message.is_empty() {
+            format!("rebase: replay {short_sha}")
+        } else {
+            commit_info.message.clone()
+        };
+
+        parent_git = repo_dyn
+            .create_commit(tree_oid, &[parent_git], &commit_msg, None)
+            .map_err(|e| anyhow::anyhow!("create_commit failed for {short_sha}: {e}"))?;
+        replayed += 1;
+
+        let summary = commit_msg.lines().next().unwrap_or("(no message)");
+        if parent_oids.len() > 1 {
             println!(
-                "  [{}/{}] CONFLICT replaying {short_sha}: {} file(s)",
+                "  [{}/{}] Replayed (merge commit) {short_sha}: {summary}",
                 i + 1,
-                commits.len(),
-                conflict_files.len()
+                total
             );
-
-            for cf in &conflict_files {
-                println!("    - {cf}");
-
-                // Read the conflict content from the working tree (has markers).
-                // For the metadata, try to capture base/ours/theirs from the index stages.
-                let (base, ours, theirs) = read_conflict_stages(ws_path, cf);
-
-                conflicts.push(RebaseConflict {
-                    path: cf.clone(),
-                    original_commit: commit_sha.clone(),
-                    base,
-                    ours,
-                    theirs,
-                });
-            }
-
-            // Relabel git's conflict markers with meaningful names so
-            // `maw ws resolve` can match them (bn-aao6).
-            // Before: <<<<<<< HEAD / >>>>>>> abc123 (commit msg)
-            // After:  <<<<<<< epoch (current) / >>>>>>> ws-name (workspace changes)
-            for cf in &conflict_files {
-                relabel_conflict_markers(ws_path, cf, ws_name);
-            }
-
-            // Add all conflicted files (with markers) to the index and commit.
-            // This preserves the conflict markers in the history so the agent
-            // can see and resolve them.
-            let _ = Command::new("git")
-                .args(["add", "--all"])
-                .current_dir(ws_path)
-                .output();
-            let msg = format!(
-                "rebase: conflict replaying {short_sha} ({} file(s))",
-                conflict_files.len()
-            );
-            let _ = Command::new("git")
-                .args(["commit", "--no-verify", "--allow-empty", "-m", &msg])
-                .current_dir(ws_path)
-                .output();
+        } else {
+            println!("  [{}/{}] Replayed {short_sha}: {summary}", i + 1, total);
         }
     }
 
-    // Step 3: Update workspace epoch ref.
-    // Silent failure here leaves a stale ref and makes downstream commands
-    // misreport the workspace state (bn-3pkx). Surface as warn; we continue
-    // because Step 4 still records conflict metadata on disk.
-    if let Ok(oid) = maw_core::model::types::GitOid::new(new_epoch) {
+    // Advance HEAD + worktree to the new chain tip.
+    repo_dyn
+        .set_head(parent_git)
+        .map_err(|e| anyhow::anyhow!("set_head failed: {e}"))?;
+    repo_dyn
+        .checkout_tree(parent_git, ws_path)
+        .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
+
+    // Step 3: Update the workspace's epoch ref to the new epoch. Silent
+    // failure would leave a stale ref (bn-3pkx) — surface as a warn.
+    {
         let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
-        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &oid) {
+        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
             tracing::warn!(
                 workspace = %ws_name,
                 epoch_ref = %epoch_ref,
-                oid = %oid,
+                oid = %new_core,
                 error = %e,
-                "failed to update workspace epoch ref after rebase — downstream commands may see a stale epoch"
+                "failed to update workspace epoch ref after rebase — \
+                 downstream commands may see a stale epoch"
             );
         }
     }
 
-    // Step 4: Record conflict metadata and update workspace metadata.
-    if !conflicts.is_empty() {
-        let conflict_count = conflicts.len() as u32;
+    // Write both sidecars. The legacy one is what `maw ws resolve` still
+    // consumes; the structured one is for future tooling (bn-3rah).
+    if state.has_conflicts() {
+        let _ = conflicted_steps; // surfaced in stdout above
 
-        // Write conflict metadata file.
-        let rebase_meta = RebaseConflicts {
-            conflicts,
-            rebase_from: old_epoch.to_string(),
-            rebase_to: new_epoch.to_string(),
-        };
-        write_rebase_conflicts(root, ws_name, &rebase_meta)?;
+        write_legacy_sidecar(ws_path, &state, &old_core, &new_core)
+            .map_err(|e| anyhow::anyhow!("failed to write legacy sidecar: {e}"))?;
+        write_structured_sidecar(ws_path, &state)
+            .map_err(|e| anyhow::anyhow!("failed to write structured sidecar: {e}"))?;
+
+        let conflict_count = state.conflicts.len();
 
         println!();
-        println!("Rebase complete: {replayed} commit(s) replayed, {conflicted} with conflicts.");
+        println!(
+            "Rebase complete: {replayed} commit(s) replayed, {} with conflicts.",
+            conflicted_steps,
+        );
         println!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
         println!();
         println!("Conflict markers use labeled sides:");
@@ -450,12 +409,13 @@ pub(super) fn rebase_workspace(
         println!("  maw ws resolve {ws_name} --keep both             # keep both sides");
         println!();
         println!("After resolving, commit and clear conflict state:");
-        println!("  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\"");
+        println!(
+            "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\""
+        );
         println!("  maw ws sync {ws_name}");
     } else {
-        // No conflicts — clean up any stale conflict metadata.
+        // Clean run — clear any stale sidecar from a previous attempt.
         let _ = delete_rebase_conflicts(root, ws_name);
-
         println!();
         println!("Rebase complete: {replayed} commit(s) replayed cleanly.");
         println!("Workspace '{ws_name}' is now up to date.");
@@ -464,289 +424,488 @@ pub(super) fn rebase_workspace(
     Ok(())
 }
 
-/// List commits ahead of the epoch, oldest first (for replay order).
-fn list_commits_ahead(ws_path: &Path, epoch_oid: &str) -> Result<Vec<String>> {
-    let range = format!("{epoch_oid}..HEAD");
-    let output = Command::new("git")
-        .args(["rev-list", "--reverse", &range])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run git rev-list: {e}"))?;
-    if !output.status.success() {
-        bail!("Failed to list commits ahead of epoch");
-    }
-    let commits: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    Ok(commits)
-}
+// ---------------------------------------------------------------------------
+// Seeding
+// ---------------------------------------------------------------------------
 
-/// Get the commit message for a given SHA.
-pub(super) fn get_commit_message(ws_path: &Path, sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args(["log", "-1", "--format=%B", sha])
-        .current_dir(ws_path)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if msg.is_empty() { None } else { Some(msg) }
-    } else {
-        None
-    }
-}
-
-/// Return the parent SHAs of a commit. Returns an empty vec on any failure
-/// (caller treats that as "treat it as a non-merge commit").
-fn commit_parent_shas(ws_path: &Path, sha: &str) -> Vec<String> {
-    let output = Command::new("git")
-        .args(["rev-list", "--parents", "-n", "1", sha])
-        .current_dir(ws_path)
-        .output();
-    let out = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    // Format: "<commit> <parent1> <parent2> ..."
-    let line = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    let mut parts = line.split_whitespace();
-    // Skip the commit itself.
-    parts.next();
-    parts.map(|s| s.to_owned()).collect()
-}
-
-/// Path (relative to workspace root) of the stub file used to signal a
-/// dropped commit to `find_conflicted_files`. Files are namespaced under
-/// `.manifold/rebase-dropped/` so they're easy to spot and clean up.
-fn dropped_stub_rel_path(commit_sha: &str) -> String {
-    format!(
-        ".manifold/rebase-dropped/{}.conflict",
-        &commit_sha[..std::cmp::min(12, commit_sha.len())],
-    )
-}
-
-/// Format a marker-bearing stub file body so that the workspace diff contains
-/// a literal `+<<<<<<<` line. That's what `find_files_with_new_conflict_markers`
-/// grepes for — a single occurrence is enough to flag the workspace and trip
-/// the merge-time marker gate.
-fn format_dropped_stub(
-    kind: &str,
-    ws_name: &str,
-    commit_sha: &str,
-    ours_label: &str,
-    ours_detail: &str,
-    theirs_label: &str,
-    theirs_detail: &str,
-) -> String {
-    // Header + a real diff3-style conflict block. The leading `<<<<<<<` at
-    // column 0 is what the marker-gate diff scanner matches on.
-    format!(
-        "# rebase: dropped {kind} while replaying onto new epoch\n\
-         # workspace: {ws_name}\n\
-         # original_commit: {commit_sha}\n\
-         #\n\
-         # This file was written by `maw ws sync --rebase` because the commit\n\
-         # above could not be replayed automatically. Resolve by editing the\n\
-         # original commit's content into the worktree, then delete this file\n\
-         # and commit. See: maw ws resolve {ws_name} --list\n\
-         \n\
-         <<<<<<< epoch ({ours_label})\n\
-         {ours_detail}\n\
-         ||||||| base\n\
-         =======\n\
-         {theirs_detail}\n\
-         >>>>>>> {ws_name} ({theirs_label})\n",
-    )
-}
-
-/// Write a stub file and return `(relative_path, file_content)` so the caller
-/// can record the sidecar entry.
+/// Recursively walk `epoch_tree_commit`'s tree and return a `ConflictTree`
+/// whose `clean` map has one entry per blob in the tree. Non-blob entries
+/// (submodules, symlinks, etc.) are preserved with their appropriate
+/// `EntryMode` so the rebase round-trips type information.
 ///
-/// The stub is placed inside `.manifold/rebase-dropped/` under the workspace
-/// root, with a name derived from the dropped commit's short SHA. Multiple
-/// merge-commit drops in one rebase get distinct files.
-fn record_merge_commit_drop(
-    ws_path: &Path,
-    ws_name: &str,
-    commit_sha: &str,
-    parents: &[String],
-) -> Result<(String, String)> {
-    let rel_path = dropped_stub_rel_path(commit_sha);
-    let parents_summary = parents.join(", ");
-    let content = format_dropped_stub(
-        "merge commit",
-        ws_name,
-        commit_sha,
-        "current (new epoch)",
-        "(merge commit — neither side was picked; both lost)",
-        "dropped",
-        &format!(
-            "merge commit with parents: {parents_summary}\n\
-             (content from both parents was dropped because cherry-pick refused)"
-        ),
-    );
+/// The returned tree's `base_epoch` is set to `base_epoch` (the caller
+/// provides this — typically the **old** epoch id so subsequent
+/// `diff_patchset` outputs match the tree's epoch).
+fn seed_conflict_tree_from_epoch(
+    repo: &dyn GitRepo,
+    epoch_commit_oid: git::GitOid,
+    base_epoch: EpochId,
+) -> Result<ConflictTree> {
+    // Resolve the commit's tree.
+    let commit = repo
+        .read_commit(epoch_commit_oid)
+        .map_err(|e| anyhow::anyhow!("Failed to read epoch commit: {e}"))?;
 
-    let full_path = ws_path.join(&rel_path);
-    if let Some(parent) = full_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            anyhow::anyhow!("Failed to create dropped-merge stub dir: {e}")
-        })?;
-    }
-    std::fs::write(&full_path, &content).map_err(|e| {
-        anyhow::anyhow!("Failed to write dropped-merge stub file: {e}")
-    })?;
-    Ok((rel_path, content))
+    let mut tree = ConflictTree::new(base_epoch);
+    walk_tree_into_clean(repo, commit.tree_oid, std::path::PathBuf::new(), &mut tree)?;
+    Ok(tree)
 }
 
-/// Same as `record_merge_commit_drop` but for cherry-pick refusals that
-/// aren't merge commits (the unexpected / unknown-refusal case).
-fn record_cherry_pick_refusal(
-    ws_path: &Path,
-    ws_name: &str,
-    commit_sha: &str,
-    stderr: &str,
-) -> Result<(String, String)> {
-    let rel_path = dropped_stub_rel_path(commit_sha);
-    let content = format_dropped_stub(
-        "commit",
-        ws_name,
-        commit_sha,
-        "current (new epoch)",
-        "(cherry-pick refused to run; original change not applied)",
-        "dropped",
-        &format!(
-            "cherry-pick refused for this commit; stderr was:\n{}",
-            if stderr.is_empty() { "(empty)" } else { stderr },
-        ),
-    );
+fn walk_tree_into_clean(
+    repo: &dyn GitRepo,
+    tree_oid: git::GitOid,
+    prefix: std::path::PathBuf,
+    tree: &mut ConflictTree,
+) -> Result<()> {
+    let entries = repo
+        .read_tree(tree_oid)
+        .map_err(|e| anyhow::anyhow!("Failed to read tree {tree_oid}: {e}"))?;
 
-    let full_path = ws_path.join(&rel_path);
-    if let Some(parent) = full_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            anyhow::anyhow!("Failed to create cherry-pick-refusal stub dir: {e}")
-        })?;
+    for entry in entries {
+        let path = prefix.join(&entry.name);
+        match entry.mode {
+            git::EntryMode::Tree => {
+                walk_tree_into_clean(repo, entry.oid, path, tree)?;
+            }
+            git::EntryMode::Blob
+            | git::EntryMode::BlobExecutable
+            | git::EntryMode::Link
+            | git::EntryMode::Commit => {
+                let mode_core: EntryMode = entry.mode.into();
+                let oid_core = GitOid::new(&entry.oid.to_string())
+                    .map_err(|e| anyhow::anyhow!("malformed blob oid in tree: {e}"))?;
+                tree.clean.insert(path, MaterializedEntry::new(mode_core, oid_core));
+            }
+        }
     }
-    std::fs::write(&full_path, &content).map_err(|e| {
-        anyhow::anyhow!("Failed to write cherry-pick-refusal stub file: {e}")
-    })?;
-    Ok((rel_path, content))
+
+    Ok(())
 }
 
-/// List files with unmerged (conflicted) entries in the index.
-pub(super) fn list_conflicted_files(ws_path: &Path) -> Vec<String> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "--diff-filter=U"])
-        .current_dir(ws_path)
-        .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => {
-            // Fallback: try ls-files --unmerged
-            let output2 = Command::new("git")
-                .args(["ls-files", "--unmerged"])
-                .current_dir(ws_path)
-                .output();
-            match output2 {
-                Ok(o) if o.status.success() => {
-                    let mut files: Vec<String> = String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter_map(|l| l.split('\t').nth(1).map(|s| s.to_string()))
-                        .collect();
-                    files.sort();
-                    files.dedup();
-                    files
+// ---------------------------------------------------------------------------
+// Epoch-delta overlap detection
+// ---------------------------------------------------------------------------
+
+/// `path → (old_epoch_blob_oid, new_epoch_blob_oid)` for every file the
+/// epoch transition (old → new) changed (Added/Modified/Renamed/Deleted).
+///
+/// Used by [`promote_overlaps_to_conflicts`] to spot three-way overlaps:
+/// if a workspace commit modifies a path that's in this map, the workspace
+/// and the epoch are both racing to change the same file, and the rebase
+/// must surface a structured conflict rather than silently keep the epoch
+/// version.
+type EpochDelta = std::collections::HashMap<std::path::PathBuf, (Option<GitOid>, Option<GitOid>)>;
+
+fn build_epoch_delta_map(
+    repo: &dyn GitRepo,
+    old_epoch: git::GitOid,
+    new_epoch: git::GitOid,
+) -> Result<EpochDelta> {
+    use maw_git::ChangeType;
+
+    let old_commit = repo
+        .read_commit(old_epoch)
+        .map_err(|e| anyhow::anyhow!("Failed to read old epoch commit: {e}"))?;
+    let new_commit = repo
+        .read_commit(new_epoch)
+        .map_err(|e| anyhow::anyhow!("Failed to read new epoch commit: {e}"))?;
+
+    let entries = repo
+        .diff_trees_with_renames(Some(old_commit.tree_oid), new_commit.tree_oid, 50)
+        .map_err(|e| anyhow::anyhow!("Failed to diff epoch trees: {e}"))?;
+
+    let mut map: EpochDelta = EpochDelta::new();
+    for entry in entries {
+        let path = std::path::PathBuf::from(&entry.path);
+        let old_oid = if entry.old_oid.is_zero() {
+            None
+        } else {
+            Some(
+                GitOid::new(&entry.old_oid.to_string())
+                    .map_err(|e| anyhow::anyhow!("malformed old epoch diff oid: {e}"))?,
+            )
+        };
+        let new_oid = if entry.new_oid.is_zero() {
+            None
+        } else {
+            Some(
+                GitOid::new(&entry.new_oid.to_string())
+                    .map_err(|e| anyhow::anyhow!("malformed new epoch diff oid: {e}"))?,
+            )
+        };
+        map.insert(path.clone(), (old_oid.clone(), new_oid.clone()));
+
+        // For renames, also record the OLD path so a workspace Delete or
+        // Modify against the pre-rename name also registers as overlap.
+        if let ChangeType::Renamed { from } = &entry.change_type {
+            map.insert(
+                std::path::PathBuf::from(from),
+                (old_oid, None), // renamed-away paths look "deleted" to workspace
+            );
+        }
+    }
+    Ok(map)
+}
+
+/// Walk the workspace patchset and, for every Add/Modify on a path that the
+/// epoch also changed, replace the `clean` entry with a `Conflict::Content`
+/// describing the three-way overlap (epoch-side = ours, workspace-side =
+/// theirs, base = old-epoch blob).
+///
+/// This is the pipeline-level step that turns what would be a silent
+/// overwrite into a structured conflict the merge-time marker gate (bn-372v)
+/// can surface.
+fn promote_overlaps_to_conflicts(
+    tree: &mut ConflictTree,
+    patch: &maw_core::merge::types::PatchSet,
+    epoch_delta: &EpochDelta,
+    ws_name: &str,
+    base_epoch_id: &EpochId,
+) {
+    use maw_core::merge::types::ChangeKind;
+
+    for change in &patch.changes {
+        let Some((ref_old, ref_new)) = epoch_delta.get(&change.path) else {
+            // Path not touched by the epoch — no overlap.
+            continue;
+        };
+
+        match change.kind {
+            ChangeKind::Added | ChangeKind::Modified => {
+                let Some(ws_blob) = change.blob.clone() else {
+                    continue;
+                };
+
+                // If the epoch's new-side blob equals what the workspace
+                // produced, there's no real divergence.
+                if let Some(epoch_new) = ref_new
+                    && *epoch_new == ws_blob
+                {
+                    continue;
                 }
-                _ => vec![],
+
+                // If the workspace's blob is identical to the old base
+                // (workspace effectively reverts to base while epoch went
+                // forward), the epoch version wins and there's no conflict.
+                if let Some(epoch_old) = ref_old
+                    && *epoch_old == ws_blob
+                {
+                    continue;
+                }
+
+                let epoch_side_blob = match ref_new {
+                    Some(new) => new.clone(),
+                    None => continue, // epoch deleted; workspace-re-added → AddAdd-ish, skip for V1
+                };
+
+                let ord = OrderingKey::new(
+                    base_epoch_id.clone(),
+                    patch.workspace_id.clone(),
+                    0,
+                    0,
+                );
+                let ours = ConflictSide::new(
+                    "epoch".to_owned(),
+                    epoch_side_blob.clone(),
+                    ord.clone(),
+                );
+                let theirs = ConflictSide::new(ws_name.to_owned(), ws_blob, ord);
+
+                let file_id = change
+                    .file_id
+                    .unwrap_or_else(|| FileId::new(merge_file_id_seed(
+                        &GitOid::new(&"f".repeat(40)).unwrap(),
+                        &change.path,
+                    )));
+
+                // Install the conflict, evicting the clean entry.
+                tree.clean.remove(&change.path);
+                tree.conflicts.insert(
+                    change.path.clone(),
+                    Conflict::Content {
+                        path: change.path.clone(),
+                        file_id,
+                        base: ref_old.clone(),
+                        sides: vec![ours, theirs],
+                        atoms: vec![],
+                    },
+                );
+            }
+            ChangeKind::Deleted => {
+                // Workspace wants to delete a file the epoch modified.
+                // That's a modify/delete conflict from the workspace's
+                // perspective. Only meaningful if the epoch kept the file.
+                if ref_new.is_none() {
+                    continue;
+                }
+                let Some(epoch_new) = ref_new.clone() else { continue };
+                let ord = OrderingKey::new(
+                    base_epoch_id.clone(),
+                    patch.workspace_id.clone(),
+                    0,
+                    0,
+                );
+                let modifier = ConflictSide::new("epoch".to_owned(), epoch_new.clone(), ord.clone());
+                let deleter = ConflictSide::new(
+                    ws_name.to_owned(),
+                    ref_old.clone().unwrap_or_else(|| epoch_new.clone()),
+                    ord,
+                );
+                let file_id = change
+                    .file_id
+                    .unwrap_or_else(|| FileId::new(merge_file_id_seed(
+                        &GitOid::new(&"e".repeat(40)).unwrap(),
+                        &change.path,
+                    )));
+                tree.clean.remove(&change.path);
+                tree.conflicts.insert(
+                    change.path.clone(),
+                    Conflict::ModifyDelete {
+                        path: change.path.clone(),
+                        file_id,
+                        modifier,
+                        deleter,
+                        modified_content: epoch_new,
+                    },
+                );
             }
         }
     }
 }
 
-/// Read the three conflict stages (base/ours/theirs) from the git index for a file.
-/// Returns (base, ours, theirs) as Option<String> for each stage.
-fn read_conflict_stages(
-    ws_path: &Path,
-    file_path: &str,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let read_stage = |stage: &str| -> Option<String> {
-        let spec = format!(":{stage}:{file_path}");
-        let output = Command::new("git")
-            .args(["show", &spec])
-            .current_dir(ws_path)
-            .output()
-            .ok()?;
-        if output.status.success() {
-            String::from_utf8(output.stdout).ok()
-        } else {
-            None
-        }
-    };
+// ---------------------------------------------------------------------------
+// Merge-commit handling
+// ---------------------------------------------------------------------------
 
-    let base = read_stage("1");
-    let ours = read_stage("2");
-    let theirs = read_stage("3");
-    (base, ours, theirs)
-}
-
-/// Relabel git's conflict markers with meaningful workspace/epoch names.
+/// For a merge commit with N parents, we've already applied the first-parent
+/// delta via `apply_unilateral_patchset`. For every non-first parent, we
+/// synthesize an explicit `Conflict::Content` at each path that parent
+/// touched — preserving the "non-first side" content as a second side of
+/// the conflict. The effect: `materialize` renders marker blobs into these
+/// files so `find_conflicted_files` (which diffs `base..HEAD` for
+/// `+<<<<<<<`) trips the merge-time marker gate (bn-372v).
 ///
-/// Git writes markers like:
-///   `<<<<<<< HEAD`
-///   `>>>>>>> abc123 (commit message)`
-///
-/// This rewrites them to:
-///   `<<<<<<< epoch (current)`
-///   `>>>>>>> ws-name (workspace changes)`
-///
-/// so that `maw ws resolve` can match them by name.
-pub(super) fn relabel_conflict_markers(ws_path: &Path, rel_path: &str, ws_name: &str) {
-    let full_path = ws_path.join(rel_path);
-    let content = match std::fs::read_to_string(&full_path) {
-        Ok(c) => c,
-        Err(e) => {
-            // bn-lc1j: surface read failure so `maw ws resolve --keep epoch`
-            // not matching markers on this file can be debugged.
-            tracing::warn!(
-                path = %full_path.display(),
-                workspace = %ws_name,
-                error = %e,
-                "failed to read conflicted file for marker relabel — \
-                 `maw ws resolve` may not match markers on this file"
-            );
-            return;
-        }
-    };
+/// V1 SIMPLIFICATION: we don't attempt true multi-side three-way merging of
+/// each parent's delta. Each non-first parent contributes **one** side per
+/// touched path (its post-merge blob). A future bone can extend this to
+/// produce fully atomized `ConflictAtom`s.
+fn inject_merge_side_conflicts(
+    tree: &mut ConflictTree,
+    ws_name: &str,
+    commit_core: &GitOid,
+    parent_index: usize,
+    side_patch: &maw_core::merge::types::PatchSet,
+) {
+    use maw_core::merge::types::ChangeKind;
 
-    let mut output = String::with_capacity(content.len());
-    for line in content.lines() {
-        if line.starts_with("<<<<<<<") {
-            output.push_str("<<<<<<< epoch (current)");
-        } else if line.starts_with(">>>>>>>") {
-            output.push_str(&format!(">>>>>>> {ws_name} (workspace changes)"));
-        } else {
-            output.push_str(line);
-        }
-        output.push('\n');
-    }
+    // Synthetic ordering key pinned to this rebase step. Only used for
+    // display ordering — the concrete timestamp is irrelevant to conflict
+    // semantics.
+    let ord = OrderingKey::new(
+        tree.base_epoch.clone(),
+        side_patch.workspace_id.clone(),
+        parent_index as u64,
+        0,
+    );
+    let side_ws_label = format!("{ws_name}#merge-parent-{parent_index}");
 
-    if let Err(e) = std::fs::write(&full_path, output) {
-        // bn-lc1j: surface write failure. File keeps git's default markers,
-        // so `maw ws resolve --keep epoch` won't match them.
-        tracing::warn!(
-            path = %full_path.display(),
-            workspace = %ws_name,
-            error = %e,
-            "failed to write relabeled conflict markers — \
-             `maw ws resolve` may not match markers on this file"
+    for change in &side_patch.changes {
+        let path = change.path.clone();
+
+        // We only care about content-bearing sides for the marker rendering.
+        let Some(blob) = change.blob.clone() else {
+            continue;
+        };
+        // Skip deletions — they don't contribute a `<<<<<<<` marker.
+        if matches!(change.kind, ChangeKind::Deleted) {
+            continue;
+        }
+
+        let new_side = ConflictSide::new(side_ws_label.clone(), blob.clone(), ord.clone());
+
+        if let Some(existing) = tree.conflicts.remove(&path) {
+            // Promote / extend an existing conflict.
+            match existing {
+                Conflict::Content {
+                    path: p,
+                    file_id,
+                    base,
+                    mut sides,
+                    atoms,
+                } => {
+                    sides.push(new_side);
+                    tree.conflicts.insert(
+                        p.clone(),
+                        Conflict::Content {
+                            path: p,
+                            file_id,
+                            base,
+                            sides,
+                            atoms,
+                        },
+                    );
+                }
+                other => {
+                    // Reinsert unchanged — we don't know how to extend other
+                    // shapes from a merge-side delta in V1.
+                    tree.conflicts.insert(path.clone(), other);
+                }
+            }
+            continue;
+        }
+
+        // New conflict: seed `ours` from whatever the first-parent apply
+        // left in `tree.clean` (if anything). This gives the marker block a
+        // meaningful "ours" side even though both OIDs came out of the merge
+        // commit's own content.
+        let ours_oid = tree
+            .clean
+            .get(&path)
+            .map(|e| e.oid.clone())
+            .unwrap_or_else(|| blob.clone());
+        let ours_side = ConflictSide::new(
+            format!("{ws_name}#merge-parent-0"),
+            ours_oid.clone(),
+            ord.clone(),
+        );
+
+        let file_id = FileId::new(merge_file_id_seed(commit_core, &path));
+        tree.conflicts.insert(
+            path.clone(),
+            Conflict::Content {
+                path,
+                file_id,
+                base: Some(ours_oid),
+                sides: vec![ours_side, new_side],
+                atoms: vec![],
+            },
         );
     }
 }
+
+/// Deterministic `FileId` seed used for merge-commit-induced conflicts.
+///
+/// Not based on `file_id_from_blob` because we want the same path across
+/// a repeated rebase to get the same id. Truncated SHA-256 of commit OID
+/// + path is deterministic enough for display-only purposes.
+fn merge_file_id_seed(commit: &GitOid, path: &std::path::Path) -> u128 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(commit.as_str().as_bytes());
+    h.update(b"\0");
+    h.update(path.to_string_lossy().as_bytes());
+    let digest = h.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Tree build
+// ---------------------------------------------------------------------------
+
+/// Take a [`MaterializedOutput`], write any `Rendered` blobs to the object
+/// store, and produce the new root tree by editing the new-epoch base tree.
+///
+/// Rendered conflict blobs replace the base-tree entry at the same path;
+/// clean entries are either already present in the base tree (pass-through)
+/// or come from workspace-side adds (upserted).
+///
+/// Paths in the base tree that are absent from `output.entries` are removed
+/// from the final tree — this matches the "all entries are present in the
+/// materialized output" invariant: `seed_conflict_tree_from_epoch` loaded
+/// every base-tree blob into `clean` before any patches were applied, so a
+/// missing output entry really means the rebase wanted to delete it.
+fn write_blobs_and_build_tree(
+    repo: &dyn GitRepo,
+    base_tree: git::GitOid,
+    output: maw_core::merge::materialize::MaterializedOutput,
+) -> Result<git::GitOid> {
+    use maw_core::merge::materialize::FinalEntry;
+
+    // Collect the set of paths currently in the base tree so we can compute
+    // which ones need to be explicitly removed.
+    let mut base_paths = std::collections::BTreeSet::<String>::new();
+    collect_blob_paths(repo, base_tree, "", &mut base_paths)?;
+
+    let mut edits: Vec<TreeEdit> = Vec::new();
+    let mut final_paths = std::collections::BTreeSet::<String>::new();
+
+    for (path, entry) in output.entries {
+        // Trees use forward-slash paths regardless of host OS.
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        final_paths.insert(path_str.clone());
+        match entry {
+            FinalEntry::Clean { mode, oid } => {
+                let git_mode: git::EntryMode = mode.into();
+                let git_oid: git::GitOid = oid
+                    .as_str()
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("bad blob oid in clean entry: {e}"))?;
+                edits.push(TreeEdit::Upsert {
+                    path: path_str,
+                    mode: git_mode,
+                    oid: git_oid,
+                });
+            }
+            FinalEntry::Rendered { mode, content } => {
+                let git_oid = repo
+                    .write_blob_with_path(&content, &path_str)
+                    .map_err(|e| anyhow::anyhow!("write_blob failed for {path_str}: {e}"))?;
+                let git_mode: git::EntryMode = mode.into();
+                edits.push(TreeEdit::Upsert {
+                    path: path_str,
+                    mode: git_mode,
+                    oid: git_oid,
+                });
+            }
+        }
+    }
+
+    // Any base-tree path not in final_paths must be removed.
+    for base_path in &base_paths {
+        if !final_paths.contains(base_path) {
+            edits.push(TreeEdit::Remove {
+                path: base_path.clone(),
+            });
+        }
+    }
+
+    repo.edit_tree(base_tree, &edits)
+        .map_err(|e| anyhow::anyhow!("edit_tree failed: {e}"))
+}
+
+/// Recursively collect all blob-entry paths from a tree, slash-joined.
+fn collect_blob_paths(
+    repo: &dyn GitRepo,
+    tree: git::GitOid,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let entries = repo
+        .read_tree(tree)
+        .map_err(|e| anyhow::anyhow!("read_tree failed: {e}"))?;
+    for entry in entries {
+        let path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        match entry.mode {
+            git::EntryMode::Tree => {
+                collect_blob_paths(repo, entry.oid, &path, out)?;
+            }
+            _ => {
+                out.insert(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

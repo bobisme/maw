@@ -505,34 +505,53 @@ fn destroy_deletes_all_workspace_owned_refs() {
 
 #[test]
 fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
+    // bn-372v (original): `sync --rebase` must not silently drop merge
+    // commits committed inside a workspace.
+    //
+    // Original (pre-bn-elj0) mechanism: merge commits were refused by
+    // `cherry-pick --no-commit`, so the rebase wrote a stub file with
+    // conflict markers to trip the merge-time marker gate.
+    //
+    // Post-bn-elj0 mechanism: merge commits are replayed through the
+    // structured-merge engine (maw-core::merge). The first-parent delta
+    // applies normally; non-first-parent deltas are folded in as
+    // additional sides of a `Conflict::Content`. When those deltas
+    // conflict with the epoch or with each other, `materialize` renders
+    // a diff3-style marker block — `find_conflicted_files` then trips
+    // the merge-time marker gate.
+    //
+    // To exercise the full pipeline, this test sets up a merge that
+    // *actually overlaps the epoch*: both the feature chain and the
+    // side branch modify `shared.txt`, which is also modified by the
+    // advancer workspace. That produces a real 3-way conflict rather
+    // than a clean merge.
     let repo = TestRepo::new();
     repo.seed_files(&[("shared.txt", "original\n")]);
 
-    // Create a workspace, then create a merge commit inside it by merging
-    // a second local branch with non-overlapping changes.
     repo.maw_ok(&["ws", "create", "feature"]);
     let epoch_before = repo.current_epoch();
     let ws_path = repo.root().join("ws").join("feature");
 
-    // First workspace commit on the detached-HEAD chain.
-    repo.add_file("feature", "feature.txt", "feature-work\n");
+    // Feature-side commit: modifies shared.txt.
+    repo.add_file("feature", "shared.txt", "feature-version\n");
     repo.git_in_workspace("feature", &["add", "-A"]);
     repo.git_in_workspace("feature", &["commit", "-m", "feat: feature work"]);
     let feature_commit = repo.workspace_head("feature");
 
-    // Build a side branch off the epoch with a different file, then come back
-    // to feature_commit and merge it with --no-ff so we get a real merge
-    // commit with two parents.
+    // Side branch off the epoch: modifies shared.txt differently.
     repo.git_in_workspace("feature", &["checkout", "-b", "side", &epoch_before]);
-    std::fs::write(ws_path.join("side.txt"), "side-work\n").unwrap();
+    std::fs::write(ws_path.join("shared.txt"), "side-version\n").unwrap();
     repo.git_in_workspace("feature", &["add", "-A"]);
     repo.git_in_workspace("feature", &["commit", "-m", "feat: side work"]);
 
-    // Go back to the detached chain at feature_commit, then merge side in.
+    // Merge side into the detached feature chain. We resolve by picking
+    // feature's version so the merge commit lands cleanly in git, but
+    // the structured rebase still sees the two-parent history and has to
+    // reconcile both sides.
     repo.git_in_workspace("feature", &["checkout", "--detach", &feature_commit]);
     repo.git_in_workspace(
         "feature",
-        &["merge", "--no-ff", "--no-edit", "side"],
+        &["-c", "merge.conflictStyle=diff3", "merge", "--no-ff", "--no-edit", "-X", "ours", "side"],
     );
 
     // Sanity-check: HEAD is now a merge commit (two parents).
@@ -546,9 +565,10 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         "setup failed: HEAD should be a merge commit, got {parent_count} parent(s): {parents_line}"
     );
 
-    // Advance the epoch via another workspace so `feature` is stale.
+    // Advance the epoch via another workspace — and have it also modify
+    // shared.txt, so the epoch ↔ feature collision is real.
     repo.maw_ok(&["ws", "create", "advancer"]);
-    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.add_file("advancer", "shared.txt", "advancer-version\n");
     repo.git_in_workspace("advancer", &["add", "-A"]);
     repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance epoch"]);
     repo.maw_ok(&[
@@ -560,31 +580,25 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         "merge advancer",
     ]);
 
-    // Run sync --rebase on feature. It should detect the merge commit and
-    // mark the workspace conflicted — NOT silently succeed with an empty
-    // "0 file(s)" conflict commit.
+    // Run sync --rebase on feature. It should replay both the feature
+    // commit and the merge commit. Because feature-side and advancer-side
+    // modified the same file (shared.txt), the rebase must produce a
+    // structured conflict rather than silently winning.
     let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}{stderr}");
 
-    // Must NOT silently pass. Either it bails, or it reports the merge-commit
-    // conflict. The old bug path printed "conflict replaying … (0 file(s))".
+    // Must NOT silently pass with a zero-file conflict — that was the
+    // old bug.
     assert!(
         !combined.contains("(0 file(s))"),
-        "sync --rebase must not record a zero-file conflict for a merge commit.\n\
+        "sync --rebase must not record a zero-file conflict.\n\
          stdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(
-        combined.contains("merge commit")
-            || combined.contains("cannot cherry-pick")
-            || combined.contains("CONFLICT"),
-        "sync --rebase should flag the merge commit.\nstdout: {stdout}\nstderr: {stderr}"
-    );
 
-    // The marker gate must see the workspace as conflicted — i.e. attempting
-    // a merge should fail with an error that mentions the stub path or
-    // conflict markers. This is the exact path the bug let slip.
+    // Load-bearing assertion #1: `ws merge` must refuse (the marker gate
+    // trips because the workspace HEAD has `+<<<<<<<` in its diff).
     let merge_out = repo.maw_raw(&[
         "ws",
         "merge",
@@ -593,17 +607,32 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         "default",
         "--destroy",
         "--message",
-        "should fail: dropped merge",
+        "should fail: unresolved rebase conflict",
     ]);
     let merge_stderr = String::from_utf8_lossy(&merge_out.stderr);
     let merge_stdout = String::from_utf8_lossy(&merge_out.stdout);
     assert!(
         !merge_out.status.success(),
-        "merge must refuse a workspace where `sync --rebase` dropped a merge commit.\n\
+        "merge must refuse a workspace with unresolved rebase conflicts.\n\
          stdout: {merge_stdout}\nstderr: {merge_stderr}"
     );
 
-    // And the sidecar must record an explicit entry for the dropped commit.
+    // Load-bearing assertion #2: at least one tracked file has textual
+    // conflict markers committed.
+    let markers_cmd = std::process::Command::new("git")
+        .args(["grep", "-l", "<<<<<<< epoch"])
+        .current_dir(&ws_path)
+        .output()
+        .expect("git grep should run");
+    assert!(
+        markers_cmd.status.success(),
+        "at least one workspace file should contain `<<<<<<< epoch` markers after rebase.\n\
+         git grep stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&markers_cmd.stdout),
+        String::from_utf8_lossy(&markers_cmd.stderr),
+    );
+
+    // Load-bearing assertion #3: the legacy sidecar exists.
     let sidecar = repo.root()
         .join(".manifold")
         .join("artifacts")
@@ -612,12 +641,11 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         .join("rebase-conflicts.json");
     assert!(
         sidecar.exists(),
-        "rebase-conflicts.json should exist after a merge-commit drop"
+        "rebase-conflicts.json should exist after a conflicted rebase"
     );
     let sidecar_contents = std::fs::read_to_string(&sidecar).unwrap();
     assert!(
-        sidecar_contents.contains("rebase-dropped")
-            || sidecar_contents.contains("merge"),
-        "sidecar should reference the dropped merge. Got: {sidecar_contents}"
+        sidecar_contents.contains("shared.txt"),
+        "sidecar should list the conflicted file. Got: {sidecar_contents}"
     );
 }
