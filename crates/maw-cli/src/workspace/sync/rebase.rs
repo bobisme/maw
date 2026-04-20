@@ -153,6 +153,61 @@ pub(super) fn rebase_workspace(
         let short_sha = &commit_sha[..std::cmp::min(12, commit_sha.len())];
         let commit_msg = get_commit_message(ws_path, commit_sha);
 
+        // Detect merge commits upfront. `git cherry-pick` without `-m <parent>`
+        // refuses merge commits and exits non-zero with nothing in the index —
+        // the old code path then committed an empty "conflict" commit and
+        // silently dropped the merge's content.
+        //
+        // We don't try to cherry-pick merge commits (picking one parent loses
+        // the other side). Instead, mark the workspace as conflicted by
+        // writing a stub file with marker syntax, and record an explicit
+        // RebaseConflict entry in the sidecar so `find_conflicted_files` and
+        // the merge-time marker gate catch the problem (bn-372v).
+        let parents = commit_parent_shas(ws_path, commit_sha);
+        if parents.len() > 1 {
+            conflicted += 1;
+            let (stub_rel_path, stub_content) = record_merge_commit_drop(
+                ws_path,
+                ws_name,
+                commit_sha,
+                &parents,
+            )?;
+
+            println!(
+                "  [{}/{}] CONFLICT: {short_sha} is a merge commit \
+                 ({} parents) — cannot cherry-pick; marked workspace conflicted",
+                i + 1,
+                commits.len(),
+                parents.len(),
+            );
+            println!("    - {stub_rel_path}");
+
+            conflicts.push(RebaseConflict {
+                path: stub_rel_path.clone(),
+                original_commit: commit_sha.clone(),
+                base: None,
+                ours: None,
+                theirs: Some(stub_content),
+            });
+
+            // Commit the stub so the markers live in HEAD and
+            // `find_conflicted_files` (which diffs workspace..HEAD) sees the
+            // added marker lines.
+            let _ = Command::new("git")
+                .args(["add", "--all"])
+                .current_dir(ws_path)
+                .output();
+            let msg = format!(
+                "rebase: dropped merge commit {short_sha} ({} parents) — resolve manually",
+                parents.len(),
+            );
+            let _ = Command::new("git")
+                .args(["commit", "--no-verify", "--allow-empty", "-m", &msg])
+                .current_dir(ws_path)
+                .output();
+            continue;
+        }
+
         // Try cherry-pick --no-commit to apply changes without auto-committing.
         let cp_output = Command::new("git")
             .args(["cherry-pick", "--no-commit", commit_sha])
@@ -212,11 +267,70 @@ pub(super) fn rebase_workspace(
                 }
             }
         } else {
-            // Cherry-pick failed (conflict). Record conflicts and continue.
+            // Cherry-pick failed. Two cases we care about:
+            //   (a) A real content conflict — the index has unmerged entries
+            //       and the worktree has `<<<<<<<` markers. Handle via the
+            //       original flow: record stage content, relabel markers.
+            //   (b) `git cherry-pick` refused to run (e.g., a corner case we
+            //       didn't detect as a merge commit upfront, or some other
+            //       structural refusal). `list_conflicted_files` comes back
+            //       empty, the worktree is clean, and committing would hide
+            //       the dropped content from every downstream gate. Promote
+            //       this to an explicit "dropped" stub — same shape as the
+            //       merge-commit path above (bn-372v).
             conflicted += 1;
 
             // Find which files have conflict markers.
             let conflict_files = list_conflicted_files(ws_path);
+
+            if conflict_files.is_empty() {
+                let stderr = String::from_utf8_lossy(&cp_output.stderr);
+                let (stub_rel_path, stub_content) = record_cherry_pick_refusal(
+                    ws_path,
+                    ws_name,
+                    commit_sha,
+                    stderr.trim(),
+                )?;
+
+                println!(
+                    "  [{}/{}] CONFLICT: cherry-pick refused for {short_sha} \
+                     (no unmerged entries) — marking workspace conflicted",
+                    i + 1,
+                    commits.len(),
+                );
+                println!("    - {stub_rel_path}");
+                if !stderr.trim().is_empty() {
+                    println!("    cherry-pick stderr: {}", stderr.trim());
+                }
+
+                conflicts.push(RebaseConflict {
+                    path: stub_rel_path.clone(),
+                    original_commit: commit_sha.clone(),
+                    base: None,
+                    ours: None,
+                    theirs: Some(stub_content),
+                });
+
+                // Clear any partial cherry-pick state so the next iteration
+                // has a clean index to work against.
+                let _ = Command::new("git")
+                    .args(["cherry-pick", "--abort"])
+                    .current_dir(ws_path)
+                    .output();
+
+                let _ = Command::new("git")
+                    .args(["add", "--all"])
+                    .current_dir(ws_path)
+                    .output();
+                let msg = format!(
+                    "rebase: dropped {short_sha} (cherry-pick refused) — resolve manually",
+                );
+                let _ = Command::new("git")
+                    .args(["commit", "--no-verify", "--allow-empty", "-m", &msg])
+                    .current_dir(ws_path)
+                    .output();
+                continue;
+            }
 
             println!(
                 "  [{}/{}] CONFLICT replaying {short_sha}: {} file(s)",
@@ -348,6 +462,142 @@ pub(super) fn get_commit_message(ws_path: &Path, sha: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Return the parent SHAs of a commit. Returns an empty vec on any failure
+/// (caller treats that as "treat it as a non-merge commit").
+fn commit_parent_shas(ws_path: &Path, sha: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["rev-list", "--parents", "-n", "1", sha])
+        .current_dir(ws_path)
+        .output();
+    let out = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    // Format: "<commit> <parent1> <parent2> ..."
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let mut parts = line.split_whitespace();
+    // Skip the commit itself.
+    parts.next();
+    parts.map(|s| s.to_owned()).collect()
+}
+
+/// Path (relative to workspace root) of the stub file used to signal a
+/// dropped commit to `find_conflicted_files`. Files are namespaced under
+/// `.manifold/rebase-dropped/` so they're easy to spot and clean up.
+fn dropped_stub_rel_path(commit_sha: &str) -> String {
+    format!(
+        ".manifold/rebase-dropped/{}.conflict",
+        &commit_sha[..std::cmp::min(12, commit_sha.len())],
+    )
+}
+
+/// Format a marker-bearing stub file body so that the workspace diff contains
+/// a literal `+<<<<<<<` line. That's what `find_files_with_new_conflict_markers`
+/// grepes for — a single occurrence is enough to flag the workspace and trip
+/// the merge-time marker gate.
+fn format_dropped_stub(
+    kind: &str,
+    ws_name: &str,
+    commit_sha: &str,
+    ours_label: &str,
+    ours_detail: &str,
+    theirs_label: &str,
+    theirs_detail: &str,
+) -> String {
+    // Header + a real diff3-style conflict block. The leading `<<<<<<<` at
+    // column 0 is what the marker-gate diff scanner matches on.
+    format!(
+        "# rebase: dropped {kind} while replaying onto new epoch\n\
+         # workspace: {ws_name}\n\
+         # original_commit: {commit_sha}\n\
+         #\n\
+         # This file was written by `maw ws sync --rebase` because the commit\n\
+         # above could not be replayed automatically. Resolve by editing the\n\
+         # original commit's content into the worktree, then delete this file\n\
+         # and commit. See: maw ws resolve {ws_name} --list\n\
+         \n\
+         <<<<<<< epoch ({ours_label})\n\
+         {ours_detail}\n\
+         ||||||| base\n\
+         =======\n\
+         {theirs_detail}\n\
+         >>>>>>> {ws_name} ({theirs_label})\n",
+    )
+}
+
+/// Write a stub file and return `(relative_path, file_content)` so the caller
+/// can record the sidecar entry.
+///
+/// The stub is placed inside `.manifold/rebase-dropped/` under the workspace
+/// root, with a name derived from the dropped commit's short SHA. Multiple
+/// merge-commit drops in one rebase get distinct files.
+fn record_merge_commit_drop(
+    ws_path: &Path,
+    ws_name: &str,
+    commit_sha: &str,
+    parents: &[String],
+) -> Result<(String, String)> {
+    let rel_path = dropped_stub_rel_path(commit_sha);
+    let parents_summary = parents.join(", ");
+    let content = format_dropped_stub(
+        "merge commit",
+        ws_name,
+        commit_sha,
+        "current (new epoch)",
+        "(merge commit — neither side was picked; both lost)",
+        "dropped",
+        &format!(
+            "merge commit with parents: {parents_summary}\n\
+             (content from both parents was dropped because cherry-pick refused)"
+        ),
+    );
+
+    let full_path = ws_path.join(&rel_path);
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("Failed to create dropped-merge stub dir: {e}")
+        })?;
+    }
+    std::fs::write(&full_path, &content).map_err(|e| {
+        anyhow::anyhow!("Failed to write dropped-merge stub file: {e}")
+    })?;
+    Ok((rel_path, content))
+}
+
+/// Same as `record_merge_commit_drop` but for cherry-pick refusals that
+/// aren't merge commits (the unexpected / unknown-refusal case).
+fn record_cherry_pick_refusal(
+    ws_path: &Path,
+    ws_name: &str,
+    commit_sha: &str,
+    stderr: &str,
+) -> Result<(String, String)> {
+    let rel_path = dropped_stub_rel_path(commit_sha);
+    let content = format_dropped_stub(
+        "commit",
+        ws_name,
+        commit_sha,
+        "current (new epoch)",
+        "(cherry-pick refused to run; original change not applied)",
+        "dropped",
+        &format!(
+            "cherry-pick refused for this commit; stderr was:\n{}",
+            if stderr.is_empty() { "(empty)" } else { stderr },
+        ),
+    );
+
+    let full_path = ws_path.join(&rel_path);
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("Failed to create cherry-pick-refusal stub dir: {e}")
+        })?;
+    }
+    std::fs::write(&full_path, &content).map_err(|e| {
+        anyhow::anyhow!("Failed to write cherry-pick-refusal stub file: {e}")
+    })?;
+    Ok((rel_path, content))
 }
 
 /// List files with unmerged (conflicted) entries in the index.

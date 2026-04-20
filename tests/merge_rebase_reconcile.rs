@@ -483,3 +483,141 @@ fn destroy_deletes_all_workspace_owned_refs() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// bn-372v: `sync --rebase` must not silently drop merge commits.
+//
+// Before the fix: `list_commits_ahead` included merge commits. Git refuses to
+// `cherry-pick --no-commit` a merge commit without `-m <parent>`, so the
+// cherry-pick failed with nothing unmerged in the index. The old code path
+// read `list_conflicted_files` (empty), made an empty commit with message
+// "rebase: conflict replaying … (0 file(s))", and moved on. No markers were
+// written anywhere, so `find_conflicted_files` returned empty, and the
+// merge-time marker gate (merge.rs:2553-2573) let the workspace merge into
+// `default` clean — silently dropping the merge commit's content.
+//
+// After the fix: merge commits are detected upfront. A stub file with
+// `<<<<<<<` markers is written so the workspace diff contains a `+<<<<<<<`
+// line, which trips `find_files_with_new_conflict_markers`, which trips the
+// merge-time marker gate. An explicit RebaseConflict entry is recorded in the
+// sidecar.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "original\n")]);
+
+    // Create a workspace, then create a merge commit inside it by merging
+    // a second local branch with non-overlapping changes.
+    repo.maw_ok(&["ws", "create", "feature"]);
+    let epoch_before = repo.current_epoch();
+    let ws_path = repo.root().join("ws").join("feature");
+
+    // First workspace commit on the detached-HEAD chain.
+    repo.add_file("feature", "feature.txt", "feature-work\n");
+    repo.git_in_workspace("feature", &["add", "-A"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: feature work"]);
+    let feature_commit = repo.workspace_head("feature");
+
+    // Build a side branch off the epoch with a different file, then come back
+    // to feature_commit and merge it with --no-ff so we get a real merge
+    // commit with two parents.
+    repo.git_in_workspace("feature", &["checkout", "-b", "side", &epoch_before]);
+    std::fs::write(ws_path.join("side.txt"), "side-work\n").unwrap();
+    repo.git_in_workspace("feature", &["add", "-A"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: side work"]);
+
+    // Go back to the detached chain at feature_commit, then merge side in.
+    repo.git_in_workspace("feature", &["checkout", "--detach", &feature_commit]);
+    repo.git_in_workspace(
+        "feature",
+        &["merge", "--no-ff", "--no-edit", "side"],
+    );
+
+    // Sanity-check: HEAD is now a merge commit (two parents).
+    let parents_line = repo.git_in_workspace(
+        "feature",
+        &["rev-list", "--parents", "-n", "1", "HEAD"],
+    );
+    let parent_count = parents_line.trim().split_whitespace().count() - 1;
+    assert!(
+        parent_count >= 2,
+        "setup failed: HEAD should be a merge commit, got {parent_count} parent(s): {parents_line}"
+    );
+
+    // Advance the epoch via another workspace so `feature` is stale.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "-A"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance epoch"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    // Run sync --rebase on feature. It should detect the merge commit and
+    // mark the workspace conflicted — NOT silently succeed with an empty
+    // "0 file(s)" conflict commit.
+    let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // Must NOT silently pass. Either it bails, or it reports the merge-commit
+    // conflict. The old bug path printed "conflict replaying … (0 file(s))".
+    assert!(
+        !combined.contains("(0 file(s))"),
+        "sync --rebase must not record a zero-file conflict for a merge commit.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        combined.contains("merge commit")
+            || combined.contains("cannot cherry-pick")
+            || combined.contains("CONFLICT"),
+        "sync --rebase should flag the merge commit.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The marker gate must see the workspace as conflicted — i.e. attempting
+    // a merge should fail with an error that mentions the stub path or
+    // conflict markers. This is the exact path the bug let slip.
+    let merge_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "feature",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "should fail: dropped merge",
+    ]);
+    let merge_stderr = String::from_utf8_lossy(&merge_out.stderr);
+    let merge_stdout = String::from_utf8_lossy(&merge_out.stdout);
+    assert!(
+        !merge_out.status.success(),
+        "merge must refuse a workspace where `sync --rebase` dropped a merge commit.\n\
+         stdout: {merge_stdout}\nstderr: {merge_stderr}"
+    );
+
+    // And the sidecar must record an explicit entry for the dropped commit.
+    let sidecar = repo.root()
+        .join(".manifold")
+        .join("artifacts")
+        .join("ws")
+        .join("feature")
+        .join("rebase-conflicts.json");
+    assert!(
+        sidecar.exists(),
+        "rebase-conflicts.json should exist after a merge-commit drop"
+    );
+    let sidecar_contents = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(
+        sidecar_contents.contains("rebase-dropped")
+            || sidecar_contents.contains("merge"),
+        "sidecar should reference the dropped merge. Got: {sidecar_contents}"
+    );
+}
