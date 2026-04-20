@@ -257,7 +257,7 @@ fn file_id_from_path(path: &Path) -> FileId {
 ///
 /// Used for pre-existing files (Modify, Delete, Rename) when no `FileId` mapping
 /// is available for the path.
-fn file_id_from_blob(blob: &GitOid) -> FileId {
+pub(crate) fn file_id_from_blob(blob: &GitOid) -> FileId {
     // Parse the first 32 hex characters of the OID as a u128.
     let hex = &blob.as_str()[..32];
     // This cannot fail: GitOid is validated to be 40 lowercase hex chars.

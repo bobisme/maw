@@ -9,6 +9,7 @@
 
 pub mod apply;
 pub mod build;
+pub mod diff_extract;
 pub mod partition;
 pub mod plan;
 pub mod rename;

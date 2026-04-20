@@ -54,6 +54,11 @@ impl std::fmt::Display for ChangeKind {
 /// `git hash-object`). Present for `Added` and `Modified` changes when the
 /// collect step had access to the git repo. Enables O(1) hash-equality checks
 /// in the resolve step without comparing raw bytes.
+///
+/// `mode` is the file's tree-entry mode (regular, executable, symlink, etc.).
+/// Present when the change was extracted from a git tree diff with mode info
+/// available (typically the new-side mode for Add/Modify; the old-side mode
+/// for Delete). `None` when unknown (legacy / test fixture paths).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChange {
     /// Path relative to the workspace root (and to the repo root).
@@ -73,13 +78,22 @@ pub struct FileChange {
     /// comparison for hash-equality checks, which is both faster and avoids
     /// loading content into memory.
     pub blob: Option<GitOid>,
+    /// File mode from the git tree entry (regular / exec / symlink /
+    /// submodule / subdirectory).
+    ///
+    /// For Add/Modified, holds the new-side mode. For Deleted, holds the
+    /// old-side mode (so downstream code can tell e.g. whether a deleted
+    /// path was a symlink). `None` when the producer did not have mode
+    /// information (typical for hand-constructed test fixtures).
+    pub mode: Option<EntryMode>,
 }
 
 impl FileChange {
-    /// Create a new `FileChange` without `FileId` or blob OID metadata.
+    /// Create a new `FileChange` without `FileId`, blob OID, or mode metadata.
     ///
     /// Suitable for explicit legacy/test fixtures. Production collect paths
-    /// should prefer [`FileChange::with_identity`].
+    /// should prefer [`FileChange::with_identity`] or
+    /// [`FileChange::with_mode`].
     #[must_use]
     pub const fn new(path: PathBuf, kind: ChangeKind, content: Option<Vec<u8>>) -> Self {
         Self {
@@ -88,6 +102,7 @@ impl FileChange {
             content,
             file_id: None,
             blob: None,
+            mode: None,
         }
     }
 
@@ -110,6 +125,32 @@ impl FileChange {
             content,
             file_id,
             blob,
+            mode: None,
+        }
+    }
+
+    /// Create a new `FileChange` with full identity metadata *and* a tree
+    /// entry mode.
+    ///
+    /// Used by the historical-diff extractor ([`crate::merge::diff_extract`])
+    /// so mode information (executable bit, symlink, submodule) can flow
+    /// through the merge pipeline.
+    #[must_use]
+    pub const fn with_mode(
+        path: PathBuf,
+        kind: ChangeKind,
+        content: Option<Vec<u8>>,
+        file_id: Option<FileId>,
+        blob: Option<GitOid>,
+        mode: Option<EntryMode>,
+    ) -> Self {
+        Self {
+            path,
+            kind,
+            content,
+            file_id,
+            blob,
+            mode,
         }
     }
 
