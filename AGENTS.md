@@ -277,6 +277,22 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 - Manifold metadata lives in `.manifold/` and `refs/manifold/*`
 - Agents never block each other - conflicts are detected at merge time
 
+## Operating Model: Conflicts Are Data, Not Errors
+
+Maw follows the **jj-style conflict model**: operations succeed even when they produce conflicts, and the conflict is represented as explicit state that rides with the workspace until resolved. Operations do not refuse to run because of conflict — they run, record the conflict, and let the user resolve it when convenient.
+
+Concretely:
+
+- **`maw ws sync --rebase`** replays workspace commits onto the new epoch. When a cherry-pick conflicts, the rebase does *not* abort — it labels the conflict markers with meaningful side names (`<<<<<<< epoch (current)` / `>>>>>>> <ws-name> (workspace changes)`), commits the marker-laden file, records structured conflict metadata in `.manifold/artifacts/ws/<name>/rebase-conflicts.json`, and continues to the next commit. The workspace ends in a "conflicted but synced" state, visible in `maw ws status` and `maw ws list`.
+
+- **`maw ws merge`** similarly allows you to merge workspaces even when the merge engine reports logical conflicts — the conflicts surface as structured output (`has_conflicts: true`, per-conflict records with terseid IDs).
+
+- **The only hard gate**: `maw ws merge` refuses to merge a *source* workspace whose HEAD still contains unresolved textual conflict markers from a prior rebase (see `find_conflicted_files` in `resolve.rs`, used by `merge.rs`). This prevents marker bytes from leaking into `default`. Pass `--force` to bypass when the detected markers are legitimate content (test fixtures, documentation).
+
+- **Resolution**: `maw ws resolve <name> --list` shows conflicts; `--keep epoch` / `--keep <ws-name>` / `--keep both` materialize a resolution. After resolving, commit and run `maw ws sync` to clear the conflict metadata.
+
+**Implication for agents**: Do not treat a conflicted workspace as a failure. It is a first-class state. Continue other work, come back to resolve when ready, then merge. The Prime Invariant ("no work is ever lost") extends to conflicts: the sides of a conflict are preserved in the sidecar and in the commit tree.
+
 <!-- edict:managed-start -->
 ## Edict Workflow
 
