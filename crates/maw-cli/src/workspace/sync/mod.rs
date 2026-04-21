@@ -1,5 +1,6 @@
 mod checks;
 mod cross_target;
+mod lock;
 mod rebase;
 
 use std::path::Path;

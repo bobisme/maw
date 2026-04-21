@@ -56,6 +56,7 @@ use maw_core::refs as manifold_refs;
 use maw_git::{self as git, GitRepo, TreeEdit};
 
 use super::checks::{sync_worktree_to_epoch, workspace_has_uncommitted_changes};
+use super::lock::WorkspaceRebaseLock;
 
 // ---------------------------------------------------------------------------
 // Legacy sidecar types (kept public for `maw ws resolve` / callers in
@@ -133,6 +134,35 @@ pub(super) fn rebase_workspace(
     ws_path: &Path,
     ahead_count: u32,
 ) -> Result<()> {
+    // Serialize concurrent rebases on the same workspace (bn-1d1g). Without
+    // this, two racing `maw ws sync --rebase <ws>` processes both rewrite
+    // HEAD / the worktree and the loser aborts mid-pipeline with an internal
+    // error (e.g. `set_head failed: ... No such file or directory`), leaving
+    // the workspace in a half-rebased state.
+    //
+    // Lock is scoped to this function — it drops (and releases the kernel
+    // flock) when the function returns or panics.
+    let _lock = match WorkspaceRebaseLock::try_acquire(root, ws_name) {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            bail!(
+                "Another rebase is in progress for workspace '{ws_name}'. \
+                 Wait for it to finish and retry. \
+                 (Lock file: {})",
+                root.join(".manifold")
+                    .join("locks")
+                    .join("rebase")
+                    .join(format!("{ws_name}.lock"))
+                    .display()
+            );
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to acquire rebase lock for workspace '{ws_name}': {e}"
+            ));
+        }
+    };
+
     // Safety: refuse to rebase if the workspace has uncommitted changes.
     let is_dirty = workspace_has_uncommitted_changes(ws_path).map_err(|e| {
         anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}")

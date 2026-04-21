@@ -28,6 +28,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 crossterm = "0.28"
 tempfile = "3"
+fs4 = { version = "0.11", default-features = false, features = ["sync"] }
 
 # OTEL deps
 opentelemetry = { version = "0.31", optional = true }

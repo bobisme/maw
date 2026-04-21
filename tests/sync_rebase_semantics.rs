@@ -1002,3 +1002,133 @@ fn keep_with_unambiguous_parent_side_works() {
         "`--keep feat` with a single feat-prefixed side must resolve to feat's content"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-1d1g — concurrent `sync --rebase` on the same workspace must serialize
+//
+// Without the workspace-scoped flock, two racing rebases both rewrite HEAD /
+// the worktree; the loser aborts mid-pipeline with an internal-looking error
+// (e.g. `set_head failed: ... No such file or directory`) and leaves the
+// workspace in a half-rebased state.
+//
+// With the lock (bn-1d1g) the second racer fast-fails with a clean
+// "Another rebase is in progress" message and exit code != 0; the workspace
+// is left in whatever consistent state the winning rebase produced, and a
+// subsequent rebase (now uncontested) succeeds.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn concurrent_rebase_races_are_serialized() {
+    use manifold_common::maw_bin;
+    use std::process::{Command, Stdio};
+
+    let repo = TestRepo::new();
+    repo.seed_files(&[("main.rs", "fn main() {}\n")]);
+
+    // Give `feat` enough committed work that the rebase pipeline takes
+    // long enough for a second invocation to hit the flock contention
+    // window (materialize + per-commit tree build + checkout_tree on a
+    // handful of commits is comfortably above the sub-millisecond range
+    // required).
+    repo.maw_ok(&["ws", "create", "feat"]);
+    for i in 0..8 {
+        repo.add_file("feat", &format!("f{i}.txt"), &format!("v{i}\n"));
+        commit_all(&repo, "feat", &format!("feat: step {i}"));
+    }
+
+    // Advance the epoch with unrelated content so `feat` is now stale with
+    // committed work — exactly the state `--rebase` is designed to handle.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "adv.txt", "advance\n");
+    commit_all(&repo, "advancer", "chore: advance");
+    repo.maw_ok(&[
+        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+    ]);
+
+    // Spawn two `maw ws sync feat --rebase` processes simultaneously.
+    // Both inherit the same cwd (the repo root). `wait()` on each child
+    // after both have been spawned so they race in the kernel.
+    let spawn = || {
+        Command::new(maw_bin())
+            .args(["ws", "sync", "feat", "--rebase"])
+            .current_dir(repo.root())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn maw")
+    };
+
+    let a = spawn();
+    let b = spawn();
+
+    let out_a = a.wait_with_output().expect("wait a");
+    let out_b = b.wait_with_output().expect("wait b");
+
+    let success_a = out_a.status.success();
+    let success_b = out_b.status.success();
+
+    // Exactly one must succeed and exactly one must fail. If both succeed
+    // the lock isn't actually serializing (they may have interleaved in a
+    // data-racing way that happened not to corrupt this time). If both
+    // fail we've regressed the happy path.
+    let succeeded = usize::from(success_a) + usize::from(success_b);
+    assert_eq!(
+        succeeded,
+        1,
+        "expected exactly one rebase to succeed, got {succeeded}\n\
+         a.status={:?} a.stdout={:?} a.stderr={:?}\n\
+         b.status={:?} b.stdout={:?} b.stderr={:?}",
+        out_a.status,
+        String::from_utf8_lossy(&out_a.stdout),
+        String::from_utf8_lossy(&out_a.stderr),
+        out_b.status,
+        String::from_utf8_lossy(&out_b.stdout),
+        String::from_utf8_lossy(&out_b.stderr),
+    );
+
+    // The loser's stderr/stdout must carry the friendly lock-contention
+    // message, not an internal-looking git error.
+    let loser_stderr = if success_a {
+        String::from_utf8_lossy(&out_b.stderr).into_owned()
+    } else {
+        String::from_utf8_lossy(&out_a.stderr).into_owned()
+    };
+    let loser_stdout = if success_a {
+        String::from_utf8_lossy(&out_b.stdout).into_owned()
+    } else {
+        String::from_utf8_lossy(&out_a.stdout).into_owned()
+    };
+    let loser_combined = format!("{loser_stdout}\n{loser_stderr}");
+    assert!(
+        loser_combined.contains("Another rebase is in progress"),
+        "loser must emit the friendly lock-contention message, got:\nstdout: {loser_stdout}\nstderr: {loser_stderr}"
+    );
+
+    // Internal git errors must NOT leak out of the loser. If `set_head` or
+    // `checkout_tree` surfaces in either stream, the workspace was half-
+    // rebased and the lock didn't do its job.
+    assert!(
+        !loser_combined.contains("set_head failed"),
+        "loser leaked an internal git error, lock did not serialize:\n{loser_combined}"
+    );
+    assert!(
+        !loser_combined.contains("checkout_tree failed"),
+        "loser leaked an internal git error, lock did not serialize:\n{loser_combined}"
+    );
+
+    // After both racers settle, a third rebase must succeed (or report
+    // "up to date" if the first racer already finished the work). Either
+    // way the workspace must be in a consistent state.
+    let third = Command::new(maw_bin())
+        .args(["ws", "sync", "feat", "--rebase"])
+        .current_dir(repo.root())
+        .output()
+        .expect("third rebase");
+    assert!(
+        third.status.success(),
+        "third rebase (no contention) must succeed; workspace left in inconsistent state?\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&third.stdout),
+        String::from_utf8_lossy(&third.stderr),
+    );
+}
