@@ -18,6 +18,15 @@
 //! * bn-3oau: when the sidecar has entries, those paths are authoritative.
 //!   The gate must refuse — regardless of whether the bytes contain
 //!   markers, placeholder text, or anything else.
+//!
+//! bn-28d1: the sidecar-only gate is vulnerable to tampering — if the
+//! sidecar is deleted or its `conflicts` map is emptied after rebase wrote
+//! a placeholder blob into HEAD, the gate silently lets the placeholder
+//! through. A tamper-resistance tripwire now cross-checks HEAD-tree blobs
+//! against the small set of tool-authored placeholder byte prefixes
+//! (`# structured conflict at `, `# BINARY CONFLICT at `). The tripwire is
+//! specific-prefix, not generic-marker, so the bn-m6ad tutorial case still
+//! merges cleanly.
 
 mod manifold_common;
 
@@ -285,5 +294,243 @@ fn merge_gate_still_refuses_when_sidecar_lists_a_marker_path() {
         "merge must refuse when sidecar lists shared.txt\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bn-28d1: tamper-resistance tripwire
+// ---------------------------------------------------------------------------
+
+/// Drive a real rebase conflict so materialize.rs writes a
+/// `# structured conflict at` placeholder blob into HEAD and produces a
+/// non-empty `conflict-tree.json` sidecar. Returns the path of the
+/// conflicted file (relative to the workspace root).
+///
+/// Uses the bn-3oau "two workspaces, merge one, rebase the other" pattern
+/// which is what actually drives the materialize.rs placeholder commit
+/// into the stale workspace's HEAD.
+fn setup_rebase_conflict(repo: &TestRepo) -> &'static str {
+    // Base commit: shared.txt in the epoch.
+    repo.seed_files(&[("shared.txt", "original\n")]);
+
+    // Workspace "alpha" modifies shared.txt and we merge it to advance the
+    // epoch. This gives beta a divergent ancestor.
+    repo.maw_ok(&["ws", "create", "alpha"]);
+    repo.add_file("alpha", "shared.txt", "alpha\n");
+    repo.git_in_workspace("alpha", &["add", "-A"]);
+    repo.git_in_workspace("alpha", &["commit", "-m", "alpha"]);
+
+    // Workspace "feat" modifies shared.txt differently — this is the
+    // workspace we'll tamper with.
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "shared.txt", "ws\n");
+    repo.git_in_workspace("feat", &["add", "-A"]);
+    repo.git_in_workspace("feat", &["commit", "-m", "ws"]);
+
+    // Merge alpha into default, advancing the epoch past feat. Destroy
+    // alpha so it doesn't clutter the remaining flow.
+    repo.maw_ok(&[
+        "ws", "merge", "alpha", "--into", "default", "--destroy", "--message", "merge alpha",
+    ]);
+
+    // Rebase feat — conflict produced, sidecar written, HEAD blob is a
+    // materialize.rs text-conflict placeholder.
+    let _ = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+
+    "shared.txt"
+}
+
+/// Assert that the workspace's HEAD blob for `path` actually starts with a
+/// tool-authored placeholder byte prefix. Without this precondition the
+/// test would pass vacuously if some other code path re-materialized the
+/// HEAD between `sync --rebase` and the gate.
+///
+/// Reads from the workspace's detached-HEAD commit in `ws/<name>/` —
+/// that's where rebase commits the placeholder-bearing tree, and that's
+/// what the gate scans.
+fn assert_head_blob_has_placeholder_prefix(repo: &TestRepo, ws: &str, path: &str) {
+    use std::process::Command;
+    let ws_dir = repo.root().join("ws").join(ws);
+    let spec = format!("HEAD:{path}");
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &spec])
+        .current_dir(&ws_dir)
+        .output()
+        .expect("git cat-file");
+    assert!(
+        out.status.success(),
+        "cat-file failed in {ws_dir:?}: {}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let head = &out.stdout[..out.stdout.len().min(64)];
+    assert!(
+        head.starts_with(b"# structured conflict at ")
+            || head.starts_with(b"# BINARY CONFLICT at "),
+        "precondition: HEAD blob for {path} must start with a tool placeholder \
+         prefix; got first 64 bytes: {:?}",
+        String::from_utf8_lossy(head)
+    );
+}
+
+#[test]
+fn merge_gate_refuses_when_sidecar_emptied_but_head_has_placeholder() {
+    // bn-28d1 core case: rebase produced a placeholder blob in HEAD AND
+    // wrote a non-empty sidecar. An attacker (or a buggy tool) empties the
+    // sidecar's `conflicts` map. The bn-m6ad/bn-3pgl sidecar-only gate
+    // would wave this through; the tripwire must refuse.
+    let repo = TestRepo::new();
+    let conflicted_path = setup_rebase_conflict(&repo);
+    assert_head_blob_has_placeholder_prefix(&repo, "feat", conflicted_path);
+
+    // Empty the sidecar's conflicts map in place.
+    let sidecar_path = repo
+        .root()
+        .join(".manifold/artifacts/ws/feat/conflict-tree.json");
+    assert!(sidecar_path.exists(), "precondition: sidecar must exist");
+    let text = std::fs::read_to_string(&sidecar_path).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value
+        .as_object_mut()
+        .expect("sidecar top-level is an object")
+        .insert(
+            "conflicts".to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+    std::fs::write(&sidecar_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    // Confirm the sidecar conflicts map is now empty.
+    let tampered = repo.read_conflict_tree_sidecar("feat").unwrap();
+    assert!(
+        tampered
+            .get("conflicts")
+            .and_then(|v| v.as_object())
+            .is_some_and(serde_json::Map::is_empty),
+        "precondition: sidecar conflicts map must be empty after tampering"
+    );
+
+    // Merge must refuse because HEAD still carries the placeholder blob.
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "feat",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "tampered",
+    ]);
+    assert!(
+        !out.status.success(),
+        "merge must refuse when sidecar is emptied but HEAD has placeholder\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(conflicted_path),
+        "error should name the tainted path '{conflicted_path}'; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("placeholder") || stderr.contains("tool-authored"),
+        "error should mention placeholder blobs; got: {stderr}"
+    );
+}
+
+#[test]
+fn merge_gate_refuses_when_both_sidecars_deleted_but_head_has_placeholder() {
+    // bn-28d1: even more aggressive tampering — delete both sidecar files
+    // entirely. The gate falls back to "no sidecar, assume clean" under
+    // bn-m6ad, but the tripwire still refuses because HEAD is corrupt.
+    let repo = TestRepo::new();
+    let conflicted_path = setup_rebase_conflict(&repo);
+    assert_head_blob_has_placeholder_prefix(&repo, "feat", conflicted_path);
+
+    let sidecar_dir = repo.root().join(".manifold/artifacts/ws/feat");
+    let _ = std::fs::remove_file(sidecar_dir.join("conflict-tree.json"));
+    let _ = std::fs::remove_file(sidecar_dir.join("rebase-conflicts.json"));
+    assert!(repo.read_conflict_tree_sidecar("feat").is_none());
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "feat",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "both sidecars deleted",
+    ]);
+    assert!(
+        !out.status.success(),
+        "merge must refuse when both sidecars are deleted but HEAD has placeholder\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(conflicted_path),
+        "error should name the tainted path '{conflicted_path}'; got: {stderr}"
+    );
+}
+
+#[test]
+fn merge_gate_tripwire_ignores_legitimate_content() {
+    // The tripwire matches only the exact byte *prefix* at column 0 of the
+    // blob. A file that merely mentions the placeholder string further in
+    // its body (e.g. documentation, a test fixture, a release note) must
+    // NOT trip the gate.
+    //
+    // This also guards against a regression where the scan accidentally
+    // falls back to generic `<<<<<<<` matching and starts flagging
+    // tutorials — the bn-m6ad failure mode.
+    let repo = TestRepo::new();
+    repo.seed_files(&[("noop.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+
+    // File whose *body* contains the exact placeholder string, but not at
+    // position 0. Also throws in a raw `<<<<<<<` diff3 marker block for
+    // good measure (the bn-m6ad tutorial case).
+    let doc = "# Release notes\n\n\
+               When a rebase conflicts, maw writes blobs starting with\n\
+               `# structured conflict at <path>` or `# BINARY CONFLICT at <path>`.\n\
+               Below is an example diff3 marker block from a fixture:\n\n\
+               <<<<<<< mine\n\
+               alpha\n\
+               ||||||| base\n\
+               zero\n\
+               =======\n\
+               beta\n\
+               >>>>>>> theirs\n";
+    std::fs::write(
+        repo.root().join("ws").join("feat").join("doc.md"),
+        doc,
+    )
+    .unwrap();
+    repo.git_in_workspace("feat", &["add", "-A"]);
+    repo.git_in_workspace("feat", &["commit", "-m", "release notes with placeholder mention"]);
+
+    // No sidecar ever written — this workspace is legitimately clean.
+    assert!(repo.read_conflict_tree_sidecar("feat").is_none());
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "feat",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "docs with placeholder mention",
+    ]);
+    assert!(
+        out.status.success(),
+        "legitimate doc mentioning the placeholder string must merge cleanly\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
 }

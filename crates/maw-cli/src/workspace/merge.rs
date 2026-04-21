@@ -2397,6 +2397,85 @@ pub struct MergeOptions<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// bn-28d1: tamper-resistance tripwire for the merge gate
+// ---------------------------------------------------------------------------
+
+/// Walk the tree at `tree_oid` recursively and return the paths of any blobs
+/// whose first bytes match a
+/// [`TOOL_PLACEHOLDER_PREFIXES`](maw_core::merge::materialize::TOOL_PLACEHOLDER_PREFIXES)
+/// entry.
+///
+/// These byte sequences are written exclusively by `materialize.rs` when it
+/// projects an unresolved conflict into a committable blob — legitimate source
+/// code never starts with them. If the sidecar check has already cleared the
+/// workspace but the HEAD tree still carries a placeholder blob, it means
+/// either:
+///
+/// * the sidecar was deleted or tampered with while the HEAD was not
+///   re-materialized (data corruption), or
+/// * a buggy flow wrote a placeholder blob without registering it in the
+///   sidecar (logic bug).
+///
+/// Either way the merge must refuse, because committing those bytes into the
+/// default branch silently poisons the resulting tree.
+///
+/// The scan reads only the first `SNIFF` bytes of each blob, so it stays
+/// cheap even on large trees. This is a one-shot gate check, not a hot path.
+fn find_tool_placeholder_blobs(
+    repo: &maw_git::GixRepo,
+    tree_oid: maw_git::GitOid,
+) -> Result<Vec<PathBuf>> {
+    /// Only sniff enough bytes to decide whether the prefix matches. The
+    /// longest prefix in `TOOL_PLACEHOLDER_PREFIXES` is a handful of bytes;
+    /// 64 is comfortably more than enough and lets the list grow without
+    /// revisiting this constant.
+    const SNIFF: usize = 64;
+
+    fn walk(
+        repo: &maw_git::GixRepo,
+        tree_oid: maw_git::GitOid,
+        prefix: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        let entries = repo
+            .read_tree(tree_oid)
+            .map_err(|e| anyhow::anyhow!("read_tree({tree_oid}) failed: {e}"))?;
+        for entry in entries {
+            let entry_path = prefix.join(&entry.name);
+            match entry.mode {
+                maw_git::EntryMode::Tree => {
+                    walk(repo, entry.oid, &entry_path, out)?;
+                }
+                maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable => {
+                    // Read the blob and check only the first SNIFF bytes.
+                    // We read the whole blob because GitRepo has no
+                    // bulk-prefix-read — acceptable at the gate since this
+                    // is not a hot path. If profiling shows pain, switch
+                    // to `git cat-file --batch-check` or a gix streaming
+                    // reader here.
+                    let content = repo
+                        .read_blob(entry.oid)
+                        .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", entry.oid))?;
+                    let head = &content[..content.len().min(SNIFF)];
+                    if maw_core::merge::materialize::is_tool_placeholder_blob(head) {
+                        out.push(entry_path);
+                    }
+                }
+                // Symlinks, submodules — their blob content isn't subject
+                // to the text-conflict placeholder format, so skip.
+                maw_git::EntryMode::Link | maw_git::EntryMode::Commit => {}
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    walk(repo, tree_oid, Path::new(""), &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Main merge function
 // ---------------------------------------------------------------------------
 
@@ -2605,6 +2684,73 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         legacy.conflicts.len()
                     );
                 }
+            }
+        }
+    }
+
+    // bn-28d1: tamper-resistance tripwire.
+    //
+    // Even if the sidecar check passed (absent, empty, or `--force`), we
+    // never merge a workspace whose HEAD tree still carries a
+    // tool-authored conflict-placeholder blob. These byte prefixes are
+    // written exclusively by `materialize.rs` for unresolved conflicts;
+    // legitimate source code never starts with them.
+    //
+    // The previous gate (bn-m6ad/bn-3pgl) trusted the sidecar as the sole
+    // authority. If the sidecar file was deleted or its `conflicts` map was
+    // emptied (malicious tampering, or a buggy tool), the gate would let
+    // placeholder-markered blobs through and commit silent data corruption
+    // into the default branch. This cross-check closes that hole.
+    //
+    // The scan looks only at specific byte prefixes — not the generic
+    // `<<<<<<<` marker — so tutorials/fixtures with conflict-marker content
+    // (bn-m6ad) still merge cleanly. Unlike the sidecar gate, `--force`
+    // does NOT bypass the tripwire: if HEAD contains a placeholder blob,
+    // merging it is by definition corruption.
+    //
+    // We resolve each workspace's actual git HEAD from the worktree rather
+    // than `refs/manifold/head/<name>` (which is a blob holding the oplog,
+    // not a commit). The rebase pipeline commits the placeholder-bearing
+    // tree to the detached HEAD inside `ws/<name>/` — that's the commit
+    // the merge would adopt, so that's the tree we scan.
+    {
+        let repo = maw_git::GixRepo::open(&root).map_err(|e| {
+            anyhow::anyhow!("failed to open repo at {}: {e}", root.display())
+        })?;
+        for (ws_id, ws_path) in &workspace_dirs {
+            let ws_name = ws_id.as_str();
+            if !ws_path.exists() {
+                // Worktree missing — the downstream validation will
+                // report a clearer error. Don't double-fail here.
+                continue;
+            }
+            let head_oid_str = match resolve_workspace_head_oid(ws_path) {
+                Ok(s) => s,
+                Err(_) => continue, // empty worktree / no commits yet
+            };
+            let head_oid: maw_git::GitOid = head_oid_str
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid workspace HEAD OID '{head_oid_str}': {e}"))?;
+            let commit = repo
+                .read_commit(head_oid)
+                .map_err(|e| anyhow::anyhow!("read_commit({head_oid}) failed: {e}"))?;
+            let tainted = find_tool_placeholder_blobs(&repo, commit.tree_oid)?;
+            if !tainted.is_empty() {
+                let file_list = tainted
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!(
+                    "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
+                     tool-authored conflict placeholders:\n\
+                     {file_list}\n  \
+                     Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                     Possible cause: the conflict sidecar was deleted or corrupted. \
+                     This check cannot be bypassed by --force because merging placeholder \
+                     blobs would corrupt the target branch.",
+                    tainted.len()
+                );
             }
         }
     }

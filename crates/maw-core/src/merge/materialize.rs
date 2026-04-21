@@ -247,6 +247,52 @@ fn marker_close(ws_name: &str) -> String {
 const MARKER_BASE: &str = "||||||| base";
 const MARKER_SEP: &str = "=======";
 
+// ---------------------------------------------------------------------------
+// Tool-authored placeholder byte prefixes (bn-28d1)
+// ---------------------------------------------------------------------------
+
+/// Byte prefixes that `maw` itself writes at the **start** of a rendered
+/// conflict blob.
+///
+/// These are written exclusively by this module (`materialize.rs`) when
+/// projecting an unresolved [`Conflict`](crate::model::conflict::Conflict) into
+/// a committable blob:
+///
+/// * `# structured conflict at <path>\n` — first line of the text-conflict
+///   stub produced by `render_text_content_conflict`.
+/// * `# BINARY CONFLICT at <path> — …\n` — first line of the binary-conflict
+///   stub produced by `render_binary_content_conflict`.
+///
+/// Legitimate source code never starts with these exact byte sequences. The
+/// merge gate cross-checks HEAD-tree blobs against this list as a
+/// tamper-resistance tripwire: if the structured sidecar has been deleted or
+/// emptied but a placeholder blob still sits in HEAD, the gate refuses the
+/// merge instead of silently committing placeholder-markered blobs into the
+/// default branch.
+///
+/// **Important**: this list is intentionally small and prefix-only. Do NOT
+/// add generic marker patterns like `<<<<<<<` — that's exactly the false
+/// positive that bn-m6ad fixed. If materialize grows a new placeholder
+/// variant, update this list to match.
+pub const TOOL_PLACEHOLDER_PREFIXES: &[&[u8]] = &[
+    b"# structured conflict at ",
+    b"# BINARY CONFLICT at ",
+];
+
+/// Return `true` if `content` starts with any byte sequence in
+/// [`TOOL_PLACEHOLDER_PREFIXES`].
+///
+/// Only the **first bytes** of the blob are examined — a file that happens to
+/// contain one of these sequences later in its body (e.g. a test fixture
+/// describing the placeholder format) is NOT flagged. Callers may therefore
+/// safely pass either the full blob or just a short prefix slice.
+#[must_use]
+pub fn is_tool_placeholder_blob(content: &[u8]) -> bool {
+    TOOL_PLACEHOLDER_PREFIXES
+        .iter()
+        .any(|p| content.starts_with(p))
+}
+
 /// Best-effort "is this blob text?" heuristic. Used to decide whether we can
 /// safely inline content inside conflict markers. Mirrors git's approach
 /// (presence of a NUL byte is a strong binary signal); we additionally treat
