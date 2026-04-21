@@ -296,7 +296,8 @@ pub(super) fn rebase_workspace(
             &epoch_delta,
             ws_name,
             &base_epoch_id,
-        );
+        )
+        .map_err(|e| anyhow::anyhow!("{e} (while replaying {short_sha})"))?;
 
         // Snapshot for sidecar before apply_unilateral_patchset's V1 "modifed
         // replaces/collapses" semantics collapse the newly-injected conflicts
@@ -650,7 +651,7 @@ fn promote_overlaps_to_conflicts(
     epoch_delta: &EpochDelta,
     ws_name: &str,
     base_epoch_id: &EpochId,
-) {
+) -> Result<()> {
     use maw_core::merge::types::ChangeKind;
 
     // Pre-scan: identify rename pairs within this patch. A rename shows up
@@ -720,6 +721,24 @@ fn promote_overlaps_to_conflicts(
                     && *epoch_old == ws_blob
                 {
                     continue;
+                }
+
+                // bn-3hqg: submodule (gitlink) conflicts are not yet
+                // supported. A workspace bumped the submodule to one SHA
+                // while the epoch bumped it to a different SHA — the merge
+                // engine has no way to run a textual 3-way merge across two
+                // gitlink OIDs (they aren't blobs), and rendering diff3
+                // markers would be meaningless. Bail with a clear error so
+                // the user can resolve the submodule manually (rather than
+                // producing a cryptic "not found: blob" later in
+                // materialize).
+                if change.mode == Some(EntryMode::Commit) {
+                    bail!(
+                        "submodule conflict at {} (workspace bumped to {}, epoch bumped to {:?}) is not yet supported; resolve the submodule manually",
+                        change.path.display(),
+                        ws_blob,
+                        ref_new,
+                    );
                 }
 
                 let epoch_side_blob = match ref_new {
@@ -826,6 +845,7 @@ fn promote_overlaps_to_conflicts(
             }
         }
     }
+    Ok(())
 }
 
 /// Rename-pair indices derived from a single [`PatchSet`].

@@ -28,11 +28,21 @@
 
 use std::path::PathBuf;
 
-use maw_git::{ChangeType, DiffEntry, GitError, GitRepo};
+use maw_git::{ChangeType, DiffEntry, EntryMode as GitEntryMode, GitError, GitRepo};
 
 use super::types::{ChangeKind, EntryMode, FileChange, PatchSet};
 use crate::model::diff::file_id_from_blob;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
+
+/// Returns `true` if the given mode is a submodule (gitlink, mode 160000).
+///
+/// Submodule entries reference commits in another repository — the OID they
+/// carry is **not** a blob in the current repo's object store, so blob reads
+/// against it will always fail. Treat them as opaque throughout the merge
+/// pipeline: preserve the OID as identity, but never dereference it (bn-3hqg).
+fn is_submodule(mode: Option<GitEntryMode>) -> bool {
+    matches!(mode, Some(GitEntryMode::Commit))
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -202,13 +212,23 @@ fn file_changes_from_entry(
     match &entry.change_type {
         ChangeType::Added => {
             let blob_core = git_to_core_oid(&entry.new_oid)?;
-            let content = repo.read_blob(entry.new_oid)?;
             let file_id = file_id_from_blob(&blob_core);
             let mode = entry.new_mode.map(EntryMode::from);
+            // Submodule (gitlink) entries carry a commit OID pointing into a
+            // DIFFERENT repository. That OID is not a blob in this repo's
+            // object store, so we must NOT call `read_blob`. Treat the entry
+            // as opaque: preserve the gitlink SHA as identity (so it flows
+            // through to the final tree unchanged) and leave `content` empty
+            // (bn-3hqg).
+            let content = if is_submodule(entry.new_mode) {
+                None
+            } else {
+                Some(repo.read_blob(entry.new_oid)?)
+            };
             Ok(vec![FileChange::with_mode(
                 path,
                 ChangeKind::Added,
-                Some(content),
+                content,
                 Some(file_id),
                 Some(blob_core),
                 mode,
@@ -217,13 +237,19 @@ fn file_changes_from_entry(
         ChangeType::Modified => {
             let old_core = git_to_core_oid(&entry.old_oid)?;
             let blob_core = git_to_core_oid(&entry.new_oid)?;
-            let content = repo.read_blob(entry.new_oid)?;
             let file_id = file_id_from_blob(&old_core);
             let mode = entry.new_mode.map(EntryMode::from);
+            // Submodule (gitlink) on either side: don't dereference as a blob.
+            // See `Added` branch for the full rationale (bn-3hqg).
+            let content = if is_submodule(entry.new_mode) || is_submodule(entry.old_mode) {
+                None
+            } else {
+                Some(repo.read_blob(entry.new_oid)?)
+            };
             Ok(vec![FileChange::with_mode(
                 path,
                 ChangeKind::Modified,
-                Some(content),
+                content,
                 Some(file_id),
                 Some(blob_core),
                 mode,
@@ -255,10 +281,17 @@ fn file_changes_from_entry(
             // move (bn-3525).
             let old_core = git_to_core_oid(&entry.old_oid)?;
             let blob_core = git_to_core_oid(&entry.new_oid)?;
-            let content = repo.read_blob(entry.new_oid)?;
             let file_id = file_id_from_blob(&old_core);
             let new_mode = entry.new_mode.map(EntryMode::from);
             let old_mode = entry.old_mode.map(EntryMode::from);
+            // Skip blob read when either side is a submodule (bn-3hqg). A
+            // submodule rename is a path change of a gitlink, not a textual
+            // file move — treat the content as opaque.
+            let content = if is_submodule(entry.new_mode) || is_submodule(entry.old_mode) {
+                None
+            } else {
+                Some(repo.read_blob(entry.new_oid)?)
+            };
 
             let from_path = PathBuf::from(from);
 
@@ -273,7 +306,7 @@ fn file_changes_from_entry(
             let modify = FileChange::with_mode(
                 path,
                 ChangeKind::Modified,
-                Some(content),
+                content,
                 Some(file_id),
                 Some(blob_core),
                 new_mode,
@@ -637,6 +670,67 @@ mod tests {
         let paths: Vec<_> = ps.changes.iter().map(|c| c.path.clone()).collect();
         assert!(paths.contains(&PathBuf::from("a.txt")));
         assert!(paths.contains(&PathBuf::from("sub/b.txt")));
+    }
+
+    #[test]
+    fn diff_patchset_submodule_added_has_no_content() {
+        // bn-3hqg: a workspace that adds a submodule (gitlink, mode 160000)
+        // must not cause diff_patchset to try `read_blob` on the gitlink SHA
+        // (the SHA points at a commit in another repo — not a blob in ours).
+        let fx = Fixture::new();
+        fx.write("keep.txt", b"seed\n");
+        let from = fx.commit("seed");
+
+        // Build a separate repo to serve as the submodule source.
+        let sub_dir = tempfile::TempDir::new().unwrap();
+        run_git(sub_dir.path(), &["init", "--initial-branch=main"]);
+        run_git(sub_dir.path(), &["config", "user.name", "Test"]);
+        run_git(sub_dir.path(), &["config", "user.email", "test@test.com"]);
+        run_git(sub_dir.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(sub_dir.path().join("sub.txt"), b"hi\n").unwrap();
+        run_git(sub_dir.path(), &["add", "-A"]);
+        run_git(sub_dir.path(), &["commit", "-m", "sub init"]);
+
+        // Add as a submodule in the outer repo.
+        let sub_path_str = sub_dir.path().to_str().unwrap();
+        run_git(
+            &fx.root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub_path_str,
+                "subdir",
+            ],
+        );
+        let to = fx.commit("add submodule");
+
+        // This used to fail with `not found: blob <sha>` because diff_patchset
+        // tried to `read_blob` the gitlink's commit OID. Now it succeeds, and
+        // the produced FileChange carries content=None + mode=Commit.
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("diff_patchset must not try to read_blob the gitlink OID");
+
+        let sub_change = ps
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("subdir"))
+            .expect("submodule change should appear in the patchset");
+        assert_eq!(sub_change.kind, ChangeKind::Added);
+        assert_eq!(
+            sub_change.mode,
+            Some(EntryMode::Commit),
+            "submodule entry must carry mode=Commit"
+        );
+        assert!(
+            sub_change.content.is_none(),
+            "submodule entry must carry no blob content (the OID isn't a blob)"
+        );
+        assert!(
+            sub_change.blob.is_some(),
+            "submodule entry still carries the gitlink SHA as identity"
+        );
     }
 
     #[test]
