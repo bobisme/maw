@@ -1014,6 +1014,16 @@ fn apply_rename_resolution(
 /// each parent's delta. Each non-first parent contributes **one** side per
 /// touched path (its post-merge blob). A future bone can extend this to
 /// produce fully atomized `ConflictAtom`s.
+///
+/// ## Convergence collapse (bn-2ras)
+///
+/// Before installing (or extending) a `Conflict::Content`, we check whether
+/// every side would carry the same blob OID. If they would, there is no real
+/// conflict — all parents agree on the final content — so we collapse to a
+/// clean tree entry instead of manufacturing a phantom conflict that
+/// `--keep` has nothing to pick. This fires for merge commits whose parents
+/// are byte-identical on a given path (e.g. a cross-branch rename+modify
+/// that happens to produce the same bytes on both sides).
 fn inject_merge_side_conflicts(
     tree: &mut ConflictTree,
     ws_name: &str,
@@ -1059,16 +1069,30 @@ fn inject_merge_side_conflicts(
                     atoms,
                 } => {
                     sides.push(new_side);
-                    tree.conflicts.insert(
-                        p.clone(),
-                        Conflict::Content {
-                            path: p,
-                            file_id,
-                            base,
-                            sides,
-                            atoms,
-                        },
-                    );
+                    // bn-2ras: if every side now shares the same blob OID,
+                    // there is no conflict — all parents agree. Collapse to
+                    // a clean entry and move on. The workspace-side mode hint
+                    // (the first one we find) is the best approximation we
+                    // have; default to `Blob` if no side carries one.
+                    if sides_all_same(&sides) {
+                        let mode = change.mode.unwrap_or(EntryMode::Blob);
+                        let oid = sides
+                            .first()
+                            .map(|s| s.content.clone())
+                            .unwrap_or_else(|| blob.clone());
+                        tree.clean.insert(p, MaterializedEntry::new(mode, oid));
+                    } else {
+                        tree.conflicts.insert(
+                            p.clone(),
+                            Conflict::Content {
+                                path: p,
+                                file_id,
+                                base,
+                                sides,
+                                atoms,
+                            },
+                        );
+                    }
                 }
                 other => {
                     // Reinsert unchanged — we don't know how to extend other
@@ -1088,6 +1112,23 @@ fn inject_merge_side_conflicts(
             .get(&path)
             .map(|e| e.oid.clone())
             .unwrap_or_else(|| blob.clone());
+
+        // bn-2ras: if the "ours" OID (first-parent's effective content) and
+        // the new merge-parent side are byte-identical, both parents agree —
+        // there is no conflict. Keep the existing clean entry intact (if
+        // present) or install a fresh clean entry from the agreed blob. We
+        // must NOT install a Conflict::Content with identical sides because
+        // that produces a marker-file that `--keep` can't resolve.
+        if ours_oid == blob {
+            let mode = change.mode.unwrap_or(EntryMode::Blob);
+            // Preserve the existing clean entry's mode if there is one —
+            // otherwise seed a fresh entry from the change's mode hint.
+            tree.clean
+                .entry(path)
+                .or_insert_with(|| MaterializedEntry::new(mode, ours_oid));
+            continue;
+        }
+
         let ours_side = ConflictSide::new(
             format!("{ws_name}#merge-parent-0"),
             ours_oid.clone(),
@@ -1095,6 +1136,7 @@ fn inject_merge_side_conflicts(
         );
 
         let file_id = FileId::new(merge_file_id_seed(commit_core, &path));
+        tree.clean.remove(&path);
         tree.conflicts.insert(
             path.clone(),
             Conflict::Content {
@@ -1105,6 +1147,16 @@ fn inject_merge_side_conflicts(
                 atoms: vec![],
             },
         );
+    }
+}
+
+/// Returns `true` when `sides` is non-empty and every entry shares the same
+/// blob OID. Used by [`inject_merge_side_conflicts`] to collapse phantom
+/// conflicts where every parent contributed identical content (bn-2ras).
+fn sides_all_same(sides: &[ConflictSide]) -> bool {
+    match sides.first() {
+        Some(first) => sides.iter().all(|s| s.content == first.content),
+        None => false,
     }
 }
 
@@ -1265,5 +1317,156 @@ mod tests {
         assert_eq!(parsed.conflicts[1].path, "Cargo.toml");
         assert_eq!(parsed.rebase_from, "c".repeat(40));
         assert_eq!(parsed.rebase_to, "d".repeat(40));
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2ras — merge-side convergence collapse
+    //
+    // When every merge parent contributes byte-identical content to a path,
+    // `inject_merge_side_conflicts` must not install a phantom
+    // `Conflict::Content` with three convergent sides — it should collapse
+    // to a clean entry carrying the agreed blob.
+    // -----------------------------------------------------------------------
+
+    use maw_core::merge::types::{ChangeKind, FileChange, PatchSet};
+    use maw_core::model::patch::FileId as CoreFileId;
+    use maw_core::model::types::{EpochId, WorkspaceId};
+
+    fn test_epoch() -> EpochId {
+        EpochId::new(&"e".repeat(40)).unwrap()
+    }
+    fn test_oid(c: char) -> GitOid {
+        GitOid::new(&c.to_string().repeat(40)).unwrap()
+    }
+    fn test_ws_id(name: &str) -> WorkspaceId {
+        WorkspaceId::new(name).unwrap()
+    }
+
+    #[test]
+    fn inject_merge_side_conflicts_collapses_identical_sides_to_clean() {
+        // Seed the tree with a clean entry for `side1.txt` = `A1` — this
+        // mimics the state after `apply_unilateral_patchset` folded in the
+        // first-parent delta.
+        let mut tree = ConflictTree::new(test_epoch());
+        let path = std::path::PathBuf::from("side1.txt");
+        let shared = test_oid('a');
+        tree.clean.insert(
+            path.clone(),
+            MaterializedEntry::new(EntryMode::Blob, shared.clone()),
+        );
+
+        // Second parent's delta also contributes `A1` (same blob) to
+        // side1.txt — merge parents converge.
+        let side_patch = PatchSet::new(
+            test_ws_id("feat"),
+            test_epoch(),
+            vec![FileChange::with_mode(
+                path.clone(),
+                ChangeKind::Added,
+                None,
+                Some(CoreFileId::new(1)),
+                Some(shared.clone()),
+                Some(EntryMode::Blob),
+            )],
+        );
+        let commit_oid = test_oid('c');
+
+        inject_merge_side_conflicts(&mut tree, "feat", &commit_oid, 1, &side_patch);
+
+        // No phantom conflict should exist.
+        assert!(
+            tree.conflicts.is_empty(),
+            "convergent merge sides must NOT install a conflict, got {:?}",
+            tree.conflicts
+        );
+        // The clean entry survives with the shared blob.
+        let entry = tree
+            .clean
+            .get(&path)
+            .expect("clean entry should remain in place");
+        assert_eq!(entry.oid, shared);
+    }
+
+    #[test]
+    fn inject_merge_side_conflicts_installs_conflict_when_sides_differ() {
+        // Baseline: when parents genuinely disagree, a conflict is installed.
+        let mut tree = ConflictTree::new(test_epoch());
+        let path = std::path::PathBuf::from("side1.txt");
+        let ours = test_oid('a');
+        let theirs = test_oid('b');
+        tree.clean.insert(
+            path.clone(),
+            MaterializedEntry::new(EntryMode::Blob, ours.clone()),
+        );
+
+        let side_patch = PatchSet::new(
+            test_ws_id("feat"),
+            test_epoch(),
+            vec![FileChange::with_mode(
+                path.clone(),
+                ChangeKind::Modified,
+                None,
+                Some(CoreFileId::new(1)),
+                Some(theirs.clone()),
+                Some(EntryMode::Blob),
+            )],
+        );
+        let commit_oid = test_oid('c');
+
+        inject_merge_side_conflicts(&mut tree, "feat", &commit_oid, 1, &side_patch);
+
+        // A real conflict is installed. `tree.clean` for this path is evicted.
+        assert!(!tree.clean.contains_key(&path));
+        let conflict = tree
+            .conflicts
+            .get(&path)
+            .expect("divergent parents must produce a conflict");
+        match conflict {
+            Conflict::Content { sides, .. } => {
+                assert_eq!(sides.len(), 2, "expected two sides");
+                assert_ne!(
+                    sides[0].content, sides[1].content,
+                    "sides must differ for a genuine conflict"
+                );
+            }
+            other => panic!("expected Content conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sides_all_same_identifies_equal_sides() {
+        let o = test_oid('a');
+        let ord = OrderingKey::new(
+            test_epoch(),
+            test_ws_id("w"),
+            0,
+            0,
+        );
+        let sides = vec![
+            ConflictSide::new("x".to_owned(), o.clone(), ord.clone()),
+            ConflictSide::new("y".to_owned(), o.clone(), ord.clone()),
+            ConflictSide::new("z".to_owned(), o, ord),
+        ];
+        assert!(sides_all_same(&sides));
+    }
+
+    #[test]
+    fn sides_all_same_rejects_divergent_sides() {
+        let ord = OrderingKey::new(
+            test_epoch(),
+            test_ws_id("w"),
+            0,
+            0,
+        );
+        let sides = vec![
+            ConflictSide::new("x".to_owned(), test_oid('a'), ord.clone()),
+            ConflictSide::new("y".to_owned(), test_oid('b'), ord),
+        ];
+        assert!(!sides_all_same(&sides));
+    }
+
+    #[test]
+    fn sides_all_same_empty_is_false() {
+        assert!(!sides_all_same(&[]));
     }
 }

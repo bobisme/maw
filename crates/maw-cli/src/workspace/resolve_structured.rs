@@ -253,20 +253,62 @@ pub(crate) fn parse_decisions(raw: &[String]) -> Result<Vec<Decision>> {
 // Side picking
 // ---------------------------------------------------------------------------
 
+/// Outcome of matching `target` against a side list.
+enum SideMatch<'a> {
+    /// A single side matched unambiguously (exact / comma-split / prefix).
+    One(&'a ConflictSide),
+    /// Nothing matched.
+    None,
+    /// The `target` is a prefix of multiple qualified side names
+    /// (e.g. `feat` matching both `feat#merge-parent-0` and
+    /// `feat#merge-parent-1`). Returns every matching side so the caller
+    /// can render a helpful error.
+    Ambiguous(Vec<&'a ConflictSide>),
+}
+
 /// Find the `ConflictSide` whose `workspace` matches `target`.
 ///
-/// Uses the same looseness as the legacy path: an exact match wins; otherwise
-/// we try comma-separated multi-workspace labels (e.g. `"ws-a, ws-b"`).
-fn pick_side<'a>(sides: &'a [ConflictSide], target: &str) -> Option<&'a ConflictSide> {
+/// Match order (first hit wins):
+///   1. **Exact** — `s.workspace == target` or `target` appears as a
+///      comma-separated component of `s.workspace`.
+///   2. **Qualified prefix** (bn-2ras) — if exactly one side has
+///      `s.workspace == "{target}#..."`, that side matches.
+///      Multi-parent merge commits produce side names like
+///      `feat#merge-parent-0` / `feat#merge-parent-1`; users typing
+///      `--keep feat` expect the obvious thing to happen when only one
+///      such side exists. If two or more sides share the prefix, we
+///      return `Ambiguous` so the caller can print the qualified
+///      alternatives.
+fn match_sides<'a>(sides: &'a [ConflictSide], target: &str) -> SideMatch<'a> {
+    // 1. Exact / comma-split match.
     for s in sides {
-        if s.workspace == target {
-            return Some(s);
-        }
-        if s.workspace.split(',').any(|p| p.trim() == target) {
-            return Some(s);
+        if s.workspace == target
+            || s.workspace.split(',').any(|p| p.trim() == target)
+        {
+            return SideMatch::One(s);
         }
     }
-    None
+    // 2. Qualified-prefix match (`target#...`).
+    let prefix = format!("{target}#");
+    let prefix_hits: Vec<&ConflictSide> = sides
+        .iter()
+        .filter(|s| s.workspace.starts_with(&prefix))
+        .collect();
+    match prefix_hits.len() {
+        0 => SideMatch::None,
+        1 => SideMatch::One(prefix_hits[0]),
+        _ => SideMatch::Ambiguous(prefix_hits),
+    }
+}
+
+/// Convenience wrapper returning the matched side (ignoring ambiguity).
+/// Ambiguous matches return `None` — callers that want the full outcome
+/// should use [`match_sides`] directly so they can surface a diagnostic.
+fn pick_side<'a>(sides: &'a [ConflictSide], target: &str) -> Option<&'a ConflictSide> {
+    match match_sides(sides, target) {
+        SideMatch::One(s) => Some(s),
+        SideMatch::None | SideMatch::Ambiguous(_) => None,
+    }
 }
 
 /// Return all side OIDs for `--keep both`, in declared order.
@@ -294,16 +336,31 @@ fn all_sides(conflict: &Conflict) -> Vec<GitOid> {
 fn pick_single_side_oid(conflict: &Conflict, target: &str) -> Result<Option<GitOid>> {
     match conflict {
         Conflict::Content { sides, .. } | Conflict::AddAdd { sides, .. } => {
-            if let Some(side) = pick_side(sides, target) {
-                Ok(Some(side.content.clone()))
-            } else {
-                let available: Vec<&str> =
-                    sides.iter().map(|s| s.workspace.as_str()).collect();
-                bail!(
-                    "Side '{}' not found for path. Available: [{}], plus 'both'.",
-                    target,
-                    available.join(", ")
-                );
+            match match_sides(sides, target) {
+                SideMatch::One(side) => Ok(Some(side.content.clone())),
+                SideMatch::Ambiguous(hits) => {
+                    // bn-2ras: `--keep feat` but the conflict has
+                    // `feat#merge-parent-0` AND `feat#merge-parent-1`. List
+                    // the qualified names so the user can pick one.
+                    let qualified: Vec<&str> =
+                        hits.iter().map(|s| s.workspace.as_str()).collect();
+                    bail!(
+                        "`--keep {target}` is ambiguous — the conflict has multiple \
+                         sides whose workspace starts with `{target}#`: [{}]. \
+                         Use the fully-qualified side name, e.g. `--keep \"{}\"`.",
+                        qualified.join(", "),
+                        qualified[0],
+                    );
+                }
+                SideMatch::None => {
+                    let available: Vec<&str> =
+                        sides.iter().map(|s| s.workspace.as_str()).collect();
+                    bail!(
+                        "Side '{}' not found for path. Available: [{}], plus 'both'.",
+                        target,
+                        available.join(", ")
+                    );
+                }
             }
         }
         Conflict::ModifyDelete {
@@ -898,6 +955,13 @@ mod tests {
     fn side(ws: &str, c: char) -> ConflictSide {
         ConflictSide::new(ws.to_owned(), oid(c), ord(ws))
     }
+    /// `side()` requires a valid WorkspaceId for the OrderingKey. Merge-side
+    /// labels like `feat#merge-parent-0` are not valid workspace ids, so
+    /// tests that exercise those labels build the side with a distinct
+    /// ordering-key workspace (the label is what's visible in the conflict).
+    fn labeled_side(label: &str, ord_ws: &str, c: char) -> ConflictSide {
+        ConflictSide::new(label.to_owned(), oid(c), ord(ord_ws))
+    }
 
     #[test]
     fn parse_decisions_rejects_cf_specs() {
@@ -937,6 +1001,77 @@ mod tests {
         assert_eq!(got, Some(oid('a')));
         let got2 = pick_single_side_oid(&c, "bn-abc").unwrap();
         assert_eq!(got2, Some(oid('b')));
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2ras — `--keep <ws>` matches `<ws>#...` sides unambiguously
+    //
+    // Merge-commit rebases produce side names like `feat#merge-parent-0` /
+    // `feat#merge-parent-1`. Users typing `--keep feat` expect the obvious
+    // thing to work when exactly one such side exists; when multiple share
+    // the prefix, we error with the qualified names.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pick_single_side_oid_matches_unambiguous_prefix() {
+        let c = Conflict::Content {
+            path: PathBuf::from("a.rs"),
+            file_id: FileId::new(1),
+            base: None,
+            sides: vec![
+                side(EPOCH_LABEL, 'a'),
+                labeled_side("feat#merge-parent-0", "feat", 'b'),
+            ],
+            atoms: vec![],
+        };
+        // `--keep feat` → unique match on `feat#merge-parent-0`.
+        let got = pick_single_side_oid(&c, "feat").unwrap();
+        assert_eq!(got, Some(oid('b')));
+        // Exact match still wins when qualified name is typed.
+        let got2 = pick_single_side_oid(&c, "feat#merge-parent-0").unwrap();
+        assert_eq!(got2, Some(oid('b')));
+    }
+
+    #[test]
+    fn pick_single_side_oid_errors_on_ambiguous_prefix() {
+        let c = Conflict::Content {
+            path: PathBuf::from("a.rs"),
+            file_id: FileId::new(1),
+            base: None,
+            sides: vec![
+                labeled_side("feat#merge-parent-0", "feat", 'a'),
+                labeled_side("feat#merge-parent-1", "feat", 'b'),
+            ],
+            atoms: vec![],
+        };
+        let err = pick_single_side_oid(&c, "feat").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "expected 'ambiguous' in error message, got: {msg}"
+        );
+        assert!(
+            msg.contains("feat#merge-parent-0") && msg.contains("feat#merge-parent-1"),
+            "ambiguity error should list qualified side names, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn pick_single_side_oid_exact_match_on_ambiguous_prefix_works() {
+        // When the target is the fully-qualified name, the exact-match rule
+        // in `match_sides` wins — ambiguity only fires for a bare prefix.
+        let c = Conflict::Content {
+            path: PathBuf::from("a.rs"),
+            file_id: FileId::new(1),
+            base: None,
+            sides: vec![
+                labeled_side("feat#merge-parent-0", "feat", 'a'),
+                labeled_side("feat#merge-parent-1", "feat", 'b'),
+            ],
+            atoms: vec![],
+        };
+        let got = pick_single_side_oid(&c, "feat#merge-parent-1").unwrap();
+        assert_eq!(got, Some(oid('b')));
     }
 
     #[test]
