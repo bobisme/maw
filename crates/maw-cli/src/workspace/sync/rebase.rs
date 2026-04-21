@@ -328,7 +328,12 @@ pub(super) fn rebase_workspace(
         }
 
         // Materialize, write blobs, build tree, commit.
-        let output = materialize(&state).map_err(|e| {
+        //
+        // `materialize` reads each conflict side's blob via `repo.read_blob`
+        // (bn-324m), so we thread the `&dyn GitRepo` through here — same
+        // handle that `write_blobs_and_build_tree` uses below to write the
+        // rendered marker blobs back.
+        let output = materialize(&state, repo_dyn).map_err(|e| {
             anyhow::anyhow!("materialize failed after replaying {short_sha}: {e}")
         })?;
         let tree_oid = write_blobs_and_build_tree(repo_dyn, new_epoch_tree, output)
