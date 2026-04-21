@@ -239,7 +239,6 @@ fn sync_rebase_no_content_drops_on_clean_replay() {
 // `#[ignore]`.
 
 #[test]
-#[ignore = "known: infer_mode_for_new_file flattens Added exec bit to 0644 — see maw-core::merge::apply TODO"]
 fn sync_rebase_preserves_executable_bit() {
     let repo = TestRepo::new();
     repo.seed_files(&[("README.md", "# test\n")]);
@@ -315,7 +314,6 @@ fn sync_rebase_preserves_executable_bit() {
 // becomes a regular file after rebase.
 
 #[test]
-#[ignore = "known: infer_mode_for_new_file flattens Added symlink to regular blob — see maw-core::merge::apply TODO"]
 fn sync_rebase_preserves_symlink() {
     // Symlinks only make sense on Unix hosts with core.symlinks support;
     // the test environment is Linux so we rely on std::os::unix::fs::symlink.

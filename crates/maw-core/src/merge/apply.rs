@@ -256,8 +256,13 @@ fn apply_modified(tree: &mut ConflictTree, change: FileChange) -> Result<(), App
     })?;
 
     if let Some(entry) = tree.clean.get_mut(&change.path) {
-        // Preserve the existing mode (executable bit, symlink, etc.).
         entry.oid = blob;
+        // If the patch carries an explicit mode, honor it (covers chmod-only
+        // commits and symlink/blob transitions). Otherwise preserve the
+        // existing materialized mode (bn-nsz0).
+        if let Some(mode) = change.mode {
+            entry.mode = mode;
+        }
     } else {
         warn!(
             path = %change.path.display(),
@@ -566,17 +571,12 @@ fn sides_converged(sides: &[ConflictSide]) -> bool {
 
 /// Phase 1 placeholder for mode inference on a new file.
 ///
-/// Until the patch collector carries an explicit mode field, we assume every
-/// newly-added file is a regular blob. Executable-bit and symlink support is
-/// preserved through the `Modified` path because we read the existing mode
-/// off the materialized entry.
-///
-/// TODO(follow-up bone): read the mode from the patch itself once
-/// `FileChange` grows an explicit `mode` field (or we derive it from the
-/// worktree). Same TODO tag as the convergence-collapse-mode issue — they
-/// should be fixed together.
-const fn infer_mode_for_new_file(_change: &FileChange) -> EntryMode {
-    EntryMode::Blob
+/// Uses `FileChange.mode` when present (populated by `diff_patchset` from the
+/// source tree's entry mode). Falls back to `EntryMode::Blob` for patches
+/// built without an explicit mode (legacy/test fixtures). This preserves
+/// executable-bit and symlink modes through replay of added files (bn-nsz0).
+fn infer_mode_for_new_file(change: &FileChange) -> EntryMode {
+    change.mode.unwrap_or(EntryMode::Blob)
 }
 
 // ---------------------------------------------------------------------------
