@@ -21,7 +21,13 @@
 //!    original commit message — this keeps commit-count parity so
 //!    `find_conflicted_files` (which diffs against the workspace base)
 //!    still sees the `+<<<<<<<` lines added by this rebase, tripping
-//!    the merge-time marker gate when conflicts exist.
+//!    the merge-time marker gate when conflicts exist. For merge commits
+//!    (≥2 parents in the original), the replayed commit also has ≥2
+//!    parents: first parent = the rebased chain head, subsequent parents
+//!    = the ORIGINAL pre-rebase OIDs of the side(s). This preserves the
+//!    DAG shape so downstream tooling sees a real merge commit; a future
+//!    follow-up can rebase the side branches and substitute the rebased
+//!    OIDs (bn-7mbe).
 //! 6. HEAD is moved via `GitRepo::set_head` and the worktree is
 //!    synchronized via `GitRepo::checkout_tree`.
 //! 7. Both sidecars (`rebase-conflicts.json`, `conflict-tree.json`) are
@@ -345,8 +351,29 @@ pub(super) fn rebase_workspace(
             commit_info.message.clone()
         };
 
+        // Preserve merge-commit DAG shape (bn-7mbe). If the original had
+        // ≥2 parents, the replayed commit must too — otherwise downstream
+        // tooling that inspects `git log --format=%P` or walks parents sees
+        // a silently-flattened linear chain.
+        //
+        // V1 limitation: only the first parent is rebased (it's the chain
+        // head we've been building). The second (and subsequent) parents
+        // are carried over as the ORIGINAL pre-rebase OIDs — semantically
+        // "this references the side content that was merged in" — so
+        // `git log --graph` will show the extra parent(s) pointing back into
+        // the pre-rebase branch. A future follow-up can rebase the side
+        // branches too and substitute the rebased OIDs here.
+        let parents_for_commit: Vec<git::GitOid> = if parent_oids.len() > 1 {
+            let mut ps = Vec::with_capacity(parent_oids.len());
+            ps.push(parent_git);
+            ps.extend(parent_oids.iter().skip(1).copied());
+            ps
+        } else {
+            vec![parent_git]
+        };
+
         parent_git = repo_dyn
-            .create_commit(tree_oid, &[parent_git], &commit_msg, None)
+            .create_commit(tree_oid, &parents_for_commit, &commit_msg, None)
             .map_err(|e| anyhow::anyhow!("create_commit failed for {short_sha}: {e}"))?;
         replayed += 1;
 

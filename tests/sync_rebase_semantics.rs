@@ -648,6 +648,54 @@ fn rename_followed_by_epoch_modify_preserves_content_at_new_path() {
 }
 
 // ---------------------------------------------------------------------------
+// bn-7mbe: rebasing a workspace that contains a merge commit in the ahead
+// range must preserve the merge-commit DAG shape (≥2 parents on the
+// replayed commit). Pre-fix, the per-iteration `create_commit` used a
+// single-parent slice, silently flattening the history to a linear chain.
+// V1 fix: second parent is the ORIGINAL pre-rebase side OID (not rebased),
+// which is enough to give downstream tooling a real merge shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_rebase_preserves_merge_commit_parent_count() {
+    let repo = TestRepo::new();
+    repo.maw_ok(&["ws", "create", "feat"]);
+
+    let feat = repo.workspace_path("feat");
+    // Build feat → A → merge(A, side)
+    std::fs::write(feat.join("a.txt"), "a\n").unwrap();
+    repo.git_in_workspace("feat", &["add", "a.txt"]);
+    repo.git_in_workspace("feat", &["commit", "-m", "A"]);
+
+    repo.git_in_workspace("feat", &["checkout", "-b", "side", "HEAD^"]);
+    std::fs::write(feat.join("s.txt"), "s\n").unwrap();
+    repo.git_in_workspace("feat", &["add", "s.txt"]);
+    repo.git_in_workspace("feat", &["commit", "-m", "side"]);
+
+    repo.git_in_workspace("feat", &["checkout", "-"]);
+    repo.git_in_workspace("feat", &["merge", "--no-ff", "side", "-m", "merge: side"]);
+
+    // Advance epoch (disjoint paths so no conflict)
+    std::fs::write(repo.workspace_path("default").join("z.txt"), "z\n").unwrap();
+    repo.git_in_workspace("default", &["add", "-A"]);
+    repo.git_in_workspace("default", &["commit", "-m", "default: z"]);
+    repo.maw_ok(&["epoch", "sync"]);
+
+    repo.maw_ok(&["ws", "sync", "--rebase", "feat"]);
+
+    // After rebase, head's parents should include 2 OIDs.
+    let parents_out = repo.git_in_workspace("feat", &["log", "-1", "--format=%P"]);
+    let parents: Vec<&str> = parents_out.split_whitespace().collect();
+    assert_eq!(
+        parents.len(),
+        2,
+        "rebased merge commit should have 2 parents, got {}: {}",
+        parents.len(),
+        parents_out.trim()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 8. Add/Add regression (bn-3l5p): workspace and epoch both add the same
 // new path — rebase must surface a structured conflict, not crash with
 // `unexpected Added on conflicted path`.
