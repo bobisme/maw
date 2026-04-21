@@ -28,6 +28,12 @@
 //! side's content, a unilateral `Deleted` **collapses** the conflict to
 //! clean absence. See [`apply_one_to_conflict`] for the per-variant table.
 //!
+//! `Added` on a conflicted path is treated as equivalent to `Modified`: the
+//! path is already tracked (the pipeline's overlap detector pre-populates
+//! `tree.conflicts` for add/add and content overlaps), so the unilateral
+//! "first-time add" is really the workspace's final content for the path.
+//! We dispatch to the same replace-each-side logic `Modified` uses.
+//!
 //! ### Convergence
 //!
 //! After applying a `Modified` patch to a `Conflict::Content`, every side now
@@ -89,10 +95,11 @@ pub enum ApplyError {
     /// A unilateral `Added` change targeted a path that already appears in
     /// an existing conflict record.
     ///
-    /// This indicates an upstream bug in the patch collector: the path is
-    /// already tracked (either as `AddAdd`, `Content`, or `ModifyDelete`),
-    /// so a further "first-time add" from the same or another workspace is
-    /// ill-formed.
+    /// **V1 semantics (bn-3l5p)**: `Added` on a conflicted path is now
+    /// treated as `Modified` — see [`apply_one_to_conflict`]. This variant
+    /// is retained for future phases that might distinguish "first-time
+    /// add" from "replace content" semantically, and for conflict shapes
+    /// that genuinely cannot accept an `Added` (none in V1).
     UnexpectedAddOnConflict {
         /// The path that was re-added on top of a conflict.
         path: std::path::PathBuf,
@@ -289,12 +296,20 @@ fn apply_deleted(tree: &mut ConflictTree, change: &FileChange) {
 ///
 /// # Variant × change-kind table
 ///
-/// | Existing conflict                | `Added`          | `Modified`                 | `Deleted`          |
-/// |----------------------------------|------------------|----------------------------|--------------------|
-/// | [`Conflict::Content`]            | error (tracked)  | replace every side's blob  | collapse to absent |
-/// | [`Conflict::AddAdd`]             | error (tracked)  | error (no base)            | collapse to absent |
-/// | [`Conflict::ModifyDelete`]       | error (tracked)  | update modifier, keep del  | collapse to absent |
-/// | [`Conflict::DivergentRename`]    | `Unhandled`      | `Unhandled`                | `Unhandled`        |
+/// | Existing conflict                | `Added`                    | `Modified`                 | `Deleted`          |
+/// |----------------------------------|----------------------------|----------------------------|--------------------|
+/// | [`Conflict::Content`]            | same as `Modified`         | replace every side's blob  | collapse to absent |
+/// | [`Conflict::AddAdd`]             | replace every side's blob  | error (no base)            | collapse to absent |
+/// | [`Conflict::ModifyDelete`]       | same as `Modified`         | update modifier, keep del  | collapse to absent |
+/// | [`Conflict::DivergentRename`]    | `Unhandled`                | `Unhandled`                | `Unhandled`        |
+///
+/// `Added` on a conflicted path (bn-3l5p): the rebase pipeline pre-populates
+/// `tree.conflicts` when the epoch and the workspace both introduce/modify
+/// the same path. The subsequent unilateral `Added` from the workspace
+/// patchset is therefore the workspace's final content for the path, just
+/// like `Modified` would be. We dispatch to the same replace-each-side
+/// handler and let convergence collapse the conflict if the workspace's
+/// content happens to equal every side.
 ///
 /// After mutation we check for **convergence**: if every side now carries the
 /// same blob OID, we collapse the conflict back into `tree.clean`. For
@@ -365,25 +380,12 @@ fn handle_content(
     _workspace: &str,
 ) -> Result<(), ApplyError> {
     match change.kind {
-        ChangeKind::Added => {
-            // Path is already tracked — re-adding is ill-formed.
-            // Put the conflict back so the tree is unchanged.
-            tree.conflicts.insert(
-                path.clone(),
-                Conflict::Content {
-                    path: path.clone(),
-                    file_id,
-                    base,
-                    sides,
-                    atoms,
-                },
-            );
-            Err(ApplyError::UnexpectedAddOnConflict {
-                path,
-                existing_shape: "content",
-            })
-        }
-        ChangeKind::Modified => {
+        // V1 SEMANTICS (bn-3l5p): `Added` on an already-tracked conflicted
+        // path is treated as `Modified`. The rebase pipeline's overlap
+        // detector installs the conflict record before the workspace's
+        // unilateral patch is folded in, so a workspace `Added` on such a
+        // path is really the workspace's final content for the path.
+        ChangeKind::Added | ChangeKind::Modified => {
             let blob = change.blob.clone().ok_or_else(|| ApplyError::MissingBlob {
                 path: change.path.clone(),
                 kind: change.kind.clone(),
@@ -444,23 +446,36 @@ fn handle_content(
 fn handle_add_add(
     tree: &mut ConflictTree,
     path: std::path::PathBuf,
-    sides: Vec<ConflictSide>,
+    mut sides: Vec<ConflictSide>,
     change: FileChange,
 ) -> Result<(), ApplyError> {
     match change.kind {
         ChangeKind::Added => {
-            // Already tracked as AddAdd — a further first-time add is ill-formed.
-            tree.conflicts.insert(
-                path.clone(),
-                Conflict::AddAdd {
-                    path: path.clone(),
-                    sides,
-                },
-            );
-            Err(ApplyError::UnexpectedAddOnConflict {
-                path,
-                existing_shape: "add_add",
-            })
+            // V1 SEMANTICS (bn-3l5p): `Added` on an already-tracked AddAdd
+            // is treated as `Modified` — the pipeline pre-populated the
+            // AddAdd conflict (both sides created the path independently),
+            // so the workspace's unilateral `Added` is its final content.
+            // Replace every side's blob and let convergence collapse if
+            // the workspace matches every side.
+            let blob = change.blob.clone().ok_or_else(|| ApplyError::MissingBlob {
+                path: change.path.clone(),
+                kind: change.kind.clone(),
+            })?;
+
+            for side in &mut sides {
+                side.content = blob.clone();
+            }
+
+            if sides_converged(&sides) {
+                tree.clean.insert(
+                    path,
+                    MaterializedEntry::new(EntryMode::Blob, blob),
+                );
+            } else {
+                tree.conflicts
+                    .insert(path.clone(), Conflict::AddAdd { path, sides });
+            }
+            Ok(())
         }
         ChangeKind::Modified => {
             // No base exists for an AddAdd. A Modified operation implies a
@@ -495,23 +510,11 @@ fn handle_modify_delete(
     _workspace: &str,
 ) -> Result<(), ApplyError> {
     match change.kind {
-        ChangeKind::Added => {
-            tree.conflicts.insert(
-                path.clone(),
-                Conflict::ModifyDelete {
-                    path: path.clone(),
-                    file_id,
-                    modifier,
-                    deleter,
-                    modified_content: _modified_content,
-                },
-            );
-            Err(ApplyError::UnexpectedAddOnConflict {
-                path,
-                existing_shape: "modify_delete",
-            })
-        }
-        ChangeKind::Modified => {
+        // V1 SEMANTICS (bn-3l5p): `Added` on an already-tracked
+        // ModifyDelete is treated as `Modified` — replace the modifier
+        // side's content with the unilateral blob. The deleter side stays
+        // as-is, and the conflict remains a ModifyDelete.
+        ChangeKind::Added | ChangeKind::Modified => {
             let blob = change.blob.clone().ok_or_else(|| ApplyError::MissingBlob {
                 path: change.path.clone(),
                 kind: change.kind.clone(),
@@ -880,26 +883,34 @@ mod tests {
     }
 
     #[test]
-    fn content_conflict_added_on_conflict_is_error() {
+    fn add_on_content_conflict_behaves_as_modified() {
+        // bn-3l5p: `Added` on a conflicted path is now treated as `Modified`.
+        // The pipeline pre-populates a Conflict::Content when epoch and
+        // workspace both touch the same path; the workspace's subsequent
+        // `Added` is the workspace's final content for that path. Folding
+        // it replaces every side's blob, and since both sides match the
+        // new blob, the conflict converges to clean.
         let mut tree = ConflictTree::new(epoch());
-        let original = content_conflict("src/battle.rs", oid('0'), oid('a'), oid('b'));
-        tree.conflicts
-            .insert(PathBuf::from("src/battle.rs"), original.clone());
+        tree.conflicts.insert(
+            PathBuf::from("src/battle.rs"),
+            content_conflict("src/battle.rs", oid('0'), oid('a'), oid('b')),
+        );
 
-        let err =
+        let result =
             apply_unilateral_patchset(tree, patch(vec![add_change("src/battle.rs", oid('c'))]))
-                .unwrap_err();
+                .expect("Added on content conflict must succeed (treated as Modified)");
 
-        match err {
-            ApplyError::UnexpectedAddOnConflict {
-                path,
-                existing_shape,
-            } => {
-                assert_eq!(path, PathBuf::from("src/battle.rs"));
-                assert_eq!(existing_shape, "content");
-            }
-            other => panic!("expected UnexpectedAddOnConflict, got {other:?}"),
-        }
+        // Convergence: both sides now hold 'c', so the conflict collapses
+        // to clean.
+        assert!(
+            !result
+                .conflicts
+                .contains_key(&PathBuf::from("src/battle.rs")),
+            "converged sides should collapse to clean"
+        );
+        let entry = &result.clean[&PathBuf::from("src/battle.rs")];
+        assert_eq!(entry.oid, oid('c'));
+        assert_eq!(entry.mode, EntryMode::Blob);
     }
 
     // -----------------------------------------------------------------------
@@ -923,26 +934,27 @@ mod tests {
     }
 
     #[test]
-    fn add_add_conflict_added_is_error() {
+    fn add_on_addadd_conflict_replaces_workspace_side() {
+        // bn-3l5p: `Added` on a tracked AddAdd conflict is the workspace's
+        // final content for the path. Replace every side's blob; under V1
+        // "unilateral is authoritative" semantics, both sides converge and
+        // the conflict collapses to clean.
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(
             PathBuf::from("src/new.rs"),
             add_add_conflict("src/new.rs", oid('a'), oid('b')),
         );
 
-        let err = apply_unilateral_patchset(tree, patch(vec![add_change("src/new.rs", oid('c'))]))
-            .unwrap_err();
+        let result =
+            apply_unilateral_patchset(tree, patch(vec![add_change("src/new.rs", oid('c'))]))
+                .expect("Added on AddAdd conflict must succeed (treated as Modified)");
 
-        match err {
-            ApplyError::UnexpectedAddOnConflict {
-                path,
-                existing_shape,
-            } => {
-                assert_eq!(path, PathBuf::from("src/new.rs"));
-                assert_eq!(existing_shape, "add_add");
-            }
-            other => panic!("expected UnexpectedAddOnConflict, got {other:?}"),
-        }
+        assert!(
+            !result.conflicts.contains_key(&PathBuf::from("src/new.rs")),
+            "AddAdd with converged sides should collapse to clean"
+        );
+        let entry = &result.clean[&PathBuf::from("src/new.rs")];
+        assert_eq!(entry.oid, oid('c'));
     }
 
     #[test]
@@ -1030,28 +1042,35 @@ mod tests {
     }
 
     #[test]
-    fn modify_delete_conflict_added_is_error() {
+    fn add_on_modify_delete_conflict_updates_modifier() {
+        // bn-3l5p: `Added` on a tracked ModifyDelete is the workspace's
+        // final content for the path. Update the modifier side's blob and
+        // keep the deleter side untouched — still a ModifyDelete.
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(
             PathBuf::from("src/ambivalent.rs"),
             modify_delete_conflict("src/ambivalent.rs", oid('a'), oid('b')),
         );
 
-        let err = apply_unilateral_patchset(
+        let result = apply_unilateral_patchset(
             tree,
             patch(vec![add_change("src/ambivalent.rs", oid('c'))]),
         )
-        .unwrap_err();
+        .expect("Added on ModifyDelete must succeed (treated as Modified)");
 
-        match err {
-            ApplyError::UnexpectedAddOnConflict {
-                path,
-                existing_shape,
+        let conflict = &result.conflicts[&PathBuf::from("src/ambivalent.rs")];
+        match conflict {
+            Conflict::ModifyDelete {
+                modifier,
+                deleter,
+                modified_content,
+                ..
             } => {
-                assert_eq!(path, PathBuf::from("src/ambivalent.rs"));
-                assert_eq!(existing_shape, "modify_delete");
+                assert_eq!(modifier.content, oid('c'));
+                assert_eq!(deleter.content, oid('b'));
+                assert_eq!(*modified_content, oid('c'));
             }
-            other => panic!("expected UnexpectedAddOnConflict, got {other:?}"),
+            other => panic!("expected ModifyDelete, got {other:?}"),
         }
     }
 

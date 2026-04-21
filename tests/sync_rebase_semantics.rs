@@ -571,3 +571,120 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
         "B's unilateral edit to unrelated.txt must land in the final tree as alice's content"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 8. Add/Add regression (bn-3l5p): workspace and epoch both add the same
+// new path — rebase must surface a structured conflict, not crash with
+// `unexpected Added on conflicted path`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_rebase_handles_add_add_conflict() {
+    // Repro: workspace adds `new.txt` with one content; epoch adds the same
+    // `new.txt` with different content. Before bn-3l5p the rebase bailed
+    // out with `ApplyError::UnexpectedAddOnConflict` and left the workspace
+    // "stale" with no conflict artifacts. After bn-3l5p `Added` on a
+    // pre-populated conflict is handled as `Modified`, so the structured
+    // sidecar lands and `maw ws resolve --keep <side>` has a path forward.
+    let repo = TestRepo::new();
+    repo.seed_files(&[("placeholder.txt", "seed\n")]);
+
+    // Workspace under test: adds new.txt with WS_NEW.
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "new.txt", "WS_NEW\n");
+    commit_all(&repo, "feat", "ws: new.txt");
+
+    // Advance the epoch via a separate workspace that adds new.txt with
+    // a DIFFERENT content (EPOCH_NEW), then merge-destroy to fast-forward
+    // the epoch.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "new.txt", "EPOCH_NEW\n");
+    commit_all(&repo, "advancer", "epoch: new.txt");
+    repo.maw_ok(&[
+        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+    ]);
+
+    // Rebase feat. Must not crash.
+    let rebase_out = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    let rebase_stderr = String::from_utf8_lossy(&rebase_out.stderr);
+    let rebase_stdout = String::from_utf8_lossy(&rebase_out.stdout);
+    assert!(
+        !rebase_stderr.contains("unexpected Added on conflicted path")
+            && !rebase_stdout.contains("unexpected Added on conflicted path"),
+        "rebase must not fail with 'unexpected Added on conflicted path' (bn-3l5p)\n\
+         stdout:\n{rebase_stdout}\nstderr:\n{rebase_stderr}"
+    );
+
+    // Structured sidecar must exist and describe new.txt with both sides.
+    let sidecar = repo
+        .read_conflict_tree_sidecar("feat")
+        .expect("conflict-tree.json should exist after an add/add rebase conflict");
+
+    let entry = find_conflict_entry(&sidecar, "new.txt").unwrap_or_else(|| {
+        panic!(
+            "sidecar should list new.txt as conflicted; got:\n{}",
+            serde_json::to_string_pretty(&sidecar).unwrap()
+        )
+    });
+
+    // The conflict shape may be either `content` (with base = None) or
+    // `add_add` — both are valid representations of add/add under the
+    // current pipeline. What matters is that both sides are recorded.
+    let ty = entry
+        .get("type")
+        .and_then(|v| v.as_str())
+        .expect("conflict entry should be tagged");
+    assert!(
+        ty == "content" || ty == "add_add",
+        "expected content or add_add shape for add/add on new.txt, got {ty}: {entry}"
+    );
+
+    let sides = entry
+        .get("sides")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("conflict entry should carry a sides array: {entry}"));
+    let side_labels: Vec<&str> = sides
+        .iter()
+        .filter_map(|s| s.get("workspace").and_then(|w| w.as_str()))
+        .collect();
+    assert!(
+        side_labels.iter().any(|l| *l == "epoch"),
+        "sides should include `epoch`, got {side_labels:?}"
+    );
+    assert!(
+        side_labels.iter().any(|l| *l == "feat"),
+        "sides should include `feat`, got {side_labels:?}"
+    );
+
+    // `--keep feat` writes WS_NEW.
+    repo.maw_ok(&["ws", "resolve", "feat", "--keep", "feat"]);
+    assert_eq!(
+        repo.read_file("feat", "new.txt").as_deref(),
+        Some("WS_NEW\n"),
+        "`--keep feat` should land the workspace's content"
+    );
+
+    // Redo the same scenario on a fresh repo to verify `--keep epoch`
+    // writes EPOCH_NEW (the previous run already consumed `--keep feat`).
+    let repo2 = TestRepo::new();
+    repo2.seed_files(&[("placeholder.txt", "seed\n")]);
+
+    repo2.maw_ok(&["ws", "create", "feat"]);
+    repo2.add_file("feat", "new.txt", "WS_NEW\n");
+    commit_all(&repo2, "feat", "ws: new.txt");
+
+    repo2.maw_ok(&["ws", "create", "advancer"]);
+    repo2.add_file("advancer", "new.txt", "EPOCH_NEW\n");
+    commit_all(&repo2, "advancer", "epoch: new.txt");
+    repo2.maw_ok(&[
+        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+    ]);
+
+    let _ = repo2.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    repo2.maw_ok(&["ws", "resolve", "feat", "--keep", "epoch"]);
+    assert_eq!(
+        repo2.read_file("feat", "new.txt").as_deref(),
+        Some("EPOCH_NEW\n"),
+        "`--keep epoch` should land the epoch's content"
+    );
+}
