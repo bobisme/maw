@@ -232,7 +232,7 @@ pub(super) fn rebase_workspace(
 
         let first_parent_core = GitOid::new(&parent_oids[0].to_string())
             .map_err(|e| anyhow::anyhow!("malformed parent OID: {e}"))?;
-        let first_parent_patch = diff_patchset(
+        let mut first_parent_patch = diff_patchset(
             repo_dyn,
             &first_parent_core,
             &commit_core,
@@ -250,9 +250,13 @@ pub(super) fn rebase_workspace(
         // enters its conflict-propagation branch. The V1 propagation
         // replaces-and-collapses, but we `materialize` BEFORE the next fold,
         // and we inspect the conflicts pre-apply to surface them here.
+        //
+        // This pass may also mutate the patch (e.g. drop `Modified(to)` for
+        // rename pairs that were resolved into a pre-installed clean entry
+        // at `to` — see `promote_overlaps_to_conflicts` for the rationale).
         promote_overlaps_to_conflicts(
             &mut state,
-            &first_parent_patch,
+            &mut first_parent_patch,
             &epoch_delta,
             ws_name,
             &base_epoch_id,
@@ -555,24 +559,87 @@ fn build_epoch_delta_map(
 /// This is the pipeline-level step that turns what would be a silent
 /// overwrite into a structured conflict the merge-time marker gate (bn-372v)
 /// can surface.
+///
+/// ## Rename handling (bn-3525)
+///
+/// `diff_patchset` emits renames as a `Deleted(from) + Modified(to)` pair
+/// with a shared `FileId`. When the epoch *independently* modified the
+/// renamed-from path, we must **follow the rename**: the epoch's content
+/// change applies to the workspace's new path, not the old one. Two
+/// sub-cases:
+///
+/// * **Pure rename** (workspace did not edit content) — the workspace's
+///   content at `to` equals the epoch's old content at `from`. We install
+///   a clean entry at `to` carrying the epoch's *new* blob, and record the
+///   delete side so `apply` still clears `from` from the tree.
+///
+/// * **Rename + edit** (workspace changed content too) — we have a true
+///   three-way overlap at `to`: base = epoch-old, ours = epoch-new,
+///   theirs = workspace-content. We install a `Conflict::Content` at `to`
+///   and the snapshot-restore step downstream preserves it through the V1
+///   apply-collapse.
+///
+/// In both sub-cases the `Deleted(from)` side is left alone — the default
+/// `apply` handling will remove `from` from the clean tree without
+/// manufacturing a spurious `ModifyDelete` at the stale path.
 fn promote_overlaps_to_conflicts(
     tree: &mut ConflictTree,
-    patch: &maw_core::merge::types::PatchSet,
+    patch: &mut maw_core::merge::types::PatchSet,
     epoch_delta: &EpochDelta,
     ws_name: &str,
     base_epoch_id: &EpochId,
 ) {
     use maw_core::merge::types::ChangeKind;
 
-    for change in &patch.changes {
-        let Some((ref_old, ref_new)) = epoch_delta.get(&change.path) else {
-            // Path not touched by the epoch — no overlap.
-            continue;
-        };
+    // Pre-scan: identify rename pairs within this patch. A rename shows up
+    // as a `Deleted(from, F)` and a `Modified(to, F)` with the same FileId
+    // (both derived from the same old blob by `diff_patchset`).
+    let rename_pairs = collect_rename_pairs(patch);
 
+    // Collect rename resolutions in a first pass (read-only over `patch`) so
+    // we can mutate both the tree and the patch's changes afterwards without
+    // borrow-checker conflicts.
+    let mut rename_resolutions: Vec<RenameResolution> = Vec::new();
+    for change in &patch.changes {
+        if change.kind == ChangeKind::Modified
+            && let Some(ws_blob) = change.blob.clone()
+            && let Some(from_path) = rename_pairs.modified_to_source.get(&change.path)
+            && let Some((ref_old_from, ref_new_from)) = epoch_delta.get(from_path)
+        {
+            if let Some(res) = plan_rename_overlap(
+                ws_name,
+                base_epoch_id,
+                patch,
+                change,
+                ws_blob,
+                ref_old_from.clone(),
+                ref_new_from.clone(),
+            ) {
+                rename_resolutions.push(res);
+            }
+        }
+    }
+
+    // Apply rename resolutions to the tree and patch in a second pass.
+    for res in rename_resolutions {
+        apply_rename_resolution(tree, &mut patch.changes, res);
+    }
+
+    for change in &patch.changes {
         match change.kind {
             ChangeKind::Added | ChangeKind::Modified => {
                 let Some(ws_blob) = change.blob.clone() else {
+                    continue;
+                };
+
+                // Skip Modified changes that are the destination of a
+                // rename pair — they were handled above.
+                if rename_pairs.modified_to_source.contains_key(&change.path) {
+                    continue;
+                }
+
+                let Some((ref_old, ref_new)) = epoch_delta.get(&change.path) else {
+                    // Path not touched by the epoch — no overlap.
                     continue;
                 };
 
@@ -632,6 +699,19 @@ fn promote_overlaps_to_conflicts(
                 );
             }
             ChangeKind::Deleted => {
+                // If this delete is the source half of a rename pair within
+                // the same patch, skip the ModifyDelete promotion — the
+                // rename-aware branch above will have installed the right
+                // shape at the destination, and `apply` will take care of
+                // clearing `from` from `tree.clean` (bn-3525).
+                if rename_pairs.deleted_from_paths.contains(&change.path) {
+                    continue;
+                }
+
+                let Some((ref_old, ref_new)) = epoch_delta.get(&change.path) else {
+                    continue;
+                };
+
                 // Workspace wants to delete a file the epoch modified.
                 // That's a modify/delete conflict from the workspace's
                 // perspective. Only meaningful if the epoch kept the file.
@@ -671,6 +751,203 @@ fn promote_overlaps_to_conflicts(
             }
         }
     }
+}
+
+/// Rename-pair indices derived from a single [`PatchSet`].
+///
+/// A rename is encoded by `diff_patchset` as `Deleted(from, FileId=F) +
+/// Modified(to, FileId=F)`. These maps let `promote_overlaps_to_conflicts`
+/// recognize the pair by path and by FileId.
+#[derive(Default)]
+struct RenamePairs {
+    /// Every `to` path for a rename pair → its matching `from` path.
+    modified_to_source: std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    /// Every `from` path for a rename pair.
+    deleted_from_paths: std::collections::HashSet<std::path::PathBuf>,
+}
+
+/// Walk the patchset and identify `Deleted(from) + Modified(to)` pairs
+/// sharing a `FileId`. Both sides of the pair are added to the returned
+/// index so the caller can look up either direction.
+fn collect_rename_pairs(patch: &maw_core::merge::types::PatchSet) -> RenamePairs {
+    use maw_core::merge::types::ChangeKind;
+
+    let mut pairs = RenamePairs::default();
+
+    // Group by FileId: collect (file_id) → (Vec<delete_paths>, Vec<modify_paths>).
+    let mut by_fid: std::collections::HashMap<
+        FileId,
+        (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>),
+    > = std::collections::HashMap::new();
+
+    for change in &patch.changes {
+        let Some(fid) = change.file_id else { continue };
+        let entry = by_fid.entry(fid).or_default();
+        match change.kind {
+            ChangeKind::Deleted => entry.0.push(change.path.clone()),
+            ChangeKind::Modified => entry.1.push(change.path.clone()),
+            ChangeKind::Added => { /* not part of a rename pair */ }
+        }
+    }
+
+    // A rename pair is a FileId with exactly one Delete and exactly one
+    // Modified. Ambiguous groupings (e.g. two deletes, or a split-rename)
+    // are left alone — they fall back to the default per-change handling.
+    for (_fid, (deletes, modifies)) in by_fid {
+        if deletes.len() == 1 && modifies.len() == 1 {
+            let from = deletes.into_iter().next().unwrap();
+            let to = modifies.into_iter().next().unwrap();
+            // Sanity check: a rename pair must have distinct paths.
+            if from != to {
+                pairs.deleted_from_paths.insert(from.clone());
+                pairs.modified_to_source.insert(to, from);
+            }
+        }
+    }
+
+    pairs
+}
+
+/// A planned resolution for one rename-vs-epoch-modify overlap.
+///
+/// Produced by [`plan_rename_overlap`] during the read-only pass over the
+/// patch; consumed by [`apply_rename_resolution`] which mutates both the
+/// conflict tree and the patch itself.
+enum RenameResolution {
+    /// Pure rename (workspace carried content unchanged across the move) —
+    /// the epoch's new blob lands at `to`.
+    Follow {
+        /// Destination path (`to`).
+        to_path: std::path::PathBuf,
+        /// Epoch's new-side blob at `from` — the content that follows the
+        /// rename.
+        epoch_new_blob: GitOid,
+        /// Tree-entry mode to use for the clean entry at `to`. Taken from
+        /// the workspace's `Modified(to)` change when available, else
+        /// defaults to `EntryMode::Blob`.
+        mode: EntryMode,
+    },
+    /// Rename + edit vs epoch modify — surface a three-way content conflict
+    /// at `to`.
+    Conflict {
+        /// Destination path (`to`).
+        to_path: std::path::PathBuf,
+        /// The fully-built `Conflict::Content` to install at `to`.
+        conflict: Conflict,
+    },
+}
+
+/// Plan a rename-vs-epoch-modify resolution without mutating anything.
+///
+/// Called during the read-only pass over the patch. Returns `None` when the
+/// overlap does not need special handling (e.g. the epoch deleted `from`;
+/// the workspace's change-at-`to` has no blob), leaving the default
+/// per-change handling to take over.
+fn plan_rename_overlap(
+    ws_name: &str,
+    base_epoch_id: &EpochId,
+    patch: &maw_core::merge::types::PatchSet,
+    change: &maw_core::merge::types::FileChange,
+    ws_blob: GitOid,
+    epoch_old: Option<GitOid>,
+    epoch_new: Option<GitOid>,
+) -> Option<RenameResolution> {
+    // If the epoch's new-side at `from` is None (epoch deleted `from`), both
+    // sides agree the old path is gone. The workspace's rename stands
+    // unchallenged; default handling upserts `to` with its own content.
+    let epoch_new_blob = epoch_new?;
+
+    // Pure rename detection: workspace's content at `to` equals epoch's old
+    // content at `from`. When true, epoch's modification can follow cleanly.
+    let is_pure_rename = match &epoch_old {
+        Some(old) => *old == ws_blob,
+        // Defensive: if epoch_old is missing, we can't prove pure-rename;
+        // fall through to a conflict so nothing is silently overwritten.
+        None => false,
+    };
+
+    if is_pure_rename {
+        let mode = change.mode.unwrap_or(EntryMode::Blob);
+        Some(RenameResolution::Follow {
+            to_path: change.path.clone(),
+            epoch_new_blob,
+            mode,
+        })
+    } else {
+        let ord = OrderingKey::new(
+            base_epoch_id.clone(),
+            patch.workspace_id.clone(),
+            0,
+            0,
+        );
+        let ours = ConflictSide::new("epoch".to_owned(), epoch_new_blob, ord.clone());
+        let theirs = ConflictSide::new(ws_name.to_owned(), ws_blob, ord);
+
+        let file_id = change.file_id.unwrap_or_else(|| {
+            FileId::new(merge_file_id_seed(
+                &GitOid::new(&"f".repeat(40)).unwrap(),
+                &change.path,
+            ))
+        });
+
+        Some(RenameResolution::Conflict {
+            to_path: change.path.clone(),
+            conflict: Conflict::Content {
+                path: change.path.clone(),
+                file_id,
+                base: epoch_old,
+                sides: vec![ours, theirs],
+                atoms: vec![],
+            },
+        })
+    }
+}
+
+/// Apply a planned rename resolution to both the conflict tree and the
+/// workspace's patch.
+///
+/// * Evicts any stale entry for `to_path` from `tree.clean` and
+///   `tree.conflicts`.
+/// * Installs the follow-the-rename clean entry or the rename+modify
+///   `Conflict::Content`.
+/// * **Mutates the patch**: removes the `Modified(to_path)` change so the
+///   subsequent `apply_unilateral_patchset` doesn't clobber our rename-aware
+///   resolution with the workspace's stale blob. The paired `Deleted(from)`
+///   is intentionally left in place — it still needs to run during apply to
+///   clear `from` from `tree.clean`.
+fn apply_rename_resolution(
+    tree: &mut ConflictTree,
+    patch_changes: &mut Vec<maw_core::merge::types::FileChange>,
+    res: RenameResolution,
+) {
+    use maw_core::merge::types::ChangeKind;
+
+    let to_path = match &res {
+        RenameResolution::Follow { to_path, .. } => to_path.clone(),
+        RenameResolution::Conflict { to_path, .. } => to_path.clone(),
+    };
+
+    tree.clean.remove(&to_path);
+    tree.conflicts.remove(&to_path);
+
+    match res {
+        RenameResolution::Follow {
+            to_path,
+            epoch_new_blob,
+            mode,
+        } => {
+            tree.clean
+                .insert(to_path, MaterializedEntry::new(mode, epoch_new_blob));
+        }
+        RenameResolution::Conflict { to_path, conflict } => {
+            tree.conflicts.insert(to_path, conflict);
+        }
+    }
+
+    // Drop the workspace's Modified(to) from the patch so apply doesn't
+    // overwrite our resolution. The paired Deleted(from) stays so apply
+    // still clears `from` from the tree.
+    patch_changes.retain(|c| !(c.kind == ChangeKind::Modified && c.path == to_path));
 }
 
 // ---------------------------------------------------------------------------

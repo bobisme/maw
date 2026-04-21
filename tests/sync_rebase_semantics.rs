@@ -573,6 +573,81 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
 }
 
 // ---------------------------------------------------------------------------
+// 8. bn-3525: rename followed by epoch-modify of the renamed-from path
+// ---------------------------------------------------------------------------
+//
+// Regression for bn-3525. When a workspace renames `a.txt → b.txt` and the
+// epoch independently modifies `a.txt`, the rebase pipeline MUST NOT silently
+// drop both paths. The pre-fix behavior produced an empty tree; the fix
+// "follows the rename" (matching git's default ort strategy) so the epoch's
+// content change lands at the new path `b.txt`.
+
+#[test]
+fn rename_followed_by_epoch_modify_preserves_content_at_new_path() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("a.txt", "hello\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+
+    // Workspace renames a.txt → b.txt (content unchanged).
+    let feat_path = repo.workspace_path("feat");
+    repo.git_in_workspace("feat", &["mv", "a.txt", "b.txt"]);
+    commit_all(&repo, "feat", "ws: rename a -> b");
+
+    // sanity: the rename really happened in the workspace.
+    assert!(feat_path.join("b.txt").exists(), "setup: b.txt must exist in feat");
+    assert!(!feat_path.join("a.txt").exists(), "setup: a.txt must be gone in feat");
+
+    // Advance the epoch by modifying a.txt through another workspace.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.modify_file("advancer", "a.txt", "hello modified\n");
+    commit_all(&repo, "advancer", "default: modify a");
+    repo.maw_ok(&[
+        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+    ]);
+
+    // Rebase feat onto the new epoch.
+    let out = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "sync --rebase failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Invariant: the rebase MUST NOT produce an empty tree. Either:
+    //   (a) b.txt is present with "hello modified" (follow-the-rename), or
+    //   (b) b.txt is present with conflict markers (three-way conflict).
+    // And a.txt must be gone (the workspace renamed it away).
+    assert!(
+        !feat_path.join("a.txt").exists(),
+        "a.txt must be gone from feat after rebase (rename source was removed)"
+    );
+    let b_contents = repo
+        .read_file("feat", "b.txt")
+        .expect("b.txt must exist after rebase — neither side should be dropped");
+
+    // Accept follow-the-rename (primary fix) or a conflict marker
+    // (acceptable alternative). An empty or original "hello\n" body would
+    // indicate the fix regressed.
+    let has_epoch_content = b_contents.contains("hello modified");
+    let has_conflict_markers = b_contents.contains("<<<<<<<");
+    assert!(
+        has_epoch_content || has_conflict_markers,
+        "b.txt must carry the epoch's modified content OR show conflict markers; got: {b_contents:?}"
+    );
+
+    // Primary fix (Option 1 / follow-the-rename): for a **pure** rename the
+    // epoch's modification should land cleanly at the new path with no
+    // conflict markers. This matches git's default ort strategy behavior.
+    assert_eq!(
+        b_contents, "hello modified\n",
+        "pure rename + epoch-modify should produce a clean follow-the-rename result \
+         (primary fix for bn-3525); got: {b_contents:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 8. Add/Add regression (bn-3l5p): workspace and epoch both add the same
 // new path — rebase must surface a structured conflict, not crash with
 // `unexpected Added on conflicted path`.

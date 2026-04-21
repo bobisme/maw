@@ -17,8 +17,14 @@
 //! * path in `tree.clean` + `Modified` → replace blob, preserve mode;
 //! * path in `tree.clean` + `Deleted` → remove from `clean`;
 //! * path absent from both maps + `Added` → insert into `clean`;
-//! * path absent from both maps + `Modified`/`Deleted` → log a warning
-//!   (unexpected) and skip — we have no base entry to modify/remove.
+//! * path absent from both maps + `Modified` → insert into `clean` (upsert).
+//!   This is necessary for the "follow-the-rename" semantics (bn-3525):
+//!   `diff_patchset` emits renames as a `Deleted(from) + Modified(to)` pair,
+//!   and the seeded tree may not contain `to` (because `to` did not yet exist
+//!   at the epoch base). Without upsert semantics the rename's content would
+//!   be silently dropped.
+//! * path absent from both maps + `Deleted` → log a warning (unexpected) and
+//!   skip — no base entry to remove.
 //!
 //! ## Conflicted paths (Phase 2)
 //!
@@ -271,10 +277,14 @@ fn apply_modified(tree: &mut ConflictTree, change: FileChange) -> Result<(), App
             entry.mode = mode;
         }
     } else {
-        warn!(
-            path = %change.path.display(),
-            "apply_unilateral_patchset: Modified on a path not present in tree; ignoring"
-        );
+        // Upsert semantics: treat `Modified` on an absent path as an insert.
+        // This path is reached legitimately when `diff_patchset` emits a
+        // rename as `Deleted(from) + Modified(to)` and the seeded tree did
+        // not contain `to` yet (bn-3525). Falling back to the `Added`
+        // handler preserves mode/blob fidelity.
+        let mode = infer_mode_for_new_file(&change);
+        tree.clean
+            .insert(change.path, MaterializedEntry::new(mode, blob));
     }
     Ok(())
 }
@@ -781,12 +791,17 @@ mod tests {
     }
 
     #[test]
-    fn modified_on_absent_path_is_ignored() {
+    fn modified_on_absent_path_is_upserted() {
+        // bn-3525: `Modified` on an absent path now inserts the entry (upsert
+        // semantics) so that the `Deleted(from) + Modified(to)` pair emitted
+        // for a rename lands cleanly — the rebase seeds the tree from the
+        // new epoch, which may not yet contain the rename's destination.
         let tree = ConflictTree::new(epoch());
         let result =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/ghost.rs", oid('b'))]))
                 .unwrap();
-        assert!(result.clean.is_empty());
+        let entry = &result.clean[&PathBuf::from("src/ghost.rs")];
+        assert_eq!(entry.oid, oid('b'));
         assert!(result.conflicts.is_empty());
     }
 
@@ -797,6 +812,45 @@ mod tests {
             .unwrap();
         assert!(result.clean.is_empty());
         assert!(result.conflicts.is_empty());
+    }
+
+    #[test]
+    fn rename_delta_removes_from_and_upserts_to() {
+        // bn-3525: a rename delta (a.txt → b.txt) is modeled as
+        // `Deleted(a.txt) + Modified(b.txt)`. Applying it to a tree that
+        // contains `a.txt` must remove `a.txt` and insert `b.txt` — without
+        // this, the rename would be silently dropped when the seeded tree
+        // does not yet contain the rename destination.
+        let mut tree = ConflictTree::new(epoch());
+        tree.clean.insert(
+            PathBuf::from("a.txt"),
+            MaterializedEntry::new(EntryMode::Blob, oid('a')),
+        );
+
+        let delete = FileChange::with_identity(
+            PathBuf::from("a.txt"),
+            ChangeKind::Deleted,
+            None,
+            None,
+            None,
+        );
+        let modify = FileChange::with_identity(
+            PathBuf::from("b.txt"),
+            ChangeKind::Modified,
+            Some(b"renamed content".to_vec()),
+            None,
+            Some(oid('a')),
+        );
+
+        let result =
+            apply_unilateral_patchset(tree, patch(vec![delete, modify])).unwrap();
+
+        assert!(
+            !result.clean.contains_key(&PathBuf::from("a.txt")),
+            "rename-from path must be removed"
+        );
+        let b_entry = &result.clean[&PathBuf::from("b.txt")];
+        assert_eq!(b_entry.oid, oid('a'));
     }
 
     // -----------------------------------------------------------------------

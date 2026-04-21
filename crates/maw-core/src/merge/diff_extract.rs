@@ -10,9 +10,21 @@
 //! [`maw_git::GitRepo::diff_trees_with_renames`] for rename-aware diffing,
 //! and loading blob contents via [`maw_git::GitRepo::read_blob`].
 //!
-//! Renames are emitted as a single `Modified` [`FileChange`] on the new path
-//! (not as a separate `Deleted` + `Added`), preserving the `FileId` identity
-//! across the move.
+//! Renames are emitted as a **pair** of [`FileChange`]s — `Deleted(from)` and
+//! `Modified(to)` — both tagged with the same `FileId` (derived from the old
+//! blob) so downstream overlap detection can recognize the identity across the
+//! move. This is required for rename-vs-modify-at-source scenarios (bn-3525):
+//! if only a single `Modified(to)` were emitted, the epoch's independent
+//! modification of the renamed-from path would race against the workspace's
+//! rename and BOTH paths would be silently dropped from the final tree (the
+//! workspace's `Modified(to)` targets a path not in the seeded new-epoch tree,
+//! which `apply_unilateral_patchset` previously ignored with a warning; and
+//! there was no `Deleted(from)` to remove the stale `from` entry either).
+//!
+//! Emitting `Deleted(from) + Modified(to)` lets the apply step remove the old
+//! path and upsert the new one, and lets `promote_overlaps_to_conflicts` see
+//! both sides of the rename so it can follow the rename when the epoch
+//! modified `from`.
 
 use std::path::PathBuf;
 
@@ -86,7 +98,7 @@ impl From<GitError> for DiffExtractError {
 /// invoked with the caller-supplied `similarity_pct` (50 matches git's
 /// default `git diff -M` threshold).
 ///
-/// Each [`DiffEntry`] becomes one [`FileChange`]:
+/// Each [`DiffEntry`] becomes one or two [`FileChange`]s:
 ///
 /// * `Added`    → `ChangeKind::Added` with `content = Some(blob bytes)` and
 ///   `blob = Some(new_oid)`. `file_id` is derived from the new blob via
@@ -96,10 +108,14 @@ impl From<GitError> for DiffExtractError {
 ///   so identity is stable across the modification.
 /// * `Deleted`  → `ChangeKind::Deleted` with `content = None`, `blob = None`,
 ///   and `mode = old_mode`. `file_id` is derived from the old blob.
-/// * `Renamed`  → a **single** `ChangeKind::Modified` emitted at the *new*
-///   path. The old path is NOT surfaced as a separate delete — the move is
-///   one logical operation. `file_id` is derived from the old blob so the
-///   same identity tags both sides of the move.
+/// * `Renamed`  → a **pair**: `ChangeKind::Deleted` at the old path plus
+///   `ChangeKind::Modified` at the new path. Both carry the same `file_id`
+///   (derived from the old blob) so identity is preserved across the move.
+///   Emitting the explicit delete is required so downstream apply steps
+///   (and overlap detection for the rebase pipeline) can see the old path
+///   going away — without it, a concurrent epoch modification of the
+///   renamed-from path would survive as a ghost entry in the final tree
+///   (bn-3525).
 ///
 /// # Errors
 ///
@@ -145,9 +161,8 @@ pub fn diff_patchset(
 
     let mut changes: Vec<FileChange> = Vec::with_capacity(entries.len());
     for entry in &entries {
-        if let Some(fc) = file_change_from_entry(repo, entry)? {
-            changes.push(fc);
-        }
+        let produced = file_changes_from_entry(repo, entry)?;
+        changes.extend(produced);
     }
 
     Ok(PatchSet::new(workspace_id.clone(), epoch.clone(), changes))
@@ -172,16 +187,16 @@ fn git_to_core_oid(oid: &maw_git::GitOid) -> Result<GitOid, DiffExtractError> {
     GitOid::new(&s).map_err(|_| DiffExtractError::MalformedOid { raw: s })
 }
 
-/// Translate one [`DiffEntry`] into at most one [`FileChange`].
+/// Translate one [`DiffEntry`] into one or two [`FileChange`]s.
 ///
-/// Returns `Ok(None)` for entries that should not produce a `FileChange`
-/// (none currently — all four change types map to exactly one change, but
-/// the `Option` keeps the interface flexible for future filters such as
-/// skipping submodule pointer changes).
-fn file_change_from_entry(
+/// All change kinds produce exactly one `FileChange` except `Renamed`, which
+/// produces **two**: a `Deleted` at the old path plus a `Modified` at the new
+/// path. See the module docs on [`diff_patchset`] for the `Renamed` rationale
+/// (bn-3525).
+fn file_changes_from_entry(
     repo: &dyn GitRepo,
     entry: &DiffEntry,
-) -> Result<Option<FileChange>, DiffExtractError> {
+) -> Result<Vec<FileChange>, DiffExtractError> {
     let path = PathBuf::from(&entry.path);
 
     match &entry.change_type {
@@ -190,14 +205,14 @@ fn file_change_from_entry(
             let content = repo.read_blob(entry.new_oid)?;
             let file_id = file_id_from_blob(&blob_core);
             let mode = entry.new_mode.map(EntryMode::from);
-            Ok(Some(FileChange::with_mode(
+            Ok(vec![FileChange::with_mode(
                 path,
                 ChangeKind::Added,
                 Some(content),
                 Some(file_id),
                 Some(blob_core),
                 mode,
-            )))
+            )])
         }
         ChangeType::Modified => {
             let old_core = git_to_core_oid(&entry.old_oid)?;
@@ -205,14 +220,14 @@ fn file_change_from_entry(
             let content = repo.read_blob(entry.new_oid)?;
             let file_id = file_id_from_blob(&old_core);
             let mode = entry.new_mode.map(EntryMode::from);
-            Ok(Some(FileChange::with_mode(
+            Ok(vec![FileChange::with_mode(
                 path,
                 ChangeKind::Modified,
                 Some(content),
                 Some(file_id),
                 Some(blob_core),
                 mode,
-            )))
+            )])
         }
         ChangeType::Deleted => {
             let old_core = git_to_core_oid(&entry.old_oid)?;
@@ -220,34 +235,50 @@ fn file_change_from_entry(
             // For deletions we surface the old-side mode so downstream code
             // can tell whether the removed path was e.g. a symlink.
             let mode = entry.old_mode.map(EntryMode::from);
-            Ok(Some(FileChange::with_mode(
+            Ok(vec![FileChange::with_mode(
                 path,
                 ChangeKind::Deleted,
                 None,
                 Some(file_id),
                 None,
                 mode,
-            )))
+            )])
         }
-        ChangeType::Renamed { from: _ } => {
-            // Renames become a single `Modified` on the *new* path. The old
-            // path's deletion is intentionally NOT surfaced — the move is one
-            // logical change. The FileId is derived from the *old* blob so
-            // the identity stays stable through the rename (and through any
-            // accompanying content edit).
+        ChangeType::Renamed { from } => {
+            // A rename is TWO logical operations downstream even though it's
+            // one DiffEntry: the old path must be removed from the tree, and
+            // the new path must be added (with the new content). We emit a
+            // `Deleted(from)` + `Modified(to)` pair, both tagged with the
+            // same FileId (derived from the old blob) so identity is
+            // preserved across the move. This is required so the apply step
+            // (and the rebase-level overlap detector) see both sides of the
+            // move (bn-3525).
             let old_core = git_to_core_oid(&entry.old_oid)?;
             let blob_core = git_to_core_oid(&entry.new_oid)?;
             let content = repo.read_blob(entry.new_oid)?;
             let file_id = file_id_from_blob(&old_core);
-            let mode = entry.new_mode.map(EntryMode::from);
-            Ok(Some(FileChange::with_mode(
+            let new_mode = entry.new_mode.map(EntryMode::from);
+            let old_mode = entry.old_mode.map(EntryMode::from);
+
+            let from_path = PathBuf::from(from);
+
+            let delete = FileChange::with_mode(
+                from_path,
+                ChangeKind::Deleted,
+                None,
+                Some(file_id),
+                None,
+                old_mode,
+            );
+            let modify = FileChange::with_mode(
                 path,
                 ChangeKind::Modified,
                 Some(content),
                 Some(file_id),
                 Some(blob_core),
-                mode,
-            )))
+                new_mode,
+            );
+            Ok(vec![delete, modify])
         }
     }
 }
@@ -462,14 +493,35 @@ mod tests {
         let to = fx.commit("rename old → new");
 
         let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
-        // A pure rename must be a SINGLE Modified on the new path, not a
-        // delete + add pair.
-        assert_eq!(ps.change_count(), 1);
-        let fc = &ps.changes[0];
-        assert_eq!(fc.path, PathBuf::from("new.txt"));
-        assert_eq!(fc.kind, ChangeKind::Modified);
-        assert_eq!(fc.content.as_deref(), Some(&b"exact-match-content\n"[..]));
-        assert!(fc.file_id.is_some());
+        // A rename must surface TWO changes: Deleted(old) + Modified(new).
+        // Both share the same FileId (derived from the old blob) so
+        // downstream identity tracking can follow the move (bn-3525).
+        assert_eq!(ps.change_count(), 2, "expected rename to emit delete+modify, got {ps:?}");
+
+        let del = ps
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("old.txt"))
+            .expect("Deleted(old.txt) should be present");
+        let modi = ps
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("new.txt"))
+            .expect("Modified(new.txt) should be present");
+
+        assert_eq!(del.kind, ChangeKind::Deleted);
+        assert!(del.content.is_none());
+        assert!(del.blob.is_none());
+
+        assert_eq!(modi.kind, ChangeKind::Modified);
+        assert_eq!(modi.content.as_deref(), Some(&b"exact-match-content\n"[..]));
+
+        // FileId identity is preserved across the rename pair.
+        assert_eq!(
+            del.file_id, modi.file_id,
+            "rename pair must share a FileId so overlap detection can follow identity"
+        );
+        assert!(modi.file_id.is_some());
     }
 
     #[test]
@@ -487,12 +539,24 @@ mod tests {
         let to = fx.commit("rename + edit");
 
         let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
-        // Still a single change on the new path.
-        assert_eq!(ps.change_count(), 1, "expected 1 change, got {ps:?}");
-        let fc = &ps.changes[0];
-        assert_eq!(fc.path, PathBuf::from("new.txt"));
-        assert_eq!(fc.kind, ChangeKind::Modified);
-        assert_eq!(fc.content.as_deref(), Some(edited.as_bytes()));
+        // Rename + edit also surfaces TWO changes.
+        assert_eq!(ps.change_count(), 2, "expected rename+edit to emit delete+modify, got {ps:?}");
+
+        let del = ps
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("old.txt"))
+            .expect("Deleted(old.txt) should be present");
+        let modi = ps
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("new.txt"))
+            .expect("Modified(new.txt) should be present");
+
+        assert_eq!(del.kind, ChangeKind::Deleted);
+        assert_eq!(modi.kind, ChangeKind::Modified);
+        assert_eq!(modi.content.as_deref(), Some(edited.as_bytes()));
+        assert_eq!(del.file_id, modi.file_id);
     }
 
     #[test]
