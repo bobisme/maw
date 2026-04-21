@@ -8,10 +8,14 @@
 //! Conflict markers use labeled sides (workspace names) so agents and humans
 //! can resolve by name rather than ours/theirs.
 //!
-//! `--keep` accepts three forms:
+//! `--keep` accepts two forms:
 //! - `NAME` — resolve all conflicted files to NAME's version
 //! - `PATH=NAME` — resolve one file
-//! - `cf-N=NAME` — resolve one conflict block within a file (see `--list`)
+//!
+//! Per-block resolution via `cf-N=NAME` is not currently supported on the
+//! structured sidecar path; the legacy path still parses it internally for
+//! backward compatibility but the CLI surface advertises only NAME and
+//! PATH=NAME.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -105,13 +109,42 @@ pub fn run(
     }
 
     // bn-3rah: prefer the structured sidecar when present. Falls back to the
-    // legacy marker-scan below when absent or unparseable. This keeps
-    // pre-gjm8 workspaces working unchanged.
-    if let Some(tree) = super::resolve_structured::read_conflict_tree_sidecar(&root, workspace) {
-        return super::resolve_structured::run_structured(
-            &root, workspace, &ws_path, paths, keep, list, format, tree,
-        )
-        .map(|_| ());
+    // legacy marker-scan below only when the sidecar file does not exist.
+    // This keeps pre-gjm8 workspaces working unchanged.
+    //
+    // bn-24tl: if the sidecar file *does* exist but is unparseable JSON, do
+    // NOT silently fall through to the legacy marker-scan stripper — that
+    // path was designed for real diff3 markers and leaves half-stripped
+    // placeholder garbage on disk. Emit a clear error instead so the user
+    // knows to regenerate the sidecar (e.g. by re-running `maw ws sync
+    // --rebase <ws>`).
+    let sidecar_path =
+        super::resolve_structured::structured_sidecar_path(&root, workspace);
+    if sidecar_path.exists() {
+        match super::resolve_structured::read_conflict_tree_sidecar(&root, workspace) {
+            Some(tree) => {
+                return super::resolve_structured::run_structured(
+                    &root, workspace, &ws_path, paths, keep, list, format, tree,
+                )
+                .map(|_| ());
+            }
+            None => {
+                bail!(
+                    "Structured conflict sidecar at {} exists but is unreadable or \
+                     malformed JSON.\n  \
+                     The legacy marker-scan fallback cannot safely resolve files \
+                     rendered by the structured engine, so it has been suppressed \
+                     to avoid leaving half-stripped placeholder markers on disk.\n  \
+                     To fix: regenerate the sidecar by re-running\n    \
+                         maw ws sync --rebase {workspace}\n  \
+                     or remove the sidecar manually (files will then be treated \
+                     as legacy marker conflicts):\n    \
+                         rm {}",
+                    sidecar_path.display(),
+                    sidecar_path.display(),
+                );
+            }
+        }
     }
 
     if list {
@@ -123,8 +156,9 @@ pub fn run(
             "Must specify --keep or --list.\n\
              \n  Examples:\n\
              \n    maw ws resolve {workspace} --keep <workspace-name>       # resolve all\n\
+             \n    maw ws resolve {workspace} --keep epoch                  # keep epoch (rebase) side\n\
+             \n    maw ws resolve {workspace} --keep both                   # keep all sides concatenated\n\
              \n    maw ws resolve {workspace} --keep src/main.rs=<name>     # resolve one file\n\
-             \n    maw ws resolve {workspace} --keep cf-0=<name>            # resolve one block\n\
              \n    maw ws resolve {workspace} --list                        # list conflicts"
         );
     }
@@ -472,6 +506,25 @@ fn collect_block_info(chunks: &[FileChunk]) -> Vec<BlockInfo> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
+    find_conflicted_files_filtered(ws_path, None)
+}
+
+/// Like [`find_conflicted_files`], but with an optional structured-sidecar
+/// filter (bn-3oau).
+///
+/// When `sidecar_paths` is `Some(set)`, only files whose path is in that set
+/// are considered conflicted even if they contain `<<<<<<<` lines that look
+/// new. This suppresses false positives on documentation / tutorial /
+/// fixture files that legitimately contain marker literals — if the
+/// structured conflict sidecar doesn't list them as conflicted, they aren't.
+///
+/// When `sidecar_paths` is `None` (no sidecar present — pre-gjm8 repos or
+/// non-rebase merges), the raw diff-scan result is returned. This preserves
+/// legacy behavior.
+pub(crate) fn find_conflicted_files_filtered(
+    ws_path: &Path,
+    sidecar_paths: Option<&std::collections::BTreeSet<PathBuf>>,
+) -> Result<Vec<PathBuf>> {
     // We're looking for conflict markers that a rebase (or similar op)
     // INTRODUCED to files in this workspace — not pre-existing marker
     // literals in source fixtures. The reliable signal is: the workspace
@@ -490,16 +543,26 @@ pub(crate) fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
     //            the workspace legitimately edited that still contained
     //            pre-existing fixtures — e.g. bn-19tb editing resolve.rs)
     //   v0.58.5 final: scan the DIFF for newly-added marker lines only
-    if let Some(base) = resolve_workspace_base_ref(ws_path) {
-        return Ok(find_files_with_new_conflict_markers(ws_path, &base));
+    //   bn-3oau: cross-check against the structured conflict sidecar when
+    //   available, so that documentation / tutorial files that legitimately
+    //   add `<<<<<<<` lines (merge-conflict tutorial, test fixtures, etc.)
+    //   don't trip the merge-time marker gate.
+    let mut results = if let Some(base) = resolve_workspace_base_ref(ws_path) {
+        find_files_with_new_conflict_markers(ws_path, &base)
+    } else {
+        // Fallback: if we can't resolve the base, walk the worktree and do a
+        // full-content scan. Noisier, but safe for the unknown-state case.
+        let mut results = Vec::new();
+        walk_for_conflicts(ws_path, ws_path, &mut results)?;
+        results.sort();
+        results.dedup();
+        results
+    };
+
+    if let Some(allowed) = sidecar_paths {
+        results.retain(|p| allowed.contains(p));
     }
 
-    // Fallback: if we can't resolve the base, walk the worktree and do a
-    // full-content scan. Noisier, but safe for the unknown-state case.
-    let mut results = Vec::new();
-    walk_for_conflicts(ws_path, ws_path, &mut results)?;
-    results.sort();
-    results.dedup();
     Ok(results)
 }
 
@@ -1488,6 +1551,134 @@ end";
         assert_eq!(blocks[1].id, "cf-1");
         assert_eq!(blocks[0].left_name, "ws-a");
         assert_eq!(blocks[0].right_name, "default");
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-3oau — find_conflicted_files_filtered cross-checks against the
+    // structured conflict sidecar so legitimate content that happens to
+    // contain `<<<<<<<` at column 0 (docs, tutorials, test fixtures)
+    // doesn't trip the merge-time marker gate.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_conflicted_files_filtered_ignores_paths_not_in_sidecar() {
+        use std::collections::BTreeSet;
+        use std::process::Command;
+
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+
+        // Init a git repo and commit a baseline file.
+        Command::new("git").args(["init", "-q"]).current_dir(root).status().unwrap();
+        Command::new("git").args(["config", "user.email", "t@t"]).current_dir(root).status().unwrap();
+        Command::new("git").args(["config", "user.name", "t"]).current_dir(root).status().unwrap();
+        std::fs::write(root.join("seed"), b"seed\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(root).status().unwrap();
+        Command::new("git").args(["commit", "-qm", "seed"]).current_dir(root).status().unwrap();
+
+        // Add a documentation file whose *new* content legitimately contains
+        // a `<<<<<<<` line — the kind of file bn-3oau reports on.
+        std::fs::write(
+            root.join("tutorial.md"),
+            b"# Merge conflicts\n<<<<<<< mine\nmy\n=======\ntheirs\n>>>>>>> theirs\n",
+        )
+        .unwrap();
+        // Add a genuinely-conflicted file the structured engine DOES flag.
+        std::fs::write(
+            root.join("real.rs"),
+            b"<<<<<<< epoch (current)\nE\n=======\nW\n>>>>>>> ws\n",
+        )
+        .unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(root).status().unwrap();
+        Command::new("git").args(["commit", "-qm", "conflicts"]).current_dir(root).status().unwrap();
+
+        // Sanity: without a filter, BOTH files look like they added marker
+        // lines (they're genuinely new commits).
+        let all = find_conflicted_files(root).unwrap();
+        assert!(
+            all.iter().any(|p| p == Path::new("tutorial.md"))
+                && all.iter().any(|p| p == Path::new("real.rs")),
+            "unfiltered scan should see both files as added-marker candidates: {all:?}"
+        );
+
+        // Filter to only the real conflict — tutorial.md must be dropped.
+        let mut sidecar: BTreeSet<PathBuf> = BTreeSet::new();
+        sidecar.insert(PathBuf::from("real.rs"));
+        let filtered =
+            find_conflicted_files_filtered(root, Some(&sidecar)).unwrap();
+        assert_eq!(filtered, vec![PathBuf::from("real.rs")]);
+
+        // Filter with an empty set — everything is filtered out.
+        let empty: BTreeSet<PathBuf> = BTreeSet::new();
+        let filtered_empty =
+            find_conflicted_files_filtered(root, Some(&empty)).unwrap();
+        assert!(
+            filtered_empty.is_empty(),
+            "empty sidecar filter should drop all paths, got: {filtered_empty:?}"
+        );
+
+        // No sidecar (None) — preserves legacy behavior, both reported.
+        let no_filter = find_conflicted_files_filtered(root, None).unwrap();
+        assert!(
+            no_filter.iter().any(|p| p == Path::new("tutorial.md")),
+            "None filter must preserve legacy behavior: {no_filter:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2gex — help text no longer advertises `cf-N=NAME` per-block syntax
+    // -----------------------------------------------------------------------
+
+    /// Grep assertion over the relevant help-bearing source so future edits
+    /// can't quietly reintroduce the misleading cf-N *examples*. A
+    /// "not supported" disclaimer mentioning `cf-N` is fine and expected
+    /// (bn-2gex resolution); what we care about is that there are no
+    /// concrete `--keep cf-0=NAME` / `--keep cf-1=NAME` examples pretending
+    /// the syntax works.
+    #[test]
+    fn help_text_no_longer_mentions_cf_n_syntax() {
+        // Check mod.rs (the #[command] doc-comment + --keep doc-comment)
+        // and the bail! error string in resolve.rs's `run` function.
+        let mod_src = include_str!("mod.rs");
+        // The clap derive Command docs are what `--help` renders. We scan
+        // only the doc-comment block for the `Resolve` variant.
+        let ws_pos = mod_src
+            .find("/// Resolve working-copy conflicts in a workspace")
+            .expect("Resolve doc-comment block not found");
+        let after_ws = &mod_src[ws_pos..];
+        let scan = &after_ws[..after_ws.len().min(4096)];
+        // Examples that pretend cf-N=NAME works must be gone.
+        assert!(
+            !scan.contains("--keep cf-0="),
+            "`maw ws resolve --help` still shows --keep cf-0=... example:\n{scan}"
+        );
+        assert!(
+            !scan.contains("--keep cf-1="),
+            "`maw ws resolve --help` still shows --keep cf-1=... example:\n{scan}"
+        );
+        // The "three forms" framing that promoted cf-N to a first-class
+        // form must be gone.
+        assert!(
+            !scan.contains("three forms"),
+            "`maw ws resolve --help` still advertises three forms (cf-N was one of them):\n{scan}"
+        );
+
+        // And the bare-call error-message help block in resolve.rs: no
+        // cf-N=NAME example in the examples list.
+        let resolve_src = include_str!("resolve.rs");
+        let bail_pos = resolve_src
+            .find("Must specify --keep or --list.")
+            .expect("bare-call bail block not found");
+        let tail = &resolve_src[bail_pos..];
+        let bail_scan = &tail[..tail.len().min(2048)];
+        assert!(
+            !bail_scan.contains("cf-0="),
+            "bare-call error help block still shows cf-0=NAME:\n{bail_scan}"
+        );
+        assert!(
+            !bail_scan.contains("cf-N="),
+            "bare-call error help block still shows cf-N=NAME:\n{bail_scan}"
+        );
     }
 }
 

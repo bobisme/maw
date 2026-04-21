@@ -2553,8 +2553,26 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     if !opts.force {
         for ws_name in &ws_to_merge {
             let ws_path = root.join("ws").join(ws_name);
-            let marker_files = super::resolve::find_conflicted_files(&ws_path)
-                .unwrap_or_default();
+
+            // bn-3oau: when a structured conflict-tree sidecar is present,
+            // use it to filter the marker-scan result so that legitimate
+            // documentation / tutorial / fixture files containing `<<<<<<<`
+            // at column 0 don't trip the gate. Only paths the structured
+            // engine flagged as actually conflicted are considered.
+            //
+            // When the sidecar is absent (pre-gjm8 repos, non-rebase merges,
+            // or a sidecar that has already been cleaned up after successful
+            // resolve), fall back to the raw diff-scan — same behavior as
+            // before.
+            let sidecar_paths: Option<BTreeSet<PathBuf>> =
+                super::resolve_structured::read_conflict_tree_sidecar(&root, ws_name)
+                    .map(|tree| tree.conflicts.keys().cloned().collect());
+
+            let marker_files = super::resolve::find_conflicted_files_filtered(
+                &ws_path,
+                sidecar_paths.as_ref(),
+            )
+            .unwrap_or_default();
             if !marker_files.is_empty() {
                 let file_list = marker_files
                     .iter()

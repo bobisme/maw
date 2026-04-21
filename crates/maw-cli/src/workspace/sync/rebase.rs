@@ -703,12 +703,25 @@ fn promote_overlaps_to_conflicts(
                     0,
                     0,
                 );
+                // bn-mg0j: propagate the workspace-side file mode into the
+                // conflict so resolvers can re-apply symlink/executable
+                // modes after `--keep`. We don't have mode info for the
+                // epoch side here (the epoch-delta map carries OIDs only),
+                // so leave that side's mode as `None`; the workspace-side
+                // hint is what matters for symlink-aware resolution in V1.
+                let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
+                    change.mode.and_then(|m| m.into());
                 let ours = ConflictSide::new(
                     "epoch".to_owned(),
                     epoch_side_blob.clone(),
                     ord.clone(),
                 );
-                let theirs = ConflictSide::new(ws_name.to_owned(), ws_blob, ord);
+                let theirs = ConflictSide::with_mode(
+                    ws_name.to_owned(),
+                    ws_blob,
+                    ord,
+                    ws_mode,
+                );
 
                 let file_id = change
                     .file_id
@@ -912,8 +925,11 @@ fn plan_rename_overlap(
             0,
             0,
         );
+        // bn-mg0j: propagate the workspace-side mode into the conflict.
+        let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
+            change.mode.and_then(|m| m.into());
         let ours = ConflictSide::new("epoch".to_owned(), epoch_new_blob, ord.clone());
-        let theirs = ConflictSide::new(ws_name.to_owned(), ws_blob, ord);
+        let theirs = ConflictSide::with_mode(ws_name.to_owned(), ws_blob, ord, ws_mode);
 
         let file_id = change.file_id.unwrap_or_else(|| {
             FileId::new(merge_file_id_seed(

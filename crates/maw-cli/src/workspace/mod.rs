@@ -1062,26 +1062,26 @@ pub enum WorkspaceCommands {
     /// (the merged workspace name and the target workspace name).
     /// Use --keep to choose which side to keep.
     ///
-    /// --keep accepts three forms:
+    /// --keep accepts two forms:
     ///   NAME              resolve ALL conflicted files to NAME's version
     ///   PATH=NAME         resolve one file to NAME's version
-    ///   cf-N=NAME         resolve one conflict block to NAME's version
     ///
-    /// NAME can be a workspace name, or the special value "both" which
-    /// concatenates both sides (left then right, keeping all content).
+    /// NAME can be a workspace name, the special value "epoch" (the side
+    /// introduced by rebase), or the special value "both" which concatenates
+    /// all sides (keeping all content).
     ///
-    /// Multiple --keep flags can be combined for per-file or per-block
-    /// resolution. Use --list to see conflict blocks with their IDs.
+    /// Multiple --keep flags can be combined for per-file resolution.
+    /// Per-block resolution via `cf-N=NAME` is not currently supported.
+    /// Use --list to see conflicted files.
     ///
     /// Examples:
     ///   maw ws resolve default --list                          # list all conflicts
-    ///   maw ws resolve default --list src/main.rs              # list blocks in one file
+    ///   maw ws resolve default --list src/main.rs              # list one file
+    ///   maw ws resolve default --keep epoch                    # keep epoch (rebase) side
     ///   maw ws resolve default --keep bn-2sc3                  # resolve all to merged version
     ///   maw ws resolve default --keep default                  # resolve all to local edits
     ///   maw ws resolve default --keep both                     # keep both sides concatenated
     ///   maw ws resolve default --keep src/main.rs=bn-2sc3      # resolve one file
-    ///   maw ws resolve default --keep cf-0=bn-2sc3 --keep cf-1=default  # per-block
-    ///   maw ws resolve default --keep cf-0=both --keep cf-1=bn-2sc3     # mix both + one side
     #[command(verbatim_doc_comment)]
     Resolve {
         /// Workspace containing conflicts
@@ -1091,10 +1091,9 @@ pub enum WorkspaceCommands {
         #[arg()]
         paths: Vec<String>,
 
-        /// Resolution strategy (repeatable). Three forms:
+        /// Resolution strategy (repeatable). Two forms:
         ///   NAME          — resolve all files to NAME's version
         ///   PATH=NAME     — resolve one file
-        ///   cf-N=NAME     — resolve one conflict block (see --list for IDs)
         #[arg(long, conflicts_with = "list")]
         keep: Vec<String>,
 

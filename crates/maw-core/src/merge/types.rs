@@ -313,6 +313,23 @@ impl From<EntryMode> for maw_git::EntryMode {
     }
 }
 
+// bn-mg0j: lossy projection from the full `EntryMode` to the trimmed
+// [`crate::model::conflict::ConflictSideMode`] hint carried by conflict
+// sides. `Tree` and `Commit` have no meaningful conflict-side shape in V1
+// (they don't appear as leaves that go through the marker-render path), so
+// those project to `None`.
+impl From<EntryMode> for Option<crate::model::conflict::ConflictSideMode> {
+    fn from(m: EntryMode) -> Self {
+        use crate::model::conflict::ConflictSideMode;
+        match m {
+            EntryMode::Blob => Some(ConflictSideMode::Blob),
+            EntryMode::BlobExecutable => Some(ConflictSideMode::BlobExecutable),
+            EntryMode::Link => Some(ConflictSideMode::Link),
+            EntryMode::Tree | EntryMode::Commit => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MaterializedEntry
 // ---------------------------------------------------------------------------

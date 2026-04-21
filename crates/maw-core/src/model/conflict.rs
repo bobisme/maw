@@ -54,6 +54,35 @@ use super::patch::FileId;
 use super::types::GitOid;
 
 // ---------------------------------------------------------------------------
+// ConflictSideMode — minimal file-mode hint for conflict sides (bn-mg0j)
+// ---------------------------------------------------------------------------
+
+/// Minimal file-mode hint attached to a [`ConflictSide`] so that resolvers
+/// can re-apply the correct mode (regular file, executable, symlink) after
+/// `--keep`.
+///
+/// This is a deliberately small mirror of the merge-layer `EntryMode` enum
+/// to avoid a crate-internal import cycle (the `model` module must not
+/// depend on `merge::types`). Only the three modes relevant to worktree
+/// materialization of resolved blobs are represented — `Tree` and `Commit`
+/// entries don't participate in the content-conflict path.
+///
+/// The field is `Option<_>` on [`ConflictSide`] and defaults to `None` via
+/// `#[serde(default)]` so old sidecar JSON written before this field existed
+/// deserializes unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictSideMode {
+    /// Regular file (git mode `100644`).
+    Blob,
+    /// Executable file (git mode `100755`).
+    BlobExecutable,
+    /// Symbolic link (git mode `120000`). The blob content is the link
+    /// target path.
+    Link,
+}
+
+// ---------------------------------------------------------------------------
 // ConflictSide
 // ---------------------------------------------------------------------------
 
@@ -78,16 +107,49 @@ pub struct ConflictSide {
     ///
     /// Used for display and tie-breaking, not for conflict resolution logic.
     pub timestamp: OrderingKey,
+
+    /// Optional file-mode hint for this side (bn-mg0j).
+    ///
+    /// When present, downstream resolvers use this to re-apply the correct
+    /// mode after `--keep` picks this side — primarily so symlink conflicts
+    /// (`120000`) don't silently get flattened to regular files (`100644`)
+    /// when the worktree is rewritten with the chosen blob's bytes.
+    ///
+    /// Defaults to `None` and is omitted from serialized JSON when unset so
+    /// sidecars written by older versions continue to deserialize cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ConflictSideMode>,
 }
 
 impl ConflictSide {
-    /// Create a new conflict side.
+    /// Create a new conflict side without a mode hint.
     #[must_use]
     pub const fn new(workspace: String, content: GitOid, timestamp: OrderingKey) -> Self {
         Self {
             workspace,
             content,
             timestamp,
+            mode: None,
+        }
+    }
+
+    /// Create a new conflict side carrying a [`ConflictSideMode`] hint.
+    ///
+    /// Used by producers that have mode information (e.g. the rebase
+    /// engine's conflict promotion for symlinks) so the resolver can
+    /// restore the correct worktree mode after `--keep`.
+    #[must_use]
+    pub const fn with_mode(
+        workspace: String,
+        content: GitOid,
+        timestamp: OrderingKey,
+        mode: Option<ConflictSideMode>,
+    ) -> Self {
+        Self {
+            workspace,
+            content,
+            timestamp,
+            mode,
         }
     }
 }

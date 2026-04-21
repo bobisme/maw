@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use maw_core::merge::types::ConflictTree;
-use maw_core::model::conflict::{Conflict, ConflictSide};
+use maw_core::model::conflict::{Conflict, ConflictSide, ConflictSideMode};
 use maw_core::model::types::GitOid;
 use maw_git::{self as git, GitRepo};
 
@@ -342,13 +342,67 @@ fn pick_single_side_oid(conflict: &Conflict, target: &str) -> Result<Option<GitO
 
 /// Outcome of applying `--keep` to a single path.
 enum PathOutcome {
-    /// Wrote `bytes` to the worktree file.
-    Wrote(Vec<u8>),
+    /// Wrote `bytes` to the worktree file. The optional `mode` hint tells
+    /// the worktree applier whether to re-establish a symlink (`Link`) or
+    /// executable bit rather than write a plain regular file (bn-mg0j).
+    Wrote {
+        bytes: Vec<u8>,
+        mode: Option<ConflictSideMode>,
+    },
     /// Removed the file from the worktree (modify/delete → accept delete).
     Deleted,
     /// Caller asked for a side that doesn't exist / can't resolve. The
     /// carried message is logged by the caller into the skipped list.
     Skipped(#[allow(dead_code)] String),
+}
+
+/// Scan all sides of a conflict and return the first mode hint found.
+///
+/// bn-mg0j: `--keep both` concatenates bytes so no single side mode wins —
+/// but if any side was recorded as a symlink, the resulting concat is not a
+/// valid symlink target anyway. We pick the first non-None hint so that a
+/// single-side-mode conflict (common case) still re-applies correctly.
+fn any_side_mode(conflict: &Conflict) -> Option<ConflictSideMode> {
+    match conflict {
+        Conflict::Content { sides, .. } | Conflict::AddAdd { sides, .. } => {
+            sides.iter().find_map(|s| s.mode)
+        }
+        Conflict::ModifyDelete {
+            modifier, deleter, ..
+        } => modifier.mode.or(deleter.mode),
+        Conflict::DivergentRename { destinations, .. } => {
+            destinations.iter().find_map(|(_, s)| s.mode)
+        }
+    }
+}
+
+/// Pick a single side by name and return its mode hint, matching the same
+/// looseness as `pick_single_side_oid`.
+fn pick_single_side_mode(conflict: &Conflict, target: &str) -> Option<ConflictSideMode> {
+    match conflict {
+        Conflict::Content { sides, .. } | Conflict::AddAdd { sides, .. } => {
+            pick_side(sides, target).and_then(|s| s.mode)
+        }
+        Conflict::ModifyDelete {
+            modifier, deleter, ..
+        } => {
+            if modifier.workspace == target
+                || modifier.workspace.split(',').any(|p| p.trim() == target)
+            {
+                modifier.mode
+            } else if deleter.workspace == target
+                || deleter.workspace.split(',').any(|p| p.trim() == target)
+            {
+                deleter.mode
+            } else {
+                None
+            }
+        }
+        Conflict::DivergentRename { destinations, .. } => destinations
+            .iter()
+            .find(|(_, s)| s.workspace == target)
+            .and_then(|(_, s)| s.mode),
+    }
 }
 
 /// Apply a resolution for a single `(path, conflict)` and produce the output.
@@ -358,6 +412,32 @@ fn apply_decision(
     target: &str,
 ) -> Result<PathOutcome> {
     if target == "both" {
+        // bn-2pry: ModifyDelete has no meaningful "both" — the deleter side
+        // carries the *pre-delete* blob OID (the base content) in its
+        // `content` field, so a naive concat would silently resurrect the
+        // base bytes under the "keep both" banner. Treat `--keep both` on
+        // a modify/delete as an alias for keeping only the modifier's
+        // content (the deletion is effectively declined). Document the
+        // choice in the skipped reason carried back to the caller so the
+        // CLI can surface it.
+        if let Conflict::ModifyDelete {
+            modifier, ..
+        } = conflict
+        {
+            let git_oid: git::GitOid = modifier
+                .content
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid blob oid {}: {e}", modifier.content))?;
+            let bytes = repo
+                .read_blob(git_oid)
+                .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", modifier.content))?;
+            return Ok(PathOutcome::Wrote {
+                bytes,
+                mode: modifier.mode,
+            });
+        }
+
         let oids = all_sides(conflict);
         if oids.is_empty() {
             return Ok(PathOutcome::Skipped("no sides to concatenate".into()));
@@ -376,12 +456,23 @@ fn apply_decision(
             }
             buf.extend_from_slice(&bytes);
         }
-        return Ok(PathOutcome::Wrote(buf));
+        // For `both`, write the concatenation as a regular file unless every
+        // side was a symlink to the same target (degenerate case we don't
+        // special-case in V1). `any_side_mode` returns the first hint for
+        // diagnostics.
+        let _hint = any_side_mode(conflict);
+        return Ok(PathOutcome::Wrote {
+            bytes: buf,
+            // Concat of multiple sides is never a valid symlink target. Fall
+            // back to a regular file write.
+            mode: None,
+        });
     }
 
     // Single side. Translate `epoch` synonym through a canonical label.
     // The sidecar seeds the epoch side with `workspace == "epoch"` (see
     // `sync::rebase::promote_overlaps_to_conflicts`), so no aliasing required.
+    let mode_hint = pick_single_side_mode(conflict, target);
     match pick_single_side_oid(conflict, target)? {
         Some(oid) => {
             let git_oid: git::GitOid = oid
@@ -391,7 +482,10 @@ fn apply_decision(
             let bytes = repo
                 .read_blob(git_oid)
                 .map_err(|e| anyhow::anyhow!("read_blob({oid}) failed: {e}"))?;
-            Ok(PathOutcome::Wrote(bytes))
+            Ok(PathOutcome::Wrote {
+                bytes,
+                mode: mode_hint,
+            })
         }
         None => Ok(PathOutcome::Deleted),
     }
@@ -400,18 +494,71 @@ fn apply_decision(
 /// Apply `PathOutcome` to the worktree at `ws_path.join(rel)`.
 fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<bool> {
     match outcome {
-        PathOutcome::Wrote(bytes) => {
+        PathOutcome::Wrote { bytes, mode } => {
             let full = ws_path.join(rel);
             if let Some(dir) = full.parent() {
                 std::fs::create_dir_all(dir)?;
             }
+
+            // bn-mg0j: if the side carried a `Link` mode hint, re-create the
+            // path as a symlink whose target is the blob's content, rather
+            // than writing the target bytes as a regular file. Without this,
+            // a resolved symlink conflict ended up as a 100644 regular file
+            // containing the target path as content.
+            if matches!(mode, Some(ConflictSideMode::Link)) {
+                // Remove any existing entry so the symlink create succeeds.
+                if full.is_file() || full.is_symlink() {
+                    std::fs::remove_file(&full).map_err(|e| {
+                        anyhow::anyhow!("remove {}: {e}", full.display())
+                    })?;
+                }
+                let target = std::str::from_utf8(&bytes).map_err(|e| {
+                    anyhow::anyhow!(
+                        "symlink target at {} is not valid UTF-8: {e}",
+                        full.display()
+                    )
+                })?;
+                // Strip a single trailing newline if present — git symlink
+                // blobs typically store the target without a trailing LF,
+                // but we're defensive here in case the side was captured
+                // from text-mode tooling.
+                let target = target.strip_suffix('\n').unwrap_or(target);
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(target, &full).map_err(|e| {
+                        anyhow::anyhow!("symlink {} -> {target}: {e}", full.display())
+                    })?;
+                }
+                #[cfg(not(unix))]
+                {
+                    // No meaningful symlink story on non-unix for maw; fall
+                    // through to a regular file write so we at least don't
+                    // lose data.
+                    std::fs::write(&full, &bytes).map_err(|e| {
+                        anyhow::anyhow!("write {}: {e}", full.display())
+                    })?;
+                }
+                return Ok(true);
+            }
+
             std::fs::write(&full, &bytes)
                 .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
+
+            // bn-mg0j: executable bit.
+            #[cfg(unix)]
+            if matches!(mode, Some(ConflictSideMode::BlobExecutable)) {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&full, perms).map_err(|e| {
+                    anyhow::anyhow!("chmod +x {}: {e}", full.display())
+                })?;
+            }
+
             Ok(true)
         }
         PathOutcome::Deleted => {
             let full = ws_path.join(rel);
-            if full.is_file() {
+            if full.is_file() || full.is_symlink() {
                 std::fs::remove_file(&full)
                     .map_err(|e| anyhow::anyhow!("remove {}: {e}", full.display()))?;
             }
@@ -539,6 +686,35 @@ pub(crate) fn run_structured(
         }
     }
 
+    // bn-2cc1: when the sidecar is now empty AND the invocation actually
+    // resolved something, auto-commit the resolution so that the workspace
+    // is *truly* ready for merge. Previously the resolver wrote bytes to
+    // the worktree but left the HEAD tree containing the pre-resolution
+    // marker blobs, causing the merge-time marker gate to refuse to ship
+    // what looked like a clean workspace.
+    //
+    // Skip auto-commit when nothing resolved in this invocation (e.g. a
+    // --list or a no-op re-run) and when there are still remaining
+    // conflicts — partial resolution should not silently create commits
+    // while more work is pending.
+    let auto_committed = if tree.conflicts.is_empty() && !resolved.is_empty() {
+        auto_commit_resolution(ws_path, workspace, &resolved)
+    } else {
+        Ok(None)
+    };
+    let auto_commit_msg: Option<String> = match auto_committed {
+        Ok(m) => m,
+        Err(e) => {
+            // Non-fatal — the resolution wrote to the worktree; a failed
+            // auto-commit just means the user has to `git commit` manually.
+            // Surface the reason so agents can react.
+            tracing::warn!(
+                "auto-commit after resolve failed in '{workspace}': {e}"
+            );
+            None
+        }
+    };
+
     // Reporting
     if format == OutputFormat::Json {
         let resolved_json: Vec<String> = resolved
@@ -555,11 +731,16 @@ pub(crate) fn run_structured(
                 )
             })
             .collect();
+        let committed_field = match &auto_commit_msg {
+            Some(sha) => format!(r#","auto_committed":"{sha}""#),
+            None => String::new(),
+        };
         println!(
-            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]}}"#,
+            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]{}}}"#,
             resolved_json.join(","),
             tree.conflicts.len(),
-            skipped_json.join(",")
+            skipped_json.join(","),
+            committed_field,
         );
     } else {
         for p in &resolved {
@@ -571,16 +752,125 @@ pub(crate) fn run_structured(
         if resolved.is_empty() && skipped.is_empty() {
             println!("Nothing to resolve.");
         } else if tree.conflicts.is_empty() {
-            println!("\nAll structured conflicts resolved — workspace is ready for merge.");
+            match &auto_commit_msg {
+                Some(sha) => println!(
+                    "\nAll structured conflicts resolved and committed ({}). \
+                     Workspace is ready for merge.",
+                    &sha[..sha.len().min(12)]
+                ),
+                None if !resolved.is_empty() => println!(
+                    "\nAll structured conflicts resolved — workspace is ready for merge. \
+                     (auto-commit skipped: run `maw exec {workspace} -- git commit` if needed)"
+                ),
+                None => println!(
+                    "\nAll structured conflicts resolved — workspace is ready for merge."
+                ),
+            }
         } else {
+            let total_original = tree.conflicts.len() + resolved.len();
             println!(
-                "\n{} structured conflict(s) remaining.",
-                tree.conflicts.len()
+                "\n{} of {} conflict(s) resolved, {} remaining. \
+                 Run `maw ws resolve {workspace} --list` to continue, \
+                 or `maw exec {workspace} -- git commit -m ...` to save progress.",
+                resolved.len(),
+                total_original,
+                tree.conflicts.len(),
             );
         }
     }
 
     Ok(true)
+}
+
+/// Stage and commit the resolved files after a full structured resolve.
+///
+/// Returns `Ok(Some(sha))` when a commit was created, `Ok(None)` when the
+/// worktree turned out to be clean (nothing to commit — legitimate race
+/// with an external actor), or an error when `git add` / `git commit`
+/// actually failed.
+///
+/// We intentionally shell out to `git` here rather than going through the
+/// `GitRepo` trait because: (a) the workspace is a regular worktree with a
+/// standard HEAD; (b) `git commit` handles the index + HEAD update
+/// atomically and respects existing user config (author/committer, hooks,
+/// signing); (c) the structured-resolve path has to succeed on
+/// `core.symlinks=true` worktrees where staging a symlink via the gix index
+/// surface would need more care.
+fn auto_commit_resolution(
+    ws_path: &Path,
+    workspace: &str,
+    resolved: &[PathBuf],
+) -> Result<Option<String>> {
+    use std::process::Command;
+
+    // Stage only the paths we actually touched. This is narrower than
+    // `git add -A` and avoids pulling in unrelated worktree edits the user
+    // might have made alongside the conflict resolution.
+    let mut add = Command::new("git");
+    add.arg("add").arg("--");
+    for p in resolved {
+        add.arg(p);
+    }
+    let add_out = add
+        .current_dir(ws_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git add failed to spawn: {e}"))?;
+    if !add_out.status.success() {
+        bail!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add_out.stderr).trim()
+        );
+    }
+
+    // If there's nothing staged after the add (e.g. the resolve happened to
+    // write the exact same bytes that were already committed), bail out
+    // cleanly with `Ok(None)` rather than creating an empty commit.
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(ws_path)
+        .status()
+        .map_err(|e| anyhow::anyhow!("git diff --cached failed: {e}"))?;
+    if staged.success() {
+        // No staged changes — nothing to commit.
+        return Ok(None);
+    }
+
+    let msg = if resolved.len() == 1 {
+        format!(
+            "resolve: {} (bn-gjm8 auto-commit)",
+            resolved[0].display()
+        )
+    } else {
+        format!(
+            "resolve: apply structured --keep decisions for {} path(s) in '{workspace}' (bn-gjm8 auto-commit)",
+            resolved.len()
+        )
+    };
+
+    let commit_out = Command::new("git")
+        .args(["commit", "-m", &msg])
+        .current_dir(ws_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git commit failed to spawn: {e}"))?;
+    if !commit_out.status.success() {
+        bail!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit_out.stderr).trim()
+        );
+    }
+
+    // Read the new HEAD SHA for reporting.
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(ws_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git rev-parse HEAD failed: {e}"))?;
+    if !head.status.success() {
+        // Commit succeeded but rev-parse failed — report a stub.
+        return Ok(Some(String::new()));
+    }
+    let sha = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    Ok(Some(sha))
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,5 +1318,355 @@ mod tests {
             msg.contains("follow-up") || msg.contains("structured"),
             "error should hint at deferred atom support, got: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2cc1 — auto-commit when full resolution clears the sidecar
+    // -----------------------------------------------------------------------
+
+    /// After `--keep` resolves the last remaining conflict, the resolver
+    /// should auto-commit the resolution so HEAD is clean and the merge-time
+    /// marker gate doesn't see the pre-resolve blobs.
+    #[test]
+    fn resolve_keep_auto_commits_when_fully_resolved() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-autocommit");
+
+        // Seed an initial commit containing a file with marker bytes so
+        // HEAD reflects an unresolved state (same shape as post-rebase).
+        std::fs::write(ws_path.join("x.rs"), b"<<<<<<< epoch (current)\nEPOCH\n=======\nWS\n>>>>>>> ws-autocommit\n").unwrap();
+        let add = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+
+        let head_before = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+        let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
+            .trim()
+            .to_owned();
+
+        let (rel, conflict) =
+            make_content_conflict("x.rs", b"EPOCH\n", b"WS\n", "ws-autocommit", &repo);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-autocommit",
+            &ws_path,
+            &[],
+            &["epoch".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        // HEAD must have advanced — the resolution is committed.
+        let head_after = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+        let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
+            .trim()
+            .to_owned();
+        assert_ne!(
+            head_before_sha, head_after_sha,
+            "auto-commit should advance HEAD"
+        );
+
+        // The committed tree should no longer contain `<<<<<<<` — the new
+        // HEAD reflects the resolved content, not the marker blob.
+        let show = std::process::Command::new("git")
+            .args(["show", "HEAD:x.rs"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+        let body = String::from_utf8_lossy(&show.stdout);
+        assert!(
+            !body.contains("<<<<<<<"),
+            "auto-commit should produce a HEAD tree without markers, got:\n{body}"
+        );
+        assert!(body.contains("EPOCH"));
+    }
+
+    /// When the resolve doesn't fully clear the tree, nothing gets
+    /// auto-committed (partial progress is left for the user to review).
+    #[test]
+    fn resolve_keep_does_not_autocommit_on_partial_resolution() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-partial");
+
+        // Make an initial commit so HEAD exists (avoids "No commits yet").
+        std::fs::write(ws_path.join("seed"), b"seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+        let head_before = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+        let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
+            .trim()
+            .to_owned();
+
+        let (rel_a, c_a) =
+            make_content_conflict("a.rs", b"EPOCH_A\n", b"WS_A\n", "ws-partial", &repo);
+        let (rel_b, c_b) =
+            make_content_conflict("b.rs", b"EPOCH_B\n", b"WS_B\n", "ws-partial", &repo);
+        std::fs::write(ws_path.join(&rel_a), b"marker-a").unwrap();
+        std::fs::write(ws_path.join(&rel_b), b"marker-b").unwrap();
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel_a.clone(), c_a);
+        tree.conflicts.insert(rel_b.clone(), c_b);
+
+        // Resolve only a.rs — b.rs stays conflicted. Auto-commit must NOT
+        // fire in this case.
+        run_structured(
+            &root,
+            "ws-partial",
+            &ws_path,
+            &[rel_a.display().to_string()],
+            &[format!("{}=epoch", rel_a.display())],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        let head_after = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .unwrap();
+        let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
+            .trim()
+            .to_owned();
+        assert_eq!(
+            head_before_sha, head_after_sha,
+            "partial resolve must not advance HEAD"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2pry — --keep both on modify/delete does not resurrect base content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_keep_both_modify_delete_does_not_resurrect_base() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-mod-del");
+
+        // Seed an initial commit so auto-commit can run.
+        std::fs::write(ws_path.join("seed"), b"seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+
+        // Build a ModifyDelete conflict with real blobs:
+        //   modifier side: "MODIFIED\n"  (the *new* epoch content)
+        //   deleter side: stores the *pre-delete* (base) content, which is
+        //     the bug source — a naive `--keep both` concat would append
+        //     this base blob's bytes under the workspace-side banner.
+        let modifier_oid = {
+            use maw_git::GitRepo;
+            let oid = repo.write_blob(b"MODIFIED\n").unwrap();
+            GitOid::new(&oid.to_string()).unwrap()
+        };
+        let base_oid = {
+            use maw_git::GitRepo;
+            let oid = repo.write_blob(b"BASE_PREDELETE\n").unwrap();
+            GitOid::new(&oid.to_string()).unwrap()
+        };
+        let rel = PathBuf::from("dir/file.txt");
+        let conflict = Conflict::ModifyDelete {
+            path: rel.clone(),
+            file_id: FileId::new(7),
+            modifier: ConflictSide::new(
+                EPOCH_LABEL.to_owned(),
+                modifier_oid.clone(),
+                ord("epoch"),
+            ),
+            deleter: ConflictSide::new(
+                "ws-mod-del".to_owned(),
+                base_oid.clone(), // <-- the pre-delete blob, pretending to be "their" content
+                ord("ws-mod-del"),
+            ),
+            modified_content: modifier_oid,
+        };
+        std::fs::create_dir_all(ws_path.join("dir")).unwrap();
+        std::fs::write(ws_path.join(&rel), b"placeholder").unwrap();
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-mod-del",
+            &ws_path,
+            &[],
+            &["both".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        let after = std::fs::read(ws_path.join(&rel)).unwrap();
+        // The BASE_PREDELETE content must NOT appear — that would be silent
+        // data resurrection.
+        let after_str = String::from_utf8_lossy(&after);
+        assert!(
+            !after_str.contains("BASE_PREDELETE"),
+            "--keep both on modify/delete resurrected base content: {after_str}"
+        );
+        assert!(
+            after_str.contains("MODIFIED"),
+            "--keep both on modify/delete should keep modifier side: {after_str}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-mg0j — symlink mode preservation on `--keep`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_preserves_symlink_mode_on_keep() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-sym");
+
+        // Seed an initial commit.
+        std::fs::write(ws_path.join("seed"), b"seed").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(&ws_path)
+            .status()
+            .unwrap();
+
+        // Build a conflict where the workspace-side is flagged as a
+        // symlink whose blob content is the link target "a.txt\n" without
+        // the newline (git stores symlink targets without a trailing LF).
+        let ws_target_oid = {
+            use maw_git::GitRepo;
+            let oid = repo.write_blob(b"a.txt").unwrap();
+            GitOid::new(&oid.to_string()).unwrap()
+        };
+        let epoch_oid = {
+            use maw_git::GitRepo;
+            let oid = repo.write_blob(b"b.txt").unwrap();
+            GitOid::new(&oid.to_string()).unwrap()
+        };
+        let rel = PathBuf::from("link");
+        let conflict = Conflict::AddAdd {
+            path: rel.clone(),
+            sides: vec![
+                ConflictSide::with_mode(
+                    EPOCH_LABEL.to_owned(),
+                    epoch_oid,
+                    ord("epoch"),
+                    Some(ConflictSideMode::Link),
+                ),
+                ConflictSide::with_mode(
+                    "ws-sym".to_owned(),
+                    ws_target_oid,
+                    ord("ws-sym"),
+                    Some(ConflictSideMode::Link),
+                ),
+            ],
+        };
+        // Placeholder worktree file (what materialize left behind).
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch\nb.txt\n=======\na.txt\n>>>>>>> ws-sym\n",
+        )
+        .unwrap();
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-sym",
+            &ws_path,
+            &[],
+            &["ws-sym".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .unwrap();
+
+        // The resolved path must be a symlink pointing at `a.txt`.
+        let full = ws_path.join(&rel);
+        let meta = std::fs::symlink_metadata(&full).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "resolved path should be a symlink, got file_type={:?}",
+            meta.file_type()
+        );
+        let target = std::fs::read_link(&full).unwrap();
+        assert_eq!(target, Path::new("a.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-24tl — corrupt sidecar produces a clear error rather than falling
+    // back to the (broken-for-placeholder-content) legacy stripper
+    // -----------------------------------------------------------------------
+
+    /// When a structured sidecar *exists* but is malformed JSON,
+    /// `read_conflict_tree_sidecar` returns `None` — matching the contract
+    /// on a missing sidecar. The `resolve::run` dispatcher distinguishes
+    /// these two cases by `Path::exists()` and bails with a clear message
+    /// on the malformed-but-present case (bn-24tl).
+    ///
+    /// This test locks in the reader's behavior; the dispatcher-level
+    /// bail is additionally covered by the integration test for
+    /// `resolve::run` against a real repo layout.
+    #[test]
+    fn read_conflict_tree_sidecar_malformed_triggers_bn_24tl_branch() {
+        let (_td, root, _ws_path, _repo) = setup_ws_repo("ws-corrupt");
+        let sidecar = structured_sidecar_path(&root, "ws-corrupt");
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, b"this is not valid json{{").unwrap();
+
+        // Sidecar exists on disk.
+        assert!(sidecar.exists(), "sidecar path should exist");
+        // But the reader returns None (unparseable). This is the
+        // precise combination `resolve::run` uses to fire the bn-24tl
+        // "cannot resolve — regenerate" bail instead of silently
+        // falling through to the legacy stripper.
+        assert!(read_conflict_tree_sidecar(&root, "ws-corrupt").is_none());
     }
 }
