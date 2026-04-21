@@ -2544,48 +2544,67 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Refuse merge if any source workspace has unresolved rebase conflicts.
     //
-    // The authoritative check is the worktree scan — we derive conflict
-    // status directly from `find_conflicted_files` (ground truth) rather
-    // than trusting any cached counter in metadata.
+    // bn-m6ad / bn-3pgl: the authoritative source of truth for "unresolved
+    // conflict state" is the structured `conflict-tree.json` sidecar. If the
+    // sidecar exists and has any entries, the workspace is unresolved — full
+    // stop. Marker-text scanning was used here historically but produced
+    // both false positives (bn-m6ad: a tutorial file containing `<<<<<<<`
+    // literals tripped the gate when no sidecar was present) and false
+    // negatives (bn-3pgl: binary-conflict placeholder blobs slipped past
+    // depending on exact diff-scan behavior). Gating on the structured
+    // sidecar eliminates both failure modes: rebase writes the sidecar for
+    // every conflicted path (text or binary), and successful resolve
+    // deletes it. No other code path mutates it.
     //
-    // `--force` bypasses the check as an escape hatch for cases where
-    // scanning is wrong (e.g., a legitimate `<<<<<<<` line in a test fixture).
+    // Legacy fallback: very old pre-gjm8 repos only had the flat
+    // `rebase-conflicts.json`. If neither structured sidecar is present
+    // but the legacy one is and non-empty, also refuse.
+    //
+    // `--force` bypasses the check as an escape hatch for operators who
+    // have verified the state is safe (e.g., the sidecar was left behind
+    // by a buggy tool and the worktree is actually clean).
     if !opts.force {
         for ws_name in &ws_to_merge {
-            let ws_path = root.join("ws").join(ws_name);
+            let sidecar =
+                super::resolve_structured::read_conflict_tree_sidecar(&root, ws_name);
 
-            // bn-3oau: when a structured conflict-tree sidecar is present,
-            // use it to filter the marker-scan result so that legitimate
-            // documentation / tutorial / fixture files containing `<<<<<<<`
-            // at column 0 don't trip the gate. Only paths the structured
-            // engine flagged as actually conflicted are considered.
-            //
-            // When the sidecar is absent (pre-gjm8 repos, non-rebase merges,
-            // or a sidecar that has already been cleaned up after successful
-            // resolve), fall back to the raw diff-scan — same behavior as
-            // before.
-            let sidecar_paths: Option<BTreeSet<PathBuf>> =
-                super::resolve_structured::read_conflict_tree_sidecar(&root, ws_name)
-                    .map(|tree| tree.conflicts.keys().cloned().collect());
-
-            let marker_files = super::resolve::find_conflicted_files_filtered(
-                &ws_path,
-                sidecar_paths.as_ref(),
-            )
-            .unwrap_or_default();
-            if !marker_files.is_empty() {
-                let file_list = marker_files
-                    .iter()
-                    .map(|p| format!("  - {}", p.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                bail!(
-                    "Workspace '{ws_name}' has {} unresolved conflict marker(s) in its worktree:\n\
-                     {file_list}\n  \
-                     Resolve them first (strip <<<<<<<, =======, >>>>>>> markers and commit), then retry.\n  \
-                     To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                    marker_files.len()
-                );
+            if let Some(tree) = sidecar.as_ref() {
+                if !tree.conflicts.is_empty() {
+                    let paths: Vec<&PathBuf> = tree.conflicts.keys().collect();
+                    let file_list = paths
+                        .iter()
+                        .map(|p| format!("  - {}", p.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bail!(
+                        "Workspace '{ws_name}' has {} unresolved conflict(s):\n\
+                         {file_list}\n  \
+                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                        paths.len()
+                    );
+                }
+            } else if let Some(legacy) =
+                super::sync::read_rebase_conflicts(&root, ws_name)
+            {
+                // Pre-gjm8 repos: only the legacy flat sidecar exists. Same
+                // semantics — if non-empty, refuse.
+                if !legacy.conflicts.is_empty() {
+                    let file_list = legacy
+                        .conflicts
+                        .iter()
+                        .map(|c| format!("  - {}", c.path))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bail!(
+                        "Workspace '{ws_name}' has {} unresolved rebase conflict(s) \
+                         (legacy sidecar):\n\
+                         {file_list}\n  \
+                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                        legacy.conflicts.len()
+                    );
+                }
             }
         }
     }

@@ -66,28 +66,45 @@ fn setup_rebase_conflict(repo: &TestRepo) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn merge_succeeds_after_manual_conflict_resolve() {
+fn merge_succeeds_after_supported_conflict_resolve() {
+    // bn-m6ad: the merge gate is now driven by the structured sidecar.
+    // After a real rebase conflict, the supported path to clear the
+    // sidecar is `maw ws resolve`. Once it has been cleared, merge
+    // proceeds. (Prior to bn-m6ad this test wrote the file directly
+    // and relied on the marker-scan gate seeing no `<<<<<<<` bytes —
+    // that path is no longer authoritative.)
     let repo = TestRepo::new();
     setup_rebase_conflict(&repo);
 
-    // At this point, b's worktree has conflict markers.
-
-    // Simulate the user manually resolving: strip markers, keep both sides.
-    let ws_path = repo.root().join("ws").join("b");
-    let shared = ws_path.join("shared.txt");
-    let content = std::fs::read_to_string(&shared).unwrap();
+    // Sanity: sidecar present before resolve.
     assert!(
-        content.contains("<<<<<<<") || content.contains(">>>>>>>"),
-        "expected markers before manual resolve: {content}"
+        repo.read_conflict_tree_sidecar("b").is_some(),
+        "sidecar should exist after rebase conflict"
     );
 
-    // User-style resolve: just overwrite with something sensible.
-    std::fs::write(&shared, "alice\nbob\n").unwrap();
-    repo.git_in_workspace("b", &["add", "-A"]);
-    repo.git_in_workspace("b", &["commit", "-m", "manual: keep both"]);
+    // Use the supported resolve flow: pick a side, clearing the conflicts.
+    let resolve_out = repo.maw_raw(&["ws", "resolve", "b", "--keep", "both"]);
+    assert!(
+        resolve_out.status.success(),
+        "ws resolve --keep both should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&resolve_out.stdout),
+        String::from_utf8_lossy(&resolve_out.stderr)
+    );
 
-    // Now the worktree is clean. `maw ws merge` derives conflict status
-    // from the worktree scan and should proceed.
+    // Conflicts should now be empty (may keep the file if `clean` is populated,
+    // but `.conflicts` must be empty — that's what the merge gate checks).
+    if let Some(tree) = repo.read_conflict_tree_sidecar("b") {
+        let conflicts = tree
+            .get("conflicts")
+            .and_then(|v| v.as_object())
+            .expect("tree should have a `conflicts` object");
+        assert!(
+            conflicts.is_empty(),
+            "sidecar.conflicts should be empty after resolve, got: {conflicts:#?}"
+        );
+    }
+
+    // Merge proceeds.
     let out = repo.maw_raw(&[
         "ws",
         "merge",
@@ -96,20 +113,14 @@ fn merge_succeeds_after_manual_conflict_resolve() {
         "default",
         "--destroy",
         "--message",
-        "merge b after manual resolve",
+        "merge b after supported resolve",
     ]);
     assert!(
         out.status.success(),
-        "merge should proceed when worktree is clean\nstdout: {}\nstderr: {}",
+        "merge should proceed when sidecar is cleared\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-
-    // Final file should have both sides.
-    let final_content = std::fs::read_to_string(repo.root().join("ws/default/shared.txt")).unwrap();
-    assert!(final_content.contains("alice"));
-    assert!(final_content.contains("bob"));
-    assert!(!final_content.contains("<<<<<<<"));
 }
 
 #[test]
@@ -146,20 +157,36 @@ fn merge_force_bypasses_marker_scan() {
 }
 
 #[test]
-fn ws_resolve_list_reports_clean_and_merge_proceeds() {
+fn ws_resolve_keep_clears_sidecar_and_merge_proceeds() {
+    // bn-m6ad: after `ws resolve --keep <side>` clears the sidecar, the
+    // merge gate no longer blocks. (Prior version wrote the file
+    // directly and relied on the marker-scan gate; that path is no
+    // longer authoritative.)
     let repo = TestRepo::new();
     setup_rebase_conflict(&repo);
 
-    // Manually clear the worktree.
-    let shared = repo.root().join("ws/b/shared.txt");
-    std::fs::write(&shared, "alice\nbob\n").unwrap();
-    repo.git_in_workspace("b", &["add", "-A"]);
-    repo.git_in_workspace("b", &["commit", "-m", "manual"]);
+    // `ws resolve b --keep alice` clears shared.txt's conflict entry.
+    let resolve_out = repo.maw_raw(&["ws", "resolve", "b", "--keep", "epoch"]);
+    assert!(
+        resolve_out.status.success(),
+        "ws resolve --keep epoch should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&resolve_out.stdout),
+        String::from_utf8_lossy(&resolve_out.stderr)
+    );
 
-    // `ws resolve b --list` should report clean.
-    let _ = repo.maw_raw(&["ws", "resolve", "b", "--list"]);
+    // Conflicts should now be empty.
+    if let Some(tree) = repo.read_conflict_tree_sidecar("b") {
+        let conflicts = tree
+            .get("conflicts")
+            .and_then(|v| v.as_object())
+            .expect("tree should have a `conflicts` object");
+        assert!(
+            conflicts.is_empty(),
+            "sidecar.conflicts should be empty after resolve, got: {conflicts:#?}"
+        );
+    }
 
-    // A subsequent merge should now succeed without `--force`.
+    // Merge proceeds without --force.
     let out = repo.maw_raw(&[
         "ws",
         "merge",
@@ -168,11 +195,11 @@ fn ws_resolve_list_reports_clean_and_merge_proceeds() {
         "default",
         "--destroy",
         "--message",
-        "after resolve list",
+        "after resolve keep",
     ]);
     assert!(
         out.status.success(),
-        "merge should succeed when worktree is clean\nstdout: {}\nstderr: {}",
+        "merge should succeed after ws resolve cleared the sidecar\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -275,14 +302,27 @@ fn find_conflicted_files_detects_markers_past_256kb() {
 }
 
 #[test]
-fn ws_merge_refuses_workspace_with_embedded_markers_in_large_file() {
+fn ws_merge_allows_embedded_markers_when_no_conflict_sidecar() {
+    // bn-m6ad: the merge gate is driven by the structured conflict sidecar
+    // (`conflict-tree.json`), not by a marker-text scan. A workspace whose
+    // bytes happen to contain `<<<<<<<` literals — tutorials, fixtures, or
+    // even literally-committed marker strings — must not be blocked when
+    // there is no sidecar on disk indicating an unresolved rebase.
+    //
+    // The authoritative "workspace has unresolved conflicts" signal is the
+    // sidecar written by `sync --rebase`. If that file is absent, the
+    // workspace is considered resolved regardless of byte content. Other
+    // tools (`ws conflicts`, `ws resolve --list`) still surface embedded
+    // markers for the operator's awareness — see
+    // `ws_conflicts_reports_embedded_markers_when_engine_is_clean` below —
+    // but the merge gate does not block on them.
     let repo = TestRepo::new();
     repo.seed_files(&[("shared.txt", "line1\nline2\n")]);
 
     repo.maw_ok(&["ws", "create", "a"]);
 
-    // Modify the file AND add a large file with markers committed into HEAD.
-    // This simulates the state after `sync --rebase` committed conflict markers.
+    // Modify a file AND add a large file with marker-shaped content in HEAD.
+    // No `sync --rebase` ever ran, so no `conflict-tree.json` is on disk.
     let ws_path = repo.root().join("ws").join("a");
     repo.add_file("a", "shared.txt", "line1\nline2\nline3\n");
 
@@ -296,9 +336,20 @@ fn ws_merge_refuses_workspace_with_embedded_markers_in_large_file() {
     std::fs::write(ws_path.join("manifest.txt"), &large).unwrap();
 
     repo.git_in_workspace("a", &["add", "-A"]);
-    repo.git_in_workspace("a", &["commit", "-m", "rebase: conflict replaying (simulated)"]);
+    repo.git_in_workspace("a", &["commit", "-m", "embed marker literals"]);
 
-    // ws merge should refuse because the worktree has markers.
+    // Sanity-check: no structured sidecar was written (nothing in the
+    // rebase pipeline put one there).
+    let sidecar = repo
+        .root()
+        .join(".manifold/artifacts/ws/a/conflict-tree.json");
+    assert!(
+        !sidecar.exists(),
+        "precondition: no structured sidecar should exist at {}",
+        sidecar.display()
+    );
+
+    // Merge must proceed — the sidecar, not the bytes, is the authority.
     let out = repo.maw_raw(&[
         "ws",
         "merge",
@@ -307,18 +358,13 @@ fn ws_merge_refuses_workspace_with_embedded_markers_in_large_file() {
         "default",
         "--destroy",
         "--message",
-        "should fail",
+        "merge a with byte-level marker literals",
     ]);
     assert!(
-        !out.status.success(),
-        "merge should refuse workspace with embedded markers\nstdout: {}\nstderr: {}",
+        out.status.success(),
+        "merge should proceed when no conflict sidecar exists, even if bytes contain `<<<<<<<`\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("manifest.txt") || stderr.contains("conflict marker"),
-        "error should mention the marker file: {stderr}"
     );
 }
 
