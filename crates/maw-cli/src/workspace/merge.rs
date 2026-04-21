@@ -2095,10 +2095,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
                 status: "embedded_markers".to_string(),
                 workspaces: workspaces.to_vec(),
                 has_conflicts: true,
-                conflict_count: workspaces_with_markers
-                    .iter()
-                    .map(|(_, f)| f.len())
-                    .sum(),
+                conflict_count: workspaces_with_markers.iter().map(|(_, f)| f.len()).sum(),
                 conflicts: vec![],
                 message: format!(
                     "Merge engine reports clean, but embedded conflict markers \
@@ -2129,7 +2126,9 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
                  markers (keeping the sides you want), then:"
             );
             for (ws_name, _) in &workspaces_with_markers {
-                println!("  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m 'resolve conflicts'");
+                println!(
+                    "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m 'resolve conflicts'"
+                );
             }
             println!();
             println!("Then retry the merge.");
@@ -2421,7 +2420,7 @@ pub struct MergeOptions<'a> {
 ///
 /// The scan reads only the first `SNIFF` bytes of each blob, so it stays
 /// cheap even on large trees. This is a one-shot gate check, not a hot path.
-fn find_tool_placeholder_blobs(
+pub(crate) fn find_tool_placeholder_blobs(
     repo: &maw_git::GixRepo,
     tree_oid: maw_git::GitOid,
 ) -> Result<Vec<PathBuf>> {
@@ -2541,9 +2540,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     "Target branch '{branch}' has diverged from the current epoch.\n\
                      \n  Branch:  {}\n  Epoch:   {}\n\
                      \n  Direct commits were made to {default_ws} outside of maw.\n\
-                     To fix: run `maw epoch sync` to absorb them into the epoch, then retry."
-                    , &branch_before_oid.as_str()[..12]
-                    , &epoch_oid.as_str()[..12]
+                     To fix: run `maw epoch sync` to absorb them into the epoch, then retry.",
+                    &branch_before_oid.as_str()[..12],
+                    &epoch_oid.as_str()[..12]
                 );
             }
         }
@@ -2644,8 +2643,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // by a buggy tool and the worktree is actually clean).
     if !opts.force {
         for ws_name in &ws_to_merge {
-            let sidecar =
-                super::resolve_structured::read_conflict_tree_sidecar(&root, ws_name);
+            let sidecar = super::resolve_structured::read_conflict_tree_sidecar(&root, ws_name);
 
             if let Some(tree) = sidecar.as_ref() {
                 if !tree.conflicts.is_empty() {
@@ -2663,9 +2661,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         paths.len()
                     );
                 }
-            } else if let Some(legacy) =
-                super::sync::read_rebase_conflicts(&root, ws_name)
-            {
+            } else if let Some(legacy) = super::sync::read_rebase_conflicts(&root, ws_name) {
                 // Pre-gjm8 repos: only the legacy flat sidecar exists. Same
                 // semantics — if non-empty, refuse.
                 if !legacy.conflicts.is_empty() {
@@ -2714,9 +2710,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // tree to the detached HEAD inside `ws/<name>/` — that's the commit
     // the merge would adopt, so that's the tree we scan.
     {
-        let repo = maw_git::GixRepo::open(&root).map_err(|e| {
-            anyhow::anyhow!("failed to open repo at {}: {e}", root.display())
-        })?;
+        let repo = maw_git::GixRepo::open(&root)
+            .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
         for (ws_id, ws_path) in &workspace_dirs {
             let ws_name = ws_id.as_str();
             if !ws_path.exists() {
@@ -3888,7 +3883,7 @@ struct ActiveChangeHead {
     head_oid: String,
 }
 
-fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
+pub(crate) fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(ws_path)
@@ -4255,9 +4250,7 @@ fn update_default_workspace(
                 println!("  User work replayed successfully.");
             }
         }
-        Ok(SnapshotReplayResult::Conflicts(conflicts))
-            if used_merge_protection =>
-        {
+        Ok(SnapshotReplayResult::Conflicts(conflicts)) if used_merge_protection => {
             // Step 4b-protected: Conflicts from merge-vs-local overlap.
             // The merge succeeded and the epoch advanced. These conflicts
             // are between the merge result and uncommitted local edits that
@@ -4287,10 +4280,14 @@ fn update_default_workspace(
             }
             eprintln!();
             eprintln!("  To fix (pick one):");
-            eprintln!("    maw ws resolve {ws_name} --keep {source_label}    # keep merged version");
+            eprintln!(
+                "    maw ws resolve {ws_name} --keep {source_label}    # keep merged version"
+            );
             eprintln!("    maw ws resolve {ws_name} --keep {ws_name}    # keep local edits");
             eprintln!("    maw ws resolve {ws_name} --keep both    # keep both sides concatenated");
-            eprintln!("    maw ws resolve {ws_name} --list                  # list conflicted files");
+            eprintln!(
+                "    maw ws resolve {ws_name} --list                  # list conflicted files"
+            );
             eprintln!();
             eprintln!("  The merge commit is safe — epoch has advanced. These conflicts only");
             eprintln!("  affect the working copy in ws/{ws_name}/.");

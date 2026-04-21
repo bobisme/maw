@@ -44,9 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use maw_core::merge::apply::apply_unilateral_patchset;
 use maw_core::merge::diff_extract::diff_patchset;
-use maw_core::merge::materialize::{
-    materialize, write_legacy_sidecar, write_structured_sidecar,
-};
+use maw_core::merge::materialize::{materialize, write_legacy_sidecar, write_structured_sidecar};
 use maw_core::merge::types::{ConflictTree, EntryMode, MaterializedEntry};
 use maw_core::model::conflict::{Conflict, ConflictSide};
 use maw_core::model::ordering::OrderingKey;
@@ -203,8 +201,8 @@ pub(super) fn rebase_workspace(
         .map_err(|e| anyhow::anyhow!("invalid new epoch OID: {e}"))?;
 
     let ws_id = WorkspaceId::new(ws_name).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let base_epoch_id = EpochId::new(old_epoch)
-        .map_err(|e| anyhow::anyhow!("invalid old epoch id: {e}"))?;
+    let base_epoch_id =
+        EpochId::new(old_epoch).map_err(|e| anyhow::anyhow!("invalid old epoch id: {e}"))?;
 
     // Enumerate commits old_epoch..HEAD (oldest first).
     let head_git = repo_dyn
@@ -311,8 +309,9 @@ pub(super) fn rebase_workspace(
         };
 
         // Apply first-parent delta.
-        state = apply_unilateral_patchset(state, first_parent_patch.clone())
-            .map_err(|e| anyhow::anyhow!("apply_unilateral_patchset failed for {short_sha}: {e}"))?;
+        state = apply_unilateral_patchset(state, first_parent_patch.clone()).map_err(|e| {
+            anyhow::anyhow!("apply_unilateral_patchset failed for {short_sha}: {e}")
+        })?;
 
         // V1 multi-parent handling: for merge commits, synthesize an explicit
         // `Conflict::Content` at every path touched by the non-first parents.
@@ -335,13 +334,7 @@ pub(super) fn rebase_workspace(
                     )
                 })?;
 
-                inject_merge_side_conflicts(
-                    &mut state,
-                    ws_name,
-                    &commit_core,
-                    idx,
-                    &side_patch,
-                );
+                inject_merge_side_conflicts(&mut state, ws_name, &commit_core, idx, &side_patch);
             }
         }
 
@@ -370,9 +363,8 @@ pub(super) fn rebase_workspace(
         // (bn-324m), so we thread the `&dyn GitRepo` through here — same
         // handle that `write_blobs_and_build_tree` uses below to write the
         // rendered marker blobs back.
-        let output = materialize(&state, repo_dyn).map_err(|e| {
-            anyhow::anyhow!("materialize failed after replaying {short_sha}: {e}")
-        })?;
+        let output = materialize(&state, repo_dyn)
+            .map_err(|e| anyhow::anyhow!("materialize failed after replaying {short_sha}: {e}"))?;
         let tree_oid = write_blobs_and_build_tree(repo_dyn, new_epoch_tree, output)
             .map_err(|e| anyhow::anyhow!("failed to build tree for {short_sha}: {e}"))?;
 
@@ -541,7 +533,8 @@ fn walk_tree_into_clean(
                 let mode_core: EntryMode = entry.mode.into();
                 let oid_core = GitOid::new(&entry.oid.to_string())
                     .map_err(|e| anyhow::anyhow!("malformed blob oid in tree: {e}"))?;
-                tree.clean.insert(path, MaterializedEntry::new(mode_core, oid_core));
+                tree.clean
+                    .insert(path, MaterializedEntry::new(mode_core, oid_core));
             }
         }
     }
@@ -746,12 +739,7 @@ fn promote_overlaps_to_conflicts(
                     None => continue, // epoch deleted; workspace-re-added → AddAdd-ish, skip for V1
                 };
 
-                let ord = OrderingKey::new(
-                    base_epoch_id.clone(),
-                    patch.workspace_id.clone(),
-                    0,
-                    0,
-                );
+                let ord = OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
                 // bn-mg0j: propagate the workspace-side file mode into the
                 // conflict so resolvers can re-apply symlink/executable
                 // modes after `--keep`. We don't have mode info for the
@@ -760,24 +748,16 @@ fn promote_overlaps_to_conflicts(
                 // hint is what matters for symlink-aware resolution in V1.
                 let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
                     change.mode.and_then(|m| m.into());
-                let ours = ConflictSide::new(
-                    "epoch".to_owned(),
-                    epoch_side_blob.clone(),
-                    ord.clone(),
-                );
-                let theirs = ConflictSide::with_mode(
-                    ws_name.to_owned(),
-                    ws_blob,
-                    ord,
-                    ws_mode,
-                );
+                let ours =
+                    ConflictSide::new("epoch".to_owned(), epoch_side_blob.clone(), ord.clone());
+                let theirs = ConflictSide::with_mode(ws_name.to_owned(), ws_blob, ord, ws_mode);
 
-                let file_id = change
-                    .file_id
-                    .unwrap_or_else(|| FileId::new(merge_file_id_seed(
+                let file_id = change.file_id.unwrap_or_else(|| {
+                    FileId::new(merge_file_id_seed(
                         &GitOid::new(&"f".repeat(40)).unwrap(),
                         &change.path,
-                    )));
+                    ))
+                });
 
                 // Install the conflict, evicting the clean entry.
                 tree.clean.remove(&change.path);
@@ -812,25 +792,37 @@ fn promote_overlaps_to_conflicts(
                 if ref_new.is_none() {
                     continue;
                 }
-                let Some(epoch_new) = ref_new.clone() else { continue };
-                let ord = OrderingKey::new(
-                    base_epoch_id.clone(),
-                    patch.workspace_id.clone(),
-                    0,
-                    0,
-                );
-                let modifier = ConflictSide::new("epoch".to_owned(), epoch_new.clone(), ord.clone());
+                let Some(epoch_new) = ref_new.clone() else {
+                    continue;
+                };
+
+                // bn-3hqg follow-up: delete-vs-bump on a submodule is still a
+                // gitlink conflict, not a text/blob conflict. The modifier SHA
+                // points at a commit in another repository, so materializing a
+                // generic ModifyDelete would fail later when it tried to read
+                // that SHA as a blob.
+                if change.mode == Some(EntryMode::Commit) {
+                    bail!(
+                        "submodule conflict at {} (workspace deleted the submodule, epoch bumped it to {}) is not yet supported; resolve the submodule manually",
+                        change.path.display(),
+                        epoch_new,
+                    );
+                }
+
+                let ord = OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
+                let modifier =
+                    ConflictSide::new("epoch".to_owned(), epoch_new.clone(), ord.clone());
                 let deleter = ConflictSide::new(
                     ws_name.to_owned(),
                     ref_old.clone().unwrap_or_else(|| epoch_new.clone()),
                     ord,
                 );
-                let file_id = change
-                    .file_id
-                    .unwrap_or_else(|| FileId::new(merge_file_id_seed(
+                let file_id = change.file_id.unwrap_or_else(|| {
+                    FileId::new(merge_file_id_seed(
                         &GitOid::new(&"e".repeat(40)).unwrap(),
                         &change.path,
-                    )));
+                    ))
+                });
                 tree.clean.remove(&change.path);
                 tree.conflicts.insert(
                     change.path.clone(),
@@ -969,12 +961,7 @@ fn plan_rename_overlap(
             mode,
         })
     } else {
-        let ord = OrderingKey::new(
-            base_epoch_id.clone(),
-            patch.workspace_id.clone(),
-            0,
-            0,
-        );
+        let ord = OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
         // bn-mg0j: propagate the workspace-side mode into the conflict.
         let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
             change.mode.and_then(|m| m.into());
@@ -1486,12 +1473,7 @@ mod tests {
     #[test]
     fn sides_all_same_identifies_equal_sides() {
         let o = test_oid('a');
-        let ord = OrderingKey::new(
-            test_epoch(),
-            test_ws_id("w"),
-            0,
-            0,
-        );
+        let ord = OrderingKey::new(test_epoch(), test_ws_id("w"), 0, 0);
         let sides = vec![
             ConflictSide::new("x".to_owned(), o.clone(), ord.clone()),
             ConflictSide::new("y".to_owned(), o.clone(), ord.clone()),
@@ -1502,12 +1484,7 @@ mod tests {
 
     #[test]
     fn sides_all_same_rejects_divergent_sides() {
-        let ord = OrderingKey::new(
-            test_epoch(),
-            test_ws_id("w"),
-            0,
-            0,
-        );
+        let ord = OrderingKey::new(test_epoch(), test_ws_id("w"), 0, 0);
         let sides = vec![
             ConflictSide::new("x".to_owned(), test_oid('a'), ord.clone()),
             ConflictSide::new("y".to_owned(), test_oid('b'), ord),

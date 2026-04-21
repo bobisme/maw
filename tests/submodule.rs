@@ -19,7 +19,9 @@
 //!     touched an unrelated file;
 //!   * clean rebase where the workspace bumps an already-present submodule;
 //!   * the bail path when workspace + epoch bump the same submodule to
-//!     different commits.
+//!     different commits;
+//!   * the bail path when the workspace deletes a submodule while the epoch
+//!     bumps it.
 
 mod manifold_common;
 
@@ -115,6 +117,18 @@ fn bump_submodule_in_workspace(
     git_ok(&ws, &["commit", "-m", message]);
 }
 
+/// Remove an already-added submodule from the workspace and commit the delete.
+fn remove_submodule_from_workspace(
+    repo: &TestRepo,
+    workspace: &str,
+    rel_path: &str,
+    message: &str,
+) {
+    let ws = repo.workspace_path(workspace);
+    git_ok(&ws, &["rm", "-f", rel_path, ".gitmodules"]);
+    git_ok(&ws, &["commit", "-m", message]);
+}
+
 /// Extract the gitlink SHA for `rel_path` from `git ls-tree HEAD` in a
 /// workspace. Returns `None` if the entry isn't a gitlink.
 fn gitlink_sha_at(repo: &TestRepo, workspace: &str, rel_path: &str) -> Option<String> {
@@ -152,7 +166,13 @@ fn rebase_preserves_unchanged_submodule() {
 
     // Create workspace and add the submodule.
     repo.maw_ok(&["ws", "create", "feat"]);
-    add_submodule_to_workspace(&repo, "feat", "subdir", _sub_src.path(), "feat: add submodule");
+    add_submodule_to_workspace(
+        &repo,
+        "feat",
+        "subdir",
+        _sub_src.path(),
+        "feat: add submodule",
+    );
 
     // Sanity: before rebase the workspace really has a gitlink entry.
     assert_eq!(
@@ -181,7 +201,10 @@ fn rebase_preserves_unchanged_submodule() {
 
     // The unrelated epoch change is visible in the workspace.
     let contents = repo.read_file("feat", "f.txt").expect("f.txt present");
-    assert_eq!(contents, "changed\n", "unrelated epoch change must land in workspace");
+    assert_eq!(
+        contents, "changed\n",
+        "unrelated epoch change must land in workspace"
+    );
 }
 
 /// Workspace bumps an already-present submodule to a new SHA; epoch doesn't
@@ -196,14 +219,27 @@ fn rebase_preserves_submodule_when_workspace_bumps_it() {
 
     // Add the submodule in `default` at v1, advance the epoch so it's the
     // shared baseline for new workspaces.
-    add_submodule_to_workspace(&repo, "default", "subdir", sub_src.path(), "chore: baseline submodule");
+    add_submodule_to_workspace(
+        &repo,
+        "default",
+        "subdir",
+        sub_src.path(),
+        "chore: baseline submodule",
+    );
     let epoch_with_sub = repo.advance_epoch("chore: seed submodule baseline");
     assert!(!epoch_with_sub.is_empty());
 
     // Create workspace off that epoch, bump the submodule to v2.
     repo.maw_ok(&["ws", "create", "feat"]);
     let sub_v2 = add_sub_commit(sub_src.path(), "v2\n", "sub: v2");
-    bump_submodule_in_workspace(&repo, "feat", "subdir", sub_src.path(), &sub_v2, "feat: bump submodule to v2");
+    bump_submodule_in_workspace(
+        &repo,
+        "feat",
+        "subdir",
+        sub_src.path(),
+        &sub_v2,
+        "feat: bump submodule to v2",
+    );
 
     // Advance the epoch with an unrelated change so the rebase has something
     // to replay onto.
@@ -231,13 +267,26 @@ fn rebase_with_submodule_conflict_bails_cleanly() {
     let (sub_src, _sub_v1) = make_sub_source("v1\n");
 
     // Seed: add submodule at v1 in default, advance epoch.
-    add_submodule_to_workspace(&repo, "default", "subdir", sub_src.path(), "chore: baseline submodule");
+    add_submodule_to_workspace(
+        &repo,
+        "default",
+        "subdir",
+        sub_src.path(),
+        "chore: baseline submodule",
+    );
     repo.advance_epoch("chore: seed submodule baseline");
 
     // Workspace bumps submodule to v2.
     repo.maw_ok(&["ws", "create", "feat"]);
     let sub_v2 = add_sub_commit(sub_src.path(), "v2\n", "sub: v2");
-    bump_submodule_in_workspace(&repo, "feat", "subdir", sub_src.path(), &sub_v2, "feat: bump to v2");
+    bump_submodule_in_workspace(
+        &repo,
+        "feat",
+        "subdir",
+        sub_src.path(),
+        &sub_v2,
+        "feat: bump to v2",
+    );
 
     // Epoch (default) concurrently bumps submodule to v3 (different from v2).
     // We drive default directly so `advance_epoch`'s `git add -A` doesn't
@@ -253,17 +302,88 @@ fn rebase_with_submodule_conflict_bails_cleanly() {
             &format!("160000,{sub_v3},subdir"),
         ],
     );
-    git_ok(&default_ws, &["commit", "-m", "chore: epoch bumps submodule"]);
-    let new_epoch = git_ok(&default_ws, &["rev-parse", "HEAD"]).trim().to_owned();
-    git_ok(&repo.root(), &["update-ref", "refs/manifold/epoch/current", &new_epoch]);
+    git_ok(
+        &default_ws,
+        &["commit", "-m", "chore: epoch bumps submodule"],
+    );
+    let new_epoch = git_ok(&default_ws, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git_ok(
+        &repo.root(),
+        &["update-ref", "refs/manifold/epoch/current", &new_epoch],
+    );
     git_ok(&repo.root(), &["update-ref", "refs/heads/main", &new_epoch]);
-    git_ok(&repo.root(), &["update-ref", "refs/manifold/epoch/ws/default", &new_epoch]);
+    git_ok(
+        &repo.root(),
+        &["update-ref", "refs/manifold/epoch/ws/default", &new_epoch],
+    );
 
     // Rebase must fail, but with a *clear* error — not with `not found: blob`.
     let stderr = repo.maw_fails(&["ws", "sync", "--rebase", "feat"]);
     assert!(
         !stderr.contains("not found: blob"),
         "submodule conflict must not crash with `not found: blob`. stderr: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("submodule"),
+        "error message should mention submodule. stderr: {stderr}"
+    );
+}
+
+/// Workspace deletes a submodule while the epoch bumps it to a new SHA.
+/// Rebase must bail cleanly instead of trying to read the gitlink SHA as a
+/// blob during generic modify/delete materialization.
+#[test]
+fn rebase_with_submodule_delete_vs_bump_bails_cleanly() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("f.txt", "base\n")]);
+
+    let (sub_src, _sub_v1) = make_sub_source("v1\n");
+
+    add_submodule_to_workspace(
+        &repo,
+        "default",
+        "subdir",
+        sub_src.path(),
+        "chore: baseline submodule",
+    );
+    repo.advance_epoch("chore: seed submodule baseline");
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    remove_submodule_from_workspace(&repo, "feat", "subdir", "feat: delete submodule");
+
+    let sub_v2 = add_sub_commit(sub_src.path(), "v2\n", "sub: v2");
+    let default_ws = repo.workspace_path("default");
+    git_ok(
+        &default_ws,
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{sub_v2},subdir"),
+        ],
+    );
+    git_ok(
+        &default_ws,
+        &["commit", "-m", "chore: epoch bumps submodule"],
+    );
+    let new_epoch = git_ok(&default_ws, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git_ok(
+        &repo.root(),
+        &["update-ref", "refs/manifold/epoch/current", &new_epoch],
+    );
+    git_ok(&repo.root(), &["update-ref", "refs/heads/main", &new_epoch]);
+    git_ok(
+        &repo.root(),
+        &["update-ref", "refs/manifold/epoch/ws/default", &new_epoch],
+    );
+
+    let stderr = repo.maw_fails(&["ws", "sync", "--rebase", "feat"]);
+    assert!(
+        !stderr.contains("not found: blob"),
+        "submodule delete-vs-bump must not crash with `not found: blob`. stderr: {stderr}"
     );
     assert!(
         stderr.to_lowercase().contains("submodule"),

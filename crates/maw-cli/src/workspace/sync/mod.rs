@@ -6,6 +6,7 @@ mod rebase;
 use std::path::Path;
 
 use anyhow::Result;
+use maw_git::GitRepo;
 use tracing::instrument;
 
 use maw_core::backend::WorkspaceBackend;
@@ -22,6 +23,56 @@ use cross_target::cross_target_sync_risk;
 use rebase::rebase_workspace;
 
 pub use rebase::{RebaseConflict, RebaseConflicts, delete_rebase_conflicts, read_rebase_conflicts};
+
+fn maybe_clear_stale_conflict_sidecars(root: &Path, ws_name: &str, ws_path: &Path) -> Result<bool> {
+    let mut tracked_paths = std::collections::BTreeSet::new();
+
+    if let Some(tree) = super::resolve_structured::read_conflict_tree_sidecar(root, ws_name) {
+        tracked_paths.extend(tree.conflicts.into_keys());
+    }
+
+    if tracked_paths.is_empty()
+        && let Some(legacy) = read_rebase_conflicts(root, ws_name)
+    {
+        tracked_paths.extend(
+            legacy
+                .conflicts
+                .into_iter()
+                .map(|conflict| std::path::PathBuf::from(conflict.path)),
+        );
+    }
+
+    if tracked_paths.is_empty() {
+        return Ok(false);
+    }
+
+    let marker_paths =
+        super::resolve::find_conflicted_files_filtered(ws_path, Some(&tracked_paths))?;
+    if !marker_paths.is_empty() {
+        return Ok(false);
+    }
+
+    let head_oid_str = match super::merge::resolve_workspace_head_oid(ws_path) {
+        Ok(oid) => oid,
+        Err(_) => return Ok(false),
+    };
+    let head_oid: maw_git::GitOid = head_oid_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid workspace HEAD OID '{head_oid_str}': {e}"))?;
+
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let commit = repo
+        .read_commit(head_oid)
+        .map_err(|e| anyhow::anyhow!("read_commit({head_oid}) failed: {e}"))?;
+    let tainted = super::merge::find_tool_placeholder_blobs(&repo, commit.tree_oid)?;
+    if !tainted.is_empty() {
+        return Ok(false);
+    }
+
+    super::resolve_structured::clear_conflict_sidecars(root, ws_name)?;
+    Ok(true)
+}
 
 #[instrument]
 pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
@@ -66,9 +117,15 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     }
 
     let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ws_path = root.join("ws").join(&workspace_name);
 
     if !ws_status.is_stale {
-        println!("Workspace '{workspace_name}' is up to date.");
+        if maybe_clear_stale_conflict_sidecars(&root, &workspace_name, &ws_path)? {
+            println!("Workspace '{workspace_name}' is up to date.");
+            println!("Cleared stale conflict metadata after a manual resolution commit.");
+        } else {
+            println!("Workspace '{workspace_name}' is up to date.");
+        }
         return Ok(());
     }
 
@@ -79,7 +136,6 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     // current epoch. The workspace HEAD is based on the old epoch, so comparing
     // against the new epoch would report 0 commits ahead (HEAD is behind it),
     // causing us to skip the rebase and fast-forward — silently dropping commits.
-    let ws_path = root.join("ws").join(&workspace_name);
     match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
         None => {
             // Could not determine commit count — refuse to sync to prevent data loss.

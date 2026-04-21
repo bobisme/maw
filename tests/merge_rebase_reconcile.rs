@@ -205,6 +205,51 @@ fn ws_resolve_keep_clears_sidecar_and_merge_proceeds() {
     );
 }
 
+#[test]
+fn sync_clears_stale_sidecar_after_manual_resolution_commit() {
+    let repo = TestRepo::new();
+    setup_rebase_conflict(&repo);
+
+    let shared = repo.root().join("ws/b/shared.txt");
+    std::fs::write(&shared, "manually resolved\n").unwrap();
+    repo.git_in_workspace("b", &["add", "-A"]);
+    repo.git_in_workspace("b", &["commit", "-m", "manual: resolve rebase conflict"]);
+
+    let sync = repo.maw_raw(&["ws", "sync", "b"]);
+    assert!(
+        sync.status.success(),
+        "sync after manual resolution should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&sync.stdout),
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    let sync_stdout = String::from_utf8_lossy(&sync.stdout);
+    assert!(
+        sync_stdout.contains("Cleared stale conflict metadata"),
+        "sync should report sidecar cleanup after manual resolution, got: {sync_stdout}"
+    );
+    assert!(
+        repo.read_conflict_tree_sidecar("b").is_none(),
+        "structured sidecar should be deleted after manual resolution commit"
+    );
+
+    let merge = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "b",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge b after manual resolve",
+    ]);
+    assert!(
+        merge.status.success(),
+        "merge should proceed after sync clears stale sidecar\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Bug 2: `ws destroy` deletes refs/manifold/head/<name>
 // ---------------------------------------------------------------------------
@@ -276,9 +321,7 @@ fn find_conflicted_files_detects_markers_past_256kb() {
         content.push_str(&format!("line {i}\n"));
     }
     // Markers at the END of the file, well past the old 256KB read limit.
-    content.push_str(
-        "\n<<<<<<< alice\nalice_content\n=======\nbob_content\n>>>>>>> bob\n",
-    );
+    content.push_str("\n<<<<<<< alice\nalice_content\n=======\nbob_content\n>>>>>>> bob\n");
     std::fs::write(&large_path, &content).unwrap();
     assert!(
         std::fs::metadata(&large_path).unwrap().len() > 256 * 1024,
@@ -330,9 +373,7 @@ fn ws_merge_allows_embedded_markers_when_no_conflict_sidecar() {
     for i in 0..30_000 {
         large.push_str(&format!("entry {i}\n"));
     }
-    large.push_str(
-        "\n<<<<<<< HEAD\nours version\n=======\ntheirs version\n>>>>>>> other\n",
-    );
+    large.push_str("\n<<<<<<< HEAD\nours version\n=======\ntheirs version\n>>>>>>> other\n");
     std::fs::write(ws_path.join("manifest.txt"), &large).unwrap();
 
     repo.git_in_workspace("a", &["add", "-A"]);
@@ -389,8 +430,7 @@ fn ws_conflicts_reports_embedded_markers_when_engine_is_clean() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("embedded conflict markers")
-            || combined.contains("dirty.txt"),
+        combined.contains("embedded conflict markers") || combined.contains("dirty.txt"),
         "ws conflicts should surface embedded markers. Got:\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
@@ -436,7 +476,9 @@ fn destroy_then_create_same_name_starts_fresh_oplog_chain() {
         .current_dir(repo.root())
         .output()
         .unwrap();
-    let first_head_oid = String::from_utf8_lossy(&first_head.stdout).trim().to_owned();
+    let first_head_oid = String::from_utf8_lossy(&first_head.stdout)
+        .trim()
+        .to_owned();
     assert!(!first_head_oid.is_empty());
 
     repo.maw_ok(&["ws", "destroy", "worker", "--force"]);
@@ -449,7 +491,9 @@ fn destroy_then_create_same_name_starts_fresh_oplog_chain() {
         .current_dir(repo.root())
         .output()
         .unwrap();
-    let second_head_oid = String::from_utf8_lossy(&second_head.stdout).trim().to_owned();
+    let second_head_oid = String::from_utf8_lossy(&second_head.stdout)
+        .trim()
+        .to_owned();
     assert!(!second_head_oid.is_empty());
 
     // The new head must not equal the old head (because the old one was deleted).
@@ -597,14 +641,21 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
     repo.git_in_workspace("feature", &["checkout", "--detach", &feature_commit]);
     repo.git_in_workspace(
         "feature",
-        &["-c", "merge.conflictStyle=diff3", "merge", "--no-ff", "--no-edit", "-X", "ours", "side"],
+        &[
+            "-c",
+            "merge.conflictStyle=diff3",
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-X",
+            "ours",
+            "side",
+        ],
     );
 
     // Sanity-check: HEAD is now a merge commit (two parents).
-    let parents_line = repo.git_in_workspace(
-        "feature",
-        &["rev-list", "--parents", "-n", "1", "HEAD"],
-    );
+    let parents_line =
+        repo.git_in_workspace("feature", &["rev-list", "--parents", "-n", "1", "HEAD"]);
     let parent_count = parents_line.trim().split_whitespace().count() - 1;
     assert!(
         parent_count >= 2,
@@ -679,7 +730,8 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
     );
 
     // Load-bearing assertion #3: the legacy sidecar exists.
-    let sidecar = repo.root()
+    let sidecar = repo
+        .root()
         .join(".manifold")
         .join("artifacts")
         .join("ws")

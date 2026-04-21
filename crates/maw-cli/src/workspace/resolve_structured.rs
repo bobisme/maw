@@ -82,6 +82,23 @@ pub(crate) fn read_conflict_tree_sidecar(root: &Path, ws_name: &str) -> Option<C
     serde_json::from_str::<ConflictTree>(&text).ok()
 }
 
+/// Delete both structured and legacy conflict sidecars for `ws_name`.
+pub(crate) fn clear_conflict_sidecars(root: &Path, ws_name: &str) -> Result<()> {
+    let structured = structured_sidecar_path(root, ws_name);
+    if structured.exists() {
+        std::fs::remove_file(&structured)
+            .map_err(|e| anyhow::anyhow!("failed to delete {}: {e}", structured.display()))?;
+    }
+
+    let legacy = legacy_sidecar_path(root, ws_name);
+    if legacy.exists() {
+        std::fs::remove_file(&legacy)
+            .map_err(|e| anyhow::anyhow!("failed to delete {}: {e}", legacy.display()))?;
+    }
+
+    Ok(())
+}
+
 /// Write an updated `ConflictTree` back to the sidecar. If the tree has no
 /// remaining conflicts (and no remaining clean entries), delete the file.
 fn write_conflict_tree_sidecar(root: &Path, ws_name: &str, tree: &ConflictTree) -> Result<()> {
@@ -166,20 +183,14 @@ pub(crate) fn list_conflicts(
         return Ok(());
     }
 
-    println!(
-        "{} structured conflict(s) in '{workspace}':",
-        entries.len()
-    );
+    println!("{} structured conflict(s) in '{workspace}':", entries.len());
     for (path, conflict) in &entries {
         let shape = conflict.variant_name();
         let sides_desc = conflict.workspaces().join(", ");
         match conflict {
             Conflict::Content { atoms, .. } => {
                 if atoms.is_empty() {
-                    println!(
-                        "  {}  [{shape}] sides=[{sides_desc}]",
-                        path.display()
-                    );
+                    println!("  {}  [{shape}] sides=[{sides_desc}]", path.display());
                 } else {
                     println!(
                         "  {}  [{shape}] sides=[{sides_desc}] atoms={}",
@@ -189,10 +200,7 @@ pub(crate) fn list_conflicts(
                 }
             }
             _ => {
-                println!(
-                    "  {}  [{shape}] sides=[{sides_desc}]",
-                    path.display()
-                );
+                println!("  {}  [{shape}] sides=[{sides_desc}]", path.display());
             }
         }
     }
@@ -200,8 +208,12 @@ pub(crate) fn list_conflicts(
     println!();
     println!("To resolve:");
     println!("  maw ws resolve {workspace} --keep epoch            # keep epoch version");
-    println!("  maw ws resolve {workspace} --keep <ws-name>        # keep a specific workspace side");
-    println!("  maw ws resolve {workspace} --keep both             # keep all sides (concatenated)");
+    println!(
+        "  maw ws resolve {workspace} --keep <ws-name>        # keep a specific workspace side"
+    );
+    println!(
+        "  maw ws resolve {workspace} --keep both             # keep all sides (concatenated)"
+    );
 
     Ok(())
 }
@@ -282,9 +294,7 @@ enum SideMatch<'a> {
 fn match_sides<'a>(sides: &'a [ConflictSide], target: &str) -> SideMatch<'a> {
     // 1. Exact / comma-split match.
     for s in sides {
-        if s.workspace == target
-            || s.workspace.split(',').any(|p| p.trim() == target)
-        {
+        if s.workspace == target || s.workspace.split(',').any(|p| p.trim() == target) {
             return SideMatch::One(s);
         }
     }
@@ -342,8 +352,7 @@ fn pick_single_side_oid(conflict: &Conflict, target: &str) -> Result<Option<GitO
                     // bn-2ras: `--keep feat` but the conflict has
                     // `feat#merge-parent-0` AND `feat#merge-parent-1`. List
                     // the qualified names so the user can pick one.
-                    let qualified: Vec<&str> =
-                        hits.iter().map(|s| s.workspace.as_str()).collect();
+                    let qualified: Vec<&str> = hits.iter().map(|s| s.workspace.as_str()).collect();
                     bail!(
                         "`--keep {target}` is ambiguous — the conflict has multiple \
                          sides whose workspace starts with `{target}#`: [{}]. \
@@ -353,8 +362,7 @@ fn pick_single_side_oid(conflict: &Conflict, target: &str) -> Result<Option<GitO
                     );
                 }
                 SideMatch::None => {
-                    let available: Vec<&str> =
-                        sides.iter().map(|s| s.workspace.as_str()).collect();
+                    let available: Vec<&str> = sides.iter().map(|s| s.workspace.as_str()).collect();
                     bail!(
                         "Side '{}' not found for path. Available: [{}], plus 'both'.",
                         target,
@@ -463,11 +471,7 @@ fn pick_single_side_mode(conflict: &Conflict, target: &str) -> Option<ConflictSi
 }
 
 /// Apply a resolution for a single `(path, conflict)` and produce the output.
-fn apply_decision(
-    repo: &dyn GitRepo,
-    conflict: &Conflict,
-    target: &str,
-) -> Result<PathOutcome> {
+fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Result<PathOutcome> {
     if target == "both" {
         // bn-2pry: ModifyDelete has no meaningful "both" — the deleter side
         // carries the *pre-delete* blob OID (the base content) in its
@@ -477,10 +481,7 @@ fn apply_decision(
         // content (the deletion is effectively declined). Document the
         // choice in the skipped reason carried back to the caller so the
         // CLI can surface it.
-        if let Conflict::ModifyDelete {
-            modifier, ..
-        } = conflict
-        {
+        if let Conflict::ModifyDelete { modifier, .. } = conflict {
             let git_oid: git::GitOid = modifier
                 .content
                 .as_str()
@@ -565,9 +566,8 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
             if matches!(mode, Some(ConflictSideMode::Link)) {
                 // Remove any existing entry so the symlink create succeeds.
                 if full.is_file() || full.is_symlink() {
-                    std::fs::remove_file(&full).map_err(|e| {
-                        anyhow::anyhow!("remove {}: {e}", full.display())
-                    })?;
+                    std::fs::remove_file(&full)
+                        .map_err(|e| anyhow::anyhow!("remove {}: {e}", full.display()))?;
                 }
                 let target = std::str::from_utf8(&bytes).map_err(|e| {
                     anyhow::anyhow!(
@@ -591,9 +591,8 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
                     // No meaningful symlink story on non-unix for maw; fall
                     // through to a regular file write so we at least don't
                     // lose data.
-                    std::fs::write(&full, &bytes).map_err(|e| {
-                        anyhow::anyhow!("write {}: {e}", full.display())
-                    })?;
+                    std::fs::write(&full, &bytes)
+                        .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
                 }
                 return Ok(true);
             }
@@ -606,9 +605,8 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
             if matches!(mode, Some(ConflictSideMode::BlobExecutable)) {
                 use std::os::unix::fs::PermissionsExt;
                 let perms = std::fs::Permissions::from_mode(0o755);
-                std::fs::set_permissions(&full, perms).map_err(|e| {
-                    anyhow::anyhow!("chmod +x {}: {e}", full.display())
-                })?;
+                std::fs::set_permissions(&full, perms)
+                    .map_err(|e| anyhow::anyhow!("chmod +x {}: {e}", full.display()))?;
             }
 
             Ok(true)
@@ -667,9 +665,7 @@ pub(crate) fn run_structured(
         match d {
             Decision::All(n) => {
                 if all_side.is_some() {
-                    bail!(
-                        "Multiple blanket --keep flags. Use one, or use PATH=NAME per-file."
-                    );
+                    bail!("Multiple blanket --keep flags. Use one, or use PATH=NAME per-file.");
                 }
                 all_side = Some(n);
             }
@@ -695,7 +691,9 @@ pub(crate) fn run_structured(
 
     if target_paths.is_empty() {
         if format == OutputFormat::Json {
-            println!(r#"{{"status":"clean","workspace":"{workspace}","structured":true,"message":"No structured conflicts found."}}"#);
+            println!(
+                r#"{{"status":"clean","workspace":"{workspace}","structured":true,"message":"No structured conflicts found."}}"#
+            );
         } else {
             println!("No structured conflicts found in '{workspace}'.");
         }
@@ -765,9 +763,7 @@ pub(crate) fn run_structured(
             // Non-fatal — the resolution wrote to the worktree; a failed
             // auto-commit just means the user has to `git commit` manually.
             // Surface the reason so agents can react.
-            tracing::warn!(
-                "auto-commit after resolve failed in '{workspace}': {e}"
-            );
+            tracing::warn!("auto-commit after resolve failed in '{workspace}': {e}");
             None
         }
     };
@@ -819,9 +815,9 @@ pub(crate) fn run_structured(
                     "\nAll structured conflicts resolved — workspace is ready for merge. \
                      (auto-commit skipped: run `maw exec {workspace} -- git commit` if needed)"
                 ),
-                None => println!(
-                    "\nAll structured conflicts resolved — workspace is ready for merge."
-                ),
+                None => {
+                    println!("\nAll structured conflicts resolved — workspace is ready for merge.")
+                }
             }
         } else {
             let total_original = tree.conflicts.len() + resolved.len();
@@ -893,10 +889,7 @@ fn auto_commit_resolution(
     }
 
     let msg = if resolved.len() == 1 {
-        format!(
-            "resolve: {} (bn-gjm8 auto-commit)",
-            resolved[0].display()
-        )
+        format!("resolve: {} (bn-gjm8 auto-commit)", resolved[0].display())
     } else {
         format!(
             "resolve: apply structured --keep decisions for {} path(s) in '{workspace}' (bn-gjm8 auto-commit)",
@@ -938,7 +931,7 @@ fn auto_commit_resolution(
 mod tests {
     use super::*;
 
-    use maw_core::model::conflict::{ConflictSide};
+    use maw_core::model::conflict::ConflictSide;
     use maw_core::model::ordering::OrderingKey;
     use maw_core::model::patch::FileId;
     use maw_core::model::types::{EpochId, WorkspaceId};
@@ -972,8 +965,7 @@ mod tests {
 
     #[test]
     fn parse_decisions_parses_all_and_file() {
-        let specs =
-            parse_decisions(&["epoch".into(), "src/main.rs=bn-abc".into()]).unwrap();
+        let specs = parse_decisions(&["epoch".into(), "src/main.rs=bn-abc".into()]).unwrap();
         assert_eq!(specs.len(), 2);
         assert!(matches!(&specs[0], Decision::All(n) if n == "epoch"));
         assert!(matches!(
@@ -1251,8 +1243,13 @@ mod tests {
     #[test]
     fn resolve_structured_keep_epoch_applies_epoch_side() {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-a");
-        let (rel, conflict) =
-            make_content_conflict("src/a.rs", b"EPOCH_CONTENT\n", b"WS_CONTENT\n", "ws-a", &repo);
+        let (rel, conflict) = make_content_conflict(
+            "src/a.rs",
+            b"EPOCH_CONTENT\n",
+            b"WS_CONTENT\n",
+            "ws-a",
+            &repo,
+        );
         // Write initial worktree file with marker soup
         std::fs::create_dir_all(ws_path.join("src")).unwrap();
         std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
@@ -1307,8 +1304,7 @@ mod tests {
     #[test]
     fn resolve_structured_keep_both_concatenates() {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-c");
-        let (rel, conflict) =
-            make_content_conflict("y.rs", b"EPOCH_A\n", b"WS_B\n", "ws-c", &repo);
+        let (rel, conflict) = make_content_conflict("y.rs", b"EPOCH_A\n", b"WS_B\n", "ws-c", &repo);
         std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel.clone(), conflict);
@@ -1342,10 +1338,8 @@ mod tests {
     #[test]
     fn resolve_structured_updates_sidecar_after_keep() {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-d");
-        let (rel_a, c_a) =
-            make_content_conflict("a.rs", b"EPOCH_A\n", b"WS_A\n", "ws-d", &repo);
-        let (rel_b, c_b) =
-            make_content_conflict("b.rs", b"EPOCH_B\n", b"WS_B\n", "ws-d", &repo);
+        let (rel_a, c_a) = make_content_conflict("a.rs", b"EPOCH_A\n", b"WS_A\n", "ws-d", &repo);
+        let (rel_b, c_b) = make_content_conflict("b.rs", b"EPOCH_B\n", b"WS_B\n", "ws-d", &repo);
         std::fs::write(ws_path.join(&rel_a), b"<<<<<<< markers\n").unwrap();
         std::fs::write(ws_path.join(&rel_b), b"<<<<<<< markers\n").unwrap();
 
@@ -1407,10 +1401,8 @@ mod tests {
     #[test]
     fn resolve_structured_list_json_reports_paths() {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-f");
-        let (rel_a, c_a) =
-            make_content_conflict("a.rs", b"E\n", b"W\n", "ws-f", &repo);
-        let (rel_b, c_b) =
-            make_content_conflict("b.rs", b"E\n", b"W\n", "ws-f", &repo);
+        let (rel_a, c_a) = make_content_conflict("a.rs", b"E\n", b"W\n", "ws-f", &repo);
+        let (rel_b, c_b) = make_content_conflict("b.rs", b"E\n", b"W\n", "ws-f", &repo);
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel_a.clone(), c_a);
         tree.conflicts.insert(rel_b.clone(), c_b);
@@ -1468,7 +1460,11 @@ mod tests {
 
         // Seed an initial commit containing a file with marker bytes so
         // HEAD reflects an unresolved state (same shape as post-rebase).
-        std::fs::write(ws_path.join("x.rs"), b"<<<<<<< epoch (current)\nEPOCH\n=======\nWS\n>>>>>>> ws-autocommit\n").unwrap();
+        std::fs::write(
+            ws_path.join("x.rs"),
+            b"<<<<<<< epoch (current)\nEPOCH\n=======\nWS\n>>>>>>> ws-autocommit\n",
+        )
+        .unwrap();
         let add = std::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&ws_path)
@@ -1644,11 +1640,7 @@ mod tests {
         let conflict = Conflict::ModifyDelete {
             path: rel.clone(),
             file_id: FileId::new(7),
-            modifier: ConflictSide::new(
-                EPOCH_LABEL.to_owned(),
-                modifier_oid.clone(),
-                ord("epoch"),
-            ),
+            modifier: ConflictSide::new(EPOCH_LABEL.to_owned(), modifier_oid.clone(), ord("epoch")),
             deleter: ConflictSide::new(
                 "ws-mod-del".to_owned(),
                 base_oid.clone(), // <-- the pre-delete blob, pretending to be "their" content
