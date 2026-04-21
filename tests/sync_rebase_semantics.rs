@@ -91,14 +91,16 @@ fn sync_rebase_preserves_commit_count() {
     repo.add_file("advancer", "unrelated.txt", "advance\n");
     commit_all(&repo, "advancer", "chore: advance");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     let new_epoch = repo.current_epoch();
-    assert_ne!(
-        before_epoch, new_epoch,
-        "setup: epoch should have advanced"
-    );
+    assert_ne!(before_epoch, new_epoch, "setup: epoch should have advanced");
 
     // Rebase alice.
     let out = repo.maw_raw(&["ws", "sync", "alice", "--rebase"]);
@@ -138,7 +140,12 @@ fn sync_rebase_preserves_commit_messages() {
     repo.add_file("advancer", "unrelated.txt", "advance\n");
     commit_all(&repo, "advancer", "chore: advance");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     let new_epoch = repo.current_epoch();
@@ -194,7 +201,12 @@ fn sync_rebase_no_content_drops_on_clean_replay() {
     repo.modify_file("advancer", "untouched.txt", "untouched-after-epoch\n");
     commit_all(&repo, "advancer", "chore: advance epoch");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase alice.
@@ -277,7 +289,12 @@ fn sync_rebase_preserves_executable_bit() {
     repo.add_file("advancer", "unrelated.txt", "advance\n");
     commit_all(&repo, "advancer", "chore: advance");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase alice.
@@ -349,7 +366,12 @@ fn sync_rebase_preserves_symlink() {
     repo.add_file("advancer", "unrelated.txt", "advance\n");
     commit_all(&repo, "advancer", "chore: advance");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     let out = repo.maw_raw(&["ws", "sync", "alice", "--rebase"]);
@@ -434,7 +456,12 @@ fn sync_rebase_merge_commit_regression_372v() {
     repo.add_file("advancer", "shared.txt", "advancer-version\n");
     commit_all(&repo, "advancer", "chore: advance epoch");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase feature.
@@ -509,7 +536,12 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
     repo.modify_file("advancer", "conflicted.txt", "epoch-version\n");
     commit_all(&repo, "advancer", "chore: epoch edits conflicted");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase alice.
@@ -557,9 +589,7 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
     //
     // The sidecar MUST NOT list unrelated.txt (B's unilateral edit is clean).
     if let Some(value) = find_conflict_entry(&sidecar, "unrelated.txt") {
-        panic!(
-            "B's edit to unrelated.txt must not appear in conflict-tree.json; found: {value}"
-        );
+        panic!("B's edit to unrelated.txt must not appear in conflict-tree.json; found: {value}");
     }
 
     // The worktree is in the "unresolved-rebase-markers-committed" state;
@@ -595,15 +625,26 @@ fn rename_followed_by_epoch_modify_preserves_content_at_new_path() {
     commit_all(&repo, "feat", "ws: rename a -> b");
 
     // sanity: the rename really happened in the workspace.
-    assert!(feat_path.join("b.txt").exists(), "setup: b.txt must exist in feat");
-    assert!(!feat_path.join("a.txt").exists(), "setup: a.txt must be gone in feat");
+    assert!(
+        feat_path.join("b.txt").exists(),
+        "setup: b.txt must exist in feat"
+    );
+    assert!(
+        !feat_path.join("a.txt").exists(),
+        "setup: a.txt must be gone in feat"
+    );
 
     // Advance the epoch by modifying a.txt through another workspace.
     repo.maw_ok(&["ws", "create", "advancer"]);
     repo.modify_file("advancer", "a.txt", "hello modified\n");
     commit_all(&repo, "advancer", "default: modify a");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase feat onto the new epoch.
@@ -724,7 +765,12 @@ fn sync_rebase_handles_add_add_conflict() {
     repo.add_file("advancer", "new.txt", "EPOCH_NEW\n");
     commit_all(&repo, "advancer", "epoch: new.txt");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase feat. Must not crash.
@@ -800,7 +846,12 @@ fn sync_rebase_handles_add_add_conflict() {
     repo2.add_file("advancer", "new.txt", "EPOCH_NEW\n");
     commit_all(&repo2, "advancer", "epoch: new.txt");
     repo2.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     let _ = repo2.maw_raw(&["ws", "sync", "feat", "--rebase"]);
@@ -875,7 +926,12 @@ fn rebase_of_merge_with_identical_parent_content_is_clean() {
     repo.modify_file("advancer", "noop.txt", "advanced\n");
     commit_all(&repo, "advancer", "chore: advance");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase feat. The merge commit should replay cleanly — parents converge
@@ -975,17 +1031,19 @@ fn keep_with_unambiguous_parent_side_works() {
     repo.git_in_workspace("feat", &["add", "-A"]);
     repo.git_in_workspace("feat", &["commit", "-m", "B: add other"]);
     repo.git_in_workspace("feat", &["checkout", "--detach", &commit_a_oid]);
-    repo.git_in_workspace(
-        "feat",
-        &["merge", "--no-ff", "sideB", "-m", "merge sideB"],
-    );
+    repo.git_in_workspace("feat", &["merge", "--no-ff", "sideB", "-m", "merge sideB"]);
 
     // Advance epoch to create a real conflict on shared.txt.
     repo.maw_ok(&["ws", "create", "advancer"]);
     repo.modify_file("advancer", "shared.txt", "EPOCH\n");
     commit_all(&repo, "advancer", "chore: epoch edits shared");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Rebase feat. The first commit's overlap produces a normal `feat` vs
@@ -1042,7 +1100,12 @@ fn concurrent_rebase_races_are_serialized() {
     repo.add_file("advancer", "adv.txt", "advance\n");
     commit_all(&repo, "advancer", "chore: advance");
     repo.maw_ok(&[
-        "ws", "merge", "advancer", "--destroy", "--message", "merge advancer",
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
     ]);
 
     // Spawn two `maw ws sync feat --rebase` processes simultaneously.

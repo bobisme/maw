@@ -72,9 +72,7 @@
 
 use tracing::warn;
 
-use super::types::{
-    ChangeKind, ConflictTree, EntryMode, FileChange, MaterializedEntry, PatchSet,
-};
+use super::types::{ChangeKind, ConflictTree, EntryMode, FileChange, MaterializedEntry, PatchSet};
 use crate::model::conflict::{Conflict, ConflictSide};
 use crate::model::types::{EpochId, GitOid};
 
@@ -346,9 +344,7 @@ fn apply_one_to_conflict(
             base,
             sides,
             atoms,
-        } => handle_content(
-            tree, path, file_id, base, sides, atoms, change, workspace,
-        ),
+        } => handle_content(tree, path, file_id, base, sides, atoms, change, workspace),
         Conflict::AddAdd { path, sides } => handle_add_add(tree, path, sides, change),
         Conflict::ModifyDelete {
             path,
@@ -416,10 +412,8 @@ fn handle_content(
                 // We currently default to `Blob` on collapse; executable and
                 // symlink bits conflicted through a content conflict will be
                 // lost until per-side mode is plumbed through.
-                tree.clean.insert(
-                    path,
-                    MaterializedEntry::new(EntryMode::Blob, blob),
-                );
+                tree.clean
+                    .insert(path, MaterializedEntry::new(EntryMode::Blob, blob));
             } else {
                 tree.conflicts.insert(
                     path.clone(),
@@ -477,10 +471,8 @@ fn handle_add_add(
             }
 
             if sides_converged(&sides) {
-                tree.clean.insert(
-                    path,
-                    MaterializedEntry::new(EntryMode::Blob, blob),
-                );
+                tree.clean
+                    .insert(path, MaterializedEntry::new(EntryMode::Blob, blob));
             } else {
                 tree.conflicts
                     .insert(path.clone(), Conflict::AddAdd { path, sides });
@@ -808,8 +800,8 @@ mod tests {
     #[test]
     fn deleted_on_absent_path_is_ignored() {
         let tree = ConflictTree::new(epoch());
-        let result = apply_unilateral_patchset(tree, patch(vec![delete_change("src/ghost.rs")]))
-            .unwrap();
+        let result =
+            apply_unilateral_patchset(tree, patch(vec![delete_change("src/ghost.rs")])).unwrap();
         assert!(result.clean.is_empty());
         assert!(result.conflicts.is_empty());
     }
@@ -842,8 +834,7 @@ mod tests {
             Some(oid('a')),
         );
 
-        let result =
-            apply_unilateral_patchset(tree, patch(vec![delete, modify])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![delete, modify])).unwrap();
 
         assert!(
             !result.clean.contains_key(&PathBuf::from("a.txt")),
@@ -870,15 +861,15 @@ mod tests {
             content_conflict("src/battle.rs", oid('0'), oid('a'), oid('b')),
         );
 
-        let result = apply_unilateral_patchset(
-            tree,
-            patch(vec![modify_change("src/battle.rs", oid('c'))]),
-        )
-        .unwrap();
+        let result =
+            apply_unilateral_patchset(tree, patch(vec![modify_change("src/battle.rs", oid('c'))]))
+                .unwrap();
 
         // Convergence collapses the conflict to clean with the new blob.
         assert!(
-            !result.conflicts.contains_key(&PathBuf::from("src/battle.rs")),
+            !result
+                .conflicts
+                .contains_key(&PathBuf::from("src/battle.rs")),
             "Modified over a 2-way content conflict should converge and collapse"
         );
         let entry = &result.clean[&PathBuf::from("src/battle.rs")];
@@ -912,7 +903,9 @@ mod tests {
 
         // All three sides replaced with 'd' => convergence => clean.
         assert!(
-            !result.conflicts.contains_key(&PathBuf::from("src/three.rs")),
+            !result
+                .conflicts
+                .contains_key(&PathBuf::from("src/three.rs")),
             "convergence should collapse a 3-way conflict too"
         );
         assert_eq!(result.clean[&PathBuf::from("src/three.rs")].oid, oid('d'));
@@ -1106,11 +1099,9 @@ mod tests {
             modify_delete_conflict("src/ambivalent.rs", oid('a'), oid('b')),
         );
 
-        let result = apply_unilateral_patchset(
-            tree,
-            patch(vec![add_change("src/ambivalent.rs", oid('c'))]),
-        )
-        .expect("Added on ModifyDelete must succeed (treated as Modified)");
+        let result =
+            apply_unilateral_patchset(tree, patch(vec![add_change("src/ambivalent.rs", oid('c'))]))
+                .expect("Added on ModifyDelete must succeed (treated as Modified)");
 
         let conflict = &result.conflicts[&PathBuf::from("src/ambivalent.rs")];
         match conflict {

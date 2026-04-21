@@ -327,10 +327,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
 ///
 /// When the `lfs` feature is not compiled into maw-git,
 /// `set_pending_gitattributes` doesn't exist and this is a no-op.
-fn set_pending_attrs_from_resolved(
-    repo: &mut maw_git::GixRepo,
-    resolved: &[ResolvedChange],
-) {
+fn set_pending_attrs_from_resolved(repo: &mut maw_git::GixRepo, resolved: &[ResolvedChange]) {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for change in resolved {
         if let ResolvedChange::Upsert { path, content } = change {
@@ -340,7 +337,11 @@ fn set_pending_attrs_from_resolved(
                     .parent()
                     .map(|p| {
                         let s = p.to_string_lossy().replace('\\', "/");
-                        if s.is_empty() { s.to_string() } else { format!("{s}/") }
+                        if s.is_empty() {
+                            s.to_string()
+                        } else {
+                            format!("{s}/")
+                        }
                     })
                     .unwrap_or_default();
                 entries.push((prefix, content.clone()));
@@ -1269,11 +1270,10 @@ mod tests {
             ws_path: PathBuf,
         ) {
             self.snapshots.insert(name.to_owned(), snapshot);
-            self.statuses
-                .insert(
-                    name.to_owned(),
-                    WorkspaceStatus::new(epoch.into(), vec![], false),
-                );
+            self.statuses.insert(
+                name.to_owned(),
+                WorkspaceStatus::new(epoch.into(), vec![], false),
+            );
             self.paths.insert(name.to_owned(), ws_path);
         }
     }

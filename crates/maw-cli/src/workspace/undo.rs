@@ -47,12 +47,9 @@ pub fn undo(name: &str) -> Result<()> {
     //
     // Mirrors the safety pattern used by `destroy --force` (create.rs) and
     // `merge --destroy` (merge.rs).
-    let capture_result = super::capture::capture_before_destroy(
-        &ws_path,
-        name,
-        status.base_epoch.oid(),
-    )
-    .context("Failed to capture recovery snapshot before undo")?;
+    let capture_result =
+        super::capture::capture_before_destroy(&ws_path, name, status.base_epoch.oid())
+            .context("Failed to capture recovery snapshot before undo")?;
 
     let added_paths = collect_added_paths(&patch_set);
     restore_workspace_to_epoch(&ws_path, &base_epoch)?;
@@ -87,7 +84,10 @@ pub fn undo(name: &str) -> Result<()> {
     if let Some(ref capture) = capture_result {
         let short_oid = &capture.commit_oid.as_str()[..12];
         println!("  Snapshot saved: {short_oid}");
-        println!("  Recover with: maw ws recover --ref {}", capture.pinned_ref);
+        println!(
+            "  Recover with: maw ws recover --ref {}",
+            capture.pinned_ref
+        );
     }
     println!("Next: maw ws touched {name} --format json");
 
@@ -97,9 +97,7 @@ pub fn undo(name: &str) -> Result<()> {
     // already filtered via patch_set.is_empty() above — but be defensive).
     if let Some(ref capture) = capture_result {
         super::capture::emit_recovery_surface(
-            name,
-            capture,
-            None,  // no destroy-record artifact for undo
+            name, capture, None,  // no destroy-record artifact for undo
             false, // no merge commit
             true,  // undo operation succeeded
         );

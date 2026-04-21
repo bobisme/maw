@@ -124,11 +124,7 @@ pub fn run(root: &Path, branch: &str, remote: &str) -> Result<()> {
 /// Return the commit OIDs present in `local` but not in `remote`, capped at
 /// a large sensible limit. For a new branch (`remote` is None), walks the
 /// full history.
-fn commits_to_push(
-    repo: &GixRepo,
-    local: GitOid,
-    remote: Option<GitOid>,
-) -> Result<Vec<GitOid>> {
+fn commits_to_push(repo: &GixRepo, local: GitOid, remote: Option<GitOid>) -> Result<Vec<GitOid>> {
     // Build a simple traversal: BFS from local, stop at remote tip (or at any
     // ancestor of it). This is O(new-commits) and doesn't need full graph
     // rev-list semantics — we just need the set of commits whose trees we
@@ -162,9 +158,7 @@ fn commits_to_push(
         }
         out.push(oid);
         if out.len() > MAX_COMMITS {
-            bail!(
-                "refusing to walk more than {MAX_COMMITS} commits during LFS pre-push scan"
-            );
+            bail!("refusing to walk more than {MAX_COMMITS} commits during LFS pre-push scan");
         }
         let commit = repo
             .read_commit(oid)
@@ -181,10 +175,7 @@ fn commits_to_push(
 
 /// Walk each commit's tree and return a deduped set of `(sha256, size)` pairs
 /// for blobs that are LFS pointers at LFS-tracked paths.
-fn collect_lfs_objects(
-    repo: &GixRepo,
-    commits: &[GitOid],
-) -> Result<Vec<([u8; 32], u64)>> {
+fn collect_lfs_objects(repo: &GixRepo, commits: &[GitOid]) -> Result<Vec<([u8; 32], u64)>> {
     // Dedupe by (sha256, size).
     let mut out: HashMap<[u8; 32], u64> = HashMap::new();
 
@@ -329,10 +320,7 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
-        let head: GitOid = String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .unwrap();
+        let head: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         (dir, head)
     }
 
@@ -380,10 +368,7 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
-        let head: GitOid = String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .unwrap();
+        let head: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         let repo = GixRepo::open(dir.path()).unwrap();
         let commit = repo.read_commit(head).unwrap();
         let mut found = HashMap::new();
@@ -404,10 +389,7 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
-        let head2: GitOid = String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .unwrap();
+        let head2: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         let repo = GixRepo::open(root).unwrap();
         let objs = collect_lfs_objects(&repo, &[head1, head2]).unwrap();
         assert_eq!(objs.len(), 1);
@@ -434,10 +416,7 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
-        let head2: GitOid = String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .unwrap();
+        let head2: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         let repo = GixRepo::open(root).unwrap();
         // Remote is at head1; local is at head2. Should return only [head2].
         let commits = commits_to_push(&repo, head2, Some(head1)).unwrap();

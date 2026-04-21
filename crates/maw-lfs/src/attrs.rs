@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use gix::bstr::BStr;
 use gix::glob::pattern::{Case, Mode as PatternMode};
-use gix::glob::{wildmatch, Pattern};
+use gix::glob::{Pattern, wildmatch};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -127,10 +127,7 @@ impl AttrsMatcher {
     /// attributes blobs directly from the tree. Use this when merging
     /// workspace content: pass the target epoch's tree so the matcher
     /// reflects the `.gitattributes` state *at the merge base*.
-    pub fn from_gix_tree(
-        repo: &gix::Repository,
-        tree: &gix::Tree<'_>,
-    ) -> Result<Self, AttrsError> {
+    pub fn from_gix_tree(repo: &gix::Repository, tree: &gix::Tree<'_>) -> Result<Self, AttrsError> {
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
         collect_gitattributes_from_gix_tree(repo, tree, String::new(), &mut entries)?;
         Self::from_entries(entries)
@@ -345,7 +342,11 @@ fn parse_rules(bytes: &[u8], source_prefix: &str) -> Result<Vec<Rule>, AttrsErro
         }
         let filter = extract_filter_decision(attrs_bytes);
         let merge = extract_merge_decision(attrs_bytes);
-        rules.push(Rule { pattern, filter, merge });
+        rules.push(Rule {
+            pattern,
+            filter,
+            merge,
+        });
     }
     Ok(rules)
 }
@@ -475,9 +476,10 @@ mod tests {
 
     #[test]
     fn simple_pattern_matches() {
-        let dir = tmp_repo_with(&[
-            (".gitattributes", "assets/**/*.png filter=lfs diff=lfs merge=lfs -text\n"),
-        ]);
+        let dir = tmp_repo_with(&[(
+            ".gitattributes",
+            "assets/**/*.png filter=lfs diff=lfs merge=lfs -text\n",
+        )]);
         let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
         assert!(m.is_lfs("assets/hero.png"));
         assert!(m.is_lfs("assets/sub/foo.png"));
@@ -499,10 +501,7 @@ mod tests {
 
     #[test]
     fn later_pattern_overrides_earlier() {
-        let dir = tmp_repo_with(&[(
-            ".gitattributes",
-            "*.png filter=lfs\nlogo.png -filter\n",
-        )]);
+        let dir = tmp_repo_with(&[(".gitattributes", "*.png filter=lfs\nlogo.png -filter\n")]);
         let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
         assert!(m.is_lfs("hero.png"));
         assert!(!m.is_lfs("logo.png"));
@@ -580,7 +579,10 @@ mod tests {
         let dir = tmp_repo_with(&[(".gitattributes", "*.events merge=union\n")]);
         let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
         assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
-        assert_eq!(m.merge_driver("nested/bar.events"), Some("union".to_owned()));
+        assert_eq!(
+            m.merge_driver("nested/bar.events"),
+            Some("union".to_owned())
+        );
         assert_eq!(m.merge_driver("foo.txt"), None);
     }
 
@@ -692,11 +694,15 @@ mod bare_repo_tests {
 
     #[test]
     fn from_entries_assets_glob_star_star() {
-        let entries = vec![
-            ("".to_owned(), b"assets/**/*.bin filter=lfs diff=lfs merge=lfs -text\n*.dat filter=lfs\n".to_vec()),
-        ];
+        let entries = vec![(
+            "".to_owned(),
+            b"assets/**/*.bin filter=lfs diff=lfs merge=lfs -text\n*.dat filter=lfs\n".to_vec(),
+        )];
         let m = AttrsMatcher::from_entries(entries).unwrap();
-        assert!(m.is_lfs("assets/sprites/debug-test.bin"), "assets/**/*.bin should match");
+        assert!(
+            m.is_lfs("assets/sprites/debug-test.bin"),
+            "assets/**/*.bin should match"
+        );
         assert!(m.is_lfs("assets/hero.bin"), "assets/hero.bin should match");
         assert!(m.is_lfs("level.dat"), "*.dat should match");
         assert!(!m.is_lfs("src/main.rs"), "*.rs should not match");

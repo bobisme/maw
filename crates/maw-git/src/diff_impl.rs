@@ -171,12 +171,11 @@ pub fn diff_trees_with_renames(
     let old_tree_ref;
     let old_tree = match old {
         Some(oid) => {
-            old_tree_ref =
-                gix_repo
-                    .find_tree(to_gix_oid(oid))
-                    .map_err(|e| GitError::NotFound {
-                        message: format!("old tree {oid}: {e}"),
-                    })?;
+            old_tree_ref = gix_repo
+                .find_tree(to_gix_oid(oid))
+                .map_err(|e| GitError::NotFound {
+                    message: format!("old tree {oid}: {e}"),
+                })?;
             &old_tree_ref
         }
         None => &empty_tree,

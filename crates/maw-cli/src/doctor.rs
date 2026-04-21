@@ -606,7 +606,14 @@ fn check_lfs_in(root: &Path) -> DoctorCheck {
             continue;
         };
 
-        scan_for_stubs(&ws_path, &ws_path, &matcher, &mut files_checked, &mut stubs, &ws_name);
+        scan_for_stubs(
+            &ws_path,
+            &ws_path,
+            &matcher,
+            &mut files_checked,
+            &mut stubs,
+            &ws_name,
+        );
     }
 
     let stub_count = stubs.len();
@@ -721,7 +728,9 @@ fn scan_for_stubs(
             continue;
         }
         *files_checked += 1;
-        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
         if maw_lfs::looks_like_pointer(&bytes) {
             stubs.push(format!("{ws_name}/{rel_str}"));
         }

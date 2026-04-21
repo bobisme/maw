@@ -155,11 +155,7 @@ impl GitRepo for GixRepo {
     }
 
     #[cfg(feature = "lfs")]
-    fn write_blob_with_path(
-        &self,
-        data: &[u8],
-        rel_path: &str,
-    ) -> Result<GitOid, GitError> {
+    fn write_blob_with_path(&self, data: &[u8], rel_path: &str) -> Result<GitOid, GitError> {
         crate::lfs_clean::write_blob_with_path(self, data, rel_path)
     }
 

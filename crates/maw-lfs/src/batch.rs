@@ -104,7 +104,9 @@ impl BatchClient {
         let mut report = DownloadReport::default();
         for obj in resp.objects {
             let Ok(oid_bytes) = hex_to_oid(&obj.oid) else {
-                report.failed.push((obj.oid.clone(), "bad oid hex".to_owned()));
+                report
+                    .failed
+                    .push((obj.oid.clone(), "bad oid hex".to_owned()));
                 continue;
             };
             if let Some(err) = obj.error {
@@ -146,7 +148,9 @@ impl BatchClient {
         let mut report = UploadReport::default();
         for obj in resp.objects {
             let Ok(oid_bytes) = hex_to_oid(&obj.oid) else {
-                report.failed.push((obj.oid.clone(), "bad oid hex".to_owned()));
+                report
+                    .failed
+                    .push((obj.oid.clone(), "bad oid hex".to_owned()));
                 continue;
             };
             if let Some(err) = obj.error {
@@ -191,9 +195,10 @@ impl BatchClient {
 
         // Try up to 2 times: once without fresh creds, once after reject-and-refetch.
         for attempt in 0..2 {
-            let creds = self.creds.get(&self.host).map_err(|_| {
-                BatchError::NoCreds(self.host.clone())
-            })?;
+            let creds = self
+                .creds
+                .get(&self.host)
+                .map_err(|_| BatchError::NoCreds(self.host.clone()))?;
             let resp = self
                 .http
                 .post(&self.endpoint)
@@ -291,10 +296,7 @@ impl BatchClient {
             }
             let oid_hex: String = oid.iter().map(|b| format!("{b:02x}")).collect();
             let vresp = vreq
-                .json(&VerifyBody {
-                    oid: oid_hex,
-                    size,
-                })
+                .json(&VerifyBody { oid: oid_hex, size })
                 .send()
                 .map_err(|e| BatchError::Http(e.to_string()))?;
             if !vresp.status().is_success() {
@@ -451,8 +453,14 @@ mod tests {
 
     #[test]
     fn extract_host_parses_port() {
-        assert_eq!(extract_host("https://git.example.com:8443/x").unwrap(), "git.example.com");
-        assert_eq!(extract_host("https://github.com/x/y.git").unwrap(), "github.com");
+        assert_eq!(
+            extract_host("https://git.example.com:8443/x").unwrap(),
+            "git.example.com"
+        );
+        assert_eq!(
+            extract_host("https://github.com/x/y.git").unwrap(),
+            "github.com"
+        );
     }
 
     #[test]

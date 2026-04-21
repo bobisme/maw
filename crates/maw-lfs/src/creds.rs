@@ -157,11 +157,21 @@ fn parse_netrc(text: &str) -> Result<Vec<(String, BasicCreds)>, CredsError> {
     while let Some(tok) = tokens.next() {
         match tok {
             "machine" => {
-                flush(&mut cur_machine, &mut cur_login, &mut cur_password, &mut out);
+                flush(
+                    &mut cur_machine,
+                    &mut cur_login,
+                    &mut cur_password,
+                    &mut out,
+                );
                 cur_machine = tokens.next().map(|s| s.to_owned());
             }
             "default" => {
-                flush(&mut cur_machine, &mut cur_login, &mut cur_password, &mut out);
+                flush(
+                    &mut cur_machine,
+                    &mut cur_login,
+                    &mut cur_password,
+                    &mut out,
+                );
                 cur_machine = Some("".to_owned()); // sentinel for default
             }
             "login" => cur_login = tokens.next().map(|s| s.to_owned()),
@@ -176,7 +186,12 @@ fn parse_netrc(text: &str) -> Result<Vec<(String, BasicCreds)>, CredsError> {
             _ => {} // unknown tokens ignored
         }
     }
-    flush(&mut cur_machine, &mut cur_login, &mut cur_password, &mut out);
+    flush(
+        &mut cur_machine,
+        &mut cur_login,
+        &mut cur_password,
+        &mut out,
+    );
     // Remove default-sentinel (we don't apply default-credentials to arbitrary hosts).
     out.retain(|(h, _)| !h.is_empty());
     Ok(out)
@@ -189,7 +204,10 @@ mod tests {
     #[test]
     fn empty_provider_has_no_creds() {
         let mut p = CredentialProvider::empty();
-        assert!(matches!(p.get("example.com"), Err(CredsError::Missing { .. })));
+        assert!(matches!(
+            p.get("example.com"),
+            Err(CredsError::Missing { .. })
+        ));
     }
 
     #[test]

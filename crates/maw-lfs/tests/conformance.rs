@@ -58,10 +58,7 @@ fn git(args: &[&str], cwd: &Path) -> String {
 fn git_raw(args: &[&str], cwd: &Path) -> Vec<u8> {
     let (stdout, stderr, ok) = run("git", args, cwd);
     if !ok {
-        panic!(
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&stderr)
-        );
+        panic!("git {args:?} failed: {}", String::from_utf8_lossy(&stderr));
     }
     stdout
 }
@@ -156,10 +153,7 @@ fn pointer_bytes_match_git_lfs() {
 
         // git-lfs pointer emits the canonical pointer on stdout.
         let lfs_out = git_lfs(
-            &[
-                "pointer",
-                &format!("--file={}", path.to_str().unwrap()),
-            ],
+            &["pointer", &format!("--file={}", path.to_str().unwrap())],
             tmp.path(),
         );
 
@@ -175,7 +169,8 @@ fn pointer_bytes_match_git_lfs() {
         .write();
 
         assert_eq!(
-            maw_bytes, lfs_out,
+            maw_bytes,
+            lfs_out,
             "pointer mismatch for fixture {name:?}\nmaw   : {:?}\nlfs   : {:?}",
             String::from_utf8_lossy(&maw_bytes),
             String::from_utf8_lossy(&lfs_out)
@@ -192,8 +187,16 @@ fn clean_filter_equivalence() {
     skip_if_no_lfs!();
 
     for (name, data) in [
-        ("small", b"the quick brown fox jumps over the lazy dog\n".to_vec()),
-        ("ten_mib", (0..10 * 1024 * 1024u32).map(|i| (i.wrapping_mul(17) % 256) as u8).collect()),
+        (
+            "small",
+            b"the quick brown fox jumps over the lazy dog\n".to_vec(),
+        ),
+        (
+            "ten_mib",
+            (0..10 * 1024 * 1024u32)
+                .map(|i| (i.wrapping_mul(17) % 256) as u8)
+                .collect(),
+        ),
     ] {
         // Path A: git-lfs clean via git add/commit.
         let tmp_a = tempfile::tempdir().unwrap();
@@ -239,7 +242,8 @@ fn clean_filter_equivalence() {
 
         // Cross-check: pointer bytes bit-identical.
         assert_eq!(
-            pointer_bytes_a, pointer_bytes_b,
+            pointer_bytes_a,
+            pointer_bytes_b,
             "[{name}] pointer byte mismatch:\nlfs: {:?}\nmaw: {:?}",
             String::from_utf8_lossy(&pointer_bytes_a),
             String::from_utf8_lossy(&pointer_bytes_b)
@@ -285,7 +289,9 @@ fn clean_filter_equivalence() {
 fn smudge_filter_equivalence() {
     skip_if_no_lfs!();
 
-    let data: Vec<u8> = (0..128 * 1024u32).map(|i| (i.wrapping_mul(7) % 256) as u8).collect();
+    let data: Vec<u8> = (0..128 * 1024u32)
+        .map(|i| (i.wrapping_mul(7) % 256) as u8)
+        .collect();
 
     // Build a repo via git-lfs: this produces a tree with the pointer blob
     // committed and the real object in .git/lfs/objects/.
@@ -384,7 +390,9 @@ fn store_interop_lfs_to_maw() {
     git(&["add", ".gitattributes"], dir);
     git(&["commit", "-q", "-m", "attrs"], dir);
 
-    let data: Vec<u8> = (0..7777u32).map(|i| (i.wrapping_mul(11) % 256) as u8).collect();
+    let data: Vec<u8> = (0..7777u32)
+        .map(|i| (i.wrapping_mul(11) % 256) as u8)
+        .collect();
     fs::write(dir.join("test.bin"), &data).unwrap();
     git(&["add", "test.bin"], dir);
     git(&["commit", "-q", "-m", "blob"], dir);

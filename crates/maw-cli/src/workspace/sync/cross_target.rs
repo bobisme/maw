@@ -14,7 +14,11 @@ pub(super) struct ActiveChangeEpoch {
     pub(super) head_oid: String,
 }
 
-pub(super) fn git_is_ancestor(repo_root: &Path, maybe_ancestor: &str, maybe_descendant: &str) -> Result<bool> {
+pub(super) fn git_is_ancestor(
+    repo_root: &Path,
+    maybe_ancestor: &str,
+    maybe_descendant: &str,
+) -> Result<bool> {
     let output = Command::new("git")
         .args([
             "merge-base",

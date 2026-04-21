@@ -575,10 +575,7 @@ enum PathMergeStrategy {
 }
 
 #[cfg(not(kani))]
-fn path_merge_strategy(
-    path: &Path,
-    attrs: Option<&maw_lfs::AttrsMatcher>,
-) -> PathMergeStrategy {
+fn path_merge_strategy(path: &Path, attrs: Option<&maw_lfs::AttrsMatcher>) -> PathMergeStrategy {
     let Some(matcher) = attrs else {
         return PathMergeStrategy::Diff3;
     };
@@ -592,10 +589,7 @@ fn path_merge_strategy(
 }
 
 #[cfg(kani)]
-fn path_merge_strategy(
-    _path: &Path,
-    _attrs: Option<&maw_lfs::AttrsMatcher>,
-) -> PathMergeStrategy {
+fn path_merge_strategy(_path: &Path, _attrs: Option<&maw_lfs::AttrsMatcher>) -> PathMergeStrategy {
     PathMergeStrategy::Diff3
 }
 
@@ -608,7 +602,7 @@ fn gitattr_driver_merge(
     entries: &[PathEntry],
     strategy: PathMergeStrategy,
 ) -> Result<Option<Vec<u8>>, ResolveError> {
-    use maw_git::merge::{merge_text_with_style, ConflictResolution, MergeResult};
+    use maw_git::merge::{ConflictResolution, MergeResult, merge_text_with_style};
 
     // Need at least 2 entries with content to run a 3-way merge.
     let with_content: Vec<&PathEntry> = entries.iter().filter(|e| e.content.is_some()).collect();

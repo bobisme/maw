@@ -375,7 +375,14 @@ fn create_change(args: &CreateArgs) -> Result<()> {
             None,
         )
     } else {
-        crate::workspace::create::create(&primary_workspace, None, Some(&change_id), false, None, None)
+        crate::workspace::create::create(
+            &primary_workspace,
+            None,
+            Some(&change_id),
+            false,
+            None,
+            None,
+        )
     };
     if let Err(err) = create_primary_result {
         rollback_change_create(&root, &store, &change_id, &branch)?;
@@ -581,9 +588,9 @@ fn resolve_create_source(root: &Path, source_spec: &str) -> Result<ResolvedSourc
         let ws_path = root.join("ws").join(source_spec);
         let repo = maw_git::GixRepo::open(&ws_path)
             .map_err(|e| anyhow::anyhow!("Failed to open workspace '{source_spec}': {e}"))?;
-        let head_oid = repo
-            .rev_parse("HEAD")
-            .map_err(|e| anyhow::anyhow!("Failed to resolve HEAD of workspace '{source_spec}': {e}"))?;
+        let head_oid = repo.rev_parse("HEAD").map_err(|e| {
+            anyhow::anyhow!("Failed to resolve HEAD of workspace '{source_spec}': {e}")
+        })?;
         return Ok(ResolvedSource {
             resolved_ref: head_oid.to_string(),
             fetched_remote: false,
@@ -1756,8 +1763,15 @@ exit 1
             })
             .expect("create change");
 
-            crate::workspace::create::create("bind-extra", None, Some("ch-bind"), false, None, None)
-                .expect("create bound workspace");
+            crate::workspace::create::create(
+                "bind-extra",
+                None,
+                Some("ch-bind"),
+                false,
+                None,
+                None,
+            )
+            .expect("create bound workspace");
 
             let store = store::ChangesStore::open(root);
             let record = store

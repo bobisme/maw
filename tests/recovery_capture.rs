@@ -148,9 +148,7 @@ fn repeated_destroy_cycles_preserve_capture_history() {
     let recover = repo.maw_ok(&["ws", "recover", "repeat-cycle", "--format", "json"]);
     let recover_json: serde_json::Value =
         serde_json::from_str(&recover).expect("ws recover --format json should parse");
-    let destroy_count = recover_json["records"]
-        .as_array()
-        .map_or(0, Vec::len);
+    let destroy_count = recover_json["records"].as_array().map_or(0, Vec::len);
 
     assert!(
         destroy_count >= 2,

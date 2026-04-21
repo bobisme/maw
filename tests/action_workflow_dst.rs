@@ -580,7 +580,10 @@ fn run_action(
             // Skip --check when default is dirty — the check runs a trial
             // merge that may interact with dirty state unpredictably.
             let has_dirty_overlap = ws.tracked_path.as_ref().is_some_and(|path| {
-                state.dirty_default_cases.iter().any(|c| c.path == *path && !c.merged)
+                state
+                    .dirty_default_cases
+                    .iter()
+                    .any(|c| c.path == *path && !c.merged)
             });
             if !has_dirty_overlap {
                 let check = parse_json(
@@ -1025,7 +1028,9 @@ fn run_action(
             repo.add_file(&ws_name, &shared_path, ws_content);
             repo.git_in_workspace(&ws_name, &["add", "-A"]);
             repo.git_in_workspace(&ws_name, &["commit", "-m", &format!("feat: {ws_name}")]);
-            state.tracked_commit_oids.insert(repo.workspace_head(&ws_name));
+            state
+                .tracked_commit_oids
+                .insert(repo.workspace_head(&ws_name));
             state.actors.push(WorkspaceActor {
                 name: ws_name.clone(),
                 tracked_path: Some(shared_path.clone()),
@@ -1038,7 +1043,11 @@ fn run_action(
             // 3. Dirty default's copy (uncommitted).
             // Use content that differs from both base and workspace to force
             // the protection to detect the stash modifying the merge result.
-            repo.add_file("default", &shared_path, "completely different local content\n");
+            repo.add_file(
+                "default",
+                &shared_path,
+                "completely different local content\n",
+            );
 
             state.dirty_default_cases.push(DirtyDefaultCase {
                 path: shared_path.clone(),
@@ -1046,7 +1055,9 @@ fn run_action(
                 resolved: false,
             });
 
-            Ok(format!("dirtied default/{shared_path} (overlaps with {ws_name})"))
+            Ok(format!(
+                "dirtied default/{shared_path} (overlaps with {ws_name})"
+            ))
         }
         ActionKind::ResolveDefault => {
             // Find an unresolved dirty-default case that has been merged.
@@ -1070,7 +1081,10 @@ fn run_action(
 
             // Resolve using "both" — always valid regardless of side labels.
             let resolve_output = repo.maw_ok(&[
-                "ws", "resolve", "default", "--keep",
+                "ws",
+                "resolve",
+                "default",
+                "--keep",
                 &format!("{path}=both"),
             ]);
 

@@ -119,7 +119,14 @@ fn merge_gate_refuses_workspace_with_structured_sidecar_entries() {
 
     // Merge a, advancing the epoch past b
     repo.maw_ok(&[
-        "ws", "merge", "a", "--into", "default", "--destroy", "--message", "merge a",
+        "ws",
+        "merge",
+        "a",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge a",
     ]);
 
     // Rebase b — this creates a structured conflict and writes
@@ -128,7 +135,10 @@ fn merge_gate_refuses_workspace_with_structured_sidecar_entries() {
 
     // Sidecar must be non-empty now.
     let sidecar = repo.read_conflict_tree_sidecar("b");
-    assert!(sidecar.is_some(), "rebase should have written conflict-tree.json");
+    assert!(
+        sidecar.is_some(),
+        "rebase should have written conflict-tree.json"
+    );
     let tree = sidecar.unwrap();
     let conflicts = tree
         .get("conflicts")
@@ -207,7 +217,14 @@ fn merge_gate_refuses_binary_conflict_without_manual_resolve() {
 
     // Merge a first
     repo.maw_ok(&[
-        "ws", "merge", "a", "--into", "default", "--destroy", "--message", "merge a",
+        "ws",
+        "merge",
+        "a",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge a",
     ]);
 
     // Rebase b — binary conflict expected
@@ -273,7 +290,14 @@ fn merge_gate_still_refuses_when_sidecar_lists_a_marker_path() {
     repo.git_in_workspace("beta", &["commit", "-m", "beta"]);
 
     repo.maw_ok(&[
-        "ws", "merge", "alpha", "--into", "default", "--destroy", "--message", "merge alpha",
+        "ws",
+        "merge",
+        "alpha",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge alpha",
     ]);
 
     // beta now stale; rebase produces a conflict on shared.txt.
@@ -330,7 +354,14 @@ fn setup_rebase_conflict(repo: &TestRepo) -> &'static str {
     // Merge alpha into default, advancing the epoch past feat. Destroy
     // alpha so it doesn't clutter the remaining flow.
     repo.maw_ok(&[
-        "ws", "merge", "alpha", "--into", "default", "--destroy", "--message", "merge alpha",
+        "ws",
+        "merge",
+        "alpha",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge alpha",
     ]);
 
     // Rebase feat — conflict produced, sidecar written, HEAD blob is a
@@ -505,13 +536,12 @@ fn merge_gate_tripwire_ignores_legitimate_content() {
                =======\n\
                beta\n\
                >>>>>>> theirs\n";
-    std::fs::write(
-        repo.root().join("ws").join("feat").join("doc.md"),
-        doc,
-    )
-    .unwrap();
+    std::fs::write(repo.root().join("ws").join("feat").join("doc.md"), doc).unwrap();
     repo.git_in_workspace("feat", &["add", "-A"]);
-    repo.git_in_workspace("feat", &["commit", "-m", "release notes with placeholder mention"]);
+    repo.git_in_workspace(
+        "feat",
+        &["commit", "-m", "release notes with placeholder mention"],
+    );
 
     // No sidecar ever written — this workspace is legitimately clean.
     assert!(repo.read_conflict_tree_sidecar("feat").is_none());

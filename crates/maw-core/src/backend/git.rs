@@ -641,7 +641,13 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // with octal escapes like \303\251, breaking PathBuf::from).
         let diff_output = Self::git_stdout_in(
             &ws_path,
-            &["-c", "core.quotePath=false", "diff", "--name-status", &base_oid],
+            &[
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--name-status",
+                &base_oid,
+            ],
         )?;
 
         parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
@@ -650,7 +656,13 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // TODO(gix): replace with GitRepo trait method when untracked file detection is available
         let untracked_output = Self::git_stdout_in(
             &ws_path,
-            &["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"],
+            &[
+                "-c",
+                "core.quotePath=false",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+            ],
         )?;
 
         for line in untracked_output.lines() {

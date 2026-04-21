@@ -179,10 +179,7 @@ impl Store {
                 if total > es {
                     let _ = named.close();
                     return Err(StoreError::ContentMismatch {
-                        expected: expected_oid
-                            .as_ref()
-                            .map(oid_hex)
-                            .unwrap_or_default(),
+                        expected: expected_oid.as_ref().map(oid_hex).unwrap_or_default(),
                         expected_size: es,
                         got: String::new(),
                         got_size: total,
@@ -200,9 +197,7 @@ impl Store {
 
         // Persist keeps the file around. We rename in commit_tmp().
         // Detach from NamedTempFile so its Drop doesn't delete.
-        let (_file, persisted) = named
-            .keep()
-            .map_err(|e| io_err(&tmp_path, e.error))?;
+        let (_file, persisted) = named.keep().map_err(|e| io_err(&tmp_path, e.error))?;
 
         if let (Some(eo), Some(es)) = (expected_oid, expected_size) {
             if oid_bytes != eo || total != es {
@@ -254,8 +249,7 @@ mod tests {
         (tmp, store)
     }
 
-    const HELLO_OID_HEX: &str =
-        "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
+    const HELLO_OID_HEX: &str = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
 
     fn hex_to_oid(hex: &str) -> [u8; 32] {
         let mut out = [0u8; 32];
@@ -414,9 +408,7 @@ mod tests {
         // 10 MiB of pseudo-random-ish bytes.
         let (_tmp, store) = new_store();
         let data: Vec<u8> = (0..10_000_000u32).map(|i| (i % 251) as u8).collect();
-        let (p, size) = store
-            .insert_from_reader(Cursor::new(data.clone()))
-            .unwrap();
+        let (p, size) = store.insert_from_reader(Cursor::new(data.clone())).unwrap();
         assert_eq!(size, data.len() as u64);
         // Round-trip equality.
         let mut out = Vec::new();
@@ -448,7 +440,9 @@ mod tests {
     #[test]
     fn empty_file_is_valid() {
         let (_tmp, store) = new_store();
-        let (p, size) = store.insert_from_reader(Cursor::new(Vec::<u8>::new())).unwrap();
+        let (p, size) = store
+            .insert_from_reader(Cursor::new(Vec::<u8>::new()))
+            .unwrap();
         assert_eq!(size, 0);
         // sha256 of empty: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         assert_eq!(

@@ -118,8 +118,7 @@ pub fn run(
     // placeholder garbage on disk. Emit a clear error instead so the user
     // knows to regenerate the sidecar (e.g. by re-running `maw ws sync
     // --rebase <ws>`).
-    let sidecar_path =
-        super::resolve_structured::structured_sidecar_path(&root, workspace);
+    let sidecar_path = super::resolve_structured::structured_sidecar_path(&root, workspace);
     if sidecar_path.exists() {
         match super::resolve_structured::read_conflict_tree_sidecar(&root, workspace) {
             Some(tree) => {
@@ -188,24 +187,27 @@ pub fn run(
     }
 
     // Find files to process
-    let target_files: Vec<PathBuf> = if !file_sides.is_empty() && all_side.is_none() && block_sides.is_empty() {
-        // Only file-level specs: process just those files
-        file_sides.keys().cloned().collect()
-    } else if !block_sides.is_empty() && all_side.is_none() && file_sides.is_empty() {
-        // Block-level specs only: need a file context. Use paths arg or find all.
-        if !paths.is_empty() {
-            paths.iter().map(PathBuf::from).collect()
+    let target_files: Vec<PathBuf> =
+        if !file_sides.is_empty() && all_side.is_none() && block_sides.is_empty() {
+            // Only file-level specs: process just those files
+            file_sides.keys().cloned().collect()
+        } else if !block_sides.is_empty() && all_side.is_none() && file_sides.is_empty() {
+            // Block-level specs only: need a file context. Use paths arg or find all.
+            if !paths.is_empty() {
+                paths.iter().map(PathBuf::from).collect()
+            } else {
+                find_conflicted_files(&ws_path)?
+            }
         } else {
+            // All or mixed: process all conflicted files
             find_conflicted_files(&ws_path)?
-        }
-    } else {
-        // All or mixed: process all conflicted files
-        find_conflicted_files(&ws_path)?
-    };
+        };
 
     if target_files.is_empty() {
         if format == OutputFormat::Json {
-            println!(r#"{{"status":"clean","workspace":"{workspace}","message":"No conflicted files found."}}"#);
+            println!(
+                r#"{{"status":"clean","workspace":"{workspace}","message":"No conflicted files found."}}"#
+            );
         } else {
             println!("No conflicted files found in '{workspace}'.");
         }
@@ -353,7 +355,12 @@ pub fn run(
 // List conflicts
 // ---------------------------------------------------------------------------
 
-fn list_conflicts(ws_path: &Path, workspace: &str, filter_paths: &[String], format: OutputFormat) -> Result<()> {
+fn list_conflicts(
+    ws_path: &Path,
+    workspace: &str,
+    filter_paths: &[String],
+    format: OutputFormat,
+) -> Result<()> {
     let all_files = find_conflicted_files(ws_path)?;
 
     // If specific paths given, list blocks for those files only
@@ -362,7 +369,10 @@ fn list_conflicts(ws_path: &Path, workspace: &str, filter_paths: &[String], form
     } else {
         let filter_set: std::collections::HashSet<PathBuf> =
             filter_paths.iter().map(PathBuf::from).collect();
-        all_files.into_iter().filter(|f| filter_set.contains(f)).collect()
+        all_files
+            .into_iter()
+            .filter(|f| filter_set.contains(f))
+            .collect()
     };
 
     if format == OutputFormat::Json {
@@ -434,7 +444,10 @@ fn list_conflicts(ws_path: &Path, workspace: &str, filter_paths: &[String], form
             let full = ws_path.join(f);
             let block_count = if let Ok(content) = std::fs::read_to_string(&full) {
                 let chunks = parse_file_conflicts(&content);
-                chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count()
+                chunks
+                    .iter()
+                    .filter(|c| matches!(c, FileChunk::Conflict(_)))
+                    .count()
             } else {
                 0
             };
@@ -455,7 +468,9 @@ fn list_conflicts(ws_path: &Path, workspace: &str, filter_paths: &[String], form
                     println!("To resolve:");
                     println!("  maw ws resolve {workspace} --keep {left}    # keep merged version");
                     println!("  maw ws resolve {workspace} --keep {right}    # keep local edits");
-                    println!("  maw ws resolve {workspace} --keep both    # keep both (concatenated)");
+                    println!(
+                        "  maw ws resolve {workspace} --keep both    # keep both (concatenated)"
+                    );
                 }
             }
         }
@@ -585,11 +600,7 @@ fn find_files_with_new_conflict_markers(ws_path: &Path, base: &str) -> Vec<PathB
         &mut files,
     );
     // Uncommitted changes (staged + unstaged).
-    run_diff_and_collect_marker_files(
-        ws_path,
-        &["diff", "-U0", "--no-color", "HEAD"],
-        &mut files,
-    );
+    run_diff_and_collect_marker_files(ws_path, &["diff", "-U0", "--no-color", "HEAD"], &mut files);
     // Untracked files: scan their full content, since there's no diff base.
     if let Ok(out) = Command::new("git")
         .args([
@@ -706,12 +717,7 @@ fn resolve_workspace_base_ref(ws_path: &Path) -> Option<String> {
     None
 }
 
-
-fn walk_for_conflicts(
-    base: &Path,
-    dir: &Path,
-    results: &mut Vec<PathBuf>,
-) -> Result<()> {
+fn walk_for_conflicts(base: &Path, dir: &Path, results: &mut Vec<PathBuf>) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Ok(()),
@@ -840,7 +846,14 @@ fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
                 if inner.starts_with("<<<<<<<") {
                     // Nested conflict marker — track depth and treat as content.
                     nested_depth += 1;
-                    push_content_line(inner, in_right, in_base, &mut right_content, &mut base_content, &mut left_content);
+                    push_content_line(
+                        inner,
+                        in_right,
+                        in_base,
+                        &mut right_content,
+                        &mut base_content,
+                        &mut left_content,
+                    );
                 } else if inner.starts_with(">>>>>>>") {
                     if nested_depth == 0 {
                         // This is our actual closing marker.
@@ -849,7 +862,14 @@ fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
                     }
                     // Closing a nested marker — treat as content.
                     nested_depth -= 1;
-                    push_content_line(inner, in_right, in_base, &mut right_content, &mut base_content, &mut left_content);
+                    push_content_line(
+                        inner,
+                        in_right,
+                        in_base,
+                        &mut right_content,
+                        &mut base_content,
+                        &mut left_content,
+                    );
                 } else if nested_depth == 0 && inner.starts_with("|||||||") {
                     in_base = true;
                 } else if nested_depth == 0 && inner.starts_with("=======") {
@@ -927,10 +947,7 @@ fn resolve_chunks(
             }
             FileChunk::Conflict(block) => {
                 let block_id = format!("cf-{block_idx}");
-                let side = block_sides
-                    .get(&block_id)
-                    .map(|s| s.as_str())
-                    .or(file_side);
+                let side = block_sides.get(&block_id).map(|s| s.as_str()).or(file_side);
 
                 if let Some(side_name) = side {
                     if side_name == "both" {
@@ -1106,7 +1123,9 @@ mod tests {
     fn parse_keep_spec_file() {
         let specs = parse_keep_specs(&["src/main.rs=bn-2sc3".into()]).unwrap();
         assert_eq!(specs.len(), 1);
-        assert!(matches!(&specs[0], KeepSpec::File(p, n) if p == Path::new("src/main.rs") && n == "bn-2sc3"));
+        assert!(
+            matches!(&specs[0], KeepSpec::File(p, n) if p == Path::new("src/main.rs") && n == "bn-2sc3")
+        );
     }
 
     #[test]
@@ -1118,10 +1137,7 @@ mod tests {
 
     #[test]
     fn parse_keep_spec_mixed() {
-        let specs = parse_keep_specs(&[
-            "cf-0=ws-a".into(),
-            "cf-1=default".into(),
-        ]).unwrap();
+        let specs = parse_keep_specs(&["cf-0=ws-a".into(), "cf-1=default".into()]).unwrap();
         assert_eq!(specs.len(), 2);
         assert!(matches!(&specs[0], KeepSpec::Block(id, _) if id == "cf-0"));
         assert!(matches!(&specs[1], KeepSpec::Block(id, _) if id == "cf-1"));
@@ -1295,7 +1311,10 @@ after";
         // Left comes before right
         let merge_pos = result.find("merge line 1").unwrap();
         let local_pos = result.find("local line 1").unwrap();
-        assert!(merge_pos < local_pos, "left side should come before right side");
+        assert!(
+            merge_pos < local_pos,
+            "left side should come before right side"
+        );
     }
 
     /// Regression test for bn-2wnt (partial-resolution reporting bug).
@@ -1330,19 +1349,22 @@ ddd
         // cf-1 is NOT specified — should remain as markers
         let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
         assert!(result.contains("aaa"), "block 0 alice content missing");
-        assert!(!result.contains("bbb"), "block 0 bob content should be gone");
+        assert!(
+            !result.contains("bbb"),
+            "block 0 bob content should be gone"
+        );
         // block 1 should still have markers
         assert!(result.contains("<<<<<<< alice"), "block 1 marker missing");
         assert!(result.contains("ccc"), "block 1 alice content missing");
         assert!(result.contains("ddd"), "block 1 bob content missing");
-        assert!(result.contains(">>>>>>> bob"), "block 1 closing marker missing");
+        assert!(
+            result.contains(">>>>>>> bob"),
+            "block 1 closing marker missing"
+        );
 
         // Count remaining `<<<<<<<` markers in the resolved output — the run()
         // function uses this exact check to detect partial resolution.
-        let remaining = result
-            .lines()
-            .filter(|l| l.starts_with("<<<<<<<"))
-            .count();
+        let remaining = result.lines().filter(|l| l.starts_with("<<<<<<<")).count();
         assert_eq!(
             remaining, 1,
             "partial resolution should leave exactly 1 marker"
@@ -1375,15 +1397,24 @@ after";
             .iter()
             .filter(|c| matches!(c, FileChunk::Conflict(_)))
             .count();
-        assert_eq!(conflict_count, 2, "parser should see 2 conflict blocks, got {conflict_count}");
+        assert_eq!(
+            conflict_count, 2,
+            "parser should see 2 conflict blocks, got {conflict_count}"
+        );
 
         let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new()).unwrap();
         assert!(
             !result.contains("<<<<<<<"),
             "all markers should be gone in one pass, got:\n{result}"
         );
-        assert!(result.contains("aaa") && result.contains("bbb"), "block 1 missing content:\n{result}");
-        assert!(result.contains("ccc") && result.contains("ddd"), "block 2 missing content:\n{result}");
+        assert!(
+            result.contains("aaa") && result.contains("bbb"),
+            "block 1 missing content:\n{result}"
+        );
+        assert!(
+            result.contains("ccc") && result.contains("ddd"),
+            "block 2 missing content:\n{result}"
+        );
         assert!(result.contains("before") && result.contains("middle") && result.contains("after"));
     }
 
@@ -1440,30 +1471,45 @@ more local code
         let chunks = parse_file_conflicts(content);
 
         // Should be exactly ONE conflict block, not split into pieces.
-        let conflict_count = chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count();
+        let conflict_count = chunks
+            .iter()
+            .filter(|c| matches!(c, FileChunk::Conflict(_)))
+            .count();
         assert_eq!(conflict_count, 1, "should parse as a single conflict block");
 
         // No context chunks should contain >>>>>>>
         for chunk in &chunks {
             if let FileChunk::Context(text) = chunk {
-                assert!(!text.contains(">>>>>>>"),
-                    "context chunk should not contain >>>>>>> marker, got: {text}");
+                assert!(
+                    !text.contains(">>>>>>>"),
+                    "context chunk should not contain >>>>>>> marker, got: {text}"
+                );
             }
         }
 
         // Resolving should not leave any >>>>>>> markers in the output.
         let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new()).unwrap();
-        assert!(!result.contains(">>>>>>> default (local edits)"),
-            "resolved output should not contain trailing >>>>>>> marker");
-        assert!(result.contains("some local code"),
-            "resolved output should contain the local content");
-        assert!(result.contains("more local code"),
-            "resolved output should contain content after nested block");
+        assert!(
+            !result.contains(">>>>>>> default (local edits)"),
+            "resolved output should not contain trailing >>>>>>> marker"
+        );
+        assert!(
+            result.contains("some local code"),
+            "resolved output should contain the local content"
+        );
+        assert!(
+            result.contains("more local code"),
+            "resolved output should contain content after nested block"
+        );
         // The nested conflict markers should be preserved as content.
-        assert!(result.contains("<<<<<<< old-ws"),
-            "nested <<<<<<< should be preserved in content");
-        assert!(result.contains(">>>>>>> default (old conflict)"),
-            "nested >>>>>>> should be preserved in content");
+        assert!(
+            result.contains("<<<<<<< old-ws"),
+            "nested <<<<<<< should be preserved in content"
+        );
+        assert!(
+            result.contains(">>>>>>> default (old conflict)"),
+            "nested >>>>>>> should be preserved in content"
+        );
     }
 
     /// Test that nested markers in the left (merge) side are handled correctly.
@@ -1484,7 +1530,10 @@ original
 local content
 >>>>>>> default (local edits)";
         let chunks = parse_file_conflicts(content);
-        let conflict_count = chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count();
+        let conflict_count = chunks
+            .iter()
+            .filter(|c| matches!(c, FileChunk::Conflict(_)))
+            .count();
         assert_eq!(conflict_count, 1, "should parse as a single conflict block");
 
         let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
@@ -1510,7 +1559,10 @@ after nested
 local side
 >>>>>>> default (local)";
         let chunks = parse_file_conflicts(content);
-        let conflict_count = chunks.iter().filter(|c| matches!(c, FileChunk::Conflict(_))).count();
+        let conflict_count = chunks
+            .iter()
+            .filter(|c| matches!(c, FileChunk::Conflict(_)))
+            .count();
         assert_eq!(conflict_count, 1);
 
         // Verify the left content includes everything up to the real =======
@@ -1569,12 +1621,32 @@ end";
         let root = td.path();
 
         // Init a git repo and commit a baseline file.
-        Command::new("git").args(["init", "-q"]).current_dir(root).status().unwrap();
-        Command::new("git").args(["config", "user.email", "t@t"]).current_dir(root).status().unwrap();
-        Command::new("git").args(["config", "user.name", "t"]).current_dir(root).status().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "t@t"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(root)
+            .status()
+            .unwrap();
         std::fs::write(root.join("seed"), b"seed\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).status().unwrap();
-        Command::new("git").args(["commit", "-qm", "seed"]).current_dir(root).status().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "seed"])
+            .current_dir(root)
+            .status()
+            .unwrap();
 
         // Add a documentation file whose *new* content legitimately contains
         // a `<<<<<<<` line — the kind of file bn-3oau reports on.
@@ -1589,8 +1661,16 @@ end";
             b"<<<<<<< epoch (current)\nE\n=======\nW\n>>>>>>> ws\n",
         )
         .unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).status().unwrap();
-        Command::new("git").args(["commit", "-qm", "conflicts"]).current_dir(root).status().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "conflicts"])
+            .current_dir(root)
+            .status()
+            .unwrap();
 
         // Sanity: without a filter, BOTH files look like they added marker
         // lines (they're genuinely new commits).
@@ -1604,14 +1684,12 @@ end";
         // Filter to only the real conflict — tutorial.md must be dropped.
         let mut sidecar: BTreeSet<PathBuf> = BTreeSet::new();
         sidecar.insert(PathBuf::from("real.rs"));
-        let filtered =
-            find_conflicted_files_filtered(root, Some(&sidecar)).unwrap();
+        let filtered = find_conflicted_files_filtered(root, Some(&sidecar)).unwrap();
         assert_eq!(filtered, vec![PathBuf::from("real.rs")]);
 
         // Filter with an empty set — everything is filtered out.
         let empty: BTreeSet<PathBuf> = BTreeSet::new();
-        let filtered_empty =
-            find_conflicted_files_filtered(root, Some(&empty)).unwrap();
+        let filtered_empty = find_conflicted_files_filtered(root, Some(&empty)).unwrap();
         assert!(
             filtered_empty.is_empty(),
             "empty sidecar filter should drop all paths, got: {filtered_empty:?}"
@@ -1707,7 +1785,7 @@ mod proptest_tests {
         ProptestConfig {
             cases: 256,
             max_shrink_iters: 128,
-            .. ProptestConfig::default()
+            ..ProptestConfig::default()
         }
     }
 

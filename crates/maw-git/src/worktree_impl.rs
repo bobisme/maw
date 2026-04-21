@@ -183,17 +183,14 @@ pub fn worktree_add(
     // then update index stats so git status doesn't show phantom mods.
     #[cfg(feature = "lfs")]
     {
-        let smudged = match crate::checkout_impl::smudge_lfs_pointers_public(
-            &checkout_index,
-            path,
-            repo,
-        ) {
-            Ok(paths) => paths,
-            Err(e) => {
-                tracing::warn!("lfs smudge post-pass failed in worktree_add: {e}");
-                Vec::new()
-            }
-        };
+        let smudged =
+            match crate::checkout_impl::smudge_lfs_pointers_public(&checkout_index, path, repo) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    tracing::warn!("lfs smudge post-pass failed in worktree_add: {e}");
+                    Vec::new()
+                }
+            };
         // Update index stat entries for smudged files, then rewrite.
         for rel_path in &smudged {
             let full = path.join(rel_path);
@@ -214,8 +211,7 @@ pub fn worktree_add(
         }
         if !smudged.is_empty() {
             let index_path = admin_dir.join("index");
-            let mut persisted =
-                gix::index::File::from_state(checkout_index.into(), index_path);
+            let mut persisted = gix::index::File::from_state(checkout_index.into(), index_path);
             let _ = persisted.write(Default::default());
         }
     }

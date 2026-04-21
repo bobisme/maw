@@ -10,9 +10,9 @@
 
 use gix::bstr::ByteSlice;
 use gix::diff::blob::intern::InternedInput;
-use gix::merge::blob::builtin_driver::text::{ConflictStyle, Labels, Options};
-use gix::merge::blob::builtin_driver;
 use gix::merge::blob::Resolution;
+use gix::merge::blob::builtin_driver;
+use gix::merge::blob::builtin_driver::text::{ConflictStyle, Labels, Options};
 
 use crate::error::GitError;
 
@@ -138,15 +138,8 @@ pub fn merge_text_with_style(
     let mut out = Vec::new();
     let mut input = InternedInput::new(&[][..], &[][..]);
 
-    let gix_resolution = builtin_driver::text(
-        &mut out,
-        &mut input,
-        labels,
-        ours,
-        base,
-        theirs,
-        options,
-    );
+    let gix_resolution =
+        builtin_driver::text(&mut out, &mut input, labels, ours, base, theirs, options);
 
     match gix_resolution {
         Resolution::Complete => Ok(MergeResult::Clean(out)),
@@ -300,7 +293,10 @@ mod tests {
             MergeResult::Clean(merged) => {
                 let s = String::from_utf8_lossy(&merged);
                 assert!(s.contains("ours_version"), "expected ours side: {s}");
-                assert!(!s.contains("theirs_version"), "should not contain theirs: {s}");
+                assert!(
+                    !s.contains("theirs_version"),
+                    "should not contain theirs: {s}"
+                );
             }
             MergeResult::Conflict(_) => panic!("ours resolution should not conflict"),
         }

@@ -38,7 +38,9 @@ pub(crate) fn append_operation_with_runtime_checkpoint(
             // checkpoint until the chain is repaired. Log once per workspace
             // per session to avoid spamming every merge.
             let ws_name = workspace_id.as_str();
-            let mut guard = DAMAGED_OPLOG_WARNED.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = DAMAGED_OPLOG_WARNED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let seen = guard.get_or_insert_with(HashSet::new);
             if seen.insert(ws_name.to_owned()) {
                 eprintln!(
@@ -76,10 +78,9 @@ fn maybe_checkpoint_after_append(
     workspace_id: &WorkspaceId,
     trigger_oid: &GitOid,
 ) -> Result<(), CheckpointAppendError> {
-    let view = materialize_from_checkpoint(root, workspace_id, |oid| {
-        read_patch_set_blob(root, oid)
-    })
-    .map_err(|e| classify_checkpoint_error(&e, e.to_string()))?;
+    let view =
+        materialize_from_checkpoint(root, workspace_id, |oid| read_patch_set_blob(root, oid))
+            .map_err(|e| classify_checkpoint_error(&e, e.to_string()))?;
 
     maybe_write_checkpoint(
         root,
@@ -115,8 +116,8 @@ pub(crate) fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid workspace name '{name}': {e}"))?;
 
     let head_ref = refs::workspace_head_ref(ws_id.as_str());
-    let current_head = refs::read_ref(&root, &head_ref)
-        .with_context(|| format!("reading {head_ref}"))?;
+    let current_head =
+        refs::read_ref(&root, &head_ref).with_context(|| format!("reading {head_ref}"))?;
 
     let Some(old_head_oid) = current_head else {
         println!(
@@ -149,8 +150,7 @@ pub(crate) fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
 
     // 2. Delete the workspace head ref. The next op appended for this
     //    workspace will start a fresh chain.
-    refs::delete_ref(&root, &head_ref)
-        .with_context(|| format!("deleting {head_ref}"))?;
+    refs::delete_ref(&root, &head_ref).with_context(|| format!("deleting {head_ref}"))?;
 
     // 3. Clear the "already warned" set so if the chain gets corrupted
     //    again in this session, the user sees a fresh warning.
@@ -199,9 +199,7 @@ pub(crate) fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
             .count();
         if stale_count > 0 {
             println!();
-            println!(
-                "  Note: {stale_count} other ref(s) also point at the old head blob."
-            );
+            println!("  Note: {stale_count} other ref(s) also point at the old head blob.");
         }
     }
 

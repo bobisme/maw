@@ -112,9 +112,7 @@ impl Pointer {
 
             match key {
                 "oid" => {
-                    let hex = value
-                        .strip_prefix("sha256:")
-                        .ok_or(ParseError::BadOid)?;
+                    let hex = value.strip_prefix("sha256:").ok_or(ParseError::BadOid)?;
                     if hex.len() != 64 {
                         return Err(ParseError::BadOid);
                     }
@@ -163,8 +161,13 @@ impl Pointer {
         }
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut out =
-            String::with_capacity(VERSION_PREFIX.len() + keyed.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>());
+        let mut out = String::with_capacity(
+            VERSION_PREFIX.len()
+                + keyed
+                    .iter()
+                    .map(|(k, v)| k.len() + v.len() + 2)
+                    .sum::<usize>(),
+        );
         out.push_str("version ");
         out.push_str(VERSION_URL);
         out.push('\n');
@@ -215,8 +218,7 @@ pub fn looks_like_pointer(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    const SAMPLE_OID_HEX: &str =
-        "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
+    const SAMPLE_OID_HEX: &str = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
     const SAMPLE_SIZE: u64 = 12345;
 
     fn sample_oid() -> [u8; 32] {
@@ -273,7 +275,10 @@ mod tests {
     #[test]
     fn too_large_rejected() {
         let huge = vec![b'a'; MAX_POINTER_BYTES + 1];
-        assert!(matches!(Pointer::parse(&huge), Err(ParseError::TooLarge(_))));
+        assert!(matches!(
+            Pointer::parse(&huge),
+            Err(ParseError::TooLarge(_))
+        ));
     }
 
     #[test]
@@ -309,10 +314,7 @@ mod tests {
 
     #[test]
     fn missing_version_rejected() {
-        let bytes = format!(
-            "oid sha256:{}\nsize {}\n",
-            SAMPLE_OID_HEX, SAMPLE_SIZE
-        );
+        let bytes = format!("oid sha256:{}\nsize {}\n", SAMPLE_OID_HEX, SAMPLE_SIZE);
         assert_eq!(
             Pointer::parse(bytes.as_bytes()),
             Err(ParseError::BadVersion)
@@ -379,7 +381,10 @@ mod tests {
             SAMPLE_OID_HEX, SAMPLE_SIZE
         );
         let p = Pointer::parse(bytes.as_bytes()).unwrap();
-        assert_eq!(p.extensions, vec![("extra".to_owned(), "value-x".to_owned())]);
+        assert_eq!(
+            p.extensions,
+            vec![("extra".to_owned(), "value-x".to_owned())]
+        );
         let out = p.write();
         let expected = format!(
             "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{}\nsize {}\n",
@@ -448,7 +453,11 @@ mod interop_tests {
             let lo = hex_digit(hex.as_bytes()[i * 2 + 1]).unwrap();
             oid[i] = (hi << 4) | lo;
         }
-        let p = Pointer { oid, size: 12, extensions: vec![] };
+        let p = Pointer {
+            oid,
+            size: 12,
+            extensions: vec![],
+        };
         let out = p.write();
         let expected = b"version https://git-lfs.github.com/spec/v1\noid sha256:a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447\nsize 12\n";
         assert_eq!(out, expected);

@@ -596,8 +596,7 @@ mod tests {
 
     #[test]
     fn materialized_entry_serde_roundtrip() {
-        let entry =
-            MaterializedEntry::new(EntryMode::Blob, GitOid::new(&"f".repeat(40)).unwrap());
+        let entry = MaterializedEntry::new(EntryMode::Blob, GitOid::new(&"f".repeat(40)).unwrap());
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: MaterializedEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, entry);

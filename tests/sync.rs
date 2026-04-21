@@ -452,8 +452,14 @@ fn sync_rebase_preserves_multiple_commits_after_multiple_epoch_advances() {
     );
 
     // Both local files survive.
-    assert_eq!(repo.read_file("feature", "a.txt").as_deref(), Some("commit 1\n"));
-    assert_eq!(repo.read_file("feature", "b.txt").as_deref(), Some("commit 2\n"));
+    assert_eq!(
+        repo.read_file("feature", "a.txt").as_deref(),
+        Some("commit 1\n")
+    );
+    assert_eq!(
+        repo.read_file("feature", "b.txt").as_deref(),
+        Some("commit 2\n")
+    );
 
     // Both epoch files present.
     assert!(repo.read_file("feature", "epoch1.txt").is_some());

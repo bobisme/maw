@@ -142,14 +142,12 @@ pub fn diff_patchset(
 ) -> Result<PatchSet, DiffExtractError> {
     // Resolve the to-side tree.
     let to_git = core_to_git_oid(to_oid)?;
-    let to_commit = repo
-        .read_commit(to_git)
-        .map_err(|e| match e {
-            GitError::NotFound { .. } => DiffExtractError::InvalidOid {
-                spec: to_oid.as_str().to_owned(),
-            },
-            other => DiffExtractError::RepoError(other),
-        })?;
+    let to_commit = repo.read_commit(to_git).map_err(|e| match e {
+        GitError::NotFound { .. } => DiffExtractError::InvalidOid {
+            spec: to_oid.as_str().to_owned(),
+        },
+        other => DiffExtractError::RepoError(other),
+    })?;
     let to_tree = to_commit.tree_oid;
 
     // Resolve the from-side tree. A zero OID ⇒ diff against the empty tree
@@ -529,7 +527,11 @@ mod tests {
         // A rename must surface TWO changes: Deleted(old) + Modified(new).
         // Both share the same FileId (derived from the old blob) so
         // downstream identity tracking can follow the move (bn-3525).
-        assert_eq!(ps.change_count(), 2, "expected rename to emit delete+modify, got {ps:?}");
+        assert_eq!(
+            ps.change_count(),
+            2,
+            "expected rename to emit delete+modify, got {ps:?}"
+        );
 
         let del = ps
             .changes
@@ -573,7 +575,11 @@ mod tests {
 
         let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
         // Rename + edit also surfaces TWO changes.
-        assert_eq!(ps.change_count(), 2, "expected rename+edit to emit delete+modify, got {ps:?}");
+        assert_eq!(
+            ps.change_count(),
+            2,
+            "expected rename+edit to emit delete+modify, got {ps:?}"
+        );
 
         let del = ps
             .changes

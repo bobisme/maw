@@ -151,11 +151,7 @@ pub trait GitRepo {
     ///
     /// Always safe to call in place of `write_blob` when the caller has a
     /// repo-relative path at hand.
-    fn write_blob_with_path(
-        &self,
-        data: &[u8],
-        rel_path: &str,
-    ) -> Result<GitOid, GitError> {
+    fn write_blob_with_path(&self, data: &[u8], rel_path: &str) -> Result<GitOid, GitError> {
         let _ = rel_path;
         self.write_blob(data)
     }

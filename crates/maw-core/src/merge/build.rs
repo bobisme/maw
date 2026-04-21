@@ -206,8 +206,7 @@ pub fn build_merge_commit(
     for change in &sorted {
         match change {
             ResolvedChange::Upsert { path, content } => {
-                let blob_oid =
-                    write_blob_at(repo, content, &path.to_string_lossy())?;
+                let blob_oid = write_blob_at(repo, content, &path.to_string_lossy())?;
                 // Regular file mode. We preserve original mode if the file
                 // already exists in the tree; otherwise use 100644.
                 let mode = tree

@@ -98,9 +98,7 @@ fn history_includes_workspace_lifecycle_events_after_restore() {
     let recover = repo.maw_ok(&["ws", "recover", "hist-a", "--format", "json"]);
     let recover_json: serde_json::Value =
         serde_json::from_str(&recover).expect("ws recover --format json should be valid JSON");
-    let destroy_records = recover_json["records"]
-        .as_array()
-        .map_or(0, Vec::len);
+    let destroy_records = recover_json["records"].as_array().map_or(0, Vec::len);
     assert!(
         destroy_records >= 1,
         "recovery surface should retain a destroy record from the destroyed instance"

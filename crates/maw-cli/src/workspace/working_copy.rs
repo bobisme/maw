@@ -779,8 +779,7 @@ pub(crate) fn replay_snapshot_with_merge_protection(
             continue;
         }
 
-        let base_content = read_file_at_commit(ws_path, anchor_epoch, path)
-            .unwrap_or_default();
+        let base_content = read_file_at_commit(ws_path, anchor_epoch, path).unwrap_or_default();
 
         // Ensure parent directories exist.
         if let Some(parent) = full.parent() {
@@ -878,7 +877,7 @@ fn merge_text_three_way(
     theirs_label: &str,
     driver: Option<&str>,
 ) -> Result<(Vec<u8>, bool)> {
-    use maw_git::merge::{merge_text_with_style, resolution_for_driver, MergeResult};
+    use maw_git::merge::{MergeResult, merge_text_with_style, resolution_for_driver};
 
     let Some(resolution) = resolution_for_driver(driver) else {
         // `merge=binary` (or `-text`) — no text merge, always a conflict.
@@ -925,7 +924,13 @@ fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> 
     // Primary: git stash show --include-untracked captures all stash content
     // including untracked files (third parent).
     let show_output = Command::new("git")
-        .args(["stash", "show", "--include-untracked", "--name-only", stash_oid])
+        .args([
+            "stash",
+            "show",
+            "--include-untracked",
+            "--name-only",
+            stash_oid,
+        ])
         .current_dir(ws_path)
         .output()
         .context("failed to run git stash show")?;

@@ -7,7 +7,9 @@ use maw_core::model::types::{GitOid, WorkspaceId};
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::types::{OpPayload, Operation};
 
-use super::{get_backend, metadata, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root};
+use super::{
+    get_backend, metadata, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
+};
 
 /// Describe (label) the current state of a workspace with a human-readable message.
 ///

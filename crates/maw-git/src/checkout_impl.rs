@@ -151,8 +151,7 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     // stat info in the in-memory index but does not persist it.
     {
         let index_path = repo.repo.index_path();
-        let mut persisted =
-            gix::index::File::from_state(index_file.into(), index_path);
+        let mut persisted = gix::index::File::from_state(index_file.into(), index_path);
         persisted
             .write(Default::default())
             .map_err(|e| GitError::BackendError {
@@ -181,8 +180,8 @@ pub fn lfs_smudge_worktree_at(ws_path: &Path, target_commit: &str) -> Result<(),
 
     // Resolve the target commit to its tree. This is the tree we WANT on
     // disk, which may differ from HEAD if checkout failed.
-    let target_oid = gix::ObjectId::from_hex(target_commit.as_bytes())
-        .map_err(|e| GitError::BackendError {
+    let target_oid =
+        gix::ObjectId::from_hex(target_commit.as_bytes()).map_err(|e| GitError::BackendError {
             message: format!("bad target OID '{target_commit}': {e}"),
         })?;
 
@@ -200,7 +199,14 @@ pub fn lfs_smudge_worktree_at(ws_path: &Path, target_commit: &str) -> Result<(),
             if let Ok(tree) = repo.repo.find_tree(tid) {
                 let attrs = maw_lfs::AttrsMatcher::from_workdir(ws_path)
                     .unwrap_or_else(|_| maw_lfs::AttrsMatcher::empty());
-                restore_missing_lfs_from_tree(&repo, &tree, ws_path, &attrs, String::new(), &mut restored);
+                restore_missing_lfs_from_tree(
+                    &repo,
+                    &tree,
+                    ws_path,
+                    &attrs,
+                    String::new(),
+                    &mut restored,
+                );
             }
         }
     }
@@ -350,11 +356,10 @@ fn smudge_lfs_pointers(
 
     let mut smudged: Vec<String> = Vec::new();
 
-    let attrs = maw_lfs::AttrsMatcher::from_workdir(workdir).map_err(|e| {
-        GitError::BackendError {
+    let attrs =
+        maw_lfs::AttrsMatcher::from_workdir(workdir).map_err(|e| GitError::BackendError {
             message: format!("lfs attrs: {e}"),
-        }
-    })?;
+        })?;
 
     // Open (or create) the LFS store under the git dir.
     let git_dir = repo.repo.git_dir();
@@ -453,16 +458,12 @@ fn smudge_lfs_pointers(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode_bits =
-                    if entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE {
-                        0o755
-                    } else {
-                        0o644
-                    };
-                std::fs::set_permissions(
-                    &tmp_path,
-                    std::fs::Permissions::from_mode(mode_bits),
-                )?;
+                let mode_bits = if entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE {
+                    0o755
+                } else {
+                    0o644
+                };
+                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode_bits))?;
             }
 
             std::fs::rename(&tmp_path, &full_path)?;

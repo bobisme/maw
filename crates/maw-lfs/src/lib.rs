@@ -28,5 +28,5 @@ pub use attrs::AttrsMatcher;
 pub use batch::BatchClient;
 pub use creds::CredentialProvider;
 pub use error::LfsError;
-pub use pointer::{looks_like_pointer, Pointer};
+pub use pointer::{Pointer, looks_like_pointer};
 pub use store::Store;

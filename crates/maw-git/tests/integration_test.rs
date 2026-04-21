@@ -1140,11 +1140,7 @@ fn count_dirty_tracked_ignores_mtime_skew_when_content_matches() {
 /// Build a linear chain: commit each tree-entry produced by `files[i]` on top
 /// of the previous, starting from the single-commit `setup_repo_with_commit`
 /// baseline. Returns the list of produced commit OIDs in order (oldest first).
-fn build_linear_chain(
-    repo: &GixRepo,
-    base: GitOid,
-    files: &[(&str, &[u8])],
-) -> Vec<GitOid> {
+fn build_linear_chain(repo: &GixRepo, base: GitOid, files: &[(&str, &[u8])]) -> Vec<GitOid> {
     let mut parent = base;
     let mut out = Vec::new();
     for (name, content) in files {
@@ -1317,8 +1313,14 @@ fn walk_commits_from_not_ancestor_of_to() {
     let walk = repo.walk_commits(commit_a, commit_b2, true).unwrap();
     assert!(walk.contains(&commit_b1));
     assert!(walk.contains(&commit_b2));
-    assert!(!walk.contains(&base), "base is reachable from commit_a, must be excluded");
-    assert!(!walk.contains(&commit_a), "commit_a itself must be excluded");
+    assert!(
+        !walk.contains(&base),
+        "base is reachable from commit_a, must be excluded"
+    );
+    assert!(
+        !walk.contains(&commit_a),
+        "commit_a itself must be excluded"
+    );
 }
 
 // ===========================================================================
@@ -1329,7 +1331,9 @@ fn walk_commits_from_not_ancestor_of_to() {
 fn diff_trees_with_renames_pure_rename_100pct() {
     // Same blob OID at old path and new path — pure rename.
     let (_dir, repo) = setup_repo();
-    let blob = repo.write_blob(b"the quick brown fox jumps over the lazy dog\n").unwrap();
+    let blob = repo
+        .write_blob(b"the quick brown fox jumps over the lazy dog\n")
+        .unwrap();
 
     let old_tree = repo
         .write_tree(&[TreeEntry {
@@ -1349,7 +1353,11 @@ fn diff_trees_with_renames_pure_rename_100pct() {
     let diff = repo
         .diff_trees_with_renames(Some(old_tree), new_tree, 100)
         .unwrap();
-    assert_eq!(diff.len(), 1, "expected a single rename entry, got {diff:?}");
+    assert_eq!(
+        diff.len(),
+        1,
+        "expected a single rename entry, got {diff:?}"
+    );
     let e = &diff[0];
     assert_eq!(e.path, "bar.txt");
     match &e.change_type {
@@ -1484,8 +1492,12 @@ line ten longer here\n";
 fn diff_trees_with_renames_heavy_edit_no_rename() {
     // <50% similar content → delete + add even at 50pct threshold.
     let (_dir, repo) = setup_repo();
-    let old_blob = repo.write_blob(b"completely different original content here\n").unwrap();
-    let new_blob = repo.write_blob(b"totally unrelated brand new text goes here\n").unwrap();
+    let old_blob = repo
+        .write_blob(b"completely different original content here\n")
+        .unwrap();
+    let new_blob = repo
+        .write_blob(b"totally unrelated brand new text goes here\n")
+        .unwrap();
 
     let old_tree = repo
         .write_tree(&[TreeEntry {

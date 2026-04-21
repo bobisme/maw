@@ -107,7 +107,11 @@ fn create_with_output(
     // Write workspace metadata (mode + optional template defaults + description).
     // Keep the common case lean: if mode is ephemeral and no template is set
     // and no description, metadata is omitted and defaults are inferred.
-    if persistent || template_profile.is_some() || bound_change_id.is_some() || description.is_some() {
+    if persistent
+        || template_profile.is_some()
+        || bound_change_id.is_some()
+        || description.is_some()
+    {
         let meta = metadata::WorkspaceMetadata {
             mode,
             template,

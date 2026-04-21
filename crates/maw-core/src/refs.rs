@@ -122,8 +122,8 @@ pub fn workspace_owned_refs(workspace_name: &str) -> Vec<String> {
         workspace_state_ref(workspace_name), // refs/manifold/ws/<name>
         workspace_epoch_ref(workspace_name), // refs/manifold/epoch/ws/<name>
         workspace_head_ref(workspace_name),  // refs/manifold/head/<name>
-        // Future additions go here — automatically covered by destroy,
-        // doctor, audit, ref GC, and invariant tests.
+                                             // Future additions go here — automatically covered by destroy,
+                                             // doctor, audit, ref GC, and invariant tests.
     ]
 }
 

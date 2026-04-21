@@ -76,11 +76,12 @@ pub fn write_blob_with_path(
     let store = maw_lfs::Store::open(git_dir).map_err(|e| GitError::BackendError {
         message: format!("lfs store: {e}"),
     })?;
-    let (pointer, _size) = store
-        .insert_from_reader(Cursor::new(data))
-        .map_err(|e| GitError::BackendError {
-            message: format!("lfs store insert: {e}"),
-        })?;
+    let (pointer, _size) =
+        store
+            .insert_from_reader(Cursor::new(data))
+            .map_err(|e| GitError::BackendError {
+                message: format!("lfs store insert: {e}"),
+            })?;
     let pointer_bytes = pointer.write();
     crate::objects_impl::write_blob(repo, &pointer_bytes)
 }

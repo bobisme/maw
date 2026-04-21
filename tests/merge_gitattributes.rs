@@ -10,11 +10,13 @@ use manifold_common::TestRepo;
 
 /// Set up a repo with a `.gitattributes` file and seed an initial file so
 /// the merge base has known content.
-fn seed_repo_with_gitattributes(repo: &TestRepo, attrs_content: &str, seed_file: &str, seed_content: &str) {
-    repo.seed_files(&[
-        (".gitattributes", attrs_content),
-        (seed_file, seed_content),
-    ]);
+fn seed_repo_with_gitattributes(
+    repo: &TestRepo,
+    attrs_content: &str,
+    seed_file: &str,
+    seed_content: &str,
+) {
+    repo.seed_files(&[(".gitattributes", attrs_content), (seed_file, seed_content)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -24,12 +26,7 @@ fn seed_repo_with_gitattributes(repo: &TestRepo, attrs_content: &str, seed_file:
 #[test]
 fn merge_union_concatenates_both_sides_without_markers() {
     let repo = TestRepo::new();
-    seed_repo_with_gitattributes(
-        &repo,
-        "*.log merge=union\n",
-        "events.log",
-        "header\n",
-    );
+    seed_repo_with_gitattributes(&repo, "*.log merge=union\n", "events.log", "header\n");
 
     // Two workspaces append different events.
     repo.maw_ok(&["ws", "create", "alice"]);
@@ -84,12 +81,7 @@ fn merge_union_concatenates_both_sides_without_markers() {
 #[test]
 fn merge_union_handles_three_workspaces() {
     let repo = TestRepo::new();
-    seed_repo_with_gitattributes(
-        &repo,
-        "*.log merge=union\n",
-        "events.log",
-        "header\n",
-    );
+    seed_repo_with_gitattributes(&repo, "*.log merge=union\n", "events.log", "header\n");
 
     for (ws, line) in &[("alice", "A"), ("bob", "B"), ("carol", "C")] {
         repo.maw_ok(&["ws", "create", ws]);
@@ -197,12 +189,7 @@ fn merge_union_preserves_base_content() {
 #[test]
 fn merge_binary_produces_conflict_when_both_sides_differ() {
     let repo = TestRepo::new();
-    seed_repo_with_gitattributes(
-        &repo,
-        "*.db merge=binary\n",
-        "data.db",
-        "v1\n",
-    );
+    seed_repo_with_gitattributes(&repo, "*.db merge=binary\n", "data.db", "v1\n");
 
     repo.maw_ok(&["ws", "create", "a"]);
     repo.add_file("a", "data.db", "va\n");
@@ -230,12 +217,7 @@ fn merge_binary_clean_when_only_one_side_changes() {
     // If one side equals base, the resolve phase's hash-equality short-circuit
     // kicks in before the binary driver — so the other side wins cleanly.
     let repo = TestRepo::new();
-    seed_repo_with_gitattributes(
-        &repo,
-        "*.db merge=binary\n",
-        "data.db",
-        "v1\n",
-    );
+    seed_repo_with_gitattributes(&repo, "*.db merge=binary\n", "data.db", "v1\n");
 
     // a modifies; b leaves data.db alone (but touches something else so the
     // workspace has a commit).
@@ -341,10 +323,7 @@ fn files_without_merge_driver_still_use_diff3() {
 fn bones_events_files_with_merge_union_concatenate() {
     let repo = TestRepo::new();
     repo.seed_files(&[
-        (
-            ".gitattributes",
-            ".bones/events/*.events merge=union\n",
-        ),
+        (".gitattributes", ".bones/events/*.events merge=union\n"),
         (
             ".bones/events/2026-04.events",
             "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n",

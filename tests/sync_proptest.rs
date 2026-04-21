@@ -26,7 +26,11 @@ use proptest::prelude::*;
 fn advance_epoch(repo: &TestRepo, tag: &str, idx: usize) {
     let name = format!("adv-{tag}-{idx}");
     repo.maw_ok(&["ws", "create", &name]);
-    repo.add_file(&name, &format!("epoch_{tag}_{idx}.txt"), &format!("epoch {tag} {idx}\n"));
+    repo.add_file(
+        &name,
+        &format!("epoch_{tag}_{idx}.txt"),
+        &format!("epoch {tag} {idx}\n"),
+    );
     repo.git_in_workspace(&name, &["add", "-A"]);
     repo.git_in_workspace(&name, &["commit", "-m", &format!("advance {tag} {idx}")]);
     repo.maw_ok(&[

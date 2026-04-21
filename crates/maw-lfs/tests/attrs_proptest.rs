@@ -15,7 +15,7 @@ fn pt_config() -> ProptestConfig {
     ProptestConfig {
         cases: 256,
         max_shrink_iters: 64,
-        .. ProptestConfig::default()
+        ..ProptestConfig::default()
     }
 }
 

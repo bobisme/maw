@@ -274,10 +274,8 @@ const MARKER_SEP: &str = "=======";
 /// add generic marker patterns like `<<<<<<<` — that's exactly the false
 /// positive that bn-m6ad fixed. If materialize grows a new placeholder
 /// variant, update this list to match.
-pub const TOOL_PLACEHOLDER_PREFIXES: &[&[u8]] = &[
-    b"# structured conflict at ",
-    b"# BINARY CONFLICT at ",
-];
+pub const TOOL_PLACEHOLDER_PREFIXES: &[&[u8]] =
+    &[b"# structured conflict at ", b"# BINARY CONFLICT at "];
 
 /// Return `true` if `content` starts with any byte sequence in
 /// [`TOOL_PLACEHOLDER_PREFIXES`].
@@ -331,11 +329,12 @@ fn read_side_blob(
                 oid: oid.clone(),
                 reason: e.to_string(),
             })?;
-    repo.read_blob(git_oid).map_err(|e| MaterializeError::ReadBlob {
-        path: path.to_path_buf(),
-        oid: oid.clone(),
-        reason: e.to_string(),
-    })
+    repo.read_blob(git_oid)
+        .map_err(|e| MaterializeError::ReadBlob {
+            path: path.to_path_buf(),
+            oid: oid.clone(),
+            reason: e.to_string(),
+        })
 }
 
 /// Render a [`Conflict::Content`] atom collection as a diff3-style markers
@@ -414,7 +413,12 @@ fn render_content_conflict(
 
     // Intermediate sides (sides[1 .. N-1]) get their own marker block so that
     // multi-way conflicts still have one labelled block per workspace.
-    for (i, side) in sides.iter().enumerate().skip(1).take(sides.len().saturating_sub(2)) {
+    for (i, side) in sides
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(sides.len().saturating_sub(2))
+    {
         out.extend_from_slice(MARKER_SEP.as_bytes());
         out.push(b'\n');
         push_with_trailing_newline(&mut out, &side_bytes[i]);
@@ -472,9 +476,7 @@ fn render_binary_content_conflict(
         )
         .as_bytes(),
     );
-    out.extend_from_slice(
-        b"# Pick a side with: maw ws resolve <workspace> --keep <side-name>\n",
-    );
+    out.extend_from_slice(b"# Pick a side with: maw ws resolve <workspace> --keep <side-name>\n");
     for side in sides {
         out.extend_from_slice(
             format!("# side: {}  @  {}\n", side.workspace, side.content).as_bytes(),
@@ -545,7 +547,12 @@ fn render_add_add_conflict(
     out.push(b'\n');
     // (no base — empty segment)
 
-    for (i, side) in sides.iter().enumerate().skip(1).take(sides.len().saturating_sub(2)) {
+    for (i, side) in sides
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(sides.len().saturating_sub(2))
+    {
         out.extend_from_slice(MARKER_SEP.as_bytes());
         out.push(b'\n');
         push_with_trailing_newline(&mut out, &side_bytes[i]);
@@ -584,11 +591,13 @@ fn render_modify_delete_conflict(
     let modifier_bytes = read_side_blob(repo, path, modified_content)?;
 
     let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(format!("# modify/delete conflict at {}\n", path.display()).as_bytes());
     out.extend_from_slice(
-        format!("# modify/delete conflict at {}\n", path.display()).as_bytes(),
-    );
-    out.extend_from_slice(
-        format!("# modifier: {} @ {}\n", modifier.workspace, modifier.content).as_bytes(),
+        format!(
+            "# modifier: {} @ {}\n",
+            modifier.workspace, modifier.content
+        )
+        .as_bytes(),
     );
     out.extend_from_slice(
         format!("# deleter:  {} @ {}\n", deleter.workspace, deleter.content).as_bytes(),
@@ -608,9 +617,7 @@ fn render_modify_delete_conflict(
     // "what was there before the delete" anchor.
     out.extend_from_slice(MARKER_SEP.as_bytes());
     out.push(b'\n');
-    out.extend_from_slice(
-        format!("(deleted by {})\n", deleter.workspace).as_bytes(),
-    );
+    out.extend_from_slice(format!("(deleted by {})\n", deleter.workspace).as_bytes());
     out.extend_from_slice(marker_close(&deleter.workspace).as_bytes());
     out.push(b'\n');
 
@@ -682,17 +689,9 @@ pub fn materialize(
                 deleter,
                 modified_content,
                 ..
-            } => render_modify_delete_conflict(
-                repo,
-                path,
-                modifier,
-                deleter,
-                modified_content,
-            )?,
+            } => render_modify_delete_conflict(repo, path, modifier, deleter, modified_content)?,
             Conflict::DivergentRename { .. } => {
-                return Err(MaterializeError::UnsupportedDivergentRename {
-                    path: path.clone(),
-                });
+                return Err(MaterializeError::UnsupportedDivergentRename { path: path.clone() });
             }
         };
 
@@ -850,9 +849,7 @@ pub fn write_legacy_sidecar(
 
     for (path, conflict) in &tree.conflicts {
         match conflict {
-            Conflict::Content {
-                base, sides, ..
-            } => {
+            Conflict::Content { base, sides, .. } => {
                 // V1: ours/theirs are OID identifiers (see schema doc above).
                 // Take the first two sides — the legacy schema only has two
                 // "ours"/"theirs" slots. For 3+ sides the first two win;
@@ -955,12 +952,7 @@ mod tests {
     }
 
     fn ord(ws: &str) -> OrderingKey {
-        OrderingKey::new(
-            epoch(),
-            WorkspaceId::new(ws).unwrap(),
-            1,
-            1_700_000_000_000,
-        )
+        OrderingKey::new(epoch(), WorkspaceId::new(ws).unwrap(), 1, 1_700_000_000_000)
     }
 
     fn side(ws: &str, content: GitOid) -> ConflictSide {
@@ -1209,8 +1201,13 @@ mod tests {
         );
         // ... and we emit a BINARY CONFLICT banner instead of pretending
         // the bytes are text between the markers.
-        let head = std::str::from_utf8(&content[..content.iter().position(|&b| b == 0).unwrap_or(content.len())])
-            .unwrap_or("");
+        let head = std::str::from_utf8(
+            &content[..content
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(content.len())],
+        )
+        .unwrap_or("");
         assert!(
             head.contains("BINARY CONFLICT"),
             "binary-conflict banner expected in header; got head:\n{head}"
@@ -1406,12 +1403,7 @@ mod tests {
                 file_id: FileId::new(1),
                 base: Some(base_oid),
                 sides: vec![side("alice", a_oid), side("bob", b_oid)],
-                atoms: vec![ConflictAtom::line_overlap(
-                    10,
-                    20,
-                    vec![],
-                    "overlap",
-                )],
+                atoms: vec![ConflictAtom::line_overlap(10, 20, vec![], "overlap")],
             },
         );
 
@@ -1479,10 +1471,7 @@ mod tests {
         // /tmp/repo/ws/foo -> /tmp/repo/.manifold/artifacts/ws/foo
         let ws = PathBuf::from("/tmp/repo/ws/foo");
         let got = sidecar_dir_for(&ws);
-        assert_eq!(
-            got,
-            PathBuf::from("/tmp/repo/.manifold/artifacts/ws/foo")
-        );
+        assert_eq!(got, PathBuf::from("/tmp/repo/.manifold/artifacts/ws/foo"));
     }
 
     // -----------------------------------------------------------------------
@@ -1554,7 +1543,10 @@ mod tests {
         let battle = by_path.get("src/battle.rs").unwrap();
         assert_eq!(battle.base.as_deref(), Some(&*format!("blob:{}", oid('0'))));
         assert_eq!(battle.ours.as_deref(), Some(&*format!("blob:{}", oid('a'))));
-        assert_eq!(battle.theirs.as_deref(), Some(&*format!("blob:{}", oid('b'))));
+        assert_eq!(
+            battle.theirs.as_deref(),
+            Some(&*format!("blob:{}", oid('b')))
+        );
 
         let new = by_path.get("src/new.rs").unwrap();
         assert_eq!(new.base, None);
