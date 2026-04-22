@@ -21,6 +21,10 @@ jobs:
 
       - name: Publish crates to crates.io
         run: |
+          # Derive the version from the pushed tag (strip leading 'v').
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Publishing workspace crates at version $VERSION"
+
           wait_for_crate() {
             crate="$1"
             version="$2"
@@ -35,12 +39,22 @@ jobs:
             return 1
           }
 
+          # Dependency order:
+          #   maw-lfs     (no workspace deps)
+          #   maw-git     (depends on maw-lfs)
+          #   maw-core    (depends on maw-git)
+          #   maw-assurance (no workspace deps; optional dep of root)
+          #   maw-workspaces (root; depends on all of the above)
+          # maw-cli has publish = false (binary crate, installed via source).
+          # maw-tui is not currently published.
+          cargo publish -p maw-lfs
+          wait_for_crate maw-lfs "$VERSION"
           cargo publish -p maw-git
-          wait_for_crate maw-git 0.54.0
+          wait_for_crate maw-git "$VERSION"
           cargo publish -p maw-core
-          wait_for_crate maw-core 0.54.0
+          wait_for_crate maw-core "$VERSION"
           cargo publish -p maw-assurance
-          wait_for_crate maw-assurance 0.54.0
-          cargo publish
+          wait_for_crate maw-assurance "$VERSION"
+          cargo publish -p maw-workspaces
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

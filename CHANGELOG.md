@@ -2,6 +2,17 @@
 
 All notable changes to maw.
 
+## v0.60.1 — CI: fix crates.io publish workflow
+
+Patch release that corrects the publish workflow so v0.60.0 can actually reach crates.io.
+
+- Add `maw-lfs` to the publish order (it's a required dep of `maw-git` via the default `lfs` feature).
+- Use the pushed git tag (`GITHUB_REF_NAME`) to derive the version dynamically instead of the hardcoded `0.54.0`.
+- Target the root crate explicitly via `cargo publish -p maw-workspaces` at the final step.
+- Add publish metadata (description, license, repository, keywords, categories) to `maw-assurance` so it can publish.
+
+No library or binary behavior change since v0.60.0.
+
 ## v0.60.0 — Structured-conflict rebase engine (bn-gjm8)
 
 Major refactor: `maw ws sync --rebase` now routes through the structured-conflict merge engine in `maw-core::merge` instead of a `git cherry-pick` loop. Closes a multi-commit fidelity gap where consecutive conflicts became order-sensitive, and eliminates 18 `Command::new("git")` shell-outs in `sync/rebase.rs`. Validated across 6 rounds of adversarial testing; 21 bones closed.

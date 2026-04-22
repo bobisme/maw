@@ -2,6 +2,11 @@
 name = "maw-assurance"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Formal-verification primitives for maw — oracle, model, and Stateright integration"
+keywords = ["verification", "stateright", "model-checking", "maw"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
