@@ -2,6 +2,78 @@
 
 All notable changes to maw.
 
+## v0.60.0 — Structured-conflict rebase engine (bn-gjm8)
+
+Major refactor: `maw ws sync --rebase` now routes through the structured-conflict merge engine in `maw-core::merge` instead of a `git cherry-pick` loop. Closes a multi-commit fidelity gap where consecutive conflicts became order-sensitive, and eliminates 18 `Command::new("git")` shell-outs in `sync/rebase.rs`. Validated across 6 rounds of adversarial testing; 21 bones closed.
+
+### Core engine — `maw-core::merge`
+
+- **`ConflictTree` + `MaterializedEntry`** (bn-3m2q, Phase 1): a tree where some paths are clean `(mode, oid)` entries and others are structured `Conflict` values, threaded between rebase iterations. Preserves executable bit, symlinks, and submodule mode across replay.
+- **`apply_unilateral_patchset`** (bn-1n4i, Phase 2): per-iteration patch application over all `Conflict` variants (`Content`, `AddAdd`, `ModifyDelete`, `DivergentRename`). V1 semantics: "unilateral patch replaces each side"; convergence collapses back to clean.
+- **`diff_patchset`** (bn-1lvo, Phase 3): historical patch extraction using rename-aware `diff_trees`. Emits `FileChange::with_identity` carrying blob OID + stable `FileId` so the merge engine can match renames across iterations.
+- **`materialize`** (bn-11b0, Phase 4): renders a `ConflictTree` to a final tree of entries + new blobs. For conflicted paths, inlines each side's actual blob bytes into diff3 markers with correct side labels. Writes both a structured `conflict-tree.json` sidecar and a legacy `rebase-conflicts.json` projection.
+
+### `GitRepo` surface — `maw-git`
+
+- **`walk_commits(from, to, reverse)`** — gix-backed rev-walk with `from..to` semantics.
+- **`diff_trees_with_renames(old, new, similarity_pct)`** — gix rewrite detection; the existing `ChangeType::Renamed { from }` variant is finally populated.
+- **`set_head(oid)`** — detached-HEAD advancement without a `git checkout` shell-out.
+
+### Rebase integration — `sync/rebase.rs`
+
+- Pipeline: `walk_commits` → per-commit `diff_patchset` → `apply_unilateral_patchset` → `materialize` → `create_commit`, chaining parents to preserve commit count + original commit messages.
+- Merge-commit preservation (bn-7mbe): replayed merges keep ≥2 parents.
+- Merge-side convergence (bn-2ras): when all sides agree byte-for-byte, no phantom conflict is installed. `--keep <name>` matches by unambiguous prefix so `--keep feat` resolves to `feat#merge-parent-N` when unambiguous.
+- Rename + epoch-modify (bn-3525): follows the rename, content lands at the new path (git ort-equivalent).
+- Submodule gitlinks (bn-3hqg): treated as opaque entries, preserved across rebase.
+- Workspace-level flock (bn-1d1g): `maw ws sync --rebase` acquires `.manifold/locks/rebase/<ws>.lock`; concurrent invocations on the same workspace fail-fast with a clear message.
+- Binary files (bn-ad5z): text-unsafe blobs render a clearly-marked placeholder that the merge gate refuses unless resolved.
+
+### Merge gate — sidecar-authoritative
+
+- `maw ws merge` no longer greps for `<<<<<<<` in workspace worktrees. The gate is driven by `conflict-tree.json` (structured) + `rebase-conflicts.json` (legacy). A workspace is "conflicted" iff a sidecar says so (bn-m6ad, bn-3pgl). Legitimate content containing marker syntax (tutorials, fixtures, docs) merges cleanly.
+- Tamper-resistance tripwire (bn-28d1): the gate also refuses to merge any workspace whose HEAD tree contains a blob starting with tool-authored placeholder bytes (`# structured conflict at ` / `# BINARY CONFLICT at `). Force-immune. Deleting or emptying the sidecars cannot bypass this.
+
+### Resolve — `maw ws resolve` (bn-3rah)
+
+- When `conflict-tree.json` is present, resolve reads structured conflicts directly. `--keep epoch` / `--keep <ws-name>` / `--keep both` write the chosen side's blob content from the sidecar instead of parsing textual markers.
+- Auto-commit on full resolution (bn-2cc1): when `--keep` clears the last sidecar entry, resolve commits the resolution. Downstream merge no longer reports "ready but refuses".
+- `--keep both` on `ModifyDelete` (bn-2pry) no longer silently resurrects the pre-delete base content.
+- Symlink conflict resolution (bn-mg0j) restores the `120000` mode via `std::os::unix::fs::symlink`.
+- Legacy sidecar fallback preserved unchanged for pre-0.60 workspaces.
+- Corrupt sidecar (bn-24tl) bails with a clear "regenerate via sync --rebase" message instead of leaving placeholder junk.
+- Help text cleaned up (bn-2gex): the unimplemented `cf-N=NAME` per-atom syntax is gone.
+
+### Safety / Prime Invariant
+
+- `maw ws undo` (bn-6cs4) now pins a recovery snapshot under `refs/manifold/recovery/` before restoring to base epoch; matches the safety pattern used by `destroy --force` and `merge --destroy`.
+- `capture_before_destroy` (bn-3mpx): stash-create returning `None` on dirty paths is no longer conflated with "nothing to preserve". Distinguishes "all dirty paths are uncapturable embedded repos" (OK to proceed) from "capturable paths refused" (abort).
+- Destroy-record timestamps bumped to nanosecond precision (bn-2dy4); rapid back-to-back destroys of the same workspace no longer collide.
+- Executable bit preservation on rebase of newly-added files (bn-2o1y, bn-nsz0).
+
+### Operating-model documentation
+
+AGENTS.md gained a "Operating Model: Conflicts Are Data, Not Errors" section codifying the jj-style model maw follows: operations succeed even when they produce conflicts; the conflict rides with the workspace as structured data until `resolve` picks a side.
+
+### Tests
+
+- `tests/sync_rebase_semantics.rs` (bn-28rd, Phase 7): semantics preservation + narrow fidelity property (unilateral edit on an unrelated path does not corrupt a pre-existing structured conflict).
+- `tests/merge_gate_sidecar.rs`: the sidecar-authoritative gate + tamper-resistance tripwire.
+- `tests/submodule.rs`: rebase passes submodule gitlinks through without crashing.
+- Concurrent rebase integration test locks in the bn-1d1g fail-fast contract.
+
+### Polish
+
+- Structured logging / error handling sweep across `capture.rs`, `destroy_record.rs`, `sync/rebase.rs`, `sync/checks.rs`, `advance.rs` (bn-2dy4, bn-2bow, bn-2blj, bn-3pkx, bn-lc1j): silent `let _ = Command::new("git").output()` failures on state-mutating operations now emit `tracing::warn!`.
+- `stash_apply` failure during merge replay (bn-1psp) returns an error instead of silently losing non-overlapping local edits.
+- `sync --rebase` of merge commits (bn-372v) no longer silently drops content.
+- `relabel_conflict_markers` (bn-lc1j) surfaces read/write errors.
+- `repo_root_from_worktree` (bn-2bow) validates the derived root contains `ws/` or `.manifold/`.
+
+### Migration
+
+No user action required. Workspaces rebased by 0.59 or earlier continue to work via the legacy sidecar path. After rebasing with 0.60, both sidecar formats are written; `maw ws resolve` prefers the structured one.
+
 ## v0.59.3
 
 ### Fixed — `maw status --status-bar` false dirty counts after mtime skew (bn-3o8k)

@@ -2,7 +2,7 @@
 members = [".", "crates/maw-git", "crates/maw-lfs", "crates/maw-core", "crates/maw-cli", "crates/maw-tui", "crates/maw-assurance"]
 
 [workspace.package]
-version = "0.59.3"
+version = "0.60.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/bobisme/maw"
@@ -44,10 +44,10 @@ proptests = []
 kani-slow = []
 
 [dependencies]
-maw-core = { path = "crates/maw-core", version = "0.59.3" }
-maw-git = { path = "crates/maw-git", version = "0.59.3", features = ["lfs"] }
-maw-lfs = { path = "crates/maw-lfs", version = "0.59.3" }
-maw-assurance = { path = "crates/maw-assurance", version = "0.59.3", optional = true }
+maw-core = { path = "crates/maw-core", version = "0.60.0" }
+maw-git = { path = "crates/maw-git", version = "0.60.0", features = ["lfs"] }
+maw-lfs = { path = "crates/maw-lfs", version = "0.60.0" }
+maw-assurance = { path = "crates/maw-assurance", version = "0.60.0", optional = true }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
 anyhow = "1"
