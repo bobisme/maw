@@ -24,9 +24,10 @@
 //!   resolve step.
 
 use std::fmt;
-use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::str::FromStr;
+
+use maw_git::{GitRepo, GixRepo, RefName};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::file_id::FileIdMap;
@@ -200,22 +201,30 @@ fn collect_one<B: WorkspaceBackend>(
     let capacity = snapshot.change_count();
     let mut changes = Vec::with_capacity(capacity);
 
+    // Open gix-backed repos once for all hot-path operations. Both can fail
+    // gracefully — the helpers fall back to safe defaults when a repo is
+    // unavailable, preserving prior CLI-era resilience.
+    let root_repo = GixRepo::open(repo_root).ok();
+    let ws_repo = GixRepo::open(&ws_path).ok();
+
     // Check if workspace HEAD has advanced beyond the epoch. If so, the
     // workspace has committed changes and we should read blobs from HEAD
     // (which holds pointer bytes for LFS files) rather than the working tree
     // (which holds smudged binary content).
-    let ws_has_commits = ws_head_differs_from_epoch(&ws_path, &epoch);
+    let ws_has_commits = ws_repo
+        .as_ref()
+        .is_some_and(|r| ws_head_differs_from_epoch(r, &epoch));
 
     // Added files: read content, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
         let Some(content) =
-            read_committed_or_workspace_file(&ws_path, path, ws_id, ws_has_commits)?
+            read_committed_or_workspace_file(ws_repo.as_ref(), &ws_path, path, ws_id, ws_has_commits)?
         else {
             // Ignore directory entries (for example untracked nested git dirs)
             // that can appear in porcelain outputs as "path/".
             continue;
         };
-        let blob = git_hash_object(repo_root, &content);
+        let blob = root_repo.as_ref().and_then(|r| git_hash_object(r, &content));
         // Assign a fresh FileId for new files. The FileIdMap for the epoch
         // won't have an entry yet; the FileId is minted here and would be
         // persisted by the workspace's oplog in a full implementation.
@@ -232,13 +241,13 @@ fn collect_one<B: WorkspaceBackend>(
     // Modified files: read current content, look up existing FileId, compute blob OID.
     for path in &snapshot.modified {
         let Some(content) =
-            read_committed_or_workspace_file(&ws_path, path, ws_id, ws_has_commits)?
+            read_committed_or_workspace_file(ws_repo.as_ref(), &ws_path, path, ws_id, ws_has_commits)?
         else {
             // Ignore non-file paths to keep collect robust against directory-only
             // workspace entries.
             continue;
         };
-        let blob = git_hash_object(repo_root, &content);
+        let blob = root_repo.as_ref().and_then(|r| git_hash_object(r, &content));
         // Modified files existed in the epoch, so their FileId is in the map.
         let file_id = file_id_map.id_for_path(path);
         changes.push(FileChange::with_identity(
@@ -268,9 +277,12 @@ fn collect_one<B: WorkspaceBackend>(
     // `workspace_creation_epoch()` finds the original epoch by computing the
     // merge-base of the workspace HEAD with the current epoch ref. This is
     // the commit the workspace was initially created from.
-    let creation_epoch = workspace_creation_epoch(repo_root, &ws_path, &epoch);
+    let creation_epoch = workspace_creation_epoch(root_repo.as_ref(), &epoch);
     for path in &snapshot.deleted {
-        if !path_exists_at_commit(repo_root, &creation_epoch, path) {
+        if !root_repo
+            .as_ref()
+            .is_some_and(|r| path_exists_at_commit(r, &creation_epoch, path))
+        {
             // File doesn't exist at the workspace's creation epoch — it was
             // added after this workspace was created. Not a real deletion.
             continue;
@@ -295,57 +307,55 @@ fn collect_one<B: WorkspaceBackend>(
 /// which is wrong for the phantom-deletion filter when the agent has committed
 /// deletions.
 ///
-/// This function computes `git merge-base HEAD <epoch>` inside the workspace
-/// to find the fork point — the original creation epoch. Falls back to `epoch`
-/// (the workspace HEAD from status) when:
-/// - The merge-base command fails (e.g. non-git backend)
-/// - HEAD equals the epoch (no agent commits)
-fn workspace_creation_epoch(repo_root: &Path, ws_path: &Path, ws_head: &EpochId) -> EpochId {
-    // Read the current epoch ref from the repo root.
-    let epoch_ref_output = Command::new("git")
-        .args(["rev-parse", "refs/manifold/epoch/current"])
-        .current_dir(repo_root)
-        .output();
+/// Computes `merge_base(ws_head, current_epoch)` to find the fork point — the
+/// original creation epoch. Falls back to `ws_head` when:
+/// - The repo is unavailable
+/// - The epoch ref does not exist
+/// - HEAD equals the current epoch (no agent commits)
+/// - The merge-base lookup fails
+fn workspace_creation_epoch(root_repo: Option<&GixRepo>, ws_head: &EpochId) -> EpochId {
+    let Some(repo) = root_repo else {
+        return ws_head.clone();
+    };
 
-    let current_epoch_oid = match epoch_ref_output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        _ => return ws_head.clone(), // No epoch ref → fall back to ws HEAD
+    // Read the current epoch ref from the bare repo's ref store.
+    let epoch_ref =
+        RefName::new("refs/manifold/epoch/current").expect("static ref name is valid");
+    let current_epoch = match repo.read_ref(&epoch_ref) {
+        Ok(Some(oid)) => oid,
+        _ => return ws_head.clone(),
     };
 
     // If HEAD already equals the current epoch, no agent commits were made.
-    if ws_head.as_str() == current_epoch_oid {
+    if ws_head.as_str() == current_epoch.to_string() {
         return ws_head.clone();
     }
 
-    // Compute merge-base(HEAD, current_epoch) inside the workspace.
-    let mb_output = Command::new("git")
-        .args(["merge-base", "HEAD", &current_epoch_oid])
-        .current_dir(ws_path)
-        .output();
-
-    match mb_output {
-        Ok(out) if out.status.success() => {
-            let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            EpochId::new(&oid_str).unwrap_or_else(|_| ws_head.clone())
-        }
-        _ => ws_head.clone(), // merge-base failed → fall back to ws HEAD
+    // Compute merge-base(ws_head, current_epoch). Refs are shared with the
+    // workspace worktree, so we can use the bare repo here.
+    let Ok(head_oid) = maw_git::GitOid::from_str(ws_head.as_str()) else {
+        return ws_head.clone();
+    };
+    match repo.merge_base(head_oid, current_epoch) {
+        Ok(Some(mb)) => EpochId::new(&mb.to_string()).unwrap_or_else(|_| ws_head.clone()),
+        _ => ws_head.clone(),
     }
 }
 
 /// Check whether a file path exists in a given git commit's tree.
 ///
-/// Uses `git cat-file -e <commit>:<path>` which exits 0 if the object exists
-/// and non-zero otherwise. This is fast (no data transfer) and works for any
-/// tree-ish.
-fn path_exists_at_commit(repo_root: &Path, commit: &EpochId, path: &Path) -> bool {
-    let rev = format!("{}:{}", commit.as_str(), path.display());
-    Command::new("git")
-        .args(["cat-file", "-e", &rev])
-        .current_dir(repo_root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+/// Uses gix rev-parse on `<commit>:<path>` — resolves to the blob OID if the
+/// path exists at that commit, or `None` otherwise. Returns false on any
+/// failure (repo error, non-UTF-8 path) so the phantom-deletion filter
+/// degrades safely.
+fn path_exists_at_commit(repo: &GixRepo, commit: &EpochId, path: &Path) -> bool {
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    matches!(
+        repo.rev_parse_opt(&format!("{}:{path_str}", commit.as_str())),
+        Ok(Some(_))
+    )
 }
 
 /// Read file content for the merge, preferring committed blobs when the
@@ -361,15 +371,17 @@ fn path_exists_at_commit(repo_root: &Path, commit: &EpochId, path: &Path) -> boo
 /// When `ws_has_commits` is false, all changes are uncommitted working-tree
 /// edits, so we read directly from disk.
 fn read_committed_or_workspace_file(
+    ws_repo: Option<&GixRepo>,
     ws_path: &Path,
     rel_path: &Path,
     ws_id: &WorkspaceId,
     ws_has_commits: bool,
 ) -> Result<Option<Vec<u8>>, CollectError> {
-    if ws_has_commits {
-        if let Some(blob) = read_committed_blob(ws_path, rel_path) {
-            return Ok(Some(blob));
-        }
+    if ws_has_commits
+        && let Some(repo) = ws_repo
+        && let Some(blob) = read_committed_blob(repo, rel_path)
+    {
+        return Ok(Some(blob));
     }
     // Fallback: workspace has no commits, or file not in HEAD (uncommitted).
     read_workspace_file(ws_path, rel_path, ws_id)
@@ -380,41 +392,23 @@ fn read_committed_or_workspace_file(
 /// Returns `true` if the workspace has committed changes (HEAD != epoch),
 /// meaning we should read from the committed tree rather than the working
 /// tree to avoid LFS smudge contamination.
-fn ws_head_differs_from_epoch(ws_path: &Path, epoch: &EpochId) -> bool {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let head_oid = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            head_oid != epoch.as_str()
-        }
+fn ws_head_differs_from_epoch(ws_repo: &GixRepo, epoch: &EpochId) -> bool {
+    match ws_repo.rev_parse_opt("HEAD") {
+        Ok(Some(head)) => head.to_string() != epoch.as_str(),
         _ => false,
     }
 }
 
-/// Read a blob from `HEAD:<rel_path>` in the workspace worktree at `ws_path`.
+/// Read a blob from `HEAD:<rel_path>` in the workspace worktree.
 ///
-/// Returns `None` if the file is not in the HEAD tree (e.g., untracked) or
-/// if the git command fails for any reason.
-fn read_committed_blob(ws_path: &Path, rel_path: &Path) -> Option<Vec<u8>> {
+/// Returns `None` if the file is not in the HEAD tree (e.g., untracked), if
+/// the path is not valid UTF-8, or if any gix lookup fails.
+fn read_committed_blob(ws_repo: &GixRepo, rel_path: &Path) -> Option<Vec<u8>> {
     let path_str = rel_path.to_str()?;
-    let rev = format!("HEAD:{path_str}");
-    let output = Command::new("git")
-        .args(["cat-file", "blob", &rev])
-        .current_dir(ws_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(output.stdout)
-    } else {
-        None
-    }
+    let oid = ws_repo
+        .rev_parse_opt(&format!("HEAD:{path_str}"))
+        .ok()??;
+    ws_repo.read_blob(oid).ok()
 }
 
 /// Read the current content of a file from a workspace's working tree.
@@ -442,32 +436,12 @@ fn read_workspace_file(
 
 /// Write `content` to the git object store and return its blob OID.
 ///
-/// Runs `git hash-object -w --stdin` in `repo_root`. Returns `None` on any
-/// failure (git unavailable, I/O error, invalid OID output) — callers treat
-/// a missing blob OID as a degraded-mode fallback, not a hard error.
-fn git_hash_object(repo_root: &Path, content: &[u8]) -> Option<GitOid> {
-    let mut child = Command::new("git")
-        .args(["hash-object", "-w", "--stdin"])
-        .current_dir(repo_root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    // Write content to stdin; ignore broken-pipe errors.
-    if let Some(stdin) = child.stdin.take() {
-        let mut stdin = stdin;
-        let _ = stdin.write_all(content);
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let hex = String::from_utf8(output.stdout).ok()?;
-    GitOid::new(hex.trim()).ok()
+/// Returns `None` on any failure (write_blob error, OID round-trip failure)
+/// — callers treat a missing blob OID as a degraded-mode fallback, not a
+/// hard error.
+fn git_hash_object(repo: &GixRepo, content: &[u8]) -> Option<GitOid> {
+    let oid = repo.write_blob(content).ok()?;
+    GitOid::new(&oid.to_string()).ok()
 }
 
 // ---------------------------------------------------------------------------
