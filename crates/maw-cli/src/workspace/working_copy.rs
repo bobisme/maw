@@ -662,7 +662,7 @@ pub(crate) fn replay_snapshot_with_merge_protection(
     snapshot: &SnapshotRef,
     resolved_paths: &[PathBuf],
     anchor_epoch: &str,
-    _epoch_after: &str,
+    epoch_after: &str,
     source_workspace_names: &[String],
     target_workspace_name: &str,
 ) -> Result<SnapshotReplayResult> {
@@ -740,9 +740,12 @@ pub(crate) fn replay_snapshot_with_merge_protection(
     };
     let local_label = format!("{target_workspace_name} (local edits)");
 
-    // Load `.gitattributes` at the anchor epoch for merge driver selection.
-    // Use the base (anchor_epoch) state — same semantics as the BUILD phase.
-    let attrs = load_stash_replay_attrs(ws_path, anchor_epoch);
+    // Load `.gitattributes` for merge driver selection. The anchor state
+    // keeps parity with BUILD phase semantics, while the merged target state
+    // covers dirty replay when a workspace introduces append-only merge rules
+    // such as `.bones/events/** merge=union`.
+    let anchor_attrs = load_stash_replay_attrs(ws_path, anchor_epoch);
+    let target_attrs = load_stash_replay_attrs(ws_path, epoch_after);
 
     let mut conflicts = Vec::new();
     for (path, merge_content) in &merge_versions {
@@ -788,7 +791,10 @@ pub(crate) fn replay_snapshot_with_merge_protection(
 
         // Look up the merge driver for this path.
         let rel = path.to_string_lossy().replace('\\', "/");
-        let driver = attrs.as_ref().and_then(|m| m.merge_driver(&rel));
+        let driver = anchor_attrs
+            .as_ref()
+            .and_then(|m| m.merge_driver(&rel))
+            .or_else(|| target_attrs.as_ref().and_then(|m| m.merge_driver(&rel)));
 
         // 3-way text merge (pure Rust via gix-merge). Cleanly merges
         // non-overlapping edits; produces diff3 markers for true conflicts.

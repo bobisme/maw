@@ -392,3 +392,137 @@ fn bones_events_files_with_merge_union_concatenate() {
         "base line duplicated: {merged}"
     );
 }
+
+#[test]
+fn dirty_default_bones_events_use_nested_union_driver() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[
+        (".bones/.gitattributes", "events/** merge=union\n"),
+        (
+            ".bones/events/2026-04.events",
+            "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n",
+        ),
+    ]);
+
+    // Default has an uncommitted event appended directly by `bn create`.
+    repo.add_file(
+        "default",
+        ".bones/events/2026-04.events",
+        "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n\
+         1234567891\tdefault\tid2\titem.create\tbn-local\t{}\thash-local\n",
+    );
+
+    // A workspace also appends to the same event shard and gets merged.
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file(
+        "alice",
+        ".bones/events/2026-04.events",
+        "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n\
+         1234567892\talice\tid3\titem.create\tbn-alice\t{}\thash-alice\n",
+    );
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "alice: add event"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "merge alice",
+    ]);
+    assert!(
+        out.status.success(),
+        "merge should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let merged = repo
+        .read_file("default", ".bones/events/2026-04.events")
+        .expect("events file should exist");
+    assert!(
+        merged.contains("hash-local"),
+        "dirty default event was not preserved:\n{merged}"
+    );
+    assert!(
+        merged.contains("hash-alice"),
+        "merged workspace event was not preserved:\n{merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "dirty target replay should honor .bones/.gitattributes merge=union:\n{merged}"
+    );
+    assert_eq!(
+        merged.matches("hash1").count(),
+        1,
+        "base line duplicated: {merged}"
+    );
+}
+
+#[test]
+fn dirty_default_bones_events_use_union_driver_introduced_by_merge() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[(
+        ".bones/events/2026-04.events",
+        "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n",
+    )]);
+
+    // Default has an uncommitted bones event, but the union driver was not
+    // present at the merge anchor yet.
+    repo.add_file(
+        "default",
+        ".bones/events/2026-04.events",
+        "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n\
+         1234567891\tdefault\tid2\titem.create\tbn-local\t{}\thash-local\n",
+    );
+
+    // The merged workspace introduces the nested .gitattributes policy and
+    // appends another event to the same shard.
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("alice", ".bones/.gitattributes", "events/** merge=union\n");
+    repo.add_file(
+        "alice",
+        ".bones/events/2026-04.events",
+        "1234567890\tsetup\tid1\titem.create\tbn-a\t{}\thash1\n\
+         1234567892\talice\tid3\titem.create\tbn-alice\t{}\thash-alice\n",
+    );
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "alice: add event policy"]);
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "merge alice",
+    ]);
+    assert!(
+        out.status.success(),
+        "merge should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let merged = repo
+        .read_file("default", ".bones/events/2026-04.events")
+        .expect("events file should exist");
+    assert!(
+        merged.contains("hash-local"),
+        "dirty default event was not preserved:\n{merged}"
+    );
+    assert!(
+        merged.contains("hash-alice"),
+        "merged workspace event was not preserved:\n{merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "dirty target replay should honor merge-introduced .bones/.gitattributes:\n{merged}"
+    );
+    assert_eq!(
+        merged.matches("hash1").count(),
+        1,
+        "base line duplicated: {merged}"
+    );
+}
