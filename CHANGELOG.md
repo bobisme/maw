@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.60.2 — Honor merge-introduced drivers during dirty replay (bn-17o5)
+
+Patch release fixing a dirty-target replay bug where `.gitattributes` merge drivers introduced by a merged workspace were ignored, causing append-only event shards (e.g. `.bones/events/**` with `merge=union`) to surface diff3 markers instead of unioning cleanly.
+
+- `replay_snapshot_with_merge_protection` now consults `.gitattributes` from both the anchor epoch and the post-merge target epoch when selecting a merge driver. Anchor rules win; target rules fill in for paths the anchor didn't govern.
+- Two integration tests cover the nested-driver and merge-introduced-driver cases.
+
+No other behavior changes since v0.60.1.
+
 ## v0.60.1 — CI: fix crates.io publish workflow
 
 Patch release that corrects the publish workflow so v0.60.0 can actually reach crates.io.
