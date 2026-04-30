@@ -236,6 +236,75 @@ fn sync_rebase_no_content_drops_on_clean_replay() {
     );
 }
 
+#[test]
+fn sync_rebase_auto_merges_disjoint_same_file_edits() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[(
+        "shared.rs",
+        "pub mod alpha {\n    // alpha anchor\n}\n\npub mod beta {\n    // beta anchor\n}\n",
+    )]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    repo.modify_file(
+        "alice",
+        "shared.rs",
+        "pub mod alpha {\n    pub struct FromAlice;\n    // alpha anchor\n}\n\npub mod beta {\n    // beta anchor\n}\n",
+    );
+    commit_all(&repo, "alice", "feat: alice alpha");
+
+    repo.modify_file(
+        "bob",
+        "shared.rs",
+        "pub mod alpha {\n    // alpha anchor\n}\n\npub mod beta {\n    pub struct FromBob;\n    // beta anchor\n}\n",
+    );
+    commit_all(&repo, "bob", "feat: bob beta");
+
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "merge alice",
+    ]);
+
+    let new_epoch = repo.current_epoch();
+    let out = repo.maw_raw(&["ws", "sync", "bob", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "sync --rebase failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let content = repo
+        .read_file("bob", "shared.rs")
+        .expect("rebased file should exist");
+    assert!(
+        content.contains("pub struct FromAlice;"),
+        "rebased content should retain epoch-side additive edit:\n{content}"
+    );
+    assert!(
+        content.contains("pub struct FromBob;"),
+        "rebased content should retain workspace-side additive edit:\n{content}"
+    );
+    assert!(
+        !content.contains("<<<<<<<") && !content.contains("# structured conflict"),
+        "disjoint edits should not materialize conflict markers:\n{content}"
+    );
+    assert!(
+        repo.read_conflict_tree_sidecar("bob").is_none(),
+        "clean disjoint rebase should not leave a structured conflict sidecar"
+    );
+    assert_eq!(
+        commits_ahead(&repo, "bob", &new_epoch),
+        1,
+        "clean rebase should preserve bob's single commit"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. Executable bit preservation
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@
 //! netrc parser does not read; for now, populate `~/.netrc` with the LFS
 //! server host.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,9 +30,23 @@ pub struct BasicCreds {
 }
 
 pub struct CredentialProvider {
-    cache: HashMap<String, BasicCreds>,
+    cache: HashMap<String, CachedCreds>,
     env: Option<BasicCreds>,
     netrc_entries: Vec<(String, BasicCreds)>, // (host, creds)
+    rejected: HashMap<String, HashSet<CredentialSource>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCreds {
+    creds: BasicCreds,
+    source: CredentialSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CredentialSource {
+    Explicit,
+    Env,
+    Netrc(usize),
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +76,7 @@ impl CredentialProvider {
             cache: HashMap::new(),
             env: None,
             netrc_entries: Vec::new(),
+            rejected: HashMap::new(),
         }
     }
 
@@ -82,26 +97,63 @@ impl CredentialProvider {
             cache: HashMap::new(),
             env,
             netrc_entries,
+            rejected: HashMap::new(),
         })
+    }
+
+    #[cfg(test)]
+    fn from_sources(env: Option<BasicCreds>, netrc_entries: Vec<(String, BasicCreds)>) -> Self {
+        Self {
+            cache: HashMap::new(),
+            env,
+            netrc_entries,
+            rejected: HashMap::new(),
+        }
     }
 
     /// Insert credentials explicitly (for testing or programmatic config).
     pub fn insert(&mut self, host: &str, creds: BasicCreds) {
-        self.cache.insert(host.to_owned(), creds);
+        self.cache.insert(
+            host.to_owned(),
+            CachedCreds {
+                creds,
+                source: CredentialSource::Explicit,
+            },
+        );
     }
 
     /// Resolve credentials for `host`, or return Missing.
     pub fn get(&mut self, host: &str) -> Result<BasicCreds, CredsError> {
         if let Some(c) = self.cache.get(host) {
+            return Ok(c.creds.clone());
+        }
+
+        let rejected = self.rejected.get(host);
+        if let Some(c) = self
+            .env
+            .as_ref()
+            .filter(|_| rejected.is_none_or(|r| !r.contains(&CredentialSource::Env)))
+        {
+            self.cache.insert(
+                host.to_owned(),
+                CachedCreds {
+                    creds: c.clone(),
+                    source: CredentialSource::Env,
+                },
+            );
             return Ok(c.clone());
         }
-        if let Some(c) = &self.env {
-            self.cache.insert(host.to_owned(), c.clone());
-            return Ok(c.clone());
-        }
-        for (h, c) in &self.netrc_entries {
-            if h == host {
-                self.cache.insert(host.to_owned(), c.clone());
+
+        for (idx, (h, c)) in self.netrc_entries.iter().enumerate() {
+            let source = CredentialSource::Netrc(idx);
+            if h == host && rejected.is_none_or(|r| !r.contains(&source)) {
+                self.cache.insert(
+                    host.to_owned(),
+                    CachedCreds {
+                        creds: c.clone(),
+                        source,
+                    },
+                );
                 return Ok(c.clone());
             }
         }
@@ -112,7 +164,12 @@ impl CredentialProvider {
 
     /// Evict cached credentials for `host` (call on 401/403 response).
     pub fn reject(&mut self, host: &str) {
-        self.cache.remove(host);
+        if let Some(cached) = self.cache.remove(host) {
+            self.rejected
+                .entry(host.to_owned())
+                .or_default()
+                .insert(cached.source);
+        }
     }
 }
 
@@ -241,6 +298,85 @@ mod tests {
             p.get("a.example"),
             Err(CredsError::Missing { .. })
         ));
+    }
+
+    #[test]
+    fn reject_env_credentials_falls_back_to_netrc() {
+        let mut p = CredentialProvider::from_sources(
+            Some(BasicCreds {
+                username: "bad-env-user".to_owned(),
+                password: "bad-env-token".to_owned(),
+            }),
+            vec![(
+                "github.com".to_owned(),
+                BasicCreds {
+                    username: "netrc-user".to_owned(),
+                    password: "netrc-token".to_owned(),
+                },
+            )],
+        );
+
+        let first = p.get("github.com").unwrap();
+        assert_eq!(first.username, "bad-env-user");
+
+        p.reject("github.com");
+        let second = p.get("github.com").unwrap();
+        assert_eq!(second.username, "netrc-user");
+        assert_eq!(second.password, "netrc-token");
+    }
+
+    #[test]
+    fn reject_netrc_credentials_does_not_reuse_same_entry() {
+        let mut p = CredentialProvider::from_sources(
+            None,
+            vec![(
+                "github.com".to_owned(),
+                BasicCreds {
+                    username: "bad-netrc-user".to_owned(),
+                    password: "bad-netrc-token".to_owned(),
+                },
+            )],
+        );
+
+        let first = p.get("github.com").unwrap();
+        assert_eq!(first.username, "bad-netrc-user");
+
+        p.reject("github.com");
+        assert!(matches!(
+            p.get("github.com"),
+            Err(CredsError::Missing { .. })
+        ));
+    }
+
+    #[test]
+    fn reject_first_netrc_entry_falls_back_to_next_matching_entry() {
+        let mut p = CredentialProvider::from_sources(
+            None,
+            vec![
+                (
+                    "github.com".to_owned(),
+                    BasicCreds {
+                        username: "old-user".to_owned(),
+                        password: "old-token".to_owned(),
+                    },
+                ),
+                (
+                    "github.com".to_owned(),
+                    BasicCreds {
+                        username: "new-user".to_owned(),
+                        password: "new-token".to_owned(),
+                    },
+                ),
+            ],
+        );
+
+        let first = p.get("github.com").unwrap();
+        assert_eq!(first.username, "old-user");
+
+        p.reject("github.com");
+        let second = p.get("github.com").unwrap();
+        assert_eq!(second.username, "new-user");
+        assert_eq!(second.password, "new-token");
     }
 
     #[test]

@@ -95,9 +95,10 @@ proptest! {
         let m = AttrsMatcher::from_entries(entries).unwrap();
         let root_path = format!("file.{ext}");
         let sub_path = format!("sub/file.{ext}");
+        let miss_path = format!("other.{ext}.not-lfs");
         prop_assert!(m.is_lfs(&root_path));
         prop_assert!(m.is_lfs(&sub_path));
-        prop_assert!(!m.is_lfs("other.rs"));
+        prop_assert!(!m.is_lfs(&miss_path));
     }
 
     /// Round-trip: merge driver rule survives a parse cycle.

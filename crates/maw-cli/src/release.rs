@@ -1,10 +1,10 @@
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 use maw_git::GitRepo as _;
 
-use crate::workspace::{MawConfig, git_cwd, repo_root};
+use crate::workspace::{git_cwd, repo_root, MawConfig};
 
 #[derive(Args)]
 pub struct ReleaseArgs {
@@ -67,7 +67,10 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         println!("  {branch} already at current epoch.");
         epoch_oid.clone()
     } else if branch_oid.is_empty() {
-        println!("  Creating {branch} at epoch ({})...", &epoch_oid[..12]);
+        println!(
+            "  Creating {branch} at epoch ({})...",
+            short_oid(&epoch_oid)
+        );
         let ref_name = maw_git::RefName::new(&branch_ref)
             .map_err(|e| anyhow::anyhow!("invalid ref name: {e}"))?;
         let oid: maw_git::GitOid = epoch_oid
@@ -77,7 +80,10 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to set {branch}: {e}"))?;
         epoch_oid.clone()
     } else if git_is_ancestor(&root, &branch_oid, &epoch_oid)? {
-        println!("  Advancing {branch} to epoch ({})...", &epoch_oid[..12]);
+        println!(
+            "  Advancing {branch} to epoch ({})...",
+            short_oid(&epoch_oid)
+        );
         let ref_name = maw_git::RefName::new(&branch_ref)
             .map_err(|e| anyhow::anyhow!("invalid ref name: {e}"))?;
         let oid: maw_git::GitOid = epoch_oid
@@ -90,7 +96,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         println!(
             "  {branch} is ahead of current epoch ({} > {}). Not rewinding.",
             &branch_oid[..12.min(branch_oid.len())],
-            &epoch_oid[..12]
+            short_oid(&epoch_oid)
         );
         println!(
             "  WARNING: refs/manifold/epoch/current is stale for this branch tip; releasing from {branch}."
@@ -137,20 +143,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 
     // Step 3: Create git tag at the branch tip
     println!("Creating tag {tag}...");
-    let git_tag = Command::new("git")
-        .args(["tag", tag, &release_oid])
-        .current_dir(&root)
-        .output()
-        .context("Failed to create git tag")?;
-
-    if !git_tag.status.success() {
-        let stderr = String::from_utf8_lossy(&git_tag.stderr);
-        if stderr.contains("already exists") {
-            println!("  Git tag {tag} already exists.");
-        } else {
-            bail!("Failed to create git tag: {}", stderr.trim());
-        }
-    }
+    create_or_verify_tag(&root, tag, &release_oid)?;
 
     // Step 4: Push git tag to origin
     println!("Pushing tag {tag} to origin...");
@@ -204,5 +197,162 @@ fn get_commit_info(root: &std::path::Path, oid: &str) -> Result<String> {
             Ok(format!("{short_oid} {subject}"))
         }
         Err(_) => Ok(oid[..12.min(oid.len())].to_string()),
+    }
+}
+
+fn short_oid(oid: &str) -> &str {
+    &oid[..12.min(oid.len())]
+}
+
+fn create_or_verify_tag(root: &std::path::Path, tag: &str, release_oid: &str) -> Result<()> {
+    if let Some(existing_oid) = resolve_tag_target_oid(root, tag)? {
+        if existing_oid == release_oid {
+            println!(
+                "  Git tag {tag} already exists at {}.",
+                short_oid(release_oid)
+            );
+            return Ok(());
+        }
+        bail!(
+            "Git tag {tag} already exists at {}, but this release targets {}.\n  \
+             Refusing to push a tag that points at the wrong commit.\n  \
+             Inspect locally:\n    \
+             git -C {} show --no-patch --decorate {tag}\n    \
+             git -C {} show --no-patch --decorate {}",
+            short_oid(&existing_oid),
+            short_oid(release_oid),
+            root.display(),
+            root.display(),
+            short_oid(release_oid)
+        );
+    }
+
+    let git_tag = Command::new("git")
+        .args(["tag", tag, release_oid])
+        .current_dir(root)
+        .output()
+        .context("Failed to create git tag")?;
+
+    if git_tag.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&git_tag.stderr);
+    if stderr.contains("already exists") {
+        let existing_oid = resolve_tag_target_oid(root, tag)?.ok_or_else(|| {
+            anyhow::anyhow!("Git reported that tag {tag} exists, but it could not be resolved")
+        })?;
+        if existing_oid == release_oid {
+            println!(
+                "  Git tag {tag} already exists at {}.",
+                short_oid(release_oid)
+            );
+            return Ok(());
+        }
+        bail!(
+            "Git tag {tag} was created concurrently at {}, but this release targets {}.\n  \
+             Refusing to push a tag that points at the wrong commit.",
+            short_oid(&existing_oid),
+            short_oid(release_oid)
+        );
+    }
+
+    bail!("Failed to create git tag: {}", stderr.trim());
+}
+
+fn resolve_tag_target_oid(root: &std::path::Path, tag: &str) -> Result<Option<String>> {
+    let tag_ref = format!("refs/tags/{tag}^{{}}");
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &tag_ref])
+        .current_dir(root)
+        .output()
+        .context("Failed to inspect git tag")?;
+
+    if output.status.success() {
+        let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if oid.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(oid))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::{create_or_verify_tag, resolve_tag_target_oid};
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run git {}: {e}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed:\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn repo_with_two_commits() -> (TempDir, String, String) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+
+        std::fs::write(root.join("file.txt"), "one\n").unwrap();
+        git(root, &["add", "file.txt"]);
+        git(root, &["commit", "-m", "first"]);
+        let first = git(root, &["rev-parse", "HEAD"]);
+
+        std::fs::write(root.join("file.txt"), "two\n").unwrap();
+        git(root, &["commit", "-am", "second"]);
+        let second = git(root, &["rev-parse", "HEAD"]);
+
+        (dir, first, second)
+    }
+
+    #[test]
+    fn create_or_verify_tag_accepts_existing_tag_at_release_commit() {
+        let (dir, first, _) = repo_with_two_commits();
+        let root = dir.path();
+        git(root, &["tag", "v1.0.0", &first]);
+
+        create_or_verify_tag(root, "v1.0.0", &first).unwrap();
+
+        assert_eq!(
+            resolve_tag_target_oid(root, "v1.0.0").unwrap().as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn create_or_verify_tag_rejects_existing_tag_at_different_commit() {
+        let (dir, first, second) = repo_with_two_commits();
+        let root = dir.path();
+        git(root, &["tag", "v1.0.0", &first]);
+
+        let err = create_or_verify_tag(root, "v1.0.0", &second)
+            .expect_err("tag mismatch must be rejected")
+            .to_string();
+
+        assert!(err.contains("already exists at"), "{err}");
+        assert!(err.contains("release targets"), "{err}");
+        assert_eq!(
+            resolve_tag_target_oid(root, "v1.0.0").unwrap().as_deref(),
+            Some(first.as_str())
+        );
     }
 }

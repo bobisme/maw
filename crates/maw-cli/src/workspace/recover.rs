@@ -429,7 +429,7 @@ fn git_grep_hits(
     ignore_case: bool,
     text: bool,
 ) -> Result<Vec<GrepHit>> {
-    let mut args: Vec<&str> = vec!["grep", "-n", "--no-color"];
+    let mut args: Vec<&str> = vec!["grep", "-z", "-n", "--no-color"];
 
     if ignore_case {
         args.push("-i");
@@ -465,26 +465,44 @@ fn git_grep_hits(
         }
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut hits: Vec<GrepHit> = Vec::new();
-    let prefix = format!("{oid}:");
+    Ok(parse_git_grep_z(&output.stdout, oid))
+}
 
-    for line in stdout.lines() {
-        let line = line.trim_end();
-        if line.is_empty() {
-            continue;
+fn parse_git_grep_z(stdout: &[u8], oid: &str) -> Vec<GrepHit> {
+    let mut hits: Vec<GrepHit> = Vec::new();
+    let prefix = format!("{oid}:").into_bytes();
+    let mut cursor = 0;
+
+    while cursor < stdout.len() {
+        let Some(path_end) = stdout[cursor..].iter().position(|b| *b == b'\0') else {
+            break;
+        };
+        let path_end = cursor + path_end;
+        let header = &stdout[cursor..path_end];
+        cursor = path_end + 1;
+
+        let Some(line_end) = stdout[cursor..].iter().position(|b| *b == b'\0') else {
+            break;
+        };
+        let line_end = cursor + line_end;
+        let line_str = String::from_utf8_lossy(&stdout[cursor..line_end]);
+        cursor = line_end + 1;
+
+        let text_end = stdout[cursor..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(stdout.len(), |offset| cursor + offset);
+        let mut text = &stdout[cursor..text_end];
+        if let Some(stripped) = text.strip_suffix(b"\r") {
+            text = stripped;
         }
-        let rest = line.strip_prefix(&prefix).unwrap_or(line);
-        let mut parts = rest.splitn(3, ':');
-        let path = match parts.next() {
-            Some(v) => v,
-            None => continue,
+        cursor = if text_end < stdout.len() {
+            text_end + 1
+        } else {
+            text_end
         };
-        let line_str = match parts.next() {
-            Some(v) => v,
-            None => continue,
-        };
-        let text = parts.next().unwrap_or("");
+
+        let path = header.strip_prefix(prefix.as_slice()).unwrap_or(header);
 
         let line_no: usize = match line_str.parse() {
             Ok(n) => n,
@@ -492,13 +510,13 @@ fn git_grep_hits(
         };
 
         hits.push(GrepHit {
-            path: path.to_string(),
+            path: String::from_utf8_lossy(path).to_string(),
             line: line_no,
-            line_text: text.to_string(),
+            line_text: String::from_utf8_lossy(text).to_string(),
         });
     }
 
-    Ok(hits)
+    hits
 }
 
 // TODO(gix): `git show <oid>:<path>` requires tree-walking to find a blob at a nested
@@ -1555,6 +1573,61 @@ three
         assert_eq!(snippet.len(), 3);
         assert_eq!(snippet[1].line, 2);
         assert!(snippet[1].is_match);
+    }
+
+    #[test]
+    fn git_grep_hits_handles_paths_with_colons() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        fs::write(root.join("with:colon.txt"), "first\ncolon-needle\n").unwrap();
+        Command::new("git")
+            .args(["add", "with:colon.txt"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "colon path"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let oid_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(oid_out.status.success());
+        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
+
+        let hits = git_grep_hits(root, &oid, "colon-needle", false, false, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "with:colon.txt");
+        assert_eq!(hits[0].line, 2);
+        assert_eq!(hits[0].line_text, "colon-needle");
     }
 
     // -----------------------------------------------------------------------

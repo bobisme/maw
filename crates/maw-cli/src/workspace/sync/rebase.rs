@@ -51,6 +51,7 @@ use maw_core::model::ordering::OrderingKey;
 use maw_core::model::patch::FileId;
 use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
 use maw_core::refs as manifold_refs;
+use maw_git::merge::{MergeResult, merge_text};
 use maw_git::{self as git, GitRepo, TreeEdit};
 
 use super::checks::{sync_worktree_to_epoch, workspace_has_uncommitted_changes};
@@ -289,6 +290,7 @@ pub(super) fn rebase_workspace(
         // rename pairs that were resolved into a pre-installed clean entry
         // at `to` — see `promote_overlaps_to_conflicts` for the rationale).
         promote_overlaps_to_conflicts(
+            repo_dyn,
             &mut state,
             &mut first_parent_patch,
             &epoch_delta,
@@ -639,6 +641,7 @@ fn build_epoch_delta_map(
 /// `apply` handling will remove `from` from the clean tree without
 /// manufacturing a spurious `ModifyDelete` at the stale path.
 fn promote_overlaps_to_conflicts(
+    repo: &dyn GitRepo,
     tree: &mut ConflictTree,
     patch: &mut maw_core::merge::types::PatchSet,
     epoch_delta: &EpochDelta,
@@ -680,6 +683,8 @@ fn promote_overlaps_to_conflicts(
     for res in rename_resolutions {
         apply_rename_resolution(tree, &mut patch.changes, res);
     }
+
+    let mut auto_resolved_paths: Vec<std::path::PathBuf> = Vec::new();
 
     for change in &patch.changes {
         match change.kind {
@@ -738,6 +743,22 @@ fn promote_overlaps_to_conflicts(
                     Some(new) => new.clone(),
                     None => continue, // epoch deleted; workspace-re-added → AddAdd-ish, skip for V1
                 };
+
+                if let Some(resolved) = try_clean_three_way_overlap(
+                    repo,
+                    &change.path,
+                    ref_old.as_ref(),
+                    &epoch_side_blob,
+                    &ws_blob,
+                    tree.clean.get(&change.path).map(|e| e.mode),
+                    change.mode,
+                    ws_name,
+                )? {
+                    tree.conflicts.remove(&change.path);
+                    tree.clean.insert(change.path.clone(), resolved);
+                    auto_resolved_paths.push(change.path.clone());
+                    continue;
+                }
 
                 let ord = OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
                 // bn-mg0j: propagate the workspace-side file mode into the
@@ -837,7 +858,70 @@ fn promote_overlaps_to_conflicts(
             }
         }
     }
+
+    if !auto_resolved_paths.is_empty() {
+        patch.changes.retain(|change| {
+            !(matches!(change.kind, ChangeKind::Added | ChangeKind::Modified)
+                && auto_resolved_paths.contains(&change.path))
+        });
+    }
+
     Ok(())
+}
+
+fn try_clean_three_way_overlap(
+    repo: &dyn GitRepo,
+    path: &std::path::Path,
+    base_blob: Option<&GitOid>,
+    epoch_blob: &GitOid,
+    workspace_blob: &GitOid,
+    epoch_mode: Option<EntryMode>,
+    workspace_mode: Option<EntryMode>,
+    ws_name: &str,
+) -> Result<Option<MaterializedEntry>> {
+    let Some(base_blob) = base_blob else {
+        return Ok(None);
+    };
+
+    let base = read_blob_by_core_oid(repo, base_blob)
+        .map_err(|e| anyhow::anyhow!("failed to read base blob for {}: {e}", path.display()))?;
+    let epoch = read_blob_by_core_oid(repo, epoch_blob)
+        .map_err(|e| anyhow::anyhow!("failed to read epoch blob for {}: {e}", path.display()))?;
+    let workspace = read_blob_by_core_oid(repo, workspace_blob).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read workspace blob for {} during three-way overlap merge: {e}",
+            path.display()
+        )
+    })?;
+
+    let merged =
+        match merge_text(&base, &epoch, &workspace, "epoch", "base", ws_name).map_err(|e| {
+            anyhow::anyhow!("three-way overlap merge failed for {}: {e}", path.display())
+        })? {
+            MergeResult::Clean(bytes) => bytes,
+            MergeResult::Conflict(_) => return Ok(None),
+        };
+
+    let rel_path = path.to_string_lossy().replace('\\', "/");
+    let merged_git_oid = repo
+        .write_blob_with_path(&merged, &rel_path)
+        .map_err(|e| anyhow::anyhow!("failed to write merged blob for {}: {e}", path.display()))?;
+    let merged_oid = GitOid::new(&merged_git_oid.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid merged blob oid for {}: {e}", path.display()))?;
+    let mode = epoch_mode.or(workspace_mode).unwrap_or(EntryMode::Blob);
+
+    Ok(Some(MaterializedEntry::new(mode, merged_oid)))
+}
+
+fn read_blob_by_core_oid(repo: &dyn GitRepo, oid: &GitOid) -> Result<Vec<u8>, git::GitError> {
+    let git_oid: git::GitOid =
+        oid.as_str()
+            .parse()
+            .map_err(|e: git::OidParseError| git::GitError::InvalidOid {
+                value: oid.as_str().to_owned(),
+                reason: e.to_string(),
+            })?;
+    repo.read_blob(git_oid)
 }
 
 /// Rename-pair indices derived from a single [`PatchSet`].

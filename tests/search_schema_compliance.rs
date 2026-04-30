@@ -428,3 +428,22 @@ fn search_json_max_hits_above_actual_count_is_not_truncated() {
         "hit_count should equal the actual number of matches"
     );
 }
+
+#[test]
+fn search_json_preserves_paths_with_colons() {
+    let repo = repo_with_destroyed_ws(
+        "colon-path-test",
+        &[("dir/with:colon.txt", "first\ncolon_path_needle\n")],
+    );
+
+    let json = search_json(&repo, &["--search", "colon_path_needle"]);
+    let hits = json["hits"].as_array().expect("hits should be an array");
+
+    assert_eq!(hits.len(), 1, "expected exactly one hit, got: {json}");
+    assert_eq!(
+        hits[0]["path"].as_str(),
+        Some("dir/with:colon.txt"),
+        "search should preserve the full path, including ':'"
+    );
+    assert_eq!(hits[0]["line"].as_u64(), Some(2));
+}
