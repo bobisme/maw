@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.60.3 — Rebase clean-overlap fix and release hardening (bn-2oii)
+
+Patch release for correctness fixes found during fresh-eyes passes after v0.60.2.
+
+- `maw ws sync <ws> --rebase` now attempts a real three-way text merge before promoting same-path Add/Modify overlaps into structured whole-file conflicts. Disjoint additive edits to the same file now replay cleanly instead of committing `# structured conflict at ...` marker blobs into the workspace history (bn-2oii).
+- `maw release` now verifies an already-existing tag points at the intended release commit before accepting it. If a tag exists at a different commit, release aborts instead of pushing a stale/wrong tag.
+- `maw ws recover --search` preserves paths containing `:` by parsing `git grep -z` output instead of splitting text hits on colon separators.
+- Git LFS credential retry now remembers which credential source was rejected, so a failed env or `.netrc` credential can fall through to the next available credential instead of being reused.
+
 ## v0.60.2 — Honor merge-introduced drivers during dirty replay (bn-17o5)
 
 Patch release fixing a dirty-target replay bug where `.gitattributes` merge drivers introduced by a merged workspace were ignored, causing append-only event shards (e.g. `.bones/events/**` with `merge=union`) to surface diff3 markers instead of unioning cleanly.
