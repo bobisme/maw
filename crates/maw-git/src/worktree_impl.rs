@@ -3,9 +3,10 @@
 //! gix does not provide high-level worktree lifecycle APIs.
 //! We build them from the documented git worktree format.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+#[cfg(feature = "lfs")]
 use gix::bstr::ByteSlice;
 
 use crate::error::GitError;
@@ -236,11 +237,12 @@ pub fn worktree_remove(repo: &GixRepo, name: &str) -> Result<(), GitError> {
             std::fs::read_to_string(&gitdir_file).map_err(|e| GitError::BackendError {
                 message: format!("failed to read worktree gitdir: {e}"),
             })?;
-        let gitdir_path = std::path::PathBuf::from(gitdir_content.trim());
+        let gitdir_path = resolve_admin_gitdir_path(&admin_dir, gitdir_content.trim());
         // gitdir points to <worktree>/.git, so parent is the worktree root
         if let Some(wt_path) = gitdir_path.parent()
             && wt_path.exists()
         {
+            verify_worktree_gitfile_points_to_admin_dir(wt_path, &admin_dir)?;
             std::fs::remove_dir_all(wt_path).map_err(|e| GitError::BackendError {
                 message: format!("failed to remove worktree dir {}: {e}", wt_path.display()),
             })?;
@@ -256,6 +258,74 @@ pub fn worktree_remove(repo: &GixRepo, name: &str) -> Result<(), GitError> {
     })?;
 
     Ok(())
+}
+
+fn verify_worktree_gitfile_points_to_admin_dir(
+    wt_path: &Path,
+    admin_dir: &Path,
+) -> Result<(), GitError> {
+    let wt_gitfile = wt_path.join(".git");
+    let gitfile_content =
+        std::fs::read_to_string(&wt_gitfile).map_err(|e| GitError::BackendError {
+            message: format!(
+                "refusing to remove worktree {}: failed to read {}: {e}",
+                wt_path.display(),
+                wt_gitfile.display()
+            ),
+        })?;
+    let target = gitfile_content
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| GitError::BackendError {
+            message: format!(
+                "refusing to remove worktree {}: {} does not point to a git worktree admin dir",
+                wt_path.display(),
+                wt_gitfile.display()
+            ),
+        })?;
+
+    let target_admin_dir = resolve_gitfile_path(wt_path, target);
+    let actual = canonicalize_existing(&target_admin_dir)?;
+    let expected = canonicalize_existing(admin_dir)?;
+    if actual != expected {
+        return Err(GitError::BackendError {
+            message: format!(
+                "refusing to remove worktree {}: {} points to {}, expected {}",
+                wt_path.display(),
+                wt_gitfile.display(),
+                actual.display(),
+                expected.display()
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn resolve_gitfile_path(wt_path: &Path, target: &str) -> PathBuf {
+    let target = PathBuf::from(target);
+    if target.is_absolute() {
+        target
+    } else {
+        wt_path.join(target)
+    }
+}
+
+fn resolve_admin_gitdir_path(admin_dir: &Path, target: &str) -> PathBuf {
+    let target = PathBuf::from(target);
+    if target.is_absolute() {
+        target
+    } else {
+        admin_dir.join(target)
+    }
+}
+
+fn canonicalize_existing(path: &Path) -> Result<PathBuf, GitError> {
+    std::fs::canonicalize(path).map_err(|e| GitError::BackendError {
+        message: format!("failed to canonicalize {}: {e}", path.display()),
+    })
 }
 
 pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
@@ -346,4 +416,106 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::repo::GitRepo as _;
+
+    fn setup_repo() -> (TempDir, GixRepo, GitOid) {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(root)
+            .output()
+            .expect("git config name");
+        std::fs::write(root.join("README.md"), "hello\n").expect("write readme");
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+
+        let repo = GixRepo::open(root).expect("open repo");
+        let head = repo.rev_parse("HEAD").expect("resolve HEAD");
+        (dir, repo, head)
+    }
+
+    #[test]
+    fn worktree_remove_removes_valid_worktree() {
+        let (dir, repo, head) = setup_repo();
+        let wt_path = dir.path().join("ws").join("agent-1");
+
+        worktree_add(&repo, "agent-1", head, &wt_path).expect("add worktree");
+        assert!(wt_path.exists());
+
+        worktree_remove(&repo, "agent-1").expect("remove worktree");
+
+        assert!(!wt_path.exists());
+        assert!(
+            !repo
+                .repo
+                .git_dir()
+                .join("worktrees")
+                .join("agent-1")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn worktree_remove_rejects_gitdir_that_does_not_point_back_to_admin_dir() {
+        let (dir, repo, _head) = setup_repo();
+        let root = dir.path();
+        let victim = root.join("victim");
+        std::fs::create_dir_all(&victim).expect("create victim");
+        std::fs::write(victim.join("important.txt"), "do not delete\n").expect("write victim");
+        let other_admin = repo.repo.git_dir().join("worktrees").join("other");
+        std::fs::create_dir_all(&other_admin).expect("create other admin dir");
+        std::fs::write(
+            victim.join(".git"),
+            format!("gitdir: {}\n", other_admin.display()),
+        )
+        .expect("write victim gitfile");
+
+        let admin_dir = repo.repo.git_dir().join("worktrees").join("evil");
+        std::fs::create_dir_all(&admin_dir).expect("create admin dir");
+        std::fs::write(
+            admin_dir.join("gitdir"),
+            format!("{}\n", victim.join(".git").display()),
+        )
+        .expect("write admin gitdir");
+
+        let err = worktree_remove(&repo, "evil").expect_err("remove must reject mismatched gitdir");
+        let err = err.to_string();
+        assert!(
+            err.contains("refusing to remove worktree"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            victim.join("important.txt").exists(),
+            "mismatched gitdir must not allow deleting the referenced directory"
+        );
+    }
 }
