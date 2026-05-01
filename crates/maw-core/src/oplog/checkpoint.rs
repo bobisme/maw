@@ -667,15 +667,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn test_patch_set(epoch_char: char) -> PatchSet {
@@ -789,7 +789,7 @@ mod tests {
     fn checkpoint_view_from_and_to_view() {
         let view = make_view("ws-1", 'a', 100);
         let cp_view = CheckpointView::from_view(&view);
-        let restored = cp_view.to_view(100).unwrap();
+        let restored = cp_view.to_view(100).expect("operation should succeed");
 
         assert_eq!(restored.workspace_id, view.workspace_id);
         assert_eq!(restored.epoch, view.epoch);
@@ -823,7 +823,7 @@ mod tests {
     fn checkpoint_view_empty_epoch() {
         let view = MaterializedView::empty(test_ws("ws-1"));
         let cp_view = CheckpointView::from_view(&view);
-        let restored = cp_view.to_view(0).unwrap();
+        let restored = cp_view.to_view(0).expect("operation should succeed");
 
         assert!(restored.epoch.is_none());
         assert!(restored.patch_set.is_none());
@@ -838,7 +838,7 @@ mod tests {
         let cp_view = CheckpointView::from_view(&view);
         assert!(cp_view.is_destroyed);
 
-        let restored = cp_view.to_view(5).unwrap();
+        let restored = cp_view.to_view(5).expect("operation should succeed");
         assert!(restored.is_destroyed);
     }
 
@@ -855,8 +855,9 @@ mod tests {
             trigger_oid: test_oid('1').as_str().to_owned(),
         };
 
-        let json = serde_json::to_value(&cp_data).unwrap();
-        let restored: CheckpointData = serde_json::from_value(json).unwrap();
+        let json = serde_json::to_value(&cp_data).expect("operation should succeed");
+        let restored: CheckpointData =
+            serde_json::from_value(json).expect("operation should succeed");
 
         assert_eq!(restored.op_count, 100);
         assert_eq!(restored.trigger_oid, cp_data.trigger_oid);
@@ -947,7 +948,8 @@ mod tests {
         ];
 
         // Full replay should give us the view at snapshot
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone())).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone()))
+            .expect("operation should succeed");
 
         assert_eq!(view.epoch, Some(test_epoch('a')));
         assert_eq!(view.patch_set, Some(ps));
@@ -992,19 +994,21 @@ mod tests {
             ),
         ];
 
-        let full_view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone())).unwrap();
+        let full_view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone()))
+            .expect("operation should succeed");
 
         // Create checkpoint from the view at op 2
         let partial_view =
-            materialize_from_ops(test_ws("ws-1"), &ops[..2], mock_reader(ps.clone())).unwrap();
+            materialize_from_ops(test_ws("ws-1"), &ops[..2], mock_reader(ps.clone()))
+                .expect("operation should succeed");
         let cp_view = CheckpointView::from_view(&partial_view);
-        let mut restored = cp_view.to_view(2).unwrap();
+        let mut restored = cp_view.to_view(2).expect("operation should succeed");
 
         // Replay the remaining op (Describe)
         let remaining_ops = &ops[2..];
         for (oid, op) in remaining_ops {
-            replay_single_op(&mut restored, oid, op, &mock_reader(ps.clone())).unwrap();
+            replay_single_op(&mut restored, oid, op, &mock_reader(ps.clone()))
+                .expect("operation should succeed");
         }
 
         // Should be equivalent to full replay
@@ -1129,41 +1133,41 @@ mod tests {
     fn setup_repo() -> (tempfile::TempDir, std::path::PathBuf) {
         use std::process::Command;
 
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         Command::new("git")
             .args(["init"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        std::fs::write(root.join("README.md"), "# Test\n").unwrap();
+        std::fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         (dir, root)
     }
@@ -1182,7 +1186,7 @@ mod tests {
                 epoch: test_epoch('a'),
             },
         };
-        let oid1 = append_operation(&root, &ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(&root, &ws_id, &op1, None).expect("operation should succeed");
 
         let op2 = Operation {
             parent_ids: vec![oid1.clone()],
@@ -1192,7 +1196,8 @@ mod tests {
                 message: "step 2".into(),
             },
         };
-        let oid2 = append_operation(&root, &ws_id, &op2, Some(&oid1)).unwrap();
+        let oid2 =
+            append_operation(&root, &ws_id, &op2, Some(&oid1)).expect("operation should succeed");
 
         let op3 = Operation {
             parent_ids: vec![oid2.clone()],
@@ -1202,21 +1207,23 @@ mod tests {
                 message: "step 3".into(),
             },
         };
-        let oid3 = append_operation(&root, &ws_id, &op3, Some(&oid2)).unwrap();
+        let oid3 =
+            append_operation(&root, &ws_id, &op3, Some(&oid2)).expect("operation should succeed");
 
         // Materialize the view at this point
         let ps = test_patch_set('a');
         let ops = vec![(oid1, op1), (oid2, op2), (oid3.clone(), op3)];
-        let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
+        let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone()))
+            .expect("operation should succeed");
         assert_eq!(view.op_count, 3);
 
         // Write a checkpoint
         let cp_oid = maybe_write_checkpoint(
             &root, &ws_id, &view, &oid3, &oid3, 3, // checkpoint every 3 ops
         )
-        .unwrap();
+        .expect("operation should succeed");
         assert!(cp_oid.is_some(), "should write checkpoint at op 3");
-        let cp_oid = cp_oid.unwrap();
+        let cp_oid = cp_oid.expect("operation should succeed");
 
         // Add two more operations after checkpoint
         let op4 = Operation {
@@ -1227,7 +1234,8 @@ mod tests {
                 message: "step 4 after checkpoint".into(),
             },
         };
-        let oid4 = append_operation(&root, &ws_id, &op4, Some(&cp_oid)).unwrap();
+        let oid4 =
+            append_operation(&root, &ws_id, &op4, Some(&cp_oid)).expect("operation should succeed");
 
         let op5 = Operation {
             parent_ids: vec![oid4.clone()],
@@ -1237,22 +1245,24 @@ mod tests {
                 message: "step 5".into(),
             },
         };
-        let _oid5 = append_operation(&root, &ws_id, &op5, Some(&oid4)).unwrap();
+        let _oid5 =
+            append_operation(&root, &ws_id, &op5, Some(&oid4)).expect("operation should succeed");
 
         // Compact: should reduce chain from 6 ops to 4 (synthetic root + checkpoint + 2 post-cp ops)
-        let result = compact(&root, &ws_id).unwrap();
+        let result = compact(&root, &ws_id).expect("operation should succeed");
         assert_eq!(result.ops_before, 6); // create + 2 describe + checkpoint + 2 describe
         assert_eq!(result.ops_after, 4); // synthetic create + checkpoint + 2 describes
 
         // Verify the chain is correct after compaction
         let stop_pred: Option<&dyn Fn(&Operation) -> bool> = None;
-        let chain = walk_chain(&root, &ws_id, None, stop_pred).unwrap();
+        let chain = walk_chain(&root, &ws_id, None, stop_pred).expect("operation should succeed");
         assert_eq!(chain.len(), 4);
 
         // The view from compacted chain should match
         let mut chain_causal: Vec<_> = chain;
         chain_causal.reverse();
-        let compacted_view = materialize_from_ops(ws_id, &chain_causal, mock_reader(ps)).unwrap();
+        let compacted_view = materialize_from_ops(ws_id, &chain_causal, mock_reader(ps))
+            .expect("operation should succeed");
 
         assert_eq!(compacted_view.description, Some("step 5".into()));
         assert_eq!(compacted_view.epoch, Some(test_epoch('a')));
@@ -1272,7 +1282,7 @@ mod tests {
                 epoch: test_epoch('a'),
             },
         };
-        let oid1 = append_operation(&root, &ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(&root, &ws_id, &op1, None).expect("operation should succeed");
 
         let op2 = Operation {
             parent_ids: vec![oid1.clone()],
@@ -1282,7 +1292,8 @@ mod tests {
                 message: "step 2".into(),
             },
         };
-        let oid2 = append_operation(&root, &ws_id, &op2, Some(&oid1)).unwrap();
+        let oid2 =
+            append_operation(&root, &ws_id, &op2, Some(&oid1)).expect("operation should succeed");
 
         let op3 = Operation {
             parent_ids: vec![oid2.clone()],
@@ -1292,15 +1303,17 @@ mod tests {
                 message: "step 3".into(),
             },
         };
-        let oid3 = append_operation(&root, &ws_id, &op3, Some(&oid2)).unwrap();
+        let oid3 =
+            append_operation(&root, &ws_id, &op3, Some(&oid2)).expect("operation should succeed");
 
         // Materialize view at step 3 and write checkpoint
         let ps = test_patch_set('a');
         let ops = vec![(oid1, op1), (oid2, op2), (oid3.clone(), op3)];
-        let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone())).unwrap();
+        let view = materialize_from_ops(ws_id.clone(), &ops, mock_reader(ps.clone()))
+            .expect("operation should succeed");
 
         let cp_oid = maybe_write_checkpoint(&root, &ws_id, &view, &oid3, &oid3, 3)
-            .unwrap()
+            .expect("operation should succeed")
             .expect("checkpoint should be written");
 
         // Add an operation after checkpoint
@@ -1312,10 +1325,12 @@ mod tests {
                 message: "step 4 after checkpoint".into(),
             },
         };
-        let _oid4 = append_operation(&root, &ws_id, &op4, Some(&cp_oid)).unwrap();
+        let _oid4 =
+            append_operation(&root, &ws_id, &op4, Some(&cp_oid)).expect("operation should succeed");
 
         // Materialize from checkpoint
-        let cp_view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps)).unwrap();
+        let cp_view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps))
+            .expect("operation should succeed");
 
         // Should have the latest description
         assert_eq!(cp_view.description, Some("step 4 after checkpoint".into()));
@@ -1335,7 +1350,7 @@ mod tests {
                 epoch: test_epoch('a'),
             },
         };
-        let oid1 = append_operation(&root, &ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(&root, &ws_id, &op1, None).expect("operation should succeed");
 
         let op2 = Operation {
             parent_ids: vec![oid1.clone()],
@@ -1345,10 +1360,12 @@ mod tests {
                 message: "no checkpoint here".into(),
             },
         };
-        let _oid2 = append_operation(&root, &ws_id, &op2, Some(&oid1)).unwrap();
+        let _oid2 =
+            append_operation(&root, &ws_id, &op2, Some(&oid1)).expect("operation should succeed");
 
         let ps = test_patch_set('a');
-        let view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps)).unwrap();
+        let view = materialize_from_checkpoint(&root, &ws_id, mock_reader(ps))
+            .expect("operation should succeed");
 
         assert_eq!(view.description, Some("no checkpoint here".into()));
         assert_eq!(view.op_count, 2);
@@ -1367,7 +1384,7 @@ mod tests {
                 epoch: test_epoch('a'),
             },
         };
-        let _oid1 = append_operation(&root, &ws_id, &op1, None).unwrap();
+        let _oid1 = append_operation(&root, &ws_id, &op1, None).expect("operation should succeed");
 
         let result = compact(&root, &ws_id);
         assert!(

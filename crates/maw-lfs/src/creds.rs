@@ -71,6 +71,7 @@ impl Default for CredentialProvider {
 
 impl CredentialProvider {
     /// An empty provider that has no credentials for any host.
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             cache: HashMap::new(),
@@ -81,6 +82,9 @@ impl CredentialProvider {
     }
 
     /// Build a provider from the standard sources (env + netrc).
+    ///
+    /// # Errors
+    /// Returns an error if a credential source cannot be parsed.
     pub fn from_env_and_netrc() -> Result<Self, CredsError> {
         let env = match (
             std::env::var("MAW_LFS_USERNAME").ok(),
@@ -123,6 +127,10 @@ impl CredentialProvider {
     }
 
     /// Resolve credentials for `host`, or return Missing.
+    ///
+    /// # Errors
+    /// Returns [`CredsError::Missing`] if no non-rejected credentials are
+    /// available for `host`.
     pub fn get(&mut self, host: &str) -> Result<BasicCreds, CredsError> {
         if let Some(c) = self.cache.get(host) {
             return Ok(c.creds.clone());
@@ -180,59 +188,59 @@ fn load_netrc() -> Option<Vec<(String, BasicCreds)>> {
     parse_netrc(&text).ok()
 }
 
+fn flush_netrc_entry(
+    machine: &mut Option<String>,
+    login: &mut Option<String>,
+    password: &mut Option<String>,
+    out: &mut Vec<(String, BasicCreds)>,
+) {
+    if let (Some(m), Some(l), Some(p)) = (machine.take(), login.take(), password.take()) {
+        out.push((
+            m,
+            BasicCreds {
+                username: l,
+                password: p,
+            },
+        ));
+    } else {
+        machine.take();
+        login.take();
+        password.take();
+    }
+}
+
 fn parse_netrc(text: &str) -> Result<Vec<(String, BasicCreds)>, CredsError> {
     // Very minimal netrc parser: handles machine/login/password tokens,
     // ignores 'default' / 'account' / 'macdef' blocks. Tokens are
     // whitespace-separated; all on separate lines or same line.
     let mut out = Vec::new();
-    let mut tokens = text.split_whitespace().peekable();
+    let mut tokens = text.split_whitespace();
     let mut cur_machine: Option<String> = None;
     let mut cur_login: Option<String> = None;
     let mut cur_password: Option<String> = None;
 
-    fn flush(
-        machine: &mut Option<String>,
-        login: &mut Option<String>,
-        password: &mut Option<String>,
-        out: &mut Vec<(String, BasicCreds)>,
-    ) {
-        if let (Some(m), Some(l), Some(p)) = (machine.take(), login.take(), password.take()) {
-            out.push((
-                m,
-                BasicCreds {
-                    username: l,
-                    password: p,
-                },
-            ));
-        } else {
-            machine.take();
-            login.take();
-            password.take();
-        }
-    }
-
     while let Some(tok) = tokens.next() {
         match tok {
             "machine" => {
-                flush(
+                flush_netrc_entry(
                     &mut cur_machine,
                     &mut cur_login,
                     &mut cur_password,
                     &mut out,
                 );
-                cur_machine = tokens.next().map(|s| s.to_owned());
+                cur_machine = tokens.next().map(std::borrow::ToOwned::to_owned);
             }
             "default" => {
-                flush(
+                flush_netrc_entry(
                     &mut cur_machine,
                     &mut cur_login,
                     &mut cur_password,
                     &mut out,
                 );
-                cur_machine = Some("".to_owned()); // sentinel for default
+                cur_machine = Some(String::new()); // sentinel for default
             }
-            "login" => cur_login = tokens.next().map(|s| s.to_owned()),
-            "password" => cur_password = tokens.next().map(|s| s.to_owned()),
+            "login" => cur_login = tokens.next().map(std::borrow::ToOwned::to_owned),
+            "password" => cur_password = tokens.next().map(std::borrow::ToOwned::to_owned),
             "account" => {
                 let _ = tokens.next();
             }
@@ -243,7 +251,7 @@ fn parse_netrc(text: &str) -> Result<Vec<(String, BasicCreds)>, CredsError> {
             _ => {} // unknown tokens ignored
         }
     }
-    flush(
+    flush_netrc_entry(
         &mut cur_machine,
         &mut cur_login,
         &mut cur_password,
@@ -277,7 +285,7 @@ mod tests {
                 password: "token".to_owned(),
             },
         );
-        let c = p.get("github.com").unwrap();
+        let c = p.get("github.com").expect("operation should succeed");
         assert_eq!(c.username, "alice");
         assert_eq!(c.password, "token");
     }
@@ -316,11 +324,11 @@ mod tests {
             )],
         );
 
-        let first = p.get("github.com").unwrap();
+        let first = p.get("github.com").expect("operation should succeed");
         assert_eq!(first.username, "bad-env-user");
 
         p.reject("github.com");
-        let second = p.get("github.com").unwrap();
+        let second = p.get("github.com").expect("operation should succeed");
         assert_eq!(second.username, "netrc-user");
         assert_eq!(second.password, "netrc-token");
     }
@@ -338,7 +346,7 @@ mod tests {
             )],
         );
 
-        let first = p.get("github.com").unwrap();
+        let first = p.get("github.com").expect("operation should succeed");
         assert_eq!(first.username, "bad-netrc-user");
 
         p.reject("github.com");
@@ -370,11 +378,11 @@ mod tests {
             ],
         );
 
-        let first = p.get("github.com").unwrap();
+        let first = p.get("github.com").expect("operation should succeed");
         assert_eq!(first.username, "old-user");
 
         p.reject("github.com");
-        let second = p.get("github.com").unwrap();
+        let second = p.get("github.com").expect("operation should succeed");
         assert_eq!(second.username, "new-user");
         assert_eq!(second.password, "new-token");
     }
@@ -388,7 +396,7 @@ password ghp_abc123
 
 machine gitlab.example.com login bob password xyz
 ";
-        let entries = parse_netrc(text).unwrap();
+        let entries = parse_netrc(text).expect("operation should succeed");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, "github.com");
         assert_eq!(entries[0].1.username, "alice");
@@ -402,7 +410,7 @@ machine gitlab.example.com login bob password xyz
     fn parse_netrc_skips_incomplete_entries() {
         let text = "machine incomplete.example login onlyuser\n\
                     machine good.example login u password p\n";
-        let entries = parse_netrc(text).unwrap();
+        let entries = parse_netrc(text).expect("operation should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "good.example");
     }
@@ -410,14 +418,14 @@ machine gitlab.example.com login bob password xyz
     #[test]
     fn parse_netrc_default_block_not_applied() {
         let text = "default login anyone password anypass\n";
-        let entries = parse_netrc(text).unwrap();
+        let entries = parse_netrc(text).expect("operation should succeed");
         assert!(entries.is_empty());
     }
 
     #[test]
     fn parse_netrc_ignores_account() {
         let text = "machine x login u account acct password p\n";
-        let entries = parse_netrc(text).unwrap();
+        let entries = parse_netrc(text).expect("operation should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1.username, "u");
         assert_eq!(entries[0].1.password, "p");

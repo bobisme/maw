@@ -343,15 +343,15 @@ mod tests {
 
     // Helper to create a test GitOid
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn timestamp() -> String {
@@ -443,8 +443,9 @@ mod tests {
         view.description = Some("test workspace".into());
         view.op_count = 2;
 
-        let json = serde_json::to_string(&view).unwrap();
-        let decoded: MaterializedView = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&view).expect("operation should succeed");
+        let decoded: MaterializedView =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, view);
     }
 
@@ -463,8 +464,8 @@ mod tests {
                 },
             ),
         )];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert_eq!(view.epoch, Some(test_epoch('a')));
         assert!(view.patch_set.is_none());
@@ -499,7 +500,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone())).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps.clone()))
+            .expect("operation should succeed");
 
         assert_eq!(view.epoch, Some(test_epoch('a')));
         assert_eq!(view.patch_set, Some(ps));
@@ -571,7 +573,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps)).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps))
+            .expect("operation should succeed");
 
         assert!(view.patch_set.is_none());
         assert!(view.patch_set_oid.is_none());
@@ -616,8 +619,8 @@ mod tests {
                 ),
             ),
         ];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert_eq!(view.epoch, Some(test_epoch('b')));
         assert!(view.patch_set.is_none(), "merge clears patch set");
@@ -650,8 +653,8 @@ mod tests {
                 ),
             ),
         ];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert_eq!(view.description, Some("implementing auth".into()));
         assert_eq!(view.op_count, 2);
@@ -688,8 +691,8 @@ mod tests {
                 ),
             ),
         ];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert_eq!(view.description, Some("updated description".into()));
     }
@@ -724,8 +727,8 @@ mod tests {
                 ),
             ),
         ];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert!(view.annotations.contains_key("validation"));
         assert_eq!(
@@ -776,8 +779,8 @@ mod tests {
                 ),
             ),
         ];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert_eq!(
             view.annotations["review"]["status"],
@@ -803,8 +806,8 @@ mod tests {
             ),
             (test_oid('2'), make_op("ws-1", OpPayload::Destroy)),
         ];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert!(view.is_destroyed);
         assert!(view.destroyed());
@@ -859,7 +862,8 @@ mod tests {
             ),
         ];
 
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps)).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(ps))
+            .expect("operation should succeed");
 
         assert_eq!(view.epoch, Some(test_epoch('b')));
         assert!(view.patch_set.is_none(), "merge clears patches");
@@ -871,8 +875,8 @@ mod tests {
     #[test]
     fn empty_op_list_produces_empty_view() {
         let ops: Vec<(GitOid, Operation)> = vec![];
-        let view =
-            materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a'))).unwrap();
+        let view = materialize_from_ops(test_ws("ws-1"), &ops, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
 
         assert_eq!(view.op_count, 0);
         assert!(view.epoch.is_none());
@@ -943,7 +947,8 @@ mod tests {
                 ),
             ),
         ];
-        let view = materialize_from_ops(test_ws("ws-1"), &ops, reader).unwrap();
+        let view =
+            materialize_from_ops(test_ws("ws-1"), &ops, reader).expect("operation should succeed");
 
         assert_eq!(view.patch_set, Some(ps2));
         assert_eq!(view.patch_set_oid, Some(test_oid('e')));
@@ -968,8 +973,8 @@ mod tests {
             ),
             (test_oid('2'), make_op("ws-1", OpPayload::Destroy)),
         ];
-        let view1 =
-            materialize_from_ops(test_ws("ws-1"), &ops1, mock_reader(test_patch_set('a'))).unwrap();
+        let view1 = materialize_from_ops(test_ws("ws-1"), &ops1, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
         assert!(view1.is_destroyed);
 
         // Destroy then create → not destroyed (re-created)
@@ -985,8 +990,8 @@ mod tests {
                 ),
             ),
         ];
-        let view2 =
-            materialize_from_ops(test_ws("ws-1"), &ops2, mock_reader(test_patch_set('a'))).unwrap();
+        let view2 = materialize_from_ops(test_ws("ws-1"), &ops2, mock_reader(test_patch_set('a')))
+            .expect("operation should succeed");
         assert!(!view2.is_destroyed);
         assert_eq!(view2.epoch, Some(test_epoch('b')));
     }

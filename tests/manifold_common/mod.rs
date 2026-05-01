@@ -156,7 +156,7 @@ impl TestRepo {
                 "worktree",
                 "add",
                 "--detach",
-                ws_default.to_str().unwrap(),
+                ws_default.to_str().expect("operation should succeed"),
                 &epoch0,
             ],
         );
@@ -199,8 +199,11 @@ impl TestRepo {
             &std::env::temp_dir(),
             &[
                 "clone",
-                remote_dir.path().to_str().unwrap(),
-                root.to_str().unwrap(),
+                remote_dir
+                    .path()
+                    .to_str()
+                    .expect("operation should succeed"),
+                root.to_str().expect("operation should succeed"),
             ],
         );
 
@@ -243,14 +246,16 @@ impl TestRepo {
 
         // Create .manifold/
         let manifold_dir = root.join(".manifold");
-        std::fs::create_dir_all(manifold_dir.join("epochs")).unwrap();
-        std::fs::create_dir_all(manifold_dir.join("artifacts").join("ws")).unwrap();
-        std::fs::create_dir_all(manifold_dir.join("artifacts").join("merge")).unwrap();
+        std::fs::create_dir_all(manifold_dir.join("epochs")).expect("operation should succeed");
+        std::fs::create_dir_all(manifold_dir.join("artifacts").join("ws"))
+            .expect("operation should succeed");
+        std::fs::create_dir_all(manifold_dir.join("artifacts").join("merge"))
+            .expect("operation should succeed");
         std::fs::write(
             manifold_dir.join("config.toml"),
             "[repo]\nbranch = \"main\"\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Set epoch ref
         git_ok(
@@ -260,7 +265,7 @@ impl TestRepo {
 
         // Create ws/default/
         let ws_dir = root.join("ws");
-        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::create_dir_all(&ws_dir).expect("operation should succeed");
         let ws_default = ws_dir.join("default");
         git_ok(
             &root,
@@ -268,7 +273,7 @@ impl TestRepo {
                 "worktree",
                 "add",
                 "--detach",
-                ws_default.to_str().unwrap(),
+                ws_default.to_str().expect("operation should succeed"),
                 &epoch0,
             ],
         );
@@ -338,7 +343,7 @@ impl TestRepo {
                 "worktree",
                 "add",
                 "--detach",
-                ws_path.to_str().unwrap(),
+                ws_path.to_str().expect("operation should succeed"),
                 &epoch,
             ],
         );
@@ -362,7 +367,12 @@ impl TestRepo {
         let ws_path = self.workspace_path(name);
         if ws_path.exists() {
             let _ = Command::new("git")
-                .args(["worktree", "remove", "--force", ws_path.to_str().unwrap()])
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    ws_path.to_str().expect("operation should succeed"),
+                ])
                 .current_dir(&self.root)
                 .output();
         }
@@ -643,7 +653,7 @@ impl TestRepo {
         let is_ws_merge = adjusted.len() >= 2
             && (adjusted[0] == "ws" || adjusted[0] == "workspace")
             && adjusted[1] == "merge";
-        let has_into_target = adjusted.iter().any(|arg| *arg == "--into");
+        let has_into_target = adjusted.contains(&"--into");
         if is_ws_merge && !has_into_target {
             adjusted.insert(2, "--into");
             adjusted.insert(3, "default");
@@ -728,9 +738,8 @@ impl TestRepo {
         let mut out = Vec::new();
         for line in output.lines() {
             // Format: <mode> SP <type> SP <oid> TAB <path>
-            let (meta, path) = match line.split_once('\t') {
-                Some(p) => p,
-                None => continue,
+            let Some((meta, path)) = line.split_once('\t') else {
+                continue;
             };
             let mut parts = meta.split_whitespace();
             let mode = match parts.next() {
@@ -969,7 +978,9 @@ mod tests {
         repo.add_file("agent", "data.txt", "v1");
         repo.modify_file("agent", "data.txt", "v2");
 
-        let content = repo.read_file("agent", "data.txt").unwrap();
+        let content = repo
+            .read_file("agent", "data.txt")
+            .expect("operation should succeed");
         assert_eq!(content, "v2");
     }
 

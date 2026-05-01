@@ -8,7 +8,7 @@ use gix::refs::{FullName, Target};
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::{GitOid, RefEdit, RefName};
 
 /// Ensure a loose ref file ends with `\n`.
 ///
@@ -188,7 +188,7 @@ pub fn rev_parse(repo: &GixRepo, spec: &str) -> Result<GitOid, GitError> {
         .repo
         .rev_parse_single(spec)
         .map_err(|e| GitError::NotFound {
-            message: format!("rev-parse '{}': {}", spec, e),
+            message: format!("rev-parse '{spec}': {e}"),
         })?;
     Ok(from_gix_oid(id.as_ref()))
 }

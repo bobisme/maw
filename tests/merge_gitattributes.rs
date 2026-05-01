@@ -102,7 +102,9 @@ fn merge_union_handles_three_workspaces() {
     ]);
     assert!(out.status.success(), "3-way merge should succeed");
 
-    let merged = repo.read_file("default", "events.log").unwrap();
+    let merged = repo
+        .read_file("default", "events.log")
+        .expect("operation should succeed");
     assert!(merged.contains("A event"), "missing A: {merged}");
     assert!(merged.contains("B event"), "missing B: {merged}");
     assert!(merged.contains("C event"), "missing C: {merged}");
@@ -134,7 +136,9 @@ fn merge_union_applies_to_nested_gitattributes() {
     let out = repo.maw_raw(&["ws", "merge", "a", "b", "--destroy", "--message", "merge"]);
     assert!(out.status.success(), "merge should succeed");
 
-    let merged = repo.read_file("default", "notes/x.txt").unwrap();
+    let merged = repo
+        .read_file("default", "notes/x.txt")
+        .expect("operation should succeed");
     assert!(merged.contains("alice"), "missing alice: {merged}");
     assert!(merged.contains("bob"), "missing bob: {merged}");
     assert!(!merged.contains("<<<<<<<"), "no markers: {merged}");
@@ -165,7 +169,9 @@ fn merge_union_preserves_base_content() {
     let out = repo.maw_raw(&["ws", "merge", "a", "b", "--destroy", "--message", "merge"]);
     assert!(out.status.success());
 
-    let merged = repo.read_file("default", "app.log").unwrap();
+    let merged = repo
+        .read_file("default", "app.log")
+        .expect("operation should succeed");
     // base lines should appear exactly once
     assert_eq!(
         merged.matches("line1\n").count(),
@@ -239,7 +245,9 @@ fn merge_binary_clean_when_only_one_side_changes() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let merged = repo.read_file("default", "data.db").unwrap();
+    let merged = repo
+        .read_file("default", "data.db")
+        .expect("operation should succeed");
     assert_eq!(merged, "va\n");
 }
 

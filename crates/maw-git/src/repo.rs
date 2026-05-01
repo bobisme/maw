@@ -51,6 +51,9 @@ pub trait GitRepo {
     /// Resolve a ref to its OID, returning `None` if the ref does not exist.
     ///
     /// Replaces: `git rev-parse <ref>` (when used to resolve a known ref name).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn read_ref(&self, name: &RefName) -> Result<Option<GitOid>, GitError>;
 
     /// Create or overwrite a ref unconditionally.
@@ -59,11 +62,17 @@ pub trait GitRepo {
     ///
     /// `log_message` is written to the reflog entry. Pass an empty string if
     /// no reflog message is needed.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn write_ref(&self, name: &RefName, oid: GitOid, log_message: &str) -> Result<(), GitError>;
 
     /// Delete a ref. No-op if the ref does not exist.
     ///
     /// Replaces: `git update-ref -d <name>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn delete_ref(&self, name: &RefName) -> Result<(), GitError>;
 
     /// Atomically apply a batch of ref updates with compare-and-swap semantics.
@@ -73,6 +82,9 @@ pub trait GitRepo {
     /// aborted and [`GitError::RefConflict`] is returned.
     ///
     /// Replaces: `git update-ref --stdin` with `start`/`prepare`/`commit`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn atomic_ref_update(&self, edits: &[RefEdit]) -> Result<(), GitError>;
 
     /// List refs matching a prefix (e.g., `"refs/manifold/"`, `"refs/heads/"`).
@@ -81,6 +93,9 @@ pub trait GitRepo {
     /// matched literally.
     ///
     /// Replaces: `git for-each-ref --format=... refs/some/prefix/`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn list_refs(&self, prefix: &str) -> Result<Vec<(RefName, GitOid)>, GitError>;
 
     // -----------------------------------------------------------------------
@@ -97,10 +112,16 @@ pub trait GitRepo {
     /// Returns [`GitError::NotFound`] if the spec cannot be resolved.
     ///
     /// Replaces: `git rev-parse <spec>` (general revspec resolution).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn rev_parse(&self, spec: &str) -> Result<GitOid, GitError>;
 
     /// Like [`rev_parse`](Self::rev_parse) but returns `None` instead of an
     /// error when the spec cannot be resolved.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn rev_parse_opt(&self, spec: &str) -> Result<Option<GitOid>, GitError>;
 
     // -----------------------------------------------------------------------
@@ -115,6 +136,9 @@ pub trait GitRepo {
     /// Returns the raw byte content.
     ///
     /// Replaces: `git cat-file blob <oid>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn read_blob(&self, oid: GitOid) -> Result<Vec<u8>, GitError>;
 
     /// Read the entries of a tree object.
@@ -122,11 +146,17 @@ pub trait GitRepo {
     /// Returns the flat list of entries (one level deep, not recursive).
     ///
     /// Replaces: `git ls-tree <oid>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn read_tree(&self, oid: GitOid) -> Result<Vec<TreeEntry>, GitError>;
 
     /// Read a commit object's metadata.
     ///
     /// Replaces: `git cat-file commit <oid>` / `git log -1 --format=...`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn read_commit(&self, oid: GitOid) -> Result<CommitInfo, GitError>;
 
     // -----------------------------------------------------------------------
@@ -139,6 +169,9 @@ pub trait GitRepo {
     ///
     /// Replaces: `git hash-object -w --stdin` / writing a blob via the
     /// object database.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn write_blob(&self, data: &[u8]) -> Result<GitOid, GitError>;
 
     /// Write a blob, with the repo-relative path that governs attribute-
@@ -151,6 +184,9 @@ pub trait GitRepo {
     ///
     /// Always safe to call in place of `write_blob` when the caller has a
     /// repo-relative path at hand.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn write_blob_with_path(&self, data: &[u8], rel_path: &str) -> Result<GitOid, GitError> {
         let _ = rel_path;
         self.write_blob(data)
@@ -159,6 +195,9 @@ pub trait GitRepo {
     /// Write a tree object from a list of entries and return its OID.
     ///
     /// Replaces: `git mktree`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn write_tree(&self, entries: &[TreeEntry]) -> Result<GitOid, GitError>;
 
     /// Create a commit object and optionally update a ref to point to it.
@@ -167,6 +206,9 @@ pub trait GitRepo {
     /// OID after the commit is written.
     ///
     /// Replaces: `git commit-tree` + optional `git update-ref`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn create_commit(
         &self,
         tree: GitOid,
@@ -188,6 +230,9 @@ pub trait GitRepo {
     /// created or updated as needed.
     ///
     /// Replaces: manual tree traversal + `git mktree` pipelines.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn edit_tree(&self, base: GitOid, edits: &[TreeEdit]) -> Result<GitOid, GitError>;
 
     // -----------------------------------------------------------------------
@@ -199,11 +244,17 @@ pub trait GitRepo {
     /// Read the current index (staging area) entries.
     ///
     /// Replaces: `git ls-files --stage`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn read_index(&self) -> Result<Vec<IndexEntry>, GitError>;
 
     /// Replace the index with the given entries.
     ///
     /// Replaces: `git read-tree` + `git update-index`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn write_index(&self, entries: &[IndexEntry]) -> Result<(), GitError>;
 
     // -----------------------------------------------------------------------
@@ -219,6 +270,9 @@ pub trait GitRepo {
     /// to match. Existing working-tree files not in the tree are removed.
     ///
     /// Replaces: `git checkout <oid> -- .` / `git read-tree -u <oid>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn checkout_tree(&self, oid: GitOid, workdir: &Path) -> Result<(), GitError>;
 
     // -----------------------------------------------------------------------
@@ -231,11 +285,17 @@ pub trait GitRepo {
     /// Returns `true` if the working tree or index has uncommitted changes.
     ///
     /// Replaces: `git diff --quiet && git diff --cached --quiet` (exit code check).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn is_dirty(&self) -> Result<bool, GitError>;
 
     /// Return the list of changed files with their statuses.
     ///
     /// Replaces: `git status --porcelain`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn status(&self) -> Result<Vec<StatusEntry>, GitError>;
 
     /// Fast status: only check tracked files (index vs worktree), skip dirwalk.
@@ -243,12 +303,18 @@ pub trait GitRepo {
     /// Much faster than [`status()`](Self::status) for large repos because it
     /// skips the directory walk for untracked files. Returns only modifications,
     /// deletions, and type changes to tracked files.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn status_tracked_only(&self) -> Result<Vec<StatusEntry>, GitError>;
 
     /// Count dirty tracked files using index stat cache comparison.
     ///
     /// The fastest dirty check: reads the index once, does one `stat()` per
     /// entry comparing mtime + size. No content hashing, no gix status pipeline.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn count_dirty_tracked(&self) -> Result<usize, GitError>;
 
     // -----------------------------------------------------------------------
@@ -263,6 +329,9 @@ pub trait GitRepo {
     /// in `new` appear as additions).
     ///
     /// Replaces: `git diff-tree -r <old> <new>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn diff_trees(&self, old: Option<GitOid>, new: GitOid) -> Result<Vec<DiffEntry>, GitError>;
 
     /// Diff two trees with rename detection.
@@ -277,6 +346,9 @@ pub trait GitRepo {
     /// git's built-in rename-threshold default.
     ///
     /// Replaces: `git diff-tree -M<similarity> -r <old> <new>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn diff_trees_with_renames(
         &self,
         old: Option<GitOid>,
@@ -295,16 +367,25 @@ pub trait GitRepo {
     /// Creates a worktree at `path` with HEAD detached at `target`.
     ///
     /// Replaces: `git worktree add --detach <path> <target>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn worktree_add(&self, name: &str, target: GitOid, path: &Path) -> Result<(), GitError>;
 
     /// Remove a linked worktree by name.
     ///
     /// Replaces: `git worktree remove <name>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn worktree_remove(&self, name: &str) -> Result<(), GitError>;
 
     /// List all worktrees (main + linked).
     ///
     /// Replaces: `git worktree list --porcelain`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn worktree_list(&self) -> Result<Vec<WorktreeInfo>, GitError>;
 
     // -----------------------------------------------------------------------
@@ -319,6 +400,9 @@ pub trait GitRepo {
     /// Returns `None` if there is nothing to stash (clean working tree).
     ///
     /// Replaces: `git stash create` (no stack push, just creates the object).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn stash_create(&self) -> Result<Option<GitOid>, GitError>;
 
     /// Apply a stash commit to the working tree.
@@ -327,6 +411,9 @@ pub trait GitRepo {
     /// in the working tree.
     ///
     /// Replaces: `git stash apply <oid>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn stash_apply(&self, oid: GitOid) -> Result<(), GitError>;
 
     /// Reset the index to match HEAD, unstaging all staged changes.
@@ -334,6 +421,9 @@ pub trait GitRepo {
     /// Working tree files are not modified — only the index is reset.
     ///
     /// Replaces: `git reset HEAD`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn unstage_all(&self) -> Result<(), GitError>;
 
     // -----------------------------------------------------------------------
@@ -347,6 +437,9 @@ pub trait GitRepo {
     /// If `force` is true, the push is a force-push (`git push --force`).
     ///
     /// Replaces: `git push <remote> <local_ref>:<remote_ref>` (or `--force`).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn push_branch(
         &self,
         remote: &str,
@@ -358,6 +451,9 @@ pub trait GitRepo {
     /// Push a single tag to a remote.
     ///
     /// Replaces: `git push <remote> <tag>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn push_tag(&self, remote: &str, tag: &str) -> Result<(), GitError>;
 
     // -----------------------------------------------------------------------
@@ -369,11 +465,17 @@ pub trait GitRepo {
     /// Read a git config value. Returns `None` if the key is not set.
     ///
     /// Replaces: `git config --get <key>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn read_config(&self, key: &str) -> Result<Option<String>, GitError>;
 
     /// Set a git config value.
     ///
     /// Replaces: `git config <key> <value>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn write_config(&self, key: &str, value: &str) -> Result<(), GitError>;
 
     // -----------------------------------------------------------------------
@@ -388,6 +490,9 @@ pub trait GitRepo {
     /// parent links.
     ///
     /// Replaces: `git merge-base --is-ancestor <ancestor> <descendant>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn is_ancestor(&self, ancestor: GitOid, descendant: GitOid) -> Result<bool, GitError>;
 
     /// Find the best common ancestor (merge base) of two commits.
@@ -395,6 +500,9 @@ pub trait GitRepo {
     /// Returns `None` if the commits have no common ancestor.
     ///
     /// Replaces: `git merge-base <a> <b>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn merge_base(&self, a: GitOid, b: GitOid) -> Result<Option<GitOid>, GitError>;
 
     /// Walk commits in the range `from..to`.
@@ -407,6 +515,9 @@ pub trait GitRepo {
     /// order). `reverse = false` returns newest-first.
     ///
     /// Replaces: `git rev-list [--reverse] from..to`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn walk_commits(
         &self,
         from: GitOid,
@@ -430,5 +541,8 @@ pub trait GitRepo {
     ///
     /// Replaces: `git update-ref --no-deref HEAD <oid>` /
     /// `git checkout --detach <oid>` (without the worktree update).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
     fn set_head(&self, oid: GitOid) -> Result<(), GitError>;
 }

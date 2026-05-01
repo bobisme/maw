@@ -38,6 +38,17 @@ fn single_seed() -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
+fn workflow_seeds(default_trace_count: u64) -> Vec<u64> {
+    single_seed().map_or_else(
+        || {
+            (0..trace_count(default_trace_count))
+                .map(|i| BASE_SEED.wrapping_add(i))
+                .collect()
+        },
+        |seed| vec![seed],
+    )
+}
+
 fn replay_command(seed: u64) -> String {
     format!(
         "WORKFLOW_DST_SEED={seed} cargo test --test workflow_dst dst_seeded_workflows_preserve_contracts -- --exact --nocapture"
@@ -109,7 +120,7 @@ struct TraceLog {
 }
 
 impl TraceLog {
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         Self {
             seed,
             entries: Vec::new(),
@@ -656,10 +667,22 @@ fn workflow_push_remote(repo: &TestRepo, state: &mut ScenarioState) -> Result<St
         }
 
         let remote_dir = repo.root().join("origin.git");
-        git_output(repo, &["init", "--bare", remote_dir.to_str().unwrap()])?;
         git_output(
             repo,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+            &[
+                "init",
+                "--bare",
+                remote_dir.to_str().expect("operation should succeed"),
+            ],
+        )?;
+        git_output(
+            repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote_dir.to_str().expect("operation should succeed"),
+            ],
         )?;
         state.remote_configured = true;
     }
@@ -749,17 +772,10 @@ fn run_seed(seed: u64) -> SeedResult {
 
 #[test]
 fn dst_seeded_workflows_preserve_contracts() {
-    let seeds: Vec<u64> = if let Some(seed) = single_seed() {
-        vec![seed]
-    } else {
-        (0..trace_count(8))
-            .map(|i| BASE_SEED.wrapping_add(i))
-            .collect()
-    };
+    let seeds = workflow_seeds(8);
     let total = seeds.len();
 
     let mut failures = Vec::new();
-    let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_seed(seed);
@@ -772,12 +788,6 @@ fn dst_seeded_workflows_preserve_contracts() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, result.violations));
-        } else {
-            summaries.push(dst_support::SuccessSeedSummary {
-                seed,
-                steps_executed: result.trace.entries.len(),
-                warnings: result.warnings,
-            });
         }
     }
 
@@ -797,20 +807,20 @@ fn dst_seeded_workflows_preserve_contracts() {
 #[test]
 #[ignore = "Slow seeded sweep. Run with WORKFLOW_DST_TRACES=64 cargo test --test workflow_dst -- --ignored --nocapture"]
 fn dst_seeded_workflows_preserve_contracts_long_run() {
-    let seeds: Vec<u64> = if let Some(seed) = single_seed() {
-        vec![seed]
-    } else {
-        (0..trace_count(64))
-            .map(|i| BASE_SEED.wrapping_add(i))
-            .collect()
-    };
+    let seeds = workflow_seeds(64);
 
     let mut failures = Vec::new();
     let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_seed(seed);
-        if !result.violations.is_empty() {
+        if result.violations.is_empty() {
+            summaries.push(dst_support::SuccessSeedSummary {
+                seed,
+                steps_executed: result.trace.entries.len(),
+                warnings: result.warnings,
+            });
+        } else {
             result.trace.dump();
             for violation in &result.violations {
                 eprintln!("  VIOLATION: {violation}");
@@ -819,12 +829,6 @@ fn dst_seeded_workflows_preserve_contracts_long_run() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, result.violations));
-        } else {
-            summaries.push(dst_support::SuccessSeedSummary {
-                seed,
-                steps_executed: result.trace.entries.len(),
-                warnings: result.warnings,
-            });
         }
     }
 

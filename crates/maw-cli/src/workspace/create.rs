@@ -46,6 +46,10 @@ pub fn create_quiet(
 }
 
 #[instrument(skip(template), fields(workspace = name, emit_output))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "workspace creation has ordered validation, backend, and metadata steps"
+)]
 fn create_with_output(
     name: &str,
     from: Option<&str>,
@@ -203,16 +207,12 @@ fn resolve_workspace_source(
         let store = ChangesStore::open(root);
         let record = store.read_active_record(change_id)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "Change '{}' not found.\n  Next: list known changes: maw changes list",
-                change_id
+                "Change '{change_id}' not found.\n  Next: list known changes: maw changes list"
             )
         })?;
         let change_branch = record.git.change_branch.trim();
         if change_branch.is_empty() {
-            bail!(
-                "Change '{}' has no configured branch in metadata.",
-                change_id
-            );
+            bail!("Change '{change_id}' has no configured branch in metadata.");
         }
         return Ok((Some(change_branch.to_owned()), Some(change_id.to_owned())));
     }
@@ -286,9 +286,7 @@ fn bind_workspace_to_change(
     let store = ChangesStore::open(root);
     let mut record = store.read_active_record(change_id)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Change '{}' not found while binding workspace '{}'.",
-            change_id,
-            workspace_name
+            "Change '{change_id}' not found while binding workspace '{workspace_name}'."
         )
     })?;
 
@@ -301,7 +299,7 @@ fn bind_workspace_to_change(
         record.workspaces.linked.push(workspace_name.to_owned());
     }
     if record.workspaces.primary.is_empty() {
-        record.workspaces.primary = workspace_name.to_owned();
+        workspace_name.clone_into(&mut record.workspaces.primary);
     }
 
     store.with_lock("bind workspace to change", |locked| {
@@ -422,6 +420,10 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
 }
 
 #[instrument(fields(workspace = name))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "destroy command keeps safety checks and cleanup in one flow"
+)]
 pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot destroy the default workspace");
@@ -487,13 +489,12 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         }
     }
 
-    let mut capture_result = None;
-    if force {
-        capture_result =
-            super::capture::capture_before_destroy(&path, name, status.base_epoch.oid()).map_err(
-                |e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"),
-            )?;
-    }
+    let capture_result = if force {
+        super::capture::capture_before_destroy(&path, name, status.base_epoch.oid())
+            .map_err(|e| anyhow::anyhow!("Failed to capture workspace state before destroy: {e}"))?
+    } else {
+        None
+    };
 
     // Determine final head for destroy record before we destroy
     let final_head =

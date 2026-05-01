@@ -93,7 +93,7 @@ fn make_temp_repo(n: usize) -> (tempfile::TempDir, PathBuf, String) {
 /// Destroy a workspace using the git worktree backend.
 fn cleanup_workspace(root: &Path, name: &str) {
     let backend = GitWorktreeBackend::new(root.to_owned());
-    let ws_id = WorkspaceId::new(name).unwrap();
+    let ws_id = WorkspaceId::new(name).expect("operation should succeed");
     let _ = backend.destroy(&ws_id);
 }
 
@@ -111,7 +111,7 @@ fn bench_create_git_worktree(c: &mut Criterion) {
 
     for &n in sizes {
         let (_guard, root, oid) = make_temp_repo(n);
-        let epoch = EpochId::new(&oid).unwrap();
+        let epoch = EpochId::new(&oid).expect("operation should succeed");
         let backend = GitWorktreeBackend::new(root.clone());
 
         group.throughput(Throughput::Elements(n as u64));
@@ -120,7 +120,7 @@ fn bench_create_git_worktree(c: &mut Criterion) {
             b.iter(|| {
                 let name = format!("bench-ws-{counter}");
                 counter += 1;
-                let ws_id = WorkspaceId::new(&name).unwrap();
+                let ws_id = WorkspaceId::new(&name).expect("operation should succeed");
                 let _ = backend.create(&ws_id, &epoch);
                 // Destroy after each create to avoid workspace accumulation.
                 cleanup_workspace(&root, &name);
@@ -144,12 +144,12 @@ fn bench_disk_usage(c: &mut Criterion) {
 
     for &n in sizes {
         let (_guard, root, oid) = make_temp_repo(n);
-        let epoch = EpochId::new(&oid).unwrap();
+        let epoch = EpochId::new(&oid).expect("operation should succeed");
         let backend = GitWorktreeBackend::new(root.clone());
 
         // Create one workspace and leave it for measurement.
         let name = format!("du-ws-{n}");
-        let ws_id = WorkspaceId::new(&name).unwrap();
+        let ws_id = WorkspaceId::new(&name).expect("operation should succeed");
         let info = backend.create(&ws_id, &epoch).expect("create workspace");
 
         // Use criterion to record the du measurement (not timing — just to
@@ -293,12 +293,12 @@ fn bench_snapshot_scaling(c: &mut Criterion) {
 
     for &(repo_n, changed_n) in cases {
         let (_guard, root, oid) = make_temp_repo(repo_n);
-        let epoch = EpochId::new(&oid).unwrap();
+        let epoch = EpochId::new(&oid).expect("operation should succeed");
         let backend = GitWorktreeBackend::new(root.clone());
 
         // Create one workspace, modify `changed_n` files in it, then snapshot repeatedly.
         let ws_name = format!("snap-{repo_n}-{changed_n}");
-        let ws_id = WorkspaceId::new(&ws_name).unwrap();
+        let ws_id = WorkspaceId::new(&ws_name).expect("operation should succeed");
         let ws_info = backend
             .create(&ws_id, &epoch)
             .expect("create snapshot workspace");
@@ -344,7 +344,7 @@ fn bench_snapshot_scaling(c: &mut Criterion) {
 /// Each workspace gets `files_per_ws` unique non-overlapping modified files,
 /// named `ws<ws_idx>_file<file_idx>.txt` to guarantee no conflicts.
 fn make_patch_set(ws_idx: usize, files_per_ws: usize, epoch: &EpochId) -> PatchSet {
-    let ws_id = WorkspaceId::new(&format!("bench-ws-{ws_idx}")).unwrap();
+    let ws_id = WorkspaceId::new(&format!("bench-ws-{ws_idx}")).expect("operation should succeed");
     let changes: Vec<FileChange> = (0..files_per_ws)
         .map(|fi| {
             FileChange::new(
@@ -363,7 +363,7 @@ fn make_patch_set(ws_idx: usize, files_per_ws: usize, epoch: &EpochId) -> PatchS
 /// `partition_by_path` time should stay roughly constant.
 fn bench_merge_partition_fixed_total(c: &mut Criterion) {
     // We need any epoch OID — use a fake 40-char hex string.
-    let epoch = EpochId::new(&"a".repeat(40)).unwrap();
+    let epoch = EpochId::new(&"a".repeat(40)).expect("operation should succeed");
 
     let mut group = c.benchmark_group("merge/partition_fixed_total");
     let total_files = 100usize;
@@ -395,7 +395,7 @@ fn bench_merge_partition_fixed_total(c: &mut Criterion) {
 /// Total files grows: 10, 50, 100, 500, 1000.
 /// `partition_by_path` time should grow roughly linearly with total files.
 fn bench_merge_partition_scaling(c: &mut Criterion) {
-    let epoch = EpochId::new(&"b".repeat(40)).unwrap();
+    let epoch = EpochId::new(&"b".repeat(40)).expect("operation should succeed");
 
     let mut group = c.benchmark_group("merge/partition_scaling");
     let ws_count = 5usize;

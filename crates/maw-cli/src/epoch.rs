@@ -14,6 +14,9 @@ use maw_core::refs as manifold_refs;
 /// the branch (e.g. after direct git commits outside maw). Unlike `maw init`,
 /// this only touches the epoch ref — no worktree pruning, migration, or
 /// branch re-attachment.
+/// # Errors
+///
+/// Returns an error if the epoch cannot be synchronized with repository state.
 pub fn sync() -> Result<()> {
     let root = repo_root()?;
     let config = MawConfig::load(&root).unwrap_or_default();

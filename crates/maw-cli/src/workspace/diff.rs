@@ -149,7 +149,7 @@ pub fn diff(
     Ok(())
 }
 
-/// Like `print_stat` but compares base_rev against the working tree (includes
+/// Like `print_stat` but compares `base_rev` against the working tree (includes
 /// uncommitted changes).
 fn print_stat_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
@@ -175,7 +175,7 @@ fn print_stat_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> R
             .status()
             .context("Failed to run git diff --stat")?;
         if !status.success() {
-            bail!("git diff --stat exited with status {}", status);
+            bail!("git diff --stat exited with status {status}");
         }
     } else {
         args.insert(1, "--color=never".to_string());
@@ -192,7 +192,7 @@ fn print_stat_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> R
     Ok(())
 }
 
-/// Like `print_patch` but compares base_rev against the working tree.
+/// Like `print_patch` but compares `base_rev` against the working tree.
 fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
@@ -216,7 +216,7 @@ fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> 
             .status()
             .context("Failed to run git diff")?;
         if !status.success() {
-            bail!("git diff exited with status {}", status);
+            bail!("git diff exited with status {status}");
         }
     } else {
         diff_args.insert(1, "--color=never".to_string());
@@ -244,7 +244,7 @@ fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> 
     Ok(())
 }
 
-/// Like `collect_diff_entries` but compares base_rev against the working tree
+/// Like `collect_diff_entries` but compares `base_rev` against the working tree
 /// and appends untracked files as Added entries.
 fn collect_diff_entries_worktree(
     ws_dir: &Path,
@@ -280,9 +280,7 @@ fn collect_diff_entries_worktree(
             continue;
         }
         let full = ws_dir.join(&path);
-        let line_count = std::fs::read_to_string(&full)
-            .map(|c| c.lines().count())
-            .unwrap_or(0);
+        let line_count = std::fs::read_to_string(&full).map_or(0, |c| c.lines().count());
         entries.push(DiffEntry {
             path,
             old_path: None,
@@ -581,8 +579,7 @@ fn parse_name_status_z(raw: &[u8]) -> Result<Vec<DiffEntry>> {
         let status_code = status_raw
             .chars()
             .next()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "?".to_string());
+            .map_or_else(|| "?".to_string(), |c| c.to_string());
 
         if status_code == "R" || status_code == "C" {
             if idx + 1 >= tokens.len() {
@@ -695,7 +692,7 @@ mod tests {
     #[test]
     fn parse_name_status_z_parses_rename_and_modify() {
         let raw = b"R100\0old.rs\0new.rs\0M\0src/lib.rs\0";
-        let parsed = parse_name_status_z(raw).unwrap();
+        let parsed = parse_name_status_z(raw).expect("operation should succeed");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].status, "R");
         assert_eq!(parsed[0].old_path.as_deref(), Some("old.rs"));
@@ -706,7 +703,8 @@ mod tests {
 
     #[test]
     fn resolve_pathspecs_validates_globs() {
-        let specs = resolve_pathspecs(&["src/**/*.rs".to_string(), "README*".to_string()]).unwrap();
+        let specs = resolve_pathspecs(&["src/**/*.rs".to_string(), "README*".to_string()])
+            .expect("operation should succeed");
         assert_eq!(specs, vec![":(glob)src/**/*.rs", ":(glob)README*"]);
     }
 }

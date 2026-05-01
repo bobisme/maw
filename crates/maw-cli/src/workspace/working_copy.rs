@@ -69,7 +69,7 @@ fn snapshot_ref_name(ws_name: &str) -> String {
 /// Created by [`snapshot_working_copy()`] and consumed by
 /// [`replay_snapshot()`].
 #[derive(Clone, Debug)]
-pub(crate) struct SnapshotRef {
+pub struct SnapshotRef {
     /// The git OID of the stash commit.
     pub oid: String,
     /// The full ref name (e.g. `refs/manifold/snapshot/default`).
@@ -78,7 +78,7 @@ pub(crate) struct SnapshotRef {
 
 /// Outcome of replaying a snapshot onto a new tree.
 #[derive(Clone, Debug)]
-pub(crate) enum SnapshotReplayResult {
+pub enum SnapshotReplayResult {
     /// Replay succeeded cleanly — all changes applied without conflict.
     Clean,
     /// Replay produced conflicts — conflict markers are in the working tree.
@@ -107,7 +107,11 @@ pub struct WorkingCopyConflict {
 /// Summary of dirty-state delta at the time of a rewrite.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct DeltaSummary {
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names are serialized/user-facing delta counters"
+)]
+pub struct DeltaSummary {
     pub staged_files: u32,
     pub unstaged_files: u32,
     pub untracked_files: u32,
@@ -117,7 +121,7 @@ pub(crate) struct DeltaSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
-pub(crate) enum ReplayOutcome {
+pub enum ReplayOutcome {
     /// Working copy was clean — no replay needed.
     Clean,
     /// Dirty state was successfully replayed on top of the new target.
@@ -142,7 +146,7 @@ impl std::fmt::Display for ReplayOutcome {
 /// for crash recovery and audit trail.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct RewriteRecord {
+pub struct RewriteRecord {
     /// Workspace name.
     pub workspace: String,
     /// ISO 8601 timestamp of the rewrite.
@@ -196,10 +200,10 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .with_context(|| format!("no parent directory for {}", path.display()))?;
     fs::create_dir_all(dir).with_context(|| format!("create dir {}", dir.display()))?;
 
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "artifact".to_owned());
+    let filename = path.file_name().map_or_else(
+        || "artifact".to_owned(),
+        |n| n.to_string_lossy().to_string(),
+    );
     let tmp_path = dir.join(format!(".{filename}.tmp"));
 
     let json = serde_json::to_string_pretty(value).context("serialize rewrite record")?;
@@ -220,7 +224,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Write a rewrite record artifact to disk.
 #[allow(dead_code)]
-pub(crate) fn write_rewrite_record(
+pub fn write_rewrite_record(
     root: &Path,
     workspace: &str,
     record: &RewriteRecord,
@@ -234,7 +238,7 @@ pub(crate) fn write_rewrite_record(
 
 /// List all rewrite records for a workspace, sorted by timestamp directory name.
 #[allow(dead_code)]
-pub(crate) fn list_rewrite_records(root: &Path, workspace: &str) -> Result<Vec<RewriteRecord>> {
+pub fn list_rewrite_records(root: &Path, workspace: &str) -> Result<Vec<RewriteRecord>> {
     let dir = rewrite_dir(root, workspace);
     if !dir.exists() {
         return Ok(vec![]);
@@ -271,7 +275,7 @@ pub(crate) fn list_rewrite_records(root: &Path, workspace: &str) -> Result<Vec<R
 
 /// Read a single rewrite record from disk.
 #[allow(dead_code)]
-pub(crate) fn read_rewrite_record(path: &Path) -> Result<RewriteRecord> {
+pub fn read_rewrite_record(path: &Path) -> Result<RewriteRecord> {
     let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let record: RewriteRecord =
         serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))?;
@@ -280,7 +284,7 @@ pub(crate) fn read_rewrite_record(path: &Path) -> Result<RewriteRecord> {
 
 /// List all workspace names that have rewrite records.
 #[allow(dead_code)]
-pub(crate) fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
+pub fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
     let rewrite_root = root.join(".manifold").join("artifacts").join("rewrite");
     if !rewrite_root.exists() {
         return Ok(vec![]);
@@ -310,7 +314,7 @@ pub(crate) fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
 // TODO(gix): `git stash --include-untracked` captures untracked files; GitRepo::stash_create()
 // does not push to the stash stack and may not capture untracked files. Kept as CLI for now.
 #[allow(dead_code)]
-pub(crate) fn stash_changes(ws_path: &Path) -> Result<bool> {
+pub fn stash_changes(ws_path: &Path) -> Result<bool> {
     let output = Command::new("git")
         .args(["stash", "--include-untracked"])
         .current_dir(ws_path)
@@ -331,7 +335,7 @@ pub(crate) fn stash_changes(ws_path: &Path) -> Result<bool> {
 // TODO(gix): checkout_tree() does not update HEAD, and write_ref("HEAD")
 // doesn't reliably create a detached HEAD in linked worktrees. Keep
 // `git checkout --detach` until gix gains proper worktree HEAD support.
-pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
+pub fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["checkout", "--detach", epoch_oid])
         .current_dir(ws_path)
@@ -354,7 +358,7 @@ pub(crate) fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
 /// `git status --porcelain` and parse the two-character status code.
 // TODO(gix): replace with GitRepo trait method when `git stash pop` is supported.
 #[allow(dead_code)]
-pub(crate) fn pop_stash_and_detect_conflicts(ws_path: &Path) -> Result<Vec<WorkingCopyConflict>> {
+pub fn pop_stash_and_detect_conflicts(ws_path: &Path) -> Result<Vec<WorkingCopyConflict>> {
     let output = Command::new("git")
         .args(["stash", "pop"])
         .current_dir(ws_path)
@@ -389,7 +393,7 @@ pub(crate) fn pop_stash_and_detect_conflicts(ws_path: &Path) -> Result<Vec<Worki
 /// - `DU` / `UD` — deleted/updated conflict
 // TODO(gix): GitRepo::status() does not yet report conflict markers (UU/AA/DD).
 // Keep CLI for conflict detection until gix reports merge conflicts.
-pub(crate) fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<WorkingCopyConflict>> {
+pub fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<WorkingCopyConflict>> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(ws_path)
@@ -450,7 +454,7 @@ pub(crate) fn detect_conflicts_in_worktree(ws_path: &Path) -> Result<Vec<Working
 // reset, reset --hard, and clean -fd are supported. Currently gix stash_create only
 // captures index state (not working tree modifications).
 #[instrument(skip_all, fields(workspace = ws_name))]
-pub(crate) fn snapshot_working_copy(
+pub fn snapshot_working_copy(
     ws_path: &Path,
     repo_root: &Path,
     ws_name: &str,
@@ -507,18 +511,17 @@ pub(crate) fn snapshot_working_copy(
         anyhow::anyhow!("stash_create failed during snapshot: {e}")
     })?;
 
-    let stash_oid = match stash_result {
-        Some(oid) => oid.to_string(),
-        None => {
-            // Shouldn't happen since we checked status, but be defensive.
-            // TODO(gix): replace git reset with GitRepo trait method
-            let _ = Command::new("git")
-                .args(["reset"])
-                .current_dir(ws_path)
-                .output();
-            tracing::warn!("stash_create returned None despite dirty status");
-            return Ok(None);
-        }
+    let stash_oid = if let Some(oid) = stash_result {
+        oid.to_string()
+    } else {
+        // Shouldn't happen since we checked status, but be defensive.
+        // TODO(gix): replace git reset with GitRepo trait method
+        let _ = Command::new("git")
+            .args(["reset"])
+            .current_dir(ws_path)
+            .output();
+        tracing::warn!("stash_create returned None despite dirty status");
+        return Ok(None);
     };
 
     // Step 4: Pin to durable ref (crash-safe).
@@ -571,7 +574,7 @@ pub(crate) fn snapshot_working_copy(
 /// use `--force`; a dirty tree will cause `git checkout` to fail, which is
 /// the correct behavior (it means the snapshot step was skipped or broken).
 // TODO(gix): replace with GitRepo trait method when `git checkout` is supported.
-pub(crate) fn checkout_to(ws_path: &Path, target: &str, branch_name: Option<&str>) -> Result<()> {
+pub fn checkout_to(ws_path: &Path, target: &str, branch_name: Option<&str>) -> Result<()> {
     let checkout_target = branch_name.unwrap_or(target);
     let output = Command::new("git")
         .args(if branch_name.is_some() {
@@ -602,10 +605,7 @@ pub(crate) fn checkout_to(ws_path: &Path, target: &str, branch_name: Option<&str
 /// - `SnapshotReplayResult::Conflicts(list)` if there are conflict markers
 ///   in the working tree. The conflicts are left as markers (working-copy-preserving —
 ///   conflicts are data, not errors).
-pub(crate) fn replay_snapshot(
-    ws_path: &Path,
-    snapshot: &SnapshotRef,
-) -> Result<SnapshotReplayResult> {
+pub fn replay_snapshot(ws_path: &Path, snapshot: &SnapshotRef) -> Result<SnapshotReplayResult> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let oid: maw_git::GitOid = snapshot
@@ -623,12 +623,12 @@ pub(crate) fn replay_snapshot(
             tracing::info!("snapshot replayed cleanly");
             Ok(SnapshotReplayResult::Clean)
         }
-        Err(_e) => {
+        Err(err) => {
             // stash apply failed — check for conflict markers.
             let conflicts = detect_conflicts_in_worktree(ws_path)?;
             if conflicts.is_empty() {
                 // Something else went wrong (not a merge conflict).
-                bail!("stash_apply failed (no conflicts detected): {}", _e);
+                bail!("stash_apply failed (no conflicts detected): {err}");
             }
 
             tracing::info!(
@@ -651,13 +651,17 @@ pub(crate) fn replay_snapshot(
 /// 1. Computes overlap between stash paths and resolved merge paths.
 /// 2. If **no overlap**: delegates to [`replay_snapshot()`].
 /// 3. If **overlap exists**:
-///    a. Applies the stash for non-overlapping files (restores user edits).
-///    b. For each overlapping file, runs `git merge-file --diff3` with:
-///       - BASE: content from `anchor_epoch` (the common ancestor)
-///       - OURS: content from the merge result (current working tree)
-///       - THEIRS: content from the stash (the user's local edits)
-///    c. Clean merges are written directly; conflicts get diff3 markers.
-pub(crate) fn replay_snapshot_with_merge_protection(
+///    - Applies the stash for non-overlapping files (restores user edits).
+///    - For each overlapping file, runs `git merge-file --diff3` with:
+///      - BASE: content from `anchor_epoch` (the common ancestor)
+///      - OURS: content from the merge result (current working tree)
+///      - THEIRS: content from the stash (the user's local edits)
+///    - Clean merges are written directly; conflicts get diff3 markers.
+#[expect(
+    clippy::too_many_lines,
+    reason = "snapshot replay keeps merge-protection cases in ordered control flow"
+)]
+pub fn replay_snapshot_with_merge_protection(
     ws_path: &Path,
     snapshot: &SnapshotRef,
     resolved_paths: &[PathBuf],
@@ -670,8 +674,10 @@ pub(crate) fn replay_snapshot_with_merge_protection(
     let stash_paths = stash_changed_paths(ws_path, &snapshot.oid)?;
 
     // Step 2: Compute overlap.
-    let resolved_set: std::collections::HashSet<&Path> =
-        resolved_paths.iter().map(|p| p.as_path()).collect();
+    let resolved_set: std::collections::HashSet<&Path> = resolved_paths
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect();
     let overlapping: Vec<PathBuf> = stash_paths
         .iter()
         .filter(|p| resolved_set.contains(p.as_path()))
@@ -752,27 +758,24 @@ pub(crate) fn replay_snapshot_with_merge_protection(
         let full = ws_path.join(path);
 
         // Read the stash version (user's local edits).
-        let stash_content = match read_file_at_commit(ws_path, &snapshot.oid, path) {
-            Some(c) => c,
-            None => {
-                // Stash doesn't have this file — user deleted it.
-                // That's a delete-vs-modify conflict.
-                let markers = write_diff3_markers(
-                    read_file_at_commit(ws_path, anchor_epoch, path)
-                        .as_deref()
-                        .unwrap_or(b""),
-                    merge_content,
-                    b"",
-                    &merge_label,
-                    &local_label,
-                );
-                let _ = std::fs::write(&full, &markers);
-                conflicts.push(WorkingCopyConflict {
-                    path: path.display().to_string(),
-                    conflict_type: "delete_mod_conflict".to_owned(),
-                });
-                continue;
-            }
+        let Some(stash_content) = read_file_at_commit(ws_path, &snapshot.oid, path) else {
+            // Stash doesn't have this file — user deleted it.
+            // That's a delete-vs-modify conflict.
+            let markers = write_diff3_markers(
+                read_file_at_commit(ws_path, anchor_epoch, path)
+                    .as_deref()
+                    .unwrap_or(b""),
+                merge_content,
+                b"",
+                &merge_label,
+                &local_label,
+            );
+            let _ = std::fs::write(&full, &markers);
+            conflicts.push(WorkingCopyConflict {
+                path: path.display().to_string(),
+                conflict_type: "delete_mod_conflict".to_owned(),
+            });
+            continue;
         };
 
         // If stash version equals merge version, nothing to do.
@@ -1034,7 +1037,7 @@ fn write_diff3_markers(
 /// Call this after a successful replay to clean up the durable pin.
 /// On replay with conflicts, the ref is intentionally KEPT as a recovery
 /// anchor.
-pub(crate) fn cleanup_snapshot(repo_root: &Path, ws_name: &str) -> Result<()> {
+pub fn cleanup_snapshot(repo_root: &Path, ws_name: &str) -> Result<()> {
     let ref_name = snapshot_ref_name(ws_name);
     manifold_refs::delete_ref(repo_root, &ref_name)
         .map_err(|e| anyhow::anyhow!("failed to delete snapshot ref '{ref_name}': {e}"))?;
@@ -1047,7 +1050,7 @@ pub(crate) fn cleanup_snapshot(repo_root: &Path, ws_name: &str) -> Result<()> {
 /// Returns the snapshot ref details if one exists (e.g. from a prior crash).
 /// Callers can use this to offer recovery.
 #[allow(dead_code)]
-pub(crate) fn dangling_snapshot(repo_root: &Path, ws_name: &str) -> Result<Option<SnapshotRef>> {
+pub fn dangling_snapshot(repo_root: &Path, ws_name: &str) -> Result<Option<SnapshotRef>> {
     let ref_name = snapshot_ref_name(ws_name);
     match manifold_refs::read_ref(repo_root, &ref_name) {
         Ok(Some(oid)) => Ok(Some(SnapshotRef {
@@ -1066,7 +1069,7 @@ pub(crate) fn dangling_snapshot(repo_root: &Path, ws_name: &str) -> Result<Optio
 /// Outcome of a `preserve_checkout_replay()` operation.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
-pub(crate) enum ReplayResult {
+pub enum ReplayResult {
     /// No user work existed — clean checkout performed.
     Clean,
     /// User work existed, captured and replayed successfully.
@@ -1100,7 +1103,11 @@ pub(crate) enum ReplayResult {
 // git ls-files --others) with GitRepo trait methods when supported.
 #[instrument(skip_all, fields(workspace = workspace_name, target = target_ref))]
 #[allow(dead_code)]
-pub(crate) fn preserve_checkout_replay(
+#[expect(
+    clippy::too_many_lines,
+    reason = "preserve checkout replay coordinates capture, checkout, replay, and cleanup"
+)]
+pub fn preserve_checkout_replay(
     ws_path: &Path,
     base_epoch: &str,
     target_ref: &str,
@@ -1149,16 +1156,13 @@ pub(crate) fn preserve_checkout_replay(
     let capture_result = capture_before_destroy(ws_path, workspace_name, &base_oid)
         .context("failed to capture recovery snapshot before rewrite")?;
 
-    let capture = match capture_result {
-        Some(c) => c,
-        None => {
-            tracing::warn!(
-                "capture returned None despite status check showing work; \
-                 falling back to clean checkout"
-            );
-            git_checkout_force(ws_path, target_ref)?;
-            return Ok(ReplayResult::Clean);
-        }
+    let Some(capture) = capture_result else {
+        tracing::warn!(
+            "capture returned None despite status check showing work; \
+             falling back to clean checkout"
+        );
+        git_checkout_force(ws_path, target_ref)?;
+        return Ok(ReplayResult::Clean);
     };
 
     let recovery_ref = capture.pinned_ref.clone();
@@ -1485,7 +1489,7 @@ mod tests {
 
     /// Create a fresh git repo with one initial commit.
     fn setup_repo() -> (TempDir, std::path::PathBuf, String) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         for (args, _label) in [
@@ -1501,60 +1505,60 @@ mod tests {
                 .args(&args)
                 .current_dir(&root)
                 .output()
-                .unwrap();
+                .expect("operation should succeed");
             assert!(out.status.success(), "git {args:?} failed");
         }
 
         // Create `.manifold/` so `repo_root_from_worktree`'s layout validation
         // (bn-2bow) recognizes this as a maw repo root.
-        fs::create_dir_all(root.join(".manifold")).unwrap();
+        fs::create_dir_all(root.join(".manifold")).expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         let out = Command::new("git")
             .args(["add", "README.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         let out = Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
 
         (dir, root, oid)
     }
 
     fn make_second_commit(root: &Path) -> String {
-        fs::write(root.join("epoch2.txt"), "epoch2 content\n").unwrap();
+        fs::write(root.join("epoch2.txt"), "epoch2 content\n").expect("operation should succeed");
         let out = Command::new("git")
             .args(["add", "epoch2.txt"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         let out = Command::new("git")
             .args(["commit", "-m", "epoch2"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
@@ -1567,18 +1571,18 @@ mod tests {
             .args(["checkout", "--force", &base_oid])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
-        let result =
-            preserve_checkout_replay(&root, &base_oid, &target_oid, &root, "test-ws").unwrap();
+        let result = preserve_checkout_replay(&root, &base_oid, &target_oid, &root, "test-ws")
+            .expect("operation should succeed");
 
         assert!(
             matches!(result, ReplayResult::Clean),
             "expected Clean, got {result:?}"
         );
 
-        let head = resolve_head_str(&root).unwrap();
+        let head = resolve_head_str(&root).expect("operation should succeed");
         assert_eq!(head, target_oid);
         assert!(root.join("epoch2.txt").exists());
     }
@@ -1592,16 +1596,17 @@ mod tests {
             .args(["checkout", "--force", &base_oid])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         // Staged change
-        fs::write(root.join("README.md"), "# Modified by user\n").unwrap();
+        fs::write(root.join("README.md"), "# Modified by user\n")
+            .expect("operation should succeed");
         let out = Command::new("git")
             .args(["add", "README.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         // Unstaged change
@@ -1609,13 +1614,14 @@ mod tests {
             root.join("README.md"),
             "# Modified by user\nUnstaged extra line\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Untracked file
-        fs::write(root.join("user-notes.txt"), "my important notes\n").unwrap();
+        fs::write(root.join("user-notes.txt"), "my important notes\n")
+            .expect("operation should succeed");
 
-        let result =
-            preserve_checkout_replay(&root, &base_oid, &target_oid, &root, "test-ws").unwrap();
+        let result = preserve_checkout_replay(&root, &base_oid, &target_oid, &root, "test-ws")
+            .expect("operation should succeed");
 
         match &result {
             ReplayResult::Replayed {
@@ -1636,7 +1642,7 @@ mod tests {
             "epoch2.txt should exist after replay"
         );
 
-        let readme = fs::read_to_string(root.join("README.md")).unwrap();
+        let readme = fs::read_to_string(root.join("README.md")).expect("operation should succeed");
         assert!(
             readme.contains("Modified by user"),
             "staged changes should survive: {readme}"
@@ -1646,7 +1652,8 @@ mod tests {
             root.join("user-notes.txt").exists(),
             "untracked file should be restored"
         );
-        let notes = fs::read_to_string(root.join("user-notes.txt")).unwrap();
+        let notes =
+            fs::read_to_string(root.join("user-notes.txt")).expect("operation should succeed");
         assert_eq!(notes, "my important notes\n");
     }
 
@@ -1691,8 +1698,8 @@ mod tests {
     #[test]
     fn rewrite_record_serialization_roundtrip() {
         let record = make_test_record("test-ws", ReplayOutcome::Replayed);
-        let json = serde_json::to_string_pretty(&record).unwrap();
-        let parsed: RewriteRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&record).expect("operation should succeed");
+        let parsed: RewriteRecord = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(parsed.workspace, "test-ws");
         assert_eq!(parsed.replay_outcome, ReplayOutcome::Replayed);
         assert_eq!(parsed.delta_summary.staged_files, 1);
@@ -1705,21 +1712,22 @@ mod tests {
     fn rewrite_record_rollback_serialization() {
         let mut record = make_test_record("ws", ReplayOutcome::Rollback);
         record.rollback_reason = Some("stash pop failed: conflict".to_owned());
-        let json = serde_json::to_string(&record).unwrap();
+        let json = serde_json::to_string(&record).expect("operation should succeed");
         assert!(json.contains("\"rollback\""));
         assert!(json.contains("stash pop failed"));
     }
 
     #[test]
     fn write_and_read_rewrite_artifact() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
         let record = make_test_record("agent-1", ReplayOutcome::Replayed);
 
-        let path = write_rewrite_record(root, "agent-1", &record).unwrap();
+        let path =
+            write_rewrite_record(root, "agent-1", &record).expect("operation should succeed");
         assert!(path.exists());
 
-        let read_back = read_rewrite_record(&path).unwrap();
+        let read_back = read_rewrite_record(&path).expect("operation should succeed");
         assert_eq!(read_back.workspace, "agent-1");
         assert_eq!(read_back.replay_outcome, ReplayOutcome::Replayed);
         assert_eq!(read_back.delta_summary.staged_files, 1);
@@ -1727,7 +1735,7 @@ mod tests {
 
     #[test]
     fn list_rewrite_records_returns_sorted() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         for ts in &["2025-06-01T12:00:00Z", "2025-06-02T12:00:00Z"] {
@@ -1735,10 +1743,10 @@ mod tests {
             record.timestamp = ts.to_string();
             record.recovery_ref =
                 format!("refs/manifold/recovery/agent-1/{}", ts.replace(':', "-"));
-            write_rewrite_record(root, "agent-1", &record).unwrap();
+            write_rewrite_record(root, "agent-1", &record).expect("operation should succeed");
         }
 
-        let records = list_rewrite_records(root, "agent-1").unwrap();
+        let records = list_rewrite_records(root, "agent-1").expect("operation should succeed");
         assert_eq!(records.len(), 2);
         assert!(records[0].recovery_ref.contains("2025-06-01"));
         assert!(records[1].recovery_ref.contains("2025-06-02"));
@@ -1746,22 +1754,23 @@ mod tests {
 
     #[test]
     fn list_rewrite_records_empty_for_nonexistent_workspace() {
-        let dir = TempDir::new().unwrap();
-        let records = list_rewrite_records(dir.path(), "nonexistent").unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
+        let records =
+            list_rewrite_records(dir.path(), "nonexistent").expect("operation should succeed");
         assert!(records.is_empty());
     }
 
     #[test]
     fn list_rewritten_workspaces_discovers_workspace_dirs() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         for ws in &["alpha", "beta"] {
             let record = make_test_record(ws, ReplayOutcome::Clean);
-            write_rewrite_record(root, ws, &record).unwrap();
+            write_rewrite_record(root, ws, &record).expect("operation should succeed");
         }
 
-        let names = list_rewritten_workspaces(root).unwrap();
+        let names = list_rewritten_workspaces(root).expect("operation should succeed");
         assert_eq!(names, vec!["alpha", "beta"]);
     }
 
@@ -1779,7 +1788,8 @@ mod tests {
     #[test]
     fn snapshot_clean_workspace_returns_none() {
         let (_dir, root, _base_oid) = setup_repo();
-        let result = snapshot_working_copy(&root, &root, "test-ws").unwrap();
+        let result =
+            snapshot_working_copy(&root, &root, "test-ws").expect("operation should succeed");
         assert!(result.is_none(), "clean workspace should return None");
     }
 
@@ -1788,11 +1798,12 @@ mod tests {
         let (_dir, root, _base_oid) = setup_repo();
 
         // Create dirty state: modify tracked file + add untracked file.
-        fs::write(root.join("README.md"), "# Modified by user\n").unwrap();
-        fs::write(root.join("notes.txt"), "user notes\n").unwrap();
+        fs::write(root.join("README.md"), "# Modified by user\n")
+            .expect("operation should succeed");
+        fs::write(root.join("notes.txt"), "user notes\n").expect("operation should succeed");
 
         let result = snapshot_working_copy(&root, &root, "test-ws")
-            .unwrap()
+            .expect("operation should succeed")
             .expect("dirty workspace should return Some");
 
         // Snapshot ref should be pinned.
@@ -1800,7 +1811,8 @@ mod tests {
         assert!(!result.oid.is_empty());
 
         // Verify the ref was written.
-        let ref_oid = maw_core::refs::read_ref(&root, &result.ref_name).unwrap();
+        let ref_oid =
+            maw_core::refs::read_ref(&root, &result.ref_name).expect("operation should succeed");
         assert!(ref_oid.is_some(), "snapshot ref should exist");
 
         // Working tree should be clean after snapshot.
@@ -1808,7 +1820,7 @@ mod tests {
             .args(["status", "--porcelain"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let status_str = String::from_utf8_lossy(&status.stdout);
         assert!(
             status_str.trim().is_empty(),
@@ -1826,20 +1838,21 @@ mod tests {
             .args(["checkout", "--force", &base_oid])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         // Create user changes.
-        fs::write(root.join("README.md"), "# User modified\n").unwrap();
-        fs::write(root.join("user-work.txt"), "important work\n").unwrap();
+        fs::write(root.join("README.md"), "# User modified\n").expect("operation should succeed");
+        fs::write(root.join("user-work.txt"), "important work\n")
+            .expect("operation should succeed");
 
         // Step 1: Snapshot.
         let snapshot = snapshot_working_copy(&root, &root, "test-ws")
-            .unwrap()
+            .expect("operation should succeed")
             .expect("dirty workspace should produce snapshot");
 
         // Step 2: Checkout to target.
-        checkout_to(&root, &target_oid, None).unwrap();
+        checkout_to(&root, &target_oid, None).expect("operation should succeed");
 
         // Verify target is checked out.
         assert!(
@@ -1848,14 +1861,14 @@ mod tests {
         );
 
         // Step 3: Replay.
-        let replay_result = replay_snapshot(&root, &snapshot).unwrap();
+        let replay_result = replay_snapshot(&root, &snapshot).expect("operation should succeed");
         assert!(
             matches!(replay_result, SnapshotReplayResult::Clean),
             "replay should be clean for non-overlapping changes"
         );
 
         // User changes should be present on top of new epoch.
-        let readme = fs::read_to_string(root.join("README.md")).unwrap();
+        let readme = fs::read_to_string(root.join("README.md")).expect("operation should succeed");
         assert!(
             readme.contains("User modified"),
             "user modification should survive: {readme}"
@@ -1870,8 +1883,9 @@ mod tests {
         );
 
         // Step 4: Cleanup.
-        cleanup_snapshot(&root, "test-ws").unwrap();
-        let ref_oid = maw_core::refs::read_ref(&root, "refs/manifold/snapshot/test-ws").unwrap();
+        cleanup_snapshot(&root, "test-ws").expect("operation should succeed");
+        let ref_oid = maw_core::refs::read_ref(&root, "refs/manifold/snapshot/test-ws")
+            .expect("operation should succeed");
         assert!(
             ref_oid.is_none(),
             "snapshot ref should be deleted after cleanup"
@@ -1883,24 +1897,24 @@ mod tests {
         let (_dir, root, _base_oid) = setup_repo();
 
         // Create a second commit that modifies README.md.
-        fs::write(root.join("README.md"), "# Epoch 2 version\n").unwrap();
+        fs::write(root.join("README.md"), "# Epoch 2 version\n").expect("operation should succeed");
         let out = Command::new("git")
             .args(["add", "README.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
         let out = Command::new("git")
             .args(["commit", "-m", "epoch2: modify README"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
         let target_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let target_oid = String::from_utf8_lossy(&target_out.stdout)
             .trim()
             .to_owned();
@@ -1910,21 +1924,22 @@ mod tests {
             .args(["checkout", "HEAD~1"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
-        fs::write(root.join("README.md"), "# User conflicting version\n").unwrap();
+        fs::write(root.join("README.md"), "# User conflicting version\n")
+            .expect("operation should succeed");
 
         // Snapshot.
         let snapshot = snapshot_working_copy(&root, &root, "test-ws")
-            .unwrap()
+            .expect("operation should succeed")
             .expect("dirty workspace should produce snapshot");
 
         // Checkout to target (which has different README.md).
-        checkout_to(&root, &target_oid, None).unwrap();
+        checkout_to(&root, &target_oid, None).expect("operation should succeed");
 
         // Replay — should produce conflict.
-        let replay_result = replay_snapshot(&root, &snapshot).unwrap();
+        let replay_result = replay_snapshot(&root, &snapshot).expect("operation should succeed");
         match replay_result {
             SnapshotReplayResult::Conflicts(conflicts) => {
                 assert!(!conflicts.is_empty(), "should have at least one conflict");
@@ -1941,7 +1956,8 @@ mod tests {
         }
 
         // Snapshot ref should still exist (not cleaned up on conflict).
-        let ref_oid = maw_core::refs::read_ref(&root, "refs/manifold/snapshot/test-ws").unwrap();
+        let ref_oid = maw_core::refs::read_ref(&root, "refs/manifold/snapshot/test-ws")
+            .expect("operation should succeed");
         assert!(ref_oid.is_some(), "snapshot ref should be kept on conflict");
     }
 }

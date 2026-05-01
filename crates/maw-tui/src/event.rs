@@ -22,6 +22,10 @@ fn normalize_event(event: Event) -> AppEvent {
     }
 }
 
+/// Poll for the next terminal input event.
+///
+/// # Errors
+/// Returns an error if crossterm cannot poll or read from the terminal.
 pub fn next_event(timeout: Duration) -> Result<AppEvent> {
     if !event::poll(timeout)? {
         return Ok(AppEvent::Tick);

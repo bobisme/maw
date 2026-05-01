@@ -59,6 +59,12 @@ pub enum ParseError {
 }
 
 impl Pointer {
+    /// Parse an LFS pointer from canonical pointer bytes.
+    ///
+    /// # Errors
+    /// Returns a [`ParseError`] if the bytes are too large, non-ASCII, use
+    /// unsupported line endings, or do not contain a valid version, oid, and
+    /// size.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.is_empty() {
             return Err(ParseError::Empty);
@@ -143,13 +149,15 @@ impl Pointer {
         let oid = oid.ok_or(ParseError::BadOid)?;
         let size = size.ok_or(ParseError::BadSize)?;
 
-        Ok(Pointer {
+        Ok(Self {
             oid,
             size,
             extensions,
         })
     }
 
+    /// Serialize this pointer in canonical Git LFS pointer format.
+    #[must_use]
     pub fn write(&self) -> Vec<u8> {
         // Version always first; all other keys sorted alphabetically.
         // Known keys: oid, size. Unknown: extensions. Merge-sort them all.
@@ -180,6 +188,7 @@ impl Pointer {
         out.into_bytes()
     }
 
+    #[must_use]
     pub fn oid_hex(&self) -> String {
         let mut s = String::with_capacity(64);
         for byte in &self.oid {
@@ -190,7 +199,7 @@ impl Pointer {
     }
 }
 
-fn hex_digit(b: u8) -> Option<u8> {
+const fn hex_digit(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -210,6 +219,7 @@ fn hex_char(n: u8) -> char {
 /// Fast check: does this byte slice look like an LFS pointer?
 ///
 /// Used to short-circuit blob inspection before a full parse.
+#[must_use]
 pub fn looks_like_pointer(bytes: &[u8]) -> bool {
     bytes.len() <= MAX_POINTER_BYTES && bytes.starts_with(VERSION_PREFIX)
 }
@@ -223,18 +233,18 @@ mod tests {
 
     fn sample_oid() -> [u8; 32] {
         let mut out = [0u8; 32];
-        for i in 0..32 {
-            let hi = hex_digit(SAMPLE_OID_HEX.as_bytes()[i * 2]).unwrap();
-            let lo = hex_digit(SAMPLE_OID_HEX.as_bytes()[i * 2 + 1]).unwrap();
-            out[i] = (hi << 4) | lo;
+        for (i, byte) in out.iter_mut().enumerate() {
+            let hi = hex_digit(SAMPLE_OID_HEX.as_bytes()[i * 2]).expect("operation should succeed");
+            let lo =
+                hex_digit(SAMPLE_OID_HEX.as_bytes()[i * 2 + 1]).expect("operation should succeed");
+            *byte = (hi << 4) | lo;
         }
         out
     }
 
     fn sample_pointer_bytes() -> Vec<u8> {
         format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {}\n",
-            SAMPLE_OID_HEX, SAMPLE_SIZE
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n"
         )
         .into_bytes()
     }
@@ -242,7 +252,7 @@ mod tests {
     #[test]
     fn roundtrip_canonical_pointer() {
         let bytes = sample_pointer_bytes();
-        let p = Pointer::parse(&bytes).unwrap();
+        let p = Pointer::parse(&bytes).expect("operation should succeed");
         assert_eq!(p.oid, sample_oid());
         assert_eq!(p.size, SAMPLE_SIZE);
         assert!(p.extensions.is_empty());
@@ -253,14 +263,13 @@ mod tests {
     #[test]
     fn parse_keys_in_any_order_after_version() {
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\nsize {}\noid sha256:{}\n",
-            SAMPLE_SIZE, SAMPLE_OID_HEX
+            "version https://git-lfs.github.com/spec/v1\nsize {SAMPLE_SIZE}\noid sha256:{SAMPLE_OID_HEX}\n"
         );
-        let p = Pointer::parse(bytes.as_bytes()).unwrap();
+        let p = Pointer::parse(bytes.as_bytes()).expect("operation should succeed");
         assert_eq!(p.size, SAMPLE_SIZE);
         // Write sorts alphabetically: oid before size.
         let out = p.write();
-        let text = std::str::from_utf8(&out).unwrap();
+        let text = std::str::from_utf8(&out).expect("operation should succeed");
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "version https://git-lfs.github.com/spec/v1");
         assert!(lines[1].starts_with("oid "));
@@ -297,8 +306,7 @@ mod tests {
     fn missing_trailing_newline_rejected() {
         // Valid content but no trailing LF — reject (spec requires LF on every line).
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {}",
-            SAMPLE_OID_HEX, SAMPLE_SIZE
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}"
         );
         assert!(Pointer::parse(bytes.as_bytes()).is_err());
     }
@@ -314,7 +322,7 @@ mod tests {
 
     #[test]
     fn missing_version_rejected() {
-        let bytes = format!("oid sha256:{}\nsize {}\n", SAMPLE_OID_HEX, SAMPLE_SIZE);
+        let bytes = format!("oid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n");
         assert_eq!(
             Pointer::parse(bytes.as_bytes()),
             Err(ParseError::BadVersion)
@@ -325,8 +333,7 @@ mod tests {
     fn uppercase_hex_rejected() {
         let upper: String = SAMPLE_OID_HEX.to_ascii_uppercase();
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {}\n",
-            upper, SAMPLE_SIZE
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{upper}\nsize {SAMPLE_SIZE}\n"
         );
         assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadOid));
     }
@@ -340,8 +347,7 @@ mod tests {
     #[test]
     fn non_numeric_size_rejected() {
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize notanumber\n",
-            SAMPLE_OID_HEX
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize notanumber\n"
         );
         assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadSize));
     }
@@ -354,18 +360,15 @@ mod tests {
 
     #[test]
     fn missing_size_rejected() {
-        let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\n",
-            SAMPLE_OID_HEX
-        );
+        let bytes =
+            format!("version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\n");
         assert_eq!(Pointer::parse(bytes.as_bytes()), Err(ParseError::BadSize));
     }
 
     #[test]
     fn duplicate_key_rejected() {
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\noid sha256:{}\nsize 1\n",
-            SAMPLE_OID_HEX, SAMPLE_OID_HEX
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\noid sha256:{SAMPLE_OID_HEX}\nsize 1\n"
         );
         assert!(matches!(
             Pointer::parse(bytes.as_bytes()),
@@ -377,18 +380,16 @@ mod tests {
     fn extensions_preserved_roundtrip() {
         // Unknown keys must be preserved and sorted with known keys on write.
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{}\nsize {}\n",
-            SAMPLE_OID_HEX, SAMPLE_SIZE
+            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n"
         );
-        let p = Pointer::parse(bytes.as_bytes()).unwrap();
+        let p = Pointer::parse(bytes.as_bytes()).expect("operation should succeed");
         assert_eq!(
             p.extensions,
             vec![("extra".to_owned(), "value-x".to_owned())]
         );
         let out = p.write();
         let expected = format!(
-            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{}\nsize {}\n",
-            SAMPLE_OID_HEX, SAMPLE_SIZE
+            "version https://git-lfs.github.com/spec/v1\nextra value-x\noid sha256:{SAMPLE_OID_HEX}\nsize {SAMPLE_SIZE}\n"
         );
         assert_eq!(out, expected.as_bytes());
     }
@@ -400,7 +401,9 @@ mod tests {
 
     #[test]
     fn looks_like_pointer_rejects_binary() {
-        let binary: Vec<u8> = (0..2048u16).map(|i| (i % 256) as u8).collect();
+        let binary: Vec<u8> = (0..2048u16)
+            .map(|i| u8::try_from(i % 256).expect("value reduced below byte range"))
+            .collect();
         assert!(!looks_like_pointer(&binary));
     }
 
@@ -420,10 +423,9 @@ mod tests {
     fn size_zero_accepted() {
         // Empty files are valid LFS content.
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 0\n",
-            SAMPLE_OID_HEX
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize 0\n"
         );
-        let p = Pointer::parse(bytes.as_bytes()).unwrap();
+        let p = Pointer::parse(bytes.as_bytes()).expect("operation should succeed");
         assert_eq!(p.size, 0);
     }
 
@@ -431,10 +433,9 @@ mod tests {
     fn large_size_accepted() {
         let big = u64::MAX;
         let bytes = format!(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {}\n",
-            SAMPLE_OID_HEX, big
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{SAMPLE_OID_HEX}\nsize {big}\n"
         );
-        let p = Pointer::parse(bytes.as_bytes()).unwrap();
+        let p = Pointer::parse(bytes.as_bytes()).expect("operation should succeed");
         assert_eq!(p.size, big);
     }
 }
@@ -448,10 +449,10 @@ mod interop_tests {
         // "hello world\n" is 12 bytes; sha256 matches git-lfs 3.7.1 output.
         let hex = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
         let mut oid = [0u8; 32];
-        for i in 0..32 {
-            let hi = hex_digit(hex.as_bytes()[i * 2]).unwrap();
-            let lo = hex_digit(hex.as_bytes()[i * 2 + 1]).unwrap();
-            oid[i] = (hi << 4) | lo;
+        for (i, byte) in oid.iter_mut().enumerate() {
+            let hi = hex_digit(hex.as_bytes()[i * 2]).expect("operation should succeed");
+            let lo = hex_digit(hex.as_bytes()[i * 2 + 1]).expect("operation should succeed");
+            *byte = (hi << 4) | lo;
         }
         let p = Pointer {
             oid,

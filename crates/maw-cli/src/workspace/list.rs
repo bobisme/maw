@@ -44,13 +44,17 @@ pub struct WorkspaceInfo {
 
 /// Compact merge-check result for ws list output.
 #[derive(Serialize)]
-pub(crate) struct MergeCheckSummary {
+pub struct MergeCheckSummary {
     pub(crate) ready: bool,
     pub(crate) conflict_count: usize,
     pub(crate) stale: bool,
 }
 
-fn is_zero(n: &u32) -> bool {
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive fields by reference"
+)]
+const fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
@@ -77,6 +81,10 @@ pub struct AdviceDetails {
     pub(crate) fix: String,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "list command combines data collection, optional checks, and rendering"
+)]
 pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
     let backend = get_backend()?;
     let backend_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -106,7 +114,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             if name == DEFAULT_WORKSPACE || ws.commits_ahead == 0 {
                 continue;
             }
-            match super::merge::check_merge_result(&[name.clone()]) {
+            match super::merge::check_merge_result(std::slice::from_ref(&name)) {
                 Ok(result) => {
                     checks.insert(
                         name,
@@ -156,8 +164,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             let rebase_conflicts = {
                 let ws_path = root.join("ws").join(ws.id.as_str());
                 super::resolve::find_conflicted_files(&ws_path)
-                    .map(|f| f.len() as u32)
-                    .unwrap_or(0)
+                    .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
             };
             WorkspaceInfo {
                 is_default,
@@ -208,11 +215,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX)
                 && ws.id.as_str() != DEFAULT_WORKSPACE
         })
-        .filter(|ws| {
-            metadata::read(&root, ws.id.as_str())
-                .map(|m| m.mode.is_persistent())
-                .unwrap_or(false)
-        })
+        .filter(|ws| metadata::read(&root, ws.id.as_str()).is_ok_and(|m| m.mode.is_persistent()))
         .map(|ws| ws.id.as_str().to_string())
         .collect();
 
@@ -223,11 +226,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 && !ws.id.as_str().starts_with(QUARANTINE_NAME_PREFIX)
                 && ws.id.as_str() != DEFAULT_WORKSPACE
         })
-        .filter(|ws| {
-            metadata::read(&root, ws.id.as_str())
-                .map(|m| m.mode.is_ephemeral())
-                .unwrap_or(true)
-        })
+        .filter(|ws| metadata::read(&root, ws.id.as_str()).map_or(true, |m| m.mode.is_ephemeral()))
         .map(|ws| ws.id.as_str().to_string())
         .collect();
 
@@ -328,6 +327,10 @@ fn print_list_text(
 }
 
 /// Print workspace list in colored, human-friendly format.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pretty renderer keeps all workspace categories in one output routine"
+)]
 fn print_list_pretty(
     workspaces: &[WorkspaceInfo],
     stale: &[String],

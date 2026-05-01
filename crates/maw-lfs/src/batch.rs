@@ -9,6 +9,7 @@
 //! headers returned by the server.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use crate::creds::CredentialProvider;
 use crate::store::Store;
 
 const MEDIA_TYPE: &str = "application/vnd.git-lfs+json";
-const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+const HTTP_TIMEOUT: Duration = Duration::from_mins(2);
 
 pub struct ObjectSpec {
     pub oid: [u8; 32],
@@ -28,7 +29,7 @@ pub struct ObjectSpec {
 
 impl ObjectSpec {
     fn oid_hex(&self) -> String {
-        self.oid.iter().map(|b| format!("{b:02x}")).collect()
+        oid_hex(&self.oid)
     }
 }
 
@@ -74,6 +75,10 @@ pub struct BatchClient {
 impl BatchClient {
     /// Build a client for the given git remote URL.
     /// Appends `/info/lfs` to the remote URL to form the LFS server base.
+    ///
+    /// # Errors
+    /// Returns an error if the remote URL is unsupported or the HTTP client
+    /// cannot be constructed.
     pub fn new(remote_url: &str, creds: CredentialProvider) -> Result<Self, BatchError> {
         let base = derive_lfs_base(remote_url)?;
         let endpoint = format!("{base}/objects/batch");
@@ -92,6 +97,10 @@ impl BatchClient {
     }
 
     /// Download all `objects` into `store`.
+    ///
+    /// # Errors
+    /// Returns an error if the LFS batch request fails before per-object
+    /// transfer results can be reported.
     pub fn download(
         &mut self,
         objects: &[ObjectSpec],
@@ -136,6 +145,10 @@ impl BatchClient {
     }
 
     /// Upload all `objects` from `store` to the server.
+    ///
+    /// # Errors
+    /// Returns an error if the LFS batch request fails before per-object
+    /// transfer results can be reported.
     pub fn upload(
         &mut self,
         objects: &[ObjectSpec],
@@ -269,7 +282,7 @@ impl BatchClient {
     ) -> Result<(), BatchError> {
         let reader = store
             .open_object(oid)?
-            .ok_or_else(|| BatchError::Http(format!("object missing from local store")))?;
+            .ok_or_else(|| BatchError::Http("object missing from local store".to_string()))?;
         let mut req = self.http.put(&upload.href);
         for (k, v) in upload.header.iter().flatten() {
             req = req.header(k, v);
@@ -294,7 +307,7 @@ impl BatchClient {
             for (k, val) in v.header.iter().flatten() {
                 vreq = vreq.header(k, val);
             }
-            let oid_hex: String = oid.iter().map(|b| format!("{b:02x}")).collect();
+            let oid_hex = oid_hex(oid);
             let vresp = vreq
                 .json(&VerifyBody { oid: oid_hex, size })
                 .send()
@@ -356,6 +369,14 @@ fn hex_to_oid(hex: &str) -> Result<[u8; 32], ()> {
         out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
     }
     Ok(out)
+}
+
+fn oid_hex(oid: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in oid {
+        write!(&mut out, "{b:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 // ---- Wire types ----
@@ -432,7 +453,7 @@ mod tests {
     #[test]
     fn derive_lfs_base_https() {
         assert_eq!(
-            derive_lfs_base("https://github.com/bob/repo.git").unwrap(),
+            derive_lfs_base("https://github.com/bob/repo.git").expect("operation should succeed"),
             "https://github.com/bob/repo.git/info/lfs"
         );
     }
@@ -440,7 +461,7 @@ mod tests {
     #[test]
     fn derive_lfs_base_trailing_slash() {
         assert_eq!(
-            derive_lfs_base("https://example.com/repo/").unwrap(),
+            derive_lfs_base("https://example.com/repo/").expect("operation should succeed"),
             "https://example.com/repo/info/lfs"
         );
     }
@@ -454,11 +475,11 @@ mod tests {
     #[test]
     fn extract_host_parses_port() {
         assert_eq!(
-            extract_host("https://git.example.com:8443/x").unwrap(),
+            extract_host("https://git.example.com:8443/x").expect("operation should succeed"),
             "git.example.com"
         );
         assert_eq!(
-            extract_host("https://github.com/x/y.git").unwrap(),
+            extract_host("https://github.com/x/y.git").expect("operation should succeed"),
             "github.com"
         );
     }
@@ -466,8 +487,8 @@ mod tests {
     #[test]
     fn hex_to_oid_round_trip() {
         let hex = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
-        let oid = hex_to_oid(hex).unwrap();
-        let back: String = oid.iter().map(|b| format!("{b:02x}")).collect();
+        let oid = hex_to_oid(hex).expect("operation should succeed");
+        let back = oid_hex(&oid);
         assert_eq!(back, hex);
     }
 
@@ -487,7 +508,7 @@ mod tests {
                 size: 12,
             }],
         };
-        let json = serde_json::to_value(&body).unwrap();
+        let json = serde_json::to_value(&body).expect("operation should succeed");
         assert_eq!(json["operation"], "download");
         assert_eq!(json["transfers"][0], "basic");
         assert_eq!(json["hash_algo"], "sha256");
@@ -517,7 +538,7 @@ mod tests {
                 }
             ]
         }"#;
-        let parsed: BatchResponse = serde_json::from_str(body).unwrap();
+        let parsed: BatchResponse = serde_json::from_str(body).expect("operation should succeed");
         assert_eq!(parsed.transfer.as_deref(), Some("basic"));
         assert_eq!(parsed.objects.len(), 2);
         assert_eq!(parsed.objects[0].oid, "deadbeef");
@@ -525,7 +546,11 @@ mod tests {
         assert!(parsed.objects[0].error.is_none());
         assert!(parsed.objects[1].error.is_some());
         assert_eq!(
-            parsed.objects[1].error.as_ref().unwrap().message,
+            parsed.objects[1]
+                .error
+                .as_ref()
+                .expect("operation should succeed")
+                .message,
             "not found"
         );
     }
@@ -533,7 +558,8 @@ mod tests {
     #[test]
     fn client_construction() {
         let creds = CredentialProvider::empty();
-        let client = BatchClient::new("https://github.com/bob/repo.git", creds).unwrap();
+        let client = BatchClient::new("https://github.com/bob/repo.git", creds)
+            .expect("operation should succeed");
         assert!(client.endpoint.ends_with("/info/lfs/objects/batch"));
         assert_eq!(client.host, "github.com");
     }

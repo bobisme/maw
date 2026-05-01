@@ -103,7 +103,7 @@ pub enum FinalEntry {
 /// Output of [`materialize`]: every path in the input tree gets an entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterializedOutput {
-    /// Path → final-state entry. Sorted (BTreeMap) for determinism.
+    /// Path → final-state entry. Sorted (`BTreeMap`) for determinism.
     pub entries: BTreeMap<PathBuf, FinalEntry>,
 }
 
@@ -944,15 +944,20 @@ mod tests {
     use tempfile::TempDir;
 
     fn epoch() -> EpochId {
-        EpochId::new(&"e".repeat(40)).unwrap()
+        EpochId::new(&"e".repeat(40)).expect("operation should succeed")
     }
 
     fn oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn ord(ws: &str) -> OrderingKey {
-        OrderingKey::new(epoch(), WorkspaceId::new(ws).unwrap(), 1, 1_700_000_000_000)
+        OrderingKey::new(
+            epoch(),
+            WorkspaceId::new(ws).expect("operation should succeed"),
+            1,
+            1_700_000_000_000,
+        )
     }
 
     fn side(ws: &str, content: GitOid) -> ConflictSide {
@@ -973,7 +978,7 @@ mod tests {
 
     impl Fx {
         fn new() -> Self {
-            let dir = TempDir::new().unwrap();
+            let dir = TempDir::new().expect("operation should succeed");
             let status = Command::new("git")
                 .args(["init", "--initial-branch=main", "-q"])
                 .current_dir(dir.path())
@@ -1000,7 +1005,7 @@ mod tests {
     fn materialize_empty_tree_returns_empty_output() {
         let fx = Fx::new();
         let tree = ConflictTree::new(epoch());
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
         assert!(out.is_empty(), "empty tree should produce empty output");
         assert_eq!(out.len(), 0);
     }
@@ -1018,10 +1023,13 @@ mod tests {
             MaterializedEntry::new(EntryMode::Blob, oid('b')),
         );
 
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
         assert_eq!(out.len(), 2);
 
-        let lib_entry = out.entries.get(&PathBuf::from("src/lib.rs")).unwrap();
+        let lib_entry = out
+            .entries
+            .get(&PathBuf::from("src/lib.rs"))
+            .expect("operation should succeed");
         match lib_entry {
             FinalEntry::Clean { mode, oid: o } => {
                 assert_eq!(*mode, EntryMode::Blob);
@@ -1030,7 +1038,10 @@ mod tests {
             FinalEntry::Rendered { .. } => panic!("clean entry should not be rendered"),
         }
 
-        let readme_entry = out.entries.get(&PathBuf::from("README.md")).unwrap();
+        let readme_entry = out
+            .entries
+            .get(&PathBuf::from("README.md"))
+            .expect("operation should succeed");
         match readme_entry {
             FinalEntry::Clean { mode, oid: o } => {
                 assert_eq!(*mode, EntryMode::Blob);
@@ -1048,8 +1059,11 @@ mod tests {
             PathBuf::from("scripts/build.sh"),
             MaterializedEntry::new(EntryMode::BlobExecutable, oid('a')),
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let entry = out.entries.get(&PathBuf::from("scripts/build.sh")).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let entry = out
+            .entries
+            .get(&PathBuf::from("scripts/build.sh"))
+            .expect("operation should succeed");
         match entry {
             FinalEntry::Clean { mode, .. } => assert_eq!(*mode, EntryMode::BlobExecutable),
             FinalEntry::Rendered { .. } => panic!("expected Clean"),
@@ -1064,8 +1078,11 @@ mod tests {
             PathBuf::from("link"),
             MaterializedEntry::new(EntryMode::Link, oid('a')),
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let entry = out.entries.get(&PathBuf::from("link")).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let entry = out
+            .entries
+            .get(&PathBuf::from("link"))
+            .expect("operation should succeed");
         match entry {
             FinalEntry::Clean { mode, .. } => assert_eq!(*mode, EntryMode::Link),
             FinalEntry::Rendered { .. } => panic!("expected Clean"),
@@ -1093,8 +1110,11 @@ mod tests {
             },
         );
 
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let entry = out.entries.get(&PathBuf::from("src/battle.rs")).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let entry = out
+            .entries
+            .get(&PathBuf::from("src/battle.rs"))
+            .expect("operation should succeed");
         let content = match entry {
             FinalEntry::Rendered { mode, content } => {
                 assert_eq!(*mode, EntryMode::Blob);
@@ -1102,7 +1122,7 @@ mod tests {
             }
             FinalEntry::Clean { .. } => panic!("conflict should be rendered"),
         };
-        let text = std::str::from_utf8(&content).unwrap();
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
         // Real content — not placeholder — between markers.
         assert!(
             text.contains("epoch version"),
@@ -1145,12 +1165,16 @@ mod tests {
             },
         );
 
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let content = match out.entries.get(&PathBuf::from("src/battle.rs")).unwrap() {
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("src/battle.rs"))
+            .expect("operation should succeed")
+        {
             FinalEntry::Rendered { content, .. } => content.clone(),
             FinalEntry::Clean { .. } => panic!("expected rendered"),
         };
-        let text = std::str::from_utf8(&content).unwrap();
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
         assert!(
             text.contains("<<<<<<< epoch (current)"),
             "first side label missing; got:\n{text}"
@@ -1174,7 +1198,7 @@ mod tests {
         let binary = b"PNG\x00\x01\x02\x03IHDR\x00\x00".to_vec();
         let epoch_oid = fx.blob(&binary);
         // Second side binary too.
-        let mut ws_bytes = binary.clone();
+        let mut ws_bytes = b"PNG\x00\x01\x02\x03IHDR\x00\x00".to_vec();
         ws_bytes.push(0xffu8);
         let ws_oid = fx.blob(&ws_bytes);
 
@@ -1189,8 +1213,12 @@ mod tests {
                 atoms: vec![],
             },
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let content = match out.entries.get(&PathBuf::from("assets/logo.png")).unwrap() {
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("assets/logo.png"))
+            .expect("operation should succeed")
+        {
             FinalEntry::Rendered { content, .. } => content.clone(),
             FinalEntry::Clean { .. } => panic!("expected rendered"),
         };
@@ -1239,12 +1267,16 @@ mod tests {
                 atoms: vec![],
             },
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let content = match out.entries.get(&PathBuf::from("config.lnk")).unwrap() {
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("config.lnk"))
+            .expect("operation should succeed")
+        {
             FinalEntry::Rendered { content, .. } => content.clone(),
             FinalEntry::Clean { .. } => panic!("expected rendered"),
         };
-        let text = std::str::from_utf8(&content).unwrap();
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
         // Both target paths must be present — we don't drop either side.
         assert!(
             text.contains("../upstream/target"),
@@ -1280,12 +1312,16 @@ mod tests {
                 atoms: vec![],
             },
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let content = match out.entries.get(&PathBuf::from("src/lib.rs")).unwrap() {
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("src/lib.rs"))
+            .expect("operation should succeed")
+        {
             FinalEntry::Rendered { content, .. } => content.clone(),
             FinalEntry::Clean { .. } => panic!("expected rendered"),
         };
-        let text = std::str::from_utf8(&content).unwrap();
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
         // Check order: <<<<<<< then ||||||| base then ======= then >>>>>>>.
         let i_open = text.find("<<<<<<<").expect("open marker");
         let i_base = text.find("||||||| base").expect("base marker");
@@ -1315,11 +1351,14 @@ mod tests {
             },
         );
 
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let entry = out.entries.get(&PathBuf::from("src/new.rs")).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let entry = out
+            .entries
+            .get(&PathBuf::from("src/new.rs"))
+            .expect("operation should succeed");
         match entry {
             FinalEntry::Rendered { content, .. } => {
-                let text = std::str::from_utf8(content).unwrap();
+                let text = std::str::from_utf8(content).expect("operation should succeed");
                 assert!(text.contains("<<<<<<< alice"));
                 assert!(text.contains(">>>>>>> bob (workspace changes)"));
                 assert!(text.contains("alice content"));
@@ -1345,11 +1384,14 @@ mod tests {
                 modified_content: modifier_oid,
             },
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let entry = out.entries.get(&PathBuf::from("src/gone.rs")).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let entry = out
+            .entries
+            .get(&PathBuf::from("src/gone.rs"))
+            .expect("operation should succeed");
         match entry {
             FinalEntry::Rendered { content, .. } => {
-                let text = std::str::from_utf8(content).unwrap();
+                let text = std::str::from_utf8(content).expect("operation should succeed");
                 assert!(text.contains("<<<<<<< alice"));
                 assert!(text.contains(">>>>>>> bob (workspace changes)"));
                 assert!(text.contains("modifier: alice"));
@@ -1375,12 +1417,14 @@ mod tests {
                 ],
             },
         );
-        let err = materialize(&tree, fx.repo.as_ref()).unwrap_err();
+        let err = materialize(&tree, fx.repo.as_ref()).expect_err("operation should fail");
         match err {
             MaterializeError::UnsupportedDivergentRename { path } => {
                 assert_eq!(path, PathBuf::from("src/util.rs"));
             }
-            other => panic!("expected UnsupportedDivergentRename, got {other:?}"),
+            other @ MaterializeError::ReadBlob { .. } => {
+                panic!("expected UnsupportedDivergentRename, got {other:?}");
+            }
         }
     }
 
@@ -1407,7 +1451,7 @@ mod tests {
             },
         );
 
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
         assert_eq!(out.len(), 2);
         assert!(matches!(
             out.entries.get(&PathBuf::from("src/lib.rs")),
@@ -1443,13 +1487,16 @@ mod tests {
                 atoms: vec![],
             },
         );
-        let out = materialize(&tree, fx.repo.as_ref()).unwrap();
-        let entry = out.entries.get(&PathBuf::from("a")).unwrap();
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let entry = out
+            .entries
+            .get(&PathBuf::from("a"))
+            .expect("operation should succeed");
         let content = match entry {
             FinalEntry::Rendered { content, .. } => content,
             FinalEntry::Clean { .. } => panic!("expected rendered"),
         };
-        let text = std::str::from_utf8(content).unwrap();
+        let text = std::str::from_utf8(content).expect("operation should succeed");
         // Exact label — these strings are the contract with
         // `maw ws resolve` and the marker-gate scanner.
         assert!(
@@ -1481,9 +1528,9 @@ mod tests {
     /// Build a workspace-shaped temp dir: `<tmp>/ws/<name>/`.
     /// Returns the `ws_path` we hand to sidecar writers.
     fn mk_ws_tree(name: &str) -> (tempfile::TempDir, PathBuf) {
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let ws_path = td.path().join("ws").join(name);
-        std::fs::create_dir_all(&ws_path).unwrap();
+        std::fs::create_dir_all(&ws_path).expect("operation should succeed");
         (td, ws_path)
     }
 
@@ -1520,13 +1567,15 @@ mod tests {
             },
         );
 
-        write_legacy_sidecar(&ws_path, &tree, &oid('1'), &oid('2')).unwrap();
+        write_legacy_sidecar(&ws_path, &tree, &oid('1'), &oid('2'))
+            .expect("operation should succeed");
 
         // Read back & parse as our duplicate schema (structural twin of
         // maw-cli's RebaseConflicts — same field names, same JSON shape).
         let path = legacy_sidecar_path(&ws_path);
-        let text = std::fs::read_to_string(&path).unwrap();
-        let parsed: LegacyRebaseConflicts = serde_json::from_str(&text).unwrap();
+        let text = std::fs::read_to_string(&path).expect("operation should succeed");
+        let parsed: LegacyRebaseConflicts =
+            serde_json::from_str(&text).expect("operation should succeed");
 
         assert_eq!(parsed.rebase_from, oid('1').to_string());
         assert_eq!(parsed.rebase_to, oid('2').to_string());
@@ -1540,7 +1589,9 @@ mod tests {
             .map(|c| (c.path.clone(), c))
             .collect();
 
-        let battle = by_path.get("src/battle.rs").unwrap();
+        let battle = by_path
+            .get("src/battle.rs")
+            .expect("operation should succeed");
         assert_eq!(battle.base.as_deref(), Some(&*format!("blob:{}", oid('0'))));
         assert_eq!(battle.ours.as_deref(), Some(&*format!("blob:{}", oid('a'))));
         assert_eq!(
@@ -1548,12 +1599,14 @@ mod tests {
             Some(&*format!("blob:{}", oid('b')))
         );
 
-        let new = by_path.get("src/new.rs").unwrap();
+        let new = by_path.get("src/new.rs").expect("operation should succeed");
         assert_eq!(new.base, None);
         assert_eq!(new.ours.as_deref(), Some(&*format!("blob:{}", oid('c'))));
         assert_eq!(new.theirs.as_deref(), Some(&*format!("blob:{}", oid('d'))));
 
-        let gone = by_path.get("src/gone.rs").unwrap();
+        let gone = by_path
+            .get("src/gone.rs")
+            .expect("operation should succeed");
         assert_eq!(gone.base, None);
         assert_eq!(gone.ours.as_deref(), Some(&*format!("blob:{}", oid('e'))));
         assert_eq!(gone.theirs.as_deref(), Some(&*format!("blob:{}", oid('f'))));
@@ -1575,10 +1628,13 @@ mod tests {
             },
         );
         // Should succeed (we just skip DRs in the legacy sidecar).
-        write_legacy_sidecar(&ws_path, &tree, &oid('1'), &oid('2')).unwrap();
+        write_legacy_sidecar(&ws_path, &tree, &oid('1'), &oid('2'))
+            .expect("operation should succeed");
 
-        let text = std::fs::read_to_string(legacy_sidecar_path(&ws_path)).unwrap();
-        let parsed: LegacyRebaseConflicts = serde_json::from_str(&text).unwrap();
+        let text = std::fs::read_to_string(legacy_sidecar_path(&ws_path))
+            .expect("operation should succeed");
+        let parsed: LegacyRebaseConflicts =
+            serde_json::from_str(&text).expect("operation should succeed");
         assert!(parsed.conflicts.is_empty());
     }
 
@@ -1599,10 +1655,11 @@ mod tests {
             },
         );
 
-        write_structured_sidecar(&ws_path, &tree).unwrap();
+        write_structured_sidecar(&ws_path, &tree).expect("operation should succeed");
 
-        let text = std::fs::read_to_string(structured_sidecar_path(&ws_path)).unwrap();
-        let parsed: ConflictTree = serde_json::from_str(&text).unwrap();
+        let text = std::fs::read_to_string(structured_sidecar_path(&ws_path))
+            .expect("operation should succeed");
+        let parsed: ConflictTree = serde_json::from_str(&text).expect("operation should succeed");
         assert_eq!(parsed, tree);
     }
 }

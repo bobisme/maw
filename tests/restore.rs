@@ -82,13 +82,11 @@ fn history_includes_workspace_lifecycle_events_after_restore() {
     let operations = history_json["operations"]
         .as_array()
         .expect("operations should be present in history output");
-    let op_types: Vec<&str> = operations
-        .iter()
-        .filter_map(|op| op["op_type"].as_str())
-        .collect();
-
     assert!(
-        op_types.contains(&"create"),
+        operations
+            .iter()
+            .filter_map(|op| op["op_type"].as_str())
+            .any(|op_type| op_type == "create"),
         "live history should include a create op for the restored workspace"
     );
 

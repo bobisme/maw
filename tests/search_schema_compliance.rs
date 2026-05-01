@@ -40,6 +40,10 @@ fn repo_with_destroyed_ws(ws_name: &str, files: &[(&str, &str)]) -> TestRepo {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "schema test intentionally validates all top-level fields together"
+)]
 fn search_json_has_required_top_level_fields_with_correct_types() {
     let repo = repo_with_destroyed_ws(
         "schema-test",
@@ -55,7 +59,7 @@ fn search_json_has_required_top_level_fields_with_correct_types() {
         json["pattern"]
     );
     assert_eq!(
-        json["pattern"].as_str().unwrap(),
+        json["pattern"].as_str().expect("operation should succeed"),
         "needle",
         "pattern should match the search query"
     );
@@ -91,7 +95,7 @@ fn search_json_has_required_top_level_fields_with_correct_types() {
     );
 
     // Verify hits array is non-empty (we know the pattern matches)
-    let hits = json["hits"].as_array().unwrap();
+    let hits = json["hits"].as_array().expect("operation should succeed");
     assert!(
         !hits.is_empty(),
         "hits should contain at least one match for 'needle'"
@@ -124,7 +128,7 @@ fn search_json_has_required_top_level_fields_with_correct_types() {
         );
 
         // Validate snippet lines
-        let snippet = hit["snippet"].as_array().unwrap();
+        let snippet = hit["snippet"].as_array().expect("operation should succeed");
         assert!(!snippet.is_empty(), "hit[{i}].snippet should be non-empty");
         for (j, sl) in snippet.iter().enumerate() {
             assert!(
@@ -143,30 +147,30 @@ fn search_json_has_required_top_level_fields_with_correct_types() {
 
         // Verify values make semantic sense
         assert_eq!(
-            hit["workspace"].as_str().unwrap(),
+            hit["workspace"].as_str().expect("operation should succeed"),
             "schema-test",
             "hit[{i}].workspace should match the destroyed workspace name"
         );
         assert_eq!(
-            hit["path"].as_str().unwrap(),
+            hit["path"].as_str().expect("operation should succeed"),
             "needle.txt",
             "hit[{i}].path should match the file containing the match"
         );
         assert!(
-            hit["line"].as_u64().unwrap() >= 1,
+            hit["line"].as_u64().expect("operation should succeed") >= 1,
             "hit[{i}].line should be >= 1"
         );
 
         // oid_short should be a prefix of oid
-        let oid = hit["oid"].as_str().unwrap();
-        let oid_short = hit["oid_short"].as_str().unwrap();
+        let oid = hit["oid"].as_str().expect("operation should succeed");
+        let oid_short = hit["oid_short"].as_str().expect("operation should succeed");
         assert!(
             oid.starts_with(oid_short),
             "hit[{i}].oid_short should be a prefix of oid"
         );
 
         // ref_name should start with the recovery ref prefix
-        let ref_name = hit["ref_name"].as_str().unwrap();
+        let ref_name = hit["ref_name"].as_str().expect("operation should succeed");
         assert!(
             ref_name.starts_with("refs/manifold/recovery/"),
             "hit[{i}].ref_name should start with refs/manifold/recovery/, got: {ref_name}"
@@ -198,8 +202,8 @@ fn search_json_is_deterministic() {
     );
 
     // Additional check: hit ordering should be stable
-    let hits1 = json1["hits"].as_array().unwrap();
-    let hits2 = json2["hits"].as_array().unwrap();
+    let hits1 = json1["hits"].as_array().expect("operation should succeed");
+    let hits2 = json2["hits"].as_array().expect("operation should succeed");
     assert_eq!(hits1.len(), hits2.len(), "hit counts should match");
 
     for (i, (h1, h2)) in hits1.iter().zip(hits2.iter()).enumerate() {
@@ -230,7 +234,7 @@ fn search_json_truncation_with_max_hits() {
 
     let json = search_json(&repo, &["--search", "pattern_match", "--max-hits", "2"]);
 
-    let hits = json["hits"].as_array().unwrap();
+    let hits = json["hits"].as_array().expect("operation should succeed");
     assert_eq!(
         hits.len(),
         2,
@@ -239,12 +243,16 @@ fn search_json_truncation_with_max_hits() {
     );
 
     assert!(
-        json["truncated"].as_bool().unwrap(),
+        json["truncated"]
+            .as_bool()
+            .expect("operation should succeed"),
         "truncated should be true when results exceed --max-hits"
     );
 
     assert_eq!(
-        json["hit_count"].as_u64().unwrap(),
+        json["hit_count"]
+            .as_u64()
+            .expect("operation should succeed"),
         2,
         "hit_count should equal the number of returned hits (truncated)"
     );
@@ -261,32 +269,39 @@ fn search_json_empty_results_shape() {
     let json = search_json(&repo, &["--search", "ZZZNONEXISTENT999"]);
 
     assert_eq!(
-        json["hit_count"].as_u64().unwrap(),
+        json["hit_count"]
+            .as_u64()
+            .expect("operation should succeed"),
         0,
         "hit_count should be 0 for no matches"
     );
 
-    let hits = json["hits"].as_array().unwrap();
+    let hits = json["hits"].as_array().expect("operation should succeed");
     assert!(
         hits.is_empty(),
         "hits should be an empty array for no matches"
     );
 
     assert!(
-        !json["truncated"].as_bool().unwrap(),
+        !json["truncated"]
+            .as_bool()
+            .expect("operation should succeed"),
         "truncated should be false when no results"
     );
 
     // Pattern should still be present
     assert_eq!(
-        json["pattern"].as_str().unwrap(),
+        json["pattern"].as_str().expect("operation should succeed"),
         "ZZZNONEXISTENT999",
         "pattern should echo the search query even with no results"
     );
 
     // scanned_refs should be >= 1 (we have a recovery snapshot)
     assert!(
-        json["scanned_refs"].as_u64().unwrap() >= 1,
+        json["scanned_refs"]
+            .as_u64()
+            .expect("operation should succeed")
+            >= 1,
         "scanned_refs should be >= 1 even with no matches"
     );
 }
@@ -301,7 +316,9 @@ fn search_json_case_insensitive() {
 
     // Exact case should find it
     let json_exact = search_json(&repo, &["--search", "HelloWorld"]);
-    let hits_exact = json_exact["hits"].as_array().unwrap();
+    let hits_exact = json_exact["hits"]
+        .as_array()
+        .expect("operation should succeed");
     assert!(
         !hits_exact.is_empty(),
         "exact case search should find HelloWorld"
@@ -309,7 +326,9 @@ fn search_json_case_insensitive() {
 
     // Wrong case without -i should NOT find it (fixed-string search)
     let json_no_flag = search_json(&repo, &["--search", "helloworld"]);
-    let hits_no_flag = json_no_flag["hits"].as_array().unwrap();
+    let hits_no_flag = json_no_flag["hits"]
+        .as_array()
+        .expect("operation should succeed");
     assert!(
         hits_no_flag.is_empty(),
         "case-sensitive search for 'helloworld' should not match 'HelloWorld'"
@@ -317,7 +336,9 @@ fn search_json_case_insensitive() {
 
     // Wrong case WITH --ignore-case should find it
     let json_ci = search_json(&repo, &["--search", "helloworld", "--ignore-case"]);
-    let hits_ci = json_ci["hits"].as_array().unwrap();
+    let hits_ci = json_ci["hits"]
+        .as_array()
+        .expect("operation should succeed");
     assert!(
         !hits_ci.is_empty(),
         "case-insensitive search for 'helloworld' should match 'HelloWorld'"
@@ -325,8 +346,14 @@ fn search_json_case_insensitive() {
 
     // Verify the match details
     let hit = &hits_ci[0];
-    assert_eq!(hit["path"].as_str().unwrap(), "greeting.txt");
-    assert_eq!(hit["workspace"].as_str().unwrap(), "case-test");
+    assert_eq!(
+        hit["path"].as_str().expect("operation should succeed"),
+        "greeting.txt"
+    );
+    assert_eq!(
+        hit["workspace"].as_str().expect("operation should succeed"),
+        "case-test"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +378,9 @@ fn search_json_includes_filter_fields() {
     // With workspace filter
     let json_filtered = search_json(&repo, &["filter-test", "--search", "searchable"]);
     assert_eq!(
-        json_filtered["workspace_filter"].as_str().unwrap(),
+        json_filtered["workspace_filter"]
+            .as_str()
+            .expect("operation should succeed"),
         "filter-test",
         "workspace_filter should be set when workspace name is provided"
     );
@@ -368,10 +397,12 @@ fn search_json_snippet_context_includes_surrounding_lines() {
 
     // Default context is 2 lines
     let json = search_json(&repo, &["--search", "NEEDLE"]);
-    let hits = json["hits"].as_array().unwrap();
+    let hits = json["hits"].as_array().expect("operation should succeed");
     assert!(!hits.is_empty(), "should find NEEDLE");
 
-    let snippet = hits[0]["snippet"].as_array().unwrap();
+    let snippet = hits[0]["snippet"]
+        .as_array()
+        .expect("operation should succeed");
 
     // With context=2 (default), we should see lines around the match line
     // Match is on line 3; context=2 means lines 1..5
@@ -395,9 +426,12 @@ fn search_json_snippet_context_includes_surrounding_lines() {
     let match_line = snippet
         .iter()
         .find(|sl| sl["is_match"].as_bool() == Some(true))
-        .unwrap();
+        .expect("operation should succeed");
     assert!(
-        match_line["text"].as_str().unwrap().contains("NEEDLE"),
+        match_line["text"]
+            .as_str()
+            .expect("operation should succeed")
+            .contains("NEEDLE"),
         "the matched snippet line should contain the search term"
     );
 }
@@ -414,16 +448,20 @@ fn search_json_max_hits_above_actual_count_is_not_truncated() {
     // There are exactly 3 matches; set --max-hits to 10 (well above)
     let json = search_json(&repo, &["--search", "match_here", "--max-hits", "10"]);
 
-    let hits = json["hits"].as_array().unwrap();
+    let hits = json["hits"].as_array().expect("operation should succeed");
     assert_eq!(hits.len(), 3, "should have exactly 3 hits");
 
     assert!(
-        !json["truncated"].as_bool().unwrap(),
+        !json["truncated"]
+            .as_bool()
+            .expect("operation should succeed"),
         "truncated should be false when actual hits < max_hits"
     );
 
     assert_eq!(
-        json["hit_count"].as_u64().unwrap(),
+        json["hit_count"]
+            .as_u64()
+            .expect("operation should succeed"),
         3,
         "hit_count should equal the actual number of matches"
     );

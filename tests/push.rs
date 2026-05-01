@@ -10,7 +10,11 @@ use tempfile::TempDir;
 fn clone_remote(remote: &std::path::Path) -> TempDir {
     let verify_dir = TempDir::new().expect("failed to create verify temp dir");
     let out = Command::new("git")
-        .args(["clone", remote.to_str().unwrap(), "."])
+        .args([
+            "clone",
+            remote.to_str().expect("operation should succeed"),
+            ".",
+        ])
         .current_dir(verify_dir.path())
         .output()
         .expect("failed to run git clone");
@@ -43,7 +47,7 @@ fn push_after_merge() {
     let verify_dir = clone_remote(remote.path());
     let feature_file = verify_dir.path().join("feature.txt");
     assert!(feature_file.exists());
-    let content = std::fs::read_to_string(&feature_file).unwrap();
+    let content = std::fs::read_to_string(&feature_file).expect("operation should succeed");
     assert_eq!(content, "new feature\n");
 }
 
@@ -69,7 +73,7 @@ fn push_advance_moves_branch_to_current_epoch() {
     let verify_dir = clone_remote(remote.path());
     let hotfix = verify_dir.path().join("hotfix.txt");
     assert!(hotfix.exists());
-    let content = std::fs::read_to_string(&hotfix).unwrap();
+    let content = std::fs::read_to_string(&hotfix).expect("operation should succeed");
     assert_eq!(content, "urgent fix\n");
 }
 
@@ -99,7 +103,7 @@ fn push_advance_does_not_rewind_when_branch_is_ahead_of_epoch() {
     let verify_dir = clone_remote(remote.path());
     let pushed = verify_dir.path().join("branch-only.txt");
     assert!(pushed.exists(), "branch tip commit should be pushed");
-    let content = std::fs::read_to_string(&pushed).unwrap();
+    let content = std::fs::read_to_string(&pushed).expect("operation should succeed");
     assert_eq!(content, "keep branch tip\n");
 }
 

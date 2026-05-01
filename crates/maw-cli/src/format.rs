@@ -34,11 +34,13 @@ impl FromStr for OutputFormat {
 impl OutputFormat {
     /// Merge a hidden `--json` flag with an explicit `--format` option.
     /// `--json` acts as a shorthand for `--format json`.
+    #[must_use]
     pub const fn with_json_flag(explicit: Option<Self>, json: bool) -> Option<Self> {
         if json { Some(Self::Json) } else { explicit }
     }
 
     /// Resolve the output format based on explicit value, env var, or TTY detection
+    #[must_use]
     pub fn resolve(explicit: Option<Self>) -> Self {
         // Priority: explicit flag > FORMAT env var > TTY detection
         if let Some(fmt) = explicit {
@@ -60,6 +62,7 @@ impl OutputFormat {
     }
 
     /// Check if colors should be disabled
+    #[must_use]
     pub fn should_use_color(self) -> bool {
         match self {
             Self::Pretty => {
@@ -71,6 +74,9 @@ impl OutputFormat {
     }
 
     /// Serialize data to the requested format
+    /// # Errors
+    ///
+    /// Returns an error if `data` cannot be serialized in the selected format.
     pub fn serialize<T: Serialize>(self, data: &T) -> Result<String> {
         match self {
             Self::Json => serde_json::to_string_pretty(data)

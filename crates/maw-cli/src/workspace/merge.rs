@@ -282,7 +282,7 @@ struct ConflictWithId {
     id: String,
     /// The underlying conflict record from the merge engine.
     record: ConflictRecord,
-    /// Atom-level IDs, e.g. ["cf-k7mx.0", "cf-k7mx.1"].
+    /// Atom-level IDs, e.g. `["cf-k7mx.0", "cf-k7mx.1"]`.
     atom_ids: Vec<String>,
 }
 
@@ -364,11 +364,10 @@ fn parse_resolutions(raw: &[String]) -> Result<BTreeMap<String, Resolution>> {
             );
         }
 
-        let resolution = if let Some(path) = strategy.strip_prefix("content:") {
-            Resolution::Content(PathBuf::from(path))
-        } else {
-            Resolution::Workspace(strategy.to_string())
-        };
+        let resolution = strategy.strip_prefix("content:").map_or_else(
+            || Resolution::Workspace(strategy.to_string()),
+            |path| Resolution::Content(PathBuf::from(path)),
+        );
 
         map.insert(id.to_string(), resolution);
     }
@@ -526,6 +525,7 @@ fn resolve_file_content(
 /// Resolve individual atoms within a file, reconstructing the complete content.
 /// Extract byte range from a Region, converting line-based regions to byte offsets.
 fn region_byte_range(region: &Region, content: &[u8]) -> (u32, u32) {
+    let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     match region {
         Region::AstNode {
             start_byte,
@@ -549,14 +549,13 @@ fn region_byte_range(region: &Region, content: &[u8]) -> (u32, u32) {
             } else {
                 0
             };
-            #[allow(clippy::cast_possible_truncation)]
             let e = line_starts
                 .get((*end - 1) as usize)
                 .copied()
                 .unwrap_or(content.len());
-            (s as u32, e as u32)
+            (to_u32(s), to_u32(e))
         }
-        Region::WholeFile => (0, content.len() as u32),
+        Region::WholeFile => (0, to_u32(content.len())),
     }
 }
 
@@ -615,7 +614,7 @@ fn resolve_atoms(
         // Find the matching edit from the chosen workspace
         let ws_name = match resolution {
             Resolution::Workspace(name) => name.as_str(),
-            _ => unreachable!(),
+            Resolution::Content(_) => unreachable!(),
         };
         let edit = atom.edits.iter().find(|ed| ed.workspace == ws_name);
         if let Some(edit) = edit {
@@ -1007,10 +1006,7 @@ fn print_conflict_report_with_resolve(
                     _ => "region".to_string(),
                 };
                 let reason_desc = atom.reason.description();
-                println!(
-                    "             {:<14} {:<16} {}",
-                    atom_id, region_desc, reason_desc
-                );
+                println!("             {atom_id:<14} {region_desc:<16} {reason_desc}");
             }
         }
         println!();
@@ -1018,17 +1014,16 @@ fn print_conflict_report_with_resolve(
 
     // Build the resolve command template
     let ws_args = ws_names.join(" ");
-    let resolve_args_owned: Vec<String>;
-    let resolve_args: &[String] = if let Some(prebuilt) = prebuilt_resolve_args {
-        prebuilt
+    let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
+    let resolve_args_owned: Vec<String> = if prebuilt_resolve_args.is_some() {
+        Vec::new()
     } else {
-        let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
-        resolve_args_owned = conflicts_with_ids
+        conflicts_with_ids
             .iter()
             .map(|c| format!("--resolve {}={default_ws}", c.id))
-            .collect();
-        &resolve_args_owned
+            .collect()
     };
+    let resolve_args = prebuilt_resolve_args.unwrap_or(resolve_args_owned.as_slice());
     println!("To resolve, re-run with --resolve:");
     println!(
         "  maw ws merge {} --into {} {}",
@@ -1039,17 +1034,11 @@ fn print_conflict_report_with_resolve(
     println!();
     let default_ws = ws_names.first().map_or("WORKSPACE", |s| s.as_str());
     println!("Or resolve all at once:");
-    println!(
-        "  maw ws merge {} --into {} --resolve-all={default_ws}",
-        ws_args, into
-    );
+    println!("  maw ws merge {ws_args} --into {into} --resolve-all={default_ws}");
     println!();
     println!("Options:  ID=WORKSPACE | ID=content:PATH");
     println!();
-    println!(
-        "To inspect full content:  maw ws conflicts {} --format json",
-        ws_args
-    );
+    println!("To inspect full content:  maw ws conflicts {ws_args} --format json");
     println!("Or edit files in a workspace, commit, and re-merge.");
 }
 
@@ -1260,6 +1249,10 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     check_merge_result_for_target(workspaces, &default_ws, &default_branch, None)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "merge check path mirrors the prepare/build pipeline for diagnostics"
+)]
 fn check_merge_result_for_target(
     workspaces: &[String],
     target_workspace: &str,
@@ -1277,8 +1270,7 @@ fn check_merge_result_for_target(
     let branch_ref = format!("refs/heads/{target_branch}");
     let branch_before_oid = maw_core::refs::read_ref(&root, &branch_ref)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Target branch '{}' does not exist.\n  To fix: create the branch first or repair change metadata, then retry.",
-            target_branch
+            "Target branch '{target_branch}' does not exist.\n  To fix: create the branch first or repair change metadata, then retry."
         )
     })?;
 
@@ -1288,8 +1280,7 @@ fn check_merge_result_for_target(
             bail!("Cannot merge the default workspace — it is the merge target, not a source.");
         }
         bail!(
-            "Cannot merge target workspace '{}' as a source — it is the merge destination.",
-            target_workspace
+            "Cannot merge target workspace '{target_workspace}' as a source — it is the merge destination."
         );
     }
 
@@ -1492,6 +1483,10 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
 /// Produces a deterministic `MergePlan` JSON describing what the merge *would*
 /// do. No refs are updated, no epoch is advanced. Artifacts are written to
 /// `.manifold/artifacts/`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "plan command emits a complete dry-run artifact in one flow"
+)]
 pub fn plan_merge(
     workspaces: &[String],
     format: OutputFormat,
@@ -1516,8 +1511,7 @@ pub fn plan_merge(
     let branch_ref = format!("refs/heads/{target_branch}");
     let branch_before_oid = maw_core::refs::read_ref(&root, &branch_ref)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Target branch '{}' does not exist.\n  To fix: create the branch first or repair change metadata, then retry.",
-            target_branch
+            "Target branch '{target_branch}' does not exist.\n  To fix: create the branch first or repair change metadata, then retry."
         )
     })?;
 
@@ -1528,8 +1522,7 @@ pub fn plan_merge(
             );
         }
         bail!(
-            "Cannot plan target workspace '{}' as a source — it is the merge destination.",
-            target_workspace
+            "Cannot plan target workspace '{target_workspace}' as a source — it is the merge destination."
         );
     }
 
@@ -1965,9 +1958,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     for ws_id in &sources {
         if !backend.exists(ws_id) {
             bail!(
-                "Workspace '{}' does not exist\n  Check: maw ws list\n  Fix: maw ws create --from main {}",
-                ws_id,
-                ws_id
+                "Workspace '{ws_id}' does not exist\n  Check: maw ws list\n  Fix: maw ws create --from main {ws_id}"
             );
         }
     }
@@ -2183,6 +2174,10 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
 // ---------------------------------------------------------------------------
 
 /// Preview what a merge would do without creating any commits.
+#[expect(
+    clippy::too_many_lines,
+    reason = "preview command renders several merge states together"
+)]
 fn preview_merge(
     workspaces: &[String],
     root: &Path,
@@ -2238,7 +2233,7 @@ fn preview_merge(
                 });
             }
             Err(e) => {
-                bail!("Could not preview workspace '{}': {e}", ws_name);
+                bail!("Could not preview workspace '{ws_name}': {e}");
             }
         }
     }
@@ -2361,6 +2356,10 @@ fn preview_merge(
 // ---------------------------------------------------------------------------
 
 /// Options controlling merge behavior.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI options are independent flags"
+)]
 pub struct MergeOptions<'a> {
     /// Destroy workspaces after a successful merge.
     pub destroy_after: bool,
@@ -2420,7 +2419,7 @@ pub struct MergeOptions<'a> {
 ///
 /// The scan reads only the first `SNIFF` bytes of each blob, so it stays
 /// cheap even on large trees. This is a one-shot gate check, not a hot path.
-pub(crate) fn find_tool_placeholder_blobs(
+pub fn find_tool_placeholder_blobs(
     repo: &maw_git::GixRepo,
     tree_oid: maw_git::GitOid,
 ) -> Result<Vec<PathBuf>> {
@@ -2524,28 +2523,26 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let branch_ref = format!("refs/heads/{branch}");
     let branch_before_oid = maw_core::refs::read_ref(&root, &branch_ref)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Target branch '{}' does not exist.
-  To fix: create the branch first or repair change metadata, then retry.",
-            branch
+            "Target branch '{branch}' does not exist.
+  To fix: create the branch first or repair change metadata, then retry."
         )
     })?;
 
     // Reject merge if default has direct commits ahead of epoch.
     // Without this check, the merge creates a new epoch from the OLD epoch,
     // and the direct commits' files appear as unstaged changes in default.
-    if target_change_id.is_none() {
-        if let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root) {
-            if epoch_oid.as_str() != branch_before_oid.as_str() {
-                bail!(
-                    "Target branch '{branch}' has diverged from the current epoch.\n\
+    if target_change_id.is_none()
+        && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root)
+        && epoch_oid.as_str() != branch_before_oid.as_str()
+    {
+        bail!(
+            "Target branch '{branch}' has diverged from the current epoch.\n\
                      \n  Branch:  {}\n  Epoch:   {}\n\
                      \n  Direct commits were made to {default_ws} outside of maw.\n\
                      To fix: run `maw epoch sync` to absorb them into the epoch, then retry.",
-                    &branch_before_oid.as_str()[..12],
-                    &epoch_oid.as_str()[..12]
-                );
-            }
-        }
+            &branch_before_oid.as_str()[..12],
+            &epoch_oid.as_str()[..12]
+        );
     }
 
     // Reject merging the default workspace
@@ -2565,10 +2562,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 && source_change != target_change
             {
                 bail!(
-                    "Workspace '{}' belongs to change '{}' and cannot merge into change '{}'.\n  To fix: merge it into its own change target, or recreate workspace with the intended --change.",
-                    ws_name,
-                    source_change,
-                    target_change
+                    "Workspace '{ws_name}' belongs to change '{source_change}' and cannot merge into change '{target_change}'.\n  To fix: merge it into its own change target, or recreate workspace with the intended --change."
                 );
             }
         }
@@ -2607,8 +2601,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 .status(&target_ws_id)
                 .map_err(|e| {
                     anyhow::anyhow!(
-                        "failed to inspect target workspace '{}' before merge: {e}",
-                        default_ws
+                        "failed to inspect target workspace '{default_ws}' before merge: {e}"
                     )
                 })?
                 .base_epoch
@@ -2719,9 +2712,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 // report a clearer error. Don't double-fail here.
                 continue;
             }
-            let head_oid_str = match resolve_workspace_head_oid(ws_path) {
-                Ok(s) => s,
-                Err(_) => continue, // empty worktree / no commits yet
+            let Ok(head_oid_str) = resolve_workspace_head_oid(ws_path) else {
+                continue; // empty worktree / no commits yet
             };
             let head_oid: maw_git::GitOid = head_oid_str
                 .parse()
@@ -3457,9 +3449,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Message is always provided by the caller (enforced in mod.rs dispatch).
     let msg = message.expect("merge message must be provided by caller");
-    let next_command = target_change_id
-        .map(|change_id| format!("maw changes pr {change_id} --draft"))
-        .unwrap_or_else(|| "maw push".to_string());
+    let next_command = target_change_id.map_or_else(
+        || "maw push".to_string(),
+        |change_id| format!("maw changes pr {change_id} --draft"),
+    );
 
     if format == OutputFormat::Json {
         let success = MergeSuccessOutput {
@@ -3473,7 +3466,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             conflict_count: 0,
             conflicts: vec![],
             message: format!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", ")),
-            next: next_command.clone(),
+            next: next_command,
             advice: vec![],
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
@@ -3665,9 +3658,8 @@ fn to_model_patch_set(root: &Path, patch_set: &CollectedPatchSet) -> Result<Mode
                 // If the file doesn't exist at the epoch commit, it was added
                 // then deleted in the workspace (net no-op). Skip it rather
                 // than propagating the error from `git rev-parse`.
-                let previous_blob = match epoch_blob_oid(root, &patch_set.epoch, &change.path) {
-                    Ok(oid) => oid,
-                    Err(_) => continue,
+                let Ok(previous_blob) = epoch_blob_oid(root, &patch_set.epoch, &change.path) else {
+                    continue;
                 };
                 let file_id = change
                     .file_id
@@ -3714,7 +3706,7 @@ fn epoch_blob_oid(root: &Path, epoch: &EpochId, path: &Path) -> Result<GitOid> {
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
     let git_oid = repo
         .rev_parse(&rev)
-        .map_err(|e| anyhow::anyhow!("rev-parse '{}' failed: {e}", rev))?;
+        .map_err(|e| anyhow::anyhow!("rev-parse '{rev}' failed: {e}"))?;
 
     GitOid::new(&git_oid.to_string())
         .map_err(|e| anyhow::anyhow!("invalid blob OID for '{}': {e}", path.display()))
@@ -3883,7 +3875,7 @@ struct ActiveChangeHead {
     head_oid: String,
 }
 
-pub(crate) fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
+pub fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(ws_path)
@@ -3983,7 +3975,10 @@ fn guard_unbound_sources_against_active_change_ancestry(
                 );
             }
 
-            let Some(target_head) = target_head_oid.as_ref().map(|oid| oid.as_str()) else {
+            let Some(target_head) = target_head_oid
+                .as_ref()
+                .map(maw_core::model::types::GitOid::as_str)
+            else {
                 continue;
             };
 
@@ -4034,6 +4029,14 @@ fn guard_unbound_sources_against_active_change_ancestry(
 /// CRITICAL: errors and conflicts during replay never abort the cleanup phase.
 /// The merge COMMIT has already succeeded — remaining cleanup (workspace
 /// destroy, GC, merge-state removal) MUST still run.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cleanup step needs explicit merge context from earlier phases"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "cleanup step preserves failure-handling order after merge commit"
+)]
 fn update_default_workspace(
     default_ws_path: &Path,
     ws_name: &str,
@@ -4085,14 +4088,14 @@ fn update_default_workspace(
         } else {
             match is_ancestor_commit(default_ws_path, base_before, epoch_before) {
                 Ok(true) => base_before.to_owned(),
-                Ok(false) => fallback_anchor.clone(),
+                Ok(false) => fallback_anchor,
                 Err(e) => {
                     tracing::warn!(
                         "failed to verify target workspace base ancestry ({} -> {}): {e}",
                         base_before,
                         epoch_before
                     );
-                    fallback_anchor.clone()
+                    fallback_anchor
                 }
             }
         }
@@ -4102,23 +4105,23 @@ fn update_default_workspace(
             Ok(Some(ws_epoch_oid)) => {
                 let ws_epoch = ws_epoch_oid.as_str();
                 if ws_epoch == epoch_before {
-                    fallback_anchor.clone()
+                    fallback_anchor
                 } else {
                     match is_ancestor_commit(default_ws_path, ws_epoch, epoch_before) {
                         Ok(true) => ws_epoch.to_owned(),
-                        Ok(false) => fallback_anchor.clone(),
+                        Ok(false) => fallback_anchor,
                         Err(e) => {
                             tracing::warn!(
                                 "failed to verify default workspace epoch ancestry ({} -> {}): {e}",
                                 ws_epoch,
                                 epoch_before
                             );
-                            fallback_anchor.clone()
+                            fallback_anchor
                         }
                     }
                 }
             }
-            _ => fallback_anchor.clone(),
+            _ => fallback_anchor,
         }
     };
 
@@ -4224,9 +4227,7 @@ fn update_default_workspace(
     };
 
     let used_merge_protection = !resolved_paths.is_empty();
-    let replay_result = if !used_merge_protection {
-        replay_snapshot(default_ws_path, &snapshot)
-    } else {
+    let replay_result = if used_merge_protection {
         replay_snapshot_with_merge_protection(
             default_ws_path,
             &snapshot,
@@ -4236,6 +4237,8 @@ fn update_default_workspace(
             source_workspace_names,
             ws_name,
         )
+    } else {
+        replay_snapshot(default_ws_path, &snapshot)
     };
 
     match replay_result {
@@ -4397,6 +4400,10 @@ fn lfs_post_checkout(ws_path: &std::path::Path, target_commit: &str) {
 fn lfs_post_checkout(_ws_path: &std::path::Path, _target_commit: &str) {}
 
 /// Handle post-merge workspace destruction with confirmation check.
+#[expect(
+    clippy::too_many_lines,
+    reason = "post-merge destroy handles confirmation, backend cleanup, and reporting"
+)]
 fn handle_post_merge_destroy(
     ws_to_merge: &[String],
     default_ws: &str,
@@ -4579,7 +4586,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn ws_id(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn make_side(workspace: &str, kind: ChangeKind, content: Option<Vec<u8>>) -> ResolveSide {
@@ -4700,8 +4707,16 @@ mod tests {
 
         // Each side should carry workspace name and change kind
         assert_eq!(json.sides.len(), 2);
-        let alice_side = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
-        let bob_side = json.sides.iter().find(|s| s.workspace == "bob").unwrap();
+        let alice_side = json
+            .sides
+            .iter()
+            .find(|s| s.workspace == "alice")
+            .expect("operation should succeed");
+        let bob_side = json
+            .sides
+            .iter()
+            .find(|s| s.workspace == "bob")
+            .expect("operation should succeed");
 
         assert_eq!(alice_side.change, "modified");
         assert_eq!(alice_side.content.as_deref(), Some("alice version"));
@@ -4778,8 +4793,16 @@ mod tests {
         let json = conflict_record_to_json(&record);
 
         assert_eq!(json.sides.len(), 2);
-        let alice = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
-        let bob = json.sides.iter().find(|s| s.workspace == "bob").unwrap();
+        let alice = json
+            .sides
+            .iter()
+            .find(|s| s.workspace == "alice")
+            .expect("operation should succeed");
+        let bob = json
+            .sides
+            .iter()
+            .find(|s| s.workspace == "bob")
+            .expect("operation should succeed");
 
         assert_eq!(alice.change, "added");
         assert_eq!(alice.content.as_deref(), Some("alice's version"));
@@ -4820,7 +4843,11 @@ mod tests {
         let record = modify_delete_record("old.rs");
         let json = conflict_record_to_json(&record);
 
-        let bob_side = json.sides.iter().find(|s| s.workspace == "bob").unwrap();
+        let bob_side = json
+            .sides
+            .iter()
+            .find(|s| s.workspace == "bob")
+            .expect("operation should succeed");
         assert_eq!(bob_side.change, "deleted");
         assert!(bob_side.content.is_none());
         assert!(!bob_side.is_binary);
@@ -4854,7 +4881,11 @@ mod tests {
 
         let json = conflict_record_to_json(&record);
 
-        let alice_side = json.sides.iter().find(|s| s.workspace == "alice").unwrap();
+        let alice_side = json
+            .sides
+            .iter()
+            .find(|s| s.workspace == "alice")
+            .expect("operation should succeed");
         assert!(alice_side.is_binary, "binary content should be flagged");
         assert!(
             alice_side.content.is_none(),
@@ -4876,7 +4907,8 @@ mod tests {
         let conflict_json = conflict_record_to_json(&record);
 
         // Serialize to JSON
-        let json_str = serde_json::to_string_pretty(&conflict_json).unwrap();
+        let json_str =
+            serde_json::to_string_pretty(&conflict_json).expect("operation should succeed");
         assert!(!json_str.is_empty());
 
         // Verify key fields are present in the JSON string
@@ -4916,7 +4948,8 @@ mod tests {
         );
 
         // Can parse it back as a generic JSON value (roundtrip)
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
         assert_eq!(parsed["type"], "content");
         assert_eq!(parsed["path"], "src/lib.rs");
         assert!(parsed["workspaces"].is_array());
@@ -4943,13 +4976,20 @@ mod tests {
             resolve_command: None,
         };
 
-        let json_str = serde_json::to_string_pretty(&output).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
 
         assert_eq!(parsed["status"], "conflict");
         assert_eq!(parsed["conflict_count"], 2);
         assert!(parsed["conflicts"].is_array());
-        assert_eq!(parsed["conflicts"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            parsed["conflicts"]
+                .as_array()
+                .expect("operation should succeed")
+                .len(),
+            2
+        );
         assert!(parsed["to_fix"].is_string());
 
         // Verify the conflicts array has the expected structure
@@ -4977,12 +5017,18 @@ mod tests {
             advice: vec![],
         };
 
-        let json_str = serde_json::to_string_pretty(&output).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
 
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["conflict_count"], 0);
-        assert!(parsed["conflicts"].as_array().unwrap().is_empty());
+        assert!(
+            parsed["conflicts"]
+                .as_array()
+                .expect("operation should succeed")
+                .is_empty()
+        );
         assert_eq!(parsed["branch"], "manifold");
         assert_eq!(parsed["next"], "maw push");
         assert_eq!(parsed["unique_count"], 3);
@@ -5003,8 +5049,9 @@ mod tests {
             to_fix: Some("maw ws merge alice --into default".to_string()),
         };
 
-        let json_str = serde_json::to_string_pretty(&output).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
 
         assert_eq!(parsed["status"], "conflict");
         assert_eq!(parsed["has_conflicts"], true);
@@ -5024,8 +5071,9 @@ mod tests {
             to_fix: None,
         };
 
-        let json_str = serde_json::to_string_pretty(&output).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
 
         assert_eq!(parsed["status"], "clean");
         assert_eq!(parsed["has_conflicts"], false);
@@ -5049,21 +5097,35 @@ mod tests {
             "fn process_order(id: u64, opts: Options) -> Result<Order> {\n    // bob's version\n}",
         );
         let conflict_json = conflict_record_to_json(&record);
-        let json_str = serde_json::to_string_pretty(&conflict_json).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str =
+            serde_json::to_string_pretty(&conflict_json).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
 
         // Agent can identify: WHICH file has a conflict
         assert_eq!(parsed["path"], "src/main.rs");
 
         // Agent can identify: WHY there is a conflict
-        assert!(!parsed["reason"].as_str().unwrap().is_empty());
-        assert!(!parsed["reason_description"].as_str().unwrap().is_empty());
+        assert!(
+            !parsed["reason"]
+                .as_str()
+                .expect("operation should succeed")
+                .is_empty()
+        );
+        assert!(
+            !parsed["reason_description"]
+                .as_str()
+                .expect("operation should succeed")
+                .is_empty()
+        );
 
         // Agent can identify: WHO made each change
-        let sides = parsed["sides"].as_array().unwrap();
+        let sides = parsed["sides"]
+            .as_array()
+            .expect("operation should succeed");
         let workspaces_in_sides: Vec<&str> = sides
             .iter()
-            .map(|s| s["workspace"].as_str().unwrap())
+            .map(|s| s["workspace"].as_str().expect("operation should succeed"))
             .collect();
         assert!(workspaces_in_sides.contains(&"alice"));
         assert!(workspaces_in_sides.contains(&"bob"));
@@ -5071,15 +5133,27 @@ mod tests {
         // Agent can read: WHAT each side contains
         for side in sides {
             assert!(side["content"].is_string() || side["is_binary"].as_bool().unwrap_or(false));
-            assert!(!side["workspace"].as_str().unwrap().is_empty());
-            assert!(!side["change"].as_str().unwrap().is_empty());
+            assert!(
+                !side["workspace"]
+                    .as_str()
+                    .expect("operation should succeed")
+                    .is_empty()
+            );
+            assert!(
+                !side["change"]
+                    .as_str()
+                    .expect("operation should succeed")
+                    .is_empty()
+            );
         }
 
         // Agent has: BASE content for reference
         assert!(parsed["base_content"].is_string());
 
         // Agent has: LOCALIZED conflict regions (atoms)
-        let atoms = parsed["atoms"].as_array().unwrap();
+        let atoms = parsed["atoms"]
+            .as_array()
+            .expect("operation should succeed");
         assert!(
             !atoms.is_empty(),
             "atoms should pinpoint the conflict region"
@@ -5090,9 +5164,16 @@ mod tests {
         assert!(atom["reason"].is_object());
 
         // Agent has: HOW to resolve it
-        let strategies = parsed["resolution_strategies"].as_array().unwrap();
+        let strategies = parsed["resolution_strategies"]
+            .as_array()
+            .expect("operation should succeed");
         assert!(!strategies.is_empty());
-        assert!(!parsed["suggested_resolution"].as_str().unwrap().is_empty());
+        assert!(
+            !parsed["suggested_resolution"]
+                .as_str()
+                .expect("operation should succeed")
+                .is_empty()
+        );
     }
 
     /// Verify that missing_base conflicts are also fully parseable.
@@ -5100,16 +5181,28 @@ mod tests {
     fn missing_base_conflict_json_is_parseable() {
         let record = missing_base_record("src/shared.rs");
         let conflict_json = conflict_record_to_json(&record);
-        let json_str = serde_json::to_string_pretty(&conflict_json).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str =
+            serde_json::to_string_pretty(&conflict_json).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
 
         assert_eq!(parsed["reason"], "missing_base");
         assert!(
             parsed["base_content"].is_null(),
             "no base content for missing_base"
         );
-        assert!(!parsed["sides"].as_array().unwrap().is_empty());
-        assert!(!parsed["suggested_resolution"].as_str().unwrap().is_empty());
+        assert!(
+            !parsed["sides"]
+                .as_array()
+                .expect("operation should succeed")
+                .is_empty()
+        );
+        assert!(
+            !parsed["suggested_resolution"]
+                .as_str()
+                .expect("operation should succeed")
+                .is_empty()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -5177,7 +5270,7 @@ mod tests {
     #[test]
     fn parse_resolutions_workspace_name() {
         let raw = vec!["cf-abcd=alice".to_string()];
-        let parsed = parse_resolutions(&raw).unwrap();
+        let parsed = parse_resolutions(&raw).expect("operation should succeed");
 
         assert_eq!(parsed.len(), 1);
         assert!(matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "alice"));
@@ -5186,7 +5279,7 @@ mod tests {
     #[test]
     fn parse_resolutions_workspace_name_with_hyphens() {
         let raw = vec!["cf-abcd=my-workspace".to_string()];
-        let parsed = parse_resolutions(&raw).unwrap();
+        let parsed = parse_resolutions(&raw).expect("operation should succeed");
 
         assert!(
             matches!(&parsed["cf-abcd"], Resolution::Workspace(name) if name == "my-workspace")
@@ -5196,7 +5289,7 @@ mod tests {
     #[test]
     fn parse_resolutions_content_path() {
         let raw = vec!["cf-abcd=content:/tmp/resolved.rs".to_string()];
-        let parsed = parse_resolutions(&raw).unwrap();
+        let parsed = parse_resolutions(&raw).expect("operation should succeed");
 
         assert!(
             matches!(&parsed["cf-abcd"], Resolution::Content(p) if p == Path::new("/tmp/resolved.rs"))
@@ -5206,7 +5299,7 @@ mod tests {
     #[test]
     fn parse_resolutions_atom_level() {
         let raw = vec!["cf-abcd.0=alice".to_string(), "cf-abcd.1=bob".to_string()];
-        let parsed = parse_resolutions(&raw).unwrap();
+        let parsed = parse_resolutions(&raw).expect("operation should succeed");
 
         assert_eq!(parsed.len(), 2);
         assert!(matches!(&parsed["cf-abcd.0"], Resolution::Workspace(n) if n == "alice"));
@@ -5232,7 +5325,7 @@ mod tests {
             "cf-bbbb=bob".to_string(),
             "cf-cccc=content:/tmp/resolved.rs".to_string(),
         ];
-        let parsed = parse_resolutions(&raw).unwrap();
+        let parsed = parse_resolutions(&raw).expect("operation should succeed");
 
         assert_eq!(parsed.len(), 3);
         assert!(matches!(&parsed["cf-aaaa"], Resolution::Workspace(n) if n == "alice"));
@@ -5253,7 +5346,8 @@ mod tests {
         resolutions.insert(id, Resolution::Workspace("alice".to_string()));
 
         let ws_dirs = BTreeMap::new();
-        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs)
+            .expect("operation should succeed");
 
         assert!(remaining.is_empty());
         assert_eq!(resolved.len(), 1);
@@ -5269,7 +5363,8 @@ mod tests {
         resolutions.insert(id, Resolution::Workspace("bob".to_string()));
 
         let ws_dirs = BTreeMap::new();
-        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs)
+            .expect("operation should succeed");
 
         assert!(remaining.is_empty());
         assert_eq!(resolved[&PathBuf::from("new.rs")], b"bob's version");
@@ -5284,7 +5379,8 @@ mod tests {
         resolutions.insert(id_a, Resolution::Workspace("alice".to_string()));
 
         let ws_dirs = BTreeMap::new();
-        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs)
+            .expect("operation should succeed");
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(remaining.len(), 1);
@@ -5304,7 +5400,7 @@ mod tests {
         let ws_dirs = BTreeMap::new();
         let result = apply_resolutions(&conflicts, &resolutions, &ws_dirs);
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result.expect_err("operation should fail").to_string();
         assert!(err.contains("Unknown conflict ID"), "error: {err}");
     }
 
@@ -5317,7 +5413,8 @@ mod tests {
         resolutions.insert(id, Resolution::Workspace("bob".to_string()));
 
         let ws_dirs = BTreeMap::new();
-        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs).unwrap();
+        let (resolved, remaining) = apply_resolutions(&conflicts, &resolutions, &ws_dirs)
+            .expect("operation should succeed");
 
         assert!(remaining.is_empty());
         assert_eq!(resolved[&PathBuf::from("new.rs")], b"bob's version");
@@ -5346,7 +5443,7 @@ mod tests {
         assert!(json.atom_ids.is_empty());
 
         // Verify serialization omits the id field
-        let json_str = serde_json::to_string(&json).unwrap();
+        let json_str = serde_json::to_string(&json).expect("operation should succeed");
         assert!(
             !json_str.contains("\"id\""),
             "id should be omitted when None"

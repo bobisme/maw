@@ -691,7 +691,7 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
                 local.insert(path, content);
             }
 
-            let mut guard = expected_clone.lock().unwrap();
+            let mut guard = expected_clone.lock().expect("operation should succeed");
             guard.extend(local);
         });
         handles.push(handle);
@@ -703,7 +703,10 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
             .unwrap_or_else(|_| panic!("heavy-{i} agent panicked"));
     }
 
-    let all_expected = Arc::try_unwrap(expected).unwrap().into_inner().unwrap();
+    let all_expected = Arc::try_unwrap(expected)
+        .expect("operation should succeed")
+        .into_inner()
+        .expect("operation should succeed");
 
     // Every agent wrote FILES_PER_AGENT files → total should be 100.
     assert_eq!(
@@ -717,10 +720,10 @@ fn high_load_five_agents_100_files_total_no_data_loss() {
     // Run merge.
     let backend = backend_for(&repo);
     let epoch_str = repo.current_epoch();
-    let epoch = maw::model::types::EpochId::new(&epoch_str).unwrap();
+    let epoch = maw::model::types::EpochId::new(&epoch_str).expect("operation should succeed");
     let sources: Vec<maw::model::types::WorkspaceId> = ws_names
         .iter()
-        .map(|n| maw::model::types::WorkspaceId::new(n).unwrap())
+        .map(|n| maw::model::types::WorkspaceId::new(n).expect("operation should succeed"))
         .collect();
 
     let build_output =
@@ -837,11 +840,11 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
                 let path = format!("created/new_{i}.txt");
                 let content = format!("created by agent-create: {i}\n");
                 let full = ws_path.join(&path);
-                std::fs::create_dir_all(full.parent().unwrap()).ok();
+                std::fs::create_dir_all(full.parent().expect("operation should succeed")).ok();
                 std::fs::write(&full, &content).ok();
                 local.insert(path, content);
             }
-            live.lock().unwrap().extend(local);
+            live.lock().expect("operation should succeed").extend(local);
         }));
     }
 
@@ -866,12 +869,15 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
             let new_path = "deleter/beacon.txt".to_owned();
             let new_content = "agent-delete was here\n".to_owned();
             let full_new = ws_path.join(&new_path);
-            std::fs::create_dir_all(full_new.parent().unwrap()).ok();
+            std::fs::create_dir_all(full_new.parent().expect("operation should succeed")).ok();
             std::fs::write(&full_new, &new_content).ok();
             // The created file goes to expected_live (but we don't have that arc here;
             // we'll check it separately by reading the candidate).
             let _ = new_content;
-            deleted.lock().unwrap().extend(del_paths);
+            deleted
+                .lock()
+                .expect("operation should succeed")
+                .extend(del_paths);
         }));
     }
 
@@ -904,11 +910,11 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
                 let path = format!("mixed_a/work_{i}.rs");
                 let content = format!("// agent-mixed-a work {i}\npub fn work_{i}() {{}}\n");
                 let full = ws_path.join(&path);
-                std::fs::create_dir_all(full.parent().unwrap()).ok();
+                std::fs::create_dir_all(full.parent().expect("operation should succeed")).ok();
                 std::fs::write(&full, &content).ok();
                 local.insert(path, content);
             }
-            live.lock().unwrap().extend(local);
+            live.lock().expect("operation should succeed").extend(local);
         }));
     }
 
@@ -925,11 +931,11 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
                 let path = format!("mixed_b/data_{i}.json");
                 let content = format!("{{\"agent\": \"mixed-b\", \"idx\": {i}}}\n");
                 let full = ws_path.join(&path);
-                std::fs::create_dir_all(full.parent().unwrap()).ok();
+                std::fs::create_dir_all(full.parent().expect("operation should succeed")).ok();
                 std::fs::write(&full, &content).ok();
                 local.insert(path, content);
             }
-            live.lock().unwrap().extend(local);
+            live.lock().expect("operation should succeed").extend(local);
         }));
     }
 
@@ -942,10 +948,10 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
     // Run merge.
     let backend = backend_for(&repo);
     let epoch_str = repo.current_epoch();
-    let epoch = maw::model::types::EpochId::new(&epoch_str).unwrap();
+    let epoch = maw::model::types::EpochId::new(&epoch_str).expect("operation should succeed");
     let sources: Vec<maw::model::types::WorkspaceId> = ws_names
         .iter()
-        .map(|n| maw::model::types::WorkspaceId::new(n).unwrap())
+        .map(|n| maw::model::types::WorkspaceId::new(n).expect("operation should succeed"))
         .collect();
 
     let build_output =
@@ -978,9 +984,9 @@ fn adversarial_concurrent_create_delete_read_no_divergence() {
 
     // All expected live files must be present.
     let live_snapshot = Arc::try_unwrap(expected_live)
-        .unwrap()
+        .expect("operation should succeed")
         .into_inner()
-        .unwrap();
+        .expect("operation should succeed");
 
     for (path, expected_content) in &live_snapshot {
         assert!(

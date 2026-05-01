@@ -26,16 +26,19 @@ use tracing::{debug, instrument};
 /// and `refs/heads/<branch>`, collects LFS pointer oids from their trees,
 /// and uploads them via the Batch API. Returns an error if any upload fails.
 #[instrument(skip_all, fields(branch = %branch, remote = %remote))]
+/// # Errors
+///
+/// Returns an error if LFS discovery, upload, or remote verification fails.
 pub fn run(root: &Path, branch: &str, remote: &str) -> Result<()> {
     let repo = GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
     // Respect the opt-out config key.
-    if let Ok(Some(v)) = repo.read_config("lfs.push_before_git_push") {
-        if v.eq_ignore_ascii_case("false") || v == "0" {
-            debug!("lfs.push_before_git_push=false — skipping LFS pre-push upload");
-            return Ok(());
-        }
+    if let Ok(Some(v)) = repo.read_config("lfs.push_before_git_push")
+        && (v.eq_ignore_ascii_case("false") || v == "0")
+    {
+        debug!("lfs.push_before_git_push=false — skipping LFS pre-push upload");
+        return Ok(());
     }
 
     // Resolve local tip and (if present) remote tracking branch.
@@ -284,7 +287,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -294,7 +297,7 @@ mod tests {
     }
 
     fn setup_repo_with_lfs_pointer() -> (tempfile::TempDir, GitOid) {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         run_git(root, &["init", "-b", "main"]);
         run_git(root, &["config", "user.name", "Test"]);
@@ -305,13 +308,13 @@ mod tests {
             root.join(".gitattributes"),
             "*.bin filter=lfs diff=lfs merge=lfs -text\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         // A valid LFS pointer blob (sha256 of "hello world\n", size 12).
         let pointer = "version https://git-lfs.github.com/spec/v1\n\
             oid sha256:a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447\n\
             size 12\n";
-        fs::write(root.join("data.bin"), pointer).unwrap();
-        fs::write(root.join("readme.txt"), "not lfs\n").unwrap();
+        fs::write(root.join("data.bin"), pointer).expect("operation should succeed");
+        fs::write(root.join("readme.txt"), "not lfs\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "add lfs file"]);
 
@@ -319,23 +322,30 @@ mod tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let head: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            .expect("operation should succeed");
+        let head: GitOid = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("operation should succeed");
         (dir, head)
     }
 
     #[test]
     fn collect_from_tree_finds_pointer_with_correct_oid_and_size() {
         let (dir, head) = setup_repo_with_lfs_pointer();
-        let repo = GixRepo::open(dir.path()).unwrap();
-        let commit = repo.read_commit(head).unwrap();
+        let repo = GixRepo::open(dir.path()).expect("operation should succeed");
+        let commit = repo.read_commit(head).expect("operation should succeed");
         let mut out = HashMap::new();
-        collect_from_tree(&repo, commit.tree_oid, &mut out).unwrap();
+        collect_from_tree(&repo, commit.tree_oid, &mut out).expect("operation should succeed");
         assert_eq!(out.len(), 1, "expected one pointer, got {out:?}");
         // sha256 of "hello world\n" is a9489...
         let expected_oid_hex = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
-        let (oid, size) = out.into_iter().next().unwrap();
-        let oid_hex: String = oid.iter().map(|b| format!("{b:02x}")).collect();
+        let (oid, size) = out.into_iter().next().expect("operation should succeed");
+        let oid_hex = oid.iter().fold(String::with_capacity(64), |mut out, b| {
+            use std::fmt::Write as _;
+            write!(&mut out, "{b:02x}").expect("writing to string should not fail");
+            out
+        });
         assert_eq!(oid_hex, expected_oid_hex);
         assert_eq!(size, 12);
     }
@@ -343,23 +353,23 @@ mod tests {
     #[test]
     fn collect_from_tree_skips_non_lfs_paths() {
         let (dir, head) = setup_repo_with_lfs_pointer();
-        let repo = GixRepo::open(dir.path()).unwrap();
-        let commit = repo.read_commit(head).unwrap();
+        let repo = GixRepo::open(dir.path()).expect("operation should succeed");
+        let commit = repo.read_commit(head).expect("operation should succeed");
         let mut out = HashMap::new();
-        collect_from_tree(&repo, commit.tree_oid, &mut out).unwrap();
+        collect_from_tree(&repo, commit.tree_oid, &mut out).expect("operation should succeed");
         // Only data.bin (LFS) — readme.txt is not matched by filter=lfs
         assert_eq!(out.len(), 1);
     }
 
     #[test]
     fn collect_from_tree_empty_when_no_gitattributes() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         run_git(root, &["init", "-b", "main"]);
         run_git(root, &["config", "user.name", "Test"]);
         run_git(root, &["config", "user.email", "t@t.test"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
-        fs::write(root.join("x.txt"), "plain\n").unwrap();
+        fs::write(root.join("x.txt"), "plain\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "init"]);
 
@@ -367,12 +377,15 @@ mod tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let head: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
-        let repo = GixRepo::open(dir.path()).unwrap();
-        let commit = repo.read_commit(head).unwrap();
+            .expect("operation should succeed");
+        let head: GitOid = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("operation should succeed");
+        let repo = GixRepo::open(dir.path()).expect("operation should succeed");
+        let commit = repo.read_commit(head).expect("operation should succeed");
         let mut found = HashMap::new();
-        collect_from_tree(&repo, commit.tree_oid, &mut found).unwrap();
+        collect_from_tree(&repo, commit.tree_oid, &mut found).expect("operation should succeed");
         assert!(found.is_empty());
     }
 
@@ -381,25 +394,28 @@ mod tests {
         let (dir, head1) = setup_repo_with_lfs_pointer();
         let root = dir.path();
         // Second commit with an unrelated edit; data.bin unchanged.
-        fs::write(root.join("readme.txt"), "updated\n").unwrap();
+        fs::write(root.join("readme.txt"), "updated\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "update readme"]);
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let head2: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
-        let repo = GixRepo::open(root).unwrap();
-        let objs = collect_lfs_objects(&repo, &[head1, head2]).unwrap();
+            .expect("operation should succeed");
+        let head2: GitOid = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("operation should succeed");
+        let repo = GixRepo::open(root).expect("operation should succeed");
+        let objs = collect_lfs_objects(&repo, &[head1, head2]).expect("operation should succeed");
         assert_eq!(objs.len(), 1);
     }
 
     #[test]
     fn commits_to_push_new_branch_walks_full_history() {
         let (dir, head) = setup_repo_with_lfs_pointer();
-        let repo = GixRepo::open(dir.path()).unwrap();
-        let commits = commits_to_push(&repo, head, None).unwrap();
+        let repo = GixRepo::open(dir.path()).expect("operation should succeed");
+        let commits = commits_to_push(&repo, head, None).expect("operation should succeed");
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0], head);
     }
@@ -408,18 +424,21 @@ mod tests {
     fn commits_to_push_stops_at_remote_ancestor() {
         let (dir, head1) = setup_repo_with_lfs_pointer();
         let root = dir.path();
-        fs::write(root.join("readme.txt"), "v2\n").unwrap();
+        fs::write(root.join("readme.txt"), "v2\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "v2"]);
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let head2: GitOid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
-        let repo = GixRepo::open(root).unwrap();
+            .expect("operation should succeed");
+        let head2: GitOid = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("operation should succeed");
+        let repo = GixRepo::open(root).expect("operation should succeed");
         // Remote is at head1; local is at head2. Should return only [head2].
-        let commits = commits_to_push(&repo, head2, Some(head1)).unwrap();
+        let commits = commits_to_push(&repo, head2, Some(head1)).expect("operation should succeed");
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0], head2);
     }

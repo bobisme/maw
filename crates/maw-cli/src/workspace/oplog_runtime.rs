@@ -20,7 +20,17 @@ use maw_core::refs;
 /// dangling reference (bn-3h90 Bug 2).
 static DAMAGED_OPLOG_WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-pub(crate) fn append_operation_with_runtime_checkpoint(
+fn first_damaged_oplog_warning_for(ws_name: &str) -> bool {
+    let mut guard = DAMAGED_OPLOG_WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let seen = guard.get_or_insert_with(HashSet::new);
+    let should_warn = seen.insert(ws_name.to_owned());
+    drop(guard);
+    should_warn
+}
+
+pub fn append_operation_with_runtime_checkpoint(
     root: &Path,
     workspace_id: &WorkspaceId,
     op: &Operation,
@@ -38,11 +48,8 @@ pub(crate) fn append_operation_with_runtime_checkpoint(
             // checkpoint until the chain is repaired. Log once per workspace
             // per session to avoid spamming every merge.
             let ws_name = workspace_id.as_str();
-            let mut guard = DAMAGED_OPLOG_WARNED
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let seen = guard.get_or_insert_with(HashSet::new);
-            if seen.insert(ws_name.to_owned()) {
+            let should_warn = first_damaged_oplog_warning_for(ws_name);
+            if should_warn {
                 eprintln!(
                     "WARNING: op log chain for workspace '{ws_name}' has a dangling blob reference \
                      — checkpoint writes are disabled for this workspace until repaired. \
@@ -96,7 +103,10 @@ fn maybe_checkpoint_after_append(
 }
 
 /// Identify dangling-blob errors so we can downgrade the log spam.
-fn classify_checkpoint_error(err: &CheckpointError, rendered: String) -> CheckpointAppendError {
+const fn classify_checkpoint_error(
+    err: &CheckpointError,
+    rendered: String,
+) -> CheckpointAppendError {
     if let CheckpointError::OpLogRead(OpLogReadError::CatFile { .. }) = err {
         return CheckpointAppendError::DamagedChain(rendered);
     }
@@ -109,7 +119,7 @@ fn classify_checkpoint_error(err: &CheckpointError, rendered: String) -> Checkpo
 /// Note: this is in `oplog_runtime` because it's the same module that owns
 /// the runtime warning for damaged chains — keeping the repair next to the
 /// detection path makes them easy to keep in sync.
-pub(crate) fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
+pub fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
     let root = super::repo_root()?;
 
     let ws_id = WorkspaceId::new(name)
@@ -131,8 +141,7 @@ pub(crate) fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
     // so the user can recover the chain if needed.
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let archive_ref = format!("refs/manifold/archive/head/{name}/{ts}");
 
     if dry_run {
@@ -154,10 +163,10 @@ pub(crate) fn repair_oplog(name: &str, dry_run: bool) -> Result<()> {
 
     // 3. Clear the "already warned" set so if the chain gets corrupted
     //    again in this session, the user sees a fresh warning.
-    if let Ok(mut guard) = DAMAGED_OPLOG_WARNED.lock() {
-        if let Some(set) = guard.as_mut() {
-            set.remove(name);
-        }
+    if let Ok(mut guard) = DAMAGED_OPLOG_WARNED.lock()
+        && let Some(set) = guard.as_mut()
+    {
+        set.remove(name);
     }
 
     println!("Op log for workspace '{name}' repaired.");

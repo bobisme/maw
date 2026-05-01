@@ -179,6 +179,10 @@ pub struct SyncArgs {
 }
 
 #[derive(Args, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flag structs naturally carry independent booleans"
+)]
 pub struct CloseArgs {
     /// Change id.
     pub change_id: String,
@@ -204,6 +208,9 @@ pub struct CloseArgs {
     pub json: bool,
 }
 
+/// # Errors
+///
+/// Returns an error if the selected change command fails.
 pub fn run(cmd: &ChangesCommands) -> Result<()> {
     match cmd {
         ChangesCommands::Close(args) => close_change(args),
@@ -306,6 +313,10 @@ struct CreateEnvelope {
     advice: Vec<String>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI command handler validates, mutates storage, and renders output"
+)]
 fn create_change(args: &CreateArgs) -> Result<()> {
     let root = repo_root()?;
     let format = OutputFormat::resolve(OutputFormat::with_json_flag(args.format, args.json));
@@ -318,8 +329,7 @@ fn create_change(args: &CreateArgs) -> Result<()> {
         validate_change_id_for_create(explicit_id)?;
         if store.read_active_record(explicit_id)?.is_some() {
             bail!(
-                "Change id '{}' already exists.\n  Next: choose another id or omit --id for auto-generation.",
-                explicit_id
+                "Change id '{explicit_id}' already exists.\n  Next: choose another id or omit --id for auto-generation."
             );
         }
         explicit_id.clone()
@@ -387,22 +397,20 @@ fn create_change(args: &CreateArgs) -> Result<()> {
     if let Err(err) = create_primary_result {
         rollback_change_create(&root, &store, &change_id, &branch)?;
         bail!(
-            "Failed to create primary workspace '{}': {err}\n  Rollback applied: removed change metadata and branch '{}'.",
-            primary_workspace,
-            branch
+            "Failed to create primary workspace '{primary_workspace}': {err}\n  Rollback applied: removed change metadata and branch '{branch}'."
         );
     }
 
     let workspace_path = root.join("ws").join(&primary_workspace);
     let advice = create_change_advice(&primary_workspace, &change_id);
     let envelope = CreateEnvelope {
-        change_id: change_id.clone(),
+        change_id,
         title: args.title.clone(),
         branch,
         source: source.resolved_ref,
         source_oid,
         fetched_remote: source.fetched_remote,
-        primary_workspace: primary_workspace.clone(),
+        primary_workspace,
         primary_workspace_path: workspace_path.display().to_string(),
         advice,
     };
@@ -451,8 +459,7 @@ fn validate_change_id_for_create(change_id: &str) -> Result<()> {
         .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
     {
         bail!(
-            "Invalid change id '{}': only ASCII letters, digits, '-' and '_' are allowed",
-            change_id
+            "Invalid change id '{change_id}': only ASCII letters, digits, '-' and '_' are allowed"
         );
     }
     Ok(())
@@ -499,10 +506,7 @@ fn slugify_title(title: &str) -> String {
 
 fn ensure_branch_absent(root: &Path, branch: &str) -> Result<()> {
     if has_ref(root, &format!("refs/heads/{branch}"))? {
-        bail!(
-            "Branch '{}' already exists.\n  To fix: choose a different change id/title.",
-            branch
-        );
+        bail!("Branch '{branch}' already exists.\n  To fix: choose a different change id/title.");
     }
     Ok(())
 }
@@ -545,10 +549,10 @@ fn parse_tracker(tracker: Option<&str>, tracker_url: Option<&str>) -> Option<sto
     let mut parsed_id = String::new();
     if let Some(raw) = tracker {
         if let Some((provider, id)) = raw.split_once(':') {
-            parsed_provider = provider.to_owned();
-            parsed_id = id.to_owned();
+            provider.clone_into(&mut parsed_provider);
+            id.clone_into(&mut parsed_id);
         } else {
-            parsed_id = raw.to_owned();
+            raw.clone_into(&mut parsed_id);
         }
     }
 
@@ -566,11 +570,9 @@ fn parse_tracker(tracker: Option<&str>, tracker_url: Option<&str>) -> Option<sto
 fn infer_base_branch(root: &Path, from: &str) -> String {
     if let Some((remote, branch)) = from.split_once('/')
         && !branch.is_empty()
+        && matches!(remote_exists(root, remote), Ok(true))
     {
-        match remote_exists(root, remote) {
-            Ok(true) => return branch.to_owned(),
-            Ok(false) | Err(_) => {}
-        }
+        return branch.to_owned();
     }
     from.to_owned()
 }
@@ -868,7 +870,7 @@ fn ensure_pr_merged_if_required(
 
     let view = gh_pr_view(root, pr.number)?;
     if view.merged_at.is_some() {
-        pr.state = "merged".to_owned();
+        "merged".clone_into(&mut pr.state);
         return Ok(());
     }
 
@@ -1006,13 +1008,13 @@ fn pr_change(args: &PrArgs) -> Result<()> {
     push_change_branch(&root, &head_branch)?;
 
     let mut pr = find_open_pr(&root, &head_branch, &base_branch)?;
-    let mut created = false;
-
-    if pr.is_none() {
+    let created = if pr.is_none() {
         create_pr(&root, &head_branch, &base_branch, args)?;
         pr = find_open_pr(&root, &head_branch, &base_branch)?;
-        created = true;
-    }
+        true
+    } else {
+        false
+    };
 
     let mut pr = pr.ok_or_else(|| {
         anyhow::anyhow!(
@@ -1079,10 +1081,7 @@ fn ensure_local_branch_exists(root: &Path, branch: &str) -> Result<()> {
     if has_ref(root, &branch_ref)? {
         return Ok(());
     }
-    bail!(
-        "Local branch '{}' does not exist.\n  To fix: create the change branch first.",
-        branch
-    );
+    bail!("Local branch '{branch}' does not exist.\n  To fix: create the change branch first.");
 }
 
 fn push_change_branch(root: &Path, head_branch: &str) -> Result<()> {
@@ -1226,6 +1225,10 @@ fn apply_pr_draft_toggle(root: &Path, pr: &mut GhPrSummary, args: &PrArgs) -> Re
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI command handler orchestrates git hosting state and local records"
+)]
 fn sync_change(args: &SyncArgs) -> Result<()> {
     let root = repo_root()?;
     let format = OutputFormat::resolve(OutputFormat::with_json_flag(args.format, args.json));
@@ -1579,7 +1582,9 @@ mod tests {
             setup_git_repo(&root);
 
             {
-                let _lock = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+                let _lock = test_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _cwd = CwdGuard::enter(&root);
                 crate::v2_init::run().expect("maw init should succeed in test repo");
             }
@@ -1617,8 +1622,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|out| out.status.success())
     }
 
     fn setup_git_repo(root: &Path) {
@@ -1632,7 +1636,9 @@ mod tests {
     }
 
     fn with_repo_cwd<T>(repo: &TestRepo, f: impl FnOnce(&Path) -> T) -> T {
-        let _lock = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _cwd = CwdGuard::enter(&repo.root);
         f(&repo.root)
     }
@@ -1957,9 +1963,12 @@ exit 1
                 .map(|entry| entry.file_name().to_string_lossy().to_string())
                 .collect();
             assert!(
-                archive_entries
-                    .iter()
-                    .any(|entry| entry.contains("ch-close") && entry.ends_with(".toml")),
+                archive_entries.iter().any(|entry| {
+                    entry.contains("ch-close")
+                        && std::path::Path::new(entry)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+                }),
                 "archive should contain closed change record"
             );
         });

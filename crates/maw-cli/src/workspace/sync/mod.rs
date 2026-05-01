@@ -52,9 +52,8 @@ fn maybe_clear_stale_conflict_sidecars(root: &Path, ws_name: &str, ws_path: &Pat
         return Ok(false);
     }
 
-    let head_oid_str = match super::merge::resolve_workspace_head_oid(ws_path) {
-        Ok(oid) => oid,
-        Err(_) => return Ok(false),
+    let Ok(head_oid_str) = super::merge::resolve_workspace_head_oid(ws_path) else {
+        return Ok(false);
     };
     let head_oid: maw_git::GitOid = head_oid_str
         .parse()
@@ -75,6 +74,13 @@ fn maybe_clear_stale_conflict_sidecars(root: &Path, ws_name: &str, ws_path: &Pat
 }
 
 #[instrument]
+/// # Errors
+///
+/// Returns an error if workspace synchronization fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sync command handles stale detection, optional rebase, and reporting"
+)]
 pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     if all {
         return sync_all();
@@ -92,18 +98,18 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
         return Ok(());
     };
 
-    let workspace_name = if let Some(n) = name {
-        n.to_string()
-    } else {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
-        workspace_name_from_cwd(&root, &cwd)
-    };
+    let workspace_name = name.map_or_else(
+        || {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
+            workspace_name_from_cwd(&root, &cwd)
+        },
+        ToString::to_string,
+    );
     let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if is_default_workspace(&workspace_name) {
         let branch = MawConfig::load(&root)
-            .map(|cfg| cfg.branch().to_string())
-            .unwrap_or_else(|_| "main".to_string());
+            .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
         println!(
             "Workspace '{workspace_name}' is the default branch workspace (tracks '{branch}')."
         );
@@ -120,11 +126,9 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     let ws_path = root.join("ws").join(&workspace_name);
 
     if !ws_status.is_stale {
+        println!("Workspace '{workspace_name}' is up to date.");
         if maybe_clear_stale_conflict_sidecars(&root, &workspace_name, &ws_path)? {
-            println!("Workspace '{workspace_name}' is up to date.");
             println!("Cleared stale conflict metadata after a manual resolution commit.");
-        } else {
-            println!("Workspace '{workspace_name}' is up to date.");
         }
         return Ok(());
     }
@@ -218,6 +222,10 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
 }
 
 /// Sync all workspaces at once
+#[expect(
+    clippy::too_many_lines,
+    reason = "sync-all command aggregates per-workspace outcomes for reporting"
+)]
 fn sync_all() -> Result<()> {
     let root = repo_root()?;
     let backend = get_backend()?;
@@ -362,6 +370,10 @@ fn sync_all() -> Result<()> {
 /// Auto-sync a stale workspace before running a command.
 /// In the git worktree model, this updates the worktree HEAD to the current epoch.
 /// Returns Ok(()) whether or not it was stale (idempotent).
+///
+/// # Errors
+///
+/// Returns an error if stale workspace synchronization fails.
 pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     if is_default_workspace(name) {
         return Ok(());

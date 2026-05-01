@@ -194,7 +194,8 @@ impl fmt::Display for TraceEntry {
             "[step {}] {} (phase={}) => {} | epoch: {} -> {}",
             self.step,
             self.action,
-            self.phase.map_or("none".to_string(), |p| p.to_string()),
+            self.phase
+                .map_or_else(|| "none".to_string(), |p| p.to_string()),
             self.outcome,
             &self.epoch_before[..8],
             &self.epoch_after[..8],
@@ -593,6 +594,10 @@ struct TraceResult {
 }
 
 /// Run a single DST trace with the given config.
+#[expect(
+    clippy::too_many_lines,
+    reason = "DST scenario runner keeps trace steps in execution order"
+)]
 fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
     let mut trace = TraceLog::new(seed);
     let mut violations = Vec::new();
@@ -784,6 +789,10 @@ fn run_trace(seed: u64, config: &TraceConfig) -> TraceResult {
 ///
 /// Sets up a repo where a merge can succeed, then injects crashes at
 /// commit-related phases and verifies epoch never decreases.
+#[expect(
+    clippy::too_many_lines,
+    reason = "DST crash runner keeps setup, injection, and assertions together"
+)]
 fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     let mut trace = TraceLog::new(seed);
     let mut violations = Vec::new();
@@ -846,7 +855,7 @@ fn run_g3_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
         let commit_state_path = manifold_dir.join("commit-state.json");
         fs::write(
             &commit_state_path,
-            serde_json::to_string_pretty(&commit_state).unwrap(),
+            serde_json::to_string_pretty(&commit_state).expect("operation should succeed"),
         )
         .expect("write commit-state.json");
 
@@ -1229,6 +1238,10 @@ fn simulate_capture_ref(repo: &TestRepo, ws_path: &Path, ws_name: &str) {
 /// 3. Run recovery
 /// 4. Assert all workspace files are preserved (I-G2.1, I-G2.2, I-G2.3)
 /// 5. Assert git integrity
+#[expect(
+    clippy::too_many_lines,
+    reason = "DST crash runner keeps setup, injection, and assertions together"
+)]
 fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     let mut trace = TraceLog::new(seed);
     let mut violations = Vec::new();
@@ -1240,8 +1253,8 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     ]);
 
     // Deterministic workspace count and file count based on seed
-    let ws_count = 1 + (seed as usize % 3); // 1-3 workspaces
-    let file_count = 1 + (seed as usize % 4); // 1-4 files per workspace
+    let ws_count = 1 + (usize::try_from(seed % 3).expect("small modulo fits usize")); // 1-3 workspaces
+    let file_count = 1 + (usize::try_from(seed % 4).expect("small modulo fits usize")); // 1-4 files per workspace
 
     let mut workspace_names = Vec::new();
     let mut workspace_files: Vec<(String, String)> = Vec::new();
@@ -1373,6 +1386,10 @@ fn run_g2_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
 /// 3. Assert workspace still exists on disk (I-G4.1, I-G4.2)
 /// 4. Assert no data loss
 /// 5. Assert git integrity
+#[expect(
+    clippy::too_many_lines,
+    reason = "DST crash runner keeps setup, injection, and assertions together"
+)]
 fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     let mut trace = TraceLog::new(seed);
     let mut violations = Vec::new();
@@ -1385,7 +1402,7 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
     repo.create_workspace(ws_name);
 
     // Deterministic file count based on seed
-    let file_count = 1 + (seed as usize % 3); // 1-3 files
+    let file_count = 1 + (usize::try_from(seed % 3).expect("small modulo fits usize")); // 1-3 files
     let mut workspace_files: Vec<(String, String)> = Vec::new();
 
     for j in 0..file_count {
@@ -1455,7 +1472,7 @@ fn run_g4_trace(seed: u64, crash_phase: CrashPhase) -> TraceResult {
             });
             fs::write(
                 manifold_dir.join("destroy-pending.json"),
-                serde_json::to_string_pretty(&marker).unwrap(),
+                serde_json::to_string_pretty(&marker).expect("operation should succeed"),
             )
             .ok();
         }
@@ -1553,7 +1570,8 @@ fn dst_g2_rewrite_path_preserves_workspace_data() {
     for i in 0..num_traces {
         let seed = base_seed.wrapping_add(i);
         // Rotate through rewrite-path phases
-        let phase_idx = i as usize % CrashPhase::REWRITE_PHASES.len();
+        let phase_idx =
+            usize::try_from(i).expect("trace index fits usize") % CrashPhase::REWRITE_PHASES.len();
         let crash_phase = CrashPhase::REWRITE_PHASES[phase_idx];
 
         let result = run_g2_trace(seed, crash_phase);
@@ -1605,7 +1623,8 @@ fn dst_g4_destroy_requires_successful_capture() {
     for i in 0..num_traces {
         let seed = base_seed.wrapping_add(i);
         // Rotate through destroy-path phases
-        let phase_idx = i as usize % CrashPhase::DESTROY_PHASES.len();
+        let phase_idx =
+            usize::try_from(i).expect("trace index fits usize") % CrashPhase::DESTROY_PHASES.len();
         let crash_phase = CrashPhase::DESTROY_PHASES[phase_idx];
 
         let result = run_g4_trace(seed, crash_phase);
@@ -1732,8 +1751,10 @@ fn incident_replay_corpus() {
         let phase_str = value["crash_phase"]
             .as_str()
             .expect("corpus entry needs 'crash_phase'");
-        let num_ws = value["num_workspaces"].as_u64().unwrap_or(2) as usize;
-        let num_files = value["num_files_per_ws"].as_u64().unwrap_or(1) as usize;
+        let num_ws = usize::try_from(value["num_workspaces"].as_u64().unwrap_or(2))
+            .expect("corpus value fits usize");
+        let num_files = usize::try_from(value["num_files_per_ws"].as_u64().unwrap_or(1))
+            .expect("corpus value fits usize");
         let create_cand = value["create_candidate"].as_bool().unwrap_or(true);
         let expected = value["expected"].as_str().unwrap_or("pass");
 
@@ -1757,8 +1778,8 @@ fn incident_replay_corpus() {
         replayed += 1;
 
         match expected {
-            "pass" => {
-                if !result.invariant_violations.is_empty() {
+            "pass"
+                if !result.invariant_violations.is_empty() => {
                     result.trace.dump();
                     failures.push((
                         path.display().to_string(),
@@ -1766,16 +1787,14 @@ fn incident_replay_corpus() {
                         result.invariant_violations,
                     ));
                 }
-            }
-            "known_violation" => {
+            "known_violation"
                 // Expected to fail — just log it
-                if result.invariant_violations.is_empty() {
+                if result.invariant_violations.is_empty() => {
                     eprintln!(
                         "NOTE: corpus entry {} (seed={seed}) marked as known_violation but passed!",
                         path.display()
                     );
                 }
-            }
             _ => {}
         }
     }

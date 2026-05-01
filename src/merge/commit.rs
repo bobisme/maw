@@ -309,7 +309,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -319,7 +319,7 @@ mod tests {
     }
 
     fn setup_repo_with_main() -> (TempDir, GitOid, GitOid) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -327,14 +327,14 @@ mod tests {
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
-        fs::write(root.join("README.md"), "hello\n").unwrap();
+        fs::write(root.join("README.md"), "hello\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "initial"]);
         run_git(root, &["branch", "-M", "main"]);
 
         let old = git_oid(root, "HEAD");
 
-        fs::write(root.join("README.md"), "hello world\n").unwrap();
+        fs::write(root.join("README.md"), "hello world\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "candidate"]);
 
@@ -352,13 +352,13 @@ mod tests {
             .args(["rev-parse", rev])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "rev-parse {rev} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).expect("operation should succeed")
     }
 
     fn assert_repo_usable(root: &Path) {
@@ -377,15 +377,15 @@ mod tests {
         let (dir, old, new) = setup_repo_with_main();
         let root = dir.path();
 
-        let result = run_commit_phase(root, "main", &old, &new).unwrap();
+        let result = run_commit_phase(root, "main", &old, &new).expect("operation should succeed");
         assert_eq!(result, CommitResult::Committed);
 
-        let epoch = refs::read_ref(root, refs::EPOCH_CURRENT).unwrap();
-        let main = refs::read_ref(root, "refs/heads/main").unwrap();
+        let epoch = refs::read_ref(root, refs::EPOCH_CURRENT).expect("operation should succeed");
+        let main = refs::read_ref(root, "refs/heads/main").expect("operation should succeed");
         assert_eq!(epoch, Some(new.clone()));
         assert_eq!(main, Some(new.clone()));
 
-        let state = read_merge_state(root).unwrap();
+        let state = read_merge_state(root).expect("operation should succeed");
         assert_eq!(state.phase, CommitPhase::Committed);
         assert!(state.epoch_ref_updated);
         assert!(state.branch_ref_updated);
@@ -400,12 +400,13 @@ mod tests {
         let (dir, old, new) = setup_repo_with_main();
         let root = dir.path();
 
-        refs::advance_epoch(root, &old, &new).unwrap();
+        refs::advance_epoch(root, &old, &new).expect("operation should succeed");
 
-        let recovery = recover_partial_commit(root, "main", &old, &new).unwrap();
+        let recovery =
+            recover_partial_commit(root, "main", &old, &new).expect("operation should succeed");
         assert_eq!(recovery, CommitRecovery::FinalizedMainRef);
 
-        let main = refs::read_ref(root, "refs/heads/main").unwrap();
+        let main = refs::read_ref(root, "refs/heads/main").expect("operation should succeed");
         assert_eq!(main, Some(new.clone()));
 
         assert_repo_usable(root);
@@ -421,7 +422,8 @@ mod tests {
         run_git(root, &["update-ref", refs::EPOCH_CURRENT, new.as_str()]);
         run_git(root, &["update-ref", "refs/heads/main", new.as_str()]);
 
-        let recovery = recover_partial_commit(root, "main", &old, &new).unwrap();
+        let recovery =
+            recover_partial_commit(root, "main", &old, &new).expect("operation should succeed");
         assert_eq!(recovery, CommitRecovery::AlreadyCommitted);
 
         assert_repo_usable(root);
@@ -434,7 +436,8 @@ mod tests {
         let (dir, old, new) = setup_repo_with_main();
         let root = dir.path();
 
-        let recovery = recover_partial_commit(root, "main", &old, &new).unwrap();
+        let recovery =
+            recover_partial_commit(root, "main", &old, &new).expect("operation should succeed");
         assert_eq!(recovery, CommitRecovery::NotCommitted);
 
         assert_repo_usable(root);

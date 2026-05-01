@@ -247,9 +247,9 @@ impl OverlayBackend {
 
         // Already populated: snapshot dir exists and has content (not just .refcount).
         if snapshot_dir.exists() {
-            let has_content = fs::read_dir(&snapshot_dir)
-                .map(|mut rd| rd.any(|e| e.ok().is_some_and(|e| e.file_name() != ".refcount")))
-                .unwrap_or(false);
+            let has_content = fs::read_dir(&snapshot_dir).is_ok_and(|mut rd| {
+                rd.any(|e| e.ok().is_some_and(|e| e.file_name() != ".refcount"))
+            });
             if has_content {
                 return Ok(snapshot_dir);
             }
@@ -390,7 +390,11 @@ impl OverlayBackend {
             work.display()
         );
         let output = Command::new("fuse-overlayfs")
-            .args(["-o", &options, merged.to_str().unwrap()])
+            .args([
+                "-o",
+                &options,
+                merged.to_str().expect("operation should succeed"),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()?;
@@ -453,7 +457,7 @@ impl OverlayBackend {
             return Ok(());
         }
 
-        let mp_str = mount_point.to_str().unwrap();
+        let mp_str = mount_point.to_str().expect("operation should succeed");
 
         // Try FUSE unmount first (works for both fuse-overlayfs and regular).
         for cmd in &[
@@ -734,8 +738,7 @@ fn command_available(cmd: &str) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Check whether kernel overlayfs via user namespaces is available.
@@ -782,8 +785,7 @@ fn kernel_userns_overlay_available() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Check whether `path` is currently an overlay filesystem mount.
@@ -975,17 +977,17 @@ mod tests {
 
     #[test]
     fn whiteout_file_regular_is_not_whiteout() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = dir.path().join("regular.txt");
-        fs::write(&path, b"hello").unwrap();
+        fs::write(&path, b"hello").expect("operation should succeed");
         assert!(!is_whiteout_file(&path));
     }
 
     #[test]
     fn whiteout_file_directory_is_not_whiteout() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let subdir = dir.path().join("subdir");
-        fs::create_dir(&subdir).unwrap();
+        fs::create_dir(&subdir).expect("operation should succeed");
         assert!(!is_whiteout_file(&subdir));
     }
 
@@ -993,25 +995,25 @@ mod tests {
 
     #[test]
     fn scan_empty_upper_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let upper = dir.path().join("upper");
-        fs::create_dir_all(&upper).unwrap();
+        fs::create_dir_all(&upper).expect("operation should succeed");
 
-        let dirty = scan_upper_dir_for_dirty(&upper).unwrap();
+        let dirty = scan_upper_dir_for_dirty(&upper).expect("operation should succeed");
         assert!(dirty.is_empty(), "empty upper → no dirty files: {dirty:?}");
     }
 
     #[test]
     fn scan_upper_reports_regular_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let upper = dir.path().join("upper");
-        fs::create_dir_all(&upper).unwrap();
+        fs::create_dir_all(&upper).expect("operation should succeed");
 
-        fs::write(upper.join("modified.rs"), b"changed").unwrap();
-        fs::create_dir_all(upper.join("src")).unwrap();
-        fs::write(upper.join("src").join("new.rs"), b"added").unwrap();
+        fs::write(upper.join("modified.rs"), b"changed").expect("operation should succeed");
+        fs::create_dir_all(upper.join("src")).expect("operation should succeed");
+        fs::write(upper.join("src").join("new.rs"), b"added").expect("operation should succeed");
 
-        let mut dirty = scan_upper_dir_for_dirty(&upper).unwrap();
+        let mut dirty = scan_upper_dir_for_dirty(&upper).expect("operation should succeed");
         dirty.sort();
         assert!(
             dirty.iter().any(|p| p == &PathBuf::from("modified.rs")),
@@ -1027,27 +1029,27 @@ mod tests {
 
     #[test]
     fn diff_empty_upper_empty_lower() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let upper = dir.path().join("upper");
         let lower = dir.path().join("lower");
-        fs::create_dir_all(&upper).unwrap();
-        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&upper).expect("operation should succeed");
+        fs::create_dir_all(&lower).expect("operation should succeed");
 
-        let result = diff_upper_vs_lower(&upper, &lower).unwrap();
+        let result = diff_upper_vs_lower(&upper, &lower).expect("operation should succeed");
         assert!(result.is_empty(), "nothing changed: {result:?}");
     }
 
     #[test]
     fn diff_added_file_not_in_lower() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let upper = dir.path().join("upper");
         let lower = dir.path().join("lower");
-        fs::create_dir_all(&upper).unwrap();
-        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&upper).expect("operation should succeed");
+        fs::create_dir_all(&lower).expect("operation should succeed");
         // Only in upper → added
-        fs::write(upper.join("new.rs"), b"fn main() {}").unwrap();
+        fs::write(upper.join("new.rs"), b"fn main() {}").expect("operation should succeed");
 
-        let result = diff_upper_vs_lower(&upper, &lower).unwrap();
+        let result = diff_upper_vs_lower(&upper, &lower).expect("operation should succeed");
         assert_eq!(result.added.len(), 1, "one added file: {result:?}");
         assert_eq!(result.added[0], PathBuf::from("new.rs"));
         assert!(result.modified.is_empty());
@@ -1056,16 +1058,16 @@ mod tests {
 
     #[test]
     fn diff_modified_file_in_both() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let upper = dir.path().join("upper");
         let lower = dir.path().join("lower");
-        fs::create_dir_all(&upper).unwrap();
-        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&upper).expect("operation should succeed");
+        fs::create_dir_all(&lower).expect("operation should succeed");
         // Same name in both → modified
-        fs::write(lower.join("README.md"), b"original").unwrap();
-        fs::write(upper.join("README.md"), b"modified").unwrap();
+        fs::write(lower.join("README.md"), b"original").expect("operation should succeed");
+        fs::write(upper.join("README.md"), b"modified").expect("operation should succeed");
 
-        let result = diff_upper_vs_lower(&upper, &lower).unwrap();
+        let result = diff_upper_vs_lower(&upper, &lower).expect("operation should succeed");
         assert!(result.added.is_empty());
         assert_eq!(result.modified.len(), 1, "one modified file: {result:?}");
         assert_eq!(result.modified[0], PathBuf::from("README.md"));
@@ -1074,15 +1076,15 @@ mod tests {
 
     #[test]
     fn diff_empty_upper_no_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let upper = dir.path().join("upper");
         let lower = dir.path().join("lower");
-        fs::create_dir_all(&upper).unwrap();
-        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&upper).expect("operation should succeed");
+        fs::create_dir_all(&lower).expect("operation should succeed");
         // File only in lower (not modified) → nothing reported
-        fs::write(lower.join("base.rs"), b"base").unwrap();
+        fs::write(lower.join("base.rs"), b"base").expect("operation should succeed");
 
-        let result = diff_upper_vs_lower(&upper, &lower).unwrap();
+        let result = diff_upper_vs_lower(&upper, &lower).expect("operation should succeed");
         assert!(result.is_empty(), "no upper changes → empty: {result:?}");
     }
 
@@ -1090,7 +1092,7 @@ mod tests {
 
     #[test]
     fn is_overlay_mounted_returns_false_for_regular_dir() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         assert!(
             !is_overlay_mounted(dir.path()),
             "regular tempdir should not be an overlay mount"
@@ -1153,7 +1155,7 @@ mod tests {
 
     #[test]
     fn epoch_refcount_inc_dec_remove() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         // Build a minimal backend (strategy doesn't matter for refcount ops).
@@ -1164,29 +1166,39 @@ mod tests {
 
         // We need a valid EpochId (40 lowercase hex chars).
         let oid = "a".repeat(40);
-        let epoch = EpochId::new(&oid).unwrap();
+        let epoch = EpochId::new(&oid).expect("operation should succeed");
 
         // Initial count is 0.
         assert_eq!(backend.read_refcount(&epoch), 0);
 
         // Create snapshot dir so the refcount file has a parent.
         let snap_dir = backend.epoch_snapshot_dir(&epoch);
-        fs::create_dir_all(&snap_dir).unwrap();
+        fs::create_dir_all(&snap_dir).expect("operation should succeed");
 
-        backend.epoch_refcount_inc(&epoch).unwrap();
+        backend
+            .epoch_refcount_inc(&epoch)
+            .expect("operation should succeed");
         assert_eq!(backend.read_refcount(&epoch), 1);
 
-        backend.epoch_refcount_inc(&epoch).unwrap();
+        backend
+            .epoch_refcount_inc(&epoch)
+            .expect("operation should succeed");
         assert_eq!(backend.read_refcount(&epoch), 2);
 
-        let remaining = backend.epoch_refcount_dec(&epoch).unwrap();
+        let remaining = backend
+            .epoch_refcount_dec(&epoch)
+            .expect("operation should succeed");
         assert_eq!(remaining, 1);
 
-        let remaining = backend.epoch_refcount_dec(&epoch).unwrap();
+        let remaining = backend
+            .epoch_refcount_dec(&epoch)
+            .expect("operation should succeed");
         assert_eq!(remaining, 0);
 
         // Snapshot dir should be removed when refcount hits 0.
-        backend.maybe_remove_epoch_snapshot(&epoch).unwrap();
+        backend
+            .maybe_remove_epoch_snapshot(&epoch)
+            .expect("operation should succeed");
         assert!(!snap_dir.exists(), "snapshot dir should be pruned");
     }
 
@@ -1196,7 +1208,7 @@ mod tests {
     fn ensure_epoch_snapshot_creates_files() {
         use std::process::Command as Cmd;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         // Init a small git repo with one commit.
@@ -1204,48 +1216,53 @@ mod tests {
             .args(["init"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Cmd::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Cmd::new("git")
             .args(["config", "user.email", "t@t.com"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Cmd::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(&root)
             .output()
-            .unwrap();
-        fs::write(root.join("hello.txt"), b"hello world").unwrap();
+            .expect("operation should succeed");
+        fs::write(root.join("hello.txt"), b"hello world").expect("operation should succeed");
         Cmd::new("git")
             .args(["add", "hello.txt"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Cmd::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let head = Cmd::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
-        let oid_str = String::from_utf8(head.stdout).unwrap().trim().to_owned();
-        let epoch = EpochId::new(&oid_str).unwrap();
+            .expect("operation should succeed");
+        let oid_str = String::from_utf8(head.stdout)
+            .expect("operation should succeed")
+            .trim()
+            .to_owned();
+        let epoch = EpochId::new(&oid_str).expect("operation should succeed");
 
         let backend = OverlayBackend {
             root,
             strategy: MountStrategy::FuseOverlayfs,
         };
 
-        let snap = backend.ensure_epoch_snapshot(&epoch).unwrap();
+        let snap = backend
+            .ensure_epoch_snapshot(&epoch)
+            .expect("operation should succeed");
         assert!(snap.exists(), "snapshot dir should exist");
         assert!(
             snap.join("hello.txt").exists(),
@@ -1253,7 +1270,9 @@ mod tests {
         );
 
         // Idempotent: calling again should not fail.
-        let snap2 = backend.ensure_epoch_snapshot(&epoch).unwrap();
+        let snap2 = backend
+            .ensure_epoch_snapshot(&epoch)
+            .expect("operation should succeed");
         assert_eq!(snap, snap2);
     }
 }

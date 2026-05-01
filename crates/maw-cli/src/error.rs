@@ -115,6 +115,7 @@ pub struct ConflictInfo {
 
 impl ConflictInfo {
     /// Create a new conflict summary.
+    #[must_use]
     pub const fn new(path: PathBuf, description: String) -> Self {
         Self { path, description }
     }
@@ -274,7 +275,7 @@ mod tests {
     use super::*;
 
     fn sample_ws_id(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     // -- Display tests: every variant produces actionable output --

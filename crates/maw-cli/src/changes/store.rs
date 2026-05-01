@@ -63,18 +63,14 @@ impl ChangeIndex {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ChangeState {
+    #[default]
     Open,
     Review,
     Merged,
     Closed,
     Aborted,
-}
-
-impl Default for ChangeState {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +139,7 @@ pub struct ChangeRecord {
     pub pr: Option<ChangePr>,
 }
 
-fn schema_version() -> u32 {
+const fn schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
@@ -180,11 +176,17 @@ impl ChangesStore {
         self.changes_root().join("archive")
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `change_id` is invalid.
     pub fn active_record_path(&self, change_id: &str) -> Result<PathBuf> {
         validate_change_id(change_id)?;
         Ok(self.active_dir().join(format!("{change_id}.toml")))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the index file cannot be read or parsed.
     pub fn read_index(&self) -> Result<ChangeIndex> {
         let path = self.index_path();
         if !path.exists() {
@@ -196,6 +198,9 @@ impl ChangesStore {
             .with_context(|| format!("Failed to parse changes index: {}", path.display()))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `change_id` is invalid or the record cannot be read.
     pub fn read_active_record(&self, change_id: &str) -> Result<Option<ChangeRecord>> {
         let path = self.active_record_path(change_id)?;
         if !path.exists() {
@@ -208,6 +213,9 @@ impl ChangesStore {
         Ok(Some(record))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the active records directory or any record cannot be read.
     pub fn list_active_records(&self) -> Result<Vec<ChangeRecord>> {
         let dir = self.active_dir();
         if !dir.exists() {
@@ -223,7 +231,11 @@ impl ChangesStore {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || !name.ends_with(".toml") {
+            if name.starts_with('.')
+                || !std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            {
                 continue;
             }
             files.push(entry.path());
@@ -241,6 +253,9 @@ impl ChangesStore {
         Ok(records)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the store lock cannot be acquired or if `f` fails.
     pub fn with_lock<T, F>(&self, operation: &str, f: F) -> Result<T>
     where
         F: FnOnce(&LockedChangesStore<'_>) -> Result<T>,
@@ -261,16 +276,25 @@ pub struct LockedChangesStore<'a> {
 }
 
 impl LockedChangesStore<'_> {
+    /// # Errors
+    ///
+    /// Returns an error if the index cannot be written.
     pub fn write_index(&self, index: &ChangeIndex) -> Result<()> {
         write_toml_atomic(&self.store.index_path(), index, "changes index")
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the record is invalid or cannot be written.
     pub fn write_active_record(&self, record: &ChangeRecord) -> Result<()> {
         validate_change_id(&record.change_id)?;
         let path = self.store.active_record_path(&record.change_id)?;
         write_toml_atomic(&path, record, "change record")
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `change_id` is invalid or the record cannot be deleted.
     pub fn delete_active_record(&self, change_id: &str) -> Result<()> {
         let path = self.store.active_record_path(change_id)?;
         if path.exists() {
@@ -280,6 +304,9 @@ impl LockedChangesStore<'_> {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if `change_id` is invalid or record archival fails.
     pub fn archive_active_record(
         &self,
         change_id: &str,
@@ -371,26 +398,24 @@ fn write_toml_atomic<T: Serialize>(path: &Path, value: &T, context_name: &str) -
 }
 
 fn temp_path_for(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "changes".to_owned());
+    let file_name = path.file_name().map_or_else(
+        || "changes".to_owned(),
+        |name| name.to_string_lossy().to_string(),
+    );
     let nonce = now_unix_millis();
     path.with_file_name(format!(".{file_name}.{nonce}.tmp"))
 }
 
 fn now_unix_secs() -> u64 {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(dur) => dur.as_secs(),
-        Err(_) => 0,
-    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |dur| dur.as_secs())
 }
 
 fn now_unix_millis() -> u128 {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(dur) => dur.as_millis(),
-        Err(_) => 0,
-    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |dur| dur.as_millis())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

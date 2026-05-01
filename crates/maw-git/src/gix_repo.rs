@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::GitError;
 use crate::repo::GitRepo;
-use crate::types::*;
+use crate::types::{
+    CommitInfo, DiffEntry, GitOid, IndexEntry, RefEdit, RefName, StatusEntry, TreeEdit, TreeEntry,
+    WorktreeInfo,
+};
 
 /// A [`GitRepo`] implementation backed by [gix](https://github.com/GitoxideLabs/gitoxide).
 ///
@@ -21,11 +24,14 @@ pub struct GixRepo {
 
 impl GixRepo {
     /// Open the git repository at or above `path`.
+    ///
+    /// # Errors
+    /// Returns an error if no repository can be discovered from `path`.
     pub fn open(path: &Path) -> Result<Self, GitError> {
         let repo = gix::open(path).map_err(|e| GitError::BackendError {
             message: e.to_string(),
         })?;
-        let workdir = repo.workdir().map(|p| p.to_path_buf());
+        let workdir = repo.workdir().map(std::path::Path::to_path_buf);
         Ok(Self {
             repo,
             workdir,
@@ -52,13 +58,16 @@ impl GixRepo {
     }
 
     /// Open a git repository at exactly `path` (no parent discovery).
+    ///
+    /// # Errors
+    /// Returns an error if `path` is not a git repository.
     pub fn open_at(path: &Path) -> Result<Self, GitError> {
         let repo = gix::open_opts(path, gix::open::Options::isolated()).map_err(|e| {
             GitError::BackendError {
                 message: e.to_string(),
             }
         })?;
-        let workdir = repo.workdir().map(|p| p.to_path_buf());
+        let workdir = repo.workdir().map(std::path::Path::to_path_buf);
         Ok(Self {
             repo,
             workdir,

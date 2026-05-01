@@ -173,6 +173,7 @@ fn init_otlp() -> TelemetryGuard {
 /// Use this to propagate trace context to child processes via environment
 /// variables.
 #[cfg(feature = "otel")]
+#[must_use]
 pub fn current_traceparent() -> Option<String> {
     use opentelemetry::propagation::TextMapPropagator as _;
     use opentelemetry_sdk::propagation::TraceContextPropagator;

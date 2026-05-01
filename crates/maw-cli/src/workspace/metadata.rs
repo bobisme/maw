@@ -118,15 +118,15 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_and_read(meta: &WorkspaceMetadata) -> WorkspaceMetadata {
-        let dir = tempdir().unwrap();
-        write(dir.path(), "test-ws", meta).unwrap();
-        read(dir.path(), "test-ws").unwrap()
+        let dir = tempdir().expect("operation should succeed");
+        write(dir.path(), "test-ws", meta).expect("operation should succeed");
+        read(dir.path(), "test-ws").expect("operation should succeed")
     }
 
     #[test]
     fn missing_file_returns_default() {
-        let dir = tempdir().unwrap();
-        let meta = read(dir.path(), "nonexistent").unwrap();
+        let dir = tempdir().expect("operation should succeed");
+        let meta = read(dir.path(), "nonexistent").expect("operation should succeed");
         assert_eq!(meta, WorkspaceMetadata::default());
         assert!(meta.mode.is_ephemeral());
     }
@@ -153,12 +153,12 @@ mod tests {
 
     #[test]
     fn creates_directory() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let meta = WorkspaceMetadata {
             mode: WorkspaceMode::Persistent,
             ..WorkspaceMetadata::default()
         };
-        write(dir.path(), "my-ws", &meta).unwrap();
+        write(dir.path(), "my-ws", &meta).expect("operation should succeed");
         let expected_path = dir
             .path()
             .join(".manifold")
@@ -169,23 +169,23 @@ mod tests {
 
     #[test]
     fn delete_existing() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let meta = WorkspaceMetadata {
             mode: WorkspaceMode::Persistent,
             ..WorkspaceMetadata::default()
         };
-        write(dir.path(), "ws", &meta).unwrap();
-        delete(dir.path(), "ws").unwrap();
+        write(dir.path(), "ws", &meta).expect("operation should succeed");
+        delete(dir.path(), "ws").expect("operation should succeed");
         // After delete, reading returns default (file gone).
-        let after = read(dir.path(), "ws").unwrap();
+        let after = read(dir.path(), "ws").expect("operation should succeed");
         assert!(after.mode.is_ephemeral());
     }
 
     #[test]
     fn delete_nonexistent_is_noop() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         // Should not error.
-        delete(dir.path(), "ghost").unwrap();
+        delete(dir.path(), "ghost").expect("operation should succeed");
     }
 
     #[test]

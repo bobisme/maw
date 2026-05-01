@@ -161,7 +161,7 @@ mod tests {
         );
 
         let patch_set = PatchSet {
-            base_epoch: EpochId::new(&"a".repeat(40)).unwrap(),
+            base_epoch: EpochId::new(&"a".repeat(40)).expect("operation should succeed"),
             patches,
         };
 
@@ -178,21 +178,21 @@ mod tests {
         patches.insert(
             PathBuf::from("b.rs"),
             PatchValue::Add {
-                blob: GitOid::new(&"b".repeat(40)).unwrap(),
+                blob: GitOid::new(&"b".repeat(40)).expect("operation should succeed"),
                 file_id: FileId::new(2),
             },
         );
         patches.insert(
             PathBuf::from("a.rs"),
             PatchValue::Modify {
-                base_blob: GitOid::new(&"c".repeat(40)).unwrap(),
-                new_blob: GitOid::new(&"d".repeat(40)).unwrap(),
+                base_blob: GitOid::new(&"c".repeat(40)).expect("operation should succeed"),
+                new_blob: GitOid::new(&"d".repeat(40)).expect("operation should succeed"),
                 file_id: FileId::new(3),
             },
         );
 
         let patch_set = PatchSet {
-            base_epoch: EpochId::new(&"e".repeat(40)).unwrap(),
+            base_epoch: EpochId::new(&"e".repeat(40)).expect("operation should succeed"),
             patches,
         };
 

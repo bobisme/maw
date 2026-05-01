@@ -25,7 +25,7 @@ fn undo_reverts_added_modified_deleted_and_renamed_paths() {
         repo.workspace_path("agent").join("rename-me.txt"),
         repo.workspace_path("agent").join("renamed.txt"),
     )
-    .unwrap();
+    .expect("operation should succeed");
 
     repo.maw_ok(&["ws", "undo", "agent"]);
 

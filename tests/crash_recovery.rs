@@ -480,8 +480,9 @@ fn corrupt_state_file_handled_gracefully() {
 
     // Write corrupt (non-JSON) content to the merge-state file
     let manifold_dir = repo.root().join(".manifold");
-    fs::create_dir_all(&manifold_dir).unwrap();
-    fs::write(merge_state_path(repo.root()), "this is not valid JSON {{{").unwrap();
+    fs::create_dir_all(&manifold_dir).expect("operation should succeed");
+    fs::write(merge_state_path(repo.root()), "this is not valid JSON {{{")
+        .expect("operation should succeed");
 
     // Recovery: corrupt state → should be reported, not panic
     let outcome = simulate_recovery(repo.root());
@@ -509,8 +510,8 @@ fn empty_state_file_handled_gracefully() {
 
     // Write an empty file
     let manifold_dir = repo.root().join(".manifold");
-    fs::create_dir_all(&manifold_dir).unwrap();
-    fs::write(merge_state_path(repo.root()), "").unwrap();
+    fs::create_dir_all(&manifold_dir).expect("operation should succeed");
+    fs::write(merge_state_path(repo.root()), "").expect("operation should succeed");
 
     let outcome = simulate_recovery(repo.root());
     assert_eq!(outcome, "corrupt_state");
@@ -546,7 +547,7 @@ fn terminal_state_aborted_requires_no_recovery() {
     let epoch = repo.current_epoch();
 
     let manifold_dir = repo.root().join(".manifold");
-    fs::create_dir_all(&manifold_dir).unwrap();
+    fs::create_dir_all(&manifold_dir).expect("operation should succeed");
     let state = serde_json::json!({
         "phase": "aborted",
         "sources": ["ws-1"],
@@ -557,9 +558,9 @@ fn terminal_state_aborted_requires_no_recovery() {
     });
     fs::write(
         merge_state_path(repo.root()),
-        serde_json::to_string_pretty(&state).unwrap(),
+        serde_json::to_string_pretty(&state).expect("operation should succeed"),
     )
-    .unwrap();
+    .expect("operation should succeed");
 
     let outcome = simulate_recovery(repo.root());
     assert_eq!(outcome, "terminal");

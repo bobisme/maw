@@ -429,15 +429,15 @@ mod tests {
     use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
 
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     #[test]
@@ -466,7 +466,8 @@ mod tests {
     #[test]
     fn summarize_create_payload() {
         let summary = summarize_payload(&OpPayload::Create {
-            epoch: EpochId::new("aabbccdd00112233445566778899aabbccddeeff").unwrap(),
+            epoch: EpochId::new("aabbccdd00112233445566778899aabbccddeeff")
+                .expect("operation should succeed"),
         });
         assert!(summary.contains("workspace created"));
         assert!(summary.contains("aabbccdd"));

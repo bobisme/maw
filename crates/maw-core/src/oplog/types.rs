@@ -183,15 +183,15 @@ mod tests {
     }
 
     fn git_oid(c: char) -> GitOid {
-        GitOid::new(&oid(c)).unwrap()
+        GitOid::new(&oid(c)).expect("operation should succeed")
     }
 
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&oid(c)).unwrap()
+        EpochId::new(&oid(c)).expect("operation should succeed")
     }
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn timestamp() -> String {
@@ -210,8 +210,8 @@ mod tests {
             timestamp: timestamp(),
             payload: OpPayload::Create { epoch: epoch('a') },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -223,8 +223,8 @@ mod tests {
             timestamp: timestamp(),
             payload: OpPayload::Destroy,
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -238,8 +238,8 @@ mod tests {
                 patch_set_oid: git_oid('d'),
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -255,8 +255,8 @@ mod tests {
                 epoch_after: epoch('b'),
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -271,8 +271,8 @@ mod tests {
                 reason: "reverted broken snapshot".to_owned(),
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -286,8 +286,8 @@ mod tests {
                 message: "implementing auth module".to_owned(),
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -313,8 +313,8 @@ mod tests {
                 data,
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 
@@ -342,15 +342,21 @@ mod tests {
             },
         };
 
-        let json1 = op.to_canonical_json().unwrap();
-        let json2 = op.to_canonical_json().unwrap();
+        let json1 = op.to_canonical_json().expect("operation should succeed");
+        let json2 = op.to_canonical_json().expect("operation should succeed");
         assert_eq!(json1, json2, "canonical JSON must be deterministic");
 
         // Verify BTreeMap keys are sorted in output
-        let json_str = String::from_utf8(json1).unwrap();
-        let a_pos = json_str.find("\"a_key\"").unwrap();
-        let m_pos = json_str.find("\"m_key\"").unwrap();
-        let z_pos = json_str.find("\"z_key\"").unwrap();
+        let json_str = String::from_utf8(json1).expect("operation should succeed");
+        let a_pos = json_str
+            .find("\"a_key\"")
+            .expect("operation should succeed");
+        let m_pos = json_str
+            .find("\"m_key\"")
+            .expect("operation should succeed");
+        let z_pos = json_str
+            .find("\"z_key\"")
+            .expect("operation should succeed");
         assert!(a_pos < m_pos, "a_key should come before m_key");
         assert!(m_pos < z_pos, "m_key should come before z_key");
     }
@@ -371,9 +377,10 @@ mod tests {
             },
         };
 
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
-        let apple_pos = json.find("\"apple\"").unwrap();
-        let zebra_pos = json.find("\"zebra\"").unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
+        let apple_pos = json.find("\"apple\"").expect("operation should succeed");
+        let zebra_pos = json.find("\"zebra\"").expect("operation should succeed");
         assert!(
             apple_pos < zebra_pos,
             "BTreeMap keys must be sorted: apple < zebra"
@@ -392,7 +399,8 @@ mod tests {
             timestamp: timestamp(),
             payload: OpPayload::Create { epoch: epoch('a') },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"create\""),
             "Create variant should have type:create tag"
@@ -407,7 +415,8 @@ mod tests {
             timestamp: timestamp(),
             payload: OpPayload::Destroy,
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"destroy\""),
             "Destroy variant should have type:destroy tag"
@@ -424,7 +433,8 @@ mod tests {
                 patch_set_oid: git_oid('a'),
             },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"snapshot\""),
             "Snapshot variant should have type:snapshot tag"
@@ -443,7 +453,8 @@ mod tests {
                 epoch_after: epoch('b'),
             },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"merge\""),
             "Merge variant should have type:merge tag"
@@ -461,7 +472,8 @@ mod tests {
                 reason: "test".to_owned(),
             },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"compensate\""),
             "Compensate variant should have type:compensate tag"
@@ -478,7 +490,8 @@ mod tests {
                 message: "hello".to_owned(),
             },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"describe\""),
             "Describe variant should have type:describe tag"
@@ -496,7 +509,8 @@ mod tests {
                 data: BTreeMap::new(),
             },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(
             json.contains("\"type\":\"annotate\""),
             "Annotate variant should have type:annotate tag"
@@ -515,7 +529,8 @@ mod tests {
             timestamp: timestamp(),
             payload: OpPayload::Create { epoch: epoch('a') },
         };
-        let json = String::from_utf8(op.to_canonical_json().unwrap()).unwrap();
+        let json = String::from_utf8(op.to_canonical_json().expect("operation should succeed"))
+            .expect("operation should succeed");
         assert!(json.contains("\"parent_ids\":[]"));
     }
 
@@ -531,8 +546,8 @@ mod tests {
                 epoch_after: epoch('e'),
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(parsed.parent_ids.len(), 3);
         assert_eq!(parsed.payload, op.payload);
     }
@@ -547,8 +562,8 @@ mod tests {
                 message: "line 1\nline 2\n日本語".to_owned(),
             },
         };
-        let json = op.to_canonical_json().unwrap();
-        let parsed = Operation::from_json(&json).unwrap();
+        let json = op.to_canonical_json().expect("operation should succeed");
+        let parsed = Operation::from_json(&json).expect("operation should succeed");
         assert_eq!(op, parsed);
     }
 }

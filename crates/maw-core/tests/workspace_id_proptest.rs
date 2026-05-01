@@ -89,7 +89,7 @@ proptest! {
     #[test]
     fn obvious_invalids_fail(
         bad in prop_oneof![
-            Just("".to_string()),
+            Just(String::new()),
             Just("-lead".to_string()),
             Just("trail-".to_string()),
             Just("dou--ble".to_string()),

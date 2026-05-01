@@ -674,7 +674,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -686,7 +686,7 @@ mod tests {
 
     /// Create a git repo with a single initial commit and an epoch ref.
     fn setup_repo() -> (TempDir, GitOid) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -694,13 +694,13 @@ mod tests {
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "initial"]);
         run_git(root, &["branch", "-M", "main"]);
 
         let oid_str = run_git(root, &["rev-parse", "HEAD"]);
-        let oid = GitOid::new(&oid_str).unwrap();
+        let oid = GitOid::new(&oid_str).expect("operation should succeed");
 
         run_git(root, &["update-ref", crate::refs::EPOCH_CURRENT, &oid_str]);
 
@@ -709,11 +709,11 @@ mod tests {
 
     /// Create a second commit (candidate commit) in the repo.
     fn make_candidate_commit(root: &Path, content: &str) -> GitOid {
-        fs::write(root.join("candidate.txt"), content).unwrap();
+        fs::write(root.join("candidate.txt"), content).expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "candidate"]);
         let oid_str = run_git(root, &["rev-parse", "HEAD"]);
-        GitOid::new(&oid_str).unwrap()
+        GitOid::new(&oid_str).expect("operation should succeed")
     }
 
     fn dummy_validation_result(passed: bool) -> ValidationResult {
@@ -762,24 +762,27 @@ mod tests {
 
     #[test]
     fn state_roundtrip() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
-        let oid = GitOid::new(&"a".repeat(40)).unwrap();
-        let epoch = EpochId::new(&"b".repeat(40)).unwrap();
+        let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+        let epoch = EpochId::new(&"b".repeat(40)).expect("operation should succeed");
         let state = QuarantineState {
             merge_id: "abc123def456".to_owned(),
             epoch_before: epoch.oid().clone(),
             candidate: oid.clone(),
-            sources: vec![WorkspaceId::new("ws-1").unwrap()],
+            sources: vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             branch: "main".to_owned(),
             validation_result: dummy_validation_result(false),
             created_at: 1000,
         };
 
-        state.write_atomic(&manifold_dir).unwrap();
+        state
+            .write_atomic(&manifold_dir)
+            .expect("operation should succeed");
 
-        let loaded = QuarantineState::read(&manifold_dir, "abc123def456").unwrap();
+        let loaded =
+            QuarantineState::read(&manifold_dir, "abc123def456").expect("operation should succeed");
         assert_eq!(loaded.merge_id, "abc123def456");
         assert_eq!(loaded.epoch_before, *epoch.oid());
         assert_eq!(loaded.candidate, oid);
@@ -789,9 +792,10 @@ mod tests {
 
     #[test]
     fn state_not_found_error() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
-        let err = QuarantineState::read(&manifold_dir, "nonexistent").unwrap_err();
+        let err =
+            QuarantineState::read(&manifold_dir, "nonexistent").expect_err("operation should fail");
         assert!(matches!(err, QuarantineError::NotFound { .. }));
     }
 
@@ -807,19 +811,19 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "candidate content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         let ws_path = create_quarantine_workspace(
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Workspace directory exists
         assert!(ws_path.exists(), "quarantine worktree should exist");
@@ -829,7 +833,8 @@ mod tests {
         assert_eq!(head, candidate.as_str(), "worktree should be at candidate");
 
         // State file exists and is valid
-        let state = QuarantineState::read(&manifold_dir, merge_id).unwrap();
+        let state =
+            QuarantineState::read(&manifold_dir, merge_id).expect("operation should succeed");
         assert_eq!(state.candidate, candidate);
         assert_eq!(state.branch, "main");
         assert!(!state.validation_result.passed);
@@ -846,36 +851,37 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         // First creation
         create_quarantine_workspace(
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Second creation should succeed (idempotent)
         let ws_path = create_quarantine_workspace(
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         assert!(ws_path.exists());
-        let state = QuarantineState::read(&manifold_dir, merge_id).unwrap();
+        let state =
+            QuarantineState::read(&manifold_dir, merge_id).expect("operation should succeed");
         assert_eq!(state.candidate, candidate);
     }
 
@@ -887,7 +893,7 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
         let vr = ValidationResult {
             passed: false,
             exit_code: Some(1),
@@ -901,13 +907,13 @@ mod tests {
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             vr,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // validation.json should exist in state dir
         let val_json = manifold_dir
@@ -916,8 +922,9 @@ mod tests {
             .join("validation.json");
         assert!(val_json.exists(), "validation.json should be written");
 
-        let contents = fs::read_to_string(&val_json).unwrap();
-        let decoded: ValidationResult = serde_json::from_str(&contents).unwrap();
+        let contents = fs::read_to_string(&val_json).expect("operation should succeed");
+        let decoded: ValidationResult =
+            serde_json::from_str(&contents).expect("operation should succeed");
         assert!(!decoded.passed);
         assert!(decoded.stderr.contains("cargo check failed"));
     }
@@ -934,24 +941,24 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         create_quarantine_workspace(
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let ws_path = quarantine_workspace_path(root, merge_id);
         assert!(ws_path.exists());
 
-        abandon_quarantine(root, &manifold_dir, merge_id).unwrap();
+        abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
 
         assert!(
             !ws_path.exists(),
@@ -972,24 +979,24 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         create_quarantine_workspace(
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // First abandon
-        abandon_quarantine(root, &manifold_dir, merge_id).unwrap();
+        abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
         // Second abandon should also succeed
-        abandon_quarantine(root, &manifold_dir, merge_id).unwrap();
+        abandon_quarantine(root, &manifold_dir, merge_id).expect("operation should succeed");
     }
 
     #[test]
@@ -999,7 +1006,8 @@ mod tests {
         let manifold_dir = root.join(".manifold");
 
         // Abandon something that was never created — should not error
-        abandon_quarantine(root, &manifold_dir, "nonexistent123").unwrap();
+        abandon_quarantine(root, &manifold_dir, "nonexistent123")
+            .expect("operation should succeed");
     }
 
     // -----------------------------------------------------------------------
@@ -1008,7 +1016,7 @@ mod tests {
 
     #[test]
     fn list_returns_empty_when_no_quarantines() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
         let result = list_quarantines(&manifold_dir);
         assert!(result.is_empty());
@@ -1023,34 +1031,36 @@ mod tests {
         // Create two candidate commits to get two different quarantine IDs
         let c1 = make_candidate_commit(root, "first\n");
         let id1 = c1.as_str()[..12].to_string();
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         create_quarantine_workspace(
             root,
             &manifold_dir,
             &id1,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             c1.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Abandon the first worktree to free the HEAD ref before making a second commit
-        abandon_quarantine(root, &manifold_dir, &id1).unwrap();
+        abandon_quarantine(root, &manifold_dir, &id1).expect("operation should succeed");
 
         // Recreate state for id1 without the worktree (test list with state-only)
         let state1 = QuarantineState {
             merge_id: id1.clone(),
             epoch_before: epoch_oid,
             candidate: c1,
-            sources: vec![WorkspaceId::new("ws-1").unwrap()],
+            sources: vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             branch: "main".to_owned(),
             validation_result: dummy_validation_result(false),
             created_at: 1000,
         };
-        state1.write_atomic(&manifold_dir).unwrap();
+        state1
+            .write_atomic(&manifold_dir)
+            .expect("operation should succeed");
 
         let c2 = make_candidate_commit(root, "second\n");
         let id2 = c2.as_str()[..12].to_string();
@@ -1059,13 +1069,13 @@ mod tests {
             root,
             &manifold_dir,
             &id2,
-            vec![WorkspaceId::new("ws-2").unwrap()],
+            vec![WorkspaceId::new("ws-2").expect("operation should succeed")],
             &epoch_id,
             c2,
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let quarantines = list_quarantines(&manifold_dir);
         assert_eq!(quarantines.len(), 2);
@@ -1087,7 +1097,7 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         // Reset refs so COMMIT phase can CAS from epoch_oid → candidate
         run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
@@ -1100,13 +1110,13 @@ mod tests {
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Use a validation config with a command that always passes
         let config = crate::config::ValidationConfig {
@@ -1117,7 +1127,8 @@ mod tests {
             on_failure: crate::config::OnFailure::Block,
         };
 
-        let result = promote_quarantine(root, &manifold_dir, merge_id, &config).unwrap();
+        let result = promote_quarantine(root, &manifold_dir, merge_id, &config)
+            .expect("operation should succeed");
 
         // Should have committed successfully
         match &result {
@@ -1155,7 +1166,7 @@ mod tests {
 
         let candidate = make_candidate_commit(root, "content\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
         run_git(
@@ -1167,13 +1178,13 @@ mod tests {
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Validation config with a command that always fails
         let config = crate::config::ValidationConfig {
@@ -1184,7 +1195,8 @@ mod tests {
             on_failure: crate::config::OnFailure::Block,
         };
 
-        let result = promote_quarantine(root, &manifold_dir, merge_id, &config).unwrap();
+        let result = promote_quarantine(root, &manifold_dir, merge_id, &config)
+            .expect("operation should succeed");
 
         match &result {
             PromoteResult::ValidationFailed { .. } => {
@@ -1202,7 +1214,8 @@ mod tests {
             "quarantine should remain after failed promote"
         );
 
-        let state = QuarantineState::read(&manifold_dir, merge_id).unwrap();
+        let state =
+            QuarantineState::read(&manifold_dir, merge_id).expect("operation should succeed");
         assert_eq!(state.candidate, candidate);
 
         // Epoch ref should NOT have advanced
@@ -1223,7 +1236,7 @@ mod tests {
         // Create a candidate that writes a broken file
         let candidate = make_candidate_commit(root, "BROKEN\n");
         let merge_id = &candidate.as_str()[..12];
-        let epoch_id = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch_id = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
 
         run_git(root, &["update-ref", "refs/heads/main", epoch_oid.as_str()]);
         run_git(
@@ -1235,17 +1248,17 @@ mod tests {
             root,
             &manifold_dir,
             merge_id,
-            vec![WorkspaceId::new("ws-1").unwrap()],
+            vec![WorkspaceId::new("ws-1").expect("operation should succeed")],
             &epoch_id,
             candidate.clone(),
             "main",
             dummy_validation_result(false),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Simulate the agent fixing the file in the quarantine workspace
         let ws_path = quarantine_workspace_path(root, merge_id);
-        fs::write(ws_path.join("candidate.txt"), "FIXED\n").unwrap();
+        fs::write(ws_path.join("candidate.txt"), "FIXED\n").expect("operation should succeed");
 
         // Validate with a command that checks the file content: "true" always passes
         // (The actual file content fix is just simulated; we use a simple passing cmd)
@@ -1257,7 +1270,8 @@ mod tests {
             on_failure: crate::config::OnFailure::Block,
         };
 
-        let result = promote_quarantine(root, &manifold_dir, merge_id, &config).unwrap();
+        let result = promote_quarantine(root, &manifold_dir, merge_id, &config)
+            .expect("operation should succeed");
 
         match &result {
             PromoteResult::Committed { new_epoch } => {
@@ -1280,7 +1294,8 @@ mod tests {
         let manifold_dir = root.join(".manifold");
         let config = crate::config::ValidationConfig::default();
 
-        let err = promote_quarantine(root, &manifold_dir, "nonexistent123", &config).unwrap_err();
+        let err = promote_quarantine(root, &manifold_dir, "nonexistent123", &config)
+            .expect_err("operation should fail");
         assert!(matches!(err, QuarantineError::NotFound { .. }));
     }
 
@@ -1295,7 +1310,8 @@ mod tests {
         let candidate = make_candidate_commit(root, "content\n");
 
         // No uncommitted changes
-        let oid = commit_quarantine_edits(root, root, &candidate).unwrap();
+        let oid =
+            commit_quarantine_edits(root, root, &candidate).expect("operation should succeed");
         assert_eq!(
             oid, candidate,
             "clean worktree should return original candidate"
@@ -1309,9 +1325,10 @@ mod tests {
         let candidate = make_candidate_commit(root, "content\n");
 
         // Make an uncommitted change
-        fs::write(root.join("new_fix.txt"), "fix\n").unwrap();
+        fs::write(root.join("new_fix.txt"), "fix\n").expect("operation should succeed");
 
-        let oid = commit_quarantine_edits(root, root, &candidate).unwrap();
+        let oid =
+            commit_quarantine_edits(root, root, &candidate).expect("operation should succeed");
         assert_ne!(oid, candidate, "new commit should be created for changes");
 
         // Verify the new file is in the commit

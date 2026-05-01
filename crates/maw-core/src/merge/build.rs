@@ -570,7 +570,7 @@ mod tests {
 
     /// Set up a fresh git repo with git identity configured.
     fn setup_git_repo() -> (TempDir, EpochId, Box<dyn maw_git::GitRepo>) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -579,18 +579,18 @@ mod tests {
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
         // Initial commit with README.md
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         run_git(root, &["add", "README.md"]);
         run_git(root, &["commit", "-m", "initial"]);
 
         let oid = git_oid(root, "HEAD");
-        let epoch = EpochId::new(oid.as_str()).unwrap();
+        let epoch = EpochId::new(oid.as_str()).expect("operation should succeed");
         let repo = open_test_repo(root);
         (dir, epoch, repo)
     }
 
     fn open_test_repo(root: &Path) -> Box<dyn maw_git::GitRepo> {
-        Box::new(maw_git::GixRepo::open(root).unwrap())
+        Box::new(maw_git::GixRepo::open(root).expect("operation should succeed"))
     }
 
     fn run_git(root: &Path, args: &[&str]) {
@@ -598,7 +598,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -612,9 +612,9 @@ mod tests {
             .args(["rev-parse", rev])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success(), "rev-parse {rev} failed");
-        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).expect("operation should succeed")
     }
 
     fn git_file_content(root: &Path, commit: &str, path: &str) -> String {
@@ -623,7 +623,7 @@ mod tests {
             .args(["show", &spec])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git show {spec} failed: {}",
@@ -637,7 +637,7 @@ mod tests {
             .args(["ls-tree", "-r", "--full-tree", "--name-only", commit])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success(), "git ls-tree failed");
         String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -647,7 +647,10 @@ mod tests {
     }
 
     fn ws_ids(names: &[&str]) -> Vec<WorkspaceId> {
-        names.iter().map(|n| WorkspaceId::new(n).unwrap()).collect()
+        names
+            .iter()
+            .map(|n| WorkspaceId::new(n).expect("operation should succeed"))
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -684,8 +687,8 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], None)
+            .expect("operation should succeed");
 
         // The new commit should have the same tree as the epoch.
         let epoch_tree = git_oid(root, &format!("{}^{{tree}}", epoch.as_str()));
@@ -710,8 +713,8 @@ mod tests {
             content: b"fn main() {}".to_vec(),
         }];
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None)
+            .expect("operation should succeed");
 
         // File should be present in the new commit.
         let content = git_file_content(root, commit_oid.as_str(), "src/main.rs");
@@ -741,8 +744,8 @@ mod tests {
             content: b"# Updated\n".to_vec(),
         }];
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None)
+            .expect("operation should succeed");
 
         let content = git_file_content(root, commit_oid.as_str(), "README.md");
         assert_eq!(content, "# Updated\n");
@@ -761,8 +764,8 @@ mod tests {
             path: PathBuf::from("README.md"),
         }];
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None)
+            .expect("operation should succeed");
 
         // File should be absent from the new tree.
         let files = git_ls_tree_flat(root, commit_oid.as_str());
@@ -781,11 +784,11 @@ mod tests {
         // Set up epoch with two files: README.md and lib.rs
         let (dir, _epoch0, _repo0) = setup_git_repo();
         let root = dir.path();
-        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").expect("operation should succeed");
         run_git(root, &["add", "lib.rs"]);
         run_git(root, &["commit", "-m", "add lib.rs"]);
         let epoch_oid = git_oid(root, "HEAD");
-        let epoch = EpochId::new(epoch_oid.as_str()).unwrap();
+        let epoch = EpochId::new(epoch_oid.as_str()).expect("operation should succeed");
         let repo = open_test_repo(root);
 
         let resolved = vec![
@@ -802,8 +805,8 @@ mod tests {
             },
         ];
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["a", "b"]), &resolved, None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["a", "b"]), &resolved, None)
+            .expect("operation should succeed");
 
         // README.md modified
         let readme = git_file_content(root, commit_oid.as_str(), "README.md");
@@ -832,14 +835,14 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["beta", "alpha"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["beta", "alpha"]), &[], None)
+            .expect("operation should succeed");
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let subject = String::from_utf8_lossy(&log_out.stdout).trim().to_owned();
 
         // Workspace IDs should be sorted: alpha before beta.
@@ -858,13 +861,13 @@ mod tests {
             &[],
             Some("custom: my merge"),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let subject = String::from_utf8_lossy(&log_out.stdout).trim().to_owned();
         assert_eq!(subject, "custom: my merge");
     }
@@ -878,15 +881,17 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None)
+            .expect("operation should succeed");
 
         // New commit's parent must be the epoch.
         let parent_out = Command::new("git")
             .args(["rev-parse", &format!("{}^", commit_oid.as_str())])
             .current_dir(root)
             .output()
-            .unwrap();
-        let parent_oid = GitOid::new(String::from_utf8_lossy(&parent_out.stdout).trim()).unwrap();
+            .expect("operation should succeed");
+        let parent_oid = GitOid::new(String::from_utf8_lossy(&parent_out.stdout).trim())
+            .expect("operation should succeed");
         assert_eq!(parent_oid, *epoch.oid());
     }
 
@@ -911,9 +916,9 @@ mod tests {
         ];
 
         let oid1 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None)
-            .unwrap();
+            .expect("operation should succeed");
         let oid2 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None)
-            .unwrap();
+            .expect("operation should succeed");
 
         // Tree OIDs must be identical (content-addressed).
         let tree1 = git_oid(root, &format!("{}^{{tree}}", oid1.as_str()));
@@ -932,14 +937,15 @@ mod tests {
 
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("operation should succeed")
             .as_secs();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None)
+            .expect("operation should succeed");
 
         let after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("operation should succeed")
             .as_secs();
 
         // Read the author date from the commit.
@@ -947,11 +953,11 @@ mod tests {
             .args(["log", "--format=%at", "-1", commit_oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let author_ts: u64 = String::from_utf8_lossy(&log_out.stdout)
             .trim()
             .parse()
-            .unwrap();
+            .expect("operation should succeed");
 
         assert!(
             author_ts >= before && author_ts <= after,
@@ -979,8 +985,8 @@ mod tests {
             },
         ];
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None)
+            .expect("operation should succeed");
 
         let files = git_ls_tree_flat(root, commit_oid.as_str());
         assert!(
@@ -1002,13 +1008,14 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &[], &[], None).unwrap();
+        let commit_oid =
+            build_merge_commit(&*repo, &epoch, &[], &[], None).expect("operation should succeed");
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let subject = String::from_utf8_lossy(&log_out.stdout).trim().to_owned();
         assert_eq!(subject, "epoch: merge");
     }
@@ -1027,8 +1034,8 @@ mod tests {
         }];
 
         // Should succeed (deleting absent path is harmless)
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None).unwrap();
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None)
+            .expect("operation should succeed");
 
         // README.md should still be present
         let files = git_ls_tree_flat(root, commit_oid.as_str());

@@ -56,11 +56,11 @@ use crate::model::types::{EpochId, WorkspaceId};
 // ---------------------------------------------------------------------------
 
 fn epoch() -> EpochId {
-    EpochId::new(&"a".repeat(40)).unwrap()
+    EpochId::new(&"a".repeat(40)).expect("operation should succeed")
 }
 
 fn ws(name: &str) -> WorkspaceId {
-    WorkspaceId::new(name).unwrap()
+    WorkspaceId::new(name).expect("operation should succeed")
 }
 
 /// A workspace's set of changes for testing.

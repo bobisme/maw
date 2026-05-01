@@ -597,7 +597,7 @@ mod resolve_entries_proofs {
         let result = resolve_entries(&kinds, &contents, base, stub_diff3);
         assert!(result.is_ok(), "stub_diff3 never returns Err");
 
-        match result.unwrap() {
+        match result.expect("operation should succeed") {
             MergeOutcome::Delete => {
                 // Delete requires all entries to be deletions.
                 assert!(kinds.iter().all(|k| is_delete(k)));
@@ -653,8 +653,10 @@ mod resolve_entries_proofs {
         let kinds_rev = [kind_from_index(k1), kind_from_index(k0)];
         let contents_rev = make_contents(&kinds_rev, &[v1, v0]);
 
-        let r_fwd = resolve_entries(&kinds_fwd, &contents_fwd, base, stub_diff3).unwrap();
-        let r_rev = resolve_entries(&kinds_rev, &contents_rev, base, stub_diff3).unwrap();
+        let r_fwd = resolve_entries(&kinds_fwd, &contents_fwd, base, stub_diff3)
+            .expect("operation should succeed");
+        let r_rev = resolve_entries(&kinds_rev, &contents_rev, base, stub_diff3)
+            .expect("operation should succeed");
 
         assert_eq!(r_fwd, r_rev, "resolve_entries must be commutative");
     }
@@ -692,7 +694,8 @@ mod resolve_entries_proofs {
             kind_from_index(k2),
         ];
         let contents_ref = make_contents(&kinds_ref, &[v0, v1, v2]);
-        let ref_result = resolve_entries(&kinds_ref, &contents_ref, base, stub_diff3).unwrap();
+        let ref_result = resolve_entries(&kinds_ref, &contents_ref, base, stub_diff3)
+            .expect("operation should succeed");
 
         // Permutation [1, 0, 2].
         let kinds_p = [
@@ -701,7 +704,8 @@ mod resolve_entries_proofs {
             kind_from_index(k2),
         ];
         let contents_p = make_contents(&kinds_p, &[v1, v0, v2]);
-        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3)
+            .expect("operation should succeed");
         assert_eq!(ref_result, r, "3-entry perm [1,0,2] differs");
 
         // Permutation [0, 2, 1].
@@ -711,7 +715,8 @@ mod resolve_entries_proofs {
             kind_from_index(k1),
         ];
         let contents_p = make_contents(&kinds_p, &[v0, v2, v1]);
-        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3)
+            .expect("operation should succeed");
         assert_eq!(ref_result, r, "3-entry perm [0,2,1] differs");
 
         // Permutation [2, 1, 0].
@@ -721,7 +726,8 @@ mod resolve_entries_proofs {
             kind_from_index(k0),
         ];
         let contents_p = make_contents(&kinds_p, &[v2, v1, v0]);
-        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3)
+            .expect("operation should succeed");
         assert_eq!(ref_result, r, "3-entry perm [2,1,0] differs");
 
         // Permutation [1, 2, 0].
@@ -731,7 +737,8 @@ mod resolve_entries_proofs {
             kind_from_index(k0),
         ];
         let contents_p = make_contents(&kinds_p, &[v1, v2, v0]);
-        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3)
+            .expect("operation should succeed");
         assert_eq!(ref_result, r, "3-entry perm [1,2,0] differs");
 
         // Permutation [2, 0, 1].
@@ -741,7 +748,8 @@ mod resolve_entries_proofs {
             kind_from_index(k1),
         ];
         let contents_p = make_contents(&kinds_p, &[v2, v0, v1]);
-        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3).unwrap();
+        let r = resolve_entries(&kinds_p, &contents_p, base, stub_diff3)
+            .expect("operation should succeed");
         assert_eq!(ref_result, r, "3-entry perm [2,0,1] differs");
     }
 
@@ -777,7 +785,8 @@ mod resolve_entries_proofs {
         let has_base: bool = kani::any();
         let base = if has_base { Some(&base_val) } else { None };
 
-        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let result =
+            resolve_entries(&kinds, &contents, base, stub_diff3).expect("operation should succeed");
 
         assert_eq!(
             result,
@@ -805,7 +814,8 @@ mod resolve_entries_proofs {
         let has_base: bool = kani::any();
         let base = if has_base { Some(&base_val) } else { None };
 
-        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let result =
+            resolve_entries(&kinds, &contents, base, stub_diff3).expect("operation should succeed");
 
         assert_eq!(
             result,
@@ -855,7 +865,8 @@ mod resolve_entries_proofs {
         let cls = classify_shared_path(&kinds, all_have_content, all_content_equal, base.is_some());
 
         if cls.is_conflict() {
-            let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+            let result = resolve_entries(&kinds, &contents, base, stub_diff3)
+                .expect("operation should succeed");
             assert!(
                 matches!(result, MergeOutcome::Conflict(_)),
                 "Pre-diff3 conflict must remain conflict through resolve_entries"
@@ -880,7 +891,8 @@ mod resolve_entries_proofs {
         let contents = [Some(base_val), Some(changed_val)];
         let base = Some(&base_val);
 
-        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let result =
+            resolve_entries(&kinds, &contents, base, stub_diff3).expect("operation should succeed");
 
         assert_eq!(
             result,
@@ -905,7 +917,8 @@ mod resolve_entries_proofs {
         let contents = [Some(base_val), Some(changed_val), Some(base_val)];
         let base = Some(&base_val);
 
-        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let result =
+            resolve_entries(&kinds, &contents, base, stub_diff3).expect("operation should succeed");
 
         assert_eq!(
             result,
@@ -928,7 +941,8 @@ mod resolve_entries_proofs {
         let contents = [Some(val_a), Some(val_b)];
         let base = Some(&base_val);
 
-        let result = resolve_entries(&kinds, &contents, base, stub_diff3).unwrap();
+        let result =
+            resolve_entries(&kinds, &contents, base, stub_diff3).expect("operation should succeed");
 
         assert_eq!(
             result,

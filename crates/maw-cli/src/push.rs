@@ -41,6 +41,13 @@ pub struct PushArgs {
 /// 4. Runs `git push origin <branch>`.
 /// 5. Optionally pushes all tags (unless `--no-tags`).
 #[instrument(skip(args), fields(advance = args.advance, no_tags = args.no_tags))]
+/// # Errors
+///
+/// Returns an error if push validation, branch advancement, or transport fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "push command handler keeps validation and transport steps in sequence"
+)]
 pub fn run(args: &PushArgs) -> Result<()> {
     let root = repo_root()?;
     let config = MawConfig::load(&root)?;
@@ -214,6 +221,10 @@ fn origin_remote_url(root: &Path) -> Result<Option<String>> {
 ///
 /// Uses compare-and-swap (CAS) semantics on the ref update to prevent
 /// race conditions with concurrent merge operations.
+#[expect(
+    clippy::too_many_lines,
+    reason = "branch advance path includes user-facing diagnostics for several git states"
+)]
 fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     // Guard: refuse to advance if a merge is in progress (non-terminal phase).
     // A concurrent merge COMMIT could be updating the same ref, so --advance
@@ -242,12 +253,11 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         .rev_parse_opt("refs/manifold/epoch/current")
         .map_err(|e| anyhow::anyhow!("Failed to read current epoch: {e}"))?;
 
-    let epoch_git_oid = match epoch_git_oid {
-        Some(oid) => oid,
-        None => bail!(
+    let Some(epoch_git_oid) = epoch_git_oid else {
+        bail!(
             "No current epoch found (refs/manifold/epoch/current missing).\n  \
              Run `maw init` first, or ensure maw ws merge has been run."
-        ),
+        );
     };
 
     let epoch_oid = epoch_git_oid.to_string();
@@ -270,13 +280,10 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
         .rev_parse_opt(&branch_ref)
         .map_err(|e| anyhow::anyhow!("Failed to read branch ref: {e}"))?;
 
-    let branch_oid = match branch_git_oid {
-        Some(oid) => oid.to_string(),
-        None => String::new(),
-    };
+    let branch_oid = branch_git_oid.map_or_else(String::new, |oid| oid.to_string());
 
     if branch_oid == epoch_oid {
-        println!("{branch} already at current epoch ({}).", epoch_short);
+        println!("{branch} already at current epoch ({epoch_short}).");
         return Ok(());
     }
 
@@ -308,7 +315,7 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     // `git update-ref <ref> <new> <old>` only succeeds if the ref still
     // points to <old>. If another process (e.g., a merge COMMIT) moved the
     // ref between our read and this write, the update fails atomically.
-    println!("Advancing {branch} to current epoch ({})...", epoch_short);
+    println!("Advancing {branch} to current epoch ({epoch_short})...");
 
     let expected_old = if branch_oid.is_empty() {
         maw_git::GitOid::ZERO
@@ -334,15 +341,14 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
                 "Branch ref was modified concurrently (CAS failed).\n  \
                  Another process (likely a merge) updated {branch} between read and write.\n  \
                  Re-run `maw push --advance` to retry.\n  \
-                 Detail: {}",
-                msg
+                 Detail: {msg}"
             );
         }
-        bail!("Failed to advance {branch}: {}", msg);
+        bail!("Failed to advance {branch}: {msg}");
     }
 
     if branch_oid.is_empty() {
-        println!("  Created {branch} at {}", epoch_short);
+        println!("  Created {branch} at {epoch_short}");
     } else {
         println!(
             "  {branch}: {} → {}",
@@ -373,15 +379,13 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
         return;
     };
 
-    let epoch_oid = match repo.rev_parse_opt("refs/manifold/epoch/current") {
-        Ok(Some(oid)) => oid,
-        _ => return,
+    let Ok(Some(epoch_oid)) = repo.rev_parse_opt("refs/manifold/epoch/current") else {
+        return;
     };
 
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_oid = match repo.rev_parse_opt(&branch_ref) {
-        Ok(Some(oid)) => oid,
-        _ => return,
+    let Ok(Some(branch_oid)) = repo.rev_parse_opt(&branch_ref) else {
+        return;
     };
 
     if epoch_oid != branch_oid {
@@ -533,6 +537,7 @@ pub enum SyncStatus {
 
 impl SyncStatus {
     /// One-line summary for status bar.
+    #[must_use]
     pub fn oneline(&self) -> String {
         match self {
             Self::UpToDate => "sync".to_string(),
@@ -546,6 +551,7 @@ impl SyncStatus {
     }
 
     /// Human-readable description.
+    #[must_use]
     pub fn describe(&self) -> String {
         match self {
             Self::UpToDate => "up to date".to_string(),
@@ -561,12 +567,14 @@ impl SyncStatus {
     }
 
     /// Whether this status indicates a warning condition.
+    #[must_use]
     pub const fn is_warning(&self) -> bool {
         !matches!(self, Self::UpToDate)
     }
 }
 
 /// Determine sync status between local branch and origin/<branch>.
+#[must_use]
 pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatus {
     let branch_ref = format!("refs/heads/{branch}");
     let remote_ref = format!("refs/remotes/origin/{branch}");
@@ -680,7 +688,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -694,7 +702,7 @@ mod tests {
             .args(["rev-parse", rev])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "rev-parse {rev} failed: {}",
@@ -728,7 +736,7 @@ mod tests {
     }
 
     fn setup_repo() -> tempfile::TempDir {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -736,7 +744,7 @@ mod tests {
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
-        fs::write(root.join("README.md"), "hello\n").unwrap();
+        fs::write(root.join("README.md"), "hello\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "initial"]);
         run_git(root, &["branch", "-M", "main"]);
@@ -750,7 +758,7 @@ mod tests {
         let root = dir.path();
 
         run_git(root, &["checkout", "-b", "feat/ch-1aa-topic"]);
-        fs::write(root.join("README.md"), "topic\n").unwrap();
+        fs::write(root.join("README.md"), "topic\n").expect("operation should succeed");
         run_git(root, &["add", "README.md"]);
         run_git(root, &["commit", "-m", "topic"]);
         let change_head = git_oid(root, "HEAD");
@@ -759,9 +767,10 @@ mod tests {
         let rec = sample_change("ch-1aa", "feat/ch-1aa-topic", "ch-1aa");
         store
             .with_lock("test write", |locked| locked.write_active_record(&rec))
-            .unwrap();
+            .expect("operation should succeed");
 
-        let detected = active_change_for_epoch(root, &change_head, "main").unwrap();
+        let detected =
+            active_change_for_epoch(root, &change_head, "main").expect("operation should succeed");
         assert_eq!(
             detected,
             Some(("ch-1aa".to_string(), "feat/ch-1aa-topic".to_string()))
@@ -778,9 +787,10 @@ mod tests {
         let rec = sample_change("ch-1aa", "feat/ch-1aa-topic", "ch-1aa");
         store
             .with_lock("test write", |locked| locked.write_active_record(&rec))
-            .unwrap();
+            .expect("operation should succeed");
 
-        let detected = active_change_for_epoch(root, &main_head, "main").unwrap();
+        let detected =
+            active_change_for_epoch(root, &main_head, "main").expect("operation should succeed");
         assert!(detected.is_none());
     }
 }

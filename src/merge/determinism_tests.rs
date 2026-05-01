@@ -39,11 +39,11 @@ use crate::model::types::{EpochId, GitOid, WorkspaceId};
 /// Fixed epoch OID for all tests (content doesn't matter for partition/resolve
 /// at the unit level — resolve just needs `base_contents` map).
 fn epoch() -> EpochId {
-    EpochId::new(&"a".repeat(40)).unwrap()
+    EpochId::new(&"a".repeat(40)).expect("operation should succeed")
 }
 
 fn ws(name: &str) -> WorkspaceId {
-    WorkspaceId::new(name).unwrap()
+    WorkspaceId::new(name).expect("operation should succeed")
 }
 
 /// Canonical representation of a `ResolvedChange` for comparison.
@@ -304,9 +304,9 @@ fn git_rev_parse(root: &Path, rev: &str) -> GitOid {
         .args(["rev-parse", rev])
         .current_dir(root)
         .output()
-        .unwrap();
+        .expect("operation should succeed");
     assert!(out.status.success(), "rev-parse {rev} failed");
-    GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+    GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).expect("operation should succeed")
 }
 
 /// Get the tree OID for a commit.
@@ -317,7 +317,7 @@ fn git_tree_oid(root: &Path, commit: &str) -> GitOid {
 /// Set up a fresh git repo with identity configured and an initial commit.
 /// Returns (`TempDir`, `EpochId`).
 fn setup_git_repo() -> (tempfile::TempDir, EpochId) {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = tempfile::TempDir::new().expect("operation should succeed");
     let root = dir.path();
 
     run_git(root, &["init"]);
@@ -325,12 +325,12 @@ fn setup_git_repo() -> (tempfile::TempDir, EpochId) {
     run_git(root, &["config", "user.email", "test@test.com"]);
     run_git(root, &["config", "commit.gpgsign", "false"]);
 
-    std::fs::write(root.join("README.md"), "# Test\n").unwrap();
+    std::fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
     run_git(root, &["add", "README.md"]);
     run_git(root, &["commit", "-m", "initial"]);
 
     let oid = git_rev_parse(root, "HEAD");
-    let epoch = EpochId::new(oid.as_str()).unwrap();
+    let epoch = EpochId::new(oid.as_str()).expect("operation should succeed");
     (dir, epoch)
 }
 
@@ -340,7 +340,7 @@ fn setup_git_repo_with_base_files(
     file_count: usize,
     regions_per_file: usize,
 ) -> (tempfile::TempDir, EpochId, Vec<(PathBuf, String)>) {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = tempfile::TempDir::new().expect("operation should succeed");
     let root = dir.path();
 
     run_git(root, &["init"]);
@@ -362,9 +362,9 @@ fn setup_git_repo_with_base_files(
         let content = lines.join("\n") + "\n";
         let full_path = root.join(&path);
         if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+            std::fs::create_dir_all(parent).expect("operation should succeed");
         }
-        std::fs::write(&full_path, &content).unwrap();
+        std::fs::write(&full_path, &content).expect("operation should succeed");
         base_files.push((path, content));
     }
 
@@ -372,7 +372,7 @@ fn setup_git_repo_with_base_files(
     run_git(root, &["commit", "-m", "base: add files"]);
 
     let oid = git_rev_parse(root, "HEAD");
-    let epoch = EpochId::new(oid.as_str()).unwrap();
+    let epoch = EpochId::new(oid.as_str()).expect("operation should succeed");
     (dir, epoch, base_files)
 }
 

@@ -239,7 +239,7 @@ fn recovery_command_from_output_is_executable() {
         "ws",
         "recover",
         "--ref",
-        snapshot_ref.unwrap(),
+        snapshot_ref.expect("operation should succeed"),
         "--show",
         "recover-me.txt",
     ]);
@@ -289,10 +289,13 @@ fn recovery_surface_includes_artifact_path() {
     let artifact = extract_field(&stderr, "artifact:");
     assert!(artifact.is_some(), "artifact field should be present");
 
-    let artifact_val = artifact.unwrap();
+    let artifact_val = artifact.expect("operation should succeed");
     // The artifact path should contain the workspace name and end with .json
     assert!(
-        artifact_val.contains("artifact-test") && artifact_val.ends_with(".json"),
+        artifact_val.contains("artifact-test")
+            && std::path::Path::new(artifact_val)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json")),
         "artifact should be a .json file containing workspace name, got: {artifact_val}"
     );
 }

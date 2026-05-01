@@ -985,19 +985,7 @@ fn reconstruct_merged_file(
         result.extend_from_slice(&base[cursor..]);
     }
 
-    // Collect items added by variants (not present in base).
-    let mut added_items: Vec<(&WorkspaceId, &TopLevelItem)> = Vec::new();
-    for constraint in resolutions.values() {
-        if let ItemChange::Added { variant_item, .. } = &constraint.change {
-            added_items.push((&constraint.workspace_id, variant_item));
-        }
-    }
-
-    // Sort by workspace ID then position for determinism.
-    added_items.sort_by(|a, b| {
-        a.0.cmp(b.0)
-            .then_with(|| a.1.start_byte.cmp(&b.1.start_byte))
-    });
+    let added_items = added_resolution_items(resolutions);
 
     // Split added items: use_declarations should be inserted near existing
     // uses (not appended at EOF), everything else is appended.
@@ -1006,19 +994,16 @@ fn reconstruct_merged_file(
     // Find the last surviving (not deleted) use_declaration in base items.
     let last_surviving_use = base_items
         .iter()
-        .filter(|item| item.kind == "use_declaration" || item.kind == "extern_crate_declaration")
-        .filter(|item| {
-            // Only consider uses that are NOT deleted (still in the result).
-            let key = item.identity_key(
-                base_items
-                    .iter()
-                    .position(|b| std::ptr::eq(b, *item))
-                    .unwrap_or(0),
-            );
-            !resolutions.contains_key(&key)
-                || !matches!(resolutions[&key].change, ItemChange::Deleted { .. })
+        .enumerate()
+        .rfind(|(idx, item)| {
+            (item.kind == "use_declaration" || item.kind == "extern_crate_declaration") && {
+                // Only consider uses that are NOT deleted (still in the result).
+                let key = item.identity_key(*idx);
+                !resolutions.contains_key(&key)
+                    || !matches!(resolutions[&key].change, ItemChange::Deleted { .. })
+            }
         })
-        .last();
+        .map(|(_, item)| item);
 
     if let Some(anchor_use) = last_surviving_use {
         let use_adds: Vec<_> = added_items
@@ -1084,6 +1069,26 @@ fn reconstruct_merged_file(
     result
 }
 
+fn added_resolution_items<'a>(
+    resolutions: &'a BTreeMap<ItemKey, &'a ItemConstraint>,
+) -> Vec<(&'a WorkspaceId, &'a TopLevelItem)> {
+    let mut added_items: Vec<_> = resolutions
+        .values()
+        .filter_map(|constraint| {
+            if let ItemChange::Added { variant_item, .. } = &constraint.change {
+                Some((&constraint.workspace_id, variant_item))
+            } else {
+                None
+            }
+        })
+        .collect();
+    added_items.sort_by(|a, b| {
+        a.0.cmp(b.0)
+            .then_with(|| a.1.start_byte.cmp(&b.1.start_byte))
+    });
+    added_items
+}
+
 /// Extract leading trivia (doc comments, attributes, blank lines) that precede
 /// an item in the source. Scans backwards from `item.start_byte` to find
 /// contiguous comment lines (`///`, `//!`, `#[`) and blank lines.
@@ -1091,9 +1096,8 @@ fn reconstruct_merged_file(
 /// Returns a byte slice from the source that should be prepended when the item
 /// is spliced into the merged file.
 fn leading_trivia<'a>(source: &'a [u8], item: &TopLevelItem) -> &'a [u8] {
-    let text = match std::str::from_utf8(source) {
-        Ok(t) => t,
-        Err(_) => return &[],
+    let Ok(text) = std::str::from_utf8(source) else {
+        return &[];
     };
 
     // Work backwards from item start, line by line.
@@ -1143,7 +1147,7 @@ mod tests {
     use crate::model::types::WorkspaceId;
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     // -----------------------------------------------------------------------
@@ -1217,7 +1221,8 @@ fn goodbye() {
     println!("goodbye");
 }
 "#;
-        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::Rust).expect("operation should succeed");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, "function_item");
         assert_eq!(items[0].name.as_deref(), Some("hello"));
@@ -1241,7 +1246,8 @@ class Point:
 def goodbye():
     print("goodbye")
 "#;
-        let (_tree, items) = parse_and_extract(source, AstLanguage::Python).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::Python).expect("operation should succeed");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, "function_definition");
         assert_eq!(items[0].name.as_deref(), Some("hello"));
@@ -1266,7 +1272,8 @@ function goodbye(): void {
     console.log("goodbye");
 }
 "#;
-        let (_tree, items) = parse_and_extract(source, AstLanguage::TypeScript).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::TypeScript).expect("operation should succeed");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, "function_declaration");
         assert_eq!(items[0].name.as_deref(), Some("hello"));
@@ -1287,7 +1294,8 @@ class Point {
     value() { return 1; }
 }
 ";
-        let (_tree, items) = parse_and_extract(source, AstLanguage::JavaScript).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::JavaScript).expect("operation should succeed");
         assert!(!items.is_empty());
         assert_eq!(items[0].kind, "function_declaration");
         assert_eq!(items[0].name.as_deref(), Some("hello"));
@@ -1306,7 +1314,8 @@ type Point struct {
     x int
 }
 ";
-        let (_tree, items) = parse_and_extract(source, AstLanguage::Go).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::Go).expect("operation should succeed");
         assert!(!items.is_empty());
         assert_eq!(items[0].kind, "function_declaration");
         assert_eq!(items[0].name.as_deref(), Some("hello"));
@@ -1321,8 +1330,10 @@ type Point struct {
         let base = b"fn foo() { 1 }\nfn bar() { 2 }\n";
         let variant = b"fn foo() { 42 }\nfn bar() { 2 }\n";
 
-        let (_, base_items) = parse_and_extract(base, AstLanguage::Rust).unwrap();
-        let (_, variant_items) = parse_and_extract(variant, AstLanguage::Rust).unwrap();
+        let (_, base_items) =
+            parse_and_extract(base, AstLanguage::Rust).expect("operation should succeed");
+        let (_, variant_items) =
+            parse_and_extract(variant, AstLanguage::Rust).expect("operation should succeed");
         let changes = compute_edit_script(&base_items, &variant_items);
 
         assert_eq!(changes.len(), 1);
@@ -1335,8 +1346,10 @@ type Point struct {
         let base = b"fn foo() { 1 }\n";
         let variant = b"fn foo() { 1 }\nfn bar() { 2 }\n";
 
-        let (_, base_items) = parse_and_extract(base, AstLanguage::Rust).unwrap();
-        let (_, variant_items) = parse_and_extract(variant, AstLanguage::Rust).unwrap();
+        let (_, base_items) =
+            parse_and_extract(base, AstLanguage::Rust).expect("operation should succeed");
+        let (_, variant_items) =
+            parse_and_extract(variant, AstLanguage::Rust).expect("operation should succeed");
         let changes = compute_edit_script(&base_items, &variant_items);
 
         assert_eq!(changes.len(), 1);
@@ -1349,8 +1362,10 @@ type Point struct {
         let base = b"fn foo() { 1 }\nfn bar() { 2 }\n";
         let variant = b"fn foo() { 1 }\n";
 
-        let (_, base_items) = parse_and_extract(base, AstLanguage::Rust).unwrap();
-        let (_, variant_items) = parse_and_extract(variant, AstLanguage::Rust).unwrap();
+        let (_, base_items) =
+            parse_and_extract(base, AstLanguage::Rust).expect("operation should succeed");
+        let (_, variant_items) =
+            parse_and_extract(variant, AstLanguage::Rust).expect("operation should succeed");
         let changes = compute_edit_script(&base_items, &variant_items);
 
         assert_eq!(changes.len(), 1);
@@ -1376,7 +1391,7 @@ type Point struct {
         let result = try_ast_merge(base, &variants, AstLanguage::Rust);
         match result {
             AstMergeResult::Clean(merged) => {
-                let merged_str = std::str::from_utf8(&merged).unwrap();
+                let merged_str = std::str::from_utf8(&merged).expect("operation should succeed");
                 assert!(merged_str.contains("42"), "should have ws-a's foo change");
                 assert!(merged_str.contains("99"), "should have ws-b's bar change");
                 assert!(
@@ -1406,7 +1421,7 @@ type Point struct {
         let result = try_ast_merge(base, &variants, AstLanguage::Python);
         match result {
             AstMergeResult::Clean(merged) => {
-                let merged_str = std::str::from_utf8(&merged).unwrap();
+                let merged_str = std::str::from_utf8(&merged).expect("operation should succeed");
                 assert!(merged_str.contains("42"), "should have ws-a's foo change");
                 assert!(merged_str.contains("99"), "should have ws-b's bar change");
             }
@@ -1431,7 +1446,7 @@ type Point struct {
         let result = try_ast_merge(base, &variants, AstLanguage::TypeScript);
         match result {
             AstMergeResult::Clean(merged) => {
-                let merged_str = std::str::from_utf8(&merged).unwrap();
+                let merged_str = std::str::from_utf8(&merged).expect("operation should succeed");
                 assert!(merged_str.contains("42"), "should have ws-a's foo change");
                 assert!(merged_str.contains("99"), "should have ws-b's bar change");
             }
@@ -1596,7 +1611,7 @@ type Point struct {
         let result = try_ast_merge(base, &variants, AstLanguage::Rust);
         match result {
             AstMergeResult::Clean(merged) => {
-                let s = std::str::from_utf8(&merged).unwrap();
+                let s = std::str::from_utf8(&merged).expect("operation should succeed");
                 assert!(s.contains("10"), "should have ws-a's change");
                 assert!(s.contains("20"), "should have ws-b's change");
                 assert!(s.contains("30"), "should have ws-c's change");
@@ -1744,7 +1759,8 @@ type Point struct {
     #[test]
     fn parse_rust_use_declarations() {
         let source = b"use std::io;\nuse std::collections::HashMap;\n\nfn main() {}\n";
-        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::Rust).expect("operation should succeed");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, "use_declaration");
         assert_eq!(items[0].name.as_deref(), Some("use std::io;"));
@@ -1771,7 +1787,7 @@ type Point struct {
         let result = try_ast_merge(base, &variants, AstLanguage::Rust);
         match result {
             AstMergeResult::Clean(merged) => {
-                let merged_str = std::str::from_utf8(&merged).unwrap();
+                let merged_str = std::str::from_utf8(&merged).expect("operation should succeed");
                 assert!(
                     merged_str.contains("use std::io;"),
                     "should keep base import"
@@ -1812,7 +1828,7 @@ type Point struct {
         // each adds a unique new import. This merges cleanly.
         match result {
             AstMergeResult::Clean(merged) => {
-                let merged_str = std::str::from_utf8(&merged).unwrap();
+                let merged_str = std::str::from_utf8(&merged).expect("operation should succeed");
                 assert!(merged_str.contains("use std::io::Read;"));
                 assert!(merged_str.contains("use std::io::Write;"));
                 assert!(
@@ -1829,7 +1845,8 @@ type Point struct {
     #[test]
     fn parse_rust_union_item() {
         let source = b"union MyUnion {\n    i: i32,\n    f: f32,\n}\n";
-        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::Rust).expect("operation should succeed");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "union_item");
         assert_eq!(items[0].name.as_deref(), Some("MyUnion"));
@@ -1838,7 +1855,8 @@ type Point struct {
     #[test]
     fn parse_rust_extern_crate() {
         let source = b"extern crate serde;\n\nfn main() {}\n";
-        let (_tree, items) = parse_and_extract(source, AstLanguage::Rust).unwrap();
+        let (_tree, items) =
+            parse_and_extract(source, AstLanguage::Rust).expect("operation should succeed");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].kind, "extern_crate_declaration");
         assert_eq!(items[0].name.as_deref(), Some("extern crate serde;"));

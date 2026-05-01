@@ -130,7 +130,7 @@ pub enum ApplyError {
     /// conflict we can't reason about** — we error loudly so the rebase
     /// pipeline can surface the gap.
     ///
-    /// TODO(follow-up bone): file DivergentRename + non-content conflict
+    /// TODO(follow-up bone): file `DivergentRename` + non-content conflict
     /// handling as its own phase.
     UnhandledConflictShape {
         /// The path of the unhandled conflict.
@@ -224,7 +224,7 @@ fn apply_one(
         return apply_one_to_conflict(tree, change, workspace);
     }
 
-    match change.kind {
+    match &change.kind {
         ChangeKind::Added => apply_added(tree, change),
         ChangeKind::Modified => apply_modified(tree, change),
         ChangeKind::Deleted => {
@@ -344,8 +344,8 @@ fn apply_one_to_conflict(
             base,
             sides,
             atoms,
-        } => handle_content(tree, path, file_id, base, sides, atoms, change, workspace),
-        Conflict::AddAdd { path, sides } => handle_add_add(tree, path, sides, change),
+        } => handle_content(tree, path, file_id, base, sides, atoms, &change, workspace),
+        Conflict::AddAdd { path, sides } => handle_add_add(tree, path, sides, &change),
         Conflict::ModifyDelete {
             path,
             file_id,
@@ -359,7 +359,7 @@ fn apply_one_to_conflict(
             modifier,
             deleter,
             modified_content,
-            change,
+            &change,
             workspace,
         ),
         divergent @ Conflict::DivergentRename { .. } => {
@@ -382,10 +382,10 @@ fn handle_content(
     base: Option<GitOid>,
     mut sides: Vec<ConflictSide>,
     atoms: Vec<crate::model::conflict::ConflictAtom>,
-    change: FileChange,
+    change: &FileChange,
     _workspace: &str,
 ) -> Result<(), ApplyError> {
-    match change.kind {
+    match &change.kind {
         // V1 SEMANTICS (bn-3l5p): `Added` on an already-tracked conflicted
         // path is treated as `Modified`. The rebase pipeline's overlap
         // detector installs the conflict record before the workspace's
@@ -451,9 +451,9 @@ fn handle_add_add(
     tree: &mut ConflictTree,
     path: std::path::PathBuf,
     mut sides: Vec<ConflictSide>,
-    change: FileChange,
+    change: &FileChange,
 ) -> Result<(), ApplyError> {
-    match change.kind {
+    match &change.kind {
         ChangeKind::Added => {
             // V1 SEMANTICS (bn-3l5p): `Added` on an already-tracked AddAdd
             // is treated as `Modified` — the pipeline pre-populated the
@@ -507,8 +507,8 @@ fn handle_modify_delete(
     file_id: crate::model::patch::FileId,
     mut modifier: ConflictSide,
     deleter: ConflictSide,
-    _modified_content: GitOid,
-    change: FileChange,
+    modified_content: GitOid,
+    change: &FileChange,
     _workspace: &str,
 ) -> Result<(), ApplyError> {
     match change.kind {
@@ -541,7 +541,7 @@ fn handle_modify_delete(
         ChangeKind::Deleted => {
             // V1 SEMANTICS: both sides now want the file gone — collapse
             // to clean absence.
-            let _ = (path, file_id, modifier, deleter, _modified_content);
+            let _ = (path, file_id, modifier, deleter, modified_content);
             Ok(())
         }
     }
@@ -600,19 +600,19 @@ mod tests {
     use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
     fn epoch() -> EpochId {
-        EpochId::new(&"e".repeat(40)).unwrap()
+        EpochId::new(&"e".repeat(40)).expect("operation should succeed")
     }
 
     fn other_epoch() -> EpochId {
-        EpochId::new(&"f".repeat(40)).unwrap()
+        EpochId::new(&"f".repeat(40)).expect("operation should succeed")
     }
 
     fn ws() -> WorkspaceId {
-        WorkspaceId::new("ws-1").unwrap()
+        WorkspaceId::new("ws-1").expect("operation should succeed")
     }
 
     fn oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn ord() -> OrderingKey {
@@ -692,7 +692,7 @@ mod tests {
 
         let result =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/lib.rs", oid('b'))]))
-                .unwrap();
+                .expect("operation should succeed");
 
         let entry = &result.clean[&PathBuf::from("src/lib.rs")];
         assert_eq!(entry.mode, EntryMode::Blob);
@@ -705,7 +705,7 @@ mod tests {
 
         let result =
             apply_unilateral_patchset(tree, patch(vec![add_change("src/new.rs", oid('c'))]))
-                .unwrap();
+                .expect("operation should succeed");
 
         let entry = &result.clean[&PathBuf::from("src/new.rs")];
         assert_eq!(entry.mode, EntryMode::Blob);
@@ -720,8 +720,8 @@ mod tests {
             MaterializedEntry::new(EntryMode::Blob, oid('a')),
         );
 
-        let result =
-            apply_unilateral_patchset(tree, patch(vec![delete_change("src/gone.rs")])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![delete_change("src/gone.rs")]))
+            .expect("operation should succeed");
 
         assert!(!result.clean.contains_key(&PathBuf::from("src/gone.rs")));
     }
@@ -738,7 +738,7 @@ mod tests {
             tree,
             patch(vec![modify_change("scripts/build.sh", oid('b'))]),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let entry = &result.clean[&PathBuf::from("scripts/build.sh")];
         assert_eq!(entry.mode, EntryMode::BlobExecutable);
@@ -753,8 +753,8 @@ mod tests {
             MaterializedEntry::new(EntryMode::Link, oid('a')),
         );
 
-        let result =
-            apply_unilateral_patchset(tree, patch(vec![modify_change("link", oid('b'))])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![modify_change("link", oid('b'))]))
+            .expect("operation should succeed");
 
         let entry = &result.clean[&PathBuf::from("link")];
         assert_eq!(entry.mode, EntryMode::Link);
@@ -769,7 +769,7 @@ mod tests {
             other_epoch(),
             vec![add_change("src/foo.rs", oid('b'))],
         );
-        let err = apply_unilateral_patchset(tree, mismatched).unwrap_err();
+        let err = apply_unilateral_patchset(tree, mismatched).expect_err("operation should fail");
         match err {
             ApplyError::EpochMismatch {
                 tree_base,
@@ -791,7 +791,7 @@ mod tests {
         let tree = ConflictTree::new(epoch());
         let result =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/ghost.rs", oid('b'))]))
-                .unwrap();
+                .expect("operation should succeed");
         let entry = &result.clean[&PathBuf::from("src/ghost.rs")];
         assert_eq!(entry.oid, oid('b'));
         assert!(result.conflicts.is_empty());
@@ -800,8 +800,8 @@ mod tests {
     #[test]
     fn deleted_on_absent_path_is_ignored() {
         let tree = ConflictTree::new(epoch());
-        let result =
-            apply_unilateral_patchset(tree, patch(vec![delete_change("src/ghost.rs")])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![delete_change("src/ghost.rs")]))
+            .expect("operation should succeed");
         assert!(result.clean.is_empty());
         assert!(result.conflicts.is_empty());
     }
@@ -834,7 +834,8 @@ mod tests {
             Some(oid('a')),
         );
 
-        let result = apply_unilateral_patchset(tree, patch(vec![delete, modify])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![delete, modify]))
+            .expect("operation should succeed");
 
         assert!(
             !result.clean.contains_key(&PathBuf::from("a.txt")),
@@ -863,7 +864,7 @@ mod tests {
 
         let result =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/battle.rs", oid('c'))]))
-                .unwrap();
+                .expect("operation should succeed");
 
         // Convergence collapses the conflict to clean with the new blob.
         assert!(
@@ -899,7 +900,7 @@ mod tests {
 
         let result =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/three.rs", oid('d'))]))
-                .unwrap();
+                .expect("operation should succeed");
 
         // All three sides replaced with 'd' => convergence => clean.
         assert!(
@@ -922,8 +923,8 @@ mod tests {
             content_conflict("src/gone.rs", oid('0'), oid('a'), oid('b')),
         );
 
-        let result =
-            apply_unilateral_patchset(tree, patch(vec![delete_change("src/gone.rs")])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![delete_change("src/gone.rs")]))
+            .expect("operation should succeed");
 
         assert!(!result.conflicts.contains_key(&PathBuf::from("src/gone.rs")));
         assert!(!result.clean.contains_key(&PathBuf::from("src/gone.rs")));
@@ -973,8 +974,8 @@ mod tests {
             add_add_conflict("src/new.rs", oid('a'), oid('b')),
         );
 
-        let result =
-            apply_unilateral_patchset(tree, patch(vec![delete_change("src/new.rs")])).unwrap();
+        let result = apply_unilateral_patchset(tree, patch(vec![delete_change("src/new.rs")]))
+            .expect("operation should succeed");
 
         assert!(!result.conflicts.contains_key(&PathBuf::from("src/new.rs")));
         assert!(!result.clean.contains_key(&PathBuf::from("src/new.rs")));
@@ -1014,7 +1015,7 @@ mod tests {
 
         let err =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/new.rs", oid('c'))]))
-                .unwrap_err();
+                .expect_err("operation should fail");
 
         match err {
             ApplyError::UnexpectedModifyOnAddAdd { path } => {
@@ -1040,7 +1041,7 @@ mod tests {
             tree,
             patch(vec![modify_change("src/ambivalent.rs", oid('c'))]),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Still a ModifyDelete; modifier's content is now 'c', deleter unchanged.
         let conflict = &result.conflicts[&PathBuf::from("src/ambivalent.rs")];
@@ -1074,7 +1075,7 @@ mod tests {
 
         let result =
             apply_unilateral_patchset(tree, patch(vec![delete_change("src/ambivalent.rs")]))
-                .unwrap();
+                .expect("operation should succeed");
 
         assert!(
             !result
@@ -1137,7 +1138,7 @@ mod tests {
             tree,
             patch(vec![modify_change("src/converge.rs", oid('d'))]),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         assert!(
             !result
@@ -1190,7 +1191,7 @@ mod tests {
 
         let err =
             apply_unilateral_patchset(tree, patch(vec![modify_change("src/util.rs", oid('d'))]))
-                .unwrap_err();
+                .expect_err("operation should fail");
 
         match err {
             ApplyError::UnhandledConflictShape { path, shape } => {
@@ -1318,7 +1319,7 @@ mod tests {
                 add_change("clean/y.rs", oid('d')),
             ]),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         assert_eq!(result.conflicts, before);
         assert_eq!(&result.conflicts[&PathBuf::from("c/a.rs")], &c1);

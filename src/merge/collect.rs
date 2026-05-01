@@ -217,14 +217,21 @@ fn collect_one<B: WorkspaceBackend>(
 
     // Added files: read content, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
-        let Some(content) =
-            read_committed_or_workspace_file(ws_repo.as_ref(), &ws_path, path, ws_id, ws_has_commits)?
+        let Some(content) = read_committed_or_workspace_file(
+            ws_repo.as_ref(),
+            &ws_path,
+            path,
+            ws_id,
+            ws_has_commits,
+        )?
         else {
             // Ignore directory entries (for example untracked nested git dirs)
             // that can appear in porcelain outputs as "path/".
             continue;
         };
-        let blob = root_repo.as_ref().and_then(|r| git_hash_object(r, &content));
+        let blob = root_repo
+            .as_ref()
+            .and_then(|r| git_hash_object(r, &content));
         // Assign a fresh FileId for new files. The FileIdMap for the epoch
         // won't have an entry yet; the FileId is minted here and would be
         // persisted by the workspace's oplog in a full implementation.
@@ -240,14 +247,21 @@ fn collect_one<B: WorkspaceBackend>(
 
     // Modified files: read current content, look up existing FileId, compute blob OID.
     for path in &snapshot.modified {
-        let Some(content) =
-            read_committed_or_workspace_file(ws_repo.as_ref(), &ws_path, path, ws_id, ws_has_commits)?
+        let Some(content) = read_committed_or_workspace_file(
+            ws_repo.as_ref(),
+            &ws_path,
+            path,
+            ws_id,
+            ws_has_commits,
+        )?
         else {
             // Ignore non-file paths to keep collect robust against directory-only
             // workspace entries.
             continue;
         };
-        let blob = root_repo.as_ref().and_then(|r| git_hash_object(r, &content));
+        let blob = root_repo
+            .as_ref()
+            .and_then(|r| git_hash_object(r, &content));
         // Modified files existed in the epoch, so their FileId is in the map.
         let file_id = file_id_map.id_for_path(path);
         changes.push(FileChange::with_identity(
@@ -319,11 +333,9 @@ fn workspace_creation_epoch(root_repo: Option<&GixRepo>, ws_head: &EpochId) -> E
     };
 
     // Read the current epoch ref from the bare repo's ref store.
-    let epoch_ref =
-        RefName::new("refs/manifold/epoch/current").expect("static ref name is valid");
-    let current_epoch = match repo.read_ref(&epoch_ref) {
-        Ok(Some(oid)) => oid,
-        _ => return ws_head.clone(),
+    let epoch_ref = RefName::new("refs/manifold/epoch/current").expect("static ref name is valid");
+    let Ok(Some(current_epoch)) = repo.read_ref(&epoch_ref) else {
+        return ws_head.clone();
     };
 
     // If HEAD already equals the current epoch, no agent commits were made.
@@ -405,9 +417,7 @@ fn ws_head_differs_from_epoch(ws_repo: &GixRepo, epoch: &EpochId) -> bool {
 /// the path is not valid UTF-8, or if any gix lookup fails.
 fn read_committed_blob(ws_repo: &GixRepo, rel_path: &Path) -> Option<Vec<u8>> {
     let path_str = rel_path.to_str()?;
-    let oid = ws_repo
-        .rev_parse_opt(&format!("HEAD:{path_str}"))
-        .ok()??;
+    let oid = ws_repo.rev_parse_opt(&format!("HEAD:{path_str}")).ok()??;
     ws_repo.read_blob(oid).ok()
 }
 
@@ -436,7 +446,7 @@ fn read_workspace_file(
 
 /// Write `content` to the git object store and return its blob OID.
 ///
-/// Returns `None` on any failure (write_blob error, OID round-trip failure)
+/// Returns `None` on any failure (`write_blob` error, OID round-trip failure)
 /// — callers treat a missing blob OID as a degraded-mode fallback, not a
 /// hard error.
 fn git_hash_object(repo: &GixRepo, content: &[u8]) -> Option<GitOid> {
@@ -468,14 +478,14 @@ mod tests {
     /// Returns `(TempDir, EpochId)` where `EpochId` is the initial commit OID.
     /// The `TempDir` must outlive the `GitWorktreeBackend` that uses it.
     fn setup_git_repo() -> (TempDir, EpochId) {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("operation should succeed");
         let root = temp_dir.path();
 
         Command::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         for (key, val) in [
             ("user.name", "Test User"),
@@ -486,24 +496,24 @@ mod tests {
                 .args(["config", key, val])
                 .current_dir(root)
                 .output()
-                .unwrap();
+                .expect("operation should succeed");
         }
 
         // Write an initial file so the repo has at least one tracked file.
-        fs::write(root.join("README.md"), "# Test Repo").unwrap();
+        fs::write(root.join("README.md"), "# Test Repo").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "Initial commit"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let oid_str = git_head_oid(root);
-        let epoch = EpochId::new(&oid_str).unwrap();
+        let epoch = EpochId::new(&oid_str).expect("operation should succeed");
         (temp_dir, epoch)
     }
 
@@ -513,8 +523,11 @@ mod tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+            .expect("operation should succeed");
+        String::from_utf8(out.stdout)
+            .expect("operation should succeed")
+            .trim()
+            .to_owned()
     }
 
     // -----------------------------------------------------------------------
@@ -523,7 +536,7 @@ mod tests {
 
     #[test]
     fn collect_error_display_snapshot_failed() {
-        let ws_id = WorkspaceId::new("alpha").unwrap();
+        let ws_id = WorkspaceId::new("alpha").expect("operation should succeed");
         let err = CollectError::SnapshotFailed {
             workspace_id: ws_id,
             reason: "disk full".to_owned(),
@@ -535,7 +548,7 @@ mod tests {
 
     #[test]
     fn collect_error_display_read_failed() {
-        let ws_id = WorkspaceId::new("beta").unwrap();
+        let ws_id = WorkspaceId::new("beta").expect("operation should succeed");
         let err = CollectError::ReadFailed {
             workspace_id: ws_id,
             path: PathBuf::from("src/lib.rs"),
@@ -549,7 +562,7 @@ mod tests {
 
     #[test]
     fn collect_error_display_epoch_failed() {
-        let ws_id = WorkspaceId::new("gamma").unwrap();
+        let ws_id = WorkspaceId::new("gamma").expect("operation should succeed");
         let err = CollectError::EpochFailed {
             workspace_id: ws_id,
             reason: "not a git repo".to_owned(),
@@ -567,10 +580,13 @@ mod tests {
     fn collect_empty_workspace_produces_empty_patch_set() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("empty-ws").unwrap();
-        backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("empty-ws").expect("operation should succeed");
+        backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id.clone()])
+            .expect("operation should succeed");
 
         assert_eq!(results.len(), 1, "should have one PatchSet");
         let ps = &results[0];
@@ -587,12 +603,15 @@ mod tests {
     fn collect_added_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("add-ws").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("add-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("new.rs"), "fn main() {}").unwrap();
+        fs::write(info.path.join("new.rs"), "fn main() {}").expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -606,18 +625,20 @@ mod tests {
     fn collect_ignores_untracked_directory_entries() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("dir-entry-ws").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("dir-entry-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
         // Create a nested git directory that porcelain can report as a
         // directory entry (path with trailing slash).
         let nested = info.path.join(".tmp").join("sub");
-        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&nested).expect("operation should succeed");
         let out = Command::new("git")
             .args(["init"])
             .current_dir(&nested)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git init nested repo failed: {}",
@@ -625,9 +646,10 @@ mod tests {
         );
 
         // Also add a normal file so the patch set is non-empty.
-        fs::write(info.path.join("normal.txt"), "ok\n").unwrap();
+        fs::write(info.path.join("normal.txt"), "ok\n").expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let ps = &results[0];
 
         assert!(
@@ -653,12 +675,15 @@ mod tests {
     fn collect_modified_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("mod-ws").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("mod-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("README.md"), "# Modified").unwrap();
+        fs::write(info.path.join("README.md"), "# Modified").expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -676,12 +701,15 @@ mod tests {
     fn collect_deleted_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("del-ws").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("del-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::remove_file(info.path.join("README.md")).unwrap();
+        fs::remove_file(info.path.join("README.md")).expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let ps = &results[0];
 
         assert_eq!(ps.change_count(), 1);
@@ -709,22 +737,24 @@ mod tests {
             .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let ws_id = WorkspaceId::new("committed-del").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("committed-del").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
         // Agent commits a deletion inside the workspace (git rm + git commit).
         Command::new("git")
             .args(["rm", "README.md"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "delete README.md"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Verify HEAD has advanced beyond the epoch.
         let ws_head = git_head_oid(&info.path);
@@ -734,7 +764,8 @@ mod tests {
             "workspace HEAD should have advanced after commit"
         );
 
-        let results = collect_snapshots(root, &backend, &[ws_id]).unwrap();
+        let results =
+            collect_snapshots(root, &backend, &[ws_id]).expect("operation should succeed");
         let ps = &results[0];
 
         assert_eq!(
@@ -761,27 +792,30 @@ mod tests {
         let backend = GitWorktreeBackend::new(root.to_path_buf());
 
         // Add a second tracked file so we can delete both later.
-        fs::write(root.join("lib.rs"), "pub fn lib() {}").unwrap();
+        fs::write(root.join("lib.rs"), "pub fn lib() {}").expect("operation should succeed");
         Command::new("git")
             .args(["add", "lib.rs"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "Add lib.rs"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let epoch2 = EpochId::new(&git_head_oid(root)).unwrap();
+            .expect("operation should succeed");
+        let epoch2 = EpochId::new(&git_head_oid(root)).expect("operation should succeed");
 
-        let ws_id = WorkspaceId::new("del-only").unwrap();
-        let info = backend.create(&ws_id, &epoch2).unwrap();
+        let ws_id = WorkspaceId::new("del-only").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch2)
+            .expect("operation should succeed");
 
         // Delete both tracked files.
-        fs::remove_file(info.path.join("README.md")).unwrap();
-        fs::remove_file(info.path.join("lib.rs")).unwrap();
+        fs::remove_file(info.path.join("README.md")).expect("operation should succeed");
+        fs::remove_file(info.path.join("lib.rs")).expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let ps = &results[0];
 
         assert!(
@@ -808,22 +842,32 @@ mod tests {
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
 
         // Workspace A: adds a new file.
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let info_a = backend.create(&ws_a, &epoch).unwrap();
-        fs::write(info_a.path.join("feature_a.rs"), "pub fn a() {}").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let info_a = backend
+            .create(&ws_a, &epoch)
+            .expect("operation should succeed");
+        fs::write(info_a.path.join("feature_a.rs"), "pub fn a() {}")
+            .expect("operation should succeed");
 
         // Workspace B: modifies README and adds a file.
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
-        let info_b = backend.create(&ws_b, &epoch).unwrap();
-        fs::write(info_b.path.join("README.md"), "# Updated by B").unwrap();
-        fs::write(info_b.path.join("feature_b.rs"), "pub fn b() {}").unwrap();
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
+        let info_b = backend
+            .create(&ws_b, &epoch)
+            .expect("operation should succeed");
+        fs::write(info_b.path.join("README.md"), "# Updated by B")
+            .expect("operation should succeed");
+        fs::write(info_b.path.join("feature_b.rs"), "pub fn b() {}")
+            .expect("operation should succeed");
 
         // Workspace C: no changes.
-        let ws_c = WorkspaceId::new("ws-c").unwrap();
-        backend.create(&ws_c, &epoch).unwrap();
+        let ws_c = WorkspaceId::new("ws-c").expect("operation should succeed");
+        backend
+            .create(&ws_c, &epoch)
+            .expect("operation should succeed");
 
         let ids = vec![ws_a.clone(), ws_b.clone(), ws_c.clone()];
-        let results = collect_snapshots(temp_dir.path(), &backend, &ids).unwrap();
+        let results =
+            collect_snapshots(temp_dir.path(), &backend, &ids).expect("operation should succeed");
 
         assert_eq!(results.len(), 3, "should have one PatchSet per workspace");
 
@@ -861,13 +905,19 @@ mod tests {
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
 
         let names = ["zulu", "alpha", "mike"];
-        let ids: Vec<WorkspaceId> = names.iter().map(|n| WorkspaceId::new(n).unwrap()).collect();
+        let ids: Vec<WorkspaceId> = names
+            .iter()
+            .map(|n| WorkspaceId::new(n).expect("operation should succeed"))
+            .collect();
 
         for ws_id in &ids {
-            backend.create(ws_id, &epoch).unwrap();
+            backend
+                .create(ws_id, &epoch)
+                .expect("operation should succeed");
         }
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &ids).unwrap();
+        let results =
+            collect_snapshots(temp_dir.path(), &backend, &ids).expect("operation should succeed");
 
         assert_eq!(results.len(), 3);
         for (i, ws_id) in ids.iter().enumerate() {
@@ -886,13 +936,16 @@ mod tests {
     fn collect_content_matches_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("content-ws").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("content-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
         let expected = b"hello world\n";
-        fs::write(info.path.join("hello.txt"), expected).unwrap();
+        fs::write(info.path.join("hello.txt"), expected).expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let change = &results[0].changes[0];
 
         assert_eq!(
@@ -910,9 +963,10 @@ mod tests {
     fn collect_nonexistent_workspace_returns_error() {
         let (temp_dir, _epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("no-such").unwrap();
+        let ws_id = WorkspaceId::new("no-such").expect("operation should succeed");
 
-        let err = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap_err();
+        let err = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect_err("operation should fail");
         match err {
             CollectError::SnapshotFailed { workspace_id, .. } => {
                 assert_eq!(workspace_id.as_str(), "no-such");
@@ -930,12 +984,16 @@ mod tests {
     fn collect_added_file_has_file_id() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("fileid-add").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("fileid-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("brand_new.rs"), "pub fn new() {}").unwrap();
+        fs::write(info.path.join("brand_new.rs"), "pub fn new() {}")
+            .expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let change = &results[0].changes[0];
 
         assert!(
@@ -953,12 +1011,16 @@ mod tests {
     fn collect_added_file_has_blob_oid() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("blob-add").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("blob-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("blob_test.rs"), "pub fn blob() {}").unwrap();
+        fs::write(info.path.join("blob_test.rs"), "pub fn blob() {}")
+            .expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let change = &results[0].changes[0];
 
         assert!(
@@ -972,12 +1034,16 @@ mod tests {
     fn collect_modified_file_has_blob_oid() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("blob-mod").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("blob-mod").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("README.md"), "# Modified content").unwrap();
+        fs::write(info.path.join("README.md"), "# Modified content")
+            .expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let change = &results[0].changes[0];
 
         assert!(
@@ -995,12 +1061,15 @@ mod tests {
     fn collect_deleted_file_has_no_blob_oid() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_id = WorkspaceId::new("blob-del").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
+        let ws_id = WorkspaceId::new("blob-del").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
 
-        fs::remove_file(info.path.join("README.md")).unwrap();
+        fs::remove_file(info.path.join("README.md")).expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let change = &results[0].changes[0];
 
         assert!(
@@ -1022,16 +1091,22 @@ mod tests {
 
         let content = b"pub fn shared() {}\n";
 
-        let ws_a = WorkspaceId::new("same-blob-a").unwrap();
-        let info_a = backend.create(&ws_a, &epoch).unwrap();
-        fs::write(info_a.path.join("shared.rs"), content).unwrap();
+        let ws_a = WorkspaceId::new("same-blob-a").expect("operation should succeed");
+        let info_a = backend
+            .create(&ws_a, &epoch)
+            .expect("operation should succeed");
+        fs::write(info_a.path.join("shared.rs"), content).expect("operation should succeed");
 
-        let ws_b = WorkspaceId::new("same-blob-b").unwrap();
-        let info_b = backend.create(&ws_b, &epoch).unwrap();
-        fs::write(info_b.path.join("shared.rs"), content).unwrap();
+        let ws_b = WorkspaceId::new("same-blob-b").expect("operation should succeed");
+        let info_b = backend
+            .create(&ws_b, &epoch)
+            .expect("operation should succeed");
+        fs::write(info_b.path.join("shared.rs"), content).expect("operation should succeed");
 
-        let results_a = collect_snapshots(temp_dir.path(), &backend, &[ws_a]).unwrap();
-        let results_b = collect_snapshots(temp_dir.path(), &backend, &[ws_b]).unwrap();
+        let results_a = collect_snapshots(temp_dir.path(), &backend, &[ws_a])
+            .expect("operation should succeed");
+        let results_b = collect_snapshots(temp_dir.path(), &backend, &[ws_b])
+            .expect("operation should succeed");
 
         let blob_a = results_a[0].changes[0].blob.as_ref();
         let blob_b = results_b[0].changes[0].blob.as_ref();
@@ -1059,14 +1134,18 @@ mod tests {
         // Manually insert: we use a workaround since track_new is random.
         // Build the map via save+reload with a known value.
         let json = format!(r#"[{{"path":"README.md","file_id":"{known_id}"}}]"#);
-        fs::create_dir_all(fileids_path.parent().unwrap()).unwrap();
-        fs::write(&fileids_path, &json).unwrap();
+        fs::create_dir_all(fileids_path.parent().expect("operation should succeed"))
+            .expect("operation should succeed");
+        fs::write(&fileids_path, &json).expect("operation should succeed");
 
-        let ws_id = WorkspaceId::new("fileid-mod").unwrap();
-        let info = backend.create(&ws_id, &epoch).unwrap();
-        fs::write(info.path.join("README.md"), "# Updated").unwrap();
+        let ws_id = WorkspaceId::new("fileid-mod").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+        fs::write(info.path.join("README.md"), "# Updated").expect("operation should succeed");
 
-        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id]).unwrap();
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
         let change = &results[0].changes[0];
 
         assert_eq!(

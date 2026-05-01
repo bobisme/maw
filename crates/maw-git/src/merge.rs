@@ -58,10 +58,10 @@ pub enum ConflictResolution {
 /// Unknown custom drivers fall back to diff3 rather than failing loudly, so
 /// adding a `merge=my-thing` entry in `.gitattributes` won't break merges
 /// even if maw doesn't recognize the driver.
+#[must_use]
 pub fn resolution_for_driver(driver: Option<&str>) -> Option<ConflictResolution> {
     match driver {
-        None => Some(ConflictResolution::Diff3),
-        Some("text") => Some(ConflictResolution::Diff3),
+        None | Some("text") => Some(ConflictResolution::Diff3),
         Some("union") => Some(ConflictResolution::Union),
         Some("ours") => Some(ConflictResolution::Ours),
         Some("binary") => None,
@@ -77,6 +77,9 @@ pub fn resolution_for_driver(driver: Option<&str>) -> Option<ConflictResolution>
 ///
 /// Labels are applied to conflict markers as:
 ///   `<<<<<<< {ours_label}` / `||||||| {base_label}` / `>>>>>>> {theirs_label}`
+///
+/// # Errors
+/// Returns an error if the merge backend cannot process the supplied inputs.
 pub fn merge_text(
     base: &[u8],
     ours: &[u8],
@@ -103,6 +106,9 @@ pub fn merge_text(
 /// [`ConflictResolution::Union`], [`ConflictResolution::Ours`], or
 /// [`ConflictResolution::Theirs`], conflict hunks are resolved automatically
 /// and the result is always [`MergeResult::Clean`].
+///
+/// # Errors
+/// Returns an error if the merge backend cannot process the supplied inputs.
 pub fn merge_text_with_style(
     base: &[u8],
     ours: &[u8],
@@ -118,12 +124,15 @@ pub fn merge_text_with_style(
         other: Some(theirs_label.as_bytes().as_bstr()),
     };
 
+    let default_marker_size = builtin_driver::text::Conflict::DEFAULT_MARKER_SIZE
+        .try_into()
+        .map_err(|_| GitError::BackendError {
+            message: "gix default conflict marker size is invalid".to_string(),
+        })?;
     let conflict = match resolution {
         ConflictResolution::Diff3 => builtin_driver::text::Conflict::Keep {
             style: ConflictStyle::Diff3,
-            marker_size: builtin_driver::text::Conflict::DEFAULT_MARKER_SIZE
-                .try_into()
-                .unwrap(),
+            marker_size: default_marker_size,
         },
         ConflictResolution::Union => builtin_driver::text::Conflict::ResolveWithUnion,
         ConflictResolution::Ours => builtin_driver::text::Conflict::ResolveWithOurs,
@@ -142,8 +151,9 @@ pub fn merge_text_with_style(
         builtin_driver::text(&mut out, &mut input, labels, ours, base, theirs, options);
 
     match gix_resolution {
-        Resolution::Complete => Ok(MergeResult::Clean(out)),
-        Resolution::CompleteWithAutoResolvedConflict => Ok(MergeResult::Clean(out)),
+        Resolution::Complete | Resolution::CompleteWithAutoResolvedConflict => {
+            Ok(MergeResult::Clean(out))
+        }
         Resolution::Conflict => Ok(MergeResult::Conflict(out)),
     }
 }
@@ -158,7 +168,8 @@ mod tests {
         let ours = b"LINE1\nline2\nline3\n";
         let theirs = b"line1\nline2\nLINE3\n";
 
-        let result = merge_text(base, ours, theirs, "ours", "base", "theirs").unwrap();
+        let result = merge_text(base, ours, theirs, "ours", "base", "theirs")
+            .expect("non-overlapping merge should run");
         match result {
             MergeResult::Clean(merged) => {
                 let s = String::from_utf8_lossy(&merged);
@@ -181,7 +192,8 @@ mod tests {
         let ours = b"key = ours\n";
         let theirs = b"key = theirs\n";
 
-        let result = merge_text(base, ours, theirs, "ours", "base", "theirs").unwrap();
+        let result = merge_text(base, ours, theirs, "ours", "base", "theirs")
+            .expect("conflicting merge should run");
         match result {
             MergeResult::Clean(_) => panic!("expected conflict"),
             MergeResult::Conflict(out) => {
@@ -199,7 +211,8 @@ mod tests {
         let ours = b"changed\n";
         let theirs = b"changed\n";
 
-        let result = merge_text(base, ours, theirs, "ours", "base", "theirs").unwrap();
+        let result = merge_text(base, ours, theirs, "ours", "base", "theirs")
+            .expect("identical-change merge should run");
         match result {
             MergeResult::Clean(merged) => {
                 assert_eq!(merged, b"changed\n");
@@ -224,7 +237,7 @@ mod tests {
             "theirs",
             ConflictResolution::Union,
         )
-        .unwrap();
+        .expect("union merge should run");
 
         match result {
             MergeResult::Clean(merged) => {
@@ -259,7 +272,7 @@ mod tests {
             "theirs",
             ConflictResolution::Union,
         )
-        .unwrap();
+        .expect("union overlap merge should run");
 
         match result {
             MergeResult::Clean(merged) => {
@@ -287,7 +300,7 @@ mod tests {
             "theirs",
             ConflictResolution::Ours,
         )
-        .unwrap();
+        .expect("ours merge should run");
 
         match result {
             MergeResult::Clean(merged) => {

@@ -16,6 +16,7 @@
 //! - `maw ws recover <name> --to <new-name>` — restore latest destroy snapshot
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -237,6 +238,10 @@ struct RecoverSearchEnvelope {
 /// `context` controls how many surrounding lines are included per match.
 /// `max_hits` caps total matches returned (deterministic truncation).
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "search command performs ref scan, matching, truncation, and rendering"
+)]
 pub fn search(
     pattern: &str,
     workspace_filter: Option<&str>,
@@ -277,27 +282,24 @@ pub fn search(
     refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
 
     if refs.is_empty() {
-        match format {
-            OutputFormat::Json => {
-                let envelope = RecoverSearchEnvelope {
-                    pattern: pattern.to_string(),
-                    workspace_filter: workspace_filter.map(|s| s.to_string()),
-                    ref_filter: ref_filter.map(|s| s.to_string()),
-                    scanned_refs: 0,
-                    hit_count: 0,
-                    truncated: false,
-                    hits: vec![],
-                    advice: vec![
-                        "No pinned recovery snapshots found to search.".to_string(),
-                        format!("List refs: git for-each-ref {RECOVERY_PREFIX}"),
-                    ],
-                };
-                println!("{}", serde_json::to_string_pretty(&envelope)?);
-            }
-            _ => {
-                println!("No pinned recovery snapshots found to search.");
-                println!("List refs: git for-each-ref {RECOVERY_PREFIX}");
-            }
+        if format == OutputFormat::Json {
+            let envelope = RecoverSearchEnvelope {
+                pattern: pattern.to_string(),
+                workspace_filter: workspace_filter.map(std::string::ToString::to_string),
+                ref_filter: ref_filter.map(std::string::ToString::to_string),
+                scanned_refs: 0,
+                hit_count: 0,
+                truncated: false,
+                hits: vec![],
+                advice: vec![
+                    "No pinned recovery snapshots found to search.".to_string(),
+                    format!("List refs: git for-each-ref {RECOVERY_PREFIX}"),
+                ],
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        } else {
+            println!("No pinned recovery snapshots found to search.");
+            println!("List refs: git for-each-ref {RECOVERY_PREFIX}");
         }
         return Ok(());
     }
@@ -340,8 +342,8 @@ pub fn search(
 
     let envelope = RecoverSearchEnvelope {
         pattern: pattern.to_string(),
-        workspace_filter: workspace_filter.map(|s| s.to_string()),
-        ref_filter: ref_filter.map(|s| s.to_string()),
+        workspace_filter: workspace_filter.map(std::string::ToString::to_string),
+        ref_filter: ref_filter.map(std::string::ToString::to_string),
         scanned_refs: refs.len(),
         hit_count: hits.len(),
         truncated,
@@ -354,8 +356,8 @@ pub fn search(
 
     audit::log_audit(&AuditEvent::Search {
         pattern_hash: audit::hash_pattern(pattern),
-        workspace_filter: workspace_filter.map(|s| s.to_string()),
-        ref_filter: ref_filter.map(|s| s.to_string()),
+        workspace_filter: workspace_filter.map(std::string::ToString::to_string),
+        ref_filter: ref_filter.map(std::string::ToString::to_string),
         hit_count: envelope.hit_count,
     });
 
@@ -539,7 +541,10 @@ fn read_file_lines(git_cwd: &Path, oid: &str, path: &str) -> Result<Vec<String>>
     }
 
     let content = String::from_utf8_lossy(&output.stdout);
-    Ok(content.lines().map(|l| l.to_string()).collect())
+    Ok(content
+        .lines()
+        .map(std::string::ToString::to_string)
+        .collect())
 }
 
 fn build_snippet(
@@ -866,7 +871,6 @@ fn show_file_at_oid(git_cwd: &Path, oid: &str, path: &str) -> Result<()> {
         );
     }
 
-    use std::io::Write;
     std::io::stdout().write_all(&output.stdout)?;
     Ok(())
 }
@@ -914,7 +918,6 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
     }
 
     // Write raw content to stdout (binary-safe isn't needed for text, but let's be correct)
-    use std::io::Write;
     std::io::stdout()
         .write_all(&output.stdout)
         .context("write to stdout")?;
@@ -1167,7 +1170,23 @@ pub fn find_dangling_snapshots(root: &Path) -> Result<Vec<DanglingSnapshot>> {
             continue;
         }
 
-        if !ws_exists {
+        if ws_exists {
+            // Workspace still exists. Only mark older refs as superseded
+            // if there are multiple recovery points.
+            if ws_refs.len() <= 1 {
+                continue;
+            }
+            // Keep the most recent, mark older ones as superseded.
+            for r in &ws_refs[..ws_refs.len() - 1] {
+                dangling.push(DanglingSnapshot {
+                    ref_name: r.ref_name.clone(),
+                    workspace: r.workspace.clone(),
+                    timestamp: r.timestamp.clone(),
+                    oid: r.oid.clone(),
+                    reason: DanglingReason::SupersededByNewer,
+                });
+            }
+        } else {
             // Workspace was destroyed. All refs for it are dangling UNLESS
             // it's the only recovery point (we always keep at least the
             // most recent one to allow future recovery).
@@ -1184,27 +1203,13 @@ pub fn find_dangling_snapshots(root: &Path) -> Result<Vec<DanglingSnapshot>> {
                     workspace: r.workspace.clone(),
                     timestamp: r.timestamp.clone(),
                     oid: r.oid.clone(),
-                    reason: if r.ref_name == ws_refs.last().unwrap().ref_name {
+                    reason: if r.ref_name
+                        == ws_refs.last().expect("operation should succeed").ref_name
+                    {
                         DanglingReason::WorkspaceDestroyed
                     } else {
                         DanglingReason::SupersededByNewer
                     },
-                });
-            }
-        } else {
-            // Workspace still exists. Only mark older refs as superseded
-            // if there are multiple recovery points.
-            if ws_refs.len() <= 1 {
-                continue;
-            }
-            // Keep the most recent, mark older ones as superseded.
-            for r in &ws_refs[..ws_refs.len() - 1] {
-                dangling.push(DanglingSnapshot {
-                    ref_name: r.ref_name.clone(),
-                    workspace: r.workspace.clone(),
-                    timestamp: r.timestamp.clone(),
-                    oid: r.oid.clone(),
-                    reason: DanglingReason::SupersededByNewer,
                 });
             }
         }
@@ -1271,7 +1276,7 @@ pub fn gc(all: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
             OutputFormat::Json => {
                 let envelope = GcEnvelope {
                     dry_run: true,
-                    removed: to_show.iter().cloned().cloned().collect(),
+                    removed: to_show.iter().copied().cloned().collect(),
                     total_dangling: dangling.len(),
                     advice: vec!["Run without --dry-run to delete.".to_string()],
                 };
@@ -1356,7 +1361,7 @@ fn list_active_workspace_names(root: &Path) -> HashSet<String> {
     let mut names = HashSet::new();
     if let Ok(entries) = std::fs::read_dir(&ws_dir) {
         for entry in entries.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 names.insert(name);
             }
@@ -1433,7 +1438,7 @@ mod tests {
             destroy_reason: super::destroy_record::DestroyReason::Destroy,
             tool_version: "0.47.0".to_string(),
         };
-        let oid = resolve_recoverable_oid(&record).unwrap();
+        let oid = resolve_recoverable_oid(&record).expect("operation should succeed");
         assert_eq!(oid, "b".repeat(40));
     }
 
@@ -1452,7 +1457,7 @@ mod tests {
             destroy_reason: super::destroy_record::DestroyReason::Destroy,
             tool_version: "0.47.0".to_string(),
         };
-        let oid = resolve_recoverable_oid(&record).unwrap();
+        let oid = resolve_recoverable_oid(&record).expect("operation should succeed");
         assert_eq!(oid, "a".repeat(40));
     }
 
@@ -1485,8 +1490,8 @@ mod tests {
 
     #[test]
     fn parse_recovery_ref_name_extracts_workspace_and_timestamp() {
-        let (ws, ts) =
-            parse_recovery_ref_name("refs/manifold/recovery/alice/2025-01-01T00-00-00Z").unwrap();
+        let (ws, ts) = parse_recovery_ref_name("refs/manifold/recovery/alice/2025-01-01T00-00-00Z")
+            .expect("operation should succeed");
         assert_eq!(ws, "alice");
         assert_eq!(ts, "2025-01-01T00-00-00Z");
     }
@@ -1495,7 +1500,7 @@ mod tests {
     fn list_and_grep_recovery_refs_in_temp_repo() {
         use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         // init repo
@@ -1503,22 +1508,22 @@ mod tests {
             .args(["init", "-q"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         fs::write(
             root.join("a.txt"),
@@ -1527,23 +1532,23 @@ needle
 three
 ",
         )
-        .unwrap();
+        .expect("operation should succeed");
         Command::new("git")
             .args(["add", "a.txt"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-qm", "init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let oid_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(oid_out.status.success());
         let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
 
@@ -1553,23 +1558,24 @@ three
             .args(["update-ref", ref_name, &oid])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(upd.status.success());
 
-        let refs = list_recovery_refs(root).unwrap();
+        let refs = list_recovery_refs(root).expect("operation should succeed");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].ref_name, ref_name);
         assert_eq!(refs[0].workspace, "alice");
         assert_eq!(refs[0].oid, oid);
 
-        let hits = git_grep_hits(root, &oid, "needle", false, false, false).unwrap();
+        let hits = git_grep_hits(root, &oid, "needle", false, false, false)
+            .expect("operation should succeed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "a.txt");
         assert_eq!(hits[0].line, 2);
 
         let mut cache = HashMap::new();
-        let snippet =
-            build_snippet(root, &oid, "a.txt", 2, 1, &hits[0].line_text, &mut cache).unwrap();
+        let snippet = build_snippet(root, &oid, "a.txt", 2, 1, &hits[0].line_text, &mut cache)
+            .expect("operation should succeed");
         assert_eq!(snippet.len(), 3);
         assert_eq!(snippet[1].line, 2);
         assert!(snippet[1].is_match);
@@ -1579,51 +1585,53 @@ three
     fn git_grep_hits_handles_paths_with_colons() {
         use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         Command::new("git")
             .args(["init", "-q"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("with:colon.txt"), "first\ncolon-needle\n").unwrap();
+        fs::write(root.join("with:colon.txt"), "first\ncolon-needle\n")
+            .expect("operation should succeed");
         Command::new("git")
             .args(["add", "with:colon.txt"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-qm", "colon path"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let oid_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(oid_out.status.success());
         let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
 
-        let hits = git_grep_hits(root, &oid, "colon-needle", false, false, false).unwrap();
+        let hits = git_grep_hits(root, &oid, "colon-needle", false, false, false)
+            .expect("operation should succeed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "with:colon.txt");
         assert_eq!(hits[0].line, 2);
@@ -1637,51 +1645,51 @@ three
     /// Helper: create a git repo with a commit and ws/ directory structure.
     /// Returns (tempdir, root, HEAD oid).
     fn setup_dangling_test_repo() -> (tempfile::TempDir, std::path::PathBuf, String) {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         Command::new("git")
             .args(["init", "-q"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("a.txt"), "content\n").unwrap();
+        fs::write(root.join("a.txt"), "content\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "a.txt"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-qm", "init"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let oid_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
 
         // Create ws/ directory
-        fs::create_dir_all(root.join("ws")).unwrap();
+        fs::create_dir_all(root.join("ws")).expect("operation should succeed");
 
         (dir, root, oid)
     }
@@ -1691,14 +1699,14 @@ three
             .args(["update-ref", ref_name, oid])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success(), "update-ref failed for {ref_name}");
     }
 
     #[test]
     fn dangling_no_refs_returns_empty() {
         let (_dir, root, _oid) = setup_dangling_test_repo();
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert!(result.is_empty());
     }
 
@@ -1715,7 +1723,7 @@ three
         );
 
         // alice workspace does not exist under ws/
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert!(
             result.is_empty(),
             "single ref for destroyed ws should not be dangling"
@@ -1738,7 +1746,7 @@ three
         );
 
         // alice workspace does not exist under ws/
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert_eq!(
             result.len(),
             2,
@@ -1746,16 +1754,16 @@ three
         );
 
         // Check reasons
-        let superseded: Vec<_> = result
+        let superseded = result
             .iter()
             .filter(|d| d.reason == DanglingReason::SupersededByNewer)
-            .collect();
-        let destroyed: Vec<_> = result
+            .count();
+        let destroyed = result
             .iter()
             .filter(|d| d.reason == DanglingReason::WorkspaceDestroyed)
-            .collect();
-        assert_eq!(superseded.len(), 1, "older ref should be superseded");
-        assert_eq!(destroyed.len(), 1, "most recent ref should be 'destroyed'");
+            .count();
+        assert_eq!(superseded, 1, "older ref should be superseded");
+        assert_eq!(destroyed, 1, "most recent ref should be 'destroyed'");
     }
 
     #[test]
@@ -1763,7 +1771,7 @@ three
         let (_dir, root, oid) = setup_dangling_test_repo();
 
         // Create workspace directory
-        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+        fs::create_dir_all(root.join("ws").join("bob")).expect("operation should succeed");
 
         pin_ref(
             &root,
@@ -1771,7 +1779,7 @@ three
             &oid,
         );
 
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert!(
             result.is_empty(),
             "single ref for active ws should not be dangling"
@@ -1783,7 +1791,7 @@ three
         let (_dir, root, oid) = setup_dangling_test_repo();
 
         // Create workspace directory
-        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+        fs::create_dir_all(root.join("ws").join("bob")).expect("operation should succeed");
 
         pin_ref(
             &root,
@@ -1796,7 +1804,7 @@ three
             &oid,
         );
 
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert_eq!(result.len(), 1, "only the older ref should be dangling");
         assert_eq!(result[0].reason, DanglingReason::SupersededByNewer);
         assert!(result[0].timestamp.contains("01-01"));
@@ -1819,12 +1827,12 @@ three
         );
 
         // Conservative cleanup (all=false): only superseded
-        let removed = cleanup_dangling_snapshots(&root, false).unwrap();
+        let removed = cleanup_dangling_snapshots(&root, false).expect("operation should succeed");
         assert_eq!(removed.len(), 1, "only superseded ref should be removed");
         assert_eq!(removed[0].reason, DanglingReason::SupersededByNewer);
 
         // Verify the ref is actually gone
-        let refs = list_recovery_refs(&root).unwrap();
+        let refs = list_recovery_refs(&root).expect("operation should succeed");
         assert_eq!(refs.len(), 1, "only one ref should remain after cleanup");
         assert!(refs[0].timestamp.contains("01-02"));
     }
@@ -1846,11 +1854,11 @@ three
         );
 
         // Aggressive cleanup (all=true)
-        let removed = cleanup_dangling_snapshots(&root, true).unwrap();
+        let removed = cleanup_dangling_snapshots(&root, true).expect("operation should succeed");
         assert_eq!(removed.len(), 2, "all refs should be removed");
 
         // Verify all refs are gone
-        let refs = list_recovery_refs(&root).unwrap();
+        let refs = list_recovery_refs(&root).expect("operation should succeed");
         assert!(refs.is_empty(), "no refs should remain after cleanup --all");
     }
 
@@ -1872,22 +1880,22 @@ three
 
         // Simulate active merge by writing merge-state.json
         let manifold_dir = root.join(".manifold");
-        fs::create_dir_all(&manifold_dir).unwrap();
+        fs::create_dir_all(&manifold_dir).expect("operation should succeed");
         let merge_state = serde_json::json!({
             "phase": "build",
             "sources": ["carol"],
             "epoch_before": "a".repeat(40),
-            "started_at": 1704067200u64,
-            "updated_at": 1704067200u64
+            "started_at": 1_704_067_200_u64,
+            "updated_at": 1_704_067_200_u64
         });
         fs::write(
             manifold_dir.join("merge-state.json"),
-            serde_json::to_string_pretty(&merge_state).unwrap(),
+            serde_json::to_string_pretty(&merge_state).expect("operation should succeed"),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Should find no dangling refs because carol is in an active merge
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert!(
             result.is_empty(),
             "refs for workspace in active merge should not be dangling"
@@ -1896,12 +1904,12 @@ three
 
     #[test]
     fn list_active_workspace_names_finds_directories() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("operation should succeed");
         let root = dir.path();
-        fs::create_dir_all(root.join("ws").join("alice")).unwrap();
-        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+        fs::create_dir_all(root.join("ws").join("alice")).expect("operation should succeed");
+        fs::create_dir_all(root.join("ws").join("bob")).expect("operation should succeed");
         // File, not directory — should be excluded
-        fs::write(root.join("ws").join("not-a-ws"), "").unwrap();
+        fs::write(root.join("ws").join("not-a-ws"), "").expect("operation should succeed");
 
         let names = list_active_workspace_names(root);
         assert!(names.contains("alice"));
@@ -1914,7 +1922,7 @@ three
         let (_dir, root, oid) = setup_dangling_test_repo();
 
         // Create one active workspace
-        fs::create_dir_all(root.join("ws").join("bob")).unwrap();
+        fs::create_dir_all(root.join("ws").join("bob")).expect("operation should succeed");
 
         // bob has one ref (active, should NOT be dangling)
         pin_ref(
@@ -1935,7 +1943,7 @@ three
             &oid,
         );
 
-        let result = find_dangling_snapshots(&root).unwrap();
+        let result = find_dangling_snapshots(&root).expect("operation should succeed");
         assert_eq!(result.len(), 2, "only alice's refs should be dangling");
         for d in &result {
             assert_eq!(d.workspace, "alice");

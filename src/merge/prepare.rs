@@ -364,22 +364,22 @@ mod tests {
     use crate::merge_state::{MergePhase, RecoveryOutcome, recover_from_merge_state};
 
     fn test_epoch() -> EpochId {
-        EpochId::new(&"a".repeat(40)).unwrap()
+        EpochId::new(&"a".repeat(40)).expect("operation should succeed")
     }
 
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     // -- run_prepare_phase_with_epoch --
 
     #[test]
     fn prepare_freezes_inputs() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let epoch = test_epoch();
@@ -393,7 +393,7 @@ mod tests {
         let sources = vec![ws_a.clone(), ws_b.clone()];
         let frozen =
             run_prepare_phase_with_epoch(&manifold_dir, epoch.clone(), &sources, heads.clone())
-                .unwrap();
+                .expect("operation should succeed");
 
         assert_eq!(frozen.epoch, epoch);
         assert_eq!(frozen.heads.len(), 2);
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn prepare_writes_merge_state_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let epoch = test_epoch();
@@ -412,13 +412,14 @@ mod tests {
         heads.insert(ws.clone(), test_oid('d'));
 
         let sources = vec![ws.clone()];
-        run_prepare_phase_with_epoch(&manifold_dir, epoch.clone(), &sources, heads).unwrap();
+        run_prepare_phase_with_epoch(&manifold_dir, epoch.clone(), &sources, heads)
+            .expect("operation should succeed");
 
         // Verify file exists and contents
         let state_path = MergeStateFile::default_path(&manifold_dir);
         assert!(state_path.exists());
 
-        let state = MergeStateFile::read(&state_path).unwrap();
+        let state = MergeStateFile::read(&state_path).expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Prepare);
         assert_eq!(state.sources, vec![ws.clone()]);
         assert_eq!(state.epoch_before, epoch);
@@ -430,7 +431,7 @@ mod tests {
 
     #[test]
     fn prepare_rejects_empty_sources() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let result =
@@ -440,14 +441,16 @@ mod tests {
 
     #[test]
     fn prepare_rejects_in_progress_merge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
-        std::fs::create_dir_all(&manifold_dir).unwrap();
+        std::fs::create_dir_all(&manifold_dir).expect("operation should succeed");
 
         // Write an in-progress merge-state
         let existing = MergeStateFile::new(vec![test_ws("old")], test_epoch(), 1000);
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        existing.write_atomic(&state_path).unwrap();
+        existing
+            .write_atomic(&state_path)
+            .expect("operation should succeed");
 
         // Try to prepare — should fail
         let mut heads = BTreeMap::new();
@@ -459,19 +462,31 @@ mod tests {
 
     #[test]
     fn prepare_overwrites_terminal_state() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
-        std::fs::create_dir_all(&manifold_dir).unwrap();
+        std::fs::create_dir_all(&manifold_dir).expect("operation should succeed");
 
         // Write a completed merge-state
         let mut existing = MergeStateFile::new(vec![test_ws("old")], test_epoch(), 1000);
-        existing.advance(MergePhase::Build, 1001).unwrap();
-        existing.advance(MergePhase::Validate, 1002).unwrap();
-        existing.advance(MergePhase::Commit, 1003).unwrap();
-        existing.advance(MergePhase::Cleanup, 1004).unwrap();
-        existing.advance(MergePhase::Complete, 1005).unwrap();
+        existing
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        existing
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
+        existing
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
+        existing
+            .advance(MergePhase::Cleanup, 1004)
+            .expect("operation should succeed");
+        existing
+            .advance(MergePhase::Complete, 1005)
+            .expect("operation should succeed");
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        existing.write_atomic(&state_path).unwrap();
+        existing
+            .write_atomic(&state_path)
+            .expect("operation should succeed");
 
         // Prepare should succeed (overwrite terminal state)
         let ws = test_ws("new-ws");
@@ -479,19 +494,19 @@ mod tests {
         heads.insert(ws.clone(), test_oid('f'));
         let frozen =
             run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws.clone()], heads)
-                .unwrap();
+                .expect("operation should succeed");
 
         assert_eq!(frozen.heads.len(), 1);
 
         // Verify state file was overwritten
-        let state = MergeStateFile::read(&state_path).unwrap();
+        let state = MergeStateFile::read(&state_path).expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Prepare);
         assert_eq!(state.sources, vec![ws]);
     }
 
     #[test]
     fn prepare_crash_safety_file_is_valid_or_absent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let ws = test_ws("crash-test");
@@ -503,29 +518,32 @@ mod tests {
         assert!(!state_path.exists());
 
         // After prepare: valid file
-        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads).unwrap();
+        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads)
+            .expect("operation should succeed");
 
         assert!(state_path.exists());
-        let state = MergeStateFile::read(&state_path).unwrap();
+        let state = MergeStateFile::read(&state_path).expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Prepare);
     }
 
     #[test]
     fn prepare_recovery_aborts_and_preserves_workspace_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let ws = test_ws("worker-1");
         let ws_file = dir.path().join("ws").join("worker-1").join("result.txt");
-        std::fs::create_dir_all(ws_file.parent().unwrap()).unwrap();
-        std::fs::write(&ws_file, "worker output\n").unwrap();
+        std::fs::create_dir_all(ws_file.parent().expect("operation should succeed"))
+            .expect("operation should succeed");
+        std::fs::write(&ws_file, "worker output\n").expect("operation should succeed");
 
         let mut heads = BTreeMap::new();
         heads.insert(ws.clone(), test_oid('c'));
-        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads).unwrap();
+        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads)
+            .expect("operation should succeed");
 
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        let outcome = recover_from_merge_state(&state_path).unwrap();
+        let outcome = recover_from_merge_state(&state_path).expect("operation should succeed");
         assert_eq!(
             outcome,
             RecoveryOutcome::AbortedPreCommit {
@@ -533,26 +551,30 @@ mod tests {
             }
         );
         assert!(!state_path.exists());
-        assert_eq!(std::fs::read_to_string(ws_file).unwrap(), "worker output\n");
+        assert_eq!(
+            std::fs::read_to_string(ws_file).expect("operation should succeed"),
+            "worker output\n"
+        );
     }
 
     #[test]
     fn prepare_creates_manifold_dir() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join("deep").join("nested").join(".manifold");
 
         let ws = test_ws("ws-1");
         let mut heads = BTreeMap::new();
         heads.insert(ws.clone(), test_oid('b'));
 
-        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads).unwrap();
+        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads)
+            .expect("operation should succeed");
 
         assert!(manifold_dir.exists());
     }
 
     #[test]
     fn prepare_records_correct_oids_for_multiple_workspaces() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let ws1 = test_ws("ws-1");
@@ -565,8 +587,8 @@ mod tests {
         heads.insert(ws3.clone(), test_oid('3'));
 
         let sources = vec![ws1.clone(), ws2.clone(), ws3.clone()];
-        let frozen =
-            run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &sources, heads).unwrap();
+        let frozen = run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &sources, heads)
+            .expect("operation should succeed");
 
         // Verify each OID is correctly recorded
         assert_eq!(frozen.heads[&ws1].as_str(), &"1".repeat(40));
@@ -575,7 +597,7 @@ mod tests {
 
         // Verify persisted state matches
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        let state = MergeStateFile::read(&state_path).unwrap();
+        let state = MergeStateFile::read(&state_path).expect("operation should succeed");
         assert_eq!(state.frozen_heads.len(), 3);
         assert_eq!(state.frozen_heads[&ws1].as_str(), &"1".repeat(40));
     }
@@ -584,7 +606,7 @@ mod tests {
     fn prepare_frozen_inputs_are_deterministic() {
         // Run PREPARE twice with same inputs → same frozen outputs
         for _ in 0..2 {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir().expect("operation should succeed");
             let manifold_dir = dir.path().join(".manifold");
 
             let epoch = test_epoch();
@@ -594,7 +616,7 @@ mod tests {
 
             let frozen =
                 run_prepare_phase_with_epoch(&manifold_dir, epoch.clone(), &[ws.clone()], heads)
-                    .unwrap();
+                    .expect("operation should succeed");
 
             assert_eq!(frozen.epoch, epoch);
             assert_eq!(frozen.heads[&ws], test_oid('d'));
@@ -603,18 +625,19 @@ mod tests {
 
     #[test]
     fn prepare_state_serialization_includes_frozen_heads() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let ws = test_ws("serial-test");
         let mut heads = BTreeMap::new();
         heads.insert(ws.clone(), test_oid('e'));
 
-        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads).unwrap();
+        run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[ws], heads)
+            .expect("operation should succeed");
 
         // Read raw JSON and verify frozen_heads is present
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        let raw_json = std::fs::read_to_string(&state_path).unwrap();
+        let raw_json = std::fs::read_to_string(&state_path).expect("operation should succeed");
         assert!(raw_json.contains("frozen_heads"));
         assert!(raw_json.contains(&"e".repeat(40)));
     }
@@ -647,7 +670,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed:\n{}",
@@ -659,13 +682,13 @@ mod tests {
 
     fn git_oid(root: &Path, rev: &str) -> GitOid {
         let hex = run_git(root, &["rev-parse", rev]);
-        GitOid::new(&hex).unwrap()
+        GitOid::new(&hex).expect("operation should succeed")
     }
 
     /// Create a minimal git repo with one commit and the epoch ref pointing to it.
     /// Returns (TempDir, initial_commit_oid).
     fn setup_git_repo_with_epoch() -> (tempfile::TempDir, GitOid) {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("operation should succeed");
         let root = dir.path();
         run_git(root, &["init", "-b", "main"]);
         run_git(root, &["config", "user.name", "Test"]);
@@ -686,20 +709,32 @@ mod tests {
         ws_name: &str,
         target_branch: Option<&str>,
     ) {
-        std::fs::create_dir_all(manifold_dir).unwrap();
-        let eb = EpochId::new(epoch_before.as_str()).unwrap();
-        let mut state = MergeStateFile::new(vec![WorkspaceId::new(ws_name).unwrap()], eb, 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
-        state.advance(MergePhase::Validate, 1002).unwrap();
-        state.advance(MergePhase::Commit, 1003).unwrap();
+        std::fs::create_dir_all(manifold_dir).expect("operation should succeed");
+        let eb = EpochId::new(epoch_before.as_str()).expect("operation should succeed");
+        let mut state = MergeStateFile::new(
+            vec![WorkspaceId::new(ws_name).expect("operation should succeed")],
+            eb,
+            1000,
+        );
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
         state.epoch_candidate = Some(epoch_candidate.clone());
         state.target_branch = target_branch.map(ToOwned::to_owned);
         if phase == MergePhase::Cleanup {
-            state.advance(MergePhase::Cleanup, 1004).unwrap();
+            state
+                .advance(MergePhase::Cleanup, 1004)
+                .expect("operation should succeed");
         }
         state
             .write_atomic(&MergeStateFile::default_path(manifold_dir))
-            .unwrap();
+            .expect("operation should succeed");
     }
 
     #[test]
@@ -716,7 +751,12 @@ mod tests {
         let ws_path = root.join(ws_name);
         run_git(
             root,
-            &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                ws_path.to_str().expect("operation should succeed"),
+                "HEAD",
+            ],
         );
 
         let manifold_dir = root.join(".manifold");
@@ -735,7 +775,7 @@ mod tests {
             &["update-ref", refs::EPOCH_CURRENT, candidate.as_str()],
         );
 
-        let ws_id = WorkspaceId::new(ws_name).unwrap();
+        let ws_id = WorkspaceId::new(ws_name).expect("operation should succeed");
         let mut workspace_dirs = BTreeMap::new();
         workspace_dirs.insert(ws_id.clone(), ws_path);
 
@@ -746,7 +786,8 @@ mod tests {
             "expected success clearing stale state, got: {result:?}"
         );
 
-        let new_state = MergeStateFile::read(&MergeStateFile::default_path(&manifold_dir)).unwrap();
+        let new_state = MergeStateFile::read(&MergeStateFile::default_path(&manifold_dir))
+            .expect("operation should succeed");
         assert_eq!(new_state.phase, MergePhase::Prepare);
     }
 
@@ -762,7 +803,12 @@ mod tests {
         let ws_path = root.join(ws_name);
         run_git(
             root,
-            &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                ws_path.to_str().expect("operation should succeed"),
+                "HEAD",
+            ],
         );
 
         let manifold_dir = root.join(".manifold");
@@ -780,7 +826,7 @@ mod tests {
             &["update-ref", refs::EPOCH_CURRENT, candidate.as_str()],
         );
 
-        let ws_id = WorkspaceId::new(ws_name).unwrap();
+        let ws_id = WorkspaceId::new(ws_name).expect("operation should succeed");
         let mut workspace_dirs = BTreeMap::new();
         workspace_dirs.insert(ws_id.clone(), ws_path);
 
@@ -815,7 +861,7 @@ mod tests {
             &[
                 "worktree",
                 "add",
-                ws_path.to_str().unwrap(),
+                ws_path.to_str().expect("operation should succeed"),
                 "refs/heads/main",
             ],
         );
@@ -830,7 +876,7 @@ mod tests {
             Some("feat/change"),
         );
 
-        let ws_id = WorkspaceId::new(ws_name).unwrap();
+        let ws_id = WorkspaceId::new(ws_name).expect("operation should succeed");
         let mut workspace_dirs = BTreeMap::new();
         workspace_dirs.insert(ws_id.clone(), ws_path);
 
@@ -853,7 +899,12 @@ mod tests {
         let ws_path = root.join(ws_name);
         run_git(
             root,
-            &["worktree", "add", ws_path.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                ws_path.to_str().expect("operation should succeed"),
+                "HEAD",
+            ],
         );
 
         let manifold_dir = root.join(".manifold");
@@ -869,7 +920,7 @@ mod tests {
         // Epoch ref is still at epoch_before (commit hasn't completed yet)
         // epoch_before is still in refs/manifold/epoch/current from setup
 
-        let ws_id = WorkspaceId::new(ws_name).unwrap();
+        let ws_id = WorkspaceId::new(ws_name).expect("operation should succeed");
         let mut workspace_dirs = BTreeMap::new();
         workspace_dirs.insert(ws_id.clone(), ws_path);
 

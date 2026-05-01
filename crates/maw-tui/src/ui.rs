@@ -206,35 +206,7 @@ fn draw_workspace_pane(
     selected: Option<usize>,
     overlap_set: Option<&std::collections::BTreeSet<String>>,
 ) {
-    let mut title_parts = vec![ws.name.clone()];
-    if ws.is_dirty {
-        title_parts.push("*".to_string());
-    }
-    if ws.is_default {
-        // Default workspace: show dirty file count instead of commit count.
-        let dirty_count = flatten_tree(&ws.file_tree, 0).len();
-        if dirty_count > 0 {
-            title_parts.push(format!(
-                "  {dirty_count} dirty file{}",
-                if dirty_count == 1 { "" } else { "s" }
-            ));
-        }
-    } else {
-        title_parts.push(format!(
-            "  +{} commit{}",
-            ws.commit_count,
-            if ws.commit_count == 1 { "" } else { "s" }
-        ));
-        if ws.commit_count > 0
-            && let Some(secs) = ws.last_activity_secs
-        {
-            title_parts.push(format!("  {}", format_time_ago(secs)));
-        }
-    }
-    if ws.is_stale {
-        title_parts.push("  stale".to_string());
-    }
-    let title = title_parts.join("");
+    let title = workspace_pane_title(ws);
 
     let block = if ws.is_stale {
         Block::default()
@@ -320,6 +292,38 @@ fn draw_workspace_pane(
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
+}
+
+fn workspace_pane_title(ws: &crate::app::WorkspacePane) -> String {
+    let mut title_parts = vec![ws.name.clone()];
+    if ws.is_dirty {
+        title_parts.push("*".to_string());
+    }
+    if ws.is_default {
+        // Default workspace: show dirty file count instead of commit count.
+        let dirty_count = flatten_tree(&ws.file_tree, 0).len();
+        if dirty_count > 0 {
+            title_parts.push(format!(
+                "  {dirty_count} dirty file{}",
+                if dirty_count == 1 { "" } else { "s" }
+            ));
+        }
+    } else {
+        title_parts.push(format!(
+            "  +{} commit{}",
+            ws.commit_count,
+            if ws.commit_count == 1 { "" } else { "s" }
+        ));
+        if ws.commit_count > 0
+            && let Some(secs) = ws.last_activity_secs
+        {
+            title_parts.push(format!("  {}", format_time_ago(secs)));
+        }
+    }
+    if ws.is_stale {
+        title_parts.push("  stale".to_string());
+    }
+    title_parts.join("")
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect) {

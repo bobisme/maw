@@ -67,6 +67,7 @@ pub fn log_audit(event: &AuditEvent) {
 ///
 /// Returns the lowercase hex digest. This is used to log search patterns
 /// without revealing their plaintext (which may match secrets).
+#[must_use]
 pub fn hash_pattern(pattern: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(pattern.as_bytes());
@@ -110,7 +111,7 @@ mod tests {
             ref_filter: None,
             hit_count: 3,
         };
-        let json = serde_json::to_string(&event).unwrap();
+        let json = serde_json::to_string(&event).expect("operation should succeed");
         assert!(json.contains("\"event_type\":\"search\""));
         assert!(json.contains("\"pattern_hash\""));
         assert!(json.contains("\"hit_count\":3"));
@@ -127,7 +128,7 @@ mod tests {
             ref_filter: None,
             hit_count: 0,
         };
-        let json = serde_json::to_string(&event).unwrap();
+        let json = serde_json::to_string(&event).expect("operation should succeed");
         assert!(
             !json.contains(raw_pattern),
             "audit JSON must never contain the raw search pattern"
@@ -140,7 +141,7 @@ mod tests {
             ref_name: "refs/manifold/recovery/alice/2025-01-01".to_string(),
             path: "src/main.rs".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
+        let json = serde_json::to_string(&event).expect("operation should succeed");
         assert!(json.contains("\"event_type\":\"show\""));
         assert!(json.contains("\"ref_name\""));
         assert!(json.contains("\"path\":\"src/main.rs\""));
@@ -152,7 +153,7 @@ mod tests {
             ref_name: "refs/manifold/recovery/alice/2025-01-01".to_string(),
             new_workspace: "recovered-alice".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
+        let json = serde_json::to_string(&event).expect("operation should succeed");
         assert!(json.contains("\"event_type\":\"restore\""));
         assert!(json.contains("\"new_workspace\":\"recovered-alice\""));
     }
@@ -163,7 +164,7 @@ mod tests {
             refs_removed: 5,
             artifacts_removed: 2,
         };
-        let json = serde_json::to_string(&event).unwrap();
+        let json = serde_json::to_string(&event).expect("operation should succeed");
         assert!(json.contains("\"event_type\":\"prune\""));
         assert!(json.contains("\"refs_removed\":5"));
         assert!(json.contains("\"artifacts_removed\":2"));

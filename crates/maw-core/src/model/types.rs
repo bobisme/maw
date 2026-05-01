@@ -324,7 +324,7 @@ impl WorkspaceId {
     /// The maximum length of a workspace name.
     pub const MAX_LEN: usize = 64;
 
-    /// Reserved workspace ID for the synthetic epoch-delta PatchSet.
+    /// Reserved workspace ID for the synthetic epoch-delta `PatchSet`.
     ///
     /// Used during merge to represent files changed in the epoch delta
     /// (between a stale workspace's base epoch and the current epoch).
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn git_oid_valid() {
         let hex = "a".repeat(40);
-        let oid = GitOid::new(&hex).unwrap();
+        let oid = GitOid::new(&hex).expect("operation should succeed");
         assert_eq!(oid.as_str(), hex);
     }
 
@@ -650,24 +650,24 @@ mod tests {
     #[test]
     fn git_oid_display() {
         let hex = "b".repeat(40);
-        let oid = GitOid::new(&hex).unwrap();
+        let oid = GitOid::new(&hex).expect("operation should succeed");
         assert_eq!(format!("{oid}"), hex);
     }
 
     #[test]
     fn git_oid_from_str() {
         let hex = "c".repeat(40);
-        let oid: GitOid = hex.parse().unwrap();
+        let oid: GitOid = hex.parse().expect("operation should succeed");
         assert_eq!(oid.as_str(), hex);
     }
 
     #[test]
     fn git_oid_serde_roundtrip() {
         let hex = "d".repeat(40);
-        let oid = GitOid::new(&hex).unwrap();
-        let json = serde_json::to_string(&oid).unwrap();
+        let oid = GitOid::new(&hex).expect("operation should succeed");
+        let json = serde_json::to_string(&oid).expect("operation should succeed");
         assert_eq!(json, format!("\"{hex}\""));
-        let decoded: GitOid = serde_json::from_str(&json).unwrap();
+        let decoded: GitOid = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, oid);
     }
 
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn epoch_id_valid() {
         let hex = "1".repeat(40);
-        let epoch = EpochId::new(&hex).unwrap();
+        let epoch = EpochId::new(&hex).expect("operation should succeed");
         assert_eq!(epoch.as_str(), hex);
         assert_eq!(epoch.oid().as_str(), hex);
     }
@@ -694,23 +694,23 @@ mod tests {
 
     #[test]
     fn epoch_id_error_kind() {
-        let err = EpochId::new("bad").unwrap_err();
+        let err = EpochId::new("bad").expect_err("operation should fail");
         assert_eq!(err.kind, ErrorKind::EpochId);
     }
 
     #[test]
     fn epoch_id_display() {
         let hex = "2".repeat(40);
-        let epoch = EpochId::new(&hex).unwrap();
+        let epoch = EpochId::new(&hex).expect("operation should succeed");
         assert_eq!(format!("{epoch}"), hex);
     }
 
     #[test]
     fn epoch_id_serde_roundtrip() {
         let hex = "3".repeat(40);
-        let epoch = EpochId::new(&hex).unwrap();
-        let json = serde_json::to_string(&epoch).unwrap();
-        let decoded: EpochId = serde_json::from_str(&json).unwrap();
+        let epoch = EpochId::new(&hex).expect("operation should succeed");
+        let json = serde_json::to_string(&epoch).expect("operation should succeed");
+        let decoded: EpochId = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, epoch);
     }
 
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn base_epoch_valid() {
         let hex = "a".repeat(40);
-        let base = BaseEpoch::new(hex.clone()).unwrap();
+        let base = BaseEpoch::new(hex.clone()).expect("operation should succeed");
         assert_eq!(base.as_str(), hex);
         assert_eq!(base.oid().as_str(), hex);
     }
@@ -734,14 +734,14 @@ mod tests {
     #[test]
     fn base_epoch_display() {
         let hex = "b".repeat(40);
-        let base = BaseEpoch::new(hex.clone()).unwrap();
+        let base = BaseEpoch::new(hex.clone()).expect("operation should succeed");
         assert_eq!(format!("{base}"), hex);
     }
 
     #[test]
     fn base_epoch_as_ref() {
         let hex = "c".repeat(40);
-        let base = BaseEpoch::new(hex.clone()).unwrap();
+        let base = BaseEpoch::new(hex.clone()).expect("operation should succeed");
         let s: &str = base.as_ref();
         assert_eq!(s, hex);
     }
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn base_epoch_from_epoch_id() {
         let hex = "d".repeat(40);
-        let epoch = EpochId::new(&hex).unwrap();
+        let epoch = EpochId::new(&hex).expect("operation should succeed");
         let base: BaseEpoch = epoch.into();
         assert_eq!(base.as_str(), hex);
     }
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn current_epoch_valid() {
         let hex = "e".repeat(40);
-        let cur = CurrentEpoch::new(hex.clone()).unwrap();
+        let cur = CurrentEpoch::new(hex.clone()).expect("operation should succeed");
         assert_eq!(cur.as_str(), hex);
     }
 
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn current_epoch_display() {
         let hex = "1".repeat(40);
-        let cur = CurrentEpoch::new(hex.clone()).unwrap();
+        let cur = CurrentEpoch::new(hex.clone()).expect("operation should succeed");
         assert_eq!(format!("{cur}"), hex);
     }
 
@@ -779,8 +779,8 @@ mod tests {
         // This is a compile-time property, not a runtime one. We assert it by
         // constructing both and observing that there is no `From` between them.
         let hex = "2".repeat(40);
-        let base = BaseEpoch::new(hex.clone()).unwrap();
-        let cur = CurrentEpoch::new(hex.clone()).unwrap();
+        let base = BaseEpoch::new(hex.clone()).expect("operation should succeed");
+        let cur = CurrentEpoch::new(hex).expect("operation should succeed");
         // They share the same underlying string but are distinct types.
         assert_eq!(base.as_str(), cur.as_str());
         // If you try to do `let _: BaseEpoch = cur;` — compile error. Good.
@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn workspace_id_valid_simple() {
-        let id = WorkspaceId::new("agent-1").unwrap();
+        let id = WorkspaceId::new("agent-1").expect("operation should succeed");
         assert_eq!(id.as_str(), "agent-1");
     }
 
@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn workspace_id_rejects_empty() {
-        let err = WorkspaceId::new("").unwrap_err();
+        let err = WorkspaceId::new("").expect_err("operation should fail");
         assert_eq!(err.kind, ErrorKind::WorkspaceId);
     }
 
@@ -854,16 +854,16 @@ mod tests {
 
     #[test]
     fn workspace_id_display() {
-        let id = WorkspaceId::new("test-ws").unwrap();
+        let id = WorkspaceId::new("test-ws").expect("operation should succeed");
         assert_eq!(format!("{id}"), "test-ws");
     }
 
     #[test]
     fn workspace_id_serde_roundtrip() {
-        let id = WorkspaceId::new("my-workspace").unwrap();
-        let json = serde_json::to_string(&id).unwrap();
+        let id = WorkspaceId::new("my-workspace").expect("operation should succeed");
+        let json = serde_json::to_string(&id).expect("operation should succeed");
         assert_eq!(json, "\"my-workspace\"");
-        let decoded: WorkspaceId = serde_json::from_str(&json).unwrap();
+        let decoded: WorkspaceId = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, id);
     }
 
@@ -917,18 +917,21 @@ mod tests {
             WorkspaceState::Destroyed,
         ];
         for state in states {
-            let json = serde_json::to_string(&state).unwrap();
-            let decoded: WorkspaceState = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&state).expect("operation should succeed");
+            let decoded: WorkspaceState =
+                serde_json::from_str(&json).expect("operation should succeed");
             assert_eq!(decoded, state);
         }
     }
 
     #[test]
     fn workspace_state_serde_tagged() {
-        let json = serde_json::to_string(&WorkspaceState::Active).unwrap();
+        let json =
+            serde_json::to_string(&WorkspaceState::Active).expect("operation should succeed");
         assert!(json.contains("\"state\":\"active\""));
 
-        let json = serde_json::to_string(&WorkspaceState::Stale { behind_epochs: 1 }).unwrap();
+        let json = serde_json::to_string(&WorkspaceState::Stale { behind_epochs: 1 })
+            .expect("operation should succeed");
         assert!(json.contains("\"state\":\"stale\""));
         assert!(json.contains("\"behind_epochs\":1"));
     }
@@ -960,8 +963,9 @@ mod tests {
     #[test]
     fn workspace_mode_serde_roundtrip() {
         for mode in [WorkspaceMode::Ephemeral, WorkspaceMode::Persistent] {
-            let json = serde_json::to_string(&mode).unwrap();
-            let decoded: WorkspaceMode = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&mode).expect("operation should succeed");
+            let decoded: WorkspaceMode =
+                serde_json::from_str(&json).expect("operation should succeed");
             assert_eq!(decoded, mode);
         }
     }
@@ -971,9 +975,9 @@ mod tests {
     #[test]
     fn workspace_info_construction() {
         let info = WorkspaceInfo {
-            id: WorkspaceId::new("test").unwrap(),
+            id: WorkspaceId::new("test").expect("operation should succeed"),
             path: PathBuf::from("/tmp/ws/test"),
-            epoch: EpochId::new(&"a".repeat(40)).unwrap(),
+            epoch: EpochId::new(&"a".repeat(40)).expect("operation should succeed"),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::Ephemeral,
             commits_ahead: 0,
@@ -987,9 +991,9 @@ mod tests {
     #[test]
     fn workspace_info_persistent_mode() {
         let info = WorkspaceInfo {
-            id: WorkspaceId::new("agent-1").unwrap(),
+            id: WorkspaceId::new("agent-1").expect("operation should succeed"),
             path: PathBuf::from("/repo/ws/agent-1"),
-            epoch: EpochId::new(&"f".repeat(40)).unwrap(),
+            epoch: EpochId::new(&"f".repeat(40)).expect("operation should succeed"),
             state: WorkspaceState::Active,
             mode: WorkspaceMode::Persistent,
             commits_ahead: 0,
@@ -1000,15 +1004,15 @@ mod tests {
     #[test]
     fn workspace_info_serde_roundtrip() {
         let info = WorkspaceInfo {
-            id: WorkspaceId::new("agent-1").unwrap(),
+            id: WorkspaceId::new("agent-1").expect("operation should succeed"),
             path: PathBuf::from("/repo/ws/agent-1"),
-            epoch: EpochId::new(&"f".repeat(40)).unwrap(),
+            epoch: EpochId::new(&"f".repeat(40)).expect("operation should succeed"),
             state: WorkspaceState::Stale { behind_epochs: 2 },
             mode: WorkspaceMode::Persistent,
             commits_ahead: 0,
         };
-        let json = serde_json::to_string(&info).unwrap();
-        let decoded: WorkspaceInfo = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&info).expect("operation should succeed");
+        let decoded: WorkspaceInfo = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, info);
     }
 
@@ -1016,7 +1020,7 @@ mod tests {
     fn workspace_info_serde_default_mode() {
         // mode field has default, so old JSON without it deserializes to Ephemeral
         let json = r#"{"id":"test","path":"/tmp/ws/test","epoch":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":{"state":"active"}}"#;
-        let info: WorkspaceInfo = serde_json::from_str(json).unwrap();
+        let info: WorkspaceInfo = serde_json::from_str(json).expect("operation should succeed");
         assert!(info.mode.is_ephemeral());
     }
 

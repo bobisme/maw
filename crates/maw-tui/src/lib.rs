@@ -28,6 +28,10 @@ fn restore_terminal() {
 }
 
 /// Run the TUI application with the given data source.
+///
+/// # Errors
+/// Returns an error if terminal setup, drawing, event handling, or data-source
+/// refresh fails.
 pub fn run(data_source: Box<dyn RepoDataSource>) -> Result<()> {
     // Install a panic hook that restores the terminal before the default
     // handler runs.  Without this, a panic leaves the user's terminal in

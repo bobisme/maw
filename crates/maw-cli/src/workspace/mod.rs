@@ -115,6 +115,10 @@ impl MawConfig {
     ///
     /// Checks repo root first, then falls back to ws/default/.maw.toml
     /// (in bare repos, root has no tracked files -- config lives in workspaces).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be read or parsed.
     pub fn load(repo_root: &Path) -> Result<Self> {
         let root_config = repo_root.join(".maw.toml");
         let ws_config = repo_root.join("ws").join("default").join(".maw.toml");
@@ -134,11 +138,13 @@ impl MawConfig {
     }
 
     /// The configured branch name (default: "main").
+    #[must_use]
     pub fn branch(&self) -> &str {
         &self.repo.branch
     }
 
     /// The configured default workspace name (default: "default").
+    #[must_use]
     pub fn default_workspace(&self) -> &str {
         &self.repo.default_workspace
     }
@@ -165,16 +171,15 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
     let store = ChangesStore::open(root);
 
     if let Some(change_record) = store.read_active_record(into)? {
-        let workspace = if !change_record.workspaces.primary.trim().is_empty() {
-            change_record.workspaces.primary
-        } else {
+        let workspace = if change_record.workspaces.primary.trim().is_empty() {
             into.to_owned()
+        } else {
+            change_record.workspaces.primary
         };
         let branch = change_record.git.change_branch;
         if branch.trim().is_empty() {
             bail!(
-                "Change '{}' has no configured branch.\n  To fix: repair change metadata before merging.",
-                into
+                "Change '{into}' has no configured branch.\n  To fix: repair change metadata before merging."
             );
         }
         return Ok(MergeTarget {
@@ -192,22 +197,18 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
         let meta = metadata::read(root, into)?;
         let Some(change_id) = meta.change_id else {
             bail!(
-                "Workspace '{}' is not bound to a change and cannot be used as --into target.\n  Use one of:\n    --into {}\n    --into <change-id>",
-                into,
-                default_workspace
+                "Workspace '{into}' is not bound to a change and cannot be used as --into target.\n  Use one of:\n    --into {default_workspace}\n    --into <change-id>"
             );
         };
 
         let change_record = store.read_active_record(&change_id)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "Workspace '{}' is bound to change '{}' but that change is not active.",
-                into,
-                change_id
+                "Workspace '{into}' is bound to change '{change_id}' but that change is not active."
             )
         })?;
 
         if change_record.git.change_branch.trim().is_empty() {
-            bail!("Change '{}' has no configured branch.", change_id);
+            bail!("Change '{change_id}' has no configured branch.");
         }
 
         return Ok(MergeTarget {
@@ -218,9 +219,7 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
     }
 
     bail!(
-        "Unknown merge target '{}'.\n  To fix: use --into {} or --into <active-change-id>.",
-        into,
-        default_workspace
+        "Unknown merge target '{into}'.\n  To fix: use --into {default_workspace} or --into <active-change-id>."
     )
 }
 
@@ -514,7 +513,7 @@ pub enum WorkspaceCommands {
         ///
         /// Runs the merge engine's conflict detection for every workspace
         /// that has unmerged work. Results appear as annotations in the
-        /// output (text: "(clean)" / "(N conflicts)"; JSON: merge_check field).
+        /// output (text: "(clean)" / "(N conflicts)"; JSON: `merge_check` field).
         ///
         /// This is slower than a plain list since it simulates each merge.
         #[arg(long)]
@@ -1001,7 +1000,7 @@ pub enum WorkspaceCommands {
         /// Show detailed recovery surface output for each destroyed workspace.
         ///
         /// Without this flag, each destroyed workspace prints a single summary line.
-        /// With --verbose, the full RECOVERY_SURFACE block is emitted (snapshot ref,
+        /// With --verbose, the full `RECOVERY_SURFACE` block is emitted (snapshot ref,
         /// OID, capture mode, artifact path, and recovery command).
         #[arg(short, long)]
         verbose: bool,
@@ -1107,6 +1106,13 @@ pub enum WorkspaceCommands {
     },
 }
 
+/// # Errors
+///
+/// Returns an error if the selected workspace command fails.
+///
+/// # Panics
+///
+/// Panics if clap dispatches an impossible create argument state.
 #[allow(clippy::too_many_lines)]
 pub fn run(cmd: WorkspaceCommands) -> Result<()> {
     match cmd {
@@ -1123,7 +1129,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 let name_hint = if random {
                     "<name>".to_string()
                 } else {
-                    name.clone().unwrap_or_else(|| "<name>".to_string())
+                    name.unwrap_or_else(|| "<name>".to_string())
                 };
                 bail!(
                     "Workspace create requires an explicit source.\n  Use one of:\n    maw ws create --from main {name_hint}\n    maw ws create --change <change-id> {name_hint}"
@@ -1476,6 +1482,9 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if the repository root cannot be discovered.
 pub fn repo_root() -> Result<PathBuf> {
     // First preference: ask git for its common-dir. This is the authoritative
     // answer from any worktree context — git always knows its own common-dir,
@@ -1532,6 +1541,10 @@ pub fn repo_root() -> Result<PathBuf> {
 ///
 /// In v2 bare repo model, the repo root has no workspace. This returns
 /// `ws/default/` when it exists, falling back to the repo root.
+///
+/// # Errors
+///
+/// Returns an error if the repository root cannot be discovered.
 pub fn git_cwd() -> Result<PathBuf> {
     let root = repo_root()?;
     let default_ws = root.join("ws").join("default");
@@ -1546,6 +1559,10 @@ pub fn git_cwd() -> Result<PathBuf> {
 ///
 /// Auto-selects the best backend for the current platform and repo size (§7.5).
 /// Falls back to `git-worktree` if detection fails or no `CoW` backend is available.
+///
+/// # Errors
+///
+/// Returns an error if the repository root cannot be discovered or backend setup fails.
 pub fn get_backend() -> Result<AnyBackend> {
     let root = repo_root()?;
 
@@ -1602,6 +1619,9 @@ fn workspaces_dir() -> Result<PathBuf> {
     Ok(repo_root()?.join("ws"))
 }
 
+/// # Errors
+///
+/// Returns an error if `name` is invalid or the repository root cannot be discovered.
 pub fn workspace_path(name: &str) -> Result<PathBuf> {
     validate_workspace_name(name)?;
     Ok(workspaces_dir()?.join(name))
@@ -1638,7 +1658,7 @@ pub(crate) fn now_timestamp_iso8601() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
 
-    let total_millis = dur.as_millis() as u64;
+    let total_millis = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX);
     let millis = total_millis % 1000;
     let secs = total_millis / 1000;
 
@@ -1776,16 +1796,16 @@ mod tests {
 
     #[test]
     fn resolve_merge_target_uses_default_workspace_branch() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
-        std::fs::create_dir_all(root.join("ws/default")).unwrap();
+        std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
         std::fs::write(
             root.join("ws/default/.maw.toml"),
             "[repo]\nbranch = \"trunk\"\ndefault_workspace = \"default\"\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let target = resolve_merge_target(root, "default").unwrap();
+        let target = resolve_merge_target(root, "default").expect("operation should succeed");
         assert_eq!(target.workspace, "default");
         assert_eq!(target.branch, "trunk");
         assert!(target.change_id.is_none());
@@ -1793,17 +1813,17 @@ mod tests {
 
     #[test]
     fn resolve_merge_target_from_change_id_uses_change_branch() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
-        std::fs::create_dir_all(root.join("ws/default")).unwrap();
+        std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
 
         let store = ChangesStore::open(root);
         let record = sample_change("ch-1aa", "changes/ch-1aa-topic", "agent-7");
         store
             .with_lock("test write", |locked| locked.write_active_record(&record))
-            .unwrap();
+            .expect("operation should succeed");
 
-        let target = resolve_merge_target(root, "ch-1aa").unwrap();
+        let target = resolve_merge_target(root, "ch-1aa").expect("operation should succeed");
         assert_eq!(target.workspace, "agent-7");
         assert_eq!(target.branch, "changes/ch-1aa-topic");
         assert_eq!(target.change_id.as_deref(), Some("ch-1aa"));
@@ -1811,13 +1831,13 @@ mod tests {
 
     #[test]
     fn resolve_merge_target_workspace_without_change_binding_fails() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
-        std::fs::create_dir_all(root.join("ws/default")).unwrap();
-        std::fs::create_dir_all(root.join("ws/agent-2")).unwrap();
+        std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("ws/agent-2")).expect("operation should succeed");
 
         let err = resolve_merge_target(root, "agent-2")
-            .unwrap_err()
+            .expect_err("operation should fail")
             .to_string();
         assert!(
             err.contains("is not bound to a change"),

@@ -1,10 +1,10 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use maw_git::GitRepo as _;
 
-use crate::workspace::{git_cwd, repo_root, MawConfig};
+use crate::workspace::{MawConfig, git_cwd, repo_root};
 
 #[derive(Args)]
 pub struct ReleaseArgs {
@@ -25,6 +25,9 @@ pub struct ReleaseArgs {
 ///
 /// Assumes the version bump is already merged (via `maw ws merge`).
 #[allow(clippy::too_many_lines)]
+/// # Errors
+///
+/// Returns an error if release validation or git operations fail.
 pub fn run(args: &ReleaseArgs) -> Result<()> {
     let tag = &args.tag;
 
@@ -65,7 +68,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
 
     let release_oid = if branch_oid == epoch_oid {
         println!("  {branch} already at current epoch.");
-        epoch_oid.clone()
+        epoch_oid
     } else if branch_oid.is_empty() {
         println!(
             "  Creating {branch} at epoch ({})...",
@@ -78,7 +81,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("invalid epoch OID: {e}"))?;
         repo.write_ref(&ref_name, oid, &format!("release: create {branch}"))
             .map_err(|e| anyhow::anyhow!("Failed to set {branch}: {e}"))?;
-        epoch_oid.clone()
+        epoch_oid
     } else if git_is_ancestor(&root, &branch_oid, &epoch_oid)? {
         println!(
             "  Advancing {branch} to epoch ({})...",
@@ -91,7 +94,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("invalid epoch OID: {e}"))?;
         repo.write_ref(&ref_name, oid, &format!("release: advance {branch}"))
             .map_err(|e| anyhow::anyhow!("Failed to advance {branch}: {e}"))?;
-        epoch_oid.clone()
+        epoch_oid
     } else if git_is_ancestor(&root, &epoch_oid, &branch_oid)? {
         println!(
             "  {branch} is ahead of current epoch ({} > {}). Not rewinding.",
@@ -101,7 +104,7 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
         println!(
             "  WARNING: refs/manifold/epoch/current is stale for this branch tip; releasing from {branch}."
         );
-        branch_oid.clone()
+        branch_oid
     } else {
         bail!(
             "Ref divergence detected: {branch} and refs/manifold/epoch/current do not have an ancestor relationship.\n  \
@@ -306,18 +309,18 @@ mod tests {
     }
 
     fn repo_with_two_commits() -> (TempDir, String, String) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
         git(root, &["init"]);
         git(root, &["config", "user.email", "test@example.com"]);
         git(root, &["config", "user.name", "Test User"]);
 
-        std::fs::write(root.join("file.txt"), "one\n").unwrap();
+        std::fs::write(root.join("file.txt"), "one\n").expect("operation should succeed");
         git(root, &["add", "file.txt"]);
         git(root, &["commit", "-m", "first"]);
         let first = git(root, &["rev-parse", "HEAD"]);
 
-        std::fs::write(root.join("file.txt"), "two\n").unwrap();
+        std::fs::write(root.join("file.txt"), "two\n").expect("operation should succeed");
         git(root, &["commit", "-am", "second"]);
         let second = git(root, &["rev-parse", "HEAD"]);
 
@@ -330,10 +333,12 @@ mod tests {
         let root = dir.path();
         git(root, &["tag", "v1.0.0", &first]);
 
-        create_or_verify_tag(root, "v1.0.0", &first).unwrap();
+        create_or_verify_tag(root, "v1.0.0", &first).expect("operation should succeed");
 
         assert_eq!(
-            resolve_tag_target_oid(root, "v1.0.0").unwrap().as_deref(),
+            resolve_tag_target_oid(root, "v1.0.0")
+                .expect("operation should succeed")
+                .as_deref(),
             Some(first.as_str())
         );
     }
@@ -351,7 +356,9 @@ mod tests {
         assert!(err.contains("already exists at"), "{err}");
         assert!(err.contains("release targets"), "{err}");
         assert_eq!(
-            resolve_tag_target_oid(root, "v1.0.0").unwrap().as_deref(),
+            resolve_tag_target_oid(root, "v1.0.0")
+                .expect("operation should succeed")
+                .as_deref(),
             Some(first.as_str())
         );
     }

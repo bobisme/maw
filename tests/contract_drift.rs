@@ -470,7 +470,10 @@ fn extract_file_path(location: &str) -> Option<String> {
     // Fallback: look for .rs path
     for word in location.split_whitespace() {
         let word = word.trim_matches('`').trim_matches(',');
-        if word.ends_with(".rs") {
+        if std::path::Path::new(word)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        {
             return Some(word.to_string());
         }
     }

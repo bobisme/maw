@@ -32,7 +32,7 @@ fn parse_git_version(version_output: &str) -> Option<(u32, u32, u32)> {
     let patch: u32 = parts
         .next()
         .and_then(|s| {
-            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
             digits.parse().ok()
         })
         .unwrap_or(0);
@@ -102,6 +102,9 @@ fn print_check(check: &DoctorCheck) {
 }
 
 #[allow(clippy::unnecessary_wraps)]
+/// # Errors
+///
+/// Returns an error if repository checks or output serialization fail.
 pub fn run(format: Option<OutputFormat>) -> Result<()> {
     let format = OutputFormat::resolve(format);
     let mut checks = Vec::new();
@@ -279,13 +282,11 @@ fn check_default_workspace(root: Option<&Path>) -> DoctorCheck {
         };
     }
 
-    let has_files = std::fs::read_dir(&default_ws)
-        .map(|entries| {
-            entries
-                .flatten()
-                .any(|e| !e.file_name().to_string_lossy().starts_with('.'))
-        })
-        .unwrap_or(false);
+    let has_files = std::fs::read_dir(&default_ws).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| !e.file_name().to_string_lossy().starts_with('.'))
+    });
 
     if has_files {
         DoctorCheck {
@@ -419,6 +420,7 @@ fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
     }
 }
 
+#[must_use]
 pub fn stray_root_entries(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -823,19 +825,19 @@ mod tests {
     #[cfg(feature = "lfs")]
     #[test]
     fn check_lfs_detects_pointer_stub() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().expect("operation should succeed");
         let root = tmp.path();
         let ws_default = root.join("ws").join("default");
-        std::fs::create_dir_all(&ws_default).unwrap();
+        std::fs::create_dir_all(&ws_default).expect("operation should succeed");
         std::fs::write(
             ws_default.join(".gitattributes"),
             "*.bin filter=lfs diff=lfs merge=lfs -text\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         let pointer = "version https://git-lfs.github.com/spec/v1\n\
                        oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
                        size 12345\n";
-        std::fs::write(ws_default.join("hero.bin"), pointer).unwrap();
+        std::fs::write(ws_default.join("hero.bin"), pointer).expect("operation should succeed");
 
         let check = check_lfs(Some(root));
         assert_eq!(check.status, "warn", "got: {}", check.message);
@@ -855,9 +857,9 @@ mod tests {
     #[cfg(feature = "lfs")]
     #[test]
     fn check_lfs_no_gitattributes_is_ok() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().expect("operation should succeed");
         let root = tmp.path();
-        std::fs::create_dir_all(root.join("ws").join("default")).unwrap();
+        std::fs::create_dir_all(root.join("ws").join("default")).expect("operation should succeed");
         let check = check_lfs(Some(root));
         assert_eq!(check.status, "ok");
         assert!(check.message.contains("no LFS tracked patterns"));
@@ -866,17 +868,18 @@ mod tests {
     #[cfg(feature = "lfs")]
     #[test]
     fn check_lfs_healthy_workspace() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().expect("operation should succeed");
         let root = tmp.path();
         let ws_default = root.join("ws").join("default");
-        std::fs::create_dir_all(&ws_default).unwrap();
+        std::fs::create_dir_all(&ws_default).expect("operation should succeed");
         std::fs::write(
             ws_default.join(".gitattributes"),
             "*.bin filter=lfs -text\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         // A non-pointer (real binary content) file
-        std::fs::write(ws_default.join("real.bin"), vec![0u8; 2048]).unwrap();
+        std::fs::write(ws_default.join("real.bin"), vec![0u8; 2048])
+            .expect("operation should succeed");
         let check = check_lfs(Some(root));
         assert_eq!(check.status, "ok", "message: {}", check.message);
         assert!(check.message.contains("healthy"));

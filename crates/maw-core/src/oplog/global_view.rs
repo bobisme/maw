@@ -352,15 +352,15 @@ mod tests {
 
     // Helpers
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn make_view(
@@ -552,7 +552,7 @@ mod tests {
         assert!(
             !gv.merged_patch_set
                 .as_ref()
-                .unwrap()
+                .expect("operation should succeed")
                 .patches
                 .contains_key(&PathBuf::from("src/main.rs"))
         );
@@ -712,8 +712,8 @@ mod tests {
         );
         let gv = compute_global_view_from_views(&[view], vec![("ws-1".into(), "head1".into())]);
 
-        let json = serde_json::to_string_pretty(&gv).unwrap();
-        let decoded: GlobalView = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&gv).expect("operation should succeed");
+        let decoded: GlobalView = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, gv);
     }
 

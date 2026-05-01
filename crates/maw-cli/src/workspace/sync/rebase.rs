@@ -101,6 +101,7 @@ fn rebase_conflicts_path(root: &Path, ws_name: &str) -> std::path::PathBuf {
 }
 
 /// Read rebase conflicts for a workspace, if any.
+#[must_use]
 pub fn read_rebase_conflicts(root: &Path, ws_name: &str) -> Option<RebaseConflicts> {
     let path = rebase_conflicts_path(root, ws_name);
     if !path.exists() {
@@ -111,6 +112,10 @@ pub fn read_rebase_conflicts(root: &Path, ws_name: &str) -> Option<RebaseConflic
 }
 
 /// Delete rebase conflicts file for a workspace (called on resolution).
+///
+/// # Errors
+///
+/// Returns an error if the conflict sidecar cannot be removed.
 pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
     let path = rebase_conflicts_path(root, ws_name);
     if path.exists() {
@@ -125,6 +130,10 @@ pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
 
 /// Replay workspace commits onto the current epoch via the structured-merge
 /// engine. Zero shell-outs — everything goes through [`GitRepo`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "rebase command follows the structured merge pipeline in order"
+)]
 pub(super) fn rebase_workspace(
     root: &Path,
     ws_name: &str,
@@ -452,8 +461,7 @@ pub(super) fn rebase_workspace(
 
         println!();
         println!(
-            "Rebase complete: {replayed} commit(s) replayed, {} with conflicts.",
-            conflicted_steps,
+            "Rebase complete: {replayed} commit(s) replayed, {conflicted_steps} with conflicts.",
         );
         println!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
         println!();
@@ -508,14 +516,14 @@ fn seed_conflict_tree_from_epoch(
         .map_err(|e| anyhow::anyhow!("Failed to read epoch commit: {e}"))?;
 
     let mut tree = ConflictTree::new(base_epoch);
-    walk_tree_into_clean(repo, commit.tree_oid, std::path::PathBuf::new(), &mut tree)?;
+    walk_tree_into_clean(repo, commit.tree_oid, std::path::Path::new(""), &mut tree)?;
     Ok(tree)
 }
 
 fn walk_tree_into_clean(
     repo: &dyn GitRepo,
     tree_oid: git::GitOid,
-    prefix: std::path::PathBuf,
+    prefix: &std::path::Path,
     tree: &mut ConflictTree,
 ) -> Result<()> {
     let entries = repo
@@ -526,7 +534,7 @@ fn walk_tree_into_clean(
         let path = prefix.join(&entry.name);
         match entry.mode {
             git::EntryMode::Tree => {
-                walk_tree_into_clean(repo, entry.oid, path, tree)?;
+                walk_tree_into_clean(repo, entry.oid, &path, tree)?;
             }
             git::EntryMode::Blob
             | git::EntryMode::BlobExecutable
@@ -640,6 +648,10 @@ fn build_epoch_delta_map(
 /// In both sub-cases the `Deleted(from)` side is left alone — the default
 /// `apply` handling will remove `from` from the clean tree without
 /// manufacturing a spurious `ModifyDelete` at the stale path.
+#[expect(
+    clippy::too_many_lines,
+    reason = "rename overlap promotion keeps planning and mutation together"
+)]
 fn promote_overlaps_to_conflicts(
     repo: &dyn GitRepo,
     tree: &mut ConflictTree,
@@ -664,8 +676,7 @@ fn promote_overlaps_to_conflicts(
             && let Some(ws_blob) = change.blob.clone()
             && let Some(from_path) = rename_pairs.modified_to_source.get(&change.path)
             && let Some((ref_old_from, ref_new_from)) = epoch_delta.get(from_path)
-        {
-            if let Some(res) = plan_rename_overlap(
+            && let Some(res) = plan_rename_overlap(
                 ws_name,
                 base_epoch_id,
                 patch,
@@ -673,9 +684,9 @@ fn promote_overlaps_to_conflicts(
                 ws_blob,
                 ref_old_from.clone(),
                 ref_new_from.clone(),
-            ) {
-                rename_resolutions.push(res);
-            }
+            )
+        {
+            rename_resolutions.push(res);
         }
     }
 
@@ -768,14 +779,14 @@ fn promote_overlaps_to_conflicts(
                 // so leave that side's mode as `None`; the workspace-side
                 // hint is what matters for symlink-aware resolution in V1.
                 let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
-                    change.mode.and_then(|m| m.into());
+                    change.mode.and_then(std::convert::Into::into);
                 let ours =
                     ConflictSide::new("epoch".to_owned(), epoch_side_blob.clone(), ord.clone());
                 let theirs = ConflictSide::with_mode(ws_name.to_owned(), ws_blob, ord, ws_mode);
 
                 let file_id = change.file_id.unwrap_or_else(|| {
                     FileId::new(merge_file_id_seed(
-                        &GitOid::new(&"f".repeat(40)).unwrap(),
+                        &GitOid::new(&"f".repeat(40)).expect("operation should succeed"),
                         &change.path,
                     ))
                 });
@@ -840,7 +851,7 @@ fn promote_overlaps_to_conflicts(
                 );
                 let file_id = change.file_id.unwrap_or_else(|| {
                     FileId::new(merge_file_id_seed(
-                        &GitOid::new(&"e".repeat(40)).unwrap(),
+                        &GitOid::new(&"e".repeat(40)).expect("operation should succeed"),
                         &change.path,
                     ))
                 });
@@ -869,6 +880,10 @@ fn promote_overlaps_to_conflicts(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "three-way overlap helper takes explicit blob identities"
+)]
 fn try_clean_three_way_overlap(
     repo: &dyn GitRepo,
     path: &std::path::Path,
@@ -928,7 +943,7 @@ fn read_blob_by_core_oid(repo: &dyn GitRepo, oid: &GitOid) -> Result<Vec<u8>, gi
 ///
 /// A rename is encoded by `diff_patchset` as `Deleted(from, FileId=F) +
 /// Modified(to, FileId=F)`. These maps let `promote_overlaps_to_conflicts`
-/// recognize the pair by path and by FileId.
+/// recognize the pair by path and by `FileId`.
 #[derive(Default)]
 struct RenamePairs {
     /// Every `to` path for a rename pair → its matching `from` path.
@@ -966,8 +981,14 @@ fn collect_rename_pairs(patch: &maw_core::merge::types::PatchSet) -> RenamePairs
     // are left alone — they fall back to the default per-change handling.
     for (_fid, (deletes, modifies)) in by_fid {
         if deletes.len() == 1 && modifies.len() == 1 {
-            let from = deletes.into_iter().next().unwrap();
-            let to = modifies.into_iter().next().unwrap();
+            let from = deletes
+                .into_iter()
+                .next()
+                .expect("operation should succeed");
+            let to = modifies
+                .into_iter()
+                .next()
+                .expect("operation should succeed");
             // Sanity check: a rename pair must have distinct paths.
             if from != to {
                 pairs.deleted_from_paths.insert(from.clone());
@@ -984,6 +1005,10 @@ fn collect_rename_pairs(patch: &maw_core::merge::types::PatchSet) -> RenamePairs
 /// Produced by [`plan_rename_overlap`] during the read-only pass over the
 /// patch; consumed by [`apply_rename_resolution`] which mutates both the
 /// conflict tree and the patch itself.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "rename resolution variants carry path/conflict context for diagnostics"
+)]
 enum RenameResolution {
     /// Pure rename (workspace carried content unchanged across the move) —
     /// the epoch's new blob lands at `to`.
@@ -1030,12 +1055,9 @@ fn plan_rename_overlap(
 
     // Pure rename detection: workspace's content at `to` equals epoch's old
     // content at `from`. When true, epoch's modification can follow cleanly.
-    let is_pure_rename = match &epoch_old {
-        Some(old) => *old == ws_blob,
-        // Defensive: if epoch_old is missing, we can't prove pure-rename;
-        // fall through to a conflict so nothing is silently overwritten.
-        None => false,
-    };
+    // Defensive: if epoch_old is missing, we can't prove pure-rename;
+    // fall through to a conflict so nothing is silently overwritten.
+    let is_pure_rename = epoch_old.as_ref().is_some_and(|old| *old == ws_blob);
 
     if is_pure_rename {
         let mode = change.mode.unwrap_or(EntryMode::Blob);
@@ -1048,13 +1070,13 @@ fn plan_rename_overlap(
         let ord = OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
         // bn-mg0j: propagate the workspace-side mode into the conflict.
         let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
-            change.mode.and_then(|m| m.into());
+            change.mode.and_then(std::convert::Into::into);
         let ours = ConflictSide::new("epoch".to_owned(), epoch_new_blob, ord.clone());
         let theirs = ConflictSide::with_mode(ws_name.to_owned(), ws_blob, ord, ws_mode);
 
         let file_id = change.file_id.unwrap_or_else(|| {
             FileId::new(merge_file_id_seed(
-                &GitOid::new(&"f".repeat(40)).unwrap(),
+                &GitOid::new(&"f".repeat(40)).expect("operation should succeed"),
                 &change.path,
             ))
         });
@@ -1092,8 +1114,9 @@ fn apply_rename_resolution(
     use maw_core::merge::types::ChangeKind;
 
     let to_path = match &res {
-        RenameResolution::Follow { to_path, .. } => to_path.clone(),
-        RenameResolution::Conflict { to_path, .. } => to_path.clone(),
+        RenameResolution::Follow { to_path, .. } | RenameResolution::Conflict { to_path, .. } => {
+            to_path.clone()
+        }
     };
 
     tree.clean.remove(&to_path);
@@ -1199,8 +1222,7 @@ fn inject_merge_side_conflicts(
                         let mode = change.mode.unwrap_or(EntryMode::Blob);
                         let oid = sides
                             .first()
-                            .map(|s| s.content.clone())
-                            .unwrap_or_else(|| blob.clone());
+                            .map_or_else(|| blob.clone(), |s| s.content.clone());
                         tree.clean.insert(p, MaterializedEntry::new(mode, oid));
                     } else {
                         tree.conflicts.insert(
@@ -1231,8 +1253,7 @@ fn inject_merge_side_conflicts(
         let ours_oid = tree
             .clean
             .get(&path)
-            .map(|e| e.oid.clone())
-            .unwrap_or_else(|| blob.clone());
+            .map_or_else(|| blob.clone(), |e| e.oid.clone());
 
         // bn-2ras: if the "ours" OID (first-parent's effective content) and
         // the new merge-parent side are byte-identical, both parents agree —
@@ -1275,10 +1296,9 @@ fn inject_merge_side_conflicts(
 /// blob OID. Used by [`inject_merge_side_conflicts`] to collapse phantom
 /// conflicts where every parent contributed identical content (bn-2ras).
 fn sides_all_same(sides: &[ConflictSide]) -> bool {
-    match sides.first() {
-        Some(first) => sides.iter().all(|s| s.content == first.content),
-        None => false,
-    }
+    sides
+        .first()
+        .is_some_and(|first| sides.iter().all(|s| s.content == first.content))
 }
 
 /// Deterministic `FileId` seed used for merge-commit-induced conflicts.
@@ -1431,8 +1451,9 @@ mod tests {
             rebase_from: "c".repeat(40),
             rebase_to: "d".repeat(40),
         };
-        let json = serde_json::to_string_pretty(&conflicts).unwrap();
-        let parsed: RebaseConflicts = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&conflicts).expect("operation should succeed");
+        let parsed: RebaseConflicts =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(parsed.conflicts.len(), 2);
         assert_eq!(parsed.conflicts[0].path, "src/main.rs");
         assert_eq!(parsed.conflicts[1].path, "Cargo.toml");
@@ -1454,13 +1475,13 @@ mod tests {
     use maw_core::model::types::{EpochId, WorkspaceId};
 
     fn test_epoch() -> EpochId {
-        EpochId::new(&"e".repeat(40)).unwrap()
+        EpochId::new(&"e".repeat(40)).expect("operation should succeed")
     }
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
     fn test_ws_id(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     #[test]
@@ -1515,10 +1536,8 @@ mod tests {
         let path = std::path::PathBuf::from("side1.txt");
         let ours = test_oid('a');
         let theirs = test_oid('b');
-        tree.clean.insert(
-            path.clone(),
-            MaterializedEntry::new(EntryMode::Blob, ours.clone()),
-        );
+        tree.clean
+            .insert(path.clone(), MaterializedEntry::new(EntryMode::Blob, ours));
 
         let side_patch = PatchSet::new(
             test_ws_id("feat"),
@@ -1528,7 +1547,7 @@ mod tests {
                 ChangeKind::Modified,
                 None,
                 Some(CoreFileId::new(1)),
-                Some(theirs.clone()),
+                Some(theirs),
                 Some(EntryMode::Blob),
             )],
         );

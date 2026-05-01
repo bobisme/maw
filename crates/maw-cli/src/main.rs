@@ -374,32 +374,32 @@ mod tests {
 
     #[test]
     fn emits_notice_for_jj_only_repo() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".jj")).unwrap();
+        let dir = tempdir().expect("operation should succeed");
+        fs::create_dir_all(dir.path().join(".jj")).expect("operation should succeed");
 
         assert!(should_emit_migration_notice(dir.path()));
     }
 
     #[test]
     fn does_not_emit_notice_for_manifold_only_repo() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".manifold")).unwrap();
+        let dir = tempdir().expect("operation should succeed");
+        fs::create_dir_all(dir.path().join(".manifold")).expect("operation should succeed");
 
         assert!(!should_emit_migration_notice(dir.path()));
     }
 
     #[test]
     fn does_not_emit_notice_when_both_exist() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".jj")).unwrap();
-        fs::create_dir_all(dir.path().join(".manifold")).unwrap();
+        let dir = tempdir().expect("operation should succeed");
+        fs::create_dir_all(dir.path().join(".jj")).expect("operation should succeed");
+        fs::create_dir_all(dir.path().join(".manifold")).expect("operation should succeed");
 
         assert!(!should_emit_migration_notice(dir.path()));
     }
 
     #[test]
     fn does_not_emit_notice_when_neither_exists() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
 
         assert!(!should_emit_migration_notice(dir.path()));
     }

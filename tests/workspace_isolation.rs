@@ -161,16 +161,16 @@ fn modify_file_in_workspace_a_original_in_workspace_b() {
     repo.modify_file("ws-mod-a", "config.toml", "[modified]\nversion = 2\n");
 
     // B should have original content.
-    let b_content =
-        std::fs::read_to_string(repo.workspace_path("ws-mod-b").join("config.toml")).unwrap();
+    let b_content = std::fs::read_to_string(repo.workspace_path("ws-mod-b").join("config.toml"))
+        .expect("operation should succeed");
     assert_eq!(
         b_content, "[original]\nversion = 1\n",
         "ws-mod-b must have original content"
     );
 
     // A should have modified content.
-    let a_content =
-        std::fs::read_to_string(repo.workspace_path("ws-mod-a").join("config.toml")).unwrap();
+    let a_content = std::fs::read_to_string(repo.workspace_path("ws-mod-a").join("config.toml"))
+        .expect("operation should succeed");
     assert_eq!(
         a_content, "[modified]\nversion = 2\n",
         "ws-mod-a should have modified content"
@@ -228,8 +228,8 @@ fn five_workspaces_concurrent_edits_no_cross_contamination() {
         }
 
         // base.txt should show THIS workspace's modification only.
-        let base_content =
-            std::fs::read_to_string(repo.workspace_path(name).join("base.txt")).unwrap();
+        let base_content = std::fs::read_to_string(repo.workspace_path(name).join("base.txt"))
+            .expect("operation should succeed");
         assert_eq!(
             base_content,
             format!("modified by {name}\n"),
@@ -238,8 +238,8 @@ fn five_workspaces_concurrent_edits_no_cross_contamination() {
     }
 
     // Default workspace should still have original base.txt.
-    let default_base =
-        std::fs::read_to_string(repo.workspace_path("default").join("base.txt")).unwrap();
+    let default_base = std::fs::read_to_string(repo.workspace_path("default").join("base.txt"))
+        .expect("operation should succeed");
     assert_eq!(
         default_base, "base content\n",
         "default workspace base.txt should be untouched"
@@ -311,7 +311,7 @@ fn destroying_workspace_does_not_affect_sibling_files() {
         survivor.exists(),
         "ws-alive's file should survive sibling destruction"
     );
-    let content = std::fs::read_to_string(&survivor).unwrap();
+    let content = std::fs::read_to_string(&survivor).expect("operation should succeed");
     assert_eq!(content, "I persist");
 }
 
@@ -329,7 +329,7 @@ fn binary_file_isolation() {
     // Write binary content in A.
     let binary_content: Vec<u8> = (u8::MIN..=u8::MAX).collect();
     let file_path = repo.workspace_path("ws-bin-a").join("data.bin");
-    std::fs::write(&file_path, &binary_content).unwrap();
+    std::fs::write(&file_path, &binary_content).expect("operation should succeed");
 
     // B should not have it.
     let b_file = repo.workspace_path("ws-bin-b").join("data.bin");

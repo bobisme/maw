@@ -183,8 +183,7 @@ impl Default for SequenceGenerator {
 fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 // ---------------------------------------------------------------------------
@@ -198,11 +197,11 @@ mod tests {
     use crate::model::types::EpochId;
 
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn key(epoch_char: char, ws_name: &str, seq: u64, wall: u64) -> OrderingKey {
@@ -401,8 +400,8 @@ mod tests {
     #[test]
     fn ordering_key_serde_roundtrip() {
         let k = key('f', "agent-3", 99, 123_456_789);
-        let json = serde_json::to_string(&k).unwrap();
-        let parsed: OrderingKey = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&k).expect("operation should succeed");
+        let parsed: OrderingKey = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(parsed.epoch_id, k.epoch_id);
         assert_eq!(parsed.workspace_id, k.workspace_id);
         assert_eq!(parsed.seq, k.seq);
@@ -415,8 +414,9 @@ mod tests {
         seq_gen.next_with_clock(5000);
         seq_gen.next_with_clock(6000);
 
-        let json = serde_json::to_string(&seq_gen).unwrap();
-        let restored: SequenceGenerator = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&seq_gen).expect("operation should succeed");
+        let restored: SequenceGenerator =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(restored.last_seq(), seq_gen.last_seq());
         assert_eq!(restored.last_wall_clock_ms(), seq_gen.last_wall_clock_ms());
     }

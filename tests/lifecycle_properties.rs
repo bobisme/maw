@@ -21,13 +21,14 @@ mod manifold_common;
 
 use manifold_common::TestRepo;
 use proptest::prelude::*;
+use std::fmt::Write as _;
 use std::process::Command;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Get the list of refs that a workspace owns (mirrors maw_core::refs::workspace_owned_refs).
+/// Get the list of refs that a workspace owns (mirrors `maw_core::refs::workspace_owned_refs`).
 /// Inlined here because maw-core is not a direct dependency of the root test crate
 /// in a way that makes the function trivially importable from integration tests.
 fn workspace_owned_refs(name: &str) -> Vec<String> {
@@ -44,8 +45,7 @@ fn ref_exists(repo: &TestRepo, ref_name: &str) -> bool {
         .args(["rev-parse", "--verify", ref_name])
         .current_dir(repo.root())
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Read the OID that a ref points to, or None if the ref doesn't exist.
@@ -60,18 +60,6 @@ fn ref_oid(repo: &TestRepo, ref_name: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Check whether any recovery refs exist for a workspace.
-fn has_recovery_refs(repo: &TestRepo, name: &str) -> bool {
-    let prefix = format!("refs/manifold/recovery/{name}/");
-    let out = Command::new("git")
-        .args(["for-each-ref", "--format=%(refname)", &prefix])
-        .current_dir(repo.root())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    !stdout.trim().is_empty()
 }
 
 /// Advance the default-branch epoch by creating a throwaway workspace,
@@ -199,7 +187,7 @@ proptest! {
             .args(["diff", "--name-only"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let diff_files = String::from_utf8_lossy(&diff_out.stdout);
 
         // Check tracked files for markers.
@@ -207,7 +195,7 @@ proptest! {
             .args(["ls-files"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let tracked = String::from_utf8_lossy(&ls_out.stdout);
 
         for file in tracked.lines().chain(diff_files.lines()) {
@@ -304,7 +292,7 @@ proptest! {
             repo.git_in_workspace("phoenix", &["commit", "-m", &format!("old {i}")]);
         }
 
-        let head_ref = format!("refs/manifold/head/phoenix");
+        let head_ref = "refs/manifold/head/phoenix".to_string();
         let old_oid = ref_oid(&repo, &head_ref);
 
         repo.maw_ok(&["ws", "destroy", "phoenix", "--force"]);
@@ -419,7 +407,8 @@ proptest! {
         repo.maw_ok(&["ws", "create", "alice"]);
         let mut alice_content = String::from("header\n");
         for i in 0..alice_lines {
-            alice_content.push_str(&format!("alice-event-{i}\n"));
+            writeln!(&mut alice_content, "alice-event-{i}")
+                .expect("writing to String cannot fail");
         }
         repo.add_file("alice", "events.log", &alice_content);
         repo.git_in_workspace("alice", &["add", "-A"]);
@@ -428,7 +417,7 @@ proptest! {
         repo.maw_ok(&["ws", "create", "bob"]);
         let mut bob_content = String::from("header\n");
         for i in 0..bob_lines {
-            bob_content.push_str(&format!("bob-event-{i}\n"));
+            writeln!(&mut bob_content, "bob-event-{i}").expect("writing to String cannot fail");
         }
         repo.add_file("bob", "events.log", &bob_content);
         repo.git_in_workspace("bob", &["add", "-A"]);

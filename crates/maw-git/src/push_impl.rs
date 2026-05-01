@@ -18,7 +18,7 @@ fn repo_dir(repo: &GixRepo) -> Result<std::path::PathBuf, GitError> {
     repo.repo
         .git_dir()
         .parent()
-        .map(|p| p.to_path_buf())
+        .map(std::path::Path::to_path_buf)
         .ok_or_else(|| GitError::BackendError {
             message: "cannot determine repository working directory".into(),
         })

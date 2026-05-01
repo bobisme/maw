@@ -313,10 +313,21 @@ pub fn compute_patchset(
 ) -> Result<PatchSet, DiffError> {
     let mut patches: BTreeMap<PathBuf, PatchValue> = BTreeMap::new();
     let file_id_map = load_file_id_map(workspace_path)?;
+    collect_tracked_changes(workspace_path, base_epoch, &file_id_map, &mut patches)?;
+    collect_untracked_changes(workspace_path, &file_id_map, &mut patches)?;
 
-    // -----------------------------------------------------------------------
-    // Step 1: tracked changes from git diff
-    // -----------------------------------------------------------------------
+    Ok(PatchSet {
+        base_epoch: base_epoch.clone(),
+        patches,
+    })
+}
+
+fn collect_tracked_changes(
+    workspace_path: &Path,
+    base_epoch: &EpochId,
+    file_id_map: &FileIdMap,
+    patches: &mut BTreeMap<PathBuf, PatchValue>,
+) -> Result<(), DiffError> {
     let diff_out = git_cmd(
         workspace_path,
         &[
@@ -399,10 +410,14 @@ pub fn compute_patchset(
             }
         }
     }
+    Ok(())
+}
 
-    // -----------------------------------------------------------------------
-    // Step 2: untracked files → Add
-    // -----------------------------------------------------------------------
+fn collect_untracked_changes(
+    workspace_path: &Path,
+    file_id_map: &FileIdMap,
+    patches: &mut BTreeMap<PathBuf, PatchValue>,
+) -> Result<(), DiffError> {
     let untracked_out = git_cmd(
         workspace_path,
         &["ls-files", "--others", "--exclude-standard"],
@@ -426,11 +441,7 @@ pub fn compute_patchset(
             .unwrap_or_else(|| file_id_from_path(&path));
         patches.insert(path, PatchValue::Add { blob, file_id });
     }
-
-    Ok(PatchSet {
-        base_epoch: base_epoch.clone(),
-        patches,
-    })
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -475,9 +486,9 @@ mod tests {
     fn write_file(dir: &Path, path: &str, content: &str) {
         let full = dir.join(path);
         if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).unwrap();
+            fs::create_dir_all(parent).expect("operation should succeed");
         }
-        fs::write(full, content).unwrap();
+        fs::write(full, content).expect("operation should succeed");
     }
 
     /// Create an initial epoch commit in `dir` and return its OID.
@@ -498,7 +509,7 @@ mod tests {
     #[test]
     fn parse_added_line() {
         let input = "A\tsrc/new.rs";
-        let entries = parse_diff_name_status(input).unwrap();
+        let entries = parse_diff_name_status(input).expect("operation should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], DiffEntry::Added(PathBuf::from("src/new.rs")));
     }
@@ -506,7 +517,7 @@ mod tests {
     #[test]
     fn parse_modified_line() {
         let input = "M\tsrc/lib.rs";
-        let entries = parse_diff_name_status(input).unwrap();
+        let entries = parse_diff_name_status(input).expect("operation should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], DiffEntry::Modified(PathBuf::from("src/lib.rs")));
     }
@@ -514,7 +525,7 @@ mod tests {
     #[test]
     fn parse_deleted_line() {
         let input = "D\told.rs";
-        let entries = parse_diff_name_status(input).unwrap();
+        let entries = parse_diff_name_status(input).expect("operation should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], DiffEntry::Deleted(PathBuf::from("old.rs")));
     }
@@ -522,7 +533,7 @@ mod tests {
     #[test]
     fn parse_renamed_line() {
         let input = "R90\told/path.rs\tnew/path.rs";
-        let entries = parse_diff_name_status(input).unwrap();
+        let entries = parse_diff_name_status(input).expect("operation should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0],
@@ -537,7 +548,7 @@ mod tests {
     fn parse_renamed_r100() {
         // R100 = identical content, just moved
         let input = "R100\tfoo.rs\tbar.rs";
-        let entries = parse_diff_name_status(input).unwrap();
+        let entries = parse_diff_name_status(input).expect("operation should succeed");
         assert_eq!(
             entries[0],
             DiffEntry::Renamed {
@@ -549,14 +560,14 @@ mod tests {
 
     #[test]
     fn parse_empty_output() {
-        let entries = parse_diff_name_status("").unwrap();
+        let entries = parse_diff_name_status("").expect("operation should succeed");
         assert!(entries.is_empty());
     }
 
     #[test]
     fn parse_multiple_entries() {
         let input = "A\tnew.rs\nM\told.rs\nD\tgone.rs";
-        let entries = parse_diff_name_status(input).unwrap();
+        let entries = parse_diff_name_status(input).expect("operation should succeed");
         assert_eq!(entries.len(), 3);
     }
 
@@ -592,7 +603,7 @@ mod tests {
 
     #[test]
     fn file_id_from_blob_is_deterministic() {
-        let oid = GitOid::new(&"a".repeat(40)).unwrap();
+        let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
         let id1 = file_id_from_blob(&oid);
         let id2 = file_id_from_blob(&oid);
         assert_eq!(id1, id2);
@@ -600,8 +611,8 @@ mod tests {
 
     #[test]
     fn file_id_from_blob_differs_for_different_blobs() {
-        let oid1 = GitOid::new(&"a".repeat(40)).unwrap();
-        let oid2 = GitOid::new(&"b".repeat(40)).unwrap();
+        let oid1 = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+        let oid2 = GitOid::new(&"b".repeat(40)).expect("operation should succeed");
         assert_ne!(file_id_from_blob(&oid1), file_id_from_blob(&oid2));
     }
 
@@ -611,7 +622,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_empty_working_dir() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -619,17 +630,17 @@ mod tests {
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "epoch"]);
         let oid = run_git(root, &["rev-parse", "HEAD"]);
-        let epoch = EpochId::new(&oid).unwrap();
+        let epoch = EpochId::new(&oid).expect("operation should succeed");
 
         // No changes since epoch.
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert!(ps.is_empty(), "no changes → empty PatchSet");
         assert_eq!(ps.base_epoch, epoch);
     }
 
     #[test]
     fn compute_patchset_added_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -639,7 +650,7 @@ mod tests {
         write_file(root, "new.rs", "fn new() {}");
         run_git(root, &["add", "new.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(ps.len(), 1);
 
         let pv = ps
@@ -658,7 +669,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_untracked_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -667,7 +678,7 @@ mod tests {
         // Do NOT stage — should be detected via ls-files --others.
         write_file(root, "untracked.txt", "hello");
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(ps.len(), 1);
 
         let pv = ps
@@ -679,7 +690,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_modified_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -689,7 +700,7 @@ mod tests {
         write_file(root, "lib.rs", "fn modified() {}");
         run_git(root, &["add", "lib.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(ps.len(), 1);
 
         let pv = ps
@@ -715,7 +726,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_deleted_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -724,7 +735,7 @@ mod tests {
         // Delete and stage.
         run_git(root, &["rm", "to_delete.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(ps.len(), 1);
 
         let pv = ps
@@ -742,7 +753,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_renamed_file_same_content() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -753,7 +764,7 @@ mod tests {
         // Rename without modifying content.
         run_git(root, &["mv", "old_name.rs", "new_name.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(ps.len(), 1, "rename → one entry at destination path");
 
         let pv = ps
@@ -775,7 +786,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_renamed_file_with_content_change() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -788,7 +799,7 @@ mod tests {
         write_file(root, "new.rs", &format!("{content}// modified\n"));
         run_git(root, &["add", "new.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(ps.len(), 1);
 
         let pv = ps
@@ -810,7 +821,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_multiple_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -829,7 +840,7 @@ mod tests {
         run_git(root, &["rm", "delete.rs"]); // deleted
         run_git(root, &["add", "."]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
 
         // keep.rs → no entry
         assert!(!ps.patches.contains_key(&PathBuf::from("keep.rs")));
@@ -857,7 +868,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_blob_oids_are_correct() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -881,7 +892,7 @@ mod tests {
             .unwrap_or("")
             .to_owned();
 
-        let ps = compute_patchset(root, &epoch_id).unwrap();
+        let ps = compute_patchset(root, &epoch_id).expect("operation should succeed");
         if let Some(PatchValue::Modify {
             base_blob,
             new_blob,
@@ -905,7 +916,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_base_epoch_preserved() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -914,7 +925,7 @@ mod tests {
         write_file(root, "b.rs", "new");
         run_git(root, &["add", "b.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert_eq!(
             ps.base_epoch, epoch,
             "base_epoch must match the epoch passed in"
@@ -923,7 +934,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_uses_btreemap_ordering() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -935,7 +946,7 @@ mod tests {
         write_file(root, "m.rs", "m");
         run_git(root, &["add", "."]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
 
         let keys: Vec<_> = ps.patches.keys().collect();
         let mut sorted = keys.clone();
@@ -945,7 +956,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_uses_fileid_map_for_modify() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -955,20 +966,23 @@ mod tests {
         );
 
         let fileids_dir = root.join(".manifold");
-        fs::create_dir_all(&fileids_dir).unwrap();
+        fs::create_dir_all(&fileids_dir).expect("operation should succeed");
         fs::write(
             fileids_dir.join("fileids"),
             r#"[
   {"path": "tracked.rs", "file_id": "0000000000000000000000000000002a"}
 ]"#,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         write_file(root, "tracked.rs", "v2");
         run_git(root, &["add", "tracked.rs"]);
 
-        let ps = compute_patchset(root, &epoch).unwrap();
-        let patch = ps.patches.get(&PathBuf::from("tracked.rs")).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
+        let patch = ps
+            .patches
+            .get(&PathBuf::from("tracked.rs"))
+            .expect("operation should succeed");
         let PatchValue::Modify { file_id, .. } = patch else {
             panic!("expected Modify patch");
         };
@@ -977,7 +991,7 @@ mod tests {
 
     #[test]
     fn compute_patchset_add_file_id_is_deterministic_across_calls() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
@@ -986,16 +1000,20 @@ mod tests {
         write_file(root, "new_file.rs", "new content");
         run_git(root, &["add", "new_file.rs"]);
 
-        let ps1 = compute_patchset(root, &epoch).unwrap();
-        let ps2 = compute_patchset(root, &epoch).unwrap();
+        let ps1 = compute_patchset(root, &epoch).expect("operation should succeed");
+        let ps2 = compute_patchset(root, &epoch).expect("operation should succeed");
 
-        let PatchValue::Add { file_id: id1, .. } =
-            ps1.patches.get(&PathBuf::from("new_file.rs")).unwrap()
+        let PatchValue::Add { file_id: id1, .. } = ps1
+            .patches
+            .get(&PathBuf::from("new_file.rs"))
+            .expect("operation should succeed")
         else {
             panic!("expected Add patch in first call");
         };
-        let PatchValue::Add { file_id: id2, .. } =
-            ps2.patches.get(&PathBuf::from("new_file.rs")).unwrap()
+        let PatchValue::Add { file_id: id2, .. } = ps2
+            .patches
+            .get(&PathBuf::from("new_file.rs"))
+            .expect("operation should succeed")
         else {
             panic!("expected Add patch in second call");
         };
@@ -1005,20 +1023,20 @@ mod tests {
 
     #[test]
     fn compute_patchset_ignores_unhashable_directory_entries() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let root = dir.path();
 
         git_init(root);
         let epoch = make_epoch(root, &[("base.rs", "// base")]);
 
         let nested = root.join(".tmp/sub");
-        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&nested).expect("operation should succeed");
         run_git(&nested, &["init"]);
         write_file(root, ".tmp/sub/scratch.txt", "nested\n");
 
         write_file(root, "ok.txt", "ok\n");
 
-        let ps = compute_patchset(root, &epoch).unwrap();
+        let ps = compute_patchset(root, &epoch).expect("operation should succeed");
         assert!(
             ps.patches.contains_key(&PathBuf::from("ok.txt")),
             "regular file should still be captured"

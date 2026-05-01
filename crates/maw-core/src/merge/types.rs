@@ -414,11 +414,11 @@ mod tests {
     use crate::model::types::{EpochId, WorkspaceId};
 
     fn make_epoch() -> EpochId {
-        EpochId::new(&"a".repeat(40)).unwrap()
+        EpochId::new(&"a".repeat(40)).expect("operation should succeed")
     }
 
     fn make_ws() -> WorkspaceId {
-        WorkspaceId::new("test-ws").unwrap()
+        WorkspaceId::new("test-ws").expect("operation should succeed")
     }
 
     #[test]
@@ -547,7 +547,7 @@ mod tests {
         // final `ConflictTree::new(base_epoch)` below moves instead of clones.
         let ord_key = OrderingKey::new(
             base_epoch.clone(),
-            "ws-1".parse().unwrap(),
+            "ws-1".parse().expect("operation should succeed"),
             1,
             1_700_000_000_000,
         );
@@ -556,29 +556,35 @@ mod tests {
         // A couple of clean entries.
         tree.clean.insert(
             PathBuf::from("src/lib.rs"),
-            MaterializedEntry::new(EntryMode::Blob, GitOid::new(&"a".repeat(40)).unwrap()),
+            MaterializedEntry::new(
+                EntryMode::Blob,
+                GitOid::new(&"a".repeat(40)).expect("operation should succeed"),
+            ),
         );
         tree.clean.insert(
             PathBuf::from("scripts/build.sh"),
             MaterializedEntry::new(
                 EntryMode::BlobExecutable,
-                GitOid::new(&"b".repeat(40)).unwrap(),
+                GitOid::new(&"b".repeat(40)).expect("operation should succeed"),
             ),
         );
         tree.clean.insert(
             PathBuf::from("link"),
-            MaterializedEntry::new(EntryMode::Link, GitOid::new(&"c".repeat(40)).unwrap()),
+            MaterializedEntry::new(
+                EntryMode::Link,
+                GitOid::new(&"c".repeat(40)).expect("operation should succeed"),
+            ),
         );
 
         // One conflict.
         let side_a = ConflictSide::new(
             "ws-1".into(),
-            GitOid::new(&"1".repeat(40)).unwrap(),
+            GitOid::new(&"1".repeat(40)).expect("operation should succeed"),
             ord_key.clone(),
         );
         let side_b = ConflictSide::new(
             "ws-2".into(),
-            GitOid::new(&"2".repeat(40)).unwrap(),
+            GitOid::new(&"2".repeat(40)).expect("operation should succeed"),
             ord_key,
         );
         tree.conflicts.insert(
@@ -589,16 +595,20 @@ mod tests {
             },
         );
 
-        let json = serde_json::to_string(&tree).unwrap();
-        let decoded: ConflictTree = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&tree).expect("operation should succeed");
+        let decoded: ConflictTree = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, tree);
     }
 
     #[test]
     fn materialized_entry_serde_roundtrip() {
-        let entry = MaterializedEntry::new(EntryMode::Blob, GitOid::new(&"f".repeat(40)).unwrap());
-        let json = serde_json::to_string(&entry).unwrap();
-        let decoded: MaterializedEntry = serde_json::from_str(&json).unwrap();
+        let entry = MaterializedEntry::new(
+            EntryMode::Blob,
+            GitOid::new(&"f".repeat(40)).expect("operation should succeed"),
+        );
+        let json = serde_json::to_string(&entry).expect("operation should succeed");
+        let decoded: MaterializedEntry =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, entry);
     }
 }

@@ -40,7 +40,7 @@ use crate::model::types::{EpochId, GitOid, WorkspaceId};
 /// carry is **not** a blob in the current repo's object store, so blob reads
 /// against it will always fail. Treat them as opaque throughout the merge
 /// pipeline: preserve the OID as identity, but never dereference it (bn-3hqg).
-fn is_submodule(mode: Option<GitEntryMode>) -> bool {
+const fn is_submodule(mode: Option<GitEntryMode>) -> bool {
     matches!(mode, Some(GitEntryMode::Commit))
 }
 
@@ -339,13 +339,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let dir = TempDir::new().unwrap();
+            let dir = TempDir::new().expect("operation should succeed");
             let root = dir.path().to_path_buf();
             run_git(&root, &["init", "--initial-branch=main"]);
             run_git(&root, &["config", "user.name", "Test"]);
             run_git(&root, &["config", "user.email", "test@test.com"]);
             run_git(&root, &["config", "commit.gpgsign", "false"]);
-            let repo: Box<dyn GitRepo> = Box::new(maw_git::GixRepo::open(&root).unwrap());
+            let repo: Box<dyn GitRepo> =
+                Box::new(maw_git::GixRepo::open(&root).expect("operation should succeed"));
             Self {
                 _dir: dir,
                 root,
@@ -366,22 +367,22 @@ mod tests {
         fn write(&self, rel: &str, content: &[u8]) {
             let path = self.root.join(rel);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).unwrap();
+                fs::create_dir_all(parent).expect("operation should succeed");
             }
-            fs::write(&path, content).unwrap();
+            fs::write(&path, content).expect("operation should succeed");
         }
 
         fn remove(&self, rel: &str) {
-            fs::remove_file(self.root.join(rel)).unwrap();
+            fs::remove_file(self.root.join(rel)).expect("operation should succeed");
         }
 
         fn rename(&self, from: &str, to: &str) {
             let from_p = self.root.join(from);
             let to_p = self.root.join(to);
             if let Some(parent) = to_p.parent() {
-                fs::create_dir_all(parent).unwrap();
+                fs::create_dir_all(parent).expect("operation should succeed");
             }
-            fs::rename(from_p, to_p).unwrap();
+            fs::rename(from_p, to_p).expect("operation should succeed");
         }
 
         fn chmod_exec(&self, rel: &str) {
@@ -389,9 +390,11 @@ mod tests {
             {
                 use std::os::unix::fs::PermissionsExt;
                 let path = self.root.join(rel);
-                let mut perms = fs::metadata(&path).unwrap().permissions();
+                let mut perms = fs::metadata(&path)
+                    .expect("operation should succeed")
+                    .permissions();
                 perms.set_mode(0o755);
-                fs::set_permissions(&path, perms).unwrap();
+                fs::set_permissions(&path, perms).expect("operation should succeed");
             }
             #[cfg(not(unix))]
             {
@@ -405,9 +408,9 @@ mod tests {
             {
                 let path = self.root.join(rel);
                 if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).unwrap();
+                    fs::create_dir_all(parent).expect("operation should succeed");
                 }
-                std::os::unix::fs::symlink(target, &path).unwrap();
+                std::os::unix::fs::symlink(target, &path).expect("operation should succeed");
             }
             #[cfg(not(unix))]
             {
@@ -422,7 +425,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -436,25 +439,25 @@ mod tests {
             .args(["rev-parse", spec])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git rev-parse {spec} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).expect("operation should succeed")
     }
 
     fn ws() -> WorkspaceId {
-        WorkspaceId::new("test-ws").unwrap()
+        WorkspaceId::new("test-ws").expect("operation should succeed")
     }
 
     fn epoch_from(oid: &GitOid) -> EpochId {
-        EpochId::new(oid.as_str()).unwrap()
+        EpochId::new(oid.as_str()).expect("operation should succeed")
     }
 
     fn zero_oid() -> GitOid {
-        GitOid::new(&"0".repeat(40)).unwrap()
+        GitOid::new(&"0".repeat(40)).expect("operation should succeed")
     }
 
     // ----- Tests -------------------------------------------------------------
@@ -467,7 +470,8 @@ mod tests {
         fx.write("new.txt", b"hello\n");
         let to = fx.commit("add new.txt");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         assert_eq!(ps.change_count(), 1);
         let fc = &ps.changes[0];
         assert_eq!(fc.path, PathBuf::from("new.txt"));
@@ -486,7 +490,8 @@ mod tests {
         fx.write("a.txt", b"v2\n");
         let to = fx.commit("v2");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         assert_eq!(ps.change_count(), 1);
         let fc = &ps.changes[0];
         assert_eq!(fc.path, PathBuf::from("a.txt"));
@@ -504,7 +509,8 @@ mod tests {
         fx.remove("gone.txt");
         let to = fx.commit("remove gone.txt");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         assert_eq!(ps.change_count(), 1);
         let fc = &ps.changes[0];
         assert_eq!(fc.path, PathBuf::from("gone.txt"));
@@ -523,7 +529,8 @@ mod tests {
         fx.rename("old.txt", "new.txt");
         let to = fx.commit("rename old → new");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         // A rename must surface TWO changes: Deleted(old) + Modified(new).
         // Both share the same FileId (derived from the old blob) so
         // downstream identity tracking can follow the move (bn-3525).
@@ -536,12 +543,12 @@ mod tests {
         let del = ps
             .changes
             .iter()
-            .find(|c| c.path == PathBuf::from("old.txt"))
+            .find(|c| c.path == Path::new("old.txt"))
             .expect("Deleted(old.txt) should be present");
         let modi = ps
             .changes
             .iter()
-            .find(|c| c.path == PathBuf::from("new.txt"))
+            .find(|c| c.path == Path::new("new.txt"))
             .expect("Modified(new.txt) should be present");
 
         assert_eq!(del.kind, ChangeKind::Deleted);
@@ -573,7 +580,8 @@ mod tests {
         fx.write("new.txt", edited.as_bytes());
         let to = fx.commit("rename + edit");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         // Rename + edit also surfaces TWO changes.
         assert_eq!(
             ps.change_count(),
@@ -584,12 +592,12 @@ mod tests {
         let del = ps
             .changes
             .iter()
-            .find(|c| c.path == PathBuf::from("old.txt"))
+            .find(|c| c.path == Path::new("old.txt"))
             .expect("Deleted(old.txt) should be present");
         let modi = ps
             .changes
             .iter()
-            .find(|c| c.path == PathBuf::from("new.txt"))
+            .find(|c| c.path == Path::new("new.txt"))
             .expect("Modified(new.txt) should be present");
 
         assert_eq!(del.kind, ChangeKind::Deleted);
@@ -614,7 +622,8 @@ mod tests {
         );
         let to = fx.commit("delete + unrelated add");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         assert_eq!(ps.change_count(), 2);
         let kinds: Vec<_> = ps.changes.iter().map(|c| &c.kind).collect();
         assert!(kinds.contains(&&ChangeKind::Added));
@@ -632,7 +641,8 @@ mod tests {
         fx.chmod_exec("script.sh");
         let to = fx.commit("chmod +x");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         assert_eq!(ps.change_count(), 1);
         let fc = &ps.changes[0];
         assert_eq!(fc.path, PathBuf::from("script.sh"));
@@ -648,12 +658,13 @@ mod tests {
         fx.symlink("link", "target.txt");
         let to = fx.commit("add symlink");
 
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws(), &epoch_from(&from), 50)
+            .expect("operation should succeed");
         // Only the symlink is new — the target was present before.
         let link = ps
             .changes
             .iter()
-            .find(|c| c.path == PathBuf::from("link"))
+            .find(|c| c.path == Path::new("link"))
             .expect("symlink change present");
         assert_eq!(link.kind, ChangeKind::Added);
         assert_eq!(link.mode, Some(EntryMode::Link));
@@ -667,7 +678,8 @@ mod tests {
         let to = fx.commit("root");
 
         // Use the zero OID as the sentinel for "diff against the empty tree".
-        let ps = diff_patchset(&*fx.repo, &zero_oid(), &to, &ws(), &epoch_from(&to), 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &zero_oid(), &to, &ws(), &epoch_from(&to), 50)
+            .expect("operation should succeed");
         assert_eq!(ps.change_count(), 2);
         for c in &ps.changes {
             assert_eq!(c.kind, ChangeKind::Added, "path {:?}", c.path);
@@ -688,17 +700,17 @@ mod tests {
         let from = fx.commit("seed");
 
         // Build a separate repo to serve as the submodule source.
-        let sub_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = tempfile::TempDir::new().expect("operation should succeed");
         run_git(sub_dir.path(), &["init", "--initial-branch=main"]);
         run_git(sub_dir.path(), &["config", "user.name", "Test"]);
         run_git(sub_dir.path(), &["config", "user.email", "test@test.com"]);
         run_git(sub_dir.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(sub_dir.path().join("sub.txt"), b"hi\n").unwrap();
+        fs::write(sub_dir.path().join("sub.txt"), b"hi\n").expect("operation should succeed");
         run_git(sub_dir.path(), &["add", "-A"]);
         run_git(sub_dir.path(), &["commit", "-m", "sub init"]);
 
         // Add as a submodule in the outer repo.
-        let sub_path_str = sub_dir.path().to_str().unwrap();
+        let sub_path_str = sub_dir.path().to_str().expect("operation should succeed");
         run_git(
             &fx.root,
             &[
@@ -721,7 +733,7 @@ mod tests {
         let sub_change = ps
             .changes
             .iter()
-            .find(|c| c.path == PathBuf::from("subdir"))
+            .find(|c| c.path == Path::new("subdir"))
             .expect("submodule change should appear in the patchset");
         assert_eq!(sub_change.kind, ChangeKind::Added);
         assert_eq!(
@@ -747,9 +759,10 @@ mod tests {
         fx.write("a.txt", b"v2\n");
         let to = fx.commit("v2");
 
-        let ws_id = WorkspaceId::new("alice").unwrap();
+        let ws_id = WorkspaceId::new("alice").expect("operation should succeed");
         let epoch = epoch_from(&from);
-        let ps = diff_patchset(&*fx.repo, &from, &to, &ws_id, &epoch, 50).unwrap();
+        let ps = diff_patchset(&*fx.repo, &from, &to, &ws_id, &epoch, 50)
+            .expect("operation should succeed");
         assert_eq!(ps.workspace_id, ws_id);
         assert_eq!(ps.epoch, epoch);
     }

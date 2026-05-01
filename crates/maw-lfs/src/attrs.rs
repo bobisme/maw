@@ -86,16 +86,21 @@ pub struct AttrsMatcher {
 
 impl AttrsMatcher {
     /// Empty matcher — nothing is LFS.
-    pub fn empty() -> Self {
+    #[must_use]
+    pub const fn empty() -> Self {
         Self { files: Vec::new() }
     }
 
     /// True if no `.gitattributes` files were loaded (no rules to match).
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 
     /// Load all `.gitattributes` files under `workdir`.
+    ///
+    /// # Errors
+    /// Returns an error if a `.gitattributes` file cannot be read or parsed.
     pub fn from_workdir(workdir: &Path) -> Result<Self, AttrsError> {
         let mut files = Vec::new();
         collect_attrs_files(workdir, workdir, &mut files)?;
@@ -110,6 +115,9 @@ impl AttrsMatcher {
     /// Each entry is `(dir_prefix, file_contents)` where `dir_prefix` is
     /// the repo-relative directory containing the `.gitattributes`, with
     /// trailing slash (or empty string for the root).
+    ///
+    /// # Errors
+    /// Returns an error if any provided `.gitattributes` contents cannot be parsed.
     pub fn from_entries(entries: Vec<(String, Vec<u8>)>) -> Result<Self, AttrsError> {
         let mut files = Vec::new();
         for (dir_prefix, bytes) in entries {
@@ -127,9 +135,12 @@ impl AttrsMatcher {
     /// attributes blobs directly from the tree. Use this when merging
     /// workspace content: pass the target epoch's tree so the matcher
     /// reflects the `.gitattributes` state *at the merge base*.
+    ///
+    /// # Errors
+    /// Returns an error if tree entries or attributes blobs cannot be decoded.
     pub fn from_gix_tree(repo: &gix::Repository, tree: &gix::Tree<'_>) -> Result<Self, AttrsError> {
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-        collect_gitattributes_from_gix_tree(repo, tree, String::new(), &mut entries)?;
+        collect_gitattributes_from_gix_tree(repo, tree, "", &mut entries)?;
         Self::from_entries(entries)
     }
 
@@ -138,14 +149,15 @@ impl AttrsMatcher {
     /// Convenience wrapper around [`Self::from_gix_tree`]. Returns an empty
     /// matcher if the repo has no HEAD (fresh repo) or if the HEAD tree
     /// cannot be resolved.
+    ///
+    /// # Errors
+    /// Returns an error if the HEAD tree exists but its attributes cannot be decoded.
     pub fn from_gix_head(repo: &gix::Repository) -> Result<Self, AttrsError> {
-        let head_commit = match repo.head_commit() {
-            Ok(c) => c,
-            Err(_) => return Ok(Self::empty()),
+        let Ok(head_commit) = repo.head_commit() else {
+            return Ok(Self::empty());
         };
-        let tree = match head_commit.tree() {
-            Ok(t) => t,
-            Err(_) => return Ok(Self::empty()),
+        let Ok(tree) = head_commit.tree() else {
+            return Ok(Self::empty());
         };
         Self::from_gix_tree(repo, &tree)
     }
@@ -156,6 +168,7 @@ impl AttrsMatcher {
     /// Absolute paths (starting with `/`) are normalized by stripping the
     /// leading slash. This prevents a panic in `gix-glob` which requires
     /// relative paths (bn-3t55).
+    #[must_use]
     pub fn is_lfs(&self, rel_path: &str) -> bool {
         let rel_path = rel_path.trim_start_matches('/');
         let mut current = false;
@@ -185,6 +198,7 @@ impl AttrsMatcher {
     /// rule is `-merge` / `!merge` (reset to default text merge).
     ///
     /// Absolute paths are normalized (bn-3t55).
+    #[must_use]
     pub fn merge_driver(&self, rel_path: &str) -> Option<String> {
         let rel_path = rel_path.trim_start_matches('/');
         let mut current: Option<String> = None;
@@ -218,7 +232,7 @@ impl AttrsMatcher {
 fn collect_gitattributes_from_gix_tree(
     repo: &gix::Repository,
     tree: &gix::Tree<'_>,
-    prefix: String,
+    prefix: &str,
     out: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), AttrsError> {
     for entry_result in tree.iter() {
@@ -237,7 +251,7 @@ fn collect_gitattributes_from_gix_tree(
                 message: format!("find subtree {subtree_id}: {e}"),
             })?;
             let sub_prefix = format!("{prefix}{name}/");
-            collect_gitattributes_from_gix_tree(repo, &subtree, sub_prefix, out)?;
+            collect_gitattributes_from_gix_tree(repo, &subtree, &sub_prefix, out)?;
         } else if name == ".gitattributes" {
             let blob_id = gix::ObjectId::from(entry.inner.oid);
             let mut blob = repo.find_blob(blob_id).map_err(|e| AttrsError::Parse {
@@ -245,7 +259,7 @@ fn collect_gitattributes_from_gix_tree(
                 line: 0,
                 message: format!("read .gitattributes blob {blob_id}: {e}"),
             })?;
-            out.push((prefix.clone(), blob.take_data()));
+            out.push((prefix.to_string(), blob.take_data()));
         }
     }
     Ok(())
@@ -280,9 +294,8 @@ fn collect_attrs_files(
         out.push(AttrsFile { dir_prefix, rules });
     }
 
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -302,7 +315,7 @@ fn dir_prefix_for(workdir: &Path, dir: &Path) -> String {
     }
     let rel = dir
         .strip_prefix(workdir)
-        .unwrap_or(Path::new(""))
+        .unwrap_or_else(|_| Path::new(""))
         .to_string_lossy()
         .replace('\\', "/");
     if rel.is_empty() {
@@ -314,9 +327,8 @@ fn dir_prefix_for(workdir: &Path, dir: &Path) -> String {
 
 fn parse_rules(bytes: &[u8], source_prefix: &str) -> Result<Vec<Rule>, AttrsError> {
     let mut rules = Vec::new();
-    let mut line_no = 0usize;
-    for line in bytes.split(|b| *b == b'\n') {
-        line_no += 1;
+    for (idx, line) in bytes.split(|b| *b == b'\n').enumerate() {
+        let line_no = idx + 1;
         // Trim leading whitespace and skip comments/blank.
         let line = trim_line(line);
         if line.is_empty() || line[0] == b'#' {
@@ -328,9 +340,8 @@ fn parse_rules(bytes: &[u8], source_prefix: &str) -> Result<Vec<Rule>, AttrsErro
         if pat_bytes.starts_with(b"[attr]") {
             continue;
         }
-        let pattern = match Pattern::from_bytes(pat_bytes) {
-            Some(p) => p,
-            None => continue,
+        let Some(pattern) = Pattern::from_bytes(pat_bytes) else {
+            continue;
         };
         if pattern.mode.contains(PatternMode::NEGATIVE) {
             // Gitattributes forbids negated patterns; skip to match git's behavior.
@@ -393,13 +404,9 @@ fn extract_filter_decision(attrs: &[u8]) -> FilterDecision {
         if token.is_empty() {
             continue;
         }
-        let (attr_name, assigned) = match token.iter().position(|b| *b == b'=') {
-            Some(i) => (&token[..i], Some(&token[i + 1..])),
-            None => (token, None),
-        };
+        let (attr_name, assigned) = split_attr_token(token);
         let (name_bytes, is_reset) = match attr_name.first() {
-            Some(b'-') => (&attr_name[1..], true),
-            Some(b'!') => (&attr_name[1..], true),
+            Some(b'-' | b'!') => (&attr_name[1..], true),
             _ => (attr_name, false),
         };
         if name_bytes != b"filter" {
@@ -410,8 +417,7 @@ fn extract_filter_decision(attrs: &[u8]) -> FilterDecision {
         } else {
             match assigned {
                 Some(v) if v == b"lfs" => FilterDecision::SetLfs,
-                Some(_) => FilterDecision::NotLfs,
-                None => FilterDecision::NotLfs, // bare `filter` — no value
+                Some(_) | None => FilterDecision::NotLfs, // bare `filter` — no value
             }
         };
     }
@@ -431,13 +437,9 @@ fn extract_merge_decision(attrs: &[u8]) -> MergeDecision {
         if token.is_empty() {
             continue;
         }
-        let (attr_name, assigned) = match token.iter().position(|b| *b == b'=') {
-            Some(i) => (&token[..i], Some(&token[i + 1..])),
-            None => (token, None),
-        };
+        let (attr_name, assigned) = split_attr_token(token);
         let (name_bytes, is_reset) = match attr_name.first() {
-            Some(b'-') => (&attr_name[1..], true),
-            Some(b'!') => (&attr_name[1..], true),
+            Some(b'-' | b'!') => (&attr_name[1..], true),
             _ => (attr_name, false),
         };
         if name_bytes != b"merge" {
@@ -446,30 +448,39 @@ fn extract_merge_decision(attrs: &[u8]) -> MergeDecision {
         decision = if is_reset {
             MergeDecision::Unset
         } else {
-            match assigned {
-                Some(v) => match std::str::from_utf8(v) {
-                    Ok(s) => MergeDecision::Set(s.to_owned()),
-                    Err(_) => MergeDecision::NoChange,
+            assigned.map_or_else(
+                || MergeDecision::Set("text".to_owned()),
+                |v| {
+                    std::str::from_utf8(v).map_or(MergeDecision::NoChange, |s| {
+                        MergeDecision::Set(s.to_owned())
+                    })
                 },
-                None => MergeDecision::Set("text".to_owned()),
-            }
+            )
         };
     }
     decision
 }
 
+fn split_attr_token(token: &[u8]) -> (&[u8], Option<&[u8]>) {
+    token
+        .iter()
+        .position(|b| *b == b'=')
+        .map_or((token, None), |i| (&token[..i], Some(&token[i + 1..])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     fn tmp_repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         for (path, content) in files {
             let full = dir.path().join(path);
             if let Some(parent) = full.parent() {
-                fs::create_dir_all(parent).unwrap();
+                fs::create_dir_all(parent).expect("operation should succeed");
             }
-            fs::write(full, content).unwrap();
+            fs::write(full, content).expect("operation should succeed");
         }
         dir
     }
@@ -480,7 +491,7 @@ mod tests {
             ".gitattributes",
             "assets/**/*.png filter=lfs diff=lfs merge=lfs -text\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("assets/hero.png"));
         assert!(m.is_lfs("assets/sub/foo.png"));
         assert!(!m.is_lfs("assets/hero.jpg"));
@@ -493,7 +504,7 @@ mod tests {
             ".gitattributes",
             "*.png filter=lfs\n*.ogg filter=lfs\n*.txt -text\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("music.ogg"));
         assert!(m.is_lfs("pic.png"));
         assert!(!m.is_lfs("notes.txt"));
@@ -502,7 +513,7 @@ mod tests {
     #[test]
     fn later_pattern_overrides_earlier() {
         let dir = tmp_repo_with(&[(".gitattributes", "*.png filter=lfs\nlogo.png -filter\n")]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("hero.png"));
         assert!(!m.is_lfs("logo.png"));
     }
@@ -513,7 +524,7 @@ mod tests {
             (".gitattributes", "*.png filter=lfs\n"),
             ("assets/.gitattributes", "hero.png -filter\n"),
         ]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("foo.png"));
         assert!(m.is_lfs("assets/other.png"));
         assert!(!m.is_lfs("assets/hero.png"));
@@ -521,8 +532,8 @@ mod tests {
 
     #[test]
     fn no_gitattributes_means_no_lfs() {
-        let dir = tempfile::tempdir().unwrap();
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(!m.is_lfs("anything.png"));
     }
 
@@ -532,14 +543,14 @@ mod tests {
             ".gitattributes",
             "# comment\n\n  # indented comment\n*.png filter=lfs\n\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("foo.png"));
     }
 
     #[test]
     fn filter_other_than_lfs_is_not_lfs() {
         let dir = tmp_repo_with(&[(".gitattributes", "*.png filter=other-lfs\n")]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(!m.is_lfs("foo.png"));
     }
 
@@ -549,7 +560,7 @@ mod tests {
             ".gitattributes",
             "assets/** filter=lfs\nassets/logo.png -filter\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("assets/hero.png"));
         assert!(!m.is_lfs("assets/logo.png"));
     }
@@ -558,10 +569,10 @@ mod tests {
     fn from_entries_no_workdir() {
         // Simulate loading from a tree.
         let entries = vec![
-            ("".to_owned(), b"*.png filter=lfs\n".to_vec()),
+            (String::new(), b"*.png filter=lfs\n".to_vec()),
             ("assets/".to_owned(), b"logo.png -filter\n".to_vec()),
         ];
-        let m = AttrsMatcher::from_entries(entries).unwrap();
+        let m = AttrsMatcher::from_entries(entries).expect("operation should succeed");
         assert!(m.is_lfs("assets/hero.png"));
         assert!(!m.is_lfs("assets/logo.png"));
         assert!(m.is_lfs("foo.png"));
@@ -577,7 +588,7 @@ mod tests {
     #[test]
     fn merge_union_driver_matches() {
         let dir = tmp_repo_with(&[(".gitattributes", "*.events merge=union\n")]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
         assert_eq!(
             m.merge_driver("nested/bar.events"),
@@ -592,7 +603,7 @@ mod tests {
             ".gitattributes",
             "*.bin merge=binary\n*.lock merge=ours\n*.custom merge=my-driver\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert_eq!(m.merge_driver("file.bin"), Some("binary".to_owned()));
         assert_eq!(m.merge_driver("Cargo.lock"), Some("ours".to_owned()));
         assert_eq!(m.merge_driver("x.custom"), Some("my-driver".to_owned()));
@@ -604,7 +615,7 @@ mod tests {
             ".gitattributes",
             "*.events merge=union\nspecial.events -merge\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
         assert_eq!(m.merge_driver("special.events"), None);
     }
@@ -615,7 +626,7 @@ mod tests {
             ".gitattributes",
             "*.png filter=lfs diff=lfs merge=binary -text\n",
         )]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("foo.png"));
         assert_eq!(m.merge_driver("foo.png"), Some("binary".to_owned()));
     }
@@ -626,7 +637,7 @@ mod tests {
             (".gitattributes", "*.events merge=union\n"),
             ("sub/.gitattributes", "*.events merge=ours\n"),
         ]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert_eq!(m.merge_driver("foo.events"), Some("union".to_owned()));
         assert_eq!(m.merge_driver("sub/foo.events"), Some("ours".to_owned()));
     }
@@ -634,7 +645,7 @@ mod tests {
     #[test]
     fn bare_merge_defaults_to_text() {
         let dir = tmp_repo_with(&[(".gitattributes", "*.txt merge\n")]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert_eq!(m.merge_driver("foo.txt"), Some("text".to_owned()));
     }
 
@@ -643,13 +654,13 @@ mod tests {
         // Sanity-check: shouldn't be catastrophically slow.
         let mut content = String::new();
         for i in 0..50 {
-            content.push_str(&format!("*.ext{i} filter=lfs\n"));
+            writeln!(&mut content, "*.ext{i} filter=lfs").expect("writing to String cannot fail");
         }
         let dir = tmp_repo_with(&[(".gitattributes", &content)]);
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         let start = std::time::Instant::now();
         for i in 0..10_000 {
-            m.is_lfs(&format!("file{i}.ext7"));
+            assert!(m.is_lfs(&format!("file{i}.ext7")));
         }
         let elapsed = start.elapsed();
         assert!(
@@ -671,15 +682,15 @@ mod interop_tests {
         //   music.ogg          → lfs
         //   src/main.rs        → unspecified
         //   assets/sub/foo.png → lfs
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         fs::write(
             dir.path().join(".gitattributes"),
             "assets/**/*.png filter=lfs diff=lfs merge=lfs -text\n\
              *.ogg filter=lfs\n\
              assets/logo.png -filter\n",
         )
-        .unwrap();
-        let m = AttrsMatcher::from_workdir(dir.path()).unwrap();
+        .expect("operation should succeed");
+        let m = AttrsMatcher::from_workdir(dir.path()).expect("operation should succeed");
         assert!(m.is_lfs("assets/hero.png"));
         assert!(!m.is_lfs("assets/logo.png"));
         assert!(m.is_lfs("music.ogg"));
@@ -695,10 +706,10 @@ mod bare_repo_tests {
     #[test]
     fn from_entries_assets_glob_star_star() {
         let entries = vec![(
-            "".to_owned(),
+            String::new(),
             b"assets/**/*.bin filter=lfs diff=lfs merge=lfs -text\n*.dat filter=lfs\n".to_vec(),
         )];
-        let m = AttrsMatcher::from_entries(entries).unwrap();
+        let m = AttrsMatcher::from_entries(entries).expect("operation should succeed");
         assert!(
             m.is_lfs("assets/sprites/debug-test.bin"),
             "assets/**/*.bin should match"

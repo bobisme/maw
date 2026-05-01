@@ -64,6 +64,9 @@ pub enum MergeCommands {
     List,
 }
 
+/// # Errors
+///
+/// Returns an error if the selected merge command fails.
 pub fn run(cmd: &MergeCommands) -> Result<()> {
     match cmd {
         MergeCommands::Promote { merge_id } => promote(merge_id),

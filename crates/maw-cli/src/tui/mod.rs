@@ -41,7 +41,11 @@ impl RepoDataSource for CliDataSource {
     }
 }
 
-/// Run the TUI application
+/// Run the TUI application.
+///
+/// # Errors
+///
+/// Returns an error if the TUI cannot initialize or run.
 pub fn run() -> Result<()> {
     maw_tui::run(Box::new(CliDataSource))
 }

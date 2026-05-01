@@ -10,7 +10,11 @@ use tempfile::TempDir;
 fn clone_remote(remote: &std::path::Path) -> TempDir {
     let verify_dir = TempDir::new().expect("failed to create verify temp dir");
     let out = Command::new("git")
-        .args(["clone", remote.to_str().unwrap(), "."])
+        .args([
+            "clone",
+            remote.to_str().expect("operation should succeed"),
+            ".",
+        ])
         .current_dir(verify_dir.path())
         .output()
         .expect("failed to run git clone");
@@ -69,6 +73,6 @@ fn release_does_not_rewind_branch_when_branch_ahead_of_epoch() {
 
     let pushed = verify_dir.path().join("release-note.txt");
     assert!(pushed.exists(), "release commit should be pushed");
-    let content = std::fs::read_to_string(&pushed).unwrap();
+    let content = std::fs::read_to_string(&pushed).expect("operation should succeed");
     assert_eq!(content, "release from branch tip\n");
 }

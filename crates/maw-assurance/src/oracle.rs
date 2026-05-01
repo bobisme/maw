@@ -311,7 +311,7 @@ fn discover_workspaces(
         if let Some(ws_name) = ref_name.strip_prefix("refs/manifold/head/") {
             workspaces
                 .entry(ws_name.to_owned())
-                .or_insert(WorkspaceStatus {
+                .or_insert_with(|| WorkspaceStatus {
                     head_oid: refs.get(ref_name).cloned().unwrap_or_default(),
                     is_dirty: false,
                     exists: false,
@@ -729,7 +729,7 @@ mod tests {
         }
     }
 
-    fn state_with_refs(refs: Vec<(&str, &str)>) -> AssuranceState {
+    fn state_with_refs(refs: &[(&str, &str)]) -> AssuranceState {
         let durable_refs: HashMap<String, String> = refs
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -773,10 +773,10 @@ mod tests {
 
     #[test]
     fn g2_pass_no_head_change() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "default", OID_A, false, true);
 
-        let mut post = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut post = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut post, "default", OID_A, false, true);
 
         assert!(check_g2_rewrite_preservation(&pre, &post).is_ok());
@@ -784,10 +784,10 @@ mod tests {
 
     #[test]
     fn g2_pass_head_changed_but_clean() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "default", OID_A, false, true);
 
-        let mut post = state_with_refs(vec![("refs/heads/main", OID_B)]);
+        let mut post = state_with_refs(&[("refs/heads/main", OID_B)]);
         add_workspace(&mut post, "default", OID_B, false, true);
 
         // Clean workspace -> no-work proof -> ok
@@ -796,10 +796,10 @@ mod tests {
 
     #[test]
     fn g2_pass_head_changed_dirty_with_recovery() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, true, true);
 
-        let mut post = state_with_refs(vec![
+        let mut post = state_with_refs(&[
             ("refs/heads/main", OID_B),
             ("refs/manifold/recovery/alice/2025-01-01T00-00-00Z", OID_A),
         ]);
@@ -810,13 +810,14 @@ mod tests {
 
     #[test]
     fn g2_violation_head_changed_dirty_no_recovery() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, true, true);
 
-        let mut post = state_with_refs(vec![("refs/heads/main", OID_B)]);
+        let mut post = state_with_refs(&[("refs/heads/main", OID_B)]);
         add_workspace(&mut post, "alice", OID_B, false, true);
 
-        let err = check_g2_rewrite_preservation(&pre, &post).unwrap_err();
+        let err = check_g2_rewrite_preservation(&pre, &post)
+            .expect_err("dirty rewritten workspace without recovery should violate G2");
         assert!(matches!(
             err,
             AssuranceViolation::RewriteNotPreserved { .. }
@@ -828,10 +829,10 @@ mod tests {
 
     #[test]
     fn g2_pass_workspace_destroyed_with_recovery() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, true, true);
 
-        let post = state_with_refs(vec![
+        let post = state_with_refs(&[
             ("refs/heads/main", OID_B),
             ("refs/manifold/recovery/alice/2025-01-01T00-00-00Z", OID_A),
         ]);
@@ -842,13 +843,14 @@ mod tests {
 
     #[test]
     fn g2_violation_workspace_destroyed_dirty_no_recovery() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, true, true);
 
-        let post = state_with_refs(vec![("refs/heads/main", OID_B)]);
+        let post = state_with_refs(&[("refs/heads/main", OID_B)]);
         // alice not in post workspaces and no recovery ref
 
-        let err = check_g2_rewrite_preservation(&pre, &post).unwrap_err();
+        let err = check_g2_rewrite_preservation(&pre, &post)
+            .expect_err("destroyed dirty workspace without recovery should violate G2");
         assert!(matches!(
             err,
             AssuranceViolation::RewriteNotPreserved { .. }
@@ -861,10 +863,10 @@ mod tests {
 
     #[test]
     fn g3_pass_not_committed() {
-        let mut pre = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
         pre.merge_state_phase = Some("prepare".to_owned());
 
-        let post = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let post = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
 
         // Not in commit phase -> always passes
         assert!(check_g3_commit_monotonicity(&pre, &post).is_ok());
@@ -872,22 +874,23 @@ mod tests {
 
     #[test]
     fn g3_pass_same_epoch() {
-        let mut pre = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
         pre.merge_state_phase = Some("commit".to_owned());
 
-        let post = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let post = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
 
         assert!(check_g3_commit_monotonicity(&pre, &post).is_ok());
     }
 
     #[test]
     fn g3_violation_epoch_disappeared() {
-        let mut pre = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
         pre.merge_state_phase = Some("commit".to_owned());
 
         let post = empty_state();
 
-        let err = check_g3_commit_monotonicity(&pre, &post).unwrap_err();
+        let err = check_g3_commit_monotonicity(&pre, &post)
+            .expect_err("missing post-commit epoch should violate G3");
         assert!(matches!(
             err,
             AssuranceViolation::CommitMonotonicityBroken { .. }
@@ -899,9 +902,9 @@ mod tests {
 
     #[test]
     fn g3_pass_no_phase() {
-        let pre = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let pre = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
         // No merge_state_phase -> not committed -> skip
-        let post = state_with_refs(vec![("refs/manifold/epoch/current", OID_B)]);
+        let post = state_with_refs(&[("refs/manifold/epoch/current", OID_B)]);
 
         assert!(check_g3_commit_monotonicity(&pre, &post).is_ok());
     }
@@ -909,10 +912,10 @@ mod tests {
     #[test]
     fn g3_pass_cleanup_phase() {
         // cleanup is past commit, so monotonicity should be enforced
-        let mut pre = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
         pre.merge_state_phase = Some("cleanup".to_owned());
 
-        let post = state_with_refs(vec![("refs/manifold/epoch/current", OID_A)]);
+        let post = state_with_refs(&[("refs/manifold/epoch/current", OID_A)]);
 
         assert!(check_g3_commit_monotonicity(&pre, &post).is_ok());
     }
@@ -923,10 +926,10 @@ mod tests {
 
     #[test]
     fn g4_pass_no_destruction() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, false, true);
 
-        let mut post = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut post = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut post, "alice", OID_A, false, true);
 
         assert!(check_g4_destructive_gate(&pre, &post).is_ok());
@@ -934,10 +937,10 @@ mod tests {
 
     #[test]
     fn g4_pass_destroyed_with_recovery() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, false, true);
 
-        let post = state_with_refs(vec![
+        let post = state_with_refs(&[
             ("refs/heads/main", OID_A),
             ("refs/manifold/recovery/alice/2025-01-01T00-00-00Z", OID_A),
         ]);
@@ -948,13 +951,14 @@ mod tests {
 
     #[test]
     fn g4_violation_destroyed_without_recovery() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         add_workspace(&mut pre, "alice", OID_A, false, true);
 
-        let post = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let post = state_with_refs(&[("refs/heads/main", OID_A)]);
         // alice not in post workspaces and no recovery ref
 
-        let err = check_g4_destructive_gate(&pre, &post).unwrap_err();
+        let err = check_g4_destructive_gate(&pre, &post)
+            .expect_err("destroyed workspace without recovery should violate G4");
         assert!(matches!(
             err,
             AssuranceViolation::DestructiveWithoutRecovery { .. }
@@ -966,11 +970,11 @@ mod tests {
 
     #[test]
     fn g4_pass_workspace_never_existed() {
-        let mut pre = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let mut pre = state_with_refs(&[("refs/heads/main", OID_A)]);
         // Workspace known via ref but exists=false (no directory)
         add_workspace(&mut pre, "ghost", OID_A, false, false);
 
-        let post = state_with_refs(vec![("refs/heads/main", OID_A)]);
+        let post = state_with_refs(&[("refs/heads/main", OID_A)]);
 
         // Ghost workspace didn't exist on disk -> no destruction
         assert!(check_g4_destructive_gate(&pre, &post).is_ok());
@@ -1025,7 +1029,8 @@ mod tests {
             OID_A.to_owned(),
         );
 
-        let err = check_g5_discoverability(&post).unwrap_err();
+        let err =
+            check_g5_discoverability(&post).expect_err("phantom recovery ref should violate G5");
         assert!(matches!(
             err,
             AssuranceViolation::RecoveryNotDiscoverable { .. }
@@ -1079,7 +1084,7 @@ mod tests {
             .args(["rev-parse", "HEAD^{tree}"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("git rev-parse HEAD^{tree} should run");
         let tree_oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
 
         // Pin recovery ref to the tree OID
@@ -1099,7 +1104,8 @@ mod tests {
             tree_oid,
         );
 
-        let err = check_g6_searchability(&post).unwrap_err();
+        let err = check_g6_searchability(&post)
+            .expect_err("recovery ref pointing to a tree should violate G6");
         assert!(matches!(
             err,
             AssuranceViolation::RecoveryNotSearchable { .. }
@@ -1123,7 +1129,8 @@ mod tests {
             "0000000000000000000000000000000000000000".to_owned(),
         );
 
-        let err = check_g6_searchability(&post).unwrap_err();
+        let err =
+            check_g6_searchability(&post).expect_err("invalid recovery oid should violate G6");
         assert!(matches!(
             err,
             AssuranceViolation::RecoveryNotSearchable { .. }
@@ -1160,7 +1167,8 @@ mod tests {
         let first_oid = git_head_oid(root);
 
         // Add a second commit
-        std::fs::write(root.join("extra.txt"), "extra\n").unwrap();
+        std::fs::write(root.join("extra.txt"), "extra\n")
+            .expect("should write extra commit fixture");
         git_cmd(root, &["add", "extra.txt"]);
         git_cmd(root, &["commit", "-m", "second"]);
         let second_oid = git_head_oid(root);
@@ -1193,7 +1201,7 @@ mod tests {
 
         // Create a second commit on a branch, then delete the branch
         git_cmd(root, &["checkout", "-b", "temp"]);
-        std::fs::write(root.join("temp.txt"), "temp\n").unwrap();
+        std::fs::write(root.join("temp.txt"), "temp\n").expect("should write temp branch fixture");
         git_cmd(root, &["add", "temp.txt"]);
         git_cmd(root, &["commit", "-m", "temp"]);
         let temp_oid = git_head_oid(root);
@@ -1220,7 +1228,8 @@ mod tests {
         };
 
         // temp_oid is no longer reachable from any post-state ref
-        let err = check_g1_reachability(&pre, &post).unwrap_err();
+        let err =
+            check_g1_reachability(&pre, &post).expect_err("orphaned commit should violate G1");
         assert!(matches!(err, AssuranceViolation::ReachabilityLost { .. }));
         let msg = format!("{err}");
         assert!(msg.contains("G1 violation"));
@@ -1234,7 +1243,7 @@ mod tests {
 
         // Create a second commit on a branch
         git_cmd(root, &["checkout", "-b", "temp"]);
-        std::fs::write(root.join("temp.txt"), "temp\n").unwrap();
+        std::fs::write(root.join("temp.txt"), "temp\n").expect("should write temp branch fixture");
         git_cmd(root, &["add", "temp.txt"]);
         git_cmd(root, &["commit", "-m", "temp"]);
         let temp_oid = git_head_oid(root);
@@ -1364,7 +1373,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn setup_test_repo() -> tempfile::TempDir {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("should create temp git repo");
         let root = dir.path();
 
         git_cmd(root, &["init"]);
@@ -1372,7 +1381,7 @@ mod tests {
         git_cmd(root, &["config", "user.email", "test@test.com"]);
         git_cmd(root, &["config", "commit.gpgsign", "false"]);
 
-        std::fs::write(root.join("README.md"), "# Test\n").unwrap();
+        std::fs::write(root.join("README.md"), "# Test\n").expect("should write README fixture");
         git_cmd(root, &["add", "README.md"]);
         git_cmd(root, &["commit", "-m", "initial"]);
 
@@ -1387,7 +1396,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("git command should start");
         assert!(
             output.status.success(),
             "git {} failed: {}",
@@ -1401,7 +1410,7 @@ mod tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("git rev-parse HEAD should start");
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 }

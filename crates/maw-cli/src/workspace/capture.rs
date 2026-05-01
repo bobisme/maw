@@ -140,7 +140,7 @@ fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
 }
 
 /// Resolve HEAD to a full OID.
-pub(crate) fn resolve_head(ws_path: &Path) -> Result<GitOid> {
+pub fn resolve_head(ws_path: &Path) -> Result<GitOid> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let git_oid = repo
@@ -228,44 +228,41 @@ fn capture_dirty_worktree(
         .cloned()
         .collect();
 
-    let stash_git_oid = match stash_result {
-        Some(oid) => oid,
-        None => {
-            // `stash_create` returned None. Two legitimate shapes:
-            //
-            // 1. All dirty paths were uncapturable embedded git dirs that
-            //    `stage_all_for_capture` excluded. After the excludes, there
-            //    is genuinely no capturable content — returning `Ok(None)`
-            //    is correct (matches "clean at epoch" semantics from the
-            //    caller's perspective).
-            //
-            // 2. At least one dirty path WAS capturable, and yet
-            //    `stash_create` still refused. This is the silent-data-loss
-            //    scenario guarded by bn-3mpx — return `Err` so callers
-            //    abort rather than proceed over user work.
-            //
-            // TODO(gix): replace git reset with GitRepo trait method
-            warn_on_reset_failure(ws_path, "capture-stash-create-none");
-            if capturable_dirty_paths.is_empty() {
-                tracing::debug!(
-                    excluded_paths = ?excluded_paths,
-                    "stash_create returned None; all dirty paths were uncapturable \
-                     embedded repos, treating as no-op capture"
-                );
-                return Ok(None);
-            }
-            tracing::warn!(
-                dirty_paths = ?dirty_paths,
-                capturable = ?capturable_dirty_paths,
-                excluded = ?excluded_paths,
-                "stash_create returned None despite capturable dirty paths"
+    let Some(stash_git_oid) = stash_result else {
+        // `stash_create` returned None. Two legitimate shapes:
+        //
+        // 1. All dirty paths were uncapturable embedded git dirs that
+        //    `stage_all_for_capture` excluded. After the excludes, there
+        //    is genuinely no capturable content — returning `Ok(None)`
+        //    is correct (matches "clean at epoch" semantics from the
+        //    caller's perspective).
+        //
+        // 2. At least one dirty path WAS capturable, and yet
+        //    `stash_create` still refused. This is the silent-data-loss
+        //    scenario guarded by bn-3mpx — return `Err` so callers
+        //    abort rather than proceed over user work.
+        //
+        // TODO(gix): replace git reset with GitRepo trait method
+        warn_on_reset_failure(ws_path, "capture-stash-create-none");
+        if capturable_dirty_paths.is_empty() {
+            tracing::debug!(
+                excluded_paths = ?excluded_paths,
+                "stash_create returned None; all dirty paths were uncapturable \
+                 embedded repos, treating as no-op capture"
             );
-            return Err(anyhow::anyhow!(
-                "capture aborted to avoid silent data loss: capturable dirty paths \
-                 were detected but `git stash create` refused to produce a stash \
-                 commit (capturable = {capturable_dirty_paths:?})"
-            ));
+            return Ok(None);
         }
+        tracing::warn!(
+            dirty_paths = ?dirty_paths,
+            capturable = ?capturable_dirty_paths,
+            excluded = ?excluded_paths,
+            "stash_create returned None despite capturable dirty paths"
+        );
+        return Err(anyhow::anyhow!(
+            "capture aborted to avoid silent data loss: capturable dirty paths \
+             were detected but `git stash create` refused to produce a stash \
+             commit (capturable = {capturable_dirty_paths:?})"
+        ));
     };
 
     let stash_oid_str = stash_git_oid.to_string();
@@ -542,53 +539,53 @@ mod tests {
 
     /// Create a fresh git repo with one commit. Returns (tempdir, repo root, HEAD OID).
     fn setup_repo() -> (TempDir, std::path::PathBuf, GitOid) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         Command::new("git")
             .args(["init"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Create a `.manifold/` directory so `repo_root_from_worktree`'s
         // layout validation (bn-2bow) recognizes this as a maw repo root.
-        fs::create_dir_all(root.join(".manifold")).unwrap();
+        fs::create_dir_all(root.join(".manifold")).expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        let oid = GitOid::new(&oid_str).unwrap();
+        let oid = GitOid::new(&oid_str).expect("operation should succeed");
 
         (dir, root, oid)
     }
@@ -602,14 +599,14 @@ mod tests {
     /// `repo_root_from_worktree` rather than silently returning a wrong path.
     #[test]
     fn repo_root_validation_rejects_non_maw_layout() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         Command::new("git")
             .args(["init"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // No .manifold/ or ws/ dir → should error
         let result = repo_root_from_worktree(&root);
@@ -617,7 +614,7 @@ mod tests {
             result.is_err(),
             "expected error when layout lacks ws/ and .manifold/, got {result:?}"
         );
-        let err = format!("{}", result.unwrap_err());
+        let err = format!("{}", result.expect_err("operation should fail"));
         assert!(
             err.contains("does not contain `ws/` or `.manifold/`"),
             "unexpected error message: {err}"
@@ -626,33 +623,33 @@ mod tests {
 
     #[test]
     fn repo_root_validation_accepts_manifold_dir() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         Command::new("git")
             .args(["init"])
             .current_dir(&root)
             .output()
-            .unwrap();
-        fs::create_dir_all(root.join(".manifold")).unwrap();
+            .expect("operation should succeed");
+        fs::create_dir_all(root.join(".manifold")).expect("operation should succeed");
 
-        let result = repo_root_from_worktree(&root).unwrap();
+        let result = repo_root_from_worktree(&root).expect("operation should succeed");
         assert_eq!(result, root);
     }
 
     #[test]
     fn repo_root_validation_accepts_ws_dir() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path().to_path_buf();
 
         Command::new("git")
             .args(["init"])
             .current_dir(&root)
             .output()
-            .unwrap();
-        fs::create_dir_all(root.join("ws")).unwrap();
+            .expect("operation should succeed");
+        fs::create_dir_all(root.join("ws")).expect("operation should succeed");
 
-        let result = repo_root_from_worktree(&root).unwrap();
+        let result = repo_root_from_worktree(&root).expect("operation should succeed");
         assert_eq!(result, root);
     }
 
@@ -675,7 +672,8 @@ mod tests {
     #[test]
     fn capture_clean_at_epoch_returns_none() {
         let (_dir, root, head_oid) = setup_repo();
-        let result = capture_before_destroy(&root, "test-ws", &head_oid).unwrap();
+        let result =
+            capture_before_destroy(&root, "test-ws", &head_oid).expect("operation should succeed");
         assert!(
             result.is_none(),
             "clean workspace at epoch should return None"
@@ -691,10 +689,10 @@ mod tests {
         let (_dir, root, head_oid) = setup_repo();
 
         // Create a dirty file
-        fs::write(root.join("dirty.txt"), "dirty content\n").unwrap();
+        fs::write(root.join("dirty.txt"), "dirty content\n").expect("operation should succeed");
 
         let result = capture_before_destroy(&root, "test-ws", &head_oid)
-            .unwrap()
+            .expect("operation should succeed")
             .expect("dirty workspace should return Some");
 
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
@@ -707,7 +705,7 @@ mod tests {
         );
 
         // Verify the pinned ref exists and resolves
-        let ref_oid = refs::read_ref(&root, &result.pinned_ref).unwrap();
+        let ref_oid = refs::read_ref(&root, &result.pinned_ref).expect("operation should succeed");
         assert_eq!(ref_oid, Some(result.commit_oid));
     }
 
@@ -720,10 +718,10 @@ mod tests {
         let (_dir, root, head_oid) = setup_repo();
 
         // Create an untracked file (never git-added)
-        fs::write(root.join("new-file.txt"), "brand new\n").unwrap();
+        fs::write(root.join("new-file.txt"), "brand new\n").expect("operation should succeed");
 
         let result = capture_before_destroy(&root, "test-ws", &head_oid)
-            .unwrap()
+            .expect("operation should succeed")
             .expect("untracked files should be captured");
 
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
@@ -734,7 +732,7 @@ mod tests {
             .args(["show", &format!("{}:new-file.txt", result.commit_oid)])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         // git stash create uses a merge commit structure; the worktree
         // content is in the third parent's tree. Access via the commit's
         // tree directly.
@@ -742,7 +740,7 @@ mod tests {
             .args(["ls-tree", "-r", "--name-only", result.commit_oid.as_str()])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let tree_files = String::from_utf8_lossy(&tree_output.stdout);
         // The stash commit's tree should include the new file
         // (via the index parent or worktree parent)
@@ -761,32 +759,32 @@ mod tests {
         let (_dir, root, base_oid) = setup_repo();
 
         // Make a second commit (workspace is now ahead of base epoch)
-        fs::write(root.join("feature.txt"), "new feature\n").unwrap();
+        fs::write(root.join("feature.txt"), "new feature\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "feature.txt"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "add feature"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let result = capture_before_destroy(&root, "test-ws", &base_oid)
-            .unwrap()
+            .expect("operation should succeed")
             .expect("committed-ahead workspace should return Some");
 
         assert_eq!(result.mode, CaptureMode::HeadOnly);
         assert!(result.dirty_paths.is_empty());
 
         // The captured OID should be the current HEAD, not the base epoch
-        let current_head = resolve_head(&root).unwrap();
+        let current_head = resolve_head(&root).expect("operation should succeed");
         assert_eq!(result.commit_oid, current_head);
         assert_ne!(result.commit_oid.as_str(), base_oid.as_str());
 
         // Recovery ref should exist
-        let ref_oid = refs::read_ref(&root, &result.pinned_ref).unwrap();
+        let ref_oid = refs::read_ref(&root, &result.pinned_ref).expect("operation should succeed");
         assert_eq!(ref_oid, Some(result.commit_oid));
     }
 
@@ -797,23 +795,23 @@ mod tests {
     #[test]
     fn list_dirty_paths_empty_when_clean() {
         let (_dir, root, _oid) = setup_repo();
-        let paths = list_dirty_paths(&root).unwrap();
+        let paths = list_dirty_paths(&root).expect("operation should succeed");
         assert!(paths.is_empty());
     }
 
     #[test]
     fn list_dirty_paths_detects_modified() {
         let (_dir, root, _oid) = setup_repo();
-        fs::write(root.join("README.md"), "# Modified\n").unwrap();
-        let paths = list_dirty_paths(&root).unwrap();
+        fs::write(root.join("README.md"), "# Modified\n").expect("operation should succeed");
+        let paths = list_dirty_paths(&root).expect("operation should succeed");
         assert!(paths.contains(&"README.md".to_string()));
     }
 
     #[test]
     fn list_dirty_paths_detects_untracked() {
         let (_dir, root, _oid) = setup_repo();
-        fs::write(root.join("untracked.txt"), "hi\n").unwrap();
-        let paths = list_dirty_paths(&root).unwrap();
+        fs::write(root.join("untracked.txt"), "hi\n").expect("operation should succeed");
+        let paths = list_dirty_paths(&root).expect("operation should succeed");
         assert!(paths.contains(&"untracked.txt".to_string()));
     }
 
@@ -828,17 +826,17 @@ mod tests {
     fn capture_dirty_workspace_skips_uncapturable_embedded_repo() {
         let (_dir, root, head_oid) = setup_repo();
 
-        fs::create_dir_all(root.join(".tmp/sub")).unwrap();
+        fs::create_dir_all(root.join(".tmp/sub")).expect("operation should succeed");
         Command::new("git")
             .args(["init"])
             .current_dir(root.join(".tmp/sub"))
             .output()
-            .unwrap();
-        fs::write(root.join(".tmp/sub/file.txt"), "nested\n").unwrap();
-        fs::write(root.join("capturable.txt"), "capturable\n").unwrap();
+            .expect("operation should succeed");
+        fs::write(root.join(".tmp/sub/file.txt"), "nested\n").expect("operation should succeed");
+        fs::write(root.join("capturable.txt"), "capturable\n").expect("operation should succeed");
 
         let result = capture_before_destroy(&root, "test-ws", &head_oid)
-            .unwrap()
+            .expect("operation should succeed")
             .expect("capture should succeed with fallback exclusions");
 
         assert_eq!(result.mode, CaptureMode::WorktreeCapture);
@@ -849,7 +847,7 @@ mod tests {
             .args(["ls-tree", "-r", "--name-only", result.commit_oid.as_str()])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let tree_files = String::from_utf8_lossy(&tree_output.stdout);
         assert!(tree_files.contains("capturable.txt"));
     }

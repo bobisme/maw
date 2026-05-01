@@ -4,12 +4,12 @@ use gix::objs::TreeRefIter;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::{ChangeType, DiffEntry, EntryMode, GitOid};
 
 /// Clamp a user-supplied similarity percentage (0-100) to a `[0.0, 1.0]`
 /// `f32` suitable for `gix_diff::Rewrites::percentage`.
 fn similarity_fraction(pct: u32) -> f32 {
-    (pct.min(100) as f32) / 100.0
+    f32::from(u16::try_from(pct.min(100)).unwrap_or(100)) / 100.0
 }
 
 /// Convert a `GitOid` to a gix `ObjectId`.
@@ -24,7 +24,7 @@ fn from_gix_oid(oid: gix::ObjectId) -> GitOid {
 }
 
 /// Convert a gix `EntryMode` to our `EntryMode`.
-fn convert_entry_mode(mode: gix::objs::tree::EntryMode) -> EntryMode {
+const fn convert_entry_mode(mode: gix::objs::tree::EntryMode) -> EntryMode {
     match mode.kind() {
         gix::objs::tree::EntryKind::Blob => EntryMode::Blob,
         gix::objs::tree::EntryKind::BlobExecutable => EntryMode::BlobExecutable,
@@ -50,7 +50,7 @@ pub fn diff_trees(
                     .map_err(|e| GitError::BackendError {
                         message: format!("failed to find old tree {oid}: {e}"),
                     })?;
-            obj.data.to_vec()
+            obj.data.clone()
         }
         None => Vec::new(),
     };
@@ -62,7 +62,7 @@ pub fn diff_trees(
             message: format!("failed to find new tree {new}: {e}"),
         })?
         .data
-        .to_vec();
+        .clone();
 
     let old_iter = TreeRefIter::from_bytes(&old_tree_data);
     let new_iter = TreeRefIter::from_bytes(&new_tree_data);
@@ -158,6 +158,10 @@ pub fn diff_trees(
 /// match (pure rename / mode change only), values below 100 enable similarity-
 /// based matching via gix's edit-distance algorithm. A common default is 50,
 /// which matches git's built-in rename-threshold.
+#[expect(
+    clippy::too_many_lines,
+    reason = "maps every gix diff variant to maw diff entries"
+)]
 pub fn diff_trees_with_renames(
     repo: &GixRepo,
     old: Option<GitOid>,

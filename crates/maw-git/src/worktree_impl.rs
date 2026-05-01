@@ -11,8 +11,12 @@ use gix::bstr::ByteSlice;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::{GitOid, WorktreeInfo};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "worktree creation writes git admin files then checks out"
+)]
 pub fn worktree_add(
     repo: &GixRepo,
     name: &str,
@@ -116,7 +120,7 @@ pub fn worktree_add(
     let index_path = admin_dir.join("index");
     let mut index_file = gix::index::File::from_state(index_state.into(), index_path);
     index_file
-        .write(Default::default())
+        .write(gix::index::write::Options::default())
         .map_err(|e| GitError::BackendError {
             message: format!("failed to write worktree index: {e}"),
         })?;
@@ -195,9 +199,8 @@ pub fn worktree_add(
         // Update index stat entries for smudged files, then rewrite.
         for rel_path in &smudged {
             let full = path.join(rel_path);
-            let meta = match gix::index::fs::Metadata::from_path_no_follow(&full) {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(meta) = gix::index::fs::Metadata::from_path_no_follow(&full) else {
+                continue;
             };
             let Ok(new_stat) = gix::index::entry::Stat::from_fs(&meta) else {
                 continue;
@@ -213,7 +216,7 @@ pub fn worktree_add(
         if !smudged.is_empty() {
             let index_path = admin_dir.join("index");
             let mut persisted = gix::index::File::from_state(checkout_index.into(), index_path);
-            let _ = persisted.write(Default::default());
+            let _ = persisted.write(gix::index::write::Options::default());
         }
     }
 
@@ -360,33 +363,7 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
             if head_file.exists() {
                 let content = std::fs::read_to_string(&head_file).ok().unwrap_or_default();
                 let trimmed = content.trim();
-                if let Some(ref_target) = trimmed.strip_prefix("ref: ") {
-                    // Symbolic ref (e.g., "ref: refs/heads/main") — resolve via repo
-                    let oid = crate::types::RefName::new(ref_target)
-                        .ok()
-                        .and_then(|rn| crate::refs_impl::read_ref(repo, &rn).ok().flatten());
-                    (oid, false)
-                } else if trimmed.len() == 40 {
-                    // Direct hex OID (detached HEAD)
-                    let mut bytes = [0u8; 20];
-                    let mut valid = true;
-                    for i in 0..20 {
-                        match u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16) {
-                            Ok(b) => bytes[i] = b,
-                            Err(_) => {
-                                valid = false;
-                                break;
-                            }
-                        }
-                    }
-                    if valid {
-                        (Some(GitOid::from_bytes(bytes)), true)
-                    } else {
-                        (None, true)
-                    }
-                } else {
-                    (None, true)
-                }
+                parse_worktree_head(repo, trimmed)
             } else {
                 (None, true)
             }
@@ -401,7 +378,7 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
                     .unwrap_or_default();
                 let p = std::path::PathBuf::from(content.trim());
                 // gitdir points to <worktree>/.git, parent is the worktree root
-                p.parent().map(|pp| pp.to_path_buf()).unwrap_or(p)
+                p.parent().map(std::path::Path::to_path_buf).unwrap_or(p)
             } else {
                 entry_path.clone()
             }
@@ -416,6 +393,31 @@ pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
     }
 
     Ok(result)
+}
+
+fn parse_worktree_head(repo: &GixRepo, trimmed: &str) -> (Option<GitOid>, bool) {
+    trimmed.strip_prefix("ref: ").map_or_else(
+        || {
+            if trimmed.len() != 40 {
+                return (None, true);
+            }
+
+            let mut bytes = [0u8; 20];
+            for i in 0..20 {
+                let Ok(b) = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16) else {
+                    return (None, true);
+                };
+                bytes[i] = b;
+            }
+            (Some(GitOid::from_bytes(bytes)), true)
+        },
+        |ref_target| {
+            let oid = crate::types::RefName::new(ref_target)
+                .ok()
+                .and_then(|rn| crate::refs_impl::read_ref(repo, &rn).ok().flatten());
+            (oid, false)
+        },
+    )
 }
 
 #[cfg(test)]

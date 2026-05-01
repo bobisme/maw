@@ -92,7 +92,7 @@ pub struct GitWorktreeBackend {
 // ---------------------------------------------------------------------------
 
 /// Map a `maw_git::GitError` to a `GitBackendError`.
-fn map_git_error(context: &str, err: maw_git::GitError) -> GitBackendError {
+fn map_git_error(context: &str, err: &maw_git::GitError) -> GitBackendError {
     GitBackendError::GitCommand {
         command: context.to_owned(),
         stderr: err.to_string(),
@@ -115,6 +115,10 @@ impl GitWorktreeBackend {
     /// Create a new `GitWorktreeBackend`.
     ///
     /// Opens a `GixRepo` at the given root. Panics if the repo cannot be opened.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `root` is not a git repository.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         let repo = open_repo_at(&root)
@@ -203,9 +207,7 @@ impl GitWorktreeBackend {
     /// Missing config or parse/load failures fall back to enabled.
     fn git_compat_refs_enabled(&self) -> bool {
         let config_path = self.root.join(".manifold").join("config.toml");
-        ManifoldConfig::load(&config_path)
-            .map(|cfg| cfg.workspace.git_compat_refs)
-            .unwrap_or(true)
+        ManifoldConfig::load(&config_path).map_or(true, |cfg| cfg.workspace.git_compat_refs)
     }
 
     /// Refresh `refs/manifold/ws/<name>` to point at a commit representing the
@@ -237,7 +239,7 @@ impl GitWorktreeBackend {
             let ws_repo = open_repo_at(ws_path)?;
             let head_oid = ws_repo
                 .rev_parse("HEAD")
-                .map_err(|e| map_git_error("rev-parse HEAD", e))?;
+                .map_err(|e| map_git_error("rev-parse HEAD", &e))?;
             head_oid.to_string()
         } else {
             oid_str.to_owned()
@@ -309,7 +311,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
             if path.exists() {
                 let _ = std::fs::remove_dir_all(&path);
             }
-            return Err(map_git_error("worktree add", e));
+            return Err(map_git_error("worktree add", &e));
         }
 
         // Record the creation epoch so status() can distinguish
@@ -410,7 +412,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
         let worktrees = self
             .repo
             .worktree_list()
-            .map_err(|e| map_git_error("worktree list", e))?;
+            .map_err(|e| map_git_error("worktree list", &e))?;
         let current_epoch = self.current_epoch_opt();
         let ws_dir = self.workspaces_dir();
 
@@ -550,7 +552,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
                 let ws_repo = open_repo_at(&ws_path)?;
                 let head_oid = ws_repo
                     .rev_parse("HEAD")
-                    .map_err(|e| map_git_error("rev-parse HEAD", e))?;
+                    .map_err(|e| map_git_error("rev-parse HEAD", &e))?;
                 let head_str = head_oid.to_string();
                 EpochId::new(&head_str).map_err(|e| GitBackendError::GitCommand {
                     command: "rev-parse HEAD".to_owned(),
@@ -624,7 +626,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
         } else {
             let head = ws_repo
                 .rev_parse("HEAD")
-                .map_err(|e| map_git_error("rev-parse HEAD", e))?;
+                .map_err(|e| map_git_error("rev-parse HEAD", &e))?;
             head.to_string()
         };
 
@@ -873,50 +875,53 @@ mod tests {
 
     /// Helper: set up a fresh git repo with one commit.
     fn setup_git_repo() -> (TempDir, EpochId) {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("operation should succeed");
         let root = temp_dir.path();
 
         Command::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# Test Repo").unwrap();
+        fs::write(root.join("README.md"), "# Test Repo").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "Initial commit"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let output = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let oid_str = String::from_utf8(output.stdout).unwrap().trim().to_string();
-        let epoch = EpochId::new(&oid_str).unwrap();
+            .expect("operation should succeed");
+        let oid_str = String::from_utf8(output.stdout)
+            .expect("operation should succeed")
+            .trim()
+            .to_string();
+        let epoch = EpochId::new(&oid_str).expect("operation should succeed");
 
         (temp_dir, epoch)
     }
@@ -927,11 +932,16 @@ mod tests {
             .args(["rev-parse", &ref_name])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         if !out.status.success() {
             return None;
         }
-        Some(String::from_utf8(out.stdout).unwrap().trim().to_owned())
+        Some(
+            String::from_utf8(out.stdout)
+                .expect("operation should succeed")
+                .trim()
+                .to_owned(),
+        )
     }
 
     // -- create tests --
@@ -941,16 +951,20 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("test-ws").unwrap();
+        let ws_name = WorkspaceId::new("test-ws").expect("operation should succeed");
 
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert_eq!(info.id, ws_name);
         assert_eq!(info.path, root.join("ws").join("test-ws"));
         assert!(info.path.exists());
         assert!(info.path.join(".git").exists());
 
         // Idempotency
-        let info2 = backend.create(&ws_name, &epoch).unwrap();
+        let info2 = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert_eq!(info2.path, info.path);
     }
 
@@ -959,13 +973,15 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("fail-ws").unwrap();
+        let ws_name = WorkspaceId::new("fail-ws").expect("operation should succeed");
 
         let ws_path = root.join("ws").join("fail-ws");
-        fs::create_dir_all(&ws_path).unwrap();
-        fs::write(ws_path.join("garbage.txt"), "garbage").unwrap();
+        fs::create_dir_all(&ws_path).expect("operation should succeed");
+        fs::write(ws_path.join("garbage.txt"), "garbage").expect("operation should succeed");
 
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(info.path.exists());
         assert!(!ws_path.join("garbage.txt").exists());
     }
@@ -976,16 +992,18 @@ mod tests {
     fn test_exists_false_for_nonexistent() {
         let (temp_dir, _epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        assert!(!backend.exists(&WorkspaceId::new("nope").unwrap()));
+        assert!(!backend.exists(&WorkspaceId::new("nope").expect("operation should succeed")));
     }
 
     #[test]
     fn test_exists_true_after_create() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("exists-ws").unwrap();
+        let ws_name = WorkspaceId::new("exists-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(backend.exists(&ws_name));
     }
 
@@ -996,7 +1014,7 @@ mod tests {
         let (temp_dir, _epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("path-test").unwrap();
+        let ws_name = WorkspaceId::new("path-test").expect("operation should succeed");
 
         assert_eq!(backend.workspace_path(&ws_name), root.join("ws/path-test"));
     }
@@ -1007,10 +1025,14 @@ mod tests {
     fn test_snapshot_empty() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("snap-empty").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-empty").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.is_empty(), "no changes expected: {snap:?}");
     }
 
@@ -1019,13 +1041,17 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-add").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Add a new file (untracked)
-        fs::write(info.path.join("newfile.txt"), "hello").unwrap();
+        fs::write(info.path.join("newfile.txt"), "hello").expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert_eq!(snap.added.len(), 1, "expected 1 added: {snap:?}");
         assert_eq!(snap.added[0], PathBuf::from("newfile.txt"));
         assert!(snap.modified.is_empty());
@@ -1036,13 +1062,17 @@ mod tests {
     fn test_snapshot_modified_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("snap-mod").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-mod").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Modify existing tracked file
-        fs::write(info.path.join("README.md"), "# Modified").unwrap();
+        fs::write(info.path.join("README.md"), "# Modified").expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.added.is_empty(), "no adds: {snap:?}");
         assert_eq!(snap.modified.len(), 1, "expected 1 modified: {snap:?}");
         assert_eq!(snap.modified[0], PathBuf::from("README.md"));
@@ -1053,13 +1083,17 @@ mod tests {
     fn test_snapshot_deleted_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("snap-del").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-del").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Delete tracked file
-        fs::remove_file(info.path.join("README.md")).unwrap();
+        fs::remove_file(info.path.join("README.md")).expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.added.is_empty());
         assert!(snap.modified.is_empty());
         assert_eq!(snap.deleted.len(), 1, "expected 1 deleted: {snap:?}");
@@ -1070,15 +1104,19 @@ mod tests {
     fn test_snapshot_mixed_changes() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("snap-mix").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-mix").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Add, modify, delete
-        fs::write(info.path.join("new.rs"), "fn main() {}").unwrap();
-        fs::write(info.path.join("README.md"), "# Changed").unwrap();
+        fs::write(info.path.join("new.rs"), "fn main() {}").expect("operation should succeed");
+        fs::write(info.path.join("README.md"), "# Changed").expect("operation should succeed");
         // Can't delete and add in same snapshot cleanly without more files,
         // so just check add + modify
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert_eq!(snap.added.len(), 1);
         assert_eq!(snap.modified.len(), 1);
         assert_eq!(snap.change_count(), 2);
@@ -1088,14 +1126,18 @@ mod tests {
     fn test_snapshot_ignores_gitignored() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("snap-ignore").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-ignore").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Create .gitignore and an ignored file
-        fs::write(info.path.join(".gitignore"), "*.log\n").unwrap();
-        fs::write(info.path.join("debug.log"), "log data").unwrap();
+        fs::write(info.path.join(".gitignore"), "*.log\n").expect("operation should succeed");
+        fs::write(info.path.join("debug.log"), "log data").expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         // .gitignore itself should show up as added, but debug.log should not
         let has_log = snap.added.iter().any(|p| p.to_str() == Some("debug.log"));
         assert!(!has_log, "gitignored file should not appear: {snap:?}");
@@ -1107,9 +1149,11 @@ mod tests {
     fn test_snapshot_nonexistent_workspace() {
         let (temp_dir, _epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("nope").unwrap();
+        let ws_name = WorkspaceId::new("nope").expect("operation should succeed");
 
-        let err = backend.snapshot(&ws_name).unwrap_err();
+        let err = backend
+            .snapshot(&ws_name)
+            .expect_err("operation should fail");
         assert!(
             matches!(err, GitBackendError::NotFound { .. }),
             "should be NotFound: {err}"
@@ -1121,20 +1165,25 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-ref").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-ref").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("README.md"), "# changed from workspace").unwrap();
-        let _snap = backend.snapshot(&ws_name).unwrap();
+        fs::write(info.path.join("README.md"), "# changed from workspace")
+            .expect("operation should succeed");
+        let _snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
 
         let ref_oid = read_ws_ref(&root, ws_name.as_str()).expect("workspace ref should exist");
         let head_oid = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_oid = String::from_utf8(head_oid.stdout)
-            .unwrap()
+            .expect("operation should succeed")
             .trim()
             .to_owned();
         assert_ne!(
@@ -1147,8 +1196,8 @@ mod tests {
             .args(["diff", "--name-only", &format!("HEAD..{ref_name}")])
             .current_dir(&root)
             .output()
-            .unwrap();
-        let diff = String::from_utf8(diff_out.stdout).unwrap();
+            .expect("operation should succeed");
+        let diff = String::from_utf8(diff_out.stdout).expect("operation should succeed");
         assert!(
             diff.lines().any(|l| l.trim() == "README.md"),
             "diff should include README.md: {diff}"
@@ -1159,23 +1208,27 @@ mod tests {
     fn test_snapshot_skips_workspace_state_ref_when_disabled_in_config() {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
-        std::fs::create_dir_all(root.join(".manifold")).unwrap();
+        std::fs::create_dir_all(root.join(".manifold")).expect("operation should succeed");
         std::fs::write(
             root.join(".manifold").join("config.toml"),
             "[workspace]\ngit_compat_refs = false\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-no-ref").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-no-ref").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         fs::write(
             info.path.join("README.md"),
             "# changed with compat disabled",
         )
-        .unwrap();
-        let _snap = backend.snapshot(&ws_name).unwrap();
+        .expect("operation should succeed");
+        let _snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
 
         assert!(
             read_ws_ref(&root, ws_name.as_str()).is_none(),
@@ -1190,18 +1243,23 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("destroy-ws").unwrap();
+        let ws_name = WorkspaceId::new("destroy-ws").expect("operation should succeed");
 
         // Create then destroy
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(info.path.exists());
 
         // Materialize Level 1 ref, then ensure destroy prunes it.
-        fs::write(info.path.join("README.md"), "# dirty before destroy").unwrap();
-        let _ = backend.snapshot(&ws_name).unwrap();
+        fs::write(info.path.join("README.md"), "# dirty before destroy")
+            .expect("operation should succeed");
+        let _ = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(read_ws_ref(&root, ws_name.as_str()).is_some());
 
-        backend.destroy(&ws_name).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
         assert!(!info.path.exists(), "directory should be gone");
         assert!(!backend.exists(&ws_name), "should not exist in git");
         assert!(
@@ -1214,39 +1272,43 @@ mod tests {
     fn test_destroy_idempotent() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("destroy-idem").unwrap();
+        let ws_name = WorkspaceId::new("destroy-idem").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Destroy twice: both should succeed
-        backend.destroy(&ws_name).unwrap();
-        backend.destroy(&ws_name).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed");
     }
 
     #[test]
     fn test_destroy_never_existed() {
         let (temp_dir, _epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("no-such-ws").unwrap();
+        let ws_name = WorkspaceId::new("no-such-ws").expect("operation should succeed");
 
         // Destroying a workspace that never existed should succeed (idempotent)
-        backend.destroy(&ws_name).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
     }
 
     #[test]
     fn test_destroy_with_dirty_files() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("dirty-destroy").unwrap();
+        let ws_name = WorkspaceId::new("dirty-destroy").expect("operation should succeed");
 
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Make dirty changes
-        fs::write(info.path.join("dirty.txt"), "uncommitted").unwrap();
-        fs::write(info.path.join("README.md"), "modified").unwrap();
+        fs::write(info.path.join("dirty.txt"), "uncommitted").expect("operation should succeed");
+        fs::write(info.path.join("README.md"), "modified").expect("operation should succeed");
 
         // Should still destroy successfully (--force handles dirty state)
-        backend.destroy(&ws_name).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
         assert!(!info.path.exists());
         assert!(!backend.exists(&ws_name));
     }
@@ -1255,16 +1317,18 @@ mod tests {
     fn test_destroy_manual_dir_removal() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("manual-rm").unwrap();
+        let ws_name = WorkspaceId::new("manual-rm").expect("operation should succeed");
 
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Simulate out-of-band directory removal (e.g., crash during previous destroy)
-        fs::remove_dir_all(&info.path).unwrap();
+        fs::remove_dir_all(&info.path).expect("operation should succeed");
         assert!(!info.path.exists());
 
         // Destroy should still succeed and prune stale git worktree entry
-        backend.destroy(&ws_name).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
         assert!(!backend.exists(&ws_name));
     }
 
@@ -1272,12 +1336,16 @@ mod tests {
     fn test_create_after_destroy() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("recreate-ws").unwrap();
+        let ws_name = WorkspaceId::new("recreate-ws").expect("operation should succeed");
 
         // Create, destroy, then create again
-        backend.create(&ws_name, &epoch).unwrap();
-        backend.destroy(&ws_name).unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(info.path.exists());
         assert!(backend.exists(&ws_name));
     }
@@ -1395,7 +1463,7 @@ mod tests {
         let (temp_dir, _epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert!(infos.is_empty(), "no workspaces under ws/ yet: {infos:?}");
     }
 
@@ -1404,11 +1472,13 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("list-ws").unwrap();
+        let ws_name = WorkspaceId::new("list-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 1, "expected 1 workspace: {infos:?}");
         assert_eq!(infos[0].id, ws_name);
         assert_eq!(infos[0].path, root.join("ws/list-ws"));
@@ -1421,12 +1491,16 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
 
-        let a = WorkspaceId::new("alpha").unwrap();
-        let b = WorkspaceId::new("beta").unwrap();
-        backend.create(&a, &epoch).unwrap();
-        backend.create(&b, &epoch).unwrap();
+        let a = WorkspaceId::new("alpha").expect("operation should succeed");
+        let b = WorkspaceId::new("beta").expect("operation should succeed");
+        backend
+            .create(&a, &epoch)
+            .expect("operation should succeed");
+        backend
+            .create(&b, &epoch)
+            .expect("operation should succeed");
 
-        let mut infos = backend.list().unwrap();
+        let mut infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 2, "expected 2 workspaces: {infos:?}");
 
         // Sort by name for stable comparison
@@ -1440,10 +1514,12 @@ mod tests {
         // The main git worktree (the repo root) should never appear in list().
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("my-ws").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("my-ws").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         for info in &infos {
             assert_ne!(
                 info.path,
@@ -1458,11 +1534,13 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
 
-        let ws_name = WorkspaceId::new("gone-ws").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
-        backend.destroy(&ws_name).unwrap();
+        let ws_name = WorkspaceId::new("gone-ws").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert!(
             infos.is_empty(),
             "destroyed workspace should not appear: {infos:?}"
@@ -1474,17 +1552,19 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("current-ws").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("current-ws").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Set refs/manifold/epoch/current to the same epoch as the workspace
         Command::new("git")
             .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].state.is_active(),
@@ -1498,29 +1578,31 @@ mod tests {
         let (temp_dir, epoch0) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("stale-ws").unwrap();
-        backend.create(&ws_name, &epoch0).unwrap();
+        let ws_name = WorkspaceId::new("stale-ws").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch0)
+            .expect("operation should succeed");
 
         // Advance the epoch: make a new commit on the main branch
         let new_file = root.join("advance.md");
-        fs::write(&new_file, "epoch 1").unwrap();
+        fs::write(&new_file, "epoch 1").expect("operation should succeed");
         Command::new("git")
             .args(["add", "advance.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "Advance epoch"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let epoch1_str = String::from_utf8(head_out.stdout)
-            .unwrap()
+            .expect("operation should succeed")
             .trim()
             .to_string();
 
@@ -1529,9 +1611,9 @@ mod tests {
             .args(["update-ref", "refs/manifold/epoch/current", &epoch1_str])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].state.is_stale(),
@@ -1552,31 +1634,33 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("ahead-ws").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("ahead-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Set epoch ref to the creation epoch
         Command::new("git")
             .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Simulate a worker committing inside the workspace
-        fs::write(info.path.join("work.rs"), "fn worker() {}").unwrap();
+        fs::write(info.path.join("work.rs"), "fn worker() {}").expect("operation should succeed");
         Command::new("git")
             .args(["add", "work.rs"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "worker commit"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Workspace HEAD is now ahead of epoch — must not be shown as stale
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 1);
         assert!(
             !infos[0].state.is_stale(),
@@ -1593,52 +1677,54 @@ mod tests {
         let (temp_dir, epoch0) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("diverged-ws").unwrap();
-        let info = backend.create(&ws_name, &epoch0).unwrap();
+        let ws_name = WorkspaceId::new("diverged-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch0)
+            .expect("operation should succeed");
 
         // Worker commits inside the workspace
-        fs::write(info.path.join("work.rs"), "fn worker() {}").unwrap();
+        fs::write(info.path.join("work.rs"), "fn worker() {}").expect("operation should succeed");
         Command::new("git")
             .args(["add", "work.rs"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "worker commit"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Epoch advances on the main repo (simulating another workspace merging)
-        fs::write(root.join("other.md"), "other workspace work").unwrap();
+        fs::write(root.join("other.md"), "other workspace work").expect("operation should succeed");
         Command::new("git")
             .args(["add", "other.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "other workspace merged"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let epoch1_str = String::from_utf8(head_out.stdout)
-            .unwrap()
+            .expect("operation should succeed")
             .trim()
             .to_string();
         Command::new("git")
             .args(["update-ref", "refs/manifold/epoch/current", &epoch1_str])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Now the workspace has diverged from epoch1: both have commits the other doesn't.
         // list() should show it as Stale (epoch is NOT ancestor of workspace HEAD).
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].state.is_stale(),
@@ -1653,9 +1739,9 @@ mod tests {
     fn test_status_nonexistent_workspace() {
         let (temp_dir, _epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("no-such").unwrap();
+        let ws_name = WorkspaceId::new("no-such").expect("operation should succeed");
 
-        let err = backend.status(&ws_name).unwrap_err();
+        let err = backend.status(&ws_name).expect_err("operation should fail");
         assert!(
             matches!(err, GitBackendError::NotFound { .. }),
             "expected NotFound: {err}"
@@ -1666,10 +1752,12 @@ mod tests {
     fn test_status_clean_workspace() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("clean-ws").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("clean-ws").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert_eq!(
             status.base_epoch.as_str(),
             epoch.as_str(),
@@ -1687,12 +1775,14 @@ mod tests {
     fn test_status_modified_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("mod-ws").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("mod-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("README.md"), "# Changed").unwrap();
+        fs::write(info.path.join("README.md"), "# Changed").expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert_eq!(
             status.dirty_count(),
             1,
@@ -1713,12 +1803,14 @@ mod tests {
     fn test_status_untracked_file() {
         let (temp_dir, epoch) = setup_git_repo();
         let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
-        let ws_name = WorkspaceId::new("untracked-ws").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("untracked-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("new_file.txt"), "new").unwrap();
+        fs::write(info.path.join("new_file.txt"), "new").expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert_eq!(status.dirty_count(), 1);
         assert!(
             status
@@ -1735,17 +1827,19 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("not-stale").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("not-stale").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Set epoch ref to the workspace's epoch
         Command::new("git")
             .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert!(
             !status.is_stale,
             "workspace should not be stale when epoch matches"
@@ -1757,28 +1851,30 @@ mod tests {
         let (temp_dir, epoch0) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("stale-status").unwrap();
-        backend.create(&ws_name, &epoch0).unwrap();
+        let ws_name = WorkspaceId::new("stale-status").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch0)
+            .expect("operation should succeed");
 
         // Advance the epoch
-        fs::write(root.join("advance.md"), "epoch 1").unwrap();
+        fs::write(root.join("advance.md"), "epoch 1").expect("operation should succeed");
         Command::new("git")
             .args(["add", "advance.md"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "Advance"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let epoch1_str = String::from_utf8(head_out.stdout)
-            .unwrap()
+            .expect("operation should succeed")
             .trim()
             .to_string();
 
@@ -1786,9 +1882,9 @@ mod tests {
             .args(["update-ref", "refs/manifold/epoch/current", &epoch1_str])
             .current_dir(&root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert!(
             status.is_stale,
             "workspace should be stale after epoch advance"
@@ -1857,13 +1953,15 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("epoch-ref-ws").unwrap();
+        let ws_name = WorkspaceId::new("epoch-ref-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // The per-workspace epoch ref should exist and match the creation epoch
         let epoch_ref = manifold_refs::workspace_epoch_ref("epoch-ref-ws");
-        let stored = manifold_refs::read_ref(&root, &epoch_ref).unwrap();
+        let stored = manifold_refs::read_ref(&root, &epoch_ref).expect("operation should succeed");
         assert_eq!(
             stored,
             Some(epoch.oid().clone()),
@@ -1871,8 +1969,8 @@ mod tests {
         );
 
         // After destroy, the ref should be cleaned up
-        backend.destroy(&ws_name).unwrap();
-        let stored = manifold_refs::read_ref(&root, &epoch_ref).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
+        let stored = manifold_refs::read_ref(&root, &epoch_ref).expect("operation should succeed");
         assert!(
             stored.is_none(),
             "workspace epoch ref should be pruned on destroy"
@@ -1888,25 +1986,27 @@ mod tests {
         let (temp_dir, epoch) = setup_git_repo();
         let root = temp_dir.path().to_path_buf();
         let backend = GitWorktreeBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("commit-ws").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("commit-ws").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Simulate an agent committing inside the workspace
-        fs::write(info.path.join("work.rs"), "fn work() {}").unwrap();
+        fs::write(info.path.join("work.rs"), "fn work() {}").expect("operation should succeed");
         Command::new("git")
             .args(["add", "work.rs"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "agent work"])
             .current_dir(&info.path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // HEAD has advanced, but status().base_epoch must still be the
         // original creation epoch
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert_eq!(
             status.base_epoch.as_str(),
             epoch.as_str(),
@@ -1914,9 +2014,9 @@ mod tests {
         );
 
         // The workspace HEAD should differ from base_epoch
-        let head_str =
-            GitWorktreeBackend::git_stdout_in(&info.path, &["rev-parse", "HEAD"]).unwrap();
-        let head_epoch = EpochId::new(head_str.trim()).unwrap();
+        let head_str = GitWorktreeBackend::git_stdout_in(&info.path, &["rev-parse", "HEAD"])
+            .expect("operation should succeed");
+        let head_epoch = EpochId::new(head_str.trim()).expect("operation should succeed");
         assert_ne!(
             head_epoch, epoch,
             "HEAD should have advanced beyond creation epoch"

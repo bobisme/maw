@@ -86,14 +86,15 @@ fn two_way_merge_disjoint_files_clean() {
     repo.add_file("bob", "bob.txt", "Bob's work\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     // Should be clean — no conflicts
     assert!(
@@ -167,14 +168,15 @@ fn two_way_merge_same_file_different_regions_diff3_clean() {
     );
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     // Should be clean — diff3 resolves non-overlapping edits
     assert!(
@@ -222,14 +224,15 @@ fn two_way_merge_same_file_same_region_conflict() {
     repo.modify_file("bob", "data.txt", "bob version\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     // Should report a conflict
     assert_eq!(
@@ -288,15 +291,16 @@ fn three_way_merge_disjoint_files_clean() {
     repo.add_file("carol", "carol.txt", "Carol's feature\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
-        maw::model::types::WorkspaceId::new("carol").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("carol").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -337,14 +341,15 @@ fn five_way_merge_disjoint_files_clean() {
     }
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources: Vec<_> = names
         .iter()
-        .map(|n| maw::model::types::WorkspaceId::new(n).unwrap())
+        .map(|n| maw::model::types::WorkspaceId::new(n).expect("operation should succeed"))
         .collect();
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -383,14 +388,15 @@ fn identical_changes_resolve_via_hash_equality() {
     repo.modify_file("bob", "config.txt", new_content);
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     // Hash equality short-circuit: identical changes → no conflict
     assert!(
@@ -424,14 +430,15 @@ fn merge_with_empty_workspace_is_noop_for_that_workspace() {
     repo.add_file("active", "feature.txt", "new feature\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("active").unwrap(),
-        maw::model::types::WorkspaceId::new("empty").unwrap(),
+        maw::model::types::WorkspaceId::new("active").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("empty").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -491,15 +498,16 @@ fn three_way_merge_same_file_different_regions_diff3_clean() {
     );
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("ws-a").unwrap(),
-        maw::model::types::WorkspaceId::new("ws-b").unwrap(),
-        maw::model::types::WorkspaceId::new("ws-c").unwrap(),
+        maw::model::types::WorkspaceId::new("ws-a").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("ws-b").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("ws-c").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -547,14 +555,15 @@ fn five_way_merge_same_file_different_regions_diff3_clean() {
     }
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources: Vec<_> = names
         .iter()
-        .map(|n| maw::model::types::WorkspaceId::new(n).unwrap())
+        .map(|n| maw::model::types::WorkspaceId::new(n).expect("operation should succeed"))
         .collect();
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -588,14 +597,15 @@ fn add_add_different_content_produces_conflict() {
     repo.add_file("bob", "new.txt", "bob's new file\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert_eq!(
         output.conflicts.len(),
@@ -626,14 +636,15 @@ fn modify_delete_produces_conflict() {
     repo.delete_file("bob", "target.txt");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert_eq!(output.conflicts.len(), 1, "modify/delete should conflict");
     assert_eq!(output.conflicts[0].path.to_str(), Some("target.txt"));
@@ -660,14 +671,15 @@ fn delete_delete_resolves_cleanly() {
     repo.delete_file("bob", "remove.txt");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -714,14 +726,15 @@ fn mixed_disjoint_and_shared_changes() {
     );
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),
@@ -766,14 +779,15 @@ fn merge_with_nested_directories() {
     repo.add_file("bob", "src/utils/helpers.rs", "pub fn helper() {}\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(output.conflicts.is_empty());
 
@@ -810,15 +824,16 @@ fn merge_is_deterministic() {
         repo.modify_file("bob", "shared.txt", "R1\n---\n---\n---\n---\nB2\n");
 
         let backend = backend_for(&repo);
-        let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+        let epoch = maw::model::types::EpochId::new(&repo.current_epoch())
+            .expect("operation should succeed");
         let sources = vec![
-            maw::model::types::WorkspaceId::new("alice").unwrap(),
-            maw::model::types::WorkspaceId::new("bob").unwrap(),
+            maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+            maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
         ];
 
         let output =
             maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
-                .unwrap();
+                .expect("operation should succeed");
 
         assert!(output.conflicts.is_empty());
 
@@ -866,15 +881,16 @@ fn nway_mixed_conflicts_and_clean() {
     repo.add_file("ws-c", "c_only.txt", "from c\n");
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("ws-a").unwrap(),
-        maw::model::types::WorkspaceId::new("ws-b").unwrap(),
-        maw::model::types::WorkspaceId::new("ws-c").unwrap(),
+        maw::model::types::WorkspaceId::new("ws-a").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("ws-b").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("ws-c").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     // conflict.txt should be conflicted
     assert_eq!(output.conflicts.len(), 1, "exactly one conflict expected");
@@ -974,14 +990,15 @@ fn add_add_identical_content_resolves_cleanly() {
     repo.add_file("bob", "new.txt", content);
 
     let backend = backend_for(&repo);
-    let epoch = maw::model::types::EpochId::new(&repo.current_epoch()).unwrap();
+    let epoch =
+        maw::model::types::EpochId::new(&repo.current_epoch()).expect("operation should succeed");
     let sources = vec![
-        maw::model::types::WorkspaceId::new("alice").unwrap(),
-        maw::model::types::WorkspaceId::new("bob").unwrap(),
+        maw::model::types::WorkspaceId::new("alice").expect("operation should succeed"),
+        maw::model::types::WorkspaceId::new("bob").expect("operation should succeed"),
     ];
 
-    let output =
-        maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources).unwrap();
+    let output = maw::merge::run_build_phase_with_inputs(repo.root(), &backend, &epoch, &sources)
+        .expect("operation should succeed");
 
     assert!(
         output.conflicts.is_empty(),

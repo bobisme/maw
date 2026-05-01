@@ -126,7 +126,7 @@ struct TraceLog {
 }
 
 impl TraceLog {
-    fn new(seed: u64, max_steps: usize) -> Self {
+    const fn new(seed: u64, max_steps: usize) -> Self {
         Self {
             seed,
             max_steps,
@@ -231,6 +231,11 @@ struct DirtyDefaultCase {
     resolved: bool,
 }
 
+#[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "stateful DST harness tracks independent one-shot action flags"
+)]
 struct ActionState {
     names: NameGen,
     actors: Vec<WorkspaceActor>,
@@ -249,30 +254,6 @@ struct ActionState {
     clean_done: bool,
     prune_done: bool,
     warnings: Vec<String>,
-}
-
-impl Default for ActionState {
-    fn default() -> Self {
-        Self {
-            names: NameGen::default(),
-            actors: Vec::new(),
-            conflict_pairs: Vec::new(),
-            recover_cases: Vec::new(),
-            sync_cases: Vec::new(),
-            dirty_default_cases: Vec::new(),
-            tracked_commit_oids: HashSet::new(),
-            change_only_paths: Vec::new(),
-            remote_configured: false,
-            remote_pushed: false,
-            change_flow_done: false,
-            undo_done: false,
-            restore_done: false,
-            attach_done: false,
-            clean_done: false,
-            prune_done: false,
-            warnings: Vec::new(),
-        }
-    }
 }
 
 fn parse_json(text: &str, context: &str) -> Result<Value, String> {
@@ -498,6 +479,10 @@ fn choose_index<T>(rng: &mut StdRng, items: &[T]) -> usize {
     rng.random_range(0..items.len())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "stateful DST dispatcher keeps action execution in one auditable match"
+)]
 fn run_action(
     repo: &TestRepo,
     state: &mut ActionState,
@@ -535,7 +520,7 @@ fn run_action(
             repo.git_in_workspace(&name, &["commit", "-m", &format!("feat: {name}")]);
             state.tracked_commit_oids.insert(repo.workspace_head(&name));
             state.actors[idx].tracked_path = Some(path.clone());
-            state.actors[idx].tracked_content = Some(content.clone());
+            state.actors[idx].tracked_content = Some(content);
             state.actors[idx].committed = true;
             Ok(format!("committed {path} in {name}"))
         }
@@ -665,7 +650,7 @@ fn run_action(
             state.conflict_pairs.push(ConflictPair {
                 left: left.clone(),
                 right: right.clone(),
-                shared_path: shared.clone(),
+                shared_path: shared,
                 resolved: false,
             });
             Ok(format!("created conflicting pair {left}/{right}"))
@@ -758,8 +743,7 @@ fn run_action(
             }
             if repo.read_file(&restored, &committed_path).as_deref() != Some("baseline\n") {
                 return Err(format!(
-                    "restored workspace missing committed file {}",
-                    committed_path
+                    "restored workspace missing committed file {committed_path}"
                 ));
             }
             state.recover_cases[idx].restored_name = Some(restored.clone());
@@ -830,9 +814,7 @@ fn run_action(
                 &["status", "--porcelain=v1", "--untracked-files=all"],
             )?;
             if status.trim().is_empty() {
-                return Err(format!(
-                    "attached workspace should expose preserved local differences, got clean status"
-                ));
+                return Err("attached workspace should expose preserved local differences, got clean status".to_string());
             }
             state.attach_done = true;
             Ok(format!("attached orphaned directory {name}"))
@@ -1089,12 +1071,12 @@ fn run_action(
             ]);
 
             // Verify markers are gone.
-            if let Some(after) = repo.read_file("default", &path) {
-                if after.contains("<<<<<<<") {
-                    return Err(format!(
-                        "conflict markers still present after resolve for {path}"
-                    ));
-                }
+            if let Some(after) = repo.read_file("default", &path)
+                && after.contains("<<<<<<<")
+            {
+                return Err(format!(
+                    "conflict markers still present after resolve for {path}"
+                ));
             }
 
             state.dirty_default_cases[case_idx].resolved = true;
@@ -1192,10 +1174,22 @@ fn run_action_dispatch(
             ));
         }
         let remote_dir = repo.root().join("origin.git");
-        git_output_in_root(repo, &["init", "--bare", remote_dir.to_str().unwrap()])?;
         git_output_in_root(
             repo,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+            &[
+                "init",
+                "--bare",
+                remote_dir.to_str().expect("operation should succeed"),
+            ],
+        )?;
+        git_output_in_root(
+            repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote_dir.to_str().expect("operation should succeed"),
+            ],
         )?;
         state.remote_configured = true;
     }
@@ -1227,19 +1221,23 @@ fn minimize_prefix(seed: u64, executed_steps: usize) -> usize {
         .unwrap_or(executed_steps)
 }
 
+fn action_seeds(default_trace_count: u64) -> Vec<u64> {
+    single_seed().map_or_else(
+        || {
+            (0..trace_count(default_trace_count))
+                .map(|i| BASE_SEED.wrapping_add(i))
+                .collect()
+        },
+        |seed| vec![seed],
+    )
+}
+
 #[test]
 fn dst_action_sequences_preserve_contracts() {
     let steps = step_limit().unwrap_or(10);
-    let seeds: Vec<u64> = if let Some(seed) = single_seed() {
-        vec![seed]
-    } else {
-        (0..trace_count(8))
-            .map(|i| BASE_SEED.wrapping_add(i))
-            .collect()
-    };
+    let seeds = action_seeds(8);
 
     let mut failures = Vec::new();
-    let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_action_seed(seed, steps, None, false);
@@ -1255,12 +1253,6 @@ fn dst_action_sequences_preserve_contracts() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, min_prefix, result.violations));
-        } else {
-            summaries.push(dst_support::SuccessSeedSummary {
-                seed,
-                steps_executed: result.trace.entries.len(),
-                warnings: result.warnings,
-            });
         }
     }
 
@@ -1282,20 +1274,20 @@ fn dst_action_sequences_preserve_contracts() {
 #[ignore = "Slow action-sequence sweep. Run with ACTION_DST_TRACES=32 cargo test --test action_workflow_dst -- --ignored --nocapture"]
 fn dst_action_sequences_preserve_contracts_long_run() {
     let steps = step_limit().unwrap_or(14);
-    let seeds: Vec<u64> = if let Some(seed) = single_seed() {
-        vec![seed]
-    } else {
-        (0..trace_count(32))
-            .map(|i| BASE_SEED.wrapping_add(i))
-            .collect()
-    };
+    let seeds = action_seeds(32);
 
     let mut failures = Vec::new();
     let mut summaries = Vec::new();
 
     for seed in seeds {
         let result = run_action_seed(seed, steps, None, false);
-        if !result.violations.is_empty() {
+        if result.violations.is_empty() {
+            summaries.push(dst_support::SuccessSeedSummary {
+                seed,
+                steps_executed: result.trace.entries.len(),
+                warnings: result.warnings,
+            });
+        } else {
             result.trace.dump();
             for violation in &result.violations {
                 eprintln!("  VIOLATION: {violation}");
@@ -1307,12 +1299,6 @@ fn dst_action_sequences_preserve_contracts_long_run() {
                 eprintln!("  ARTIFACT: {}", bundle.display());
             }
             failures.push((seed, min_prefix, result.violations));
-        } else {
-            summaries.push(dst_support::SuccessSeedSummary {
-                seed,
-                steps_executed: result.trace.entries.len(),
-                warnings: result.warnings,
-            });
         }
     }
 

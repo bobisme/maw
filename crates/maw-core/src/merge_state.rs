@@ -525,17 +525,17 @@ mod tests {
     use super::*;
 
     fn test_epoch() -> EpochId {
-        EpochId::new(&"a".repeat(40)).unwrap()
+        EpochId::new(&"a".repeat(40)).expect("operation should succeed")
     }
 
     fn test_oid() -> GitOid {
-        GitOid::new(&"b".repeat(40)).unwrap()
+        GitOid::new(&"b".repeat(40)).expect("operation should succeed")
     }
 
     fn test_sources() -> Vec<WorkspaceId> {
         vec![
-            WorkspaceId::new("agent-1").unwrap(),
-            WorkspaceId::new("agent-2").unwrap(),
+            WorkspaceId::new("agent-1").expect("operation should succeed"),
+            WorkspaceId::new("agent-2").expect("operation should succeed"),
         ]
     }
 
@@ -608,15 +608,16 @@ mod tests {
             MergePhase::Aborted,
         ];
         for phase in phases {
-            let json = serde_json::to_string(&phase).unwrap();
-            let decoded: MergePhase = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&phase).expect("operation should succeed");
+            let decoded: MergePhase =
+                serde_json::from_str(&json).expect("operation should succeed");
             assert_eq!(decoded, phase, "roundtrip failed for {phase}");
         }
     }
 
     #[test]
     fn phase_serde_snake_case() {
-        let json = serde_json::to_string(&MergePhase::Prepare).unwrap();
+        let json = serde_json::to_string(&MergePhase::Prepare).expect("operation should succeed");
         assert_eq!(json, "\"prepare\"");
     }
 
@@ -639,20 +640,30 @@ mod tests {
     fn advance_happy_path() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
 
-        state.advance(MergePhase::Build, 1001).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Build);
         assert_eq!(state.updated_at, 1001);
 
-        state.advance(MergePhase::Validate, 1002).unwrap();
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Validate);
 
-        state.advance(MergePhase::Commit, 1003).unwrap();
+        state
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Commit);
 
-        state.advance(MergePhase::Cleanup, 1004).unwrap();
+        state
+            .advance(MergePhase::Cleanup, 1004)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Cleanup);
 
-        state.advance(MergePhase::Complete, 1005).unwrap();
+        state
+            .advance(MergePhase::Complete, 1005)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Complete);
         assert_eq!(state.updated_at, 1005);
     }
@@ -660,7 +671,9 @@ mod tests {
     #[test]
     fn advance_invalid_transition() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        let err = state.advance(MergePhase::Validate, 1001).unwrap_err();
+        let err = state
+            .advance(MergePhase::Validate, 1001)
+            .expect_err("operation should fail");
         assert!(matches!(err, MergeStateError::InvalidTransition { .. }));
         // Phase should not change on error
         assert_eq!(state.phase, MergePhase::Prepare);
@@ -669,20 +682,34 @@ mod tests {
     #[test]
     fn advance_from_terminal_fails() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
-        state.advance(MergePhase::Validate, 1002).unwrap();
-        state.advance(MergePhase::Commit, 1003).unwrap();
-        state.advance(MergePhase::Cleanup, 1004).unwrap();
-        state.advance(MergePhase::Complete, 1005).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Cleanup, 1004)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Complete, 1005)
+            .expect("operation should succeed");
 
-        let err = state.advance(MergePhase::Aborted, 1006).unwrap_err();
+        let err = state
+            .advance(MergePhase::Aborted, 1006)
+            .expect_err("operation should fail");
         assert!(matches!(err, MergeStateError::InvalidTransition { .. }));
     }
 
     #[test]
     fn abort_from_prepare() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.abort("test abort", 1001).unwrap();
+        state
+            .abort("test abort", 1001)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Aborted);
         assert_eq!(state.abort_reason.as_deref(), Some("test abort"));
         assert_eq!(state.updated_at, 1001);
@@ -691,8 +718,12 @@ mod tests {
     #[test]
     fn abort_from_build() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
-        state.abort("build failed", 1002).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        state
+            .abort("build failed", 1002)
+            .expect("operation should succeed");
         assert_eq!(state.phase, MergePhase::Aborted);
         assert_eq!(state.abort_reason.as_deref(), Some("build failed"));
     }
@@ -700,8 +731,12 @@ mod tests {
     #[test]
     fn abort_from_terminal_fails() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.abort("first abort", 1001).unwrap();
-        let err = state.abort("double abort", 1002).unwrap_err();
+        state
+            .abort("first abort", 1001)
+            .expect("operation should succeed");
+        let err = state
+            .abort("double abort", 1002)
+            .expect_err("operation should fail");
         assert!(matches!(err, MergeStateError::InvalidTransition { .. }));
     }
 
@@ -710,17 +745,21 @@ mod tests {
     #[test]
     fn json_roundtrip_prepare() {
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        let json = state.to_json().unwrap();
-        let decoded = MergeStateFile::from_json(&json).unwrap();
+        let json = state.to_json().expect("operation should succeed");
+        let decoded = MergeStateFile::from_json(&json).expect("operation should succeed");
         assert_eq!(decoded, state);
     }
 
     #[test]
     fn json_roundtrip_with_optional_fields() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
         state.epoch_candidate = Some(test_oid());
-        state.advance(MergePhase::Validate, 1002).unwrap();
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
         state.validation_result = Some(ValidationResult {
             passed: true,
             exit_code: Some(0),
@@ -729,18 +768,20 @@ mod tests {
             duration_ms: 1500,
             command_results: Vec::new(),
         });
-        state.advance(MergePhase::Commit, 1003).unwrap();
-        state.epoch_after = Some(EpochId::new(&"c".repeat(40)).unwrap());
+        state
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
+        state.epoch_after = Some(EpochId::new(&"c".repeat(40)).expect("operation should succeed"));
 
-        let json = state.to_json().unwrap();
-        let decoded = MergeStateFile::from_json(&json).unwrap();
+        let json = state.to_json().expect("operation should succeed");
+        let decoded = MergeStateFile::from_json(&json).expect("operation should succeed");
         assert_eq!(decoded, state);
     }
 
     #[test]
     fn json_is_pretty_printed() {
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        let json = state.to_json().unwrap();
+        let json = state.to_json().expect("operation should succeed");
         // Pretty-printed JSON has newlines
         assert!(json.contains('\n'));
         // Contains indentation
@@ -750,7 +791,7 @@ mod tests {
     #[test]
     fn json_omits_none_fields() {
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        let json = state.to_json().unwrap();
+        let json = state.to_json().expect("operation should succeed");
         assert!(!json.contains("epoch_candidate"));
         assert!(!json.contains("validation_result"));
         assert!(!json.contains("epoch_after"));
@@ -760,16 +801,18 @@ mod tests {
     #[test]
     fn json_includes_some_fields() {
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
         state.epoch_candidate = Some(test_oid());
-        let json = state.to_json().unwrap();
+        let json = state.to_json().expect("operation should succeed");
         assert!(json.contains("epoch_candidate"));
         assert!(json.contains(&"b".repeat(40)));
     }
 
     #[test]
     fn json_deserialize_invalid() {
-        let err = MergeStateFile::from_json("not json").unwrap_err();
+        let err = MergeStateFile::from_json("not json").expect_err("operation should fail");
         assert!(matches!(err, MergeStateError::Deserialize(_)));
     }
 
@@ -777,49 +820,55 @@ mod tests {
 
     #[test]
     fn write_and_read_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let loaded = MergeStateFile::read(&path).unwrap();
+        let loaded = MergeStateFile::read(&path).expect("operation should succeed");
         assert_eq!(loaded, state);
     }
 
     #[test]
     fn write_overwrite_preserves_atomicity() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         // Write initial state
         let state1 = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state1.write_atomic(&path).unwrap();
+        state1
+            .write_atomic(&path)
+            .expect("operation should succeed");
 
         // Overwrite with advanced state
         let mut state2 = MergeStateFile::new(test_sources(), test_epoch(), 2000);
-        state2.advance(MergePhase::Build, 2001).unwrap();
+        state2
+            .advance(MergePhase::Build, 2001)
+            .expect("operation should succeed");
         state2.epoch_candidate = Some(test_oid());
-        state2.write_atomic(&path).unwrap();
+        state2
+            .write_atomic(&path)
+            .expect("operation should succeed");
 
         // Read should return state2
-        let loaded = MergeStateFile::read(&path).unwrap();
+        let loaded = MergeStateFile::read(&path).expect("operation should succeed");
         assert_eq!(loaded, state2);
     }
 
     #[test]
     fn read_not_found() {
         let path = PathBuf::from("/tmp/nonexistent-merge-state-test.json");
-        let err = MergeStateFile::read(&path).unwrap_err();
+        let err = MergeStateFile::read(&path).expect_err("operation should fail");
         assert!(matches!(err, MergeStateError::NotFound(_)));
     }
 
     #[test]
     fn read_corrupt_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = dir.path().join("merge-state.json");
-        fs::write(&path, "corrupted data").unwrap();
-        let err = MergeStateFile::read(&path).unwrap_err();
+        fs::write(&path, "corrupted data").expect("operation should succeed");
+        let err = MergeStateFile::read(&path).expect_err("operation should fail");
         assert!(matches!(err, MergeStateError::Deserialize(_)));
     }
 
@@ -831,11 +880,11 @@ mod tests {
 
     #[test]
     fn tmp_file_cleaned_up_after_write() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
         // Temp file should be gone after successful rename
         assert!(!dir.path().join(".merge-state.tmp").exists());
@@ -853,8 +902,9 @@ mod tests {
             duration_ms: 5432,
             command_results: Vec::new(),
         };
-        let json = serde_json::to_string_pretty(&result).unwrap();
-        let decoded: ValidationResult = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&result).expect("operation should succeed");
+        let decoded: ValidationResult =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, result);
     }
 
@@ -868,8 +918,9 @@ mod tests {
             duration_ms: 60000,
             command_results: Vec::new(),
         };
-        let json = serde_json::to_string_pretty(&result).unwrap();
-        let decoded: ValidationResult = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&result).expect("operation should succeed");
+        let decoded: ValidationResult =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, result);
         assert!(decoded.exit_code.is_none());
     }
@@ -901,9 +952,10 @@ mod tests {
                 },
             ],
         };
-        let json = serde_json::to_string_pretty(&result).unwrap();
+        let json = serde_json::to_string_pretty(&result).expect("operation should succeed");
         assert!(json.contains("command_results"));
-        let decoded: ValidationResult = serde_json::from_str(&json).unwrap();
+        let decoded: ValidationResult =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded.command_results.len(), 2);
         assert_eq!(decoded.command_results[0].command, "cargo check");
         assert!(decoded.command_results[0].passed);
@@ -921,7 +973,8 @@ mod tests {
             "stderr": "",
             "duration_ms": 100
         }"#;
-        let decoded: ValidationResult = serde_json::from_str(json).unwrap();
+        let decoded: ValidationResult =
+            serde_json::from_str(json).expect("operation should succeed");
         assert!(decoded.passed);
         assert!(decoded.command_results.is_empty());
     }
@@ -930,11 +983,11 @@ mod tests {
 
     #[test]
     fn cleanup_phase_destroys_sources_and_removes_merge_state() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
         assert!(path.exists());
 
         let mut destroyed = Vec::new();
@@ -942,7 +995,7 @@ mod tests {
             destroyed.push(ws.as_str().to_owned());
             Ok(())
         })
-        .unwrap();
+        .expect("operation should succeed");
 
         assert_eq!(destroyed, vec!["agent-1".to_owned(), "agent-2".to_owned()]);
         assert!(!path.exists());
@@ -950,14 +1003,14 @@ mod tests {
 
     #[test]
     fn cleanup_phase_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
-        run_cleanup_phase(&state, &path, false, |_ws| Ok(())).unwrap();
-        run_cleanup_phase(&state, &path, false, |_ws| Ok(())).unwrap();
+        run_cleanup_phase(&state, &path, false, |_ws| Ok(())).expect("operation should succeed");
+        run_cleanup_phase(&state, &path, false, |_ws| Ok(())).expect("operation should succeed");
 
         assert!(!path.exists());
     }
@@ -967,32 +1020,64 @@ mod tests {
         match phase {
             MergePhase::Prepare => {}
             MergePhase::Build => {
-                state.advance(MergePhase::Build, 1001).unwrap();
+                state
+                    .advance(MergePhase::Build, 1001)
+                    .expect("operation should succeed");
             }
             MergePhase::Validate => {
-                state.advance(MergePhase::Build, 1001).unwrap();
-                state.advance(MergePhase::Validate, 1002).unwrap();
+                state
+                    .advance(MergePhase::Build, 1001)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Validate, 1002)
+                    .expect("operation should succeed");
             }
             MergePhase::Commit => {
-                state.advance(MergePhase::Build, 1001).unwrap();
-                state.advance(MergePhase::Validate, 1002).unwrap();
-                state.advance(MergePhase::Commit, 1003).unwrap();
+                state
+                    .advance(MergePhase::Build, 1001)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Validate, 1002)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Commit, 1003)
+                    .expect("operation should succeed");
             }
             MergePhase::Cleanup => {
-                state.advance(MergePhase::Build, 1001).unwrap();
-                state.advance(MergePhase::Validate, 1002).unwrap();
-                state.advance(MergePhase::Commit, 1003).unwrap();
-                state.advance(MergePhase::Cleanup, 1004).unwrap();
+                state
+                    .advance(MergePhase::Build, 1001)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Validate, 1002)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Commit, 1003)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Cleanup, 1004)
+                    .expect("operation should succeed");
             }
             MergePhase::Complete => {
-                state.advance(MergePhase::Build, 1001).unwrap();
-                state.advance(MergePhase::Validate, 1002).unwrap();
-                state.advance(MergePhase::Commit, 1003).unwrap();
-                state.advance(MergePhase::Cleanup, 1004).unwrap();
-                state.advance(MergePhase::Complete, 1005).unwrap();
+                state
+                    .advance(MergePhase::Build, 1001)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Validate, 1002)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Commit, 1003)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Cleanup, 1004)
+                    .expect("operation should succeed");
+                state
+                    .advance(MergePhase::Complete, 1005)
+                    .expect("operation should succeed");
             }
             MergePhase::Aborted => {
-                state.abort("aborted for test", 1001).unwrap();
+                state
+                    .abort("aborted for test", 1001)
+                    .expect("operation should succeed");
             }
         }
         state
@@ -1000,22 +1085,22 @@ mod tests {
 
     #[test]
     fn recovery_no_merge_state_returns_no_merge_in_progress() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert_eq!(outcome, RecoveryOutcome::NoMergeInProgress);
     }
 
     #[test]
     fn recovery_prepare_aborts_and_deletes_state_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert_eq!(
             outcome,
             RecoveryOutcome::AbortedPreCommit {
@@ -1027,13 +1112,13 @@ mod tests {
 
     #[test]
     fn recovery_build_aborts_and_deletes_state_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = state_in_phase(MergePhase::Build);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert_eq!(
             outcome,
             RecoveryOutcome::AbortedPreCommit {
@@ -1045,61 +1130,74 @@ mod tests {
 
     #[test]
     fn recovery_commit_requests_ref_check_and_keeps_state_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let state = state_in_phase(MergePhase::Commit);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert_eq!(outcome, RecoveryOutcome::CheckCommit);
         assert!(path.exists());
     }
 
     #[test]
     fn recovery_validate_requests_rerun_and_keeps_state_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
-        state.advance(MergePhase::Validate, 1002).unwrap();
-        state.write_atomic(&path).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert_eq!(outcome, RecoveryOutcome::RetryValidate);
         assert!(path.exists());
     }
 
     #[test]
     fn recovery_cleanup_requests_rerun_and_deletes_state_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
-        state.advance(MergePhase::Validate, 1002).unwrap();
-        state.advance(MergePhase::Commit, 1003).unwrap();
-        state.advance(MergePhase::Cleanup, 1004).unwrap();
-        state.write_atomic(&path).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
+        state
+            .advance(MergePhase::Cleanup, 1004)
+            .expect("operation should succeed");
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert_eq!(outcome, RecoveryOutcome::RetryCleanup);
         assert!(!path.exists());
     }
 
     #[test]
     fn recovery_precommit_abort_preserves_workspace_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let workspace_file = dir.path().join("ws").join("agent-1").join("keep.txt");
-        fs::create_dir_all(workspace_file.parent().unwrap()).unwrap();
-        fs::write(&workspace_file, "important work\n").unwrap();
+        fs::create_dir_all(workspace_file.parent().expect("operation should succeed"))
+            .expect("operation should succeed");
+        fs::write(&workspace_file, "important work\n").expect("operation should succeed");
 
         let path = MergeStateFile::default_path(dir.path());
         let state = state_in_phase(MergePhase::Build);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&path).unwrap();
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
         assert!(matches!(
             outcome,
             RecoveryOutcome::AbortedPreCommit {
@@ -1107,7 +1205,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            fs::read_to_string(&workspace_file).unwrap(),
+            fs::read_to_string(&workspace_file).expect("operation should succeed"),
             "important work\n"
         );
     }
@@ -1124,13 +1222,13 @@ mod tests {
             ];
 
             for (phase, should_delete_state_file) in scenarios {
-                let dir = tempfile::tempdir().unwrap();
+                let dir = tempfile::tempdir().expect("operation should succeed");
                 let path = MergeStateFile::default_path(dir.path());
                 let state = state_in_phase(phase.clone());
-                state.write_atomic(&path).unwrap();
+                state.write_atomic(&path).expect("operation should succeed");
 
-                let first = recover_from_merge_state(&path).unwrap();
-                let second = recover_from_merge_state(&path).unwrap();
+                let first = recover_from_merge_state(&path).expect("operation should succeed");
+                let second = recover_from_merge_state(&path).expect("operation should succeed");
 
                 match phase {
                     MergePhase::Prepare | MergePhase::Build => {
@@ -1175,23 +1273,27 @@ mod tests {
 
     #[test]
     fn full_lifecycle_persist_each_phase() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = MergeStateFile::default_path(dir.path());
 
         // Prepare
         let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
         // Build
-        state.advance(MergePhase::Build, 1001).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
         state.epoch_candidate = Some(test_oid());
-        state.write_atomic(&path).unwrap();
-        let loaded = MergeStateFile::read(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
+        let loaded = MergeStateFile::read(&path).expect("operation should succeed");
         assert_eq!(loaded.phase, MergePhase::Build);
         assert!(loaded.epoch_candidate.is_some());
 
         // Validate
-        state.advance(MergePhase::Validate, 1002).unwrap();
+        state
+            .advance(MergePhase::Validate, 1002)
+            .expect("operation should succeed");
         state.validation_result = Some(ValidationResult {
             passed: true,
             exit_code: Some(0),
@@ -1200,23 +1302,29 @@ mod tests {
             duration_ms: 850,
             command_results: Vec::new(),
         });
-        state.write_atomic(&path).unwrap();
+        state.write_atomic(&path).expect("operation should succeed");
 
         // Commit
-        state.advance(MergePhase::Commit, 1003).unwrap();
-        state.epoch_after = Some(EpochId::new(&"c".repeat(40)).unwrap());
-        state.write_atomic(&path).unwrap();
+        state
+            .advance(MergePhase::Commit, 1003)
+            .expect("operation should succeed");
+        state.epoch_after = Some(EpochId::new(&"c".repeat(40)).expect("operation should succeed"));
+        state.write_atomic(&path).expect("operation should succeed");
 
         // Cleanup
-        state.advance(MergePhase::Cleanup, 1004).unwrap();
-        state.write_atomic(&path).unwrap();
+        state
+            .advance(MergePhase::Cleanup, 1004)
+            .expect("operation should succeed");
+        state.write_atomic(&path).expect("operation should succeed");
 
         // Complete
-        state.advance(MergePhase::Complete, 1005).unwrap();
-        state.write_atomic(&path).unwrap();
+        state
+            .advance(MergePhase::Complete, 1005)
+            .expect("operation should succeed");
+        state.write_atomic(&path).expect("operation should succeed");
 
         // Final read
-        let final_state = MergeStateFile::read(&path).unwrap();
+        let final_state = MergeStateFile::read(&path).expect("operation should succeed");
         assert_eq!(final_state.phase, MergePhase::Complete);
         assert!(final_state.epoch_candidate.is_some());
         assert!(final_state.validation_result.is_some());

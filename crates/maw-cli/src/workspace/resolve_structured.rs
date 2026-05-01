@@ -47,7 +47,7 @@ use crate::format::OutputFormat;
 /// constructed with `workspace = "epoch"`). Kept `pub(crate)` so tests and
 /// documentation consumers can reference the canonical name.
 #[allow(dead_code)]
-pub(crate) const EPOCH_LABEL: &str = "epoch";
+pub const EPOCH_LABEL: &str = "epoch";
 
 // ---------------------------------------------------------------------------
 // Sidecar paths & I/O
@@ -62,12 +62,12 @@ fn sidecar_dir(root: &Path, ws_name: &str) -> PathBuf {
 }
 
 /// Path to `conflict-tree.json` for `ws_name`.
-pub(crate) fn structured_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
+pub fn structured_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
     sidecar_dir(root, ws_name).join("conflict-tree.json")
 }
 
 /// Path to the legacy flat sidecar.
-pub(crate) fn legacy_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
+pub fn legacy_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
     sidecar_dir(root, ws_name).join("rebase-conflicts.json")
 }
 
@@ -76,14 +76,14 @@ pub(crate) fn legacy_sidecar_path(root: &Path, ws_name: &str) -> PathBuf {
 /// Returns `None` when the file is missing, unreadable, or can't be parsed as
 /// a [`ConflictTree`]. Callers should fall back to the legacy marker-scan
 /// path in that case — this keeps pre-gjm8 workspaces working unchanged.
-pub(crate) fn read_conflict_tree_sidecar(root: &Path, ws_name: &str) -> Option<ConflictTree> {
+pub fn read_conflict_tree_sidecar(root: &Path, ws_name: &str) -> Option<ConflictTree> {
     let path = structured_sidecar_path(root, ws_name);
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str::<ConflictTree>(&text).ok()
 }
 
 /// Delete both structured and legacy conflict sidecars for `ws_name`.
-pub(crate) fn clear_conflict_sidecars(root: &Path, ws_name: &str) -> Result<()> {
+pub fn clear_conflict_sidecars(root: &Path, ws_name: &str) -> Result<()> {
     let structured = structured_sidecar_path(root, ws_name);
     if structured.exists() {
         std::fs::remove_file(&structured)
@@ -126,7 +126,7 @@ fn write_conflict_tree_sidecar(root: &Path, ws_name: &str, tree: &ConflictTree) 
 /// and JSON output but driven by `ConflictTree.conflicts`.
 ///
 /// Only paths in `filter_paths` (if non-empty) are shown; otherwise all.
-pub(crate) fn list_conflicts(
+pub fn list_conflicts(
     tree: &ConflictTree,
     workspace: &str,
     filter_paths: &[String],
@@ -227,7 +227,7 @@ pub(crate) fn list_conflicts(
 /// * `All(name)` — applies to every path with a matching side.
 /// * `File(path, name)` — applies only to `path`.
 #[derive(Debug)]
-pub(crate) enum Decision {
+pub enum Decision {
     All(String),
     File(PathBuf, String),
 }
@@ -237,7 +237,7 @@ pub(crate) enum Decision {
 /// Block-level (`cf-N=NAME`) keep-specs are not supported on the structured
 /// path in V1 — the structured sidecar uses atoms/paths, not cf-IDs. Such
 /// specs are rejected with an error so the CLI surface is predictable.
-pub(crate) fn parse_decisions(raw: &[String]) -> Result<Vec<Decision>> {
+pub fn parse_decisions(raw: &[String]) -> Result<Vec<Decision>> {
     let mut out = Vec::new();
     for s in raw {
         if let Some((left, right)) = s.split_once('=') {
@@ -631,7 +631,11 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
 /// fall back — currently never, but kept as a signal channel for future
 /// additions.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_structured(
+#[expect(
+    clippy::too_many_lines,
+    reason = "structured resolver keeps path processing and auto-commit reporting together"
+)]
+pub fn run_structured(
     root: &Path,
     workspace: &str,
     ws_path: &Path,
@@ -714,15 +718,14 @@ pub(crate) fn run_structured(
             continue;
         };
         match apply_decision(repo_dyn, &conflict, &target) {
-            Ok(outcome) => match apply_outcome(ws_path, rel, outcome)? {
-                true => {
+            Ok(outcome) => {
+                if apply_outcome(ws_path, rel, outcome)? {
                     tree.conflicts.remove(rel);
                     resolved.push(rel.clone());
-                }
-                false => {
+                } else {
                     skipped.push((rel.clone(), "decision produced no output".into()));
                 }
-            },
+            }
             Err(e) => {
                 skipped.push((rel.clone(), e.to_string()));
             }
@@ -784,10 +787,9 @@ pub(crate) fn run_structured(
                 )
             })
             .collect();
-        let committed_field = match &auto_commit_msg {
-            Some(sha) => format!(r#","auto_committed":"{sha}""#),
-            None => String::new(),
-        };
+        let committed_field = auto_commit_msg
+            .as_ref()
+            .map_or_else(String::new, |sha| format!(r#","auto_committed":"{sha}""#));
         println!(
             r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]{}}}"#,
             resolved_json.join(","),
@@ -816,7 +818,7 @@ pub(crate) fn run_structured(
                      (auto-commit skipped: run `maw exec {workspace} -- git commit` if needed)"
                 ),
                 None => {
-                    println!("\nAll structured conflicts resolved — workspace is ready for merge.")
+                    println!("\nAll structured conflicts resolved — workspace is ready for merge.");
                 }
             }
         } else {
@@ -937,18 +939,23 @@ mod tests {
     use maw_core::model::types::{EpochId, WorkspaceId};
 
     fn epoch() -> EpochId {
-        EpochId::new(&"e".repeat(40)).unwrap()
+        EpochId::new(&"e".repeat(40)).expect("operation should succeed")
     }
     fn oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
     fn ord(ws: &str) -> OrderingKey {
-        OrderingKey::new(epoch(), WorkspaceId::new(ws).unwrap(), 1, 1_700_000_000_000)
+        OrderingKey::new(
+            epoch(),
+            WorkspaceId::new(ws).expect("operation should succeed"),
+            1,
+            1_700_000_000_000,
+        )
     }
     fn side(ws: &str, c: char) -> ConflictSide {
         ConflictSide::new(ws.to_owned(), oid(c), ord(ws))
     }
-    /// `side()` requires a valid WorkspaceId for the OrderingKey. Merge-side
+    /// `side()` requires a valid `WorkspaceId` for the `OrderingKey`. Merge-side
     /// labels like `feat#merge-parent-0` are not valid workspace ids, so
     /// tests that exercise those labels build the side with a distinct
     /// ordering-key workspace (the label is what's visible in the conflict).
@@ -958,14 +965,15 @@ mod tests {
 
     #[test]
     fn parse_decisions_rejects_cf_specs() {
-        let err = parse_decisions(&["cf-0=alice".into()]).unwrap_err();
+        let err = parse_decisions(&["cf-0=alice".into()]).expect_err("operation should fail");
         let msg = err.to_string();
         assert!(msg.contains("cf-"), "msg={msg}");
     }
 
     #[test]
     fn parse_decisions_parses_all_and_file() {
-        let specs = parse_decisions(&["epoch".into(), "src/main.rs=bn-abc".into()]).unwrap();
+        let specs = parse_decisions(&["epoch".into(), "src/main.rs=bn-abc".into()])
+            .expect("operation should succeed");
         assert_eq!(specs.len(), 2);
         assert!(matches!(&specs[0], Decision::All(n) if n == "epoch"));
         assert!(matches!(
@@ -976,7 +984,7 @@ mod tests {
 
     #[test]
     fn parse_decisions_rejects_empty_side() {
-        let err = parse_decisions(&["src/x=".into()]).unwrap_err();
+        let err = parse_decisions(&["src/x=".into()]).expect_err("operation should fail");
         assert!(err.to_string().contains("empty side"));
     }
 
@@ -989,9 +997,9 @@ mod tests {
             sides: vec![side(EPOCH_LABEL, 'a'), side("bn-abc", 'b')],
             atoms: vec![],
         };
-        let got = pick_single_side_oid(&c, EPOCH_LABEL).unwrap();
+        let got = pick_single_side_oid(&c, EPOCH_LABEL).expect("operation should succeed");
         assert_eq!(got, Some(oid('a')));
-        let got2 = pick_single_side_oid(&c, "bn-abc").unwrap();
+        let got2 = pick_single_side_oid(&c, "bn-abc").expect("operation should succeed");
         assert_eq!(got2, Some(oid('b')));
     }
 
@@ -1017,10 +1025,11 @@ mod tests {
             atoms: vec![],
         };
         // `--keep feat` → unique match on `feat#merge-parent-0`.
-        let got = pick_single_side_oid(&c, "feat").unwrap();
+        let got = pick_single_side_oid(&c, "feat").expect("operation should succeed");
         assert_eq!(got, Some(oid('b')));
         // Exact match still wins when qualified name is typed.
-        let got2 = pick_single_side_oid(&c, "feat#merge-parent-0").unwrap();
+        let got2 =
+            pick_single_side_oid(&c, "feat#merge-parent-0").expect("operation should succeed");
         assert_eq!(got2, Some(oid('b')));
     }
 
@@ -1036,7 +1045,7 @@ mod tests {
             ],
             atoms: vec![],
         };
-        let err = pick_single_side_oid(&c, "feat").unwrap_err();
+        let err = pick_single_side_oid(&c, "feat").expect_err("operation should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("ambiguous"),
@@ -1062,7 +1071,8 @@ mod tests {
             ],
             atoms: vec![],
         };
-        let got = pick_single_side_oid(&c, "feat#merge-parent-1").unwrap();
+        let got =
+            pick_single_side_oid(&c, "feat#merge-parent-1").expect("operation should succeed");
         assert_eq!(got, Some(oid('b')));
     }
 
@@ -1075,7 +1085,7 @@ mod tests {
             sides: vec![side("alice", 'a'), side("bob", 'b')],
             atoms: vec![],
         };
-        let err = pick_single_side_oid(&c, "nonexistent").unwrap_err();
+        let err = pick_single_side_oid(&c, "nonexistent").expect_err("operation should fail");
         let msg = err.to_string();
         assert!(msg.contains("nonexistent"));
         assert!(msg.contains("alice"));
@@ -1091,9 +1101,9 @@ mod tests {
             deleter: side("bob", 'b'),
             modified_content: oid('a'),
         };
-        let mod_side = pick_single_side_oid(&c, "alice").unwrap();
+        let mod_side = pick_single_side_oid(&c, "alice").expect("operation should succeed");
         assert_eq!(mod_side, Some(oid('a')));
-        let del_side = pick_single_side_oid(&c, "bob").unwrap();
+        let del_side = pick_single_side_oid(&c, "bob").expect("operation should succeed");
         assert!(del_side.is_none(), "deleter side should return None");
     }
 
@@ -1112,26 +1122,27 @@ mod tests {
 
     #[test]
     fn read_conflict_tree_sidecar_missing_returns_none() {
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let got = read_conflict_tree_sidecar(td.path(), "no-such-ws");
         assert!(got.is_none());
     }
 
     #[test]
     fn read_conflict_tree_sidecar_malformed_returns_none() {
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let dir = sidecar_dir(td.path(), "broken");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("conflict-tree.json"), "not json").unwrap();
+        std::fs::create_dir_all(&dir).expect("operation should succeed");
+        std::fs::write(dir.join("conflict-tree.json"), "not json")
+            .expect("operation should succeed");
         let got = read_conflict_tree_sidecar(td.path(), "broken");
         assert!(got.is_none());
     }
 
     #[test]
     fn read_conflict_tree_sidecar_roundtrip() {
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let dir = sidecar_dir(td.path(), "ok");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("operation should succeed");
 
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(
@@ -1141,8 +1152,8 @@ mod tests {
                 sides: vec![side(EPOCH_LABEL, 'a'), side("ws-b", 'b')],
             },
         );
-        let json = serde_json::to_string_pretty(&tree).unwrap();
-        std::fs::write(dir.join("conflict-tree.json"), json).unwrap();
+        let json = serde_json::to_string_pretty(&tree).expect("operation should succeed");
+        std::fs::write(dir.join("conflict-tree.json"), json).expect("operation should succeed");
 
         let got = read_conflict_tree_sidecar(td.path(), "ok").expect("parsed");
         assert_eq!(got, tree);
@@ -1150,15 +1161,15 @@ mod tests {
 
     #[test]
     fn write_conflict_tree_sidecar_deletes_when_empty() {
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let dir = sidecar_dir(td.path(), "wipe");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("operation should succeed");
         let path = dir.join("conflict-tree.json");
-        std::fs::write(&path, "{}").unwrap();
+        std::fs::write(&path, "{}").expect("operation should succeed");
 
         let tree = ConflictTree::new(epoch());
         assert!(tree.is_empty());
-        write_conflict_tree_sidecar(td.path(), "wipe", &tree).unwrap();
+        write_conflict_tree_sidecar(td.path(), "wipe", &tree).expect("operation should succeed");
         assert!(!path.exists(), "empty tree should have removed sidecar");
     }
 
@@ -1174,7 +1185,7 @@ mod tests {
     // only need OID lookups, not HEAD/worktree semantics.
     // -----------------------------------------------------------------------
 
-    /// Init a git repo inside the ws_path directory (so `GixRepo::open(ws_path)`
+    /// Init a git repo inside the `ws_path` directory (so `GixRepo::open(ws_path)`
     /// finds it without ancestor discovery). Returns
     /// `(root_tempdir, root_path, ws_path, repo_handle)`.
     ///
@@ -1182,36 +1193,36 @@ mod tests {
     /// for unit tests we initialize a standalone repo inside the workspace
     /// directory, which is enough for `read_blob` / `write_blob` round-trips.
     fn setup_ws_repo(ws_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf, maw_git::GixRepo) {
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let root = td.path().to_path_buf();
 
         let ws_path = root.join("ws").join(ws_name);
-        std::fs::create_dir_all(&ws_path).unwrap();
+        std::fs::create_dir_all(&ws_path).expect("operation should succeed");
 
         std::process::Command::new("git")
-            .args(["init", ws_path.to_str().unwrap()])
+            .args(["init", ws_path.to_str().expect("operation should succeed")])
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let repo = maw_git::GixRepo::open(&ws_path).unwrap();
+        let repo = maw_git::GixRepo::open(&ws_path).expect("operation should succeed");
         (td, root, ws_path, repo)
     }
 
     /// Write a blob into the repo and return its `GitOid` (maw-core flavor).
     fn write_blob(repo: &maw_git::GixRepo, bytes: &[u8]) -> GitOid {
         use maw_git::GitRepo;
-        let git_oid = repo.write_blob(bytes).unwrap();
-        GitOid::new(&git_oid.to_string()).unwrap()
+        let git_oid = repo.write_blob(bytes).expect("operation should succeed");
+        GitOid::new(&git_oid.to_string()).expect("operation should succeed")
     }
 
     /// Build an epoch-vs-workspace content conflict with real blobs.
@@ -1251,8 +1262,8 @@ mod tests {
             &repo,
         );
         // Write initial worktree file with marker soup
-        std::fs::create_dir_all(ws_path.join("src")).unwrap();
-        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
+        std::fs::create_dir_all(ws_path.join("src")).expect("operation should succeed");
+        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").expect("operation should succeed");
 
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel.clone(), conflict);
@@ -1267,9 +1278,9 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let after = std::fs::read(ws_path.join(&rel)).unwrap();
+        let after = std::fs::read(ws_path.join(&rel)).expect("operation should succeed");
         assert_eq!(after, b"EPOCH_CONTENT\n");
         // Sidecar should be gone (tree empty).
         let sp = structured_sidecar_path(&root, "ws-a");
@@ -1281,7 +1292,7 @@ mod tests {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-b");
         let (rel, conflict) =
             make_content_conflict("x.rs", b"EPOCH\n", b"WS_SIDE\n", "ws-b", &repo);
-        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
+        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").expect("operation should succeed");
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel.clone(), conflict);
 
@@ -1295,9 +1306,9 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let after = std::fs::read(ws_path.join(&rel)).unwrap();
+        let after = std::fs::read(ws_path.join(&rel)).expect("operation should succeed");
         assert_eq!(after, b"WS_SIDE\n");
     }
 
@@ -1305,7 +1316,7 @@ mod tests {
     fn resolve_structured_keep_both_concatenates() {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-c");
         let (rel, conflict) = make_content_conflict("y.rs", b"EPOCH_A\n", b"WS_B\n", "ws-c", &repo);
-        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").unwrap();
+        std::fs::write(ws_path.join(&rel), b"<<<<<<< markers\n").expect("operation should succeed");
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel.clone(), conflict);
 
@@ -1319,14 +1330,14 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let after = std::fs::read_to_string(ws_path.join(&rel)).unwrap();
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("operation should succeed");
         // Order: epoch side first (as seeded), then workspace side.
         assert!(after.contains("EPOCH_A"), "missing epoch content: {after}");
         assert!(after.contains("WS_B"), "missing workspace content: {after}");
-        let epoch_pos = after.find("EPOCH_A").unwrap();
-        let ws_pos = after.find("WS_B").unwrap();
+        let epoch_pos = after.find("EPOCH_A").expect("operation should succeed");
+        let ws_pos = after.find("WS_B").expect("operation should succeed");
         assert!(
             epoch_pos < ws_pos,
             "epoch side should come first, got: {after}"
@@ -1340,15 +1351,17 @@ mod tests {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-d");
         let (rel_a, c_a) = make_content_conflict("a.rs", b"EPOCH_A\n", b"WS_A\n", "ws-d", &repo);
         let (rel_b, c_b) = make_content_conflict("b.rs", b"EPOCH_B\n", b"WS_B\n", "ws-d", &repo);
-        std::fs::write(ws_path.join(&rel_a), b"<<<<<<< markers\n").unwrap();
-        std::fs::write(ws_path.join(&rel_b), b"<<<<<<< markers\n").unwrap();
+        std::fs::write(ws_path.join(&rel_a), b"<<<<<<< markers\n")
+            .expect("operation should succeed");
+        std::fs::write(ws_path.join(&rel_b), b"<<<<<<< markers\n")
+            .expect("operation should succeed");
 
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel_a.clone(), c_a);
-        tree.conflicts.insert(rel_b.clone(), c_b.clone());
+        tree.conflicts.insert(rel_b.clone(), c_b);
 
         // Persist sidecar, then only resolve `a.rs`.
-        write_conflict_tree_sidecar(&root, "ws-d", &tree).unwrap();
+        write_conflict_tree_sidecar(&root, "ws-d", &tree).expect("operation should succeed");
 
         run_structured(
             &root,
@@ -1360,7 +1373,7 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Structured sidecar should now only contain b.rs.
         let after = read_conflict_tree_sidecar(&root, "ws-d").expect("sidecar still present");
@@ -1369,10 +1382,10 @@ mod tests {
         assert!(!after.conflicts.contains_key(&rel_a));
 
         // a.rs was written from epoch side.
-        let a_bytes = std::fs::read(ws_path.join(&rel_a)).unwrap();
+        let a_bytes = std::fs::read(ws_path.join(&rel_a)).expect("operation should succeed");
         assert_eq!(a_bytes, b"EPOCH_A\n");
         // b.rs left untouched (still has our marker placeholder).
-        let b_bytes = std::fs::read(ws_path.join(&rel_b)).unwrap();
+        let b_bytes = std::fs::read(ws_path.join(&rel_b)).expect("operation should succeed");
         assert_eq!(b_bytes, b"<<<<<<< markers\n");
     }
 
@@ -1393,8 +1406,9 @@ mod tests {
         // And once a malformed sidecar is present the reader still returns
         // None (i.e. falls back to legacy rather than raising).
         let dir = sidecar_dir(&root, "ws-e");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("conflict-tree.json"), "not-json").unwrap();
+        std::fs::create_dir_all(&dir).expect("operation should succeed");
+        std::fs::write(dir.join("conflict-tree.json"), "not-json")
+            .expect("operation should succeed");
         assert!(read_conflict_tree_sidecar(&root, "ws-e").is_none());
     }
 
@@ -1408,8 +1422,8 @@ mod tests {
         tree.conflicts.insert(rel_b.clone(), c_b);
 
         // List mode — should not touch worktree.
-        std::fs::write(ws_path.join(&rel_a), b"original-a").unwrap();
-        std::fs::write(ws_path.join(&rel_b), b"original-b").unwrap();
+        std::fs::write(ws_path.join(&rel_a), b"original-a").expect("operation should succeed");
+        std::fs::write(ws_path.join(&rel_b), b"original-b").expect("operation should succeed");
 
         run_structured(
             &root,
@@ -1421,11 +1435,17 @@ mod tests {
             OutputFormat::Json,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Worktree content unchanged.
-        assert_eq!(std::fs::read(ws_path.join(&rel_a)).unwrap(), b"original-a");
-        assert_eq!(std::fs::read(ws_path.join(&rel_b)).unwrap(), b"original-b");
+        assert_eq!(
+            std::fs::read(ws_path.join(&rel_a)).expect("operation should succeed"),
+            b"original-a"
+        );
+        assert_eq!(
+            std::fs::read(ws_path.join(&rel_b)).expect("operation should succeed"),
+            b"original-b"
+        );
     }
 
     #[test]
@@ -1435,7 +1455,7 @@ mod tests {
         // path is rejected with an error pointing to the atom follow-up.
         //
         // When per-atom lands, replace this test with a positive one.
-        let err = parse_decisions(&["cf-0=alice".into()]).unwrap_err();
+        let err = parse_decisions(&["cf-0=alice".into()]).expect_err("operation should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("Per-block") || msg.contains("cf-"),
@@ -1464,25 +1484,25 @@ mod tests {
             ws_path.join("x.rs"),
             b"<<<<<<< epoch (current)\nEPOCH\n=======\nWS\n>>>>>>> ws-autocommit\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         let add = std::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(add.success());
         let commit = std::process::Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(commit.success());
 
         let head_before = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
             .trim()
             .to_owned();
@@ -1491,7 +1511,7 @@ mod tests {
             make_content_conflict("x.rs", b"EPOCH\n", b"WS\n", "ws-autocommit", &repo);
 
         let mut tree = ConflictTree::new(epoch());
-        tree.conflicts.insert(rel.clone(), conflict);
+        tree.conflicts.insert(rel, conflict);
 
         run_structured(
             &root,
@@ -1503,14 +1523,14 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // HEAD must have advanced — the resolution is committed.
         let head_after = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
             .trim()
             .to_owned();
@@ -1525,7 +1545,7 @@ mod tests {
             .args(["show", "HEAD:x.rs"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let body = String::from_utf8_lossy(&show.stdout);
         assert!(
             !body.contains("<<<<<<<"),
@@ -1541,22 +1561,22 @@ mod tests {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-partial");
 
         // Make an initial commit so HEAD exists (avoids "No commits yet").
-        std::fs::write(ws_path.join("seed"), b"seed").unwrap();
+        std::fs::write(ws_path.join("seed"), b"seed").expect("operation should succeed");
         std::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         std::process::Command::new("git")
             .args(["commit", "-m", "seed"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         let head_before = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
             .trim()
             .to_owned();
@@ -1565,12 +1585,12 @@ mod tests {
             make_content_conflict("a.rs", b"EPOCH_A\n", b"WS_A\n", "ws-partial", &repo);
         let (rel_b, c_b) =
             make_content_conflict("b.rs", b"EPOCH_B\n", b"WS_B\n", "ws-partial", &repo);
-        std::fs::write(ws_path.join(&rel_a), b"marker-a").unwrap();
-        std::fs::write(ws_path.join(&rel_b), b"marker-b").unwrap();
+        std::fs::write(ws_path.join(&rel_a), b"marker-a").expect("operation should succeed");
+        std::fs::write(ws_path.join(&rel_b), b"marker-b").expect("operation should succeed");
 
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel_a.clone(), c_a);
-        tree.conflicts.insert(rel_b.clone(), c_b);
+        tree.conflicts.insert(rel_b, c_b);
 
         // Resolve only a.rs — b.rs stays conflicted. Auto-commit must NOT
         // fire in this case.
@@ -1584,13 +1604,13 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let head_after = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&ws_path)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
             .trim()
             .to_owned();
@@ -1609,17 +1629,17 @@ mod tests {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-mod-del");
 
         // Seed an initial commit so auto-commit can run.
-        std::fs::write(ws_path.join("seed"), b"seed").unwrap();
+        std::fs::write(ws_path.join("seed"), b"seed").expect("operation should succeed");
         std::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         std::process::Command::new("git")
             .args(["commit", "-m", "seed"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Build a ModifyDelete conflict with real blobs:
         //   modifier side: "MODIFIED\n"  (the *new* epoch content)
@@ -1628,13 +1648,17 @@ mod tests {
         //     this base blob's bytes under the workspace-side banner.
         let modifier_oid = {
             use maw_git::GitRepo;
-            let oid = repo.write_blob(b"MODIFIED\n").unwrap();
-            GitOid::new(&oid.to_string()).unwrap()
+            let oid = repo
+                .write_blob(b"MODIFIED\n")
+                .expect("operation should succeed");
+            GitOid::new(&oid.to_string()).expect("operation should succeed")
         };
         let base_oid = {
             use maw_git::GitRepo;
-            let oid = repo.write_blob(b"BASE_PREDELETE\n").unwrap();
-            GitOid::new(&oid.to_string()).unwrap()
+            let oid = repo
+                .write_blob(b"BASE_PREDELETE\n")
+                .expect("operation should succeed");
+            GitOid::new(&oid.to_string()).expect("operation should succeed")
         };
         let rel = PathBuf::from("dir/file.txt");
         let conflict = Conflict::ModifyDelete {
@@ -1643,13 +1667,13 @@ mod tests {
             modifier: ConflictSide::new(EPOCH_LABEL.to_owned(), modifier_oid.clone(), ord("epoch")),
             deleter: ConflictSide::new(
                 "ws-mod-del".to_owned(),
-                base_oid.clone(), // <-- the pre-delete blob, pretending to be "their" content
+                base_oid, // <-- the pre-delete blob, pretending to be "their" content
                 ord("ws-mod-del"),
             ),
             modified_content: modifier_oid,
         };
-        std::fs::create_dir_all(ws_path.join("dir")).unwrap();
-        std::fs::write(ws_path.join(&rel), b"placeholder").unwrap();
+        std::fs::create_dir_all(ws_path.join("dir")).expect("operation should succeed");
+        std::fs::write(ws_path.join(&rel), b"placeholder").expect("operation should succeed");
 
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel.clone(), conflict);
@@ -1664,9 +1688,9 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let after = std::fs::read(ws_path.join(&rel)).unwrap();
+        let after = std::fs::read(ws_path.join(&rel)).expect("operation should succeed");
         // The BASE_PREDELETE content must NOT appear — that would be silent
         // data resurrection.
         let after_str = String::from_utf8_lossy(&after);
@@ -1690,30 +1714,30 @@ mod tests {
         let (_td, root, ws_path, repo) = setup_ws_repo("ws-sym");
 
         // Seed an initial commit.
-        std::fs::write(ws_path.join("seed"), b"seed").unwrap();
+        std::fs::write(ws_path.join("seed"), b"seed").expect("operation should succeed");
         std::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         std::process::Command::new("git")
             .args(["commit", "-m", "seed"])
             .current_dir(&ws_path)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Build a conflict where the workspace-side is flagged as a
         // symlink whose blob content is the link target "a.txt\n" without
         // the newline (git stores symlink targets without a trailing LF).
         let ws_target_oid = {
             use maw_git::GitRepo;
-            let oid = repo.write_blob(b"a.txt").unwrap();
-            GitOid::new(&oid.to_string()).unwrap()
+            let oid = repo.write_blob(b"a.txt").expect("operation should succeed");
+            GitOid::new(&oid.to_string()).expect("operation should succeed")
         };
         let epoch_oid = {
             use maw_git::GitRepo;
-            let oid = repo.write_blob(b"b.txt").unwrap();
-            GitOid::new(&oid.to_string()).unwrap()
+            let oid = repo.write_blob(b"b.txt").expect("operation should succeed");
+            GitOid::new(&oid.to_string()).expect("operation should succeed")
         };
         let rel = PathBuf::from("link");
         let conflict = Conflict::AddAdd {
@@ -1738,7 +1762,7 @@ mod tests {
             ws_path.join(&rel),
             b"<<<<<<< epoch\nb.txt\n=======\na.txt\n>>>>>>> ws-sym\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         let mut tree = ConflictTree::new(epoch());
         tree.conflicts.insert(rel.clone(), conflict);
@@ -1753,17 +1777,17 @@ mod tests {
             OutputFormat::Text,
             tree,
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // The resolved path must be a symlink pointing at `a.txt`.
         let full = ws_path.join(&rel);
-        let meta = std::fs::symlink_metadata(&full).unwrap();
+        let meta = std::fs::symlink_metadata(&full).expect("operation should succeed");
         assert!(
             meta.file_type().is_symlink(),
             "resolved path should be a symlink, got file_type={:?}",
             meta.file_type()
         );
-        let target = std::fs::read_link(&full).unwrap();
+        let target = std::fs::read_link(&full).expect("operation should succeed");
         assert_eq!(target, Path::new("a.txt"));
     }
 
@@ -1785,8 +1809,9 @@ mod tests {
     fn read_conflict_tree_sidecar_malformed_triggers_bn_24tl_branch() {
         let (_td, root, _ws_path, _repo) = setup_ws_repo("ws-corrupt");
         let sidecar = structured_sidecar_path(&root, "ws-corrupt");
-        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
-        std::fs::write(&sidecar, b"this is not valid json{{").unwrap();
+        std::fs::create_dir_all(sidecar.parent().expect("operation should succeed"))
+            .expect("operation should succeed");
+        std::fs::write(&sidecar, b"this is not valid json{{").expect("operation should succeed");
 
         // Sidecar exists on disk.
         assert!(sidecar.exists(), "sidecar path should exist");

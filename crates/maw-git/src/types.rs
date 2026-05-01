@@ -100,7 +100,7 @@ impl fmt::Display for OidParseError {
 
 impl std::error::Error for OidParseError {}
 
-fn hex_digit(b: u8) -> Option<u8> {
+const fn hex_digit(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn oid_roundtrip_hex() {
         let hex = "0123456789abcdef0123456789abcdef01234567";
-        let oid: GitOid = hex.parse().unwrap();
+        let oid: GitOid = hex.parse().expect("valid oid hex should parse");
         assert_eq!(oid.to_string(), hex);
     }
 
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn oid_copy_semantics() {
         let hex = "a".repeat(40);
-        let oid: GitOid = hex.parse().unwrap();
+        let oid: GitOid = hex.parse().expect("valid oid hex should parse");
         let copy = oid; // Copy
         assert_eq!(oid, copy);
     }
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn refname_display() {
-        let r = RefName::new("refs/heads/main").unwrap();
+        let r = RefName::new("refs/heads/main").expect("valid ref name should parse");
         assert_eq!(r.to_string(), "refs/heads/main");
     }
 }

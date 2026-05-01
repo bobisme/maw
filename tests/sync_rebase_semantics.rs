@@ -334,9 +334,11 @@ fn sync_rebase_preserves_executable_bit() {
     {
         use std::os::unix::fs::PermissionsExt;
         let run_path = repo.workspace_path("alice").join("run.sh");
-        let mut perms = std::fs::metadata(&run_path).unwrap().permissions();
+        let mut perms = std::fs::metadata(&run_path)
+            .expect("operation should succeed")
+            .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&run_path, perms).unwrap();
+        std::fs::set_permissions(&run_path, perms).expect("operation should succeed");
     }
     repo.git_in_workspace("alice", &["add", "run.sh"]);
     repo.git_in_workspace("alice", &["commit", "-m", "feat: add executable run.sh"]);
@@ -489,7 +491,7 @@ fn sync_rebase_merge_commit_regression_372v() {
 
     // Side branch off the epoch: a different modification of shared.txt.
     repo.git_in_workspace("feature", &["checkout", "-b", "side", &epoch_before]);
-    std::fs::write(ws_path.join("shared.txt"), "side-version\n").unwrap();
+    std::fs::write(ws_path.join("shared.txt"), "side-version\n").expect("operation should succeed");
     commit_all(&repo, "feature", "feat: side work");
 
     // Go back to the feature chain (detached) and merge side in, resolving
@@ -513,7 +515,7 @@ fn sync_rebase_merge_commit_regression_372v() {
     // Make sure we really produced a merge commit.
     let parents_line =
         repo.git_in_workspace("feature", &["rev-list", "--parents", "-n", "1", "HEAD"]);
-    let parent_count = parents_line.trim().split_whitespace().count() - 1;
+    let parent_count = parents_line.split_whitespace().count() - 1;
     assert!(
         parent_count >= 2,
         "setup failed: HEAD should be a merge commit, got {parent_count} parent(s)"
@@ -545,7 +547,7 @@ fn sync_rebase_merge_commit_regression_372v() {
     let entry = find_conflict_entry(&sidecar, "shared.txt").unwrap_or_else(|| {
         panic!(
             "conflict-tree.json should have a `shared.txt` conflict entry; got: {}",
-            serde_json::to_string_pretty(&sidecar).unwrap()
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
         )
     });
 
@@ -624,7 +626,7 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
     let entry = find_conflict_entry(&sidecar, "conflicted.txt").unwrap_or_else(|| {
         panic!(
             "sidecar should list conflicted.txt as conflicted; got:\n{}",
-            serde_json::to_string_pretty(&sidecar).unwrap()
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
         )
     });
 
@@ -646,11 +648,11 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
         .filter_map(|s| s.get("workspace").and_then(|w| w.as_str()))
         .collect();
     assert!(
-        side_labels.iter().any(|l| *l == "epoch"),
+        side_labels.contains(&"epoch"),
         "sides should include `epoch` label, got {side_labels:?}"
     );
     assert!(
-        side_labels.iter().any(|l| *l == "alice"),
+        side_labels.contains(&"alice"),
         "sides should include `alice` label, got {side_labels:?}"
     );
 
@@ -773,12 +775,12 @@ fn sync_rebase_preserves_merge_commit_parent_count() {
 
     let feat = repo.workspace_path("feat");
     // Build feat → A → merge(A, side)
-    std::fs::write(feat.join("a.txt"), "a\n").unwrap();
+    std::fs::write(feat.join("a.txt"), "a\n").expect("operation should succeed");
     repo.git_in_workspace("feat", &["add", "a.txt"]);
     repo.git_in_workspace("feat", &["commit", "-m", "A"]);
 
     repo.git_in_workspace("feat", &["checkout", "-b", "side", "HEAD^"]);
-    std::fs::write(feat.join("s.txt"), "s\n").unwrap();
+    std::fs::write(feat.join("s.txt"), "s\n").expect("operation should succeed");
     repo.git_in_workspace("feat", &["add", "s.txt"]);
     repo.git_in_workspace("feat", &["commit", "-m", "side"]);
 
@@ -786,7 +788,8 @@ fn sync_rebase_preserves_merge_commit_parent_count() {
     repo.git_in_workspace("feat", &["merge", "--no-ff", "side", "-m", "merge: side"]);
 
     // Advance epoch (disjoint paths so no conflict)
-    std::fs::write(repo.workspace_path("default").join("z.txt"), "z\n").unwrap();
+    std::fs::write(repo.workspace_path("default").join("z.txt"), "z\n")
+        .expect("operation should succeed");
     repo.git_in_workspace("default", &["add", "-A"]);
     repo.git_in_workspace("default", &["commit", "-m", "default: z"]);
     repo.maw_ok(&["epoch", "sync"]);
@@ -861,7 +864,7 @@ fn sync_rebase_handles_add_add_conflict() {
     let entry = find_conflict_entry(&sidecar, "new.txt").unwrap_or_else(|| {
         panic!(
             "sidecar should list new.txt as conflicted; got:\n{}",
-            serde_json::to_string_pretty(&sidecar).unwrap()
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
         )
     });
 
@@ -886,11 +889,11 @@ fn sync_rebase_handles_add_add_conflict() {
         .filter_map(|s| s.get("workspace").and_then(|w| w.as_str()))
         .collect();
     assert!(
-        side_labels.iter().any(|l| *l == "epoch"),
+        side_labels.contains(&"epoch"),
         "sides should include `epoch`, got {side_labels:?}"
     );
     assert!(
-        side_labels.iter().any(|l| *l == "feat"),
+        side_labels.contains(&"feat"),
         "sides should include `feat`, got {side_labels:?}"
     );
 
@@ -1025,7 +1028,7 @@ fn rebase_of_merge_with_identical_parent_content_is_clean() {
             !conflicts.contains_key("side1.txt"),
             "bn-2ras: side1.txt must NOT be in conflict-tree.json (merge parents \
              converge on identical content), got: {}",
-            serde_json::to_string_pretty(s).unwrap()
+            serde_json::to_string_pretty(s).expect("operation should succeed")
         );
     }
 

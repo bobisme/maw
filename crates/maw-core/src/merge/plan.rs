@@ -299,15 +299,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn test_epoch() -> EpochId {
-        EpochId::new(&"a".repeat(40)).unwrap()
+        EpochId::new(&"a".repeat(40)).expect("operation should succeed")
     }
 
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn test_ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     // -- merge_id --
@@ -357,8 +357,8 @@ mod tests {
 
     #[test]
     fn merge_id_changes_with_different_epoch() {
-        let epoch1 = EpochId::new(&"a".repeat(40)).unwrap();
-        let epoch2 = EpochId::new(&"b".repeat(40)).unwrap();
+        let epoch1 = EpochId::new(&"a".repeat(40)).expect("operation should succeed");
+        let epoch2 = EpochId::new(&"b".repeat(40)).expect("operation should succeed");
         let sources = vec![test_ws("ws-a")];
         let mut heads = BTreeMap::new();
         heads.insert(test_ws("ws-a"), test_oid('c'));
@@ -415,15 +415,15 @@ mod tests {
     #[test]
     fn merge_plan_serde_roundtrip() {
         let plan = make_plan();
-        let json = serde_json::to_string_pretty(&plan).unwrap();
-        let decoded: MergePlan = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&plan).expect("operation should succeed");
+        let decoded: MergePlan = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, plan);
     }
 
     #[test]
     fn merge_plan_is_pretty_printed() {
         let plan = make_plan();
-        let json = serde_json::to_string_pretty(&plan).unwrap();
+        let json = serde_json::to_string_pretty(&plan).expect("operation should succeed");
         assert!(json.contains('\n'));
         assert!(json.contains("  "));
     }
@@ -440,7 +440,7 @@ mod tests {
             drivers: Vec::new(),
             validation: None,
         };
-        let json = serde_json::to_string_pretty(&plan).unwrap();
+        let json = serde_json::to_string_pretty(&plan).expect("operation should succeed");
         // drivers is skip_serializing_if = "Vec::is_empty"
         assert!(!json.contains("\"drivers\""));
         // validation is skip_serializing_if = "Option::is_none"
@@ -454,8 +454,9 @@ mod tests {
             timeout_seconds: 30,
             policy: "warn".to_owned(),
         };
-        let json = serde_json::to_string_pretty(&info).unwrap();
-        let decoded: ValidationInfo = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&info).expect("operation should succeed");
+        let decoded: ValidationInfo =
+            serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, info);
     }
 
@@ -466,7 +467,7 @@ mod tests {
             kind: "ours".to_owned(),
             command: None,
         };
-        let json = serde_json::to_string_pretty(&info).unwrap();
+        let json = serde_json::to_string_pretty(&info).expect("operation should succeed");
         assert!(!json.contains("command"));
     }
 
@@ -474,11 +475,11 @@ mod tests {
 
     #[test]
     fn write_plan_artifact_creates_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
         let plan = make_plan();
 
-        let path = write_plan_artifact(&manifold_dir, &plan).unwrap();
+        let path = write_plan_artifact(&manifold_dir, &plan).expect("operation should succeed");
         assert!(path.exists());
         assert_eq!(
             path,
@@ -489,18 +490,18 @@ mod tests {
         );
 
         // Verify contents round-trip
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let decoded: MergePlan = serde_json::from_str(&contents).unwrap();
+        let contents = std::fs::read_to_string(&path).expect("operation should succeed");
+        let decoded: MergePlan = serde_json::from_str(&contents).expect("operation should succeed");
         assert_eq!(decoded, plan);
     }
 
     #[test]
     fn write_plan_artifact_is_atomic_no_tmp_left_behind() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
         let plan = make_plan();
 
-        write_plan_artifact(&manifold_dir, &plan).unwrap();
+        write_plan_artifact(&manifold_dir, &plan).expect("operation should succeed");
 
         let artifact_dir = manifold_dir.join("artifacts/merge").join(&plan.merge_id);
         assert!(!artifact_dir.join(".plan.json.tmp").exists());
@@ -508,24 +509,24 @@ mod tests {
 
     #[test]
     fn write_plan_artifact_overwrites_existing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
         let mut plan = make_plan();
 
-        write_plan_artifact(&manifold_dir, &plan).unwrap();
+        write_plan_artifact(&manifold_dir, &plan).expect("operation should succeed");
 
         // Modify and re-write
         plan.overlaps = vec![PathBuf::from("new.rs")];
-        let path = write_plan_artifact(&manifold_dir, &plan).unwrap();
+        let path = write_plan_artifact(&manifold_dir, &plan).expect("operation should succeed");
 
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let decoded: MergePlan = serde_json::from_str(&contents).unwrap();
+        let contents = std::fs::read_to_string(&path).expect("operation should succeed");
+        let decoded: MergePlan = serde_json::from_str(&contents).expect("operation should succeed");
         assert_eq!(decoded.overlaps, vec![PathBuf::from("new.rs")]);
     }
 
     #[test]
     fn write_workspace_report_artifact_creates_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
         let report = WorkspaceReport {
             workspace_id: "agent-1".to_owned(),
@@ -542,12 +543,14 @@ mod tests {
             ],
         };
 
-        let path = write_workspace_report_artifact(&manifold_dir, &report).unwrap();
+        let path = write_workspace_report_artifact(&manifold_dir, &report)
+            .expect("operation should succeed");
         assert!(path.exists());
         assert_eq!(path, manifold_dir.join("artifacts/ws/agent-1/report.json"));
 
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let decoded: WorkspaceReport = serde_json::from_str(&contents).unwrap();
+        let contents = std::fs::read_to_string(&path).expect("operation should succeed");
+        let decoded: WorkspaceReport =
+            serde_json::from_str(&contents).expect("operation should succeed");
         assert_eq!(decoded, report);
     }
 

@@ -293,11 +293,11 @@ mod tests {
     }
 
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&oid(c)).unwrap()
+        EpochId::new(&oid(c)).expect("operation should succeed")
     }
 
     fn git_oid(c: char) -> GitOid {
-        GitOid::new(&oid(c)).unwrap()
+        GitOid::new(&oid(c)).expect("operation should succeed")
     }
 
     fn fid(n: u128) -> FileId {
@@ -316,7 +316,7 @@ mod tests {
     fn join_epoch_mismatch() {
         let a = empty_ps('a');
         let b = empty_ps('b');
-        let err = join(&a, &b).unwrap_err();
+        let err = join(&a, &b).expect_err("operation should fail");
         assert_eq!(err.left, epoch('a'));
         assert_eq!(err.right, epoch('b'));
     }
@@ -345,7 +345,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 2);
         assert!(
@@ -374,7 +374,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 1);
     }
@@ -383,7 +383,7 @@ mod tests {
     fn join_two_empties() {
         let a = empty_ps('a');
         let b = empty_ps('a');
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert!(result.merged.is_empty());
     }
@@ -404,7 +404,7 @@ mod tests {
         let mut b = empty_ps('a');
         b.patches.insert("file.rs".into(), pv.clone());
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 1);
         assert_eq!(result.merged.patches[&PathBuf::from("file.rs")], pv);
@@ -423,7 +423,7 @@ mod tests {
         let mut b = empty_ps('a');
         b.patches.insert("file.rs".into(), pv);
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 1);
     }
@@ -440,7 +440,7 @@ mod tests {
         let mut b = empty_ps('a');
         b.patches.insert("file.rs".into(), pv);
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 1);
     }
@@ -458,7 +458,7 @@ mod tests {
         let mut b = empty_ps('a');
         b.patches.insert("new.rs".into(), pv);
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 1);
     }
@@ -487,7 +487,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(!result.is_clean());
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].path, PathBuf::from("file.rs"));
@@ -523,7 +523,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(!result.is_clean());
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].reason, ConflictReason::DivergentModify);
@@ -550,7 +550,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(!result.is_clean());
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].reason, ConflictReason::ModifyDelete);
@@ -591,7 +591,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(!result.is_clean());
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].reason, ConflictReason::DivergentRename);
@@ -619,7 +619,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(!result.is_clean());
         assert_eq!(result.conflicts[0].reason, ConflictReason::RenameConflict);
     }
@@ -644,7 +644,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(!result.is_clean());
         assert_eq!(result.conflicts[0].reason, ConflictReason::Incompatible);
     }
@@ -709,7 +709,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         // 3 paths merged (only_a, only_b, shared), 1 conflict
         assert_eq!(result.merged.len(), 3);
         assert!(
@@ -764,8 +764,8 @@ mod tests {
             },
         );
 
-        let ab = join(&a, &b).unwrap();
-        let ba = join(&b, &a).unwrap();
+        let ab = join(&a, &b).expect("operation should succeed");
+        let ba = join(&b, &a).expect("operation should succeed");
         assert_eq!(ab, ba, "join must be commutative");
     }
 
@@ -789,8 +789,8 @@ mod tests {
             },
         );
 
-        let ab = join(&a, &b).unwrap();
-        let ba = join(&b, &a).unwrap();
+        let ab = join(&a, &b).expect("operation should succeed");
+        let ba = join(&b, &a).expect("operation should succeed");
         assert_eq!(ab, ba, "join must be commutative even with conflicts");
     }
 
@@ -817,7 +817,7 @@ mod tests {
             },
         );
 
-        let result = join(&a, &a).unwrap();
+        let result = join(&a, &a).expect("operation should succeed");
         assert!(result.is_clean(), "join(a, a) must have no conflicts");
         assert_eq!(result.merged, a, "join(a, a) must equal a");
     }
@@ -856,14 +856,14 @@ mod tests {
         );
 
         // (a ⊕ b) ⊕ c
-        let ab = join(&a, &b).unwrap();
+        let ab = join(&a, &b).expect("operation should succeed");
         assert!(ab.is_clean());
-        let abc_left = join(&ab.merged, &c).unwrap();
+        let abc_left = join(&ab.merged, &c).expect("operation should succeed");
 
         // a ⊕ (b ⊕ c)
-        let bc = join(&b, &c).unwrap();
+        let bc = join(&b, &c).expect("operation should succeed");
         assert!(bc.is_clean());
-        let abc_right = join(&a, &bc.merged).unwrap();
+        let abc_right = join(&a, &bc.merged).expect("operation should succeed");
 
         assert_eq!(abc_left, abc_right, "join must be associative");
     }
@@ -893,7 +893,7 @@ mod tests {
             );
         }
 
-        let result = join(&a, &b).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.merged.len(), 100);
     }
@@ -918,9 +918,9 @@ mod tests {
             },
         );
 
-        let result = join(&a, &b).unwrap();
-        let json = serde_json::to_string(&result).unwrap();
-        let decoded: JoinResult = serde_json::from_str(&json).unwrap();
+        let result = join(&a, &b).expect("operation should succeed");
+        let json = serde_json::to_string(&result).expect("operation should succeed");
+        let decoded: JoinResult = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, result);
     }
 
@@ -959,7 +959,7 @@ mod proptests {
 
     // Strategy: generate a random PatchSet with a fixed epoch.
     fn arb_git_oid() -> impl Strategy<Value = GitOid> {
-        "[0-9a-f]{40}".prop_map(|s| GitOid::new(&s).unwrap())
+        "[0-9a-f]{40}".prop_map(|s| GitOid::new(&s).expect("operation should succeed"))
     }
 
     fn arb_file_id() -> impl Strategy<Value = FileId> {
@@ -1001,7 +1001,7 @@ mod proptests {
 
     fn arb_patchset() -> impl Strategy<Value = PatchSet> {
         // Fixed epoch for join compatibility.
-        let epoch = EpochId::new(&"a".repeat(40)).unwrap();
+        let epoch = EpochId::new(&"a".repeat(40)).expect("operation should succeed");
         prop::collection::btree_map(arb_path(), arb_patch_value(), 0..5).prop_map(move |patches| {
             PatchSet {
                 base_epoch: epoch.clone(),
@@ -1013,14 +1013,14 @@ mod proptests {
     proptest! {
         #[test]
         fn prop_commutativity(a in arb_patchset(), b in arb_patchset()) {
-            let ab = join(&a, &b).unwrap();
-            let ba = join(&b, &a).unwrap();
+            let ab = join(&a, &b).expect("operation should succeed");
+            let ba = join(&b, &a).expect("operation should succeed");
             prop_assert_eq!(ab, ba, "join must be commutative");
         }
 
         #[test]
         fn prop_idempotency(a in arb_patchset()) {
-            let aa = join(&a, &a).unwrap();
+            let aa = join(&a, &a).expect("operation should succeed");
             prop_assert!(aa.is_clean(), "join(a, a) must have no conflicts");
             prop_assert_eq!(aa.merged, a, "join(a, a) must equal a");
         }
@@ -1034,11 +1034,11 @@ mod proptests {
             // Associativity only holds cleanly when there are no conflicts
             // in intermediate joins (conflicted paths are excluded from merged,
             // so the composition may differ). Test the clean case.
-            let ab = join(&a, &b).unwrap();
-            let bc = join(&b, &c).unwrap();
+            let ab = join(&a, &b).expect("operation should succeed");
+            let bc = join(&b, &c).expect("operation should succeed");
             if ab.is_clean() && bc.is_clean() {
-                let abc_left = join(&ab.merged, &c).unwrap();
-                let abc_right = join(&a, &bc.merged).unwrap();
+                let abc_left = join(&ab.merged, &c).expect("operation should succeed");
+                let abc_right = join(&a, &bc.merged).expect("operation should succeed");
                 prop_assert_eq!(abc_left, abc_right, "join must be associative for clean joins");
             }
             // When there are conflicts, we intentionally skip — associativity

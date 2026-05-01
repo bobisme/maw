@@ -233,12 +233,12 @@ mod tests {
 
     // Helper: build a valid 40-char hex EpochId.
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&oid(c)).unwrap()
+        EpochId::new(&oid(c)).expect("operation should succeed")
     }
 
     // Helper: build a valid GitOid.
     fn git_oid(c: char) -> GitOid {
-        GitOid::new(&oid(c)).unwrap()
+        GitOid::new(&oid(c)).expect("operation should succeed")
     }
 
     // -----------------------------------------------------------------------
@@ -264,7 +264,7 @@ mod tests {
         for n in [0_u128, 1, u128::from(u64::MAX), u128::MAX] {
             let id = FileId::new(n);
             let hex = id.to_hex();
-            let decoded = FileId::from_hex(&hex).unwrap();
+            let decoded = FileId::from_hex(&hex).expect("operation should succeed");
             assert_eq!(decoded, id);
         }
     }
@@ -294,10 +294,10 @@ mod tests {
     #[test]
     fn file_id_serde_round_trip() {
         let id = FileId::new(0xdead_beef_cafe);
-        let json = serde_json::to_string(&id).unwrap();
+        let json = serde_json::to_string(&id).expect("operation should succeed");
         // Serialized as quoted hex string.
         assert!(json.starts_with('"'));
-        let decoded: FileId = serde_json::from_str(&json).unwrap();
+        let decoded: FileId = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, id);
     }
 
@@ -370,8 +370,8 @@ mod tests {
     #[test]
     fn patch_set_serde_round_trip_empty() {
         let ps = PatchSet::empty(epoch('4'));
-        let json = serde_json::to_string(&ps).unwrap();
-        let decoded: PatchSet = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&ps).expect("operation should succeed");
+        let decoded: PatchSet = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, ps);
     }
 
@@ -394,8 +394,8 @@ mod tests {
             },
         );
 
-        let json = serde_json::to_string(&ps).unwrap();
-        let decoded: PatchSet = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&ps).expect("operation should succeed");
+        let decoded: PatchSet = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, ps);
     }
 
@@ -409,10 +409,10 @@ mod tests {
             blob: git_oid('a'),
             file_id: FileId::new(1),
         };
-        let json = serde_json::to_string(&pv).unwrap();
+        let json = serde_json::to_string(&pv).expect("operation should succeed");
         // Tagged with "op":"add"
         assert!(json.contains("\"op\":\"add\""));
-        let decoded: PatchValue = serde_json::from_str(&json).unwrap();
+        let decoded: PatchValue = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, pv);
     }
 
@@ -422,9 +422,9 @@ mod tests {
             previous_blob: git_oid('b'),
             file_id: FileId::new(2),
         };
-        let json = serde_json::to_string(&pv).unwrap();
+        let json = serde_json::to_string(&pv).expect("operation should succeed");
         assert!(json.contains("\"op\":\"delete\""));
-        let decoded: PatchValue = serde_json::from_str(&json).unwrap();
+        let decoded: PatchValue = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, pv);
     }
 
@@ -435,9 +435,9 @@ mod tests {
             new_blob: git_oid('d'),
             file_id: FileId::new(3),
         };
-        let json = serde_json::to_string(&pv).unwrap();
+        let json = serde_json::to_string(&pv).expect("operation should succeed");
         assert!(json.contains("\"op\":\"modify\""));
-        let decoded: PatchValue = serde_json::from_str(&json).unwrap();
+        let decoded: PatchValue = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, pv);
     }
 
@@ -448,10 +448,10 @@ mod tests {
             file_id: FileId::new(4),
             new_blob: None,
         };
-        let json = serde_json::to_string(&pv).unwrap();
+        let json = serde_json::to_string(&pv).expect("operation should succeed");
         assert!(json.contains("\"op\":\"rename\""));
         assert!(json.contains("\"new_blob\":null"));
-        let decoded: PatchValue = serde_json::from_str(&json).unwrap();
+        let decoded: PatchValue = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, pv);
     }
 
@@ -462,9 +462,9 @@ mod tests {
             file_id: FileId::new(5),
             new_blob: Some(git_oid('e')),
         };
-        let json = serde_json::to_string(&pv).unwrap();
+        let json = serde_json::to_string(&pv).expect("operation should succeed");
         assert!(json.contains("\"op\":\"rename\""));
-        let decoded: PatchValue = serde_json::from_str(&json).unwrap();
+        let decoded: PatchValue = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, pv);
     }
 
@@ -493,9 +493,10 @@ mod tests {
         ];
 
         for pv in variants {
-            let json = serde_json::to_string(pv).unwrap();
+            let json = serde_json::to_string(pv).expect("operation should succeed");
             assert!(json.contains("\"op\":"), "Missing 'op' tag in: {json}");
-            let decoded: PatchValue = serde_json::from_str(&json).unwrap();
+            let decoded: PatchValue =
+                serde_json::from_str(&json).expect("operation should succeed");
             assert_eq!(&decoded, pv);
         }
     }
@@ -521,8 +522,8 @@ mod tests {
             );
             ps
         };
-        let json1 = serde_json::to_string(&make()).unwrap();
-        let json2 = serde_json::to_string(&make()).unwrap();
+        let json1 = serde_json::to_string(&make()).expect("operation should succeed");
+        let json2 = serde_json::to_string(&make()).expect("operation should succeed");
         assert_eq!(json1, json2);
     }
 }

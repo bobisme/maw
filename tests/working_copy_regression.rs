@@ -386,8 +386,9 @@ fn t8_symlink_in_default_not_corrupted_by_merge_cleanup() {
         default_path.join("real-data.txt"),
         "precious event data that must not be lost\n",
     )
-    .unwrap();
-    std::os::unix::fs::symlink("real-data.txt", default_path.join("current.txt")).unwrap();
+    .expect("operation should succeed");
+    std::os::unix::fs::symlink("real-data.txt", default_path.join("current.txt"))
+        .expect("operation should succeed");
 
     // Commit the symlink setup.
     repo.git_in_workspace("default", &["add", "-A"]);
@@ -404,9 +405,11 @@ fn t8_symlink_in_default_not_corrupted_by_merge_cleanup() {
 
     // Meanwhile, simulate shard rotation on default:
     // new shard file created, symlink updated to point to it.
-    std::fs::write(default_path.join("new-data.txt"), "new shard content\n").unwrap();
-    std::fs::remove_file(default_path.join("current.txt")).unwrap();
-    std::os::unix::fs::symlink("new-data.txt", default_path.join("current.txt")).unwrap();
+    std::fs::write(default_path.join("new-data.txt"), "new shard content\n")
+        .expect("operation should succeed");
+    std::fs::remove_file(default_path.join("current.txt")).expect("operation should succeed");
+    std::os::unix::fs::symlink("new-data.txt", default_path.join("current.txt"))
+        .expect("operation should succeed");
 
     // Merge the workspace — this triggers cleanup which replays default's dirty state.
     repo.maw_ok(&[
@@ -419,7 +422,8 @@ fn t8_symlink_in_default_not_corrupted_by_merge_cleanup() {
     ]);
 
     // CRITICAL: real-data.txt must NOT be corrupted.
-    let data = std::fs::read_to_string(default_path.join("real-data.txt")).unwrap();
+    let data = std::fs::read_to_string(default_path.join("real-data.txt"))
+        .expect("operation should succeed");
     assert_eq!(
         data, "precious event data that must not be lost\n",
         "real-data.txt was corrupted — symlink was followed during merge cleanup"

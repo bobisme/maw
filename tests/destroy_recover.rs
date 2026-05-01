@@ -57,7 +57,7 @@ fn destroy_force_dirty_workspace_is_recoverable_via_recover() {
     let entry = workspaces
         .iter()
         .find(|w| w["name"].as_str() == Some("dirty-ws"))
-        .unwrap();
+        .expect("operation should succeed");
     assert_ne!(
         entry["snapshot_oid"].as_str(),
         None,
@@ -248,12 +248,14 @@ fn recover_list_shows_multiple_destroyed_workspaces() {
     // Show details for a specific workspace
     let show = recover_show_json(&repo, "ws-beta");
     assert_eq!(show["workspace"].as_str(), Some("ws-beta"));
-    let records = show["records"].as_array().unwrap();
+    let records = show["records"]
+        .as_array()
+        .expect("operation should succeed");
     assert_eq!(records.len(), 1);
     assert!(
         records[0]["dirty_files"]
             .as_array()
-            .unwrap()
+            .expect("operation should succeed")
             .iter()
             .any(|f| f.as_str() == Some("beta.txt")),
         "dirty_files should include beta.txt"
@@ -400,8 +402,12 @@ fn workspace_name_reuse_creates_independent_destroy_records() {
     );
 
     // Records should have different timestamps
-    let ts0 = records[0]["destroyed_at"].as_str().unwrap();
-    let ts1 = records[1]["destroyed_at"].as_str().unwrap();
+    let ts0 = records[0]["destroyed_at"]
+        .as_str()
+        .expect("operation should succeed");
+    let ts1 = records[1]["destroyed_at"]
+        .as_str()
+        .expect("operation should succeed");
     assert_ne!(ts0, ts1, "destroy timestamps should differ");
 
     // Both records should have dirty snapshots
@@ -412,7 +418,7 @@ fn workspace_name_reuse_creates_independent_destroy_records() {
     let list = recover_list_json(&repo);
     let names: Vec<&str> = list["destroyed_workspaces"]
         .as_array()
-        .unwrap()
+        .expect("operation should succeed")
         .iter()
         .filter_map(|w| w["name"].as_str())
         .collect();

@@ -70,7 +70,7 @@ pub fn describe(name: &str, message: &str) -> Result<()> {
     }
 
     println!("Described workspace '{name}':");
-    println!("  {}", message);
+    println!("  {message}");
     println!();
     println!("  Op: {}", &op_oid.as_str()[..12]);
     println!("Next: maw ws history {name}");

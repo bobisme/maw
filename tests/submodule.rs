@@ -75,7 +75,7 @@ fn add_submodule_to_workspace(
             "protocol.file.allow=always",
             "submodule",
             "add",
-            source_dir.to_str().unwrap(),
+            source_dir.to_str().expect("operation should succeed"),
             rel_path,
         ])
         .current_dir(&ws)
@@ -162,7 +162,7 @@ fn rebase_preserves_unchanged_submodule() {
     repo.seed_files(&[("f.txt", "base\n")]);
 
     // Submodule source repo (kept alive via the returned TempDir).
-    let (_sub_src, sub_sha) = make_sub_source("v1\n");
+    let (sub_src, sub_sha) = make_sub_source("v1\n");
 
     // Create workspace and add the submodule.
     repo.maw_ok(&["ws", "create", "feat"]);
@@ -170,7 +170,7 @@ fn rebase_preserves_unchanged_submodule() {
         &repo,
         "feat",
         "subdir",
-        _sub_src.path(),
+        sub_src.path(),
         "feat: add submodule",
     );
 
@@ -310,12 +310,12 @@ fn rebase_with_submodule_conflict_bails_cleanly() {
         .trim()
         .to_owned();
     git_ok(
-        &repo.root(),
+        repo.root(),
         &["update-ref", "refs/manifold/epoch/current", &new_epoch],
     );
-    git_ok(&repo.root(), &["update-ref", "refs/heads/main", &new_epoch]);
+    git_ok(repo.root(), &["update-ref", "refs/heads/main", &new_epoch]);
     git_ok(
-        &repo.root(),
+        repo.root(),
         &["update-ref", "refs/manifold/epoch/ws/default", &new_epoch],
     );
 
@@ -371,12 +371,12 @@ fn rebase_with_submodule_delete_vs_bump_bails_cleanly() {
         .trim()
         .to_owned();
     git_ok(
-        &repo.root(),
+        repo.root(),
         &["update-ref", "refs/manifold/epoch/current", &new_epoch],
     );
-    git_ok(&repo.root(), &["update-ref", "refs/heads/main", &new_epoch]);
+    git_ok(repo.root(), &["update-ref", "refs/heads/main", &new_epoch]);
     git_ok(
-        &repo.root(),
+        repo.root(),
         &["update-ref", "refs/manifold/epoch/ws/default", &new_epoch],
     );
 

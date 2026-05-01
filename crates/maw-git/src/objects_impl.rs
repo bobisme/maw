@@ -2,7 +2,7 @@
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::{CommitInfo, EntryMode, GitOid, RefName, TreeEdit, TreeEntry};
 
 /// Convert our `GitOid` to a `gix::ObjectId`.
 fn to_gix_oid(oid: GitOid) -> gix::ObjectId {
@@ -16,7 +16,7 @@ fn from_gix_oid(oid: gix::ObjectId) -> GitOid {
 }
 
 /// Convert a gix `EntryMode` to our `EntryMode`.
-fn from_gix_entry_mode(mode: gix::objs::tree::EntryMode) -> EntryMode {
+const fn from_gix_entry_mode(mode: gix::objs::tree::EntryMode) -> EntryMode {
     match mode.kind() {
         gix::objs::tree::EntryKind::Tree => EntryMode::Tree,
         gix::objs::tree::EntryKind::Blob => EntryMode::Blob,
@@ -27,7 +27,7 @@ fn from_gix_entry_mode(mode: gix::objs::tree::EntryMode) -> EntryMode {
 }
 
 /// Convert our `EntryMode` to a gix `EntryKind`.
-fn to_gix_entry_kind(mode: EntryMode) -> gix::objs::tree::EntryKind {
+const fn to_gix_entry_kind(mode: EntryMode) -> gix::objs::tree::EntryKind {
     match mode {
         EntryMode::Blob => gix::objs::tree::EntryKind::Blob,
         EntryMode::BlobExecutable => gix::objs::tree::EntryKind::BlobExecutable,
@@ -169,41 +169,38 @@ pub fn create_commit(
             message: format!("failed to read committer identity: {e}"),
         })?;
 
-    match update_ref {
-        Some(ref_name) => {
-            let id = repo
-                .repo
-                .commit_as(
-                    committer_sig,
-                    author_sig,
-                    ref_name.as_str(),
-                    message,
-                    tree_oid,
-                    parent_oids,
-                )
-                .map_err(|e| GitError::BackendError {
-                    message: format!("failed to create commit: {e}"),
-                })?;
-            Ok(from_gix_oid(id.detach()))
-        }
-        None => {
-            let commit = gix::objs::Commit {
-                message: message.into(),
-                tree: tree_oid,
-                author: author_sig.into(),
-                committer: committer_sig.into(),
-                encoding: None,
-                parents: parent_oids.into_iter().collect(),
-                extra_headers: Default::default(),
-            };
-            let id = repo
-                .repo
-                .write_object(&commit)
-                .map_err(|e| GitError::BackendError {
-                    message: format!("failed to write commit object: {e}"),
-                })?;
-            Ok(from_gix_oid(id.detach()))
-        }
+    if let Some(ref_name) = update_ref {
+        let id = repo
+            .repo
+            .commit_as(
+                committer_sig,
+                author_sig,
+                ref_name.as_str(),
+                message,
+                tree_oid,
+                parent_oids,
+            )
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to create commit: {e}"),
+            })?;
+        Ok(from_gix_oid(id.detach()))
+    } else {
+        let commit = gix::objs::Commit {
+            message: message.into(),
+            tree: tree_oid,
+            author: author_sig.into(),
+            committer: committer_sig.into(),
+            encoding: None,
+            parents: parent_oids.into_iter().collect(),
+            extra_headers: Vec::default(),
+        };
+        let id = repo
+            .repo
+            .write_object(&commit)
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to write commit object: {e}"),
+            })?;
+        Ok(from_gix_oid(id.detach()))
     }
 }
 

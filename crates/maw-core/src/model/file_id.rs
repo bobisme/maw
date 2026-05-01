@@ -397,7 +397,9 @@ mod tests {
     #[test]
     fn track_new_assigns_fresh_id() {
         let mut map = FileIdMap::new();
-        let id = map.track_new("src/main.rs".into()).unwrap();
+        let id = map
+            .track_new("src/main.rs".into())
+            .expect("operation should succeed");
         assert!(map.contains_path(Path::new("src/main.rs")));
         assert!(map.contains_id(id));
         assert_eq!(map.id_for_path(Path::new("src/main.rs")), Some(id));
@@ -408,8 +410,12 @@ mod tests {
     #[test]
     fn track_new_generates_unique_ids() {
         let mut map = FileIdMap::new();
-        let id_a = map.track_new("a.rs".into()).unwrap();
-        let id_b = map.track_new("b.rs".into()).unwrap();
+        let id_a = map
+            .track_new("a.rs".into())
+            .expect("operation should succeed");
+        let id_b = map
+            .track_new("b.rs".into())
+            .expect("operation should succeed");
         // IDs must be distinct (with overwhelming probability).
         assert_ne!(id_a, id_b);
     }
@@ -417,8 +423,11 @@ mod tests {
     #[test]
     fn track_new_rejects_duplicate_path() {
         let mut map = FileIdMap::new();
-        map.track_new("src/lib.rs".into()).unwrap();
-        let err = map.track_new("src/lib.rs".into()).unwrap_err();
+        map.track_new("src/lib.rs".into())
+            .expect("operation should succeed");
+        let err = map
+            .track_new("src/lib.rs".into())
+            .expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::PathAlreadyTracked(_)));
         assert_eq!(map.len(), 1); // Map unchanged.
     }
@@ -426,11 +435,13 @@ mod tests {
     #[test]
     fn track_rename_preserves_file_id() {
         let mut map = FileIdMap::new();
-        let id = map.track_new("foo.rs".into()).unwrap();
+        let id = map
+            .track_new("foo.rs".into())
+            .expect("operation should succeed");
 
         let returned_id = map
             .track_rename(Path::new("foo.rs"), "bar.rs".into())
-            .unwrap();
+            .expect("operation should succeed");
 
         assert_eq!(returned_id, id, "FileId must be unchanged by rename");
         assert!(!map.contains_path(Path::new("foo.rs")));
@@ -445,19 +456,21 @@ mod tests {
         let mut map = FileIdMap::new();
         let err = map
             .track_rename(Path::new("missing.rs"), "dest.rs".into())
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::PathNotTracked(_)));
     }
 
     #[test]
     fn track_rename_rejects_occupied_destination() {
         let mut map = FileIdMap::new();
-        map.track_new("a.rs".into()).unwrap();
-        map.track_new("b.rs".into()).unwrap();
+        map.track_new("a.rs".into())
+            .expect("operation should succeed");
+        map.track_new("b.rs".into())
+            .expect("operation should succeed");
 
         let err = map
             .track_rename(Path::new("a.rs"), "b.rs".into())
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::PathAlreadyTracked(_)));
         // Both originals must still be intact.
         assert_eq!(map.len(), 2);
@@ -468,11 +481,13 @@ mod tests {
     #[test]
     fn track_copy_assigns_new_id() {
         let mut map = FileIdMap::new();
-        let src_id = map.track_new("src/lib.rs".into()).unwrap();
+        let src_id = map
+            .track_new("src/lib.rs".into())
+            .expect("operation should succeed");
 
         let dst_id = map
             .track_copy(Path::new("src/lib.rs"), "src/lib_copy.rs".into())
-            .unwrap();
+            .expect("operation should succeed");
 
         assert_ne!(dst_id, src_id, "copy gets a new FileId");
         assert_eq!(map.len(), 2);
@@ -485,19 +500,21 @@ mod tests {
         let mut map = FileIdMap::new();
         let err = map
             .track_copy(Path::new("missing.rs"), "dest.rs".into())
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::PathNotTracked(_)));
     }
 
     #[test]
     fn track_copy_rejects_occupied_destination() {
         let mut map = FileIdMap::new();
-        map.track_new("a.rs".into()).unwrap();
-        map.track_new("b.rs".into()).unwrap();
+        map.track_new("a.rs".into())
+            .expect("operation should succeed");
+        map.track_new("b.rs".into())
+            .expect("operation should succeed");
 
         let err = map
             .track_copy(Path::new("a.rs"), "b.rs".into())
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::PathAlreadyTracked(_)));
         assert_eq!(map.len(), 2);
     }
@@ -505,9 +522,13 @@ mod tests {
     #[test]
     fn track_delete_removes_both_mappings() {
         let mut map = FileIdMap::new();
-        let id = map.track_new("gone.rs".into()).unwrap();
+        let id = map
+            .track_new("gone.rs".into())
+            .expect("operation should succeed");
 
-        let returned = map.track_delete(Path::new("gone.rs")).unwrap();
+        let returned = map
+            .track_delete(Path::new("gone.rs"))
+            .expect("operation should succeed");
 
         assert_eq!(returned, id);
         assert!(!map.contains_path(Path::new("gone.rs")));
@@ -518,16 +539,23 @@ mod tests {
     #[test]
     fn track_delete_rejects_unknown_path() {
         let mut map = FileIdMap::new();
-        let err = map.track_delete(Path::new("nope.rs")).unwrap_err();
+        let err = map
+            .track_delete(Path::new("nope.rs"))
+            .expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::PathNotTracked(_)));
     }
 
     #[test]
     fn track_new_after_delete_same_path() {
         let mut map = FileIdMap::new();
-        let id1 = map.track_new("file.rs".into()).unwrap();
-        map.track_delete(Path::new("file.rs")).unwrap();
-        let id2 = map.track_new("file.rs".into()).unwrap();
+        let id1 = map
+            .track_new("file.rs".into())
+            .expect("operation should succeed");
+        map.track_delete(Path::new("file.rs"))
+            .expect("operation should succeed");
+        let id2 = map
+            .track_new("file.rs".into())
+            .expect("operation should succeed");
 
         // New file at same path gets a brand-new FileId.
         assert_ne!(id1, id2);
@@ -543,25 +571,32 @@ mod tests {
         let mut map = FileIdMap::new();
         assert_eq!(map.path_to_id.len(), map.id_to_path.len());
 
-        map.track_new("a.rs".into()).unwrap();
+        map.track_new("a.rs".into())
+            .expect("operation should succeed");
         assert_eq!(map.path_to_id.len(), map.id_to_path.len());
 
-        map.track_new("b.rs".into()).unwrap();
+        map.track_new("b.rs".into())
+            .expect("operation should succeed");
         assert_eq!(map.path_to_id.len(), map.id_to_path.len());
 
-        map.track_rename(Path::new("a.rs"), "c.rs".into()).unwrap();
+        map.track_rename(Path::new("a.rs"), "c.rs".into())
+            .expect("operation should succeed");
         assert_eq!(map.path_to_id.len(), map.id_to_path.len());
 
-        map.track_delete(Path::new("b.rs")).unwrap();
+        map.track_delete(Path::new("b.rs"))
+            .expect("operation should succeed");
         assert_eq!(map.path_to_id.len(), map.id_to_path.len());
     }
 
     #[test]
     fn iter_returns_sorted_paths() {
         let mut map = FileIdMap::new();
-        map.track_new("z.rs".into()).unwrap();
-        map.track_new("a.rs".into()).unwrap();
-        map.track_new("m.rs".into()).unwrap();
+        map.track_new("z.rs".into())
+            .expect("operation should succeed");
+        map.track_new("a.rs".into())
+            .expect("operation should succeed");
+        map.track_new("m.rs".into())
+            .expect("operation should succeed");
 
         let paths: Vec<_> = map.iter().map(|(p, _)| p.to_path_buf()).collect();
         let mut sorted = paths.clone();
@@ -575,15 +610,19 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let fileids_path = dir.path().join(".manifold").join("fileids");
 
         let mut map = FileIdMap::new();
-        let id_a = map.track_new("src/main.rs".into()).unwrap();
-        let id_b = map.track_new("src/lib.rs".into()).unwrap();
-        map.save(&fileids_path).unwrap();
+        let id_a = map
+            .track_new("src/main.rs".into())
+            .expect("operation should succeed");
+        let id_b = map
+            .track_new("src/lib.rs".into())
+            .expect("operation should succeed");
+        map.save(&fileids_path).expect("operation should succeed");
 
-        let loaded = FileIdMap::load(&fileids_path).unwrap();
+        let loaded = FileIdMap::load(&fileids_path).expect("operation should succeed");
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.id_for_path(Path::new("src/main.rs")), Some(id_a));
         assert_eq!(loaded.id_for_path(Path::new("src/lib.rs")), Some(id_b));
@@ -593,16 +632,16 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_empty_map() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let fileids_path = dir.path().join(".manifold").join("fileids");
 
-        let map = FileIdMap::load(&fileids_path).unwrap();
+        let map = FileIdMap::load(&fileids_path).expect("operation should succeed");
         assert!(map.is_empty());
     }
 
     #[test]
     fn save_creates_parent_directories() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let nested = dir
             .path()
             .join("deep")
@@ -611,23 +650,25 @@ mod tests {
             .join("fileids");
 
         let map = FileIdMap::new();
-        map.save(&nested).unwrap();
+        map.save(&nested).expect("operation should succeed");
         assert!(nested.exists());
     }
 
     #[test]
     fn save_produces_valid_json() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let fileids_path = dir.path().join("fileids");
 
         let mut map = FileIdMap::new();
-        map.track_new("src/main.rs".into()).unwrap();
-        map.save(&fileids_path).unwrap();
+        map.track_new("src/main.rs".into())
+            .expect("operation should succeed");
+        map.save(&fileids_path).expect("operation should succeed");
 
-        let content = fs::read_to_string(&fileids_path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let content = fs::read_to_string(&fileids_path).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("operation should succeed");
         assert!(parsed.is_array());
-        let arr = parsed.as_array().unwrap();
+        let arr = parsed.as_array().expect("operation should succeed");
         assert_eq!(arr.len(), 1);
         assert!(arr[0].get("path").is_some());
         assert!(arr[0].get("file_id").is_some());
@@ -637,7 +678,7 @@ mod tests {
     fn save_is_deterministic() {
         // Two maps with the same contents produce identical JSON.
         let make = || {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir().expect("operation should succeed");
             let p = dir.path().join("fileids");
             let mut map = FileIdMap::new();
             // Use fixed FileIds via direct insertion (bypass random).
@@ -647,41 +688,41 @@ mod tests {
             map.id_to_path.insert(id1, "a.rs".into());
             map.path_to_id.insert("b.rs".into(), id2);
             map.id_to_path.insert(id2, "b.rs".into());
-            map.save(&p).unwrap();
+            map.save(&p).expect("operation should succeed");
             (dir, p)
         };
         let (_dir1, p1) = make();
         let (_dir2, p2) = make();
-        let c1 = fs::read_to_string(&p1).unwrap();
-        let c2 = fs::read_to_string(&p2).unwrap();
+        let c1 = fs::read_to_string(&p1).expect("operation should succeed");
+        let c2 = fs::read_to_string(&p2).expect("operation should succeed");
         assert_eq!(c1, c2, "save must be deterministic");
     }
 
     #[test]
     fn load_detects_duplicate_paths() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let p = dir.path().join("fileids");
         // Write a corrupt file with duplicate paths.
         let json = r#"[
             {"path": "foo.rs", "file_id": "00000000000000000000000000000001"},
             {"path": "foo.rs", "file_id": "00000000000000000000000000000002"}
         ]"#;
-        fs::write(&p, json).unwrap();
-        let err = FileIdMap::load(&p).unwrap_err();
+        fs::write(&p, json).expect("operation should succeed");
+        let err = FileIdMap::load(&p).expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::DuplicatePath(_)));
     }
 
     #[test]
     fn load_detects_duplicate_file_ids() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let p = dir.path().join("fileids");
         // Write a corrupt file with duplicate FileIds.
         let json = r#"[
             {"path": "a.rs", "file_id": "00000000000000000000000000000001"},
             {"path": "b.rs", "file_id": "00000000000000000000000000000001"}
         ]"#;
-        fs::write(&p, json).unwrap();
-        let err = FileIdMap::load(&p).unwrap_err();
+        fs::write(&p, json).expect("operation should succeed");
+        let err = FileIdMap::load(&p).expect_err("operation should fail");
         assert!(matches!(err, FileIdMapError::DuplicateFileId(_)));
     }
 
@@ -704,13 +745,15 @@ mod tests {
     fn concurrent_rename_and_edit_same_file_id() {
         // Common base state: foo.rs exists with a known FileId.
         let mut base_map = FileIdMap::new();
-        let foo_id = base_map.track_new("foo.rs".into()).unwrap();
+        let foo_id = base_map
+            .track_new("foo.rs".into())
+            .expect("operation should succeed");
 
         // --- Workspace A: renames foo.rs → bar.rs ---
         let mut map_a = base_map.clone();
         let rename_id = map_a
             .track_rename(Path::new("foo.rs"), "bar.rs".into())
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(rename_id, foo_id, "FileId unchanged across rename");
         assert!(!map_a.contains_path(Path::new("foo.rs")));
         assert!(map_a.contains_path(Path::new("bar.rs")));
@@ -740,10 +783,12 @@ mod tests {
     #[test]
     fn copy_gets_new_file_id() {
         let mut map = FileIdMap::new();
-        let orig_id = map.track_new("original.rs".into()).unwrap();
+        let orig_id = map
+            .track_new("original.rs".into())
+            .expect("operation should succeed");
         let copy_id = map
             .track_copy(Path::new("original.rs"), "copy.rs".into())
-            .unwrap();
+            .expect("operation should succeed");
 
         assert_ne!(orig_id, copy_id, "copy must have a new FileId");
 
@@ -763,7 +808,9 @@ mod tests {
             FileIdMapError::DuplicatePath("c.rs".into()),
             FileIdMapError::DuplicateFileId(FileId::new(0)),
             FileIdMapError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "oops")),
-            FileIdMapError::Json(serde_json::from_str::<FileId>("!").unwrap_err()),
+            FileIdMapError::Json(
+                serde_json::from_str::<FileId>("!").expect_err("operation should fail"),
+            ),
         ];
         for err in errors {
             let msg = format!("{err}");

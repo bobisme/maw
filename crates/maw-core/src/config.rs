@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn parse_empty_string() {
-        let cfg = ManifoldConfig::parse("").unwrap();
+        let cfg = ManifoldConfig::parse("").expect("operation should succeed");
         assert_eq!(cfg, ManifoldConfig::default());
     }
 
@@ -655,7 +655,7 @@ command = "cargo generate-lockfile"
 match = "generated/**"
 kind = "theirs"
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.repo.branch, "develop");
         assert_eq!(cfg.workspace.backend, BackendKind::GitWorktree);
         assert!(cfg.workspace.git_compat_refs);
@@ -681,7 +681,7 @@ kind = "theirs"
 backend = "git-worktree"
 git_compat_refs = false
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.workspace.backend, BackendKind::GitWorktree);
         assert!(!cfg.workspace.git_compat_refs);
     }
@@ -694,7 +694,7 @@ commands = ["cargo check", "cargo test"]
 timeout_seconds = 120
 on_failure = "block"
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.merge.validation.command, None);
         assert_eq!(
             cfg.merge.validation.commands,
@@ -715,7 +715,7 @@ command = "cargo fmt --check"
 commands = ["cargo check", "cargo test"]
 on_failure = "block-quarantine"
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(
             cfg.merge.validation.effective_commands(),
             vec!["cargo fmt --check", "cargo check", "cargo test"]
@@ -728,7 +728,7 @@ on_failure = "block-quarantine"
 [repo]
 branch = "trunk"
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.repo.branch, "trunk");
         // Everything else is default.
         assert_eq!(cfg.workspace.backend, BackendKind::Auto);
@@ -742,7 +742,7 @@ branch = "trunk"
         let toml = r"
 unknown_field = true
 ";
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("unknown field"),
             "error should mention unknown field: {}",
@@ -757,7 +757,7 @@ unknown_field = true
 branch = "main"
 extra = "oops"
 "#;
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("unknown field"),
             "error should mention unknown field: {}",
@@ -771,7 +771,7 @@ extra = "oops"
 [workspace]
 backend = "quantum-teleport"
 "#;
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("unknown variant"),
             "error should mention unknown variant: {}",
@@ -785,7 +785,7 @@ backend = "quantum-teleport"
 [merge.validation]
 on_failure = "explode"
 "#;
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("unknown variant"),
             "error should mention unknown variant: {}",
@@ -796,7 +796,7 @@ on_failure = "explode"
     #[test]
     fn parse_includes_line_number_on_error() {
         let toml = "good = 1\n[repo]\nbranch = 42\n";
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("line"),
             "error should include line number: {}",
@@ -806,13 +806,14 @@ on_failure = "explode"
 
     #[test]
     fn load_missing_file_returns_defaults() {
-        let cfg = ManifoldConfig::load(Path::new("/nonexistent/config.toml")).unwrap();
+        let cfg = ManifoldConfig::load(Path::new("/nonexistent/config.toml"))
+            .expect("operation should succeed");
         assert_eq!(cfg, ManifoldConfig::default());
     }
 
     #[test]
     fn load_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
@@ -821,17 +822,17 @@ on_failure = "explode"
 branch = "release"
 "#,
         )
-        .unwrap();
-        let cfg = ManifoldConfig::load(&path).unwrap();
+        .expect("operation should succeed");
+        let cfg = ManifoldConfig::load(&path).expect("operation should succeed");
         assert_eq!(cfg.repo.branch, "release");
     }
 
     #[test]
     fn load_invalid_file_shows_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "not valid [[[toml").unwrap();
-        let err = ManifoldConfig::load(&path).unwrap_err();
+        std::fs::write(&path, "not valid [[[toml").expect("operation should succeed");
+        let err = ManifoldConfig::load(&path).expect_err("operation should fail");
         assert_eq!(err.path.as_deref(), Some(path.as_path()));
         assert!(!err.message.is_empty());
     }
@@ -881,7 +882,7 @@ branch = "release"
             ("copy", BackendKind::Copy),
         ] {
             let toml = format!("[workspace]\nbackend = \"{input}\"");
-            let cfg = ManifoldConfig::parse(&toml).unwrap();
+            let cfg = ManifoldConfig::parse(&toml).expect("operation should succeed");
             assert_eq!(cfg.workspace.backend, expected, "variant: {input}");
         }
     }
@@ -897,7 +898,7 @@ branch = "release"
             ("block-quarantine", OnFailure::BlockQuarantine),
         ] {
             let toml = format!("[merge.validation]\non_failure = \"{input}\"");
-            let cfg = ManifoldConfig::parse(&toml).unwrap();
+            let cfg = ManifoldConfig::parse(&toml).expect("operation should succeed");
             assert_eq!(
                 cfg.merge.validation.on_failure, expected,
                 "variant: {input}"
@@ -972,9 +973,13 @@ branch = "release"
             ("typescript", LanguagePreset::TypeScript),
         ] {
             let toml = format!("[merge.validation]\npreset = \"{input}\"");
-            let cfg = ManifoldConfig::parse(&toml).unwrap();
+            let cfg = ManifoldConfig::parse(&toml).expect("operation should succeed");
             assert_eq!(
-                cfg.merge.validation.preset.as_ref().unwrap(),
+                cfg.merge
+                    .validation
+                    .preset
+                    .as_ref()
+                    .expect("operation should succeed"),
                 &expected,
                 "variant: {input}"
             );
@@ -989,7 +994,8 @@ branch = "release"
 
     #[test]
     fn validation_config_has_any_validation_with_preset() {
-        let cfg = ManifoldConfig::parse("[merge.validation]\npreset = \"rust\"").unwrap();
+        let cfg = ManifoldConfig::parse("[merge.validation]\npreset = \"rust\"")
+            .expect("operation should succeed");
         assert!(cfg.merge.validation.has_any_validation());
         // No explicit commands set
         assert!(!cfg.merge.validation.has_commands());
@@ -997,7 +1003,8 @@ branch = "release"
 
     #[test]
     fn validation_config_has_any_validation_with_command() {
-        let cfg = ManifoldConfig::parse("[merge.validation]\ncommand = \"cargo test\"").unwrap();
+        let cfg = ManifoldConfig::parse("[merge.validation]\ncommand = \"cargo test\"")
+            .expect("operation should succeed");
         assert!(cfg.merge.validation.has_any_validation());
         assert!(cfg.merge.validation.has_commands());
     }
@@ -1018,7 +1025,7 @@ command = "cargo fmt --check"
 preset = "rust"
 on_failure = "block"
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(
             cfg.merge.validation.command.as_deref(),
             Some("cargo fmt --check")
@@ -1035,7 +1042,7 @@ on_failure = "block"
     #[test]
     fn parse_rejects_invalid_language_preset() {
         let toml = "[merge.validation]\npreset = \"cobol\"";
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("unknown variant"),
             "expected 'unknown variant' but got: {}",
@@ -1076,7 +1083,7 @@ on_failure = "block"
 [merge.ast]
 languages = ["rust", "python", "typescript"]
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.merge.ast.languages.len(), 3);
         assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Rust));
         assert!(cfg.merge.ast.languages.contains(&AstConfigLanguage::Python));
@@ -1094,7 +1101,7 @@ languages = ["rust", "python", "typescript"]
 [merge.ast]
 languages = ["rust"]
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.merge.ast.languages.len(), 1);
         assert_eq!(cfg.merge.ast.languages[0], AstConfigLanguage::Rust);
     }
@@ -1105,7 +1112,7 @@ languages = ["rust"]
 [merge.ast]
 languages = ["ts"]
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.merge.ast.languages.len(), 1);
         assert_eq!(cfg.merge.ast.languages[0], AstConfigLanguage::TypeScript);
     }
@@ -1116,7 +1123,7 @@ languages = ["ts"]
 [merge.ast]
 languages = ["javascript", "go"]
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.merge.ast.languages.len(), 2);
         assert!(
             cfg.merge
@@ -1135,7 +1142,7 @@ packs = ["core", "web"]
 semantic_false_positive_budget_pct = 3
 semantic_min_confidence = 80
 "#;
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert_eq!(cfg.merge.ast.packs.len(), 2);
         assert!(cfg.merge.ast.packs.contains(&AstLanguagePack::Core));
         assert!(cfg.merge.ast.packs.contains(&AstLanguagePack::Web));
@@ -1149,7 +1156,7 @@ semantic_min_confidence = 80
 [merge.ast]
 languages = []
 ";
-        let cfg = ManifoldConfig::parse(toml).unwrap();
+        let cfg = ManifoldConfig::parse(toml).expect("operation should succeed");
         assert!(cfg.merge.ast.languages.is_empty());
     }
 
@@ -1159,7 +1166,7 @@ languages = []
 [merge.ast]
 languages = ["cobol"]
 "#;
-        let err = ManifoldConfig::parse(toml).unwrap_err();
+        let err = ManifoldConfig::parse(toml).expect_err("operation should fail");
         assert!(
             err.message.contains("unknown variant"),
             "expected 'unknown variant' but got: {}",

@@ -48,6 +48,9 @@ fn should_auto_sync(cmd: &str) -> bool {
 }
 
 #[instrument(skip(args), fields(workspace = %args.workspace, cmd = ?args.cmd))]
+/// # Errors
+///
+/// Returns an error if command execution or workspace setup fails.
 pub fn run(args: &ExecArgs) -> Result<()> {
     if args.cmd.is_empty() {
         bail!(

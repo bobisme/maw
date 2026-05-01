@@ -10,7 +10,7 @@ use gix::objs::TreeRefIter;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::GitOid;
 
 /// Convert a `GitOid` to a `gix::ObjectId`.
 fn to_gix_oid(oid: GitOid) -> gix::ObjectId {
@@ -51,9 +51,8 @@ fn write_index_tree(repo: &GixRepo) -> Result<GitOid, GitError> {
     })?;
 
     for entry in index.entries() {
-        let path = match entry.path(&index).to_str() {
-            Ok(p) => p,
-            Err(_) => continue,
+        let Ok(path) = entry.path(&index).to_str() else {
+            continue;
         };
 
         let kind = match entry.mode {
@@ -88,13 +87,13 @@ pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
     }
 
     // 2. Read HEAD to get current commit OID.
-    let head_id = repo
+    let head_object = repo
         .repo
         .rev_parse_single("HEAD")
         .map_err(|e| GitError::BackendError {
             message: format!("failed to resolve HEAD: {e}"),
         })?;
-    let head_oid = from_gix_oid(head_id.detach());
+    let head_oid = from_gix_oid(head_object.detach());
 
     // 3. Write the current index state as a tree.
     let index_tree_oid = write_index_tree(repo)?;
@@ -131,7 +130,7 @@ pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
             committer: committer_sig.into(),
             encoding: None,
             parents: vec![head_gix].into(),
-            extra_headers: Default::default(),
+            extra_headers: Vec::default(),
         };
         let id = repo
             .repo
@@ -175,7 +174,7 @@ pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
             committer: committer_sig.into(),
             encoding: None,
             parents: vec![head_gix, idx_gix].into(),
-            extra_headers: Default::default(),
+            extra_headers: Vec::default(),
         };
         let id = repo
             .repo
@@ -189,6 +188,10 @@ pub fn stash_create(repo: &GixRepo) -> Result<Option<GitOid>, GitError> {
     Ok(Some(stash_commit))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "stash replay handles all tree diff cases"
+)]
 pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
     let workdir = repo
         .workdir
@@ -238,7 +241,7 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
             message: format!("failed to find parent tree: {e}"),
         })?
         .data
-        .to_vec();
+        .clone();
 
     let stash_tree_data = repo
         .repo
@@ -247,7 +250,7 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
             message: format!("failed to find stash tree: {e}"),
         })?
         .data
-        .to_vec();
+        .clone();
 
     let old_iter = TreeRefIter::from_bytes(&parent_tree_data);
     let new_iter = TreeRefIter::from_bytes(&stash_tree_data);
@@ -282,9 +285,8 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                 if entry_mode.is_tree() {
                     continue;
                 }
-                let path_str = match path.to_str() {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                let Ok(path_str) = path.to_str() else {
+                    continue;
                 };
 
                 // Reject paths with .. components (path traversal protection).
@@ -314,10 +316,10 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                 // corrupts the symlink target instead of replacing the symlink.
                 // This was the root cause of the .bones/events shard corruption:
                 // writing symlink target text through a symlink into the real file.
-                if let Ok(meta) = std::fs::symlink_metadata(&file_path) {
-                    if meta.is_symlink() || meta.is_file() {
-                        let _ = std::fs::remove_file(&file_path);
-                    }
+                if let Ok(meta) = std::fs::symlink_metadata(&file_path)
+                    && (meta.is_symlink() || meta.is_file())
+                {
+                    let _ = std::fs::remove_file(&file_path);
                 }
 
                 if entry_mode.kind() == gix::objs::tree::EntryKind::Link {
@@ -376,9 +378,8 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
                 if entry_mode.is_tree() {
                     continue;
                 }
-                let path_str = match path.to_str() {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                let Ok(path_str) = path.to_str() else {
+                    continue;
                 };
 
                 // Reject paths with .. components (path traversal protection).
@@ -413,7 +414,7 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
     let index_path = repo.repo.index_path();
     let mut index_file = gix::index::File::from_state(stash_index.into(), index_path);
     index_file
-        .write(Default::default())
+        .write(gix::index::write::Options::default())
         .map_err(|e| GitError::BackendError {
             message: format!("failed to write index: {e}"),
         })?;
@@ -426,44 +427,44 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    /// Helper: init a git repo with an initial commit, return (tempdir, GixRepo).
+    /// Helper: init a git repo with an initial commit, return (tempdir, `GixRepo`).
     fn setup_repo() -> (tempfile::TempDir, GixRepo) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test setup should succeed");
         let root = dir.path();
 
         Command::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
 
-        std::fs::write(root.join("init.txt"), "init\n").unwrap();
+        std::fs::write(root.join("init.txt"), "init\n").expect("test setup should succeed");
         Command::new("git")
             .args(["add", "-A"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
         Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
 
-        let repo = GixRepo::open(root).unwrap();
+        let repo = GixRepo::open(root).expect("test setup should succeed");
         (dir, repo)
     }
 
-    /// Regression test: stash_apply must create OS symlinks for mode 120000 entries,
+    /// Regression test: `stash_apply` must create OS symlinks for mode 120000 entries,
     /// not write the target path as regular file content.
     ///
     /// This was the root cause of the .bones/events shard corruption where a 1.6MB
@@ -475,40 +476,43 @@ mod tests {
         let root = dir.path();
 
         // Add a real file and a symlink as dirty (unstaged) changes.
-        std::fs::write(root.join("real-data.txt"), "important data\n").unwrap();
-        std::os::unix::fs::symlink("real-data.txt", root.join("current.txt")).unwrap();
+        std::fs::write(root.join("real-data.txt"), "important data\n")
+            .expect("test setup should succeed");
+        std::os::unix::fs::symlink("real-data.txt", root.join("current.txt"))
+            .expect("test setup should succeed");
 
         // Stage so the stash captures them (stash reads from index).
         Command::new("git")
             .args(["add", "-A"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
 
         // Create a stash from the dirty state.
         let stash_oid = stash_create(&repo)
-            .unwrap()
+            .expect("test setup should succeed")
             .expect("stash should not be empty");
 
         // Clean the worktree (remove the files we just added).
-        std::fs::remove_file(root.join("current.txt")).unwrap();
-        std::fs::remove_file(root.join("real-data.txt")).unwrap();
+        std::fs::remove_file(root.join("current.txt")).expect("test setup should succeed");
+        std::fs::remove_file(root.join("real-data.txt")).expect("test setup should succeed");
 
         // Reset index to HEAD.
         Command::new("git")
             .args(["reset", "HEAD", "--", "."])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
 
         assert!(!root.join("current.txt").exists());
         assert!(!root.join("real-data.txt").exists());
 
         // Apply the stash — this should recreate the symlink.
-        stash_apply(&repo, stash_oid).unwrap();
+        stash_apply(&repo, stash_oid).expect("test setup should succeed");
 
         // Verify: current.txt should be a symlink, not a regular file.
-        let meta = std::fs::symlink_metadata(root.join("current.txt")).unwrap();
+        let meta =
+            std::fs::symlink_metadata(root.join("current.txt")).expect("test setup should succeed");
         assert!(
             meta.is_symlink(),
             "current.txt should be a symlink, but is type {:?}",
@@ -516,18 +520,23 @@ mod tests {
         );
 
         // Verify: symlink target is correct.
-        let target = std::fs::read_link(root.join("current.txt")).unwrap();
-        assert_eq!(target.to_str().unwrap(), "real-data.txt");
+        let target =
+            std::fs::read_link(root.join("current.txt")).expect("test setup should succeed");
+        assert_eq!(
+            target.to_str().expect("test setup should succeed"),
+            "real-data.txt"
+        );
 
         // Verify: real-data.txt is a regular file with correct content.
-        let content = std::fs::read_to_string(root.join("real-data.txt")).unwrap();
+        let content =
+            std::fs::read_to_string(root.join("real-data.txt")).expect("test setup should succeed");
         assert_eq!(content, "important data\n");
     }
 
     /// Regression test: writing a regular file where a symlink exists on disk
     /// must NOT follow the symlink. The symlink must be removed first.
     ///
-    /// Without the fix, File::create follows the symlink and overwrites the
+    /// Without the fix, <File::create> follows the symlink and overwrites the
     /// target file with the new content.
     #[cfg(unix)]
     #[test]
@@ -536,51 +545,57 @@ mod tests {
         let root = dir.path();
 
         // Set up: a regular file "data.txt" with important content.
-        std::fs::write(root.join("data.txt"), "precious data that must survive\n").unwrap();
+        std::fs::write(root.join("data.txt"), "precious data that must survive\n")
+            .expect("test setup should succeed");
         Command::new("git")
             .args(["add", "-A"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
         Command::new("git")
             .args(["commit", "-m", "add data"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
 
         // Now create a stash where "link.txt" is a regular file.
-        std::fs::write(root.join("link.txt"), "regular content\n").unwrap();
+        std::fs::write(root.join("link.txt"), "regular content\n")
+            .expect("test setup should succeed");
         Command::new("git")
             .args(["add", "-A"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("test setup should succeed");
         let stash_oid = stash_create(&repo)
-            .unwrap()
+            .expect("test setup should succeed")
             .expect("stash should not be empty");
 
         // But on disk, replace link.txt with a symlink pointing to data.txt.
-        std::fs::remove_file(root.join("link.txt")).unwrap();
-        std::os::unix::fs::symlink("data.txt", root.join("link.txt")).unwrap();
+        std::fs::remove_file(root.join("link.txt")).expect("test setup should succeed");
+        std::os::unix::fs::symlink("data.txt", root.join("link.txt"))
+            .expect("test setup should succeed");
 
         // Apply stash: should replace the symlink with a regular file,
         // NOT write "regular content" through the symlink into data.txt.
-        stash_apply(&repo, stash_oid).unwrap();
+        stash_apply(&repo, stash_oid).expect("test setup should succeed");
 
         // Verify: data.txt must NOT be corrupted.
-        let data = std::fs::read_to_string(root.join("data.txt")).unwrap();
+        let data =
+            std::fs::read_to_string(root.join("data.txt")).expect("test setup should succeed");
         assert_eq!(
             data, "precious data that must survive\n",
             "data.txt was corrupted by symlink following"
         );
 
         // Verify: link.txt should now be a regular file.
-        let meta = std::fs::symlink_metadata(root.join("link.txt")).unwrap();
+        let meta =
+            std::fs::symlink_metadata(root.join("link.txt")).expect("test setup should succeed");
         assert!(
             meta.is_file() && !meta.is_symlink(),
             "link.txt should be a regular file, not a symlink"
         );
-        let content = std::fs::read_to_string(root.join("link.txt")).unwrap();
+        let content =
+            std::fs::read_to_string(root.join("link.txt")).expect("test setup should succeed");
         assert_eq!(content, "regular content\n");
     }
 }

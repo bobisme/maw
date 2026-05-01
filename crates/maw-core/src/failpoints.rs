@@ -32,7 +32,10 @@ static REGISTRY: LazyLock<Mutex<HashMap<&'static str, FailpointAction>>> =
 ///
 /// Panics if the internal registry mutex is poisoned.
 pub fn set(name: &'static str, action: FailpointAction) {
-    REGISTRY.lock().unwrap().insert(name, action);
+    REGISTRY
+        .lock()
+        .expect("operation should succeed")
+        .insert(name, action);
 }
 
 /// Clear a specific failpoint.
@@ -41,7 +44,10 @@ pub fn set(name: &'static str, action: FailpointAction) {
 ///
 /// Panics if the internal registry mutex is poisoned.
 pub fn clear(name: &'static str) {
-    REGISTRY.lock().unwrap().remove(name);
+    REGISTRY
+        .lock()
+        .expect("operation should succeed")
+        .remove(name);
 }
 
 /// Clear all failpoints.
@@ -50,7 +56,7 @@ pub fn clear(name: &'static str) {
 ///
 /// Panics if the internal registry mutex is poisoned.
 pub fn clear_all() {
-    REGISTRY.lock().unwrap().clear();
+    REGISTRY.lock().expect("operation should succeed").clear();
 }
 
 /// Check if a failpoint is set and execute its action.
@@ -60,8 +66,12 @@ pub fn clear_all() {
 ///
 /// Panics if the internal registry mutex is poisoned, or if the
 /// failpoint action is `Panic`.
+///
+/// # Errors
+///
+/// Returns the configured error message if the failpoint action is `Error`.
 pub fn check(name: &str) -> Result<(), String> {
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.lock().expect("operation should succeed");
     match registry.get(name) {
         None | Some(FailpointAction::Off) => Ok(()),
         Some(FailpointAction::Error(msg)) => Err(msg.clone()),
@@ -98,7 +108,7 @@ mod tests {
         set("FP_TEST_ERROR", FailpointAction::Error("injected".into()));
         let result = check("FP_TEST_ERROR");
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("operation should fail");
         assert!(
             err.contains("injected"),
             "expected 'injected' in error: {err}"

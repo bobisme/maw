@@ -179,8 +179,8 @@ fn to_ref_name(name: &str) -> Result<maw_git::RefName, RefError> {
 }
 
 /// Map a `maw_git::GitError` to a `RefError`.
-fn map_git_error(name: &str, err: maw_git::GitError) -> RefError {
-    match &err {
+fn map_git_error(name: &str, err: &maw_git::GitError) -> RefError {
+    match err {
         maw_git::GitError::RefConflict { ref_name, .. } => RefError::CasMismatch {
             ref_name: ref_name.clone(),
         },
@@ -320,14 +320,14 @@ pub fn read_ref_via(repo: &dyn maw_git::GitRepo, name: &str) -> Result<Option<Gi
         match repo.read_ref(&ref_name) {
             Ok(Some(oid)) => return Ok(Some(from_git_oid(oid)?)),
             Ok(None) | Err(maw_git::GitError::NotFound { .. }) => return Ok(None),
-            Err(e) => return Err(map_git_error(name, e)),
+            Err(e) => return Err(map_git_error(name, &e)),
         }
     }
     // Fall back to rev_parse_opt for arbitrary revspecs
     match repo.rev_parse_opt(name) {
         Ok(Some(oid)) => Ok(Some(from_git_oid(oid)?)),
         Ok(None) => Ok(None),
-        Err(e) => Err(map_git_error(name, e)),
+        Err(e) => Err(map_git_error(name, &e)),
     }
 }
 
@@ -351,7 +351,7 @@ pub fn write_ref_via(
     let ref_name = to_ref_name(name)?;
     let git_oid = to_git_oid(oid)?;
     repo.write_ref(&ref_name, git_oid, "")
-        .map_err(|e| map_git_error(name, e))
+        .map_err(|e| map_git_error(name, &e))
 }
 
 /// Atomically update a git ref using compare-and-swap (CAS).
@@ -411,7 +411,7 @@ pub fn write_ref_cas_via(
         expected_old_oid: old,
     };
     repo.atomic_ref_update(&[edit])
-        .map_err(|e| map_git_error(name, e))
+        .map_err(|e| map_git_error(name, &e))
 }
 
 /// Atomically update multiple refs.
@@ -455,7 +455,7 @@ pub fn update_refs_atomic_via(
     repo.atomic_ref_update(&edits).map_err(|e| {
         // Try to identify which ref failed
         let first_ref = updates.first().map_or("unknown", |u| u.0);
-        map_git_error(first_ref, e)
+        map_git_error(first_ref, &e)
     })
 }
 
@@ -478,7 +478,7 @@ pub fn delete_ref_via(repo: &dyn maw_git::GitRepo, name: &str) -> Result<(), Ref
     let ref_name = to_ref_name(name)?;
     match repo.delete_ref(&ref_name) {
         Ok(()) | Err(maw_git::GitError::NotFound { .. }) => Ok(()),
-        Err(e) => Err(map_git_error(name, e)),
+        Err(e) => Err(map_git_error(name, &e)),
     }
 }
 
@@ -539,74 +539,74 @@ mod tests {
 
     /// Create a fresh git repo with one commit and return the HEAD OID.
     fn setup_repo() -> (TempDir, GitOid) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         Command::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        let oid = GitOid::new(&oid_str).unwrap();
+        let oid = GitOid::new(&oid_str).expect("operation should succeed");
 
         (dir, oid)
     }
 
     /// Create a second commit in the repo and return its OID.
     fn add_commit(root: &std::path::Path) -> GitOid {
-        fs::write(root.join("extra.txt"), "extra\n").unwrap();
+        fs::write(root.join("extra.txt"), "extra\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "extra.txt"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "second"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        GitOid::new(&oid_str).unwrap()
+        GitOid::new(&oid_str).expect("operation should succeed")
     }
 
     // -----------------------------------------------------------------------
@@ -715,9 +715,10 @@ mod tests {
             .args(["update-ref", "refs/manifold/epoch/current", oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let result = read_ref(root, "refs/manifold/epoch/current").unwrap();
+        let result =
+            read_ref(root, "refs/manifold/epoch/current").expect("operation should succeed");
         assert_eq!(result, Some(oid));
     }
 
@@ -726,7 +727,8 @@ mod tests {
         let (dir, _oid) = setup_repo();
         let root = dir.path();
 
-        let result = read_ref(root, "refs/manifold/does-not-exist").unwrap();
+        let result =
+            read_ref(root, "refs/manifold/does-not-exist").expect("operation should succeed");
         assert_eq!(result, None);
     }
 
@@ -736,7 +738,7 @@ mod tests {
         let root = dir.path();
 
         // HEAD always exists
-        let result = read_ref(root, "HEAD").unwrap();
+        let result = read_ref(root, "HEAD").expect("operation should succeed");
         assert_eq!(result, Some(oid));
     }
 
@@ -749,9 +751,9 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        write_ref(root, EPOCH_CURRENT, &oid).unwrap();
+        write_ref(root, EPOCH_CURRENT, &oid).expect("operation should succeed");
 
-        let result = read_ref(root, EPOCH_CURRENT).unwrap();
+        let result = read_ref(root, EPOCH_CURRENT).expect("operation should succeed");
         assert_eq!(result, Some(oid));
     }
 
@@ -761,10 +763,10 @@ mod tests {
         let root = dir.path();
         let second_oid = add_commit(root);
 
-        write_ref(root, EPOCH_CURRENT, &first_oid).unwrap();
-        write_ref(root, EPOCH_CURRENT, &second_oid).unwrap();
+        write_ref(root, EPOCH_CURRENT, &first_oid).expect("operation should succeed");
+        write_ref(root, EPOCH_CURRENT, &second_oid).expect("operation should succeed");
 
-        let result = read_ref(root, EPOCH_CURRENT).unwrap();
+        let result = read_ref(root, EPOCH_CURRENT).expect("operation should succeed");
         assert_eq!(result, Some(second_oid));
     }
 
@@ -779,12 +781,13 @@ mod tests {
         let second_oid = add_commit(root);
 
         // Set initial value
-        write_ref(root, EPOCH_CURRENT, &first_oid).unwrap();
+        write_ref(root, EPOCH_CURRENT, &first_oid).expect("operation should succeed");
 
         // CAS from first → second
-        write_ref_cas(root, EPOCH_CURRENT, &first_oid, &second_oid).unwrap();
+        write_ref_cas(root, EPOCH_CURRENT, &first_oid, &second_oid)
+            .expect("operation should succeed");
 
-        let result = read_ref(root, EPOCH_CURRENT).unwrap();
+        let result = read_ref(root, EPOCH_CURRENT).expect("operation should succeed");
         assert_eq!(result, Some(second_oid));
     }
 
@@ -796,17 +799,18 @@ mod tests {
         let third_oid = add_commit(root);
 
         // Set to second_oid
-        write_ref(root, EPOCH_CURRENT, &second_oid).unwrap();
+        write_ref(root, EPOCH_CURRENT, &second_oid).expect("operation should succeed");
 
         // Try CAS with first_oid as expected old (wrong!)
-        let err = write_ref_cas(root, EPOCH_CURRENT, &first_oid, &third_oid).unwrap_err();
+        let err = write_ref_cas(root, EPOCH_CURRENT, &first_oid, &third_oid)
+            .expect_err("operation should fail");
         assert!(
             matches!(err, RefError::CasMismatch { .. }),
             "expected CasMismatch, got: {err}"
         );
 
         // Ref should still be second_oid
-        let result = read_ref(root, EPOCH_CURRENT).unwrap();
+        let result = read_ref(root, EPOCH_CURRENT).expect("operation should succeed");
         assert_eq!(result, Some(second_oid));
     }
 
@@ -821,20 +825,20 @@ mod tests {
         let v2 = add_commit(root);
         let v3 = add_commit(root);
 
-        write_ref(root, EPOCH_CURRENT, &v1).unwrap();
+        write_ref(root, EPOCH_CURRENT, &v1).expect("operation should succeed");
 
         // Agent A advances v1 → v2 (succeeds)
-        write_ref_cas(root, EPOCH_CURRENT, &v1, &v2).unwrap();
+        write_ref_cas(root, EPOCH_CURRENT, &v1, &v2).expect("operation should succeed");
 
         // Agent B tries v1 → v3 (fails, current is v2)
-        let err = write_ref_cas(root, EPOCH_CURRENT, &v1, &v3).unwrap_err();
+        let err = write_ref_cas(root, EPOCH_CURRENT, &v1, &v3).expect_err("operation should fail");
         assert!(
             matches!(err, RefError::CasMismatch { .. }),
             "agent B should lose the race: {err}"
         );
 
         // Epoch stayed at v2
-        let result = read_ref(root, EPOCH_CURRENT).unwrap();
+        let result = read_ref(root, EPOCH_CURRENT).expect("operation should succeed");
         assert_eq!(result, Some(v2));
     }
 
@@ -847,11 +851,19 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        write_ref(root, EPOCH_CURRENT, &oid).unwrap();
-        assert!(read_ref(root, EPOCH_CURRENT).unwrap().is_some());
+        write_ref(root, EPOCH_CURRENT, &oid).expect("operation should succeed");
+        assert!(
+            read_ref(root, EPOCH_CURRENT)
+                .expect("operation should succeed")
+                .is_some()
+        );
 
-        delete_ref(root, EPOCH_CURRENT).unwrap();
-        assert!(read_ref(root, EPOCH_CURRENT).unwrap().is_none());
+        delete_ref(root, EPOCH_CURRENT).expect("operation should succeed");
+        assert!(
+            read_ref(root, EPOCH_CURRENT)
+                .expect("operation should succeed")
+                .is_none()
+        );
     }
 
     #[test]
@@ -859,10 +871,10 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        write_ref(root, EPOCH_CURRENT, &oid).unwrap();
-        delete_ref(root, EPOCH_CURRENT).unwrap();
+        write_ref(root, EPOCH_CURRENT, &oid).expect("operation should succeed");
+        delete_ref(root, EPOCH_CURRENT).expect("operation should succeed");
         // Deleting again should not error
-        delete_ref(root, EPOCH_CURRENT).unwrap();
+        delete_ref(root, EPOCH_CURRENT).expect("operation should succeed");
     }
 
     #[test]
@@ -871,7 +883,7 @@ mod tests {
         let root = dir.path();
 
         // Should not error even if the ref never existed
-        delete_ref(root, "refs/manifold/nonexistent").unwrap();
+        delete_ref(root, "refs/manifold/nonexistent").expect("operation should succeed");
     }
 
     // -----------------------------------------------------------------------
@@ -881,7 +893,11 @@ mod tests {
     #[test]
     fn read_epoch_current_missing() {
         let (dir, _) = setup_repo();
-        assert!(read_epoch_current(dir.path()).unwrap().is_none());
+        assert!(
+            read_epoch_current(dir.path())
+                .expect("operation should succeed")
+                .is_none()
+        );
     }
 
     #[test]
@@ -889,8 +905,8 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        write_epoch_current(root, &oid).unwrap();
-        let result = read_epoch_current(root).unwrap();
+        write_epoch_current(root, &oid).expect("operation should succeed");
+        let result = read_epoch_current(root).expect("operation should succeed");
         assert_eq!(result, Some(oid));
     }
 
@@ -900,10 +916,13 @@ mod tests {
         let root = dir.path();
         let v2 = add_commit(root);
 
-        write_epoch_current(root, &v1).unwrap();
-        advance_epoch(root, &v1, &v2).unwrap();
+        write_epoch_current(root, &v1).expect("operation should succeed");
+        advance_epoch(root, &v1, &v2).expect("operation should succeed");
 
-        assert_eq!(read_epoch_current(root).unwrap(), Some(v2));
+        assert_eq!(
+            read_epoch_current(root).expect("operation should succeed"),
+            Some(v2)
+        );
     }
 
     #[test]
@@ -913,10 +932,10 @@ mod tests {
         let v2 = add_commit(root);
         let v3 = add_commit(root);
 
-        write_epoch_current(root, &v2).unwrap();
+        write_epoch_current(root, &v2).expect("operation should succeed");
 
         // Try to advance from v1 (stale) to v3 — should fail
-        let err = advance_epoch(root, &v1, &v3).unwrap_err();
+        let err = advance_epoch(root, &v1, &v3).expect_err("operation should fail");
         assert!(
             matches!(err, RefError::CasMismatch { .. }),
             "expected CasMismatch: {err}"
@@ -933,8 +952,8 @@ mod tests {
         let root = dir.path();
         let v2 = add_commit(root);
 
-        write_ref(root, EPOCH_CURRENT, &v1).unwrap();
-        write_ref(root, "refs/heads/test-branch", &v1).unwrap();
+        write_ref(root, EPOCH_CURRENT, &v1).expect("operation should succeed");
+        write_ref(root, "refs/heads/test-branch", &v1).expect("operation should succeed");
 
         update_refs_atomic(
             root,
@@ -943,10 +962,16 @@ mod tests {
                 ("refs/heads/test-branch", &v1, &v2),
             ],
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2.clone()));
-        assert_eq!(read_ref(root, "refs/heads/test-branch").unwrap(), Some(v2));
+        assert_eq!(
+            read_ref(root, EPOCH_CURRENT).expect("operation should succeed"),
+            Some(v2.clone())
+        );
+        assert_eq!(
+            read_ref(root, "refs/heads/test-branch").expect("operation should succeed"),
+            Some(v2)
+        );
     }
 
     #[test]
@@ -957,8 +982,8 @@ mod tests {
         let v3 = add_commit(root);
 
         // Set epoch to v2, branch to v1
-        write_ref(root, EPOCH_CURRENT, &v2).unwrap();
-        write_ref(root, "refs/heads/test-branch", &v1).unwrap();
+        write_ref(root, EPOCH_CURRENT, &v2).expect("operation should succeed");
+        write_ref(root, "refs/heads/test-branch", &v1).expect("operation should succeed");
 
         // Try atomic update expecting epoch=v1 (wrong!) and branch=v1
         let err = update_refs_atomic(
@@ -968,7 +993,7 @@ mod tests {
                 ("refs/heads/test-branch", &v1, &v3),
             ],
         )
-        .unwrap_err();
+        .expect_err("operation should fail");
 
         assert!(
             matches!(err, RefError::CasMismatch { .. }),
@@ -976,8 +1001,14 @@ mod tests {
         );
 
         // Neither ref should have moved
-        assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2));
-        assert_eq!(read_ref(root, "refs/heads/test-branch").unwrap(), Some(v1));
+        assert_eq!(
+            read_ref(root, EPOCH_CURRENT).expect("operation should succeed"),
+            Some(v2)
+        );
+        assert_eq!(
+            read_ref(root, "refs/heads/test-branch").expect("operation should succeed"),
+            Some(v1)
+        );
     }
 
     #[test]
@@ -986,11 +1017,14 @@ mod tests {
         let root = dir.path();
         let v2 = add_commit(root);
 
-        write_ref(root, EPOCH_CURRENT, &v1).unwrap();
+        write_ref(root, EPOCH_CURRENT, &v1).expect("operation should succeed");
 
-        update_refs_atomic(root, &[(EPOCH_CURRENT, &v1, &v2)]).unwrap();
+        update_refs_atomic(root, &[(EPOCH_CURRENT, &v1, &v2)]).expect("operation should succeed");
 
-        assert_eq!(read_ref(root, EPOCH_CURRENT).unwrap(), Some(v2));
+        assert_eq!(
+            read_ref(root, EPOCH_CURRENT).expect("operation should succeed"),
+            Some(v2)
+        );
     }
 
     // -----------------------------------------------------------------------

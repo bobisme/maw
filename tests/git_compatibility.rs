@@ -61,7 +61,9 @@ fn git_log_grep_and_diff_work_across_epochs() {
     assert!(diff.contains("README.md"));
 
     // No conflict markers in the resulting mainline snapshot.
-    let lib_content = repo.read_file("default", "src/lib.rs").unwrap();
+    let lib_content = repo
+        .read_file("default", "src/lib.rs")
+        .expect("operation should succeed");
     assert!(!lib_content.contains("<<<<<<<"));
 }
 

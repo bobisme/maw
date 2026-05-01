@@ -151,72 +151,78 @@ mod tests {
     use super::*;
 
     fn setup_repo() -> (TempDir, String) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         Command::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# test\n").unwrap();
+        fs::write(root.join("README.md"), "# test\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let oid = String::from_utf8(out.stdout).unwrap().trim().to_string();
+            .expect("operation should succeed");
+        let oid = String::from_utf8(out.stdout)
+            .expect("operation should succeed")
+            .trim()
+            .to_string();
 
-        fs::create_dir_all(root.join(".manifold/epochs")).unwrap();
+        fs::create_dir_all(root.join(".manifold/epochs")).expect("operation should succeed");
 
         (dir, oid)
     }
 
     fn commit(root: &Path, file: &str) -> String {
-        fs::write(root.join(file), file).unwrap();
+        fs::write(root.join(file), file).expect("operation should succeed");
         Command::new("git")
             .args(["add", file])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", file])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
+            .expect("operation should succeed");
+        String::from_utf8(out.stdout)
+            .expect("operation should succeed")
+            .trim()
+            .to_string()
     }
 
     #[test]
@@ -225,24 +231,30 @@ mod tests {
         let root = dir.path();
 
         let backend = GitWorktreeBackend::new(root.to_path_buf());
-        let ws = WorkspaceId::new("persist").unwrap();
+        let ws = WorkspaceId::new("persist").expect("operation should succeed");
         backend
-            .create(&ws, &EpochId::new(&epoch0).unwrap())
-            .unwrap();
+            .create(
+                &ws,
+                &EpochId::new(&epoch0).expect("operation should succeed"),
+            )
+            .expect("operation should succeed");
 
         let epoch1 = commit(root, "new.txt");
         Command::new("git")
             .args(["update-ref", "refs/manifold/epoch/current", &epoch1])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch0}"))).unwrap();
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch1}"))).unwrap();
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch0}")))
+            .expect("operation should succeed");
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch1}")))
+            .expect("operation should succeed");
         let orphan = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{orphan}"))).unwrap();
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{orphan}")))
+            .expect("operation should succeed");
 
-        let report = gc_unreferenced_epochs(root, false).unwrap();
+        let report = gc_unreferenced_epochs(root, false).expect("operation should succeed");
         assert_eq!(report.removed, vec![orphan.to_string()]);
         assert!(root.join(format!(".manifold/epochs/e-{epoch0}")).exists());
         assert!(root.join(format!(".manifold/epochs/e-{epoch1}")).exists());
@@ -255,11 +267,15 @@ mod tests {
         let root = dir.path();
 
         let backend = GitWorktreeBackend::new(root.to_path_buf());
-        let ws = WorkspaceId::new("tempws").unwrap();
+        let ws = WorkspaceId::new("tempws").expect("operation should succeed");
         backend
-            .create(&ws, &EpochId::new(&epoch0).unwrap())
-            .unwrap();
-        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch0}"))).unwrap();
+            .create(
+                &ws,
+                &EpochId::new(&epoch0).expect("operation should succeed"),
+            )
+            .expect("operation should succeed");
+        fs::create_dir_all(root.join(format!(".manifold/epochs/e-{epoch0}")))
+            .expect("operation should succeed");
 
         // Keep current epoch elsewhere so epoch0 is not retained by epoch/current.
         let epoch1 = commit(root, "later.txt");
@@ -267,13 +283,13 @@ mod tests {
             .args(["update-ref", "refs/manifold/epoch/current", &epoch1])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        backend.destroy(&ws).unwrap();
+        backend.destroy(&ws).expect("operation should succeed");
 
         // After destroying the last workspace referencing epoch0, run GC.
         // In production this would be called from the CLI layer after destroy.
-        let report = gc_unreferenced_epochs(root, false).unwrap();
+        let report = gc_unreferenced_epochs(root, false).expect("operation should succeed");
         assert_eq!(report.removed, vec![epoch0.clone()]);
         assert!(
             !root.join(format!(".manifold/epochs/e-{epoch0}")).exists(),

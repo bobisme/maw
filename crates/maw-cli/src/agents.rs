@@ -22,6 +22,9 @@ pub enum AgentsCommands {
     Show,
 }
 
+/// # Errors
+///
+/// Returns an error if the requested agent metadata operation fails.
 pub fn run(cmd: &AgentsCommands) -> Result<()> {
     match cmd {
         AgentsCommands::Init { force } => init(*force),
@@ -145,7 +148,9 @@ fn init(force: bool) -> Result<()> {
         if content.contains(MAW_SECTION_START) {
             if force {
                 // Replace existing section
-                let start_idx = content.find(MAW_SECTION_START).unwrap();
+                let start_idx = content
+                    .find(MAW_SECTION_START)
+                    .expect("operation should succeed");
                 let end_idx = content
                     .find(MAW_SECTION_END)
                     .map_or(content.len(), |i| i + MAW_SECTION_END.len());

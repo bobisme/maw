@@ -52,21 +52,34 @@ fn io_err(path: impl Into<PathBuf>, source: io::Error) -> StoreError {
 fn oid_hex(oid: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
     for b in oid {
-        s.push_str(&format!("{:02x}", b));
+        s.push(hex_char(b >> 4));
+        s.push(hex_char(b & 0x0f));
     }
     s
 }
 
+const fn hex_char(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + n - 10) as char,
+        _ => unreachable!(),
+    }
+}
+
 impl Store {
     /// Open (and create if missing) the LFS store under `<git_dir>/lfs`.
+    ///
+    /// # Errors
+    /// Returns an error if the store directory cannot be created.
     pub fn open(git_dir: &Path) -> Result<Self, StoreError> {
         let root = git_dir.join("lfs");
         let objects = root.join("objects");
         fs::create_dir_all(&objects).map_err(|e| io_err(&objects, e))?;
-        Ok(Store { root })
+        Ok(Self { root })
     }
 
     /// Path to the real file for a given oid (may or may not exist).
+    #[must_use]
     pub fn object_path(&self, oid: &[u8; 32]) -> PathBuf {
         let hex = oid_hex(oid);
         self.root
@@ -77,11 +90,15 @@ impl Store {
     }
 
     /// Is this object present in the local store?
+    #[must_use]
     pub fn contains(&self, oid: &[u8; 32]) -> bool {
         self.object_path(oid).is_file()
     }
 
     /// Open a reader for the real bytes, or None if the object is missing.
+    ///
+    /// # Errors
+    /// Returns an error if the object exists but cannot be opened.
     pub fn open_object(&self, oid: &[u8; 32]) -> Result<Option<Box<dyn Read + Send>>, StoreError> {
         let path = self.object_path(oid);
         match fs::File::open(&path) {
@@ -97,10 +114,14 @@ impl Store {
     /// Returns the built pointer and the byte count.
     /// Idempotent: if an object with the computed oid already exists, the
     /// temp file is dropped and the existing file is kept.
+    ///
+    /// # Errors
+    /// Returns an error if the input cannot be read, the temp object cannot be
+    /// written, or the completed object cannot be moved into the store.
     pub fn insert_from_reader<R: Read>(&self, reader: R) -> Result<(Pointer, u64), StoreError> {
         let (oid, size, tmp_path) = self.stream_to_tmp(reader, None, None)?;
         let final_path = self.object_path(&oid);
-        self.commit_tmp(tmp_path, &final_path)?;
+        Self::commit_tmp(&tmp_path, &final_path)?;
         Ok((
             Pointer {
                 oid,
@@ -113,6 +134,10 @@ impl Store {
 
     /// Stream bytes in while verifying them against a known oid + size.
     /// On mismatch, the temp file is cleaned up.
+    ///
+    /// # Errors
+    /// Returns an error if streaming fails, verification fails, or the completed
+    /// object cannot be moved into the store.
     pub fn insert_from_stream<R: Read>(
         &self,
         expected_oid: &[u8; 32],
@@ -132,7 +157,7 @@ impl Store {
             });
         }
         let final_path = self.object_path(&oid);
-        self.commit_tmp(tmp_path, &final_path)?;
+        Self::commit_tmp(&tmp_path, &final_path)?;
         Ok(())
     }
 
@@ -175,16 +200,16 @@ impl Store {
             total += n as u64;
 
             // Early abort on size overflow if verifying.
-            if let Some(es) = expected_size {
-                if total > es {
-                    let _ = named.close();
-                    return Err(StoreError::ContentMismatch {
-                        expected: expected_oid.as_ref().map(oid_hex).unwrap_or_default(),
-                        expected_size: es,
-                        got: String::new(),
-                        got_size: total,
-                    });
-                }
+            if let Some(es) = expected_size
+                && total > es
+            {
+                let _ = named.close();
+                return Err(StoreError::ContentMismatch {
+                    expected: expected_oid.as_ref().map(oid_hex).unwrap_or_default(),
+                    expected_size: es,
+                    got: String::new(),
+                    got_size: total,
+                });
             }
         }
 
@@ -199,16 +224,16 @@ impl Store {
         // Detach from NamedTempFile so its Drop doesn't delete.
         let (_file, persisted) = named.keep().map_err(|e| io_err(&tmp_path, e.error))?;
 
-        if let (Some(eo), Some(es)) = (expected_oid, expected_size) {
-            if oid_bytes != eo || total != es {
-                let _ = fs::remove_file(&persisted);
-                return Err(StoreError::ContentMismatch {
-                    expected: oid_hex(&eo),
-                    expected_size: es,
-                    got: oid_hex(&oid_bytes),
-                    got_size: total,
-                });
-            }
+        if let (Some(eo), Some(es)) = (expected_oid, expected_size)
+            && (oid_bytes != eo || total != es)
+        {
+            let _ = fs::remove_file(&persisted);
+            return Err(StoreError::ContentMismatch {
+                expected: oid_hex(&eo),
+                expected_size: es,
+                got: oid_hex(&oid_bytes),
+                got_size: total,
+            });
         }
 
         Ok((oid_bytes, total, persisted))
@@ -216,21 +241,21 @@ impl Store {
 
     /// Move a completed temp file to its final content-addressed path.
     /// Idempotent: if the target already exists, drop the tmp file.
-    fn commit_tmp(&self, tmp: PathBuf, final_path: &Path) -> Result<(), StoreError> {
+    fn commit_tmp(tmp: &Path, final_path: &Path) -> Result<(), StoreError> {
         if final_path.exists() {
-            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(tmp);
             return Ok(());
         }
         // Ensure parent dirs exist.
         if let Some(parent) = final_path.parent() {
             fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
         }
-        match fs::rename(&tmp, final_path) {
+        match fs::rename(tmp, final_path) {
             Ok(()) => Ok(()),
             Err(_) if final_path.exists() => {
                 // Lost a race to another writer — tmp already gone OR the
                 // rename succeeded under us. Either way target is present.
-                let _ = fs::remove_file(&tmp);
+                let _ = fs::remove_file(tmp);
                 Ok(())
             }
             Err(e) => Err(io_err(final_path, e)),
@@ -244,8 +269,8 @@ mod tests {
     use std::io::Cursor;
 
     fn new_store() -> (tempfile::TempDir, Store) {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().expect("operation should succeed");
+        let store = Store::open(tmp.path()).expect("operation should succeed");
         (tmp, store)
     }
 
@@ -254,7 +279,8 @@ mod tests {
     fn hex_to_oid(hex: &str) -> [u8; 32] {
         let mut out = [0u8; 32];
         for i in 0..32 {
-            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+            out[i] =
+                u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("operation should succeed");
         }
         out
     }
@@ -264,7 +290,7 @@ mod tests {
         let (_tmp, store) = new_store();
         let (pointer, size) = store
             .insert_from_reader(Cursor::new(b"hello world\n".to_vec()))
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(size, 12);
         assert_eq!(pointer.oid_hex(), HELLO_OID_HEX);
         assert!(store.contains(&pointer.oid));
@@ -292,7 +318,12 @@ mod tests {
     fn open_object_returns_none_for_missing() {
         let (_tmp, store) = new_store();
         let oid = [0u8; 32];
-        assert!(store.open_object(&oid).unwrap().is_none());
+        assert!(
+            store
+                .open_object(&oid)
+                .expect("operation should succeed")
+                .is_none()
+        );
     }
 
     #[test]
@@ -300,10 +331,15 @@ mod tests {
         let (_tmp, store) = new_store();
         let (p, _) = store
             .insert_from_reader(Cursor::new(b"hello world\n".to_vec()))
-            .unwrap();
-        let mut reader = store.open_object(&p.oid).unwrap().unwrap();
+            .expect("operation should succeed");
+        let mut reader = store
+            .open_object(&p.oid)
+            .expect("operation should succeed")
+            .expect("operation should succeed");
         let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
+        reader
+            .read_to_end(&mut out)
+            .expect("operation should succeed");
         assert_eq!(out, b"hello world\n");
     }
 
@@ -312,10 +348,10 @@ mod tests {
         let (_tmp, store) = new_store();
         let (p1, _) = store
             .insert_from_reader(Cursor::new(b"same".to_vec()))
-            .unwrap();
+            .expect("operation should succeed");
         let (p2, _) = store
             .insert_from_reader(Cursor::new(b"same".to_vec()))
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(p1.oid, p2.oid);
         assert!(store.contains(&p1.oid));
     }
@@ -327,7 +363,7 @@ mod tests {
         let oid = hex_to_oid(HELLO_OID_HEX);
         store
             .insert_from_stream(&oid, 12, Cursor::new(data.to_vec()))
-            .unwrap();
+            .expect("operation should succeed");
         assert!(store.contains(&oid));
     }
 
@@ -338,7 +374,7 @@ mod tests {
         let oid = hex_to_oid(HELLO_OID_HEX);
         let err = store
             .insert_from_stream(&oid, 999, Cursor::new(data.to_vec()))
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, StoreError::ContentMismatch { .. }));
         assert!(!store.contains(&oid));
     }
@@ -350,7 +386,7 @@ mod tests {
         let fake_oid = hex_to_oid(HELLO_OID_HEX);
         let err = store
             .insert_from_stream(&fake_oid, 17, Cursor::new(data.to_vec()))
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, StoreError::ContentMismatch { .. }));
         assert!(!store.contains(&fake_oid));
     }
@@ -362,7 +398,7 @@ mod tests {
         let oid = [0u8; 32];
         let err = store
             .insert_from_stream(&oid, 10, Cursor::new(data))
-            .unwrap_err();
+            .expect_err("operation should fail");
         assert!(matches!(err, StoreError::ContentMismatch { .. }));
         assert!(!store.contains(&oid));
     }
@@ -383,22 +419,32 @@ mod tests {
             let gd = git_dir.clone();
             let d = data.clone();
             handles.push(thread::spawn(move || {
-                let store = Store::open(&gd).unwrap();
-                store.insert_from_reader(Cursor::new((*d).clone())).unwrap()
+                let store = Store::open(&gd).expect("operation should succeed");
+                store
+                    .insert_from_reader(Cursor::new((*d).clone()))
+                    .expect("operation should succeed")
             }));
         }
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("operation should succeed"))
+            .collect();
         // All threads compute the same oid.
         let first_oid = results[0].0.oid;
         for (p, _) in &results {
             assert_eq!(p.oid, first_oid);
         }
-        let store = Store::open(&git_dir).unwrap();
+        let store = Store::open(&git_dir).expect("operation should succeed");
         assert!(store.contains(&first_oid));
         // File content is intact.
-        let mut reader = store.open_object(&first_oid).unwrap().unwrap();
+        let mut reader = store
+            .open_object(&first_oid)
+            .expect("operation should succeed")
+            .expect("operation should succeed");
         let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
+        reader
+            .read_to_end(&mut out)
+            .expect("operation should succeed");
         assert_eq!(out.len(), data.len());
         assert_eq!(out[0], b'y');
     }
@@ -408,16 +454,18 @@ mod tests {
         // 10 MiB of pseudo-random-ish bytes.
         let (_tmp, store) = new_store();
         let data: Vec<u8> = (0..10_000_000u32).map(|i| (i % 251) as u8).collect();
-        let (p, size) = store.insert_from_reader(Cursor::new(data.clone())).unwrap();
+        let (p, size) = store
+            .insert_from_reader(Cursor::new(data.clone()))
+            .expect("operation should succeed");
         assert_eq!(size, data.len() as u64);
         // Round-trip equality.
         let mut out = Vec::new();
         store
             .open_object(&p.oid)
-            .unwrap()
-            .unwrap()
+            .expect("operation should succeed")
+            .expect("operation should succeed")
             .read_to_end(&mut out)
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(out, data);
     }
 
@@ -428,12 +476,18 @@ mod tests {
         let (_tmp, store) = new_store();
         let oid = hex_to_oid(HELLO_OID_HEX);
         let path = store.object_path(&oid);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"hello world\n").unwrap();
+        fs::create_dir_all(path.parent().expect("operation should succeed"))
+            .expect("operation should succeed");
+        fs::write(&path, b"hello world\n").expect("operation should succeed");
         assert!(store.contains(&oid));
-        let mut reader = store.open_object(&oid).unwrap().unwrap();
+        let mut reader = store
+            .open_object(&oid)
+            .expect("operation should succeed")
+            .expect("operation should succeed");
         let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).unwrap();
+        reader
+            .read_to_end(&mut buf)
+            .expect("operation should succeed");
         assert_eq!(buf, b"hello world\n");
     }
 
@@ -442,7 +496,7 @@ mod tests {
         let (_tmp, store) = new_store();
         let (p, size) = store
             .insert_from_reader(Cursor::new(Vec::<u8>::new()))
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(size, 0);
         // sha256 of empty: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         assert_eq!(

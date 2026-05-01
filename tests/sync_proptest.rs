@@ -1,7 +1,7 @@
 //! Property-based tests for the `ws sync` decision gate (bn-3o7w).
 //!
-//! These tests fuzz random sequences of (workspace_create, local_commit*,
-//! concurrent_merge*, sync) and assert the core safety invariants that were
+//! These tests fuzz random sequences of (`workspace_create`, `local_commit`*,
+//! `concurrent_merge`*, sync) and assert the core safety invariants that were
 //! violated by bn-18dj:
 //!
 //! 1. `sync` (without `--rebase`) on a workspace with local commits must NEVER
@@ -89,7 +89,7 @@ proptest! {
 
         let head_after = repo.workspace_head("feature");
         prop_assert_eq!(
-            head_before.clone(),
+            head_before,
             head_after,
             "sync without --rebase must not change HEAD"
         );
@@ -188,7 +188,7 @@ proptest! {
 
         let head_after = repo.workspace_head("feature");
         prop_assert_eq!(
-            head_before.clone(),
+            head_before,
             head_after,
             "auto-sync via exec must not change HEAD when workspace has local commits"
         );
@@ -231,7 +231,7 @@ proptest! {
 
         // alpha has local commits — HEAD must not change.
         prop_assert_eq!(
-            alpha_head_before.clone(),
+            alpha_head_before,
             repo.workspace_head("alpha"),
             "sync --all must not change HEAD of workspace with local commits (alpha)"
         );
@@ -247,7 +247,7 @@ proptest! {
         // beta with local commits: must also be preserved.
         if ws_b_commits > 0 {
             prop_assert_eq!(
-                beta_head_before.clone(),
+                beta_head_before,
                 repo.workspace_head("beta"),
                 "sync --all must not change HEAD of workspace with local commits (beta)"
             );

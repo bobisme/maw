@@ -55,6 +55,9 @@ pub struct StatusArgs {
     pub json: bool,
 }
 
+/// # Errors
+///
+/// Returns an error if status collection or rendering fails.
 pub fn run(args: &StatusArgs) -> Result<()> {
     // Fast path: --status-bar skips expensive operations (gix status walk,
     // ChangesStore, full backend init) and uses lightweight alternatives.
@@ -677,7 +680,7 @@ fn collect_status() -> Result<StatusSummary> {
 /// Avoids the expensive operations in [`collect_status`]:
 /// - Uses `git status --porcelain` instead of gix status (avoids full worktree walk)
 /// - Counts workspace dirs directly instead of going through the backend
-/// - Skips ChangesStore entirely (not shown in status bar)
+/// - Skips `ChangesStore` entirely (not shown in status bar)
 /// - Uses `git rev-list --count` only when local != remote (fast OID comparison first)
 fn collect_status_fast() -> Result<StatusSummary> {
     let root = workspace::repo_root()?;
@@ -740,22 +743,19 @@ fn collect_status_fast() -> Result<StatusSummary> {
 
 /// Count dirty tracked files using maw-git's fast index-stat check.
 fn count_dirty_tracked_files(ws_path: &Path) -> usize {
-    let repo = match maw_git::GixRepo::open(ws_path) {
-        Ok(r) => r,
-        Err(_) => return 0,
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return 0;
     };
     repo.count_dirty_tracked().unwrap_or(0)
 }
 
 /// Collect changed and untracked files from git status in a directory.
 fn collect_git_status(ws_path: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let repo = match maw_git::GixRepo::open(ws_path) {
-        Ok(r) => r,
-        Err(_) => return Ok((Vec::new(), Vec::new())),
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return Ok((Vec::new(), Vec::new()));
     };
-    let entries = match repo.status() {
-        Ok(e) => e,
-        Err(_) => return Ok((Vec::new(), Vec::new())),
+    let Ok(entries) = repo.status() else {
+        return Ok((Vec::new(), Vec::new()));
     };
 
     let mut changed = Vec::new();

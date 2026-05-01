@@ -76,10 +76,10 @@ mod tests {
 
     #[test]
     fn test_init_manifold_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
 
-        init_manifold_dir(root).unwrap();
+        init_manifold_dir(root).expect("operation should succeed");
 
         assert!(root.join(".manifold").is_dir());
         assert!(root.join(".manifold/epochs").is_dir());
@@ -92,14 +92,16 @@ mod tests {
 
     #[test]
     fn test_idempotency() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
 
-        init_manifold_dir(root).unwrap();
-        let config_first = fs::read_to_string(root.join(".manifold/config.toml")).unwrap();
+        init_manifold_dir(root).expect("operation should succeed");
+        let config_first = fs::read_to_string(root.join(".manifold/config.toml"))
+            .expect("operation should succeed");
 
-        init_manifold_dir(root).unwrap();
-        let config_second = fs::read_to_string(root.join(".manifold/config.toml")).unwrap();
+        init_manifold_dir(root).expect("operation should succeed");
+        let config_second = fs::read_to_string(root.join(".manifold/config.toml"))
+            .expect("operation should succeed");
 
         assert_eq!(config_first, config_second);
     }

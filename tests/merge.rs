@@ -546,7 +546,7 @@ fn stale_workspace_is_blocked_for_check_plan_dry_run_and_merge() {
     assert!(
         plan_json["conflicts"]
             .as_array()
-            .is_some_and(|conflicts| conflicts.is_empty()),
+            .is_some_and(std::vec::Vec::is_empty),
         "stale plan JSON should not synthesize conflicts, got: {plan_json}"
     );
 
@@ -1660,18 +1660,12 @@ fn changes_create_json_advice_avoids_invalid_self_merge_instructions() {
         .collect::<Vec<_>>();
 
     assert!(
-        !advice
-            .iter()
-            .any(|line| *line == "maw ws merge ch-guide-json --into ch-guide-json --destroy"),
+        !advice.contains(&"maw ws merge ch-guide-json --into ch-guide-json --destroy"),
         "JSON advice should not include invalid self-merge command: {payload}"
     );
     assert!(
-        advice
-            .iter()
-            .any(|line| *line == "maw ws create --change ch-guide-json <agent-workspace>")
-            && advice.iter().any(
-                |line| *line == "maw ws merge <agent-workspace> --into ch-guide-json --destroy"
-            ),
+        advice.contains(&"maw ws create --change ch-guide-json <agent-workspace>")
+            && advice.contains(&"maw ws merge <agent-workspace> --into ch-guide-json --destroy"),
         "JSON advice should include worker workspace merge guidance: {payload}"
     );
 }

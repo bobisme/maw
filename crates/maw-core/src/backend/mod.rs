@@ -254,7 +254,11 @@ mod tests {
 
     #[test]
     fn workspace_status_is_clean() {
-        let status = WorkspaceStatus::new(BaseEpoch::new("a".repeat(40)).unwrap(), vec![], false);
+        let status = WorkspaceStatus::new(
+            BaseEpoch::new("a".repeat(40)).expect("operation should succeed"),
+            vec![],
+            false,
+        );
         assert!(status.is_clean());
         assert_eq!(status.dirty_count(), 0);
     }
@@ -263,7 +267,7 @@ mod tests {
     fn workspace_status_dirty() {
         let dirty_files = vec![PathBuf::from("file1.rs"), PathBuf::from("file2.rs")];
         let status = WorkspaceStatus::new(
-            BaseEpoch::new("b".repeat(40)).unwrap(),
+            BaseEpoch::new("b".repeat(40)).expect("operation should succeed"),
             dirty_files.clone(),
             false,
         );
@@ -274,7 +278,11 @@ mod tests {
 
     #[test]
     fn workspace_status_stale() {
-        let status = WorkspaceStatus::new(BaseEpoch::new("c".repeat(40)).unwrap(), vec![], true);
+        let status = WorkspaceStatus::new(
+            BaseEpoch::new("c".repeat(40)).expect("operation should succeed"),
+            vec![],
+            true,
+        );
         assert!(status.is_stale);
         assert!(status.is_clean());
     }

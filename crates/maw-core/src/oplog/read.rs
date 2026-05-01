@@ -191,6 +191,11 @@ pub fn read_operation(root: &Path, oid: &GitOid) -> Result<Operation, OpLogReadE
 ///
 /// This is the underlying implementation; [`read_operation`] is a
 /// convenience wrapper that opens a repo at `root`.
+///
+/// # Errors
+///
+/// Returns an error if the blob cannot be read or if the blob content is not a
+/// valid [`Operation`] JSON.
 pub fn read_operation_via(
     repo: &dyn maw_git::GitRepo,
     oid: &GitOid,
@@ -339,59 +344,59 @@ mod tests {
 
     /// Create a fresh git repo with one commit.
     fn setup_repo() -> (TempDir, GitOid) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         StdCommand::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         StdCommand::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = StdCommand::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        let oid = GitOid::new(&oid_str).unwrap();
+        let oid = GitOid::new(&oid_str).expect("operation should succeed");
 
         (dir, oid)
     }
 
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn make_create_op(ws_id: &WorkspaceId) -> Operation {
@@ -420,14 +425,15 @@ mod tests {
 
         // First op: Create (no parent)
         let op1 = make_create_op(ws_id);
-        let oid1 = append_operation(root, ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(root, ws_id, &op1, None).expect("operation should succeed");
         chain.push((oid1.clone(), op1));
 
         // Subsequent ops: Describe with incrementing messages
         let mut prev_oid = oid1;
         for i in 1..count {
             let op = make_describe_op(ws_id, prev_oid.clone(), &format!("step {}", i + 1));
-            let oid = append_operation(root, ws_id, &op, Some(&prev_oid)).unwrap();
+            let oid = append_operation(root, ws_id, &op, Some(&prev_oid))
+                .expect("operation should succeed");
             chain.push((oid.clone(), op));
             prev_oid = oid;
         }
@@ -443,7 +449,7 @@ mod tests {
     fn read_head_no_operations_returns_none() {
         let (dir, _) = setup_repo();
         let ws_id = ws("agent-1");
-        let result = read_head(dir.path(), &ws_id).unwrap();
+        let result = read_head(dir.path(), &ws_id).expect("operation should succeed");
         assert_eq!(result, None);
     }
 
@@ -454,9 +460,9 @@ mod tests {
         let ws_id = ws("agent-1");
 
         let op = make_create_op(&ws_id);
-        let oid = append_operation(root, &ws_id, &op, None).unwrap();
+        let oid = append_operation(root, &ws_id, &op, None).expect("operation should succeed");
 
-        let head = read_head(root, &ws_id).unwrap();
+        let head = read_head(root, &ws_id).expect("operation should succeed");
         assert_eq!(head, Some(oid));
     }
 
@@ -467,9 +473,9 @@ mod tests {
         let ws_id = ws("agent-1");
 
         let chain = write_chain(root, &ws_id, 3);
-        let last_oid = chain.last().unwrap().0.clone();
+        let last_oid = chain.last().expect("operation should succeed").0.clone();
 
-        let head = read_head(root, &ws_id).unwrap();
+        let head = read_head(root, &ws_id).expect("operation should succeed");
         assert_eq!(head, Some(last_oid));
     }
 
@@ -484,9 +490,9 @@ mod tests {
         let ws_id = ws("agent-1");
 
         let op = make_create_op(&ws_id);
-        let oid = write_operation_blob(root, &op).unwrap();
+        let oid = write_operation_blob(root, &op).expect("operation should succeed");
 
-        let read_back = read_operation(root, &oid).unwrap();
+        let read_back = read_operation(root, &oid).expect("operation should succeed");
         assert_eq!(read_back, op);
     }
 
@@ -495,7 +501,7 @@ mod tests {
         let (dir, _) = setup_repo();
         let root = dir.path();
 
-        let bad_oid = GitOid::new(&"f".repeat(40)).unwrap();
+        let bad_oid = GitOid::new(&"f".repeat(40)).expect("operation should succeed");
         let result = read_operation(root, &bad_oid);
         assert!(result.is_err());
         assert!(matches!(result, Err(OpLogReadError::CatFile { .. })));
@@ -513,7 +519,7 @@ mod tests {
 
         let chain = write_chain(root, &ws_id, 1);
 
-        let walked = walk_all(root, &ws_id).unwrap();
+        let walked = walk_all(root, &ws_id).expect("operation should succeed");
         assert_eq!(walked.len(), 1);
         assert_eq!(walked[0].0, chain[0].0);
         assert_eq!(walked[0].1, chain[0].1);
@@ -527,7 +533,7 @@ mod tests {
 
         let chain = write_chain(root, &ws_id, 5);
 
-        let walked = walk_all(root, &ws_id).unwrap();
+        let walked = walk_all(root, &ws_id).expect("operation should succeed");
         assert_eq!(walked.len(), 5);
 
         // Walked should be newest-first (reverse of write order).
@@ -546,7 +552,7 @@ mod tests {
 
         let chain = write_chain(root, &ws_id, 5);
 
-        let walked = walk_all(root, &ws_id).unwrap();
+        let walked = walk_all(root, &ws_id).expect("operation should succeed");
         assert_eq!(walked.len(), 5);
 
         // All operations from the chain should be present (possibly reordered).
@@ -575,7 +581,7 @@ mod tests {
 
         write_chain(root, &ws_id, 5);
 
-        let walked = walk_chain(root, &ws_id, Some(3), None).unwrap();
+        let walked = walk_chain(root, &ws_id, Some(3), None).expect("operation should succeed");
         assert_eq!(walked.len(), 3);
     }
 
@@ -587,7 +593,7 @@ mod tests {
 
         let chain = write_chain(root, &ws_id, 5);
 
-        let walked = walk_chain(root, &ws_id, Some(1), None).unwrap();
+        let walked = walk_chain(root, &ws_id, Some(1), None).expect("operation should succeed");
         assert_eq!(walked.len(), 1);
         // Should be the head (newest).
         assert_eq!(walked[0].0, chain[4].0);
@@ -601,7 +607,7 @@ mod tests {
 
         write_chain(root, &ws_id, 3);
 
-        let walked = walk_chain(root, &ws_id, Some(100), None).unwrap();
+        let walked = walk_chain(root, &ws_id, Some(100), None).expect("operation should succeed");
         assert_eq!(walked.len(), 3);
     }
 
@@ -624,7 +630,7 @@ mod tests {
             None,
             Some(&|op: &Operation| matches!(op.payload, OpPayload::Create { .. })),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // All 5 ops should be present because the Create is at the root
         // and has no parents anyway.
@@ -648,7 +654,7 @@ mod tests {
                 matches!(&op.payload, OpPayload::Describe { message } if message == "step 3")
             }),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Should have: step 5 (head), step 4, step 3 (stop here).
         // Step 3's parents are NOT explored.
@@ -681,7 +687,7 @@ mod tests {
 
         // Create two independent ops in different "workspaces" (same ws for simplicity).
         let op1 = make_create_op(&ws_id);
-        let oid1 = write_operation_blob(root, &op1).unwrap();
+        let oid1 = write_operation_blob(root, &op1).expect("operation should succeed");
 
         let op2 = Operation {
             parent_ids: vec![],
@@ -689,7 +695,7 @@ mod tests {
             timestamp: "2026-02-19T12:30:00Z".to_owned(),
             payload: OpPayload::Create { epoch: epoch('b') },
         };
-        let oid2 = write_operation_blob(root, &op2).unwrap();
+        let oid2 = write_operation_blob(root, &op2).expect("operation should succeed");
 
         // Merge op with both as parents.
         let merge_op = Operation {
@@ -704,12 +710,12 @@ mod tests {
         };
 
         // Manually write merge blob and set head ref.
-        let merge_oid = write_operation_blob(root, &merge_op).unwrap();
+        let merge_oid = write_operation_blob(root, &merge_op).expect("operation should succeed");
         let ref_name = refs::workspace_head_ref(ws_id.as_str());
-        refs::write_ref(root, &ref_name, &merge_oid).unwrap();
+        refs::write_ref(root, &ref_name, &merge_oid).expect("operation should succeed");
 
         // Walk: should find all 3 operations.
-        let walked = walk_all(root, &ws_id).unwrap();
+        let walked = walk_all(root, &ws_id).expect("operation should succeed");
         assert_eq!(walked.len(), 3);
 
         // First should be the merge (head).
@@ -737,7 +743,7 @@ mod tests {
         //    \    /
         //     merge
         let root_op = make_create_op(&ws_id);
-        let root_oid = write_operation_blob(root, &root_op).unwrap();
+        let root_oid = write_operation_blob(root, &root_op).expect("operation should succeed");
 
         let op_a = Operation {
             parent_ids: vec![root_oid.clone()],
@@ -747,7 +753,7 @@ mod tests {
                 message: "branch a".to_owned(),
             },
         };
-        let oid_a = write_operation_blob(root, &op_a).unwrap();
+        let oid_a = write_operation_blob(root, &op_a).expect("operation should succeed");
 
         let op_b = Operation {
             parent_ids: vec![root_oid],
@@ -757,7 +763,7 @@ mod tests {
                 message: "branch b".to_owned(),
             },
         };
-        let oid_b = write_operation_blob(root, &op_b).unwrap();
+        let oid_b = write_operation_blob(root, &op_b).expect("operation should succeed");
 
         let merge_op = Operation {
             parent_ids: vec![oid_a, oid_b],
@@ -769,14 +775,14 @@ mod tests {
                 epoch_after: epoch('b'),
             },
         };
-        let merge_oid = write_operation_blob(root, &merge_op).unwrap();
+        let merge_oid = write_operation_blob(root, &merge_op).expect("operation should succeed");
 
         // Set head to merge.
         let ref_name = refs::workspace_head_ref(ws_id.as_str());
-        refs::write_ref(root, &ref_name, &merge_oid).unwrap();
+        refs::write_ref(root, &ref_name, &merge_oid).expect("operation should succeed");
 
         // Walk: should find exactly 4 operations (no duplicates for root_op).
-        let walked = walk_all(root, &ws_id).unwrap();
+        let walked = walk_all(root, &ws_id).expect("operation should succeed");
         assert_eq!(
             walked.len(),
             4,
@@ -804,19 +810,19 @@ mod tests {
 
         let original = Operation {
             parent_ids: vec![
-                GitOid::new(&"a".repeat(40)).unwrap(),
-                GitOid::new(&"b".repeat(40)).unwrap(),
+                GitOid::new(&"a".repeat(40)).expect("operation should succeed"),
+                GitOid::new(&"b".repeat(40)).expect("operation should succeed"),
             ],
             workspace_id: ws_id,
             timestamp: "2026-02-19T15:30:00Z".to_owned(),
             payload: OpPayload::Compensate {
-                target_op: GitOid::new(&"c".repeat(40)).unwrap(),
+                target_op: GitOid::new(&"c".repeat(40)).expect("operation should succeed"),
                 reason: "reverting broken snapshot\nwith newlines".to_owned(),
             },
         };
 
-        let oid = write_operation_blob(root, &original).unwrap();
-        let read_back = read_operation(root, &oid).unwrap();
+        let oid = write_operation_blob(root, &original).expect("operation should succeed");
+        let read_back = read_operation(root, &oid).expect("operation should succeed");
 
         assert_eq!(read_back.parent_ids, original.parent_ids);
         assert_eq!(read_back.workspace_id, original.workspace_id);
@@ -856,7 +862,8 @@ mod tests {
     fn error_display_deserialize() {
         let err = OpLogReadError::Deserialize {
             oid: "deadbeef".to_owned(),
-            source: serde_json::from_str::<Operation>("not json").unwrap_err(),
+            source: serde_json::from_str::<Operation>("not json")
+                .expect_err("operation should fail"),
         };
         let msg = format!("{err}");
         assert!(msg.contains("deserialize"));

@@ -42,7 +42,11 @@ pub struct WorkspaceEntry {
     pub(crate) rebase_conflicts: u32,
 }
 
-fn is_zero(n: &u32) -> bool {
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive fields by reference"
+)]
+const fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
@@ -56,6 +60,10 @@ pub struct GlobalViewSummary {
     pub(crate) total_ops: usize,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "status command gathers and renders workspace state in one path"
+)]
 pub fn status(format: OutputFormat) -> Result<()> {
     let backend = get_backend()?;
 
@@ -117,8 +125,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
             let rebase_conflicts = {
                 let ws_path = root.join("ws").join(ws.id.as_str());
                 super::resolve::find_conflicted_files(&ws_path)
-                    .map(|f| f.len() as u32)
-                    .unwrap_or(0)
+                    .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
             };
             WorkspaceEntry {
                 name: ws.id.as_str().to_string(),

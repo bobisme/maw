@@ -25,7 +25,7 @@ fn pt_config() -> ProptestConfig {
 #[test]
 fn bn_3t55_absolute_path_no_longer_panics() {
     let entries = vec![(String::new(), b"0 filter=lfs\n".to_vec())];
-    let m = AttrsMatcher::from_entries(entries).unwrap();
+    let m = AttrsMatcher::from_entries(entries).expect("operation should succeed");
     // Should not panic — the leading slash is stripped internally.
     let _ = m.is_lfs("/abs/path");
     let _ = m.merge_driver("/abs/path");
@@ -92,7 +92,7 @@ proptest! {
     ) {
         let content = format!("*.{ext} filter=lfs\n");
         let entries = vec![(String::new(), content.into_bytes())];
-        let m = AttrsMatcher::from_entries(entries).unwrap();
+        let m = AttrsMatcher::from_entries(entries).expect("operation should succeed");
         let root_path = format!("file.{ext}");
         let sub_path = format!("sub/file.{ext}");
         let miss_path = format!("other.{ext}.not-lfs");
@@ -109,9 +109,9 @@ proptest! {
     ) {
         let content = format!("*.{ext} merge={driver}\n");
         let entries = vec![(String::new(), content.into_bytes())];
-        let m = AttrsMatcher::from_entries(entries).unwrap();
+        let m = AttrsMatcher::from_entries(entries).expect("operation should succeed");
         let path = format!("file.{ext}");
-        prop_assert_eq!(m.merge_driver(&path), Some(driver.clone()));
+        prop_assert_eq!(m.merge_driver(&path), Some(driver));
     }
 
     /// Multiple rules — later-line-wins semantics.
@@ -123,7 +123,7 @@ proptest! {
         prop_assume!(name != "default"); // avoid accidental collisions
         let content = format!("*.{ext} filter=lfs\n{name}.{ext} -filter\n");
         let entries = vec![(String::new(), content.into_bytes())];
-        let m = AttrsMatcher::from_entries(entries).unwrap();
+        let m = AttrsMatcher::from_entries(entries).expect("operation should succeed");
         let hit = format!("{name}.{ext}");
         let other = format!("other.{ext}");
         prop_assert!(!m.is_lfs(&hit));

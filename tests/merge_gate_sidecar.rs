@@ -50,7 +50,7 @@ fn merge_gate_allows_workspace_with_marker_content_but_empty_sidecar() {
     // Commit a file whose bytes contain a full diff3 marker block — as
     // though it were a merge-conflict tutorial, a fixture, or a
     // blog-post draft.
-    let tutorial = r#"# Merge conflicts
+    let tutorial = r"# Merge conflicts
 
 <<<<<<< mine
 my version
@@ -59,8 +59,8 @@ original
 =======
 their version
 >>>>>>> theirs
-"#;
-    std::fs::write(ws_path.join("tutorial.md"), tutorial).unwrap();
+";
+    std::fs::write(ws_path.join("tutorial.md"), tutorial).expect("operation should succeed");
     repo.git_in_workspace("feat", &["add", "-A"]);
     repo.git_in_workspace("feat", &["commit", "-m", "ws: tutorial"]);
 
@@ -139,7 +139,7 @@ fn merge_gate_refuses_workspace_with_structured_sidecar_entries() {
         sidecar.is_some(),
         "rebase should have written conflict-tree.json"
     );
-    let tree = sidecar.unwrap();
+    let tree = sidecar.expect("operation should succeed");
     let conflicts = tree
         .get("conflicts")
         .and_then(|v| v.as_object())
@@ -192,7 +192,7 @@ fn merge_gate_refuses_binary_conflict_without_manual_resolve() {
         repo.root().join("ws").join("default").join("logo.png"),
         &binary_bytes,
     )
-    .unwrap();
+    .expect("operation should succeed");
     repo.git_in_workspace("default", &["add", "-A"]);
     repo.git_in_workspace("default", &["commit", "-m", "seed binary"]);
     repo.maw_ok(&["epoch", "sync"]);
@@ -202,16 +202,16 @@ fn merge_gate_refuses_binary_conflict_without_manual_resolve() {
     let ws_a_bin = repo.root().join("ws").join("a").join("logo.png");
     let mut a_bytes = binary_bytes.clone();
     a_bytes.extend_from_slice(b"A_SIDE_SUFFIX\x00\x01");
-    std::fs::write(&ws_a_bin, &a_bytes).unwrap();
+    std::fs::write(&ws_a_bin, &a_bytes).expect("operation should succeed");
     repo.git_in_workspace("a", &["add", "-A"]);
     repo.git_in_workspace("a", &["commit", "-m", "a: tweak logo"]);
 
     // Workspace "b" modifies the same binary differently
     repo.maw_ok(&["ws", "create", "b"]);
-    let ws_b_bin = repo.root().join("ws").join("b").join("logo.png");
-    let mut b_bytes = binary_bytes.clone();
+    let ws_b_logo = repo.root().join("ws").join("b").join("logo.png");
+    let mut b_bytes = binary_bytes;
     b_bytes.extend_from_slice(b"B_SIDE_SUFFIX\x02\x03");
-    std::fs::write(&ws_b_bin, &b_bytes).unwrap();
+    std::fs::write(&ws_b_logo, &b_bytes).expect("operation should succeed");
     repo.git_in_workspace("b", &["add", "-A"]);
     repo.git_in_workspace("b", &["commit", "-m", "b: tweak logo differently"]);
 
@@ -390,7 +390,8 @@ fn assert_head_blob_has_placeholder_prefix(repo: &TestRepo, ws: &str, path: &str
         .expect("git cat-file");
     assert!(
         out.status.success(),
-        "cat-file failed in {ws_dir:?}: {}\n{}",
+        "cat-file failed in {}: {}\n{}",
+        ws_dir.display(),
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout),
     );
@@ -419,8 +420,9 @@ fn merge_gate_refuses_when_sidecar_emptied_but_head_has_placeholder() {
         .root()
         .join(".manifold/artifacts/ws/feat/conflict-tree.json");
     assert!(sidecar_path.exists(), "precondition: sidecar must exist");
-    let text = std::fs::read_to_string(&sidecar_path).unwrap();
-    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let text = std::fs::read_to_string(&sidecar_path).expect("operation should succeed");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).expect("operation should succeed");
     value
         .as_object_mut()
         .expect("sidecar top-level is an object")
@@ -428,10 +430,16 @@ fn merge_gate_refuses_when_sidecar_emptied_but_head_has_placeholder() {
             "conflicts".to_string(),
             serde_json::Value::Object(serde_json::Map::new()),
         );
-    std::fs::write(&sidecar_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    std::fs::write(
+        &sidecar_path,
+        serde_json::to_string_pretty(&value).expect("operation should succeed"),
+    )
+    .expect("operation should succeed");
 
     // Confirm the sidecar conflicts map is now empty.
-    let tampered = repo.read_conflict_tree_sidecar("feat").unwrap();
+    let tampered = repo
+        .read_conflict_tree_sidecar("feat")
+        .expect("operation should succeed");
     assert!(
         tampered
             .get("conflicts")
@@ -536,7 +544,8 @@ fn merge_gate_tripwire_ignores_legitimate_content() {
                =======\n\
                beta\n\
                >>>>>>> theirs\n";
-    std::fs::write(repo.root().join("ws").join("feat").join("doc.md"), doc).unwrap();
+    std::fs::write(repo.root().join("ws").join("feat").join("doc.md"), doc)
+        .expect("operation should succeed");
     repo.git_in_workspace("feat", &["add", "-A"]);
     repo.git_in_workspace(
         "feat",

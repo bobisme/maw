@@ -311,6 +311,7 @@ impl PullSummary {
     }
 
     /// Returns true if any merge operations were created (divergent heads merged).
+    #[must_use]
     pub fn has_merges(&self) -> bool {
         self.heads
             .iter()
@@ -977,6 +978,10 @@ const fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 // ---------------------------------------------------------------------------
 
 /// Run `maw pull`.
+///
+/// # Errors
+///
+/// Returns an error if transport discovery or pull operations fail.
 pub fn run_pull(args: &PullArgs) -> Result<()> {
     let root = repo_root()?;
 
@@ -1021,65 +1026,65 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn setup_repo() -> TempDir {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         StdCommand::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Need at least one commit for git merge-base to work.
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         StdCommand::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         dir
     }
 
     fn make_commit(root: &Path, content: &str) -> GitOid {
         let file = root.join(format!("f{}.txt", content.len()));
-        fs::write(&file, content).unwrap();
+        fs::write(&file, content).expect("operation should succeed");
         StdCommand::new("git")
-            .args(["add", file.to_str().unwrap()])
+            .args(["add", file.to_str().expect("operation should succeed")])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         StdCommand::new("git")
             .args(["commit", "-m", content])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let out = StdCommand::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+            .expect("operation should succeed");
+        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).expect("operation should succeed")
     }
 
     fn write_blob(root: &Path, content: &[u8]) -> GitOid {
@@ -1090,10 +1095,15 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .unwrap();
-        child.stdin.as_mut().unwrap().write_all(content).unwrap();
-        let out = child.wait_with_output().unwrap();
-        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+            .expect("operation should succeed");
+        child
+            .stdin
+            .as_mut()
+            .expect("operation should succeed")
+            .write_all(content)
+            .expect("operation should succeed");
+        let out = child.wait_with_output().expect("operation should succeed");
+        GitOid::new(String::from_utf8_lossy(&out.stdout).trim()).expect("operation should succeed")
     }
 
     // -----------------------------------------------------------------------
@@ -1112,7 +1122,10 @@ mod tests {
     fn validate_ws_name_empty() {
         let r = validate_workspace_name("");
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("must not be empty"));
+        assert!(
+            r.expect_err("operation should fail")
+                .contains("must not be empty")
+        );
     }
 
     #[test]
@@ -1153,18 +1166,19 @@ mod tests {
     fn validate_remote_op_blob_valid() {
         let dir = setup_repo();
         let root = dir.path();
-        let ws_id = WorkspaceId::new("agent-1").unwrap();
+        let ws_id = WorkspaceId::new("agent-1").expect("operation should succeed");
 
         let op = Operation {
             parent_ids: vec![],
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T12:00:00Z".to_string(),
             payload: OpPayload::Create {
-                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40)).unwrap(),
+                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40))
+                    .expect("operation should succeed"),
             },
         };
 
-        let oid = write_operation_blob(root, &op).unwrap();
+        let oid = write_operation_blob(root, &op).expect("operation should succeed");
         assert!(validate_remote_op_blob(root, &oid).is_ok());
     }
 
@@ -1172,11 +1186,14 @@ mod tests {
     fn validate_remote_op_blob_nonexistent_oid() {
         let dir = setup_repo();
         let root = dir.path();
-        let fake_oid = GitOid::new(&"f".repeat(40)).unwrap();
+        let fake_oid = GitOid::new(&"f".repeat(40)).expect("operation should succeed");
 
         let r = validate_remote_op_blob(root, &fake_oid);
         assert!(r.is_err());
-        assert!(r.unwrap_err().contains("does not exist"));
+        assert!(
+            r.expect_err("operation should fail")
+                .contains("does not exist")
+        );
     }
 
     #[test]
@@ -1208,7 +1225,7 @@ mod tests {
         let c2 = make_commit(root, "second");
 
         // c1 is ancestor of c2 → remote (c2) is ahead of local (c1)
-        let rel = git_ancestry_relation(root, &c1, &c2).unwrap();
+        let rel = git_ancestry_relation(root, &c1, &c2).expect("operation should succeed");
         assert_eq!(rel, AncestryRelation::RemoteAhead);
     }
 
@@ -1221,7 +1238,7 @@ mod tests {
         let c2 = make_commit(root, "second");
 
         // c2 is local (ahead), c1 is remote (behind)
-        let rel = git_ancestry_relation(root, &c2, &c1).unwrap();
+        let rel = git_ancestry_relation(root, &c2, &c1).expect("operation should succeed");
         assert_eq!(rel, AncestryRelation::LocalAheadOrEqual);
     }
 
@@ -1237,7 +1254,7 @@ mod tests {
             .args(["checkout", "-b", "branch-a"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let c_a = make_commit(root, "branch-a-commit");
 
         // Go back to base and create branch B
@@ -1245,10 +1262,10 @@ mod tests {
             .args(["checkout", base.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let c_b = make_commit(root, "branch-b-commit");
 
-        let rel = git_ancestry_relation(root, &c_a, &c_b).unwrap();
+        let rel = git_ancestry_relation(root, &c_a, &c_b).expect("operation should succeed");
         assert_eq!(rel, AncestryRelation::Diverged);
     }
 
@@ -1256,17 +1273,18 @@ mod tests {
     fn oplog_ancestry_remote_ahead_linear_chain() {
         let dir = setup_repo();
         let root = dir.path();
-        let ws_id = WorkspaceId::new("agent-1").unwrap();
+        let ws_id = WorkspaceId::new("agent-1").expect("operation should succeed");
 
         let op1 = Operation {
             parent_ids: vec![],
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T10:00:00Z".to_string(),
             payload: OpPayload::Create {
-                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40)).unwrap(),
+                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40))
+                    .expect("operation should succeed"),
             },
         };
-        let oid1 = write_operation_blob(root, &op1).unwrap();
+        let oid1 = write_operation_blob(root, &op1).expect("operation should succeed");
 
         let op2 = Operation {
             parent_ids: vec![oid1.clone()],
@@ -1276,12 +1294,12 @@ mod tests {
                 message: "next".to_string(),
             },
         };
-        let oid2 = write_operation_blob(root, &op2).unwrap();
+        let oid2 = write_operation_blob(root, &op2).expect("operation should succeed");
 
-        let rel = oplog_ancestry_relation(root, &oid1, &oid2).unwrap();
+        let rel = oplog_ancestry_relation(root, &oid1, &oid2).expect("operation should succeed");
         assert_eq!(rel, AncestryRelation::RemoteAhead);
 
-        let rel = oplog_ancestry_relation(root, &oid2, &oid1).unwrap();
+        let rel = oplog_ancestry_relation(root, &oid2, &oid1).expect("operation should succeed");
         assert_eq!(rel, AncestryRelation::LocalAheadOrEqual);
     }
 
@@ -1289,17 +1307,18 @@ mod tests {
     fn oplog_ancestry_diverged() {
         let dir = setup_repo();
         let root = dir.path();
-        let ws_id = WorkspaceId::new("agent-1").unwrap();
+        let ws_id = WorkspaceId::new("agent-1").expect("operation should succeed");
 
         let base = Operation {
             parent_ids: vec![],
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T09:00:00Z".to_string(),
             payload: OpPayload::Create {
-                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40)).unwrap(),
+                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40))
+                    .expect("operation should succeed"),
             },
         };
-        let base_oid = write_operation_blob(root, &base).unwrap();
+        let base_oid = write_operation_blob(root, &base).expect("operation should succeed");
 
         let left = Operation {
             parent_ids: vec![base_oid.clone()],
@@ -1318,10 +1337,11 @@ mod tests {
             },
         };
 
-        let left_oid = write_operation_blob(root, &left).unwrap();
-        let right_oid = write_operation_blob(root, &right).unwrap();
+        let left_oid = write_operation_blob(root, &left).expect("operation should succeed");
+        let right_oid = write_operation_blob(root, &right).expect("operation should succeed");
 
-        let rel = oplog_ancestry_relation(root, &left_oid, &right_oid).unwrap();
+        let rel =
+            oplog_ancestry_relation(root, &left_oid, &right_oid).expect("operation should succeed");
         assert_eq!(rel, AncestryRelation::Diverged);
     }
 
@@ -1334,7 +1354,7 @@ mod tests {
         let dir = setup_repo();
         let root = dir.path();
 
-        let refs = list_refs_with_prefix(root, "refs/manifold/").unwrap();
+        let refs = list_refs_with_prefix(root, "refs/manifold/").expect("operation should succeed");
         assert!(refs.is_empty());
     }
 
@@ -1344,10 +1364,11 @@ mod tests {
         let root = dir.path();
 
         let c = make_commit(root, "ref-content");
-        refs::write_ref(root, "refs/manifold/head/ws-a", &c).unwrap();
-        refs::write_ref(root, "refs/manifold/head/ws-b", &c).unwrap();
+        refs::write_ref(root, "refs/manifold/head/ws-a", &c).expect("operation should succeed");
+        refs::write_ref(root, "refs/manifold/head/ws-b", &c).expect("operation should succeed");
 
-        let r = list_refs_with_prefix(root, "refs/manifold/head/").unwrap();
+        let r =
+            list_refs_with_prefix(root, "refs/manifold/head/").expect("operation should succeed");
         assert_eq!(r.len(), 2);
         assert!(r.contains(&"refs/manifold/head/ws-a".to_string()));
         assert!(r.contains(&"refs/manifold/head/ws-b".to_string()));
@@ -1358,33 +1379,37 @@ mod tests {
         let dir = setup_repo();
         let root = dir.path();
 
-        let remote_dir = TempDir::new().unwrap();
+        let remote_dir = TempDir::new().expect("operation should succeed");
         StdCommand::new("git")
             .args(["init", "--bare"])
             .current_dir(remote_dir.path())
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         StdCommand::new("git")
             .args([
                 "remote",
                 "add",
                 "origin",
-                remote_dir.path().to_str().unwrap(),
+                remote_dir
+                    .path()
+                    .to_str()
+                    .expect("operation should succeed"),
             ])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Simulate stale staging refs left behind by a previous interrupted pull.
         let stale_epoch = make_commit(root, "stale-epoch");
-        refs::write_ref(root, "refs/manifold/remote/epoch/current", &stale_epoch).unwrap();
+        refs::write_ref(root, "refs/manifold/remote/epoch/current", &stale_epoch)
+            .expect("operation should succeed");
 
-        let summary = pull_manifold_refs(root, "origin", false).unwrap();
+        let summary = pull_manifold_refs(root, "origin", false).expect("operation should succeed");
         assert_eq!(summary.epoch, RefMergeResult::NoRemote);
         assert!(
             refs::read_ref(root, "refs/manifold/remote/epoch/current")
-                .unwrap()
+                .expect("operation should succeed")
                 .is_none()
         );
     }
@@ -1401,7 +1426,7 @@ mod tests {
         assert!(ts.ends_with('Z'), "timestamp should end with Z: {ts}");
         assert!(ts.contains('T'), "timestamp should contain T: {ts}");
         // Year should be reasonable.
-        let year: u64 = ts[..4].parse().unwrap();
+        let year: u64 = ts[..4].parse().expect("operation should succeed");
         assert!(year >= 2026, "year should be >= 2026: {year}");
     }
 
@@ -1452,7 +1477,7 @@ mod tests {
 
         let dir = setup_repo();
         let root = dir.path();
-        let ws_id = WorkspaceId::new("agent-1").unwrap();
+        let ws_id = WorkspaceId::new("agent-1").expect("operation should succeed");
 
         // Create two "diverged" ops (with no parents to keep it simple).
         let op_a = Operation {
@@ -1460,7 +1485,8 @@ mod tests {
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T10:00:00Z".to_string(),
             payload: OpPayload::Create {
-                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40)).unwrap(),
+                epoch: maw_core::model::types::EpochId::new(&"a".repeat(40))
+                    .expect("operation should succeed"),
             },
         };
         let op_b = Operation {
@@ -1468,23 +1494,28 @@ mod tests {
             workspace_id: ws_id.clone(),
             timestamp: "2026-02-19T11:00:00Z".to_string(),
             payload: OpPayload::Create {
-                epoch: maw_core::model::types::EpochId::new(&"b".repeat(40)).unwrap(),
+                epoch: maw_core::model::types::EpochId::new(&"b".repeat(40))
+                    .expect("operation should succeed"),
             },
         };
 
-        let oid_a = write_operation_blob(root, &op_a).unwrap();
-        let oid_b = write_operation_blob(root, &op_b).unwrap();
+        let oid_a = write_operation_blob(root, &op_a).expect("operation should succeed");
+        let oid_b = write_operation_blob(root, &op_b).expect("operation should succeed");
 
         let head_ref = refs::workspace_head_ref(ws_id.as_str());
 
         // Create merge op.
-        create_transport_merge_op(root, &ws_id, &oid_a, &oid_b, &head_ref).unwrap();
+        create_transport_merge_op(root, &ws_id, &oid_a, &oid_b, &head_ref)
+            .expect("operation should succeed");
 
         // Head ref should now point to the merge op.
-        let new_head = refs::read_ref(root, &head_ref).unwrap().unwrap();
+        let new_head = refs::read_ref(root, &head_ref)
+            .expect("operation should succeed")
+            .expect("operation should succeed");
 
         // Read the merge op and verify its parent_ids.
-        let merge_op = maw_core::oplog::read::read_operation(root, &new_head).unwrap();
+        let merge_op = maw_core::oplog::read::read_operation(root, &new_head)
+            .expect("operation should succeed");
         assert_eq!(merge_op.parent_ids.len(), 2);
         assert!(merge_op.parent_ids.contains(&oid_a));
         assert!(merge_op.parent_ids.contains(&oid_b));

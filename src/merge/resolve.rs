@@ -153,6 +153,10 @@ pub enum Diff3Result<C> {
 /// The function does not allocate `PathBuf`, build `ConflictRecord`, format
 /// workspace labels, or do any I/O. The caller maps the [`MergeOutcome`]
 /// to concrete output types.
+///
+/// # Panics
+///
+/// Panics if `kinds` and `contents` have different lengths.
 pub fn resolve_entries<C, E, F>(
     kinds: &[ChangeKind],
     contents: &[Option<C>],
@@ -192,7 +196,11 @@ where
         SharedClassification::ResolvedDelete => return Ok(MergeOutcome::Delete),
         SharedClassification::ResolvedIdentical => {
             // Return the first non-None content.
-            let content = contents.iter().find_map(|c| c.as_ref()).unwrap().clone();
+            let content = contents
+                .iter()
+                .find_map(|c| c.as_ref())
+                .expect("operation should succeed")
+                .clone();
             return Ok(MergeOutcome::Upsert(content));
         }
         SharedClassification::ConflictModifyDelete => {
@@ -684,13 +692,11 @@ fn resolve_shared_path(
         // mixed in). For delete/modify cases, fall through to the generic
         // algebra which correctly emits a ModifyDelete conflict.
         let has_delete = entries.iter().any(PathEntry::is_deletion);
-        if !has_delete {
-            if let Some(merged) = gitattr_driver_merge(base, entries, strategy)? {
-                return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
-                    path: path.to_path_buf(),
-                    content: merged,
-                }));
-            }
+        if !has_delete && let Some(merged) = gitattr_driver_merge(base, entries, strategy)? {
+            return Ok(SharedOutcome::Resolved(ResolvedChange::Upsert {
+                path: path.to_path_buf(),
+                content: merged,
+            }));
         }
     }
 
@@ -745,11 +751,10 @@ fn resolve_shared_path(
             match diff3_merge_bytes(base_c, ours_c, theirs_c)? {
                 Diff3Outcome::Clean(out) => Ok(Diff3Result::Clean(out)),
                 Diff3Outcome::Conflict { .. } => {
-                    if let Some(retried) = retry_with_shifted_alignment(base_c, ours_c, theirs_c)? {
-                        Ok(Diff3Result::Clean(retried))
-                    } else {
-                        Ok(Diff3Result::Conflict)
-                    }
+                    retry_with_shifted_alignment(base_c, ours_c, theirs_c)?
+                        .map_or(Ok(Diff3Result::Conflict), |retried| {
+                            Ok(Diff3Result::Clean(retried))
+                        })
                 }
             }
         },
@@ -958,7 +963,8 @@ fn resolve_shared_path_with_ast(
     }
 
     // Fall back to diff3 conflict.
-    let (marker_output, ours_label, theirs_label) = diff3_conflict.unwrap();
+    let (marker_output, ours_label, theirs_label) =
+        diff3_conflict.expect("operation should succeed");
     let atoms = parse_diff3_atoms(&marker_output, &ours_label, &theirs_label);
     Ok(SharedOutcome::Conflict(conflict_record(
         path,
@@ -975,9 +981,8 @@ fn resolve_shared_path_with_ast(
 /// `MergeOutcome::Conflict(Diff3Conflict)`. The generic function doesn't
 /// carry marker output, so we re-run diff3 here to get it.
 fn recover_diff3_atoms(entries: &[PathEntry], base: Option<&[u8]>) -> Vec<ConflictAtom> {
-    let base_bytes = match base {
-        Some(b) => b,
-        None => return vec![],
+    let Some(base_bytes) = base else {
+        return vec![];
     };
     let variants: Vec<&[u8]> = entries
         .iter()
@@ -1463,7 +1468,7 @@ mod tests {
     use crate::model::types::WorkspaceId;
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn entry(name: &str, kind: ChangeKind, content: Option<&[u8]>) -> PathEntry {
@@ -1498,7 +1503,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("same.txt"), b"old\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.resolved.len(), 1);
         assert_eq!(upsert_content(&result), b"identical\n");
@@ -1517,7 +1522,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("doc.txt"), b"a\nb\nc\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.resolved.len(), 1);
         assert_eq!(upsert_content(&result), b"A\nb\nC\n");
@@ -1536,7 +1541,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("doc.txt"), b"a\nb\nc\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert_eq!(result.resolved.len(), 0);
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].reason, ConflictReason::Diff3Conflict);
@@ -1554,7 +1559,7 @@ mod tests {
 
         let base = BTreeMap::new();
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert_eq!(result.resolved.len(), 0);
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].reason, ConflictReason::AddAddDifferent);
@@ -1573,7 +1578,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("file.txt"), b"old\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert_eq!(result.resolved.len(), 0);
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].reason, ConflictReason::ModifyDelete);
@@ -1592,7 +1597,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("gone.txt"), b"old\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(result.resolved.len(), 1);
         match &result.resolved[0] {
@@ -1630,7 +1635,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("k3.txt"), base_text.to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(
             upsert_content(&result),
@@ -1677,7 +1682,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("k5.txt"), base_text.to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(
             upsert_content(&result),
@@ -1694,7 +1699,7 @@ mod tests {
         let edited = b"fn one() {\n}\n\nfn two() {\n    println!(\"2\");\n}\n\nfn three() {\n}\n";
 
         // Bare diff3 conflicts on this shifted-code fixture.
-        match diff3_merge_bytes(base_text, moved, edited).unwrap() {
+        match diff3_merge_bytes(base_text, moved, edited).expect("operation should succeed") {
             Diff3Outcome::Conflict { .. } => {}
             Diff3Outcome::Clean(_) => {
                 panic!("fixture should conflict before shifted alignment retry")
@@ -1711,13 +1716,14 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("src/lib.rs"), base_text.to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(
             result.is_clean(),
             "alignment retry should auto-resolve moved block"
         );
 
-        let merged = String::from_utf8(upsert_content(&result).to_vec()).unwrap();
+        let merged =
+            String::from_utf8(upsert_content(&result).to_vec()).expect("operation should succeed");
         assert!(merged.contains("println!(\"2\")"));
         assert!(merged.contains("fn three()"));
     }
@@ -1728,11 +1734,15 @@ mod tests {
         let variant = b"fn two() {\n    println!(\"2\");\n}\n\nfn helper() {\n    println!(\"h\");\n}\n\nfn one() {\n    println!(\"1\");\n}\n";
 
         let normalized = normalize_shifted_blocks(base, variant).expect("expected normalization");
-        let normalized_text = String::from_utf8(normalized).unwrap();
+        let normalized_text = String::from_utf8(normalized).expect("operation should succeed");
 
         // Anchored functions should be restored to base-relative order.
-        let one_pos = normalized_text.find("fn one()").unwrap();
-        let two_pos = normalized_text.find("fn two()").unwrap();
+        let one_pos = normalized_text
+            .find("fn one()")
+            .expect("operation should succeed");
+        let two_pos = normalized_text
+            .find("fn two()")
+            .expect("operation should succeed");
         assert!(
             one_pos < two_pos,
             "fn one should appear before fn two after normalization"
@@ -1768,16 +1778,16 @@ mod tests {
 
         for (ours, theirs) in fixtures {
             if matches!(
-                diff3_merge_bytes(base, ours, theirs).unwrap(),
+                diff3_merge_bytes(base, ours, theirs).expect("operation should succeed"),
                 Diff3Outcome::Clean(_)
             ) {
                 bare_clean += 1;
             }
             if retry_with_shifted_alignment(base, ours, theirs)
-                .unwrap()
+                .expect("operation should succeed")
                 .is_some()
                 || matches!(
-                    diff3_merge_bytes(base, ours, theirs).unwrap(),
+                    diff3_merge_bytes(base, ours, theirs).expect("operation should succeed"),
                     Diff3Outcome::Clean(_)
                 )
             {
@@ -1810,7 +1820,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("a.txt"), b"old\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         let paths: Vec<_> = result
             .resolved
             .iter()
@@ -1839,7 +1849,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("doc.txt"), b"a\nb\nc\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert_eq!(result.conflicts.len(), 1);
         let record = &result.conflicts[0];
         assert_eq!(record.reason, ConflictReason::Diff3Conflict);
@@ -1876,8 +1886,16 @@ mod tests {
         );
 
         // Edits carry the correct content.
-        let content_a = atom.edits.iter().find(|e| e.workspace == "ws-a").unwrap();
-        let content_b = atom.edits.iter().find(|e| e.workspace == "ws-b").unwrap();
+        let content_a = atom
+            .edits
+            .iter()
+            .find(|e| e.workspace == "ws-a")
+            .expect("operation should succeed");
+        let content_b = atom
+            .edits
+            .iter()
+            .find(|e| e.workspace == "ws-b")
+            .expect("operation should succeed");
         assert_eq!(content_a.content, "B1");
         assert_eq!(content_b.content, "B2");
     }
@@ -1902,7 +1920,7 @@ mod tests {
         let mut base_map = BTreeMap::new();
         base_map.insert(PathBuf::from("src.txt"), base.to_vec());
 
-        let result = resolve_partition(&partition, &base_map).unwrap();
+        let result = resolve_partition(&partition, &base_map).expect("operation should succeed");
         assert_eq!(result.conflicts.len(), 1);
         let record = &result.conflicts[0];
         assert_eq!(record.atoms.len(), 1);
@@ -1947,7 +1965,7 @@ mod tests {
         let mut base_map = BTreeMap::new();
         base_map.insert(PathBuf::from("multi.txt"), base.to_vec());
 
-        let result = resolve_partition(&partition, &base_map).unwrap();
+        let result = resolve_partition(&partition, &base_map).expect("operation should succeed");
         assert_eq!(result.conflicts.len(), 1);
         let record = &result.conflicts[0];
 
@@ -1978,7 +1996,8 @@ mod tests {
                 entry("ws-b", ChangeKind::Added, Some(b"world\n")),
             ],
         );
-        let result = resolve_partition(&partition, &BTreeMap::new()).unwrap();
+        let result =
+            resolve_partition(&partition, &BTreeMap::new()).expect("operation should succeed");
         assert_eq!(
             result.conflicts[0].atoms.len(),
             0,
@@ -1995,7 +2014,7 @@ mod tests {
         );
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("gone.txt"), b"old\n".to_vec());
-        let result2 = resolve_partition(&partition2, &base).unwrap();
+        let result2 = resolve_partition(&partition2, &base).expect("operation should succeed");
         assert_eq!(
             result2.conflicts[0].atoms.len(),
             0,
@@ -2027,8 +2046,16 @@ mod tests {
         );
         assert_eq!(atom.edits.len(), 2);
 
-        let alice = atom.edits.iter().find(|e| e.workspace == "alice").unwrap();
-        let bob = atom.edits.iter().find(|e| e.workspace == "bob").unwrap();
+        let alice = atom
+            .edits
+            .iter()
+            .find(|e| e.workspace == "alice")
+            .expect("operation should succeed");
+        let bob = atom
+            .edits
+            .iter()
+            .find(|e| e.workspace == "bob")
+            .expect("operation should succeed");
         assert_eq!(alice.content, "B1");
         assert_eq!(bob.content, "B2");
 
@@ -2076,7 +2103,7 @@ mod tests {
                 .edits
                 .iter()
                 .find(|e| e.workspace == "ws-a")
-                .unwrap()
+                .expect("operation should succeed")
                 .content,
             "A1"
         );
@@ -2085,7 +2112,7 @@ mod tests {
                 .edits
                 .iter()
                 .find(|e| e.workspace == "ws-b")
-                .unwrap()
+                .expect("operation should succeed")
                 .content,
             "A2"
         );
@@ -2102,7 +2129,7 @@ mod tests {
                 .edits
                 .iter()
                 .find(|e| e.workspace == "ws-a")
-                .unwrap()
+                .expect("operation should succeed")
                 .content,
             "B1"
         );
@@ -2111,7 +2138,7 @@ mod tests {
                 .edits
                 .iter()
                 .find(|e| e.workspace == "ws-b")
-                .unwrap()
+                .expect("operation should succeed")
                 .content,
             "B2"
         );
@@ -2139,7 +2166,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("doc.txt"), b"a\norig\nc\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert_eq!(result.conflicts.len(), 1);
         let atoms = &result.conflicts[0].atoms;
         assert_eq!(atoms.len(), 1);
@@ -2197,7 +2224,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("file.txt"), b"old\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean(), "same blob OID should resolve cleanly");
         assert_eq!(result.resolved.len(), 1);
         assert_eq!(upsert_content(&result), b"content\n");
@@ -2232,7 +2259,7 @@ mod tests {
         );
 
         let base = BTreeMap::new();
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         assert!(result.is_clean());
         assert_eq!(upsert_content(&result), b"fn f() {}\n");
     }
@@ -2261,7 +2288,7 @@ mod tests {
         let mut base = BTreeMap::new();
         base.insert(PathBuf::from("diff.txt"), b"a\nb\nc\n".to_vec());
 
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         // Non-overlapping edits should still auto-resolve via diff3.
         assert!(
             result.is_clean(),
@@ -2288,7 +2315,7 @@ mod tests {
         );
 
         let base = BTreeMap::new();
-        let result = resolve_partition(&partition, &base).unwrap();
+        let result = resolve_partition(&partition, &base).expect("operation should succeed");
         // Byte equality still resolves cleanly.
         assert!(
             result.is_clean(),
@@ -2371,12 +2398,13 @@ mod tests {
             let mut base_map = BTreeMap::new();
             base_map.insert(PathBuf::from("src/lib.rs"), base.to_vec());
 
-            let plain_result = resolve_partition(&partition, &base_map).unwrap();
+            let plain_result =
+                resolve_partition(&partition, &base_map).expect("operation should succeed");
 
             // Now try with AST merge enabled.
             let ast_config = AstMergeConfig::all_languages();
-            let ast_result =
-                resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+            let ast_result = resolve_partition_with_ast(&partition, &base_map, &ast_config)
+                .expect("operation should succeed");
 
             if !plain_result.is_clean() {
                 // diff3 conflicted — AST merge should resolve it.
@@ -2389,7 +2417,7 @@ mod tests {
                     ResolvedChange::Upsert { content, .. } => content,
                     _ => panic!("expected upsert"),
                 };
-                let merged_str = std::str::from_utf8(merged).unwrap();
+                let merged_str = std::str::from_utf8(merged).expect("operation should succeed");
                 assert!(
                     merged_str.contains("new_a"),
                     "merged should contain ws-a's foo change"
@@ -2420,7 +2448,8 @@ mod tests {
             base_map.insert(PathBuf::from("src/processor.rs"), base.to_vec());
 
             let ast_config = AstMergeConfig::all_languages();
-            let result = resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
+            let result = resolve_partition_with_ast(&partition, &base_map, &ast_config)
+                .expect("operation should succeed");
 
             // Both ws-a and ws-b modify the same function — should conflict.
             assert_eq!(result.conflicts.len(), 1);
@@ -2458,10 +2487,12 @@ mod tests {
 
             // With no languages enabled, AST merge should not be tried.
             let no_ast_config = AstMergeConfig::default();
-            let result = resolve_partition_with_ast(&partition, &base_map, &no_ast_config).unwrap();
+            let result = resolve_partition_with_ast(&partition, &base_map, &no_ast_config)
+                .expect("operation should succeed");
 
             // Should get the same result as plain resolve_partition.
-            let plain_result = resolve_partition(&partition, &base_map).unwrap();
+            let plain_result =
+                resolve_partition(&partition, &base_map).expect("operation should succeed");
             assert_eq!(result.is_clean(), plain_result.is_clean());
         }
 
@@ -2483,8 +2514,10 @@ mod tests {
             base_map.insert(PathBuf::from("data.json"), base.to_vec());
 
             let ast_config = AstMergeConfig::all_languages();
-            let result = resolve_partition_with_ast(&partition, &base_map, &ast_config).unwrap();
-            let plain_result = resolve_partition(&partition, &base_map).unwrap();
+            let result = resolve_partition_with_ast(&partition, &base_map, &ast_config)
+                .expect("operation should succeed");
+            let plain_result =
+                resolve_partition(&partition, &base_map).expect("operation should succeed");
             assert_eq!(result.is_clean(), plain_result.is_clean());
         }
     }

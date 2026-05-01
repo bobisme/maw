@@ -31,18 +31,30 @@ pub struct WorkspaceEntry {
 /// without a direct dependency on maw-cli internals.
 pub trait RepoDataSource {
     /// Return the repository root directory.
+    ///
+    /// # Errors
+    /// Returns an error if the repository root cannot be resolved.
     fn repo_root(&self) -> Result<PathBuf>;
 
     /// Return the configured branch name (e.g. "main").
+    ///
+    /// # Errors
+    /// Returns an error if the branch configuration cannot be read.
     fn branch_name(&self) -> Result<String>;
 
     /// List all workspaces (including "default").
+    ///
+    /// # Errors
+    /// Returns an error if workspace metadata cannot be queried.
     fn list_workspaces(&self) -> Result<Vec<WorkspaceEntry>>;
 }
 
 // ---------------------------------------------------------------------------
 // File tree types
 // ---------------------------------------------------------------------------
+
+type DirChild = (String, Option<FileStatus>, String);
+type DirChildren = BTreeMap<String, Vec<DirChild>>;
 
 /// Status of a changed file relative to epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,10 +121,7 @@ impl TreeNode {
 /// Directories are sorted first, then files, both alphabetical.
 #[must_use]
 pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
-    fn build_children(
-        dir_path: &str,
-        dir_children: &BTreeMap<String, Vec<(String, Option<FileStatus>, String)>>,
-    ) -> Vec<TreeNode> {
+    fn build_children(dir_path: &str, dir_children: &DirChildren) -> Vec<TreeNode> {
         let Some(entries) = dir_children.get(dir_path) else {
             return Vec::new();
         };
@@ -153,8 +162,7 @@ pub fn build_file_tree(files: &[(FileStatus, String)]) -> Vec<TreeNode> {
 
     // Build an intermediate map: dir_path -> Vec<(name, status, full_path)>
     // and a set of known directories.
-    let mut dir_children: BTreeMap<String, Vec<(String, Option<FileStatus>, String)>> =
-        BTreeMap::new();
+    let mut dir_children: DirChildren = BTreeMap::new();
     let mut known_dirs: BTreeSet<String> = BTreeSet::new();
 
     for (status, path) in files {
@@ -262,6 +270,11 @@ pub struct App {
 }
 
 impl App {
+    /// Create an application and perform the initial data refresh.
+    ///
+    /// # Errors
+    /// Returns an error if the data source cannot provide the initial
+    /// workspace snapshot.
     pub fn new(data_source: Box<dyn RepoDataSource>) -> Result<Self> {
         let mut app = Self {
             workspaces: Vec::new(),
@@ -282,6 +295,10 @@ impl App {
         Ok(app)
     }
 
+    /// Run the event loop until the user exits.
+    ///
+    /// # Errors
+    /// Returns an error if terminal drawing, event polling, or a refresh fails.
     pub fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         while !self.should_quit {
             // Draw UI
@@ -420,6 +437,11 @@ impl App {
     // Data fetching
     // ------------------------------------------------------------------
 
+    /// Refresh workspace and overlap data from the repository.
+    ///
+    /// # Errors
+    /// Returns an error if the data source cannot list workspaces or resolve
+    /// repository metadata.
     pub fn refresh(&mut self) -> Result<()> {
         self.fetch_header_info();
         self.workspaces = self.fetch_workspace_panes()?;
@@ -628,17 +650,16 @@ impl App {
             let status_char = line
                 .chars()
                 .nth(1)
-                .unwrap_or(line.chars().next().unwrap_or('M'));
+                .unwrap_or_else(|| line.chars().next().unwrap_or('M'));
             let status = match status_char {
                 'M' | ' ' => {
                     // Check index status if worktree is unchanged
                     let idx = line.chars().next().unwrap_or(' ');
                     FileStatus::from_char(if status_char == ' ' { idx } else { status_char })
                 }
-                '?' => FileStatus::Added,
+                '?' | 'A' => FileStatus::Added,
                 'D' => FileStatus::Deleted,
                 'R' => FileStatus::Renamed,
-                'A' => FileStatus::Added,
                 c => FileStatus::from_char(c),
             };
             let path = line[3..].trim().to_string();

@@ -40,6 +40,9 @@ pub struct RefGcReport {
 /// Count stale head refs (refs for workspaces that no longer exist).
 ///
 /// Used by `maw doctor` to report stale refs without deleting them.
+/// # Errors
+///
+/// Returns an error if stale refs cannot be inspected.
 pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
     let repo =
         maw_git::GixRepo::open(root).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
@@ -135,11 +138,8 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
                 }
                 report.recovery_refs_deleted += 1;
             }
-            Some(_) => {
-                // Recent enough — keep.
-            }
-            None => {
-                // Could not determine commit time — skip (conservative).
+            Some(_) | None => {
+                // Recent enough or unknown commit time — keep conservatively.
             }
         }
     }
@@ -223,51 +223,54 @@ mod tests {
     use super::*;
 
     fn setup_repo() -> (TempDir, String) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         Command::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# test\n").unwrap();
+        fs::write(root.join("README.md"), "# test\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
-        let oid = String::from_utf8(out.stdout).unwrap().trim().to_string();
+            .expect("operation should succeed");
+        let oid = String::from_utf8(out.stdout)
+            .expect("operation should succeed")
+            .trim()
+            .to_string();
 
         // Create ws/ directory structure
-        fs::create_dir_all(root.join("ws")).unwrap();
+        fs::create_dir_all(root.join("ws")).expect("operation should succeed");
 
         (dir, oid)
     }
@@ -277,7 +280,7 @@ mod tests {
         let (dir, _oid) = setup_repo();
         let root = dir.path();
 
-        let report = run(root, 30, false).unwrap();
+        let report = run(root, 30, false).expect("operation should succeed");
         assert_eq!(report.head_refs_deleted, 0);
         assert_eq!(report.recovery_refs_deleted, 0);
     }
@@ -291,25 +294,25 @@ mod tests {
         refs::write_ref(
             root,
             &refs::workspace_head_ref("gone-agent"),
-            &maw_core::model::types::GitOid::new(&oid).unwrap(),
+            &maw_core::model::types::GitOid::new(&oid).expect("operation should succeed"),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
         // Verify the ref exists
         assert!(
             refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
-                .unwrap()
+                .expect("operation should succeed")
                 .is_some()
         );
 
-        let report = run(root, 30, false).unwrap();
+        let report = run(root, 30, false).expect("operation should succeed");
         assert_eq!(report.head_refs_deleted, 1);
         assert_eq!(report.stale_head_names, vec!["gone-agent"]);
 
         // Ref should be gone
         assert!(
             refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
-                .unwrap()
+                .expect("operation should succeed")
                 .is_none()
         );
     }
@@ -320,23 +323,23 @@ mod tests {
         let root = dir.path();
 
         // Create workspace directory
-        fs::create_dir_all(root.join("ws/active-agent")).unwrap();
+        fs::create_dir_all(root.join("ws/active-agent")).expect("operation should succeed");
 
         // Create a head ref for the workspace
         refs::write_ref(
             root,
             &refs::workspace_head_ref("active-agent"),
-            &maw_core::model::types::GitOid::new(&oid).unwrap(),
+            &maw_core::model::types::GitOid::new(&oid).expect("operation should succeed"),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let report = run(root, 30, false).unwrap();
+        let report = run(root, 30, false).expect("operation should succeed");
         assert_eq!(report.head_refs_deleted, 0);
 
         // Ref should still exist
         assert!(
             refs::read_ref(root, &refs::workspace_head_ref("active-agent"))
-                .unwrap()
+                .expect("operation should succeed")
                 .is_some()
         );
     }
@@ -349,17 +352,17 @@ mod tests {
         refs::write_ref(
             root,
             &refs::workspace_head_ref("gone-agent"),
-            &maw_core::model::types::GitOid::new(&oid).unwrap(),
+            &maw_core::model::types::GitOid::new(&oid).expect("operation should succeed"),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        let report = run(root, 30, true).unwrap();
+        let report = run(root, 30, true).expect("operation should succeed");
         assert_eq!(report.head_refs_deleted, 1);
 
         // Ref should still exist because it was a dry run
         assert!(
             refs::read_ref(root, &refs::workspace_head_ref("gone-agent"))
-                .unwrap()
+                .expect("operation should succeed")
                 .is_some()
         );
     }
@@ -369,17 +372,20 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        let git_oid = maw_core::model::types::GitOid::new(&oid).unwrap();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("operation should succeed");
 
         // Two stale refs
-        refs::write_ref(root, &refs::workspace_head_ref("stale-1"), &git_oid).unwrap();
-        refs::write_ref(root, &refs::workspace_head_ref("stale-2"), &git_oid).unwrap();
+        refs::write_ref(root, &refs::workspace_head_ref("stale-1"), &git_oid)
+            .expect("operation should succeed");
+        refs::write_ref(root, &refs::workspace_head_ref("stale-2"), &git_oid)
+            .expect("operation should succeed");
 
         // One active ref (workspace exists)
-        fs::create_dir_all(root.join("ws/active")).unwrap();
-        refs::write_ref(root, &refs::workspace_head_ref("active"), &git_oid).unwrap();
+        fs::create_dir_all(root.join("ws/active")).expect("operation should succeed");
+        refs::write_ref(root, &refs::workspace_head_ref("active"), &git_oid)
+            .expect("operation should succeed");
 
-        let count = count_stale_head_refs(root).unwrap();
+        let count = count_stale_head_refs(root).expect("operation should succeed");
         assert_eq!(count, 2);
     }
 
@@ -388,18 +394,22 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        let git_oid = maw_core::model::types::GitOid::new(&oid).unwrap();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("operation should succeed");
 
         // Create a recovery ref. The commit is from "just now", so with
         // older_than_days=0 it should be deleted.
         let recovery_ref = "refs/manifold/recovery/gone-ws/20250101-000000";
-        refs::write_ref(root, recovery_ref, &git_oid).unwrap();
+        refs::write_ref(root, recovery_ref, &git_oid).expect("operation should succeed");
 
-        let report = run(root, 0, false).unwrap();
+        let report = run(root, 0, false).expect("operation should succeed");
         assert_eq!(report.recovery_refs_deleted, 1);
 
         // Ref should be gone
-        assert!(refs::read_ref(root, recovery_ref).unwrap().is_none());
+        assert!(
+            refs::read_ref(root, recovery_ref)
+                .expect("operation should succeed")
+                .is_none()
+        );
     }
 
     #[test]
@@ -407,17 +417,21 @@ mod tests {
         let (dir, oid) = setup_repo();
         let root = dir.path();
 
-        let git_oid = maw_core::model::types::GitOid::new(&oid).unwrap();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("operation should succeed");
 
         // Create a recovery ref. The commit is from "just now", so with
         // older_than_days=30 it should be kept.
         let recovery_ref = "refs/manifold/recovery/some-ws/20260301-000000";
-        refs::write_ref(root, recovery_ref, &git_oid).unwrap();
+        refs::write_ref(root, recovery_ref, &git_oid).expect("operation should succeed");
 
-        let report = run(root, 30, false).unwrap();
+        let report = run(root, 30, false).expect("operation should succeed");
         assert_eq!(report.recovery_refs_deleted, 0);
 
         // Ref should still exist
-        assert!(refs::read_ref(root, recovery_ref).unwrap().is_some());
+        assert!(
+            refs::read_ref(root, recovery_ref)
+                .expect("operation should succeed")
+                .is_some()
+        );
     }
 }

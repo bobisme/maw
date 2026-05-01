@@ -10,6 +10,10 @@ use maw_git::GitRepo as _;
 /// Migrates workspace layout, sets git bare mode, moves default workspace
 /// to ws/default/, and cleans up the old structure. Idempotent — safe to
 /// run multiple times.
+///
+/// # Errors
+///
+/// Returns an error if repository upgrade checks or filesystem mutations fail.
 pub fn run() -> Result<()> {
     println!("Checking repo for upgrade...");
     println!();
@@ -382,12 +386,11 @@ fn clean_root_source_files() -> Result<()> {
 /// files (locks/state/cache) even after tracked files are moved to ws/default/.
 /// We surface these explicitly so users don't miss manual cleanup.
 fn warn_remaining_untracked_root_files() {
-    let output = match Command::new("git")
+    let Ok(output) = Command::new("git")
         .args(["status", "--porcelain=1", "--untracked-files=all"])
         .output()
-    {
-        Ok(out) => out,
-        Err(_) => return,
+    else {
+        return;
     };
 
     if !output.status.success() {

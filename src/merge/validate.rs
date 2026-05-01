@@ -661,10 +661,11 @@ mod tests {
 
     #[test]
     fn validate_passing_command() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_in_dir("echo hello", dir.path(), 10, &OnFailure::Block).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("echo hello", dir.path(), 10, &OnFailure::Block)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Passed(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert!(result.passed);
         assert_eq!(result.exit_code, Some(0));
         assert!(result.stdout.contains("hello"));
@@ -673,27 +674,29 @@ mod tests {
 
     #[test]
     fn validate_failing_command_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::Block).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::Block)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Blocked(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert!(!result.passed);
         assert_eq!(result.exit_code, Some(1));
     }
 
     #[test]
     fn validate_failing_command_warn() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::Warn).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::Warn)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::PassedWithWarnings(_)));
         assert!(outcome.may_proceed());
     }
 
     #[test]
     fn validate_failing_command_quarantine() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome =
-            run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::Quarantine).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::Quarantine)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Quarantine(_)));
         assert!(outcome.may_proceed());
         assert!(outcome.needs_quarantine());
@@ -701,9 +704,9 @@ mod tests {
 
     #[test]
     fn validate_failing_command_block_quarantine() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome =
-            run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::BlockQuarantine).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("exit 1", dir.path(), 10, &OnFailure::BlockQuarantine)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::BlockedAndQuarantine(_)));
         assert!(!outcome.may_proceed());
         assert!(outcome.needs_quarantine());
@@ -711,10 +714,11 @@ mod tests {
 
     #[test]
     fn validate_timeout_kills_command() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_in_dir("sleep 60", dir.path(), 1, &OnFailure::Block).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("sleep 60", dir.path(), 1, &OnFailure::Block)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Blocked(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert!(!result.passed);
         assert!(result.exit_code.is_none()); // killed by timeout
         assert!(result.stderr.contains("timeout"));
@@ -724,29 +728,29 @@ mod tests {
 
     #[test]
     fn validate_captures_stderr() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_in_dir(
             "echo error-output >&2 && exit 1",
             dir.path(),
             10,
             &OnFailure::Block,
         )
-        .unwrap();
-        let result = outcome.result().unwrap();
+        .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         assert!(result.stderr.contains("error-output"));
     }
 
     #[test]
     fn validate_captures_stdout_and_stderr() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_in_dir(
             "echo out-text && echo err-text >&2",
             dir.path(),
             10,
             &OnFailure::Block,
         )
-        .unwrap();
-        let result = outcome.result().unwrap();
+        .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         assert!(result.passed);
         assert!(result.stdout.contains("out-text"));
         assert!(result.stderr.contains("err-text"));
@@ -754,9 +758,10 @@ mod tests {
 
     #[test]
     fn validate_exit_code_nonzero() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_in_dir("exit 42", dir.path(), 10, &OnFailure::Block).unwrap();
-        let result = outcome.result().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("exit 42", dir.path(), 10, &OnFailure::Block)
+            .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         assert_eq!(result.exit_code, Some(42));
         assert!(!result.passed);
     }
@@ -772,9 +777,10 @@ mod tests {
             preset: None,
             on_failure: OnFailure::Block,
         };
-        let oid = GitOid::new(&"a".repeat(40)).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_phase(dir.path(), &oid, &config).unwrap();
+        let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome =
+            run_validate_phase(dir.path(), &oid, &config).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
     }
 
@@ -787,9 +793,10 @@ mod tests {
             preset: None,
             on_failure: OnFailure::Block,
         };
-        let oid = GitOid::new(&"a".repeat(40)).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_phase(dir.path(), &oid, &config).unwrap();
+        let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome =
+            run_validate_phase(dir.path(), &oid, &config).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
     }
 
@@ -802,18 +809,20 @@ mod tests {
             preset: None,
             on_failure: OnFailure::Block,
         };
-        let oid = GitOid::new(&"a".repeat(40)).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_phase(dir.path(), &oid, &config).unwrap();
+        let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome =
+            run_validate_phase(dir.path(), &oid, &config).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
     }
 
     #[test]
     fn validate_phase_with_no_command_returns_skipped() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig::default();
-        let oid = GitOid::new(&"a".repeat(40)).unwrap();
-        let outcome = run_validate_phase(dir.path(), &oid, &config).unwrap();
+        let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+        let outcome =
+            run_validate_phase(dir.path(), &oid, &config).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
         assert!(outcome.may_proceed());
     }
@@ -822,16 +831,16 @@ mod tests {
 
     #[test]
     fn pipeline_all_pass() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_pipeline_in_dir(
             &["echo step1", "echo step2", "echo step3"],
             dir.path(),
             10,
             &OnFailure::Block,
         )
-        .unwrap();
+        .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Passed(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert!(result.passed);
         assert_eq!(result.command_results.len(), 3);
         assert!(result.command_results.iter().all(|r| r.passed));
@@ -842,16 +851,16 @@ mod tests {
 
     #[test]
     fn pipeline_stops_on_first_failure() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_pipeline_in_dir(
             &["echo ok", "exit 1", "echo should-not-run"],
             dir.path(),
             10,
             &OnFailure::Block,
         )
-        .unwrap();
+        .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Blocked(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert!(!result.passed);
         // Only 2 commands ran (the third was skipped)
         assert_eq!(result.command_results.len(), 2);
@@ -861,15 +870,15 @@ mod tests {
 
     #[test]
     fn pipeline_first_command_fails() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_pipeline_in_dir(
             &["exit 42", "echo never"],
             dir.path(),
             10,
             &OnFailure::Block,
         )
-        .unwrap();
-        let result = outcome.result().unwrap();
+        .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         assert!(!result.passed);
         assert_eq!(result.exit_code, Some(42));
         assert_eq!(result.command_results.len(), 1);
@@ -877,26 +886,26 @@ mod tests {
 
     #[test]
     fn pipeline_captures_per_command_output() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_pipeline_in_dir(
             &["echo output-a", "echo output-b"],
             dir.path(),
             10,
             &OnFailure::Block,
         )
-        .unwrap();
-        let result = outcome.result().unwrap();
+        .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         assert!(result.command_results[0].stdout.contains("output-a"));
         assert!(result.command_results[1].stdout.contains("output-b"));
     }
 
     #[test]
     fn pipeline_total_duration_is_sum() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome =
             run_validate_pipeline_in_dir(&["true", "true"], dir.path(), 10, &OnFailure::Block)
-                .unwrap();
-        let result = outcome.result().unwrap();
+                .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         let per_cmd_total: u64 = result.command_results.iter().map(|r| r.duration_ms).sum();
         // Total duration should be at least the sum of per-command durations
         assert!(result.duration_ms >= per_cmd_total.saturating_sub(10));
@@ -904,15 +913,15 @@ mod tests {
 
     #[test]
     fn pipeline_timeout_per_command() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let outcome = run_validate_pipeline_in_dir(
             &["echo fast", "sleep 60"],
             dir.path(),
             1,
             &OnFailure::Block,
         )
-        .unwrap();
-        let result = outcome.result().unwrap();
+        .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         assert!(!result.passed);
         assert_eq!(result.command_results.len(), 2);
         assert!(result.command_results[0].passed);
@@ -922,9 +931,9 @@ mod tests {
 
     #[test]
     fn pipeline_warn_policy_proceeds() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome =
-            run_validate_pipeline_in_dir(&["exit 1"], dir.path(), 10, &OnFailure::Warn).unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_pipeline_in_dir(&["exit 1"], dir.path(), 10, &OnFailure::Warn)
+            .expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::PassedWithWarnings(_)));
         assert!(outcome.may_proceed());
     }
@@ -933,9 +942,10 @@ mod tests {
 
     #[test]
     fn single_command_omits_command_results() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = run_validate_in_dir("echo hi", dir.path(), 10, &OnFailure::Block).unwrap();
-        let result = outcome.result().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let outcome = run_validate_in_dir("echo hi", dir.path(), 10, &OnFailure::Block)
+            .expect("operation should succeed");
+        let result = outcome.result().expect("operation should succeed");
         // Single-command runs don't populate command_results for backward compat
         assert!(result.command_results.is_empty());
     }
@@ -944,7 +954,7 @@ mod tests {
 
     #[test]
     fn write_artifact_creates_directory_and_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let result = ValidationResult {
@@ -956,7 +966,8 @@ mod tests {
             command_results: Vec::new(),
         };
 
-        let path = write_validation_artifact(&manifold_dir, "test-merge-id", &result).unwrap();
+        let path = write_validation_artifact(&manifold_dir, "test-merge-id", &result)
+            .expect("operation should succeed");
         assert!(path.exists());
         assert_eq!(
             path,
@@ -964,14 +975,15 @@ mod tests {
         );
 
         // Verify contents
-        let contents = fs::read_to_string(&path).unwrap();
-        let decoded: ValidationResult = serde_json::from_str(&contents).unwrap();
+        let contents = fs::read_to_string(&path).expect("operation should succeed");
+        let decoded: ValidationResult =
+            serde_json::from_str(&contents).expect("operation should succeed");
         assert_eq!(decoded, result);
     }
 
     #[test]
     fn write_artifact_with_multi_command_results() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let result = ValidationResult {
@@ -1000,9 +1012,11 @@ mod tests {
             ],
         };
 
-        let path = write_validation_artifact(&manifold_dir, "merge-42", &result).unwrap();
-        let contents = fs::read_to_string(&path).unwrap();
-        let decoded: ValidationResult = serde_json::from_str(&contents).unwrap();
+        let path = write_validation_artifact(&manifold_dir, "merge-42", &result)
+            .expect("operation should succeed");
+        let contents = fs::read_to_string(&path).expect("operation should succeed");
+        let decoded: ValidationResult =
+            serde_json::from_str(&contents).expect("operation should succeed");
         assert_eq!(decoded.command_results.len(), 2);
         assert_eq!(decoded.command_results[0].command, "cargo check");
         assert_eq!(decoded.command_results[1].command, "cargo test");
@@ -1010,7 +1024,7 @@ mod tests {
 
     #[test]
     fn write_artifact_overwrites_existing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
 
         let result1 = ValidationResult {
@@ -1021,7 +1035,8 @@ mod tests {
             duration_ms: 100,
             command_results: Vec::new(),
         };
-        write_validation_artifact(&manifold_dir, "id1", &result1).unwrap();
+        write_validation_artifact(&manifold_dir, "id1", &result1)
+            .expect("operation should succeed");
 
         let result2 = ValidationResult {
             passed: true,
@@ -1031,10 +1046,12 @@ mod tests {
             duration_ms: 200,
             command_results: Vec::new(),
         };
-        let path = write_validation_artifact(&manifold_dir, "id1", &result2).unwrap();
+        let path = write_validation_artifact(&manifold_dir, "id1", &result2)
+            .expect("operation should succeed");
 
         let decoded: ValidationResult =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).expect("operation should succeed"))
+                .expect("operation should succeed");
         assert!(decoded.passed);
         assert!(decoded.stdout.contains("second run"));
     }
@@ -1043,22 +1060,22 @@ mod tests {
 
     #[test]
     fn validate_rerun_same_inputs_produces_same_decision() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("ok.txt"), "ok\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("ok.txt"), "ok\n").expect("operation should succeed");
 
-        let first =
-            run_validate_in_dir("test -f ok.txt", dir.path(), 10, &OnFailure::Block).unwrap();
-        let second =
-            run_validate_in_dir("test -f ok.txt", dir.path(), 10, &OnFailure::Block).unwrap();
+        let first = run_validate_in_dir("test -f ok.txt", dir.path(), 10, &OnFailure::Block)
+            .expect("operation should succeed");
+        let second = run_validate_in_dir("test -f ok.txt", dir.path(), 10, &OnFailure::Block)
+            .expect("operation should succeed");
 
         assert_eq!(first.may_proceed(), second.may_proceed());
         assert_eq!(
-            first.result().unwrap().exit_code,
-            second.result().unwrap().exit_code
+            first.result().expect("operation should succeed").exit_code,
+            second.result().expect("operation should succeed").exit_code
         );
         assert_eq!(
-            first.result().unwrap().passed,
-            second.result().unwrap().passed
+            first.result().expect("operation should succeed").passed,
+            second.result().expect("operation should succeed").passed
         );
     }
 
@@ -1160,8 +1177,9 @@ mod tests {
 
     #[test]
     fn detect_preset_rust_from_cargo_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n")
+            .expect("operation should succeed");
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::Rust)
@@ -1170,8 +1188,9 @@ mod tests {
 
     #[test]
     fn detect_preset_python_from_pyproject_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"\n")
+            .expect("operation should succeed");
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::Python)
@@ -1180,12 +1199,12 @@ mod tests {
 
     #[test]
     fn detect_preset_python_from_setup_py() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         std::fs::write(
             dir.path().join("setup.py"),
             "from setuptools import setup\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::Python)
@@ -1194,8 +1213,9 @@ mod tests {
 
     #[test]
     fn detect_preset_python_from_setup_cfg() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("setup.cfg"), "[metadata]\nname=x\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("setup.cfg"), "[metadata]\nname=x\n")
+            .expect("operation should succeed");
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::Python)
@@ -1204,8 +1224,8 @@ mod tests {
 
     #[test]
     fn detect_preset_typescript_from_tsconfig() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("tsconfig.json"), "{}\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("tsconfig.json"), "{}\n").expect("operation should succeed");
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::TypeScript)
@@ -1214,17 +1234,20 @@ mod tests {
 
     #[test]
     fn detect_preset_returns_none_for_unknown_project() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "# hello\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("README.md"), "# hello\n")
+            .expect("operation should succeed");
         assert_eq!(detect_language_preset(dir.path()), None);
     }
 
     #[test]
     fn detect_preset_rust_wins_over_python_when_both_present() {
         // Cargo.toml takes precedence (first in detection order)
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
-        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n")
+            .expect("operation should succeed");
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"\n")
+            .expect("operation should succeed");
         assert_eq!(
             detect_language_preset(dir.path()),
             Some(LanguagePreset::Rust)
@@ -1235,9 +1258,10 @@ mod tests {
 
     #[test]
     fn resolve_explicit_commands_take_precedence_over_preset() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         // Cargo.toml present — would trigger Rust preset — but explicit command wins.
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n")
+            .expect("operation should succeed");
         let config = ValidationConfig {
             command: Some("make test".into()),
             commands: Vec::new(),
@@ -1251,7 +1275,7 @@ mod tests {
 
     #[test]
     fn resolve_named_preset_rust() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1265,7 +1289,7 @@ mod tests {
 
     #[test]
     fn resolve_named_preset_python() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1279,7 +1303,7 @@ mod tests {
 
     #[test]
     fn resolve_named_preset_typescript() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1293,8 +1317,9 @@ mod tests {
 
     #[test]
     fn resolve_auto_preset_detects_rust() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n")
+            .expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1308,8 +1333,9 @@ mod tests {
 
     #[test]
     fn resolve_auto_preset_detects_python() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n")
+            .expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1323,8 +1349,8 @@ mod tests {
 
     #[test]
     fn resolve_auto_preset_detects_typescript() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1338,7 +1364,7 @@ mod tests {
 
     #[test]
     fn resolve_auto_preset_unknown_project_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         // No marker files
         let config = ValidationConfig {
             command: None,
@@ -1353,7 +1379,7 @@ mod tests {
 
     #[test]
     fn resolve_no_preset_no_commands_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig::default();
         let cmds = resolve_commands(&config, dir.path());
         assert!(cmds.is_empty());
@@ -1363,15 +1389,16 @@ mod tests {
 
     #[test]
     fn config_in_dir_skipped_with_no_config() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig::default();
-        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        let outcome =
+            run_validate_config_in_dir(&config, dir.path()).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
     }
 
     #[test]
     fn config_in_dir_skipped_when_auto_finds_nothing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         // No marker files — auto-detect returns None → skipped
         let config = ValidationConfig {
             command: None,
@@ -1380,15 +1407,17 @@ mod tests {
             timeout_seconds: 60,
             on_failure: OnFailure::Block,
         };
-        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        let outcome =
+            run_validate_config_in_dir(&config, dir.path()).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Skipped));
     }
 
     #[test]
     fn config_in_dir_explicit_commands_ignore_preset() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         // Rust preset present but explicit commands win
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n")
+            .expect("operation should succeed");
         let config = ValidationConfig {
             command: Some("echo explicit".into()),
             commands: Vec::new(),
@@ -1396,9 +1425,10 @@ mod tests {
             timeout_seconds: 10,
             on_failure: OnFailure::Block,
         };
-        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        let outcome =
+            run_validate_config_in_dir(&config, dir.path()).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Passed(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert!(result.stdout.contains("explicit"));
         // Single-command run: command_results empty for backward compat
         assert!(result.command_results.is_empty());
@@ -1406,7 +1436,7 @@ mod tests {
 
     #[test]
     fn config_in_dir_multi_command_explicit_with_preset_ignored() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: vec!["echo step1".into(), "echo step2".into()],
@@ -1414,9 +1444,10 @@ mod tests {
             timeout_seconds: 10,
             on_failure: OnFailure::Block,
         };
-        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        let outcome =
+            run_validate_config_in_dir(&config, dir.path()).expect("operation should succeed");
         assert!(matches!(outcome, ValidateOutcome::Passed(_)));
-        let result = outcome.result().unwrap();
+        let result = outcome.result().expect("operation should succeed");
         assert_eq!(result.command_results.len(), 2);
         assert!(result.command_results[0].stdout.contains("step1"));
         assert!(result.command_results[1].stdout.contains("step2"));
@@ -1427,8 +1458,9 @@ mod tests {
         // Create a dir with Cargo.toml so auto-detection fires.
         // The Rust preset commands will likely fail (not a real project),
         // but with Warn policy the outcome is PassedWithWarnings (not Skipped).
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n")
+            .expect("operation should succeed");
         let config = ValidationConfig {
             command: None,
             commands: Vec::new(),
@@ -1436,7 +1468,8 @@ mod tests {
             timeout_seconds: 5,
             on_failure: OnFailure::Warn,
         };
-        let outcome = run_validate_config_in_dir(&config, dir.path()).unwrap();
+        let outcome =
+            run_validate_config_in_dir(&config, dir.path()).expect("operation should succeed");
         // Must NOT be skipped — preset was resolved
         assert!(!matches!(outcome, ValidateOutcome::Skipped));
     }

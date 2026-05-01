@@ -328,8 +328,10 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
 
             if !actual_pure_deleters.is_empty() {
                 // Rename + delete conflict.
-                let renamer_occ = dest_occs.first().unwrap();
-                let deleter_occ = actual_pure_deleters.first().unwrap();
+                let renamer_occ = dest_occs.first().expect("operation should succeed");
+                let deleter_occ = actual_pure_deleters
+                    .first()
+                    .expect("operation should succeed");
 
                 rename_conflicts.push(RenameConflict::RenameDelete {
                     file_id: *file_id,
@@ -398,7 +400,13 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
             .collect();
         if remaining.len() == 1 {
             // Demoted from shared to unique.
-            new_unique.push((path, remaining.into_iter().next().unwrap()));
+            new_unique.push((
+                path,
+                remaining
+                    .into_iter()
+                    .next()
+                    .expect("operation should succeed"),
+            ));
         } else if remaining.len() > 1 {
             new_shared.insert(path, remaining);
         }
@@ -426,7 +434,13 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
     let mut truly_shared: Vec<(PathBuf, Vec<PathEntry>)> = Vec::new();
     for (path, entries) in final_shared {
         if entries.len() == 1 {
-            new_unique.push((path, entries.into_iter().next().unwrap()));
+            new_unique.push((
+                path,
+                entries
+                    .into_iter()
+                    .next()
+                    .expect("operation should succeed"),
+            ));
         } else {
             truly_shared.push((path, entries));
         }
@@ -471,7 +485,7 @@ mod tests {
     use crate::model::types::WorkspaceId;
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn fid(n: u128) -> FileId {

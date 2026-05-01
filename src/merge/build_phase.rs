@@ -303,7 +303,7 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     // 6. Build candidate commit
     let mut repo = open_gix_repo(repo_root)?;
     set_pending_attrs_from_resolved(&mut repo, &resolved);
-    let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().to_path_buf()).collect();
+    let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().clone()).collect();
     let candidate = build_merge_commit(&repo, epoch, sources, &resolved, None)?;
 
     Ok(BuildPhaseOutput {
@@ -337,11 +337,7 @@ fn set_pending_attrs_from_resolved(repo: &mut maw_git::GixRepo, resolved: &[Reso
                     .parent()
                     .map(|p| {
                         let s = p.to_string_lossy().replace('\\', "/");
-                        if s.is_empty() {
-                            s.to_string()
-                        } else {
-                            format!("{s}/")
-                        }
+                        if s.is_empty() { s } else { format!("{s}/") }
                     })
                     .unwrap_or_default();
                 entries.push((prefix, content.clone()));
@@ -444,7 +440,7 @@ fn epoch_delta_paths(
 
 /// Result of epoch-delta injection.
 ///
-/// Contains the (possibly modified) PatchSets and any base-content overrides
+/// Contains the (possibly modified) `PatchSets` and any base-content overrides
 /// needed for correct three-way merge resolution.
 struct EpochDeltaResult {
     /// Base content overrides: for overlapping paths, the base content should
@@ -645,7 +641,7 @@ fn run_pipeline<B: WorkspaceBackend>(
     // Build the candidate git tree + commit from resolved changes
     let mut repo = open_gix_repo(repo_root)?;
     set_pending_attrs_from_resolved(&mut repo, &resolved);
-    let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().to_path_buf()).collect();
+    let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().clone()).collect();
     let candidate = build_merge_commit(
         &repo,
         &state.epoch_before,
@@ -1181,7 +1177,7 @@ mod tests {
             .args(args)
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git {} failed: {}",
@@ -1195,7 +1191,7 @@ mod tests {
     /// Returns (`TempDir`, `epoch_oid`).
     /// Epoch tree contains: README.md, lib.rs, src/main.rs.
     fn setup_epoch_repo() -> (TempDir, EpochId) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -1203,16 +1199,16 @@ mod tests {
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
-        fs::write(root.join("README.md"), "# Test Project\n").unwrap();
-        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").unwrap();
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("README.md"), "# Test Project\n").expect("operation should succeed");
+        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").expect("operation should succeed");
+        fs::create_dir_all(root.join("src")).expect("operation should succeed");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("operation should succeed");
 
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "epoch: initial"]);
 
         let hex = run_git(root, &["rev-parse", "HEAD"]);
-        let epoch = EpochId::new(&hex).unwrap();
+        let epoch = EpochId::new(&hex).expect("operation should succeed");
         run_git(
             root,
             &["update-ref", "refs/manifold/epoch/current", epoch.as_str()],
@@ -1227,13 +1223,15 @@ mod tests {
         sources: &[WorkspaceId],
         epoch: &EpochId,
     ) -> PathBuf {
-        fs::create_dir_all(manifold_dir).unwrap();
+        fs::create_dir_all(manifold_dir).expect("operation should succeed");
         let mut state = MergeStateFile::new(sources.to_vec(), epoch.clone(), 1000);
         for ws in sources {
             state.frozen_heads.insert(ws.clone(), epoch.oid().clone());
         }
         let state_path = MergeStateFile::default_path(manifold_dir);
-        state.write_atomic(&state_path).unwrap();
+        state
+            .write_atomic(&state_path)
+            .expect("operation should succeed");
         state_path
     }
 
@@ -1349,7 +1347,7 @@ mod tests {
     /// and the collect path correctly falls through to reading the
     /// working-tree bytes we wrote.
     fn isolate_ws_dir(ws_path: &Path) {
-        fs::create_dir_all(ws_path).unwrap();
+        fs::create_dir_all(ws_path).expect("operation should succeed");
         Command::new("git")
             .args(["init", "-q"])
             .current_dir(ws_path)
@@ -1369,9 +1367,9 @@ mod tests {
         isolate_ws_dir(&ws_path);
         let full_path = ws_path.join(file_name);
         if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).unwrap();
+            fs::create_dir_all(parent).expect("operation should succeed");
         }
-        fs::write(&full_path, content).unwrap();
+        fs::write(&full_path, content).expect("operation should succeed");
         let snapshot = SnapshotResult::new(
             vec![PathBuf::from(file_name)], // added
             vec![],                         // modified
@@ -1391,9 +1389,9 @@ mod tests {
         isolate_ws_dir(&ws_path);
         let full_path = ws_path.join(file_name);
         if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).unwrap();
+            fs::create_dir_all(parent).expect("operation should succeed");
         }
-        fs::write(&full_path, content).unwrap();
+        fs::write(&full_path, content).expect("operation should succeed");
         let snapshot = SnapshotResult::new(
             vec![],                         // added
             vec![PathBuf::from(file_name)], // modified
@@ -1419,20 +1417,20 @@ mod tests {
     }
 
     fn write_merge_config(manifold_dir: &Path, contents: &str) {
-        fs::create_dir_all(manifold_dir).unwrap();
-        fs::write(manifold_dir.join("config.toml"), contents).unwrap();
+        fs::create_dir_all(manifold_dir).expect("operation should succeed");
+        fs::write(manifold_dir.join("config.toml"), contents).expect("operation should succeed");
     }
 
     fn commit_epoch_file(root: &Path, rel_path: &str, content: &str, message: &str) -> EpochId {
         let full = root.join(rel_path);
         if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).unwrap();
+            fs::create_dir_all(parent).expect("operation should succeed");
         }
-        fs::write(&full, content).unwrap();
+        fs::write(&full, content).expect("operation should succeed");
         run_git(root, &["add", rel_path]);
         run_git(root, &["commit", "-m", message]);
         let hex = run_git(root, &["rev-parse", "HEAD"]);
-        let epoch = EpochId::new(&hex).unwrap();
+        let epoch = EpochId::new(&hex).expect("operation should succeed");
         run_git(
             root,
             &["update-ref", "refs/manifold/epoch/current", epoch.as_str()],
@@ -1447,7 +1445,8 @@ mod tests {
     #[test]
     fn read_file_at_epoch_returns_content() {
         let (dir, epoch) = setup_epoch_repo();
-        let content = read_file_at_epoch(dir.path(), &epoch, Path::new("README.md")).unwrap();
+        let content = read_file_at_epoch(dir.path(), &epoch, Path::new("README.md"))
+            .expect("operation should succeed");
         assert_eq!(content, b"# Test Project\n");
     }
 
@@ -1461,7 +1460,8 @@ mod tests {
     #[test]
     fn read_file_at_epoch_nested_path() {
         let (dir, epoch) = setup_epoch_repo();
-        let content = read_file_at_epoch(dir.path(), &epoch, Path::new("src/main.rs")).unwrap();
+        let content = read_file_at_epoch(dir.path(), &epoch, Path::new("src/main.rs"))
+            .expect("operation should succeed");
         assert_eq!(content, b"fn main() {}\n");
     }
 
@@ -1474,8 +1474,8 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
 
         // Create patch sets where both workspaces modify README.md
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
 
         use crate::merge::types::{ChangeKind, FileChange, PatchSet};
 
@@ -1503,7 +1503,8 @@ mod tests {
         let partition = partition_by_path(&patch_sets);
         assert_eq!(partition.shared_count(), 1);
 
-        let base = read_base_contents(dir.path(), &epoch, &partition).unwrap();
+        let base =
+            read_base_contents(dir.path(), &epoch, &partition).expect("operation should succeed");
         assert_eq!(base.len(), 1);
         assert_eq!(base[&PathBuf::from("README.md")], b"# Test Project\n");
     }
@@ -1513,8 +1514,8 @@ mod tests {
         let (dir, epoch) = setup_epoch_repo();
 
         use crate::merge::types::{ChangeKind, FileChange, PatchSet};
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
 
         let patch_sets = vec![
             PatchSet::new(
@@ -1540,7 +1541,8 @@ mod tests {
         let partition = partition_by_path(&patch_sets);
         assert_eq!(partition.shared_count(), 1);
 
-        let base = read_base_contents(dir.path(), &epoch, &partition).unwrap();
+        let base =
+            read_base_contents(dir.path(), &epoch, &partition).expect("operation should succeed");
         assert!(base.is_empty(), "new files not in epoch should be omitted");
     }
 
@@ -1550,17 +1552,21 @@ mod tests {
 
     #[test]
     fn build_phase_wrong_state_rejected() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
-        fs::create_dir_all(&manifold_dir).unwrap();
+        fs::create_dir_all(&manifold_dir).expect("operation should succeed");
 
-        let ws = WorkspaceId::new("ws-1").unwrap();
-        let epoch = EpochId::new(&"a".repeat(40)).unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
+        let epoch = EpochId::new(&"a".repeat(40)).expect("operation should succeed");
 
         let mut state = MergeStateFile::new(vec![ws], epoch, 1000);
-        state.advance(MergePhase::Build, 1001).unwrap();
+        state
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
         let state_path = MergeStateFile::default_path(&manifold_dir);
-        state.write_atomic(&state_path).unwrap();
+        state
+            .write_atomic(&state_path)
+            .expect("operation should succeed");
 
         let backend = MockBackend::new();
         let result = run_build_phase(dir.path(), &manifold_dir, &backend);
@@ -1575,9 +1581,9 @@ mod tests {
 
     #[test]
     fn build_phase_merge_state_not_found() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let manifold_dir = dir.path().join(".manifold");
-        fs::create_dir_all(&manifold_dir).unwrap();
+        fs::create_dir_all(&manifold_dir).expect("operation should succeed");
 
         let backend = MockBackend::new();
         let result = run_build_phase(dir.path(), &manifold_dir, &backend);
@@ -1588,12 +1594,12 @@ mod tests {
     fn build_phase_advances_state_and_records_candidate() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         let state_path = write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         // Empty workspace — no changes
         let ws_path = dir.path().join("ws/ws-1");
-        fs::create_dir_all(&ws_path).unwrap();
+        fs::create_dir_all(&ws_path).expect("operation should succeed");
         let mut backend = MockBackend::new();
         backend.add_workspace(
             "ws-1",
@@ -1602,10 +1608,11 @@ mod tests {
             ws_path,
         );
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         // Merge-state advanced to Build with candidate OID recorded
-        let final_state = MergeStateFile::read(&state_path).unwrap();
+        let final_state = MergeStateFile::read(&state_path).expect("operation should succeed");
         assert_eq!(final_state.phase, MergePhase::Build);
         assert_eq!(final_state.epoch_candidate, Some(output.candidate));
     }
@@ -1614,7 +1621,7 @@ mod tests {
     fn build_phase_crash_recovery_aborts_without_moving_refs() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         let state_path = write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) = make_workspace_with_added_file(
@@ -1629,9 +1636,10 @@ mod tests {
         let head_before = run_git(dir.path(), &["rev-parse", "HEAD"]);
         let epoch_before = run_git(dir.path(), &["rev-parse", "refs/manifold/epoch/current"]);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
-        let outcome = recover_from_merge_state(&state_path).unwrap();
+        let outcome = recover_from_merge_state(&state_path).expect("operation should succeed");
         assert_eq!(
             outcome,
             RecoveryOutcome::AbortedPreCommit {
@@ -1659,7 +1667,7 @@ mod tests {
         );
 
         assert_eq!(
-            fs::read_to_string(ws_path.join("feature.rs")).unwrap(),
+            fs::read_to_string(ws_path.join("feature.rs")).expect("operation should succeed"),
             "pub fn feature() {}\n"
         );
 
@@ -1670,11 +1678,11 @@ mod tests {
     fn build_phase_no_changes_produces_valid_commit() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let ws_path = dir.path().join("ws/ws-1");
-        fs::create_dir_all(&ws_path).unwrap();
+        fs::create_dir_all(&ws_path).expect("operation should succeed");
         let mut backend = MockBackend::new();
         backend.add_workspace(
             "ws-1",
@@ -1683,7 +1691,8 @@ mod tests {
             ws_path,
         );
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(!output.candidate.as_str().is_empty());
         assert!(output.conflicts.is_empty());
@@ -1696,7 +1705,7 @@ mod tests {
     fn build_phase_adds_new_file() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) = make_workspace_with_added_file(
@@ -1708,7 +1717,8 @@ mod tests {
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(output.conflicts.is_empty());
         assert_eq!(output.resolved_count, 1);
@@ -1730,8 +1740,8 @@ mod tests {
     fn build_phase_disjoint_two_workspaces() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         let (path_a, snap_a) =
@@ -1743,7 +1753,8 @@ mod tests {
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
         backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(output.conflicts.is_empty());
         assert_eq!(output.resolved_count, 2);
@@ -1763,8 +1774,8 @@ mod tests {
     fn build_phase_identical_modifications_resolve_cleanly() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         let new_content = b"# Updated README\n";
@@ -1777,7 +1788,8 @@ mod tests {
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
         backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         // Hash equality short-circuit: identical changes = no conflict
         assert!(output.conflicts.is_empty());
@@ -1796,7 +1808,7 @@ mod tests {
     fn build_phase_delete_removes_file_from_tree() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) = make_workspace_with_deleted_file(dir.path(), "ws-1", "lib.rs");
@@ -1804,7 +1816,8 @@ mod tests {
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(output.conflicts.is_empty());
 
@@ -1820,7 +1833,7 @@ mod tests {
     fn build_phase_candidate_parent_is_epoch() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         let (ws_path, snapshot) =
@@ -1828,7 +1841,8 @@ mod tests {
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         let parent = run_git(
             dir.path(),
@@ -1840,7 +1854,7 @@ mod tests {
     #[test]
     fn build_phase_is_deterministic() {
         let (dir, epoch) = setup_epoch_repo();
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
 
         let mut tree_oids = vec![];
         for _ in 0..2 {
@@ -1848,7 +1862,7 @@ mod tests {
             // Clean up merge-state between runs
             let state_path = MergeStateFile::default_path(&manifold_dir);
             if state_path.exists() {
-                fs::remove_file(&state_path).unwrap();
+                fs::remove_file(&state_path).expect("operation should succeed");
             }
             write_prepare_state(&manifold_dir, &[ws.clone()], &epoch);
 
@@ -1861,7 +1875,8 @@ mod tests {
             let mut backend = MockBackend::new();
             backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
 
-            let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+            let output = run_build_phase(dir.path(), &manifold_dir, &backend)
+                .expect("operation should succeed");
             let tree_oid = run_git(
                 dir.path(),
                 &[
@@ -1882,9 +1897,9 @@ mod tests {
     fn build_phase_three_way_disjoint() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
-        let ws_c = WorkspaceId::new("ws-c").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
+        let ws_c = WorkspaceId::new("ws-c").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b, ws_c], &epoch);
 
         let (pa, sa) = make_workspace_with_added_file(dir.path(), "ws-a", "a.txt", b"aaa\n");
@@ -1896,7 +1911,8 @@ mod tests {
         backend.add_workspace("ws-b", epoch.clone(), sb, pb);
         backend.add_workspace("ws-c", epoch, sc, pc);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(output.conflicts.is_empty());
         assert_eq!(output.resolved_count, 3);
@@ -1914,7 +1930,7 @@ mod tests {
     #[test]
     fn build_phase_with_inputs_bypasses_state_file() {
         let (dir, epoch) = setup_epoch_repo();
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
 
         let (ws_path, snapshot) =
             make_workspace_with_added_file(dir.path(), "ws-1", "hello.txt", b"hello world\n");
@@ -1922,7 +1938,8 @@ mod tests {
         backend.add_workspace("ws-1", epoch.clone(), snapshot, ws_path);
 
         // No merge-state file at all — with_inputs doesn't need one
-        let output = run_build_phase_with_inputs(dir.path(), &backend, &epoch, &[ws]).unwrap();
+        let output = run_build_phase_with_inputs(dir.path(), &backend, &epoch, &[ws])
+            .expect("operation should succeed");
 
         assert!(!output.candidate.as_str().is_empty());
         assert!(output.conflicts.is_empty());
@@ -1953,17 +1970,17 @@ mod tests {
     fn build_phase_mixed_add_modify_delete() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws], &epoch);
 
         // Create workspace with all three change types
         let ws_path = dir.path().join("ws/ws-1");
-        fs::create_dir_all(&ws_path).unwrap();
+        fs::create_dir_all(&ws_path).expect("operation should succeed");
 
         // Added file
-        fs::write(ws_path.join("new.txt"), "new content\n").unwrap();
+        fs::write(ws_path.join("new.txt"), "new content\n").expect("operation should succeed");
         // Modified file — write new content at workspace path
-        fs::write(ws_path.join("README.md"), "# Updated\n").unwrap();
+        fs::write(ws_path.join("README.md"), "# Updated\n").expect("operation should succeed");
         // Deleted file — lib.rs (no need to create on disk for delete)
 
         let snapshot = SnapshotResult::new(
@@ -1975,7 +1992,8 @@ mod tests {
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(output.conflicts.is_empty());
         assert_eq!(output.resolved_count, 3); // add + modify + delete
@@ -2013,8 +2031,8 @@ mod tests {
         );
 
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
@@ -2035,7 +2053,8 @@ command = "printf 're-generated lockfile\n' > Cargo.lock"
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
         backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
         assert!(output.conflicts.is_empty());
 
         let lock = run_git(
@@ -2056,8 +2075,8 @@ command = "printf 're-generated lockfile\n' > Cargo.lock"
         );
 
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
@@ -2086,7 +2105,8 @@ command = "mkdir -p src/gen && printf '{\"version\":42}\n' > src/gen/schema.json
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
         backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
         assert!(output.conflicts.is_empty());
 
         let generated = run_git(
@@ -2103,8 +2123,8 @@ command = "mkdir -p src/gen && printf '{\"version\":42}\n' > src/gen/schema.json
     fn build_phase_ours_driver_keeps_epoch_version() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
@@ -2124,7 +2144,8 @@ kind = "ours"
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
         backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
-        let output = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap();
+        let output =
+            run_build_phase(dir.path(), &manifold_dir, &backend).expect("operation should succeed");
         assert!(output.conflicts.is_empty());
 
         let readme = run_git(
@@ -2138,8 +2159,8 @@ kind = "ours"
     fn build_phase_theirs_driver_requires_single_workspace() {
         let (dir, epoch) = setup_epoch_repo();
         let manifold_dir = dir.path().join(".manifold");
-        let ws_a = WorkspaceId::new("ws-a").unwrap();
-        let ws_b = WorkspaceId::new("ws-b").unwrap();
+        let ws_a = WorkspaceId::new("ws-a").expect("operation should succeed");
+        let ws_b = WorkspaceId::new("ws-b").expect("operation should succeed");
         write_prepare_state(&manifold_dir, &[ws_a, ws_b], &epoch);
 
         write_merge_config(
@@ -2159,7 +2180,8 @@ kind = "theirs"
         backend.add_workspace("ws-a", epoch.clone(), snap_a, path_a);
         backend.add_workspace("ws-b", epoch, snap_b, path_b);
 
-        let err = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap_err();
+        let err = run_build_phase(dir.path(), &manifold_dir, &backend)
+            .expect_err("operation should fail");
         let msg = format!("{err}");
         assert!(msg.contains("requires exactly one workspace"));
     }
@@ -2175,7 +2197,7 @@ kind = "theirs"
         );
 
         let manifold_dir = dir.path().join(".manifold");
-        let ws = WorkspaceId::new("ws-1").unwrap();
+        let ws = WorkspaceId::new("ws-1").expect("operation should succeed");
         write_prepare_state(&manifold_dir, std::slice::from_ref(&ws), &epoch);
 
         write_merge_config(
@@ -2193,7 +2215,8 @@ command = "exit 19"
         let mut backend = MockBackend::new();
         backend.add_workspace("ws-1", epoch, snapshot, ws_path);
 
-        let err = run_build_phase(dir.path(), &manifold_dir, &backend).unwrap_err();
+        let err = run_build_phase(dir.path(), &manifold_dir, &backend)
+            .expect_err("operation should fail");
         let msg = format!("{err}");
         assert!(
             msg.contains("regenerate command failed"),
@@ -2221,7 +2244,7 @@ command = "exit 19"
     #[test]
     fn stale_workspace_overlapping_change_produces_conflict() {
         // Setup: initial epoch with README.md = "line 1\n"
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -2229,11 +2252,11 @@ command = "exit 19"
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
-        fs::write(root.join("README.md"), "line 1\n").unwrap();
+        fs::write(root.join("README.md"), "line 1\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "epoch: initial"]);
         let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
-        let initial_epoch = EpochId::new(&initial_hex).unwrap();
+        let initial_epoch = EpochId::new(&initial_hex).expect("operation should succeed");
         run_git(
             root,
             &[
@@ -2262,11 +2285,12 @@ command = "exit 19"
 
         // Write merge-state with current epoch and the stale source.
         let manifold_dir = root.join(".manifold");
-        let sources = vec![WorkspaceId::new("ws-stale").unwrap()];
+        let sources = vec![WorkspaceId::new("ws-stale").expect("operation should succeed")];
         write_prepare_state(&manifold_dir, &sources, &current_epoch);
 
         // Run the build phase.
-        let result = run_build_phase(root, &manifold_dir, &backend).unwrap();
+        let result =
+            run_build_phase(root, &manifold_dir, &backend).expect("operation should succeed");
 
         // The overlapping file should produce a conflict.
         assert!(
@@ -2289,7 +2313,7 @@ command = "exit 19"
         );
 
         // Verify one side is the epoch-delta.
-        let conflict = readme_conflict.unwrap();
+        let conflict = readme_conflict.expect("operation should succeed");
         let has_epoch_side = conflict
             .sides
             .iter()
@@ -2309,7 +2333,7 @@ command = "exit 19"
     /// delta → should merge cleanly (no conflict).
     #[test]
     fn stale_workspace_non_overlapping_change_merges_cleanly() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -2317,12 +2341,12 @@ command = "exit 19"
         run_git(root, &["config", "user.email", "test@test.com"]);
         run_git(root, &["config", "commit.gpgsign", "false"]);
 
-        fs::write(root.join("README.md"), "readme\n").unwrap();
-        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+        fs::write(root.join("README.md"), "readme\n").expect("operation should succeed");
+        fs::write(root.join("lib.rs"), "pub fn lib() {}\n").expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "epoch: initial"]);
         let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
-        let initial_epoch = EpochId::new(&initial_hex).unwrap();
+        let initial_epoch = EpochId::new(&initial_hex).expect("operation should succeed");
         run_git(
             root,
             &[
@@ -2347,10 +2371,11 @@ command = "exit 19"
         backend.add_workspace("ws-stale", initial_epoch.clone(), snapshot, ws_path);
 
         let manifold_dir = root.join(".manifold");
-        let sources = vec![WorkspaceId::new("ws-stale").unwrap()];
+        let sources = vec![WorkspaceId::new("ws-stale").expect("operation should succeed")];
         write_prepare_state(&manifold_dir, &sources, &current_epoch);
 
-        let result = run_build_phase(root, &manifold_dir, &backend).unwrap();
+        let result =
+            run_build_phase(root, &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(
             result.conflicts.is_empty(),
@@ -2364,7 +2389,7 @@ command = "exit 19"
     /// → diff3 should auto-resolve (no conflict).
     #[test]
     fn stale_workspace_diff3_auto_resolve() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         run_git(root, &["init"]);
@@ -2374,11 +2399,11 @@ command = "exit 19"
 
         // Create a multi-line file so diff3 can resolve non-overlapping edits.
         let original = "line 1\nline 2\nline 3\nline 4\nline 5\n";
-        fs::write(root.join("multi.txt"), original).unwrap();
+        fs::write(root.join("multi.txt"), original).expect("operation should succeed");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "epoch: initial"]);
         let initial_hex = run_git(root, &["rev-parse", "HEAD"]);
-        let initial_epoch = EpochId::new(&initial_hex).unwrap();
+        let initial_epoch = EpochId::new(&initial_hex).expect("operation should succeed");
         run_git(
             root,
             &[
@@ -2400,10 +2425,11 @@ command = "exit 19"
         backend.add_workspace("ws-stale", initial_epoch.clone(), snapshot, ws_path);
 
         let manifold_dir = root.join(".manifold");
-        let sources = vec![WorkspaceId::new("ws-stale").unwrap()];
+        let sources = vec![WorkspaceId::new("ws-stale").expect("operation should succeed")];
         write_prepare_state(&manifold_dir, &sources, &current_epoch);
 
-        let result = run_build_phase(root, &manifold_dir, &backend).unwrap();
+        let result =
+            run_build_phase(root, &manifold_dir, &backend).expect("operation should succeed");
 
         assert!(
             result.conflicts.is_empty(),

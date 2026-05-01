@@ -599,23 +599,25 @@ mod tests {
     ///
     /// Returns the temp dir, the repo root path, and the epoch ID.
     fn setup_repo_with_snapshot() -> (TempDir, PathBuf, EpochId) {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let root = temp.path().to_path_buf();
 
         // Fake 40-char hex epoch OID
         let epoch_oid = "a".repeat(40);
-        let epoch = EpochId::new(&epoch_oid).unwrap();
+        let epoch = EpochId::new(&epoch_oid).expect("operation should succeed");
 
         // Create epoch snapshot directory with some files
         let snap_dir = root
             .join(".manifold")
             .join("epochs")
             .join(format!("e-{epoch_oid}"));
-        fs::create_dir_all(&snap_dir).unwrap();
-        fs::write(snap_dir.join("README.md"), "# Epoch snapshot").unwrap();
-        fs::write(snap_dir.join("main.rs"), "fn main() {}").unwrap();
-        fs::create_dir_all(snap_dir.join("src")).unwrap();
-        fs::write(snap_dir.join("src").join("lib.rs"), "pub fn lib() {}").unwrap();
+        fs::create_dir_all(&snap_dir).expect("operation should succeed");
+        fs::write(snap_dir.join("README.md"), "# Epoch snapshot")
+            .expect("operation should succeed");
+        fs::write(snap_dir.join("main.rs"), "fn main() {}").expect("operation should succeed");
+        fs::create_dir_all(snap_dir.join("src")).expect("operation should succeed");
+        fs::write(snap_dir.join("src").join("lib.rs"), "pub fn lib() {}")
+            .expect("operation should succeed");
 
         (temp, root, epoch)
     }
@@ -626,9 +628,11 @@ mod tests {
     fn test_create_workspace() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("test-ws").unwrap();
+        let ws_name = WorkspaceId::new("test-ws").expect("operation should succeed");
 
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert_eq!(info.id, ws_name);
         assert_eq!(info.path, root.join("ws").join("test-ws"));
         assert!(info.path.exists());
@@ -644,10 +648,14 @@ mod tests {
     fn test_create_idempotent() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("idem-ws").unwrap();
+        let ws_name = WorkspaceId::new("idem-ws").expect("operation should succeed");
 
-        let info1 = backend.create(&ws_name, &epoch).unwrap();
-        let info2 = backend.create(&ws_name, &epoch).unwrap();
+        let info1 = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+        let info2 = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert_eq!(info1.path, info2.path);
         assert_eq!(info1.epoch, info2.epoch);
     }
@@ -656,16 +664,19 @@ mod tests {
     fn test_create_replaces_mismatched_workspace() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("replace-ws").unwrap();
+        let ws_name = WorkspaceId::new("replace-ws").expect("operation should succeed");
 
         // Create workspace with wrong epoch file
         let ws_path = root.join("ws").join("replace-ws");
-        fs::create_dir_all(&ws_path).unwrap();
-        fs::write(ws_path.join(EPOCH_FILE), "b".repeat(40) + "\n").unwrap();
-        fs::write(ws_path.join("stale.txt"), "stale content").unwrap();
+        fs::create_dir_all(&ws_path).expect("operation should succeed");
+        fs::write(ws_path.join(EPOCH_FILE), "b".repeat(40) + "\n")
+            .expect("operation should succeed");
+        fs::write(ws_path.join("stale.txt"), "stale content").expect("operation should succeed");
 
         // Create should replace with correct epoch
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert_eq!(info.epoch, epoch);
         // Old content removed
         assert!(!ws_path.join("stale.txt").exists());
@@ -677,11 +688,13 @@ mod tests {
     fn test_create_missing_epoch_snapshot() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("no-snap-ws").unwrap();
+        let ws_name = WorkspaceId::new("no-snap-ws").expect("operation should succeed");
 
         // Use an epoch that has no snapshot
-        let missing_epoch = EpochId::new(&"f".repeat(40)).unwrap();
-        let err = backend.create(&ws_name, &missing_epoch).unwrap_err();
+        let missing_epoch = EpochId::new(&"f".repeat(40)).expect("operation should succeed");
+        let err = backend
+            .create(&ws_name, &missing_epoch)
+            .expect_err("operation should fail");
         assert!(
             matches!(err, ReflinkBackendError::EpochSnapshotMissing { .. }),
             "expected EpochSnapshotMissing: {err}"
@@ -694,16 +707,18 @@ mod tests {
     fn test_exists_false_for_nonexistent() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        assert!(!backend.exists(&WorkspaceId::new("nope").unwrap()));
+        assert!(!backend.exists(&WorkspaceId::new("nope").expect("operation should succeed")));
     }
 
     #[test]
     fn test_exists_true_after_create() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("exists-ws").unwrap();
+        let ws_name = WorkspaceId::new("exists-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(backend.exists(&ws_name));
     }
 
@@ -712,10 +727,10 @@ mod tests {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
         let ws_path = root.join("ws").join("incomplete");
-        fs::create_dir_all(&ws_path).unwrap();
+        fs::create_dir_all(&ws_path).expect("operation should succeed");
         // No .maw-epoch file → not a valid workspace
 
-        let ws_name = WorkspaceId::new("incomplete").unwrap();
+        let ws_name = WorkspaceId::new("incomplete").expect("operation should succeed");
         assert!(!backend.exists(&ws_name));
     }
 
@@ -725,12 +740,14 @@ mod tests {
     fn test_destroy_workspace() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("destroy-ws").unwrap();
+        let ws_name = WorkspaceId::new("destroy-ws").expect("operation should succeed");
 
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(info.path.exists());
 
-        backend.destroy(&ws_name).unwrap();
+        backend.destroy(&ws_name).expect("operation should succeed");
         assert!(!info.path.exists());
         assert!(!backend.exists(&ws_name));
     }
@@ -739,30 +756,36 @@ mod tests {
     fn test_destroy_idempotent() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("idem-destroy").unwrap();
+        let ws_name = WorkspaceId::new("idem-destroy").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
-        backend.destroy(&ws_name).unwrap();
-        backend.destroy(&ws_name).unwrap(); // second call is a no-op
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed"); // second call is a no-op
     }
 
     #[test]
     fn test_destroy_never_existed() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("no-such-ws").unwrap();
-        backend.destroy(&ws_name).unwrap(); // should not error
+        let ws_name = WorkspaceId::new("no-such-ws").expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed"); // should not error
     }
 
     #[test]
     fn test_create_after_destroy() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("recreate-ws").unwrap();
+        let ws_name = WorkspaceId::new("recreate-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
-        backend.destroy(&ws_name).unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
         assert!(info.path.exists());
         assert!(backend.exists(&ws_name));
     }
@@ -773,7 +796,7 @@ mod tests {
     fn test_list_empty_no_workspaces() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert!(infos.is_empty());
     }
 
@@ -781,11 +804,13 @@ mod tests {
     fn test_list_single_workspace() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("list-ws").unwrap();
+        let ws_name = WorkspaceId::new("list-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 1, "expected 1: {infos:?}");
         assert_eq!(infos[0].id, ws_name);
         assert_eq!(infos[0].epoch, epoch);
@@ -797,12 +822,16 @@ mod tests {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
 
-        let a = WorkspaceId::new("alpha").unwrap();
-        let b = WorkspaceId::new("beta").unwrap();
-        backend.create(&a, &epoch).unwrap();
-        backend.create(&b, &epoch).unwrap();
+        let a = WorkspaceId::new("alpha").expect("operation should succeed");
+        let b = WorkspaceId::new("beta").expect("operation should succeed");
+        backend
+            .create(&a, &epoch)
+            .expect("operation should succeed");
+        backend
+            .create(&b, &epoch)
+            .expect("operation should succeed");
 
-        let mut infos = backend.list().unwrap();
+        let mut infos = backend.list().expect("operation should succeed");
         assert_eq!(infos.len(), 2, "expected 2: {infos:?}");
         infos.sort_by(|x, y| x.id.as_str().cmp(y.id.as_str()));
         assert_eq!(infos[0].id.as_str(), "alpha");
@@ -813,12 +842,14 @@ mod tests {
     fn test_list_excludes_destroyed_workspace() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("gone-ws").unwrap();
+        let ws_name = WorkspaceId::new("gone-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
-        backend.destroy(&ws_name).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+        backend.destroy(&ws_name).expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert!(
             infos.is_empty(),
             "destroyed workspace must not appear: {infos:?}"
@@ -829,14 +860,16 @@ mod tests {
     fn test_list_skips_non_workspace_dirs() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("real-ws").unwrap();
+        let ws_name = WorkspaceId::new("real-ws").expect("operation should succeed");
 
-        backend.create(&ws_name, &epoch).unwrap();
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // Create a directory with no .maw-epoch (not a workspace)
-        fs::create_dir_all(root.join("ws").join("not-a-ws")).unwrap();
+        fs::create_dir_all(root.join("ws").join("not-a-ws")).expect("operation should succeed");
 
-        let infos = backend.list().unwrap();
+        let infos = backend.list().expect("operation should succeed");
         assert_eq!(
             infos.len(),
             1,
@@ -851,10 +884,14 @@ mod tests {
     fn test_snapshot_empty_no_changes() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-clean").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-clean").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.is_empty(), "no changes expected: {snap:?}");
     }
 
@@ -862,12 +899,16 @@ mod tests {
     fn test_snapshot_added_file() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-add").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("newfile.txt"), "hello").unwrap();
+        fs::write(info.path.join("newfile.txt"), "hello").expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert_eq!(snap.added.len(), 1, "expected 1 added: {snap:?}");
         assert_eq!(snap.added[0], PathBuf::from("newfile.txt"));
         assert!(snap.modified.is_empty());
@@ -878,12 +919,16 @@ mod tests {
     fn test_snapshot_modified_file() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-mod").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-mod").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("README.md"), "# Modified").unwrap();
+        fs::write(info.path.join("README.md"), "# Modified").expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.added.is_empty(), "no adds: {snap:?}");
         assert_eq!(snap.modified.len(), 1, "expected 1 modified: {snap:?}");
         assert_eq!(snap.modified[0], PathBuf::from("README.md"));
@@ -894,12 +939,16 @@ mod tests {
     fn test_snapshot_deleted_file() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-del").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-del").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::remove_file(info.path.join("README.md")).unwrap();
+        fs::remove_file(info.path.join("README.md")).expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.added.is_empty());
         assert!(snap.modified.is_empty());
         assert_eq!(snap.deleted.len(), 1, "expected 1 deleted: {snap:?}");
@@ -910,12 +959,17 @@ mod tests {
     fn test_snapshot_nested_file_modified() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-nested").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-nested").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("src").join("lib.rs"), "pub fn changed() {}").unwrap();
+        fs::write(info.path.join("src").join("lib.rs"), "pub fn changed() {}")
+            .expect("operation should succeed");
 
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         assert!(snap.added.is_empty());
         assert_eq!(snap.modified.len(), 1, "expected 1 modified: {snap:?}");
         assert_eq!(snap.modified[0], PathBuf::from("src/lib.rs"));
@@ -926,11 +980,15 @@ mod tests {
     fn test_snapshot_epoch_file_excluded() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("snap-exclude").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("snap-exclude").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
         // The .maw-epoch file must not appear in the snapshot
-        let snap = backend.snapshot(&ws_name).unwrap();
+        let snap = backend
+            .snapshot(&ws_name)
+            .expect("operation should succeed");
         let has_epoch_file = snap
             .added
             .iter()
@@ -944,9 +1002,11 @@ mod tests {
     fn test_snapshot_nonexistent_workspace() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("no-such").unwrap();
+        let ws_name = WorkspaceId::new("no-such").expect("operation should succeed");
 
-        let err = backend.snapshot(&ws_name).unwrap_err();
+        let err = backend
+            .snapshot(&ws_name)
+            .expect_err("operation should fail");
         assert!(
             matches!(err, ReflinkBackendError::NotFound { .. }),
             "expected NotFound: {err}"
@@ -959,10 +1019,12 @@ mod tests {
     fn test_status_clean_workspace() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("status-clean").unwrap();
-        backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("status-clean").expect("operation should succeed");
+        backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert_eq!(status.base_epoch.as_str(), epoch.as_str());
         assert!(
             status.is_clean(),
@@ -976,12 +1038,14 @@ mod tests {
     fn test_status_modified_file() {
         let (_temp, root, epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("status-mod").unwrap();
-        let info = backend.create(&ws_name, &epoch).unwrap();
+        let ws_name = WorkspaceId::new("status-mod").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
 
-        fs::write(info.path.join("README.md"), "# Modified").unwrap();
+        fs::write(info.path.join("README.md"), "# Modified").expect("operation should succeed");
 
-        let status = backend.status(&ws_name).unwrap();
+        let status = backend.status(&ws_name).expect("operation should succeed");
         assert_eq!(status.dirty_count(), 1);
         assert!(
             status
@@ -997,9 +1061,9 @@ mod tests {
     fn test_status_nonexistent_workspace() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("no-such").unwrap();
+        let ws_name = WorkspaceId::new("no-such").expect("operation should succeed");
 
-        let err = backend.status(&ws_name).unwrap_err();
+        let err = backend.status(&ws_name).expect_err("operation should fail");
         assert!(
             matches!(err, ReflinkBackendError::NotFound { .. }),
             "expected NotFound: {err}"
@@ -1012,7 +1076,7 @@ mod tests {
     fn test_workspace_path() {
         let (_temp, root, _epoch) = setup_repo_with_snapshot();
         let backend = RefLinkBackend::new(root.clone());
-        let ws_name = WorkspaceId::new("path-test").unwrap();
+        let ws_name = WorkspaceId::new("path-test").expect("operation should succeed");
         assert_eq!(backend.workspace_path(&ws_name), root.join("ws/path-test"));
     }
 
@@ -1020,13 +1084,13 @@ mod tests {
 
     #[test]
     fn test_diff_dirs_identical() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let base = temp.path().join("base");
         let ws = temp.path().join("ws");
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&ws).unwrap();
-        fs::write(base.join("file.txt"), "hello").unwrap();
-        fs::write(ws.join("file.txt"), "hello").unwrap();
+        fs::create_dir_all(&base).expect("operation should succeed");
+        fs::create_dir_all(&ws).expect("operation should succeed");
+        fs::write(base.join("file.txt"), "hello").expect("operation should succeed");
+        fs::write(ws.join("file.txt"), "hello").expect("operation should succeed");
 
         let snap = diff_dirs(&base, &ws);
         assert!(snap.is_empty());
@@ -1034,12 +1098,12 @@ mod tests {
 
     #[test]
     fn test_diff_dirs_added() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let base = temp.path().join("base");
         let ws = temp.path().join("ws");
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&ws).unwrap();
-        fs::write(ws.join("new.txt"), "new").unwrap();
+        fs::create_dir_all(&base).expect("operation should succeed");
+        fs::create_dir_all(&ws).expect("operation should succeed");
+        fs::write(ws.join("new.txt"), "new").expect("operation should succeed");
 
         let snap = diff_dirs(&base, &ws);
         assert_eq!(snap.added, vec![PathBuf::from("new.txt")]);
@@ -1049,13 +1113,13 @@ mod tests {
 
     #[test]
     fn test_diff_dirs_modified() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let base = temp.path().join("base");
         let ws = temp.path().join("ws");
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&ws).unwrap();
-        fs::write(base.join("file.txt"), "original").unwrap();
-        fs::write(ws.join("file.txt"), "changed").unwrap();
+        fs::create_dir_all(&base).expect("operation should succeed");
+        fs::create_dir_all(&ws).expect("operation should succeed");
+        fs::write(base.join("file.txt"), "original").expect("operation should succeed");
+        fs::write(ws.join("file.txt"), "changed").expect("operation should succeed");
 
         let snap = diff_dirs(&base, &ws);
         assert!(snap.added.is_empty());
@@ -1065,12 +1129,12 @@ mod tests {
 
     #[test]
     fn test_diff_dirs_deleted() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let base = temp.path().join("base");
         let ws = temp.path().join("ws");
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&ws).unwrap();
-        fs::write(base.join("old.txt"), "old").unwrap();
+        fs::create_dir_all(&base).expect("operation should succeed");
+        fs::create_dir_all(&ws).expect("operation should succeed");
+        fs::write(base.join("old.txt"), "old").expect("operation should succeed");
 
         let snap = diff_dirs(&base, &ws);
         assert!(snap.added.is_empty());
@@ -1081,11 +1145,11 @@ mod tests {
     #[test]
     fn test_diff_dirs_missing_base() {
         // If the epoch snapshot doesn't exist, all workspace files are "added"
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let base = temp.path().join("nonexistent-base");
         let ws = temp.path().join("ws");
-        fs::create_dir_all(&ws).unwrap();
-        fs::write(ws.join("file.txt"), "hello").unwrap();
+        fs::create_dir_all(&ws).expect("operation should succeed");
+        fs::write(ws.join("file.txt"), "hello").expect("operation should succeed");
 
         let snap = diff_dirs(&base, &ws);
         assert_eq!(snap.added, vec![PathBuf::from("file.txt")]);
@@ -1095,13 +1159,13 @@ mod tests {
 
     #[test]
     fn test_diff_dirs_excludes_epoch_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let base = temp.path().join("base");
         let ws = temp.path().join("ws");
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&base).expect("operation should succeed");
+        fs::create_dir_all(&ws).expect("operation should succeed");
         // .maw-epoch only in ws (as it would be after create)
-        fs::write(ws.join(EPOCH_FILE), "a".repeat(40) + "\n").unwrap();
+        fs::write(ws.join(EPOCH_FILE), "a".repeat(40) + "\n").expect("operation should succeed");
 
         let snap = diff_dirs(&base, &ws);
         // .maw-epoch is excluded, so snap should be empty
@@ -1113,20 +1177,25 @@ mod tests {
 
     #[test]
     fn test_recursive_copy_fallback() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("operation should succeed");
         let src = temp.path().join("src");
         let dst = temp.path().join("dst");
-        fs::create_dir_all(src.join("subdir")).unwrap();
-        fs::write(src.join("file.txt"), "hello").unwrap();
-        fs::write(src.join("subdir").join("nested.txt"), "nested").unwrap();
+        fs::create_dir_all(src.join("subdir")).expect("operation should succeed");
+        fs::write(src.join("file.txt"), "hello").expect("operation should succeed");
+        fs::write(src.join("subdir").join("nested.txt"), "nested")
+            .expect("operation should succeed");
 
-        RefLinkBackend::recursive_copy(&src, &dst).unwrap();
+        RefLinkBackend::recursive_copy(&src, &dst).expect("operation should succeed");
 
         assert!(dst.join("file.txt").exists());
         assert!(dst.join("subdir").join("nested.txt").exists());
-        assert_eq!(fs::read_to_string(dst.join("file.txt")).unwrap(), "hello");
         assert_eq!(
-            fs::read_to_string(dst.join("subdir").join("nested.txt")).unwrap(),
+            fs::read_to_string(dst.join("file.txt")).expect("operation should succeed"),
+            "hello"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.join("subdir").join("nested.txt"))
+                .expect("operation should succeed"),
             "nested"
         );
     }

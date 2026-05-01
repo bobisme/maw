@@ -47,9 +47,9 @@ fn create_test_blob(repo: &Path, content: &str) -> String {
     child
         .stdin
         .as_mut()
-        .unwrap()
+        .expect("operation should succeed")
         .write_all(content.as_bytes())
-        .unwrap();
+        .expect("operation should succeed");
     let out = child.wait_with_output().expect("failed to wait for git");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -81,8 +81,8 @@ fn clone_from_bare(bare_remote: &Path, ws_name: &str) -> (std::path::PathBuf, te
         &std::env::temp_dir(),
         &[
             "clone",
-            bare_remote.to_str().unwrap(),
-            root.to_str().unwrap(),
+            bare_remote.to_str().expect("operation should succeed"),
+            root.to_str().expect("operation should succeed"),
         ],
     );
 
@@ -92,18 +92,20 @@ fn clone_from_bare(bare_remote: &Path, ws_name: &str) -> (std::path::PathBuf, te
 
     // Initialize Manifold layout in the clone.
     let manifold_dir = root.join(".manifold");
-    std::fs::create_dir_all(manifold_dir.join("epochs")).unwrap();
-    std::fs::create_dir_all(manifold_dir.join("artifacts").join("ws")).unwrap();
-    std::fs::create_dir_all(manifold_dir.join("artifacts").join("merge")).unwrap();
+    std::fs::create_dir_all(manifold_dir.join("epochs")).expect("operation should succeed");
+    std::fs::create_dir_all(manifold_dir.join("artifacts").join("ws"))
+        .expect("operation should succeed");
+    std::fs::create_dir_all(manifold_dir.join("artifacts").join("merge"))
+        .expect("operation should succeed");
     std::fs::write(
         manifold_dir.join("config.toml"),
         "[repo]\nbranch = \"main\"\n",
     )
-    .unwrap();
+    .expect("operation should succeed");
 
     // Create ws/ layout.
     let ws_dir = root.join("ws");
-    std::fs::create_dir_all(&ws_dir).unwrap();
+    std::fs::create_dir_all(&ws_dir).expect("operation should succeed");
     let ws_default = ws_dir.join(ws_name);
     let head = git_ok(&root, &["rev-parse", "HEAD"]).trim().to_string();
     git_ok(
@@ -112,7 +114,7 @@ fn clone_from_bare(bare_remote: &Path, ws_name: &str) -> (std::path::PathBuf, te
             "worktree",
             "add",
             "--detach",
-            ws_default.to_str().unwrap(),
+            ws_default.to_str().expect("operation should succeed"),
             &head,
         ],
     );

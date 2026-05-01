@@ -8,8 +8,12 @@ use gix::bstr::ByteSlice;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::{EntryMode, GitOid, IndexEntry};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "checkout is a sequential git plumbing operation"
+)]
 pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), GitError> {
     let gix_oid = gix::ObjectId::from_bytes_or_panic(oid.as_bytes());
 
@@ -52,7 +56,13 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     let tree_paths: HashSet<String> = index_file
         .entries()
         .iter()
-        .filter_map(|entry| entry.path(&index_file).to_str().ok().map(|s| s.to_owned()))
+        .filter_map(|entry| {
+            entry
+                .path(&index_file)
+                .to_str()
+                .ok()
+                .map(std::borrow::ToOwned::to_owned)
+        })
         .collect();
 
     // Get checkout options from the repository configuration.
@@ -130,9 +140,8 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
     #[cfg(feature = "lfs")]
     for rel_path in &smudged_paths {
         let full = workdir.join(rel_path);
-        let meta = match gix::index::fs::Metadata::from_path_no_follow(&full) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(meta) = gix::index::fs::Metadata::from_path_no_follow(&full) else {
+            continue;
         };
         let Ok(new_stat) = gix::index::entry::Stat::from_fs(&meta) else {
             continue;
@@ -153,7 +162,7 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
         let index_path = repo.repo.index_path();
         let mut persisted = gix::index::File::from_state(index_file.into(), index_path);
         persisted
-            .write(Default::default())
+            .write(gix::index::write::Options::default())
             .map_err(|e| GitError::BackendError {
                 message: format!("failed to write index after checkout: {e}"),
             })?;
@@ -191,23 +200,16 @@ pub fn lfs_smudge_worktree_at(ws_path: &Path, target_commit: &str) -> Result<(),
     let mut restored: Vec<String> = Vec::new();
     if let Ok(obj) = repo.repo.find_object(target_oid) {
         let tree_id = match obj.kind {
-            gix::object::Kind::Commit => obj.into_commit().tree_id().ok().map(|t| t.detach()),
+            gix::object::Kind::Commit => obj.into_commit().tree_id().ok().map(gix::Id::detach),
             gix::object::Kind::Tree => Some(target_oid),
             _ => None,
         };
-        if let Some(tid) = tree_id {
-            if let Ok(tree) = repo.repo.find_tree(tid) {
-                let attrs = maw_lfs::AttrsMatcher::from_workdir(ws_path)
-                    .unwrap_or_else(|_| maw_lfs::AttrsMatcher::empty());
-                restore_missing_lfs_from_tree(
-                    &repo,
-                    &tree,
-                    ws_path,
-                    &attrs,
-                    String::new(),
-                    &mut restored,
-                );
-            }
+        if let Some(tid) = tree_id
+            && let Ok(tree) = repo.repo.find_tree(tid)
+        {
+            let attrs = maw_lfs::AttrsMatcher::from_workdir(ws_path)
+                .unwrap_or_else(|_| maw_lfs::AttrsMatcher::empty());
+            restore_missing_lfs_from_tree(&repo, &tree, ws_path, &attrs, "", &mut restored);
         }
     }
 
@@ -248,7 +250,7 @@ pub fn lfs_smudge_worktree_at(ws_path: &Path, target_commit: &str) -> Result<(),
     let index_path = repo.repo.index_path();
     let mut persisted = gix::index::File::from_state(index_state, index_path);
     persisted
-        .write(Default::default())
+        .write(gix::index::write::Options::default())
         .map_err(|e| GitError::BackendError {
             message: format!("failed to rewrite index after smudge: {e}"),
         })?;
@@ -264,7 +266,7 @@ fn restore_missing_lfs_from_tree(
     tree: &gix::Tree<'_>,
     workdir: &Path,
     attrs: &maw_lfs::AttrsMatcher,
-    prefix: String,
+    prefix: &str,
     restored: &mut Vec<String>,
 ) {
     use gix::bstr::ByteSlice;
@@ -281,7 +283,14 @@ fn restore_missing_lfs_from_tree(
                 } else {
                     format!("{prefix}/{name}")
                 };
-                restore_missing_lfs_from_tree(repo, &subtree, workdir, attrs, sub_prefix, restored);
+                restore_missing_lfs_from_tree(
+                    repo,
+                    &subtree,
+                    workdir,
+                    attrs,
+                    &sub_prefix,
+                    restored,
+                );
             }
             continue;
         }
@@ -310,7 +319,7 @@ fn restore_missing_lfs_from_tree(
         let Ok(obj) = repo.repo.find_object(blob_id) else {
             continue;
         };
-        let data = obj.data.to_vec();
+        let data = obj.data.clone();
         if data.is_empty() {
             // Empty file — just touch it.
             if let Some(parent) = full_path.parent() {
@@ -337,7 +346,7 @@ fn restore_missing_lfs_from_tree(
 /// `worktree_impl::worktree_add` and `checkout_tree`.
 /// Returns the repo-relative paths of files that were smudged.
 #[cfg(feature = "lfs")]
-pub(crate) fn smudge_lfs_pointers_public(
+pub fn smudge_lfs_pointers_public(
     index: &gix::index::File,
     workdir: &Path,
     repo: &GixRepo,
@@ -347,6 +356,10 @@ pub(crate) fn smudge_lfs_pointers_public(
 
 /// Returns the repo-relative paths of files that were successfully smudged.
 #[cfg(feature = "lfs")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "smudge pass handles restore, parse, and atomic write cases"
+)]
 fn smudge_lfs_pointers(
     index: &gix::index::File,
     workdir: &Path,
@@ -376,9 +389,8 @@ fn smudge_lfs_pointers(
         if !is_file {
             continue;
         }
-        let path_str = match entry.path(index).to_str() {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Ok(path_str) = entry.path(index).to_str() else {
+            continue;
         };
         if !attrs.is_lfs(path_str) {
             continue;
@@ -393,9 +405,9 @@ fn smudge_lfs_pointers(
         let meta = std::fs::metadata(&full_path);
         if meta.is_err() {
             // File missing — read the committed blob (should be pointer text).
-            let blob_oid = gix::ObjectId::from(entry.id);
+            let blob_oid = entry.id;
             if let Ok(obj) = repo.repo.find_object(blob_oid) {
-                let data = obj.data.to_vec();
+                let data = obj.data.clone();
                 if maw_lfs::looks_like_pointer(&data) {
                     // Ensure parent directory exists.
                     if let Some(parent) = full_path.parent() {
@@ -414,21 +426,21 @@ fn smudge_lfs_pointers(
         }
 
         // Pointer cap is 1024 bytes per spec; anything larger is real content.
-        let meta = meta.unwrap();
+        let Ok(meta) = meta else {
+            continue;
+        };
         if meta.len() > 1024 {
             continue;
         }
 
-        let bytes = match std::fs::read(&full_path) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Ok(bytes) = std::fs::read(&full_path) else {
+            continue;
         };
         if !maw_lfs::looks_like_pointer(&bytes) {
             continue;
         }
-        let pointer = match maw_lfs::Pointer::parse(&bytes) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let Ok(pointer) = maw_lfs::Pointer::parse(&bytes) else {
+            continue;
         };
 
         let mut reader = match store.open_object(&pointer.oid) {
@@ -489,15 +501,13 @@ fn remove_stale_files(
     dir: &Path,
     tree_paths: &HashSet<String>,
 ) -> Result<(), GitError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
     };
 
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entry) = entry else {
+            continue;
         };
         let path = entry.path();
         let name = entry.file_name();
@@ -518,7 +528,7 @@ fn remove_stale_files(
                 .unwrap_or_default();
             if !rel.is_empty() && !tree_paths.contains(&rel) {
                 std::fs::remove_file(&path).map_err(|e| GitError::BackendError {
-                    message: format!("failed to remove stale file '{}': {e}", rel),
+                    message: format!("failed to remove stale file '{rel}': {e}"),
                 })?;
             }
         }
@@ -597,7 +607,7 @@ pub fn write_index(repo: &GixRepo, entries: &[IndexEntry]) -> Result<(), GitErro
     for ie in entries {
         let mode = entry_mode_to_gix_mode(ie.mode);
         let id = gix::ObjectId::from_bytes_or_panic(ie.oid.as_bytes());
-        let stat: gix::index::entry::Stat = Default::default();
+        let stat = gix::index::entry::Stat::default();
         let flags = gix::index::entry::Flags::empty();
 
         state.dangerously_push_entry(stat, id, flags, mode, ie.path.as_str().into());
@@ -608,7 +618,7 @@ pub fn write_index(repo: &GixRepo, entries: &[IndexEntry]) -> Result<(), GitErro
     let index_path = repo.repo.index_path();
     let mut index_file = gix::index::File::from_state(state, index_path);
     index_file
-        .write(Default::default())
+        .write(gix::index::write::Options::default())
         .map_err(|e| GitError::BackendError {
             message: format!("failed to write index: {e}"),
         })?;
@@ -616,7 +626,7 @@ pub fn write_index(repo: &GixRepo, entries: &[IndexEntry]) -> Result<(), GitErro
     Ok(())
 }
 
-fn gix_mode_to_entry_mode(mode: gix::index::entry::Mode) -> Option<EntryMode> {
+const fn gix_mode_to_entry_mode(mode: gix::index::entry::Mode) -> Option<EntryMode> {
     Some(match mode {
         gix::index::entry::Mode::FILE => EntryMode::Blob,
         gix::index::entry::Mode::FILE_EXECUTABLE => EntryMode::BlobExecutable,
@@ -627,7 +637,7 @@ fn gix_mode_to_entry_mode(mode: gix::index::entry::Mode) -> Option<EntryMode> {
     })
 }
 
-fn entry_mode_to_gix_mode(mode: EntryMode) -> gix::index::entry::Mode {
+const fn entry_mode_to_gix_mode(mode: EntryMode) -> gix::index::entry::Mode {
     match mode {
         EntryMode::Blob => gix::index::entry::Mode::FILE,
         EntryMode::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,

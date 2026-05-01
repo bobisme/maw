@@ -232,11 +232,11 @@ mod tests {
     use crate::model::types::{EpochId, WorkspaceId};
 
     fn make_epoch() -> EpochId {
-        EpochId::new(&"a".repeat(40)).unwrap()
+        EpochId::new(&"a".repeat(40)).expect("operation should succeed")
     }
 
     fn make_ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn make_change(path: &str, kind: ChangeKind, content: Option<&[u8]>) -> FileChange {
@@ -674,11 +674,11 @@ mod tests {
         let entry_a = entries
             .iter()
             .find(|e| e.workspace_id.as_str() == "ws-a")
-            .unwrap();
+            .expect("operation should succeed");
         let entry_b = entries
             .iter()
             .find(|e| e.workspace_id.as_str() == "ws-b")
-            .unwrap();
+            .expect("operation should succeed");
 
         assert_eq!(entry_a.file_id, Some(fid_a));
         assert_eq!(entry_b.file_id, Some(fid_b));

@@ -638,9 +638,9 @@ impl fmt::Display for ConflictAtom {
 /// use maw_core::model::patch::FileId;
 /// use maw_core::model::types::EpochId;
 ///
-/// let oid = GitOid::new(&"a".repeat(40)).unwrap();
-/// let epoch = EpochId::new(&"e".repeat(40)).unwrap();
-/// let ts = OrderingKey::new(epoch.clone(), "ws-1".parse().unwrap(), 1, 1000);
+/// let oid = GitOid::new(&"a".repeat(40)).expect("operation should succeed");
+/// let epoch = EpochId::new(&"e".repeat(40)).expect("operation should succeed");
+/// let ts = OrderingKey::new(epoch.clone(), "ws-1".parse().expect("operation should succeed"), 1, 1000);
 /// let side = ConflictSide::new("ws-1".into(), oid.clone(), ts);
 ///
 /// let conflict = Conflict::AddAdd {
@@ -648,7 +648,7 @@ impl fmt::Display for ConflictAtom {
 ///     sides: vec![side],
 /// };
 ///
-/// let json = serde_json::to_string(&conflict).unwrap();
+/// let json = serde_json::to_string(&conflict).expect("operation should succeed");
 /// assert!(json.contains("\"type\":\"add_add\""));
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -898,7 +898,7 @@ mod tests {
 
     // Helper to create a test GitOid
     fn test_oid(c: char) -> GitOid {
-        GitOid::new(&c.to_string().repeat(40)).unwrap()
+        GitOid::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     // Helper to create a test FileId
@@ -908,8 +908,13 @@ mod tests {
 
     // Helper to create a test OrderingKey
     fn test_ordering_key(ws: &str, seq: u64) -> OrderingKey {
-        let epoch = EpochId::new(&"e".repeat(40)).unwrap();
-        OrderingKey::new(epoch, ws.parse().unwrap(), seq, 1_700_000_000_000)
+        let epoch = EpochId::new(&"e".repeat(40)).expect("operation should succeed");
+        OrderingKey::new(
+            epoch,
+            ws.parse().expect("operation should succeed"),
+            seq,
+            1_700_000_000_000,
+        )
     }
 
     // Helper to create a test ConflictSide
@@ -945,8 +950,8 @@ mod tests {
     #[test]
     fn conflict_side_serde_roundtrip() {
         let side = test_side("bob", 'b', 42);
-        let json = serde_json::to_string(&side).unwrap();
-        let decoded: ConflictSide = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&side).expect("operation should succeed");
+        let decoded: ConflictSide = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded.workspace, side.workspace);
         assert_eq!(decoded.content, side.content);
         assert_eq!(decoded.timestamp.seq, side.timestamp.seq);
@@ -984,30 +989,30 @@ mod tests {
     #[test]
     fn region_lines_serde_roundtrip() {
         let r = Region::lines(42, 67);
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"kind\":\"lines\""));
         assert!(json.contains("\"start\":42"));
         assert!(json.contains("\"end\":67"));
-        let decoded: Region = serde_json::from_str(&json).unwrap();
+        let decoded: Region = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, r);
     }
 
     #[test]
     fn region_ast_node_serde_roundtrip() {
         let r = Region::ast_node("function_item", Some("foo".into()), 100, 200);
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"kind\":\"ast_node\""));
         assert!(json.contains("\"node_kind\":\"function_item\""));
-        let decoded: Region = serde_json::from_str(&json).unwrap();
+        let decoded: Region = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, r);
     }
 
     #[test]
     fn region_whole_file_serde_roundtrip() {
         let r = Region::whole_file();
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"kind\":\"whole_file\""));
-        let decoded: Region = serde_json::from_str(&json).unwrap();
+        let decoded: Region = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, r);
     }
 
@@ -1051,8 +1056,9 @@ mod tests {
             ConflictReason::custom("custom"),
         ];
         for reason in &reasons {
-            let json = serde_json::to_string(reason).unwrap();
-            let decoded: ConflictReason = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(reason).expect("operation should succeed");
+            let decoded: ConflictReason =
+                serde_json::from_str(&json).expect("operation should succeed");
             assert_eq!(decoded.variant_name(), reason.variant_name());
             assert_eq!(decoded.description(), reason.description());
         }
@@ -1079,8 +1085,8 @@ mod tests {
     #[test]
     fn atom_edit_serde_roundtrip() {
         let edit = AtomEdit::new("bob", Region::lines(20, 30), "new code here");
-        let json = serde_json::to_string(&edit).unwrap();
-        let decoded: AtomEdit = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&edit).expect("operation should succeed");
+        let decoded: AtomEdit = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, edit);
     }
 
@@ -1144,12 +1150,12 @@ mod tests {
             ],
             ConflictReason::overlapping("overlap at lines 3-5"),
         );
-        let json = serde_json::to_string_pretty(&atom).unwrap();
+        let json = serde_json::to_string_pretty(&atom).expect("operation should succeed");
         assert!(json.contains("\"base_region\""));
         assert!(json.contains("\"edits\""));
         assert!(json.contains("\"reason\""));
 
-        let decoded: ConflictAtom = serde_json::from_str(&json).unwrap();
+        let decoded: ConflictAtom = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded, atom);
     }
 
@@ -1276,11 +1282,11 @@ mod tests {
             atoms: vec![test_atom("imports block")],
         };
 
-        let json = serde_json::to_string_pretty(&conflict).unwrap();
+        let json = serde_json::to_string_pretty(&conflict).expect("operation should succeed");
         assert!(json.contains("\"type\": \"content\""));
         assert!(json.contains("\"path\": \"src/main.rs\""));
 
-        let decoded: Conflict = serde_json::from_str(&json).unwrap();
+        let decoded: Conflict = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded.variant_name(), "content");
         assert_eq!(decoded.path(), &PathBuf::from("src/main.rs"));
     }
@@ -1294,7 +1300,7 @@ mod tests {
             sides: vec![test_side("ws-1", 'a', 1), test_side("ws-2", 'b', 1)],
             atoms: vec![],
         };
-        let json = serde_json::to_string(&conflict).unwrap();
+        let json = serde_json::to_string(&conflict).expect("operation should succeed");
         assert!(json.contains("\"type\":\"content\""));
     }
 
@@ -1322,10 +1328,10 @@ mod tests {
             sides: vec![test_side("ws-a", 'a', 5), test_side("ws-b", 'b', 3)],
         };
 
-        let json = serde_json::to_string(&conflict).unwrap();
+        let json = serde_json::to_string(&conflict).expect("operation should succeed");
         assert!(json.contains("\"type\":\"add_add\""));
 
-        let decoded: Conflict = serde_json::from_str(&json).unwrap();
+        let decoded: Conflict = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded.variant_name(), "add_add");
     }
 
@@ -1359,10 +1365,10 @@ mod tests {
             modified_content: test_oid('a'),
         };
 
-        let json = serde_json::to_string_pretty(&conflict).unwrap();
+        let json = serde_json::to_string_pretty(&conflict).expect("operation should succeed");
         assert!(json.contains("\"type\": \"modify_delete\""));
 
-        let decoded: Conflict = serde_json::from_str(&json).unwrap();
+        let decoded: Conflict = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded.variant_name(), "modify_delete");
         if let Conflict::ModifyDelete {
             modifier, deleter, ..
@@ -1421,10 +1427,10 @@ mod tests {
             ],
         };
 
-        let json = serde_json::to_string(&conflict).unwrap();
+        let json = serde_json::to_string(&conflict).expect("operation should succeed");
         assert!(json.contains("\"type\":\"divergent_rename\""));
 
-        let decoded: Conflict = serde_json::from_str(&json).unwrap();
+        let decoded: Conflict = serde_json::from_str(&json).expect("operation should succeed");
         assert_eq!(decoded.variant_name(), "divergent_rename");
     }
 
@@ -1525,8 +1531,8 @@ mod tests {
         ];
 
         for variant in &variants {
-            let json = serde_json::to_string(variant).unwrap();
-            let decoded: Conflict = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(variant).expect("operation should succeed");
+            let decoded: Conflict = serde_json::from_str(&json).expect("operation should succeed");
             assert_eq!(decoded.variant_name(), variant.variant_name());
         }
     }
@@ -1540,7 +1546,7 @@ mod tests {
             deleter: test_side("ws-2", 'b', 1),
             modified_content: test_oid('a'),
         };
-        let json = serde_json::to_string(&conflict).unwrap();
+        let json = serde_json::to_string(&conflict).expect("operation should succeed");
         assert!(json.contains("\"modified_content\""));
         assert!(json.contains("\"file_id\""));
         assert!(!json.contains("\"modifiedContent\""));
@@ -1588,7 +1594,7 @@ mod tests {
 
         for (conflict, expected_name) in cases {
             assert_eq!(conflict.variant_name(), expected_name);
-            let json = serde_json::to_string(&conflict).unwrap();
+            let json = serde_json::to_string(&conflict).expect("operation should succeed");
             let expected_tag = format!("\"type\":\"{expected_name}\"");
             assert!(
                 json.contains(&expected_tag),

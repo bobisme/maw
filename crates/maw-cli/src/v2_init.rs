@@ -507,11 +507,12 @@ mod tests {
 
     #[test]
     fn greenfield_creates_valid_repo() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         // .git/ exists
         assert!(root.join(".git").exists(), ".git/ should exist");
@@ -525,11 +526,11 @@ mod tests {
 
     #[test]
     fn greenfield_creates_manifold_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        greenfield_init(&root, &InitOptions::default()).unwrap();
+        greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         assert!(root.join(".manifold").is_dir());
         assert!(root.join(".manifold/epochs").is_dir());
@@ -541,11 +542,12 @@ mod tests {
 
     #[test]
     fn greenfield_sets_epoch0() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         // refs/manifold/epoch/current exists and matches epoch0
         let ref_oid = read_ref(&result.repo_root, "refs/manifold/epoch/current");
@@ -558,11 +560,12 @@ mod tests {
 
     #[test]
     fn greenfield_creates_default_workspace() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         // ws/default/ exists
         assert!(result.default_workspace.is_dir());
@@ -574,13 +577,14 @@ mod tests {
 
     #[test]
     fn greenfield_rejects_existing_git() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
 
         // Create a .git dir manually
-        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).expect("operation should succeed");
 
-        let err = greenfield_init(root, &InitOptions::default()).unwrap_err();
+        let err =
+            greenfield_init(root, &InitOptions::default()).expect_err("operation should fail");
         assert!(
             matches!(err, InitError::AlreadyExists { .. }),
             "should reject existing .git/: {err}"
@@ -589,28 +593,30 @@ mod tests {
 
     #[test]
     fn greenfield_sets_bare_mode() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         let output = Command::new("git")
             .args(["config", "core.bare"])
             .current_dir(&result.repo_root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let val = String::from_utf8_lossy(&output.stdout);
         assert_eq!(val.trim(), "true", "core.bare should be true");
     }
 
     #[test]
     fn greenfield_uses_repo_git_common_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         assert!(result.repo_root.join(".git").is_file());
         assert!(result.repo_root.join(REPO_GIT_DIR).is_dir());
@@ -622,14 +628,14 @@ mod tests {
 
     #[test]
     fn greenfield_custom_branch() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let opts = InitOptions {
             branch: "develop".to_owned(),
         };
-        let result = greenfield_init(&root, &opts).unwrap();
+        let result = greenfield_init(&root, &opts).expect("operation should succeed");
 
         assert_eq!(result.branch, "develop");
 
@@ -640,11 +646,12 @@ mod tests {
 
     #[test]
     fn greenfield_epoch0_is_valid_oid() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         // EpochId validates as a proper 40-char hex OID
         assert_eq!(result.epoch0.as_str().len(), 40);
@@ -659,11 +666,12 @@ mod tests {
 
     #[test]
     fn greenfield_no_index_in_root() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         // Index file should be removed from common-dir (bare mode)
         let common_dir = git_common_dir(&result.repo_root);
@@ -675,18 +683,19 @@ mod tests {
 
     #[test]
     fn greenfield_workspace_at_correct_commit() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path().join("myrepo");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        let result = greenfield_init(&root, &InitOptions::default()).unwrap();
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
 
         // The workspace HEAD should be at epoch₀
         let ws_head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&result.default_workspace)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let ws_oid = String::from_utf8_lossy(&ws_head.stdout).trim().to_owned();
         assert_eq!(ws_oid, result.epoch0.as_str());
     }
@@ -696,7 +705,7 @@ mod tests {
         let result = InitResult {
             repo_root: PathBuf::from("/tmp/myrepo"),
             default_workspace: PathBuf::from("/tmp/myrepo/ws/default"),
-            epoch0: EpochId::new(&"a".repeat(40)).unwrap(),
+            epoch0: EpochId::new(&"a".repeat(40)).expect("operation should succeed"),
             branch: "main".to_owned(),
         };
         let display = format!("{result}");
@@ -911,6 +920,9 @@ impl Default for BrownfieldInitOptions {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if repository initialization fails.
 pub fn run() -> anyhow::Result<()> {
     // Warn (but don't block) if git is below the minimum supported version.
     crate::doctor::warn_git_version_if_old();
@@ -968,6 +980,10 @@ pub fn run() -> anyhow::Result<()> {
 /// # Idempotency
 /// Running this function twice is safe. If `ws/default/` already exists,
 /// it returns early with `already_initialized = true`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "brownfield init performs ordered filesystem and git migration checks"
+)]
 pub fn brownfield_init(
     root: &Path,
     opts: &BrownfieldInitOptions,
@@ -1362,9 +1378,7 @@ fn bf_workspace_git_usable(ws_path: &Path) -> bool {
 }
 
 fn bf_configured_branch(root: &Path) -> String {
-    MawConfig::load(root)
-        .map(|cfg| cfg.branch().to_string())
-        .unwrap_or_else(|_| "main".to_string())
+    MawConfig::load(root).map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string())
 }
 
 fn bf_ref_exists(root: &Path, ref_name: &str) -> bool {
@@ -1372,8 +1386,7 @@ fn bf_ref_exists(root: &Path, ref_name: &str) -> bool {
         .args(["show-ref", "--verify", "--quiet", ref_name])
         .current_dir(root)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn bf_get_ref_oid(root: &Path, ref_name: &str) -> Result<Option<EpochId>, BrownfieldInitError> {
@@ -1793,13 +1806,12 @@ fn bf_clean_root_tracked_files(
 /// files (locks/state/cache) even after tracked files are moved to ws/default/.
 /// We surface these explicitly so users don't miss manual cleanup.
 fn bf_warn_remaining_untracked_root_files(root: &Path) {
-    let output = match Command::new("git")
+    let Ok(output) = Command::new("git")
         .args(["status", "--porcelain=1", "--untracked-files=all"])
         .current_dir(root)
         .output()
-    {
-        Ok(out) => out,
-        Err(_) => return,
+    else {
+        return;
     };
 
     if !output.status.success() {
@@ -1913,30 +1925,30 @@ mod brownfield_tests {
             .args(["config", "user.name", "Test"])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Create files
-        fs::write(dir.join("README.md"), "# My Project\n").unwrap();
-        fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
-        fs::create_dir_all(dir.join("src")).unwrap();
-        fs::write(dir.join("src/lib.rs"), "// lib\n").unwrap();
+        fs::write(dir.join("README.md"), "# My Project\n").expect("operation should succeed");
+        fs::write(dir.join("main.rs"), "fn main() {}\n").expect("operation should succeed");
+        fs::create_dir_all(dir.join("src")).expect("operation should succeed");
+        fs::write(dir.join("src/lib.rs"), "// lib\n").expect("operation should succeed");
 
         // Commit
         Command::new("git")
             .args(["add", "."])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "initial commit"])
             .current_dir(dir)
@@ -1948,9 +1960,9 @@ mod brownfield_tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        EpochId::new(&oid).unwrap()
+        EpochId::new(&oid).expect("operation should succeed")
     }
 
     fn setup_legacy_initialized_repo(dir: &Path) -> EpochId {
@@ -1960,23 +1972,24 @@ mod brownfield_tests {
             .args(["config", "core.bare", "true"])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        layout::init_manifold_dir(dir).unwrap();
-        manifold_refs::write_ref(dir, manifold_refs::EPOCH_CURRENT, head.oid()).unwrap();
+        layout::init_manifold_dir(dir).expect("operation should succeed");
+        manifold_refs::write_ref(dir, manifold_refs::EPOCH_CURRENT, head.oid())
+            .expect("operation should succeed");
         manifold_refs::write_ref(
             dir,
             &manifold_refs::workspace_state_ref("default"),
             head.oid(),
         )
-        .unwrap();
+        .expect("operation should succeed");
 
-        fs::create_dir_all(dir.join("ws")).unwrap();
+        fs::create_dir_all(dir.join("ws")).expect("operation should succeed");
         Command::new("git")
             .args(["worktree", "add", "--detach", "ws/default", head.as_str()])
             .current_dir(dir)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         head
     }
@@ -2014,16 +2027,20 @@ mod brownfield_tests {
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout)
             .lines()
-            .filter_map(|line| line.strip_prefix("worktree ").map(|p| p.to_owned()))
+            .filter_map(|line| {
+                line.strip_prefix("worktree ")
+                    .map(std::borrow::ToOwned::to_owned)
+            })
             .collect()
     }
 
     #[test]
     fn brownfield_rejects_missing_git() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         // No .git/ here
-        let err = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap_err();
+        let err = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect_err("operation should fail");
         assert!(
             matches!(err, BrownfieldInitError::NotAGitRepo { .. }),
             "expected NotAGitRepo, got: {err}"
@@ -2032,7 +2049,7 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_rejects_empty_repo() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
 
         // Init git but make no commits
@@ -2040,24 +2057,25 @@ mod brownfield_tests {
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let err = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap_err();
+        let err = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect_err("operation should fail");
         assert!(
             matches!(err, BrownfieldInitError::EmptyRepo),
             "expected EmptyRepo, got: {err}"
@@ -2066,11 +2084,11 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_creates_manifold_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         assert!(root.join(".manifold").is_dir());
         assert!(root.join(".manifold/epochs").is_dir());
@@ -2080,27 +2098,30 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_sets_epoch_ref_to_head() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         let initial_head = setup_existing_repo(root);
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
 
         // epoch₀ matches initial HEAD
         assert_eq!(result.epoch0, initial_head);
 
         // refs/manifold/epoch/current points to HEAD
-        let ref_oid = read_ref(root, "refs/manifold/epoch/current").unwrap();
+        let ref_oid =
+            read_ref(root, "refs/manifold/epoch/current").expect("operation should succeed");
         assert_eq!(ref_oid, initial_head.as_str());
     }
 
     #[test]
     fn brownfield_creates_default_workspace() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
 
         assert!(result.default_workspace.is_dir());
         assert!(result.default_workspace.ends_with("ws/default"));
@@ -2113,17 +2134,17 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_sets_bare_mode() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["config", "core.bare"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let val = String::from_utf8_lossy(&out.stdout);
         assert_eq!(val.trim(), "true", "core.bare should be true");
         assert!(
@@ -2138,7 +2159,7 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_removes_tracked_files_from_root() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
@@ -2146,7 +2167,8 @@ mod brownfield_tests {
         assert!(root.join("README.md").exists());
         assert!(root.join("main.rs").exists());
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
 
         // After init: tracked files removed from root (now in ws/default/)
         assert!(
@@ -2166,14 +2188,14 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_can_preserve_root_tracked_files_when_cleanup_disabled() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
         let opts = BrownfieldInitOptions {
             clean_root_tracked_files: false,
         };
-        let result = brownfield_init(root, &opts).unwrap();
+        let result = brownfield_init(root, &opts).expect("operation should succeed");
 
         // Root tracked files are intentionally preserved.
         assert!(root.join("README.md").exists());
@@ -2187,29 +2209,35 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_cleans_empty_subdirs() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         // src/ should be removed since all its tracked files were cleaned
         assert!(
-            !root.join("src").exists() || fs::read_dir(root.join("src")).unwrap().next().is_none(),
+            !root.join("src").exists()
+                || fs::read_dir(root.join("src"))
+                    .expect("operation should succeed")
+                    .next()
+                    .is_none(),
             "src/ should be empty or removed after tracked file cleanup"
         );
     }
 
     #[test]
     fn brownfield_is_idempotent() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
-        let result1 = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result1 = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(!result1.already_initialized);
 
-        let result2 = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result2 = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(
             result2.already_initialized,
             "second call should be idempotent"
@@ -2219,7 +2247,7 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_migrates_legacy_initialized_repo_to_repo_git() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         let head = setup_legacy_initialized_repo(root);
 
@@ -2229,7 +2257,8 @@ mod brownfield_tests {
         );
         assert!(!root.join(REPO_GIT_DIR).exists());
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(result.already_initialized);
 
         assert!(
@@ -2246,7 +2275,7 @@ mod brownfield_tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(root.join("ws/default"))
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "default worktree should remain usable after migration"
@@ -2257,14 +2286,14 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_preserves_git_history() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         let initial_head = setup_existing_repo(root);
 
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         // HEAD should still point to the initial commit
-        let head_oid = read_ref(root, "HEAD").unwrap();
+        let head_oid = read_ref(root, "HEAD").expect("operation should succeed");
         assert_eq!(
             head_oid,
             initial_head.as_str(),
@@ -2277,7 +2306,7 @@ mod brownfield_tests {
         let result = BrownfieldInitResult {
             repo_root: PathBuf::from("/tmp/myrepo"),
             default_workspace: PathBuf::from("/tmp/myrepo/ws/default"),
-            epoch0: EpochId::new(&"b".repeat(40)).unwrap(),
+            epoch0: EpochId::new(&"b".repeat(40)).expect("operation should succeed"),
             epoch_resynced_from: None,
             head_branch: Some("main".to_owned()),
             already_initialized: false,
@@ -2298,8 +2327,10 @@ mod brownfield_tests {
         let result = BrownfieldInitResult {
             repo_root: PathBuf::from("/tmp/myrepo"),
             default_workspace: PathBuf::from("/tmp/myrepo/ws/default"),
-            epoch0: EpochId::new(&"c".repeat(40)).unwrap(),
-            epoch_resynced_from: Some(EpochId::new(&"d".repeat(40)).unwrap()),
+            epoch0: EpochId::new(&"c".repeat(40)).expect("operation should succeed"),
+            epoch_resynced_from: Some(
+                EpochId::new(&"d".repeat(40)).expect("operation should succeed"),
+            ),
             head_branch: None,
             already_initialized: true,
             dirty_files_at_root: Vec::new(),
@@ -2336,7 +2367,7 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_removes_root_index() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
@@ -2346,7 +2377,7 @@ mod brownfield_tests {
             "index should exist before init"
         );
 
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         let common_dir = git_common_dir(root);
         assert!(
@@ -2357,26 +2388,28 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_bootstraps_refs_when_ws_default_already_exists() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
         // Simulate external bare common-dir topology with default worktree already created.
-        fs::rename(root.join(".git"), root.join(REPO_GIT_DIR)).unwrap();
-        fs::write(root.join(".git"), format!("gitdir: {REPO_GIT_DIR}\n")).unwrap();
+        fs::rename(root.join(".git"), root.join(REPO_GIT_DIR)).expect("operation should succeed");
+        fs::write(root.join(".git"), format!("gitdir: {REPO_GIT_DIR}\n"))
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "core.bare", "true"])
             .current_dir(root)
             .output()
-            .unwrap();
-        fs::create_dir_all(root.join("ws")).unwrap();
+            .expect("operation should succeed");
+        fs::create_dir_all(root.join("ws")).expect("operation should succeed");
         Command::new("git")
             .args(["worktree", "add", "--detach", "ws/default", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(result.already_initialized);
 
         assert!(read_ref(root, manifold_refs::EPOCH_CURRENT).is_some());
@@ -2385,39 +2418,41 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_repairs_orphaned_default_workspace_registration() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         let ws_default = root.join("ws/default");
-        fs::write(ws_default.join("LOCAL_NOTE.txt"), "keep this file\n").unwrap();
+        fs::write(ws_default.join("LOCAL_NOTE.txt"), "keep this file\n")
+            .expect("operation should succeed");
 
-        fs::remove_file(ws_default.join(".git")).unwrap();
+        fs::remove_file(ws_default.join(".git")).expect("operation should succeed");
         Command::new("git")
             .args(["worktree", "prune"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let broken = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             !broken.status.success(),
             "workspace should be broken before repair"
         );
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(result.already_initialized);
 
         let repaired = Command::new("git")
             .args(["rev-parse", "--is-inside-work-tree"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(repaired.status.success(), "workspace should be repaired");
         assert_eq!(String::from_utf8_lossy(&repaired.stdout).trim(), "true");
         assert!(ws_default.join("LOCAL_NOTE.txt").exists());
@@ -2425,10 +2460,10 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_prunes_stale_worktree_registrations_on_idempotent_run() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         let ghost_path = root.join("ws/ghost");
         Command::new("git")
@@ -2436,13 +2471,13 @@ mod brownfield_tests {
                 "worktree",
                 "add",
                 "--detach",
-                ghost_path.to_str().unwrap(),
+                ghost_path.to_str().expect("operation should succeed"),
                 "HEAD",
             ])
             .current_dir(root)
             .output()
-            .unwrap();
-        fs::remove_dir_all(&ghost_path).unwrap();
+            .expect("operation should succeed");
+        fs::remove_dir_all(&ghost_path).expect("operation should succeed");
 
         let before = worktree_paths(root);
         assert!(
@@ -2452,7 +2487,8 @@ mod brownfield_tests {
             "ghost registration should exist before prune"
         );
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(result.already_initialized);
 
         let after = worktree_paths(root);
@@ -2464,51 +2500,54 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_workspace_at_correct_commit() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         let initial_head = setup_existing_repo(root);
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
 
         // ws/default/ HEAD should be at epoch₀
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&result.default_workspace)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let ws_oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         assert_eq!(ws_oid, initial_head.as_str());
     }
 
     #[test]
     fn brownfield_idempotent_attaches_default_to_configured_branch_when_detached() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap_err();
+        brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect_err("operation should fail");
 
         setup_existing_repo(root);
-        brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
         let ws_default = root.join("ws/default");
-        let epoch_before = read_ref(root, manifold_refs::EPOCH_CURRENT).unwrap();
+        let epoch_before =
+            read_ref(root, manifold_refs::EPOCH_CURRENT).expect("operation should succeed");
 
         // Create a commit and advance main while keeping epoch/current stale.
-        fs::write(ws_default.join("branch-tip.txt"), "hello\n").unwrap();
+        fs::write(ws_default.join("branch-tip.txt"), "hello\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "branch-tip.txt"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "feat: branch tip"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let branch_tip = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let branch_tip = String::from_utf8_lossy(&branch_tip.stdout)
             .trim()
             .to_owned();
@@ -2516,43 +2555,45 @@ mod brownfield_tests {
             .args(["update-ref", "refs/heads/main", &branch_tip])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Rewind ws/default back to stale epoch and keep it detached.
         Command::new("git")
             .args(["switch", "--detach", &epoch_before])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let detached = Command::new("git")
             .args(["symbolic-ref", "--quiet", "HEAD"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             !detached.status.success(),
             "ws/default should be detached pre-fix"
         );
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
         assert!(result.already_initialized);
         assert_eq!(
             result
                 .epoch_resynced_from
                 .as_ref()
-                .map(|epoch| epoch.as_str()),
+                .map(maw_core::model::types::EpochId::as_str),
             Some(epoch_before.as_str())
         );
         assert_eq!(result.epoch0.as_str(), branch_tip);
 
-        let epoch_after = read_ref(root, manifold_refs::EPOCH_CURRENT).unwrap();
+        let epoch_after =
+            read_ref(root, manifold_refs::EPOCH_CURRENT).expect("operation should succeed");
         assert_eq!(epoch_after, branch_tip, "epoch/current should be resynced");
 
         let branch = Command::new("git")
             .args(["symbolic-ref", "--short", "HEAD"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             branch.status.success(),
             "ws/default should be branch-attached"
@@ -2563,9 +2604,9 @@ mod brownfield_tests {
             .args(["rev-parse", "HEAD"])
             .current_dir(&ws_default)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let ws_head = String::from_utf8_lossy(&ws_head.stdout).trim().to_owned();
-        let main_head = read_ref(root, "refs/heads/main").unwrap();
+        let main_head = read_ref(root, "refs/heads/main").expect("operation should succeed");
         assert_eq!(
             ws_head, main_head,
             "ws/default should be aligned to main tip"
@@ -2574,11 +2615,12 @@ mod brownfield_tests {
 
     #[test]
     fn brownfield_detects_head_branch() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         setup_existing_repo(root);
 
-        let result = brownfield_init(root, &BrownfieldInitOptions::default()).unwrap();
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
 
         // Should detect the branch (git init defaults to "master" or "main")
         assert!(

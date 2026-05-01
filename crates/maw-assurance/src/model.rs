@@ -537,72 +537,106 @@ mod tests {
     #[test]
     fn happy_path_reaches_complete() {
         let model = MergeModel::new(vec!["ws1".into()]);
-        let mut state = model.init_states().into_iter().next().unwrap();
+        let mut state = model
+            .init_states()
+            .into_iter()
+            .next()
+            .expect("operation should succeed");
 
         // Idle -> Prepare
-        state = model.next_state(&state, Action::Prepare).unwrap();
+        state = model
+            .next_state(&state, Action::Prepare)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Prepare);
 
         // Prepare -> Build
-        state = model.next_state(&state, Action::Build).unwrap();
+        state = model
+            .next_state(&state, Action::Build)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Build);
         assert_eq!(state.candidate, 2);
 
         // Build -> Validate (pass)
-        state = model.next_state(&state, Action::ValidatePass).unwrap();
+        state = model
+            .next_state(&state, Action::ValidatePass)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Validate);
 
         // Validate -> CommitEpoch
-        state = model.next_state(&state, Action::CommitEpoch).unwrap();
+        state = model
+            .next_state(&state, Action::CommitEpoch)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::CommitEpoch);
         assert_eq!(state.epoch_ref, 2);
 
         // CommitEpoch -> CommitBranch
-        state = model.next_state(&state, Action::CommitBranch).unwrap();
+        state = model
+            .next_state(&state, Action::CommitBranch)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::CommitBranch);
         assert_eq!(state.branch_ref, 2);
 
         // CommitBranch -> Cleanup
-        state = model.next_state(&state, Action::Cleanup).unwrap();
+        state = model
+            .next_state(&state, Action::Cleanup)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Cleanup);
 
         // Capture recovery for ws1
         state = model
             .next_state(&state, Action::CaptureRecovery("ws1".into()))
-            .unwrap();
+            .expect("operation should succeed");
         assert!(state.recovery_captured.contains("ws1"));
 
         // Destroy ws1
         state = model
             .next_state(&state, Action::DestroyWorkspace("ws1".into()))
-            .unwrap();
+            .expect("operation should succeed");
         assert!(!state.workspaces["ws1"].exists);
 
         // Cleanup -> Complete
-        state = model.next_state(&state, Action::Cleanup).unwrap();
+        state = model
+            .next_state(&state, Action::Cleanup)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Complete);
     }
 
     #[test]
     fn crash_during_commit_epoch_recovers() {
         let model = MergeModel::new(vec!["ws1".into()]);
-        let mut state = model.init_states().into_iter().next().unwrap();
+        let mut state = model
+            .init_states()
+            .into_iter()
+            .next()
+            .expect("operation should succeed");
 
-        state = model.next_state(&state, Action::Prepare).unwrap();
-        state = model.next_state(&state, Action::Build).unwrap();
-        state = model.next_state(&state, Action::ValidatePass).unwrap();
-        state = model.next_state(&state, Action::CommitEpoch).unwrap();
+        state = model
+            .next_state(&state, Action::Prepare)
+            .expect("operation should succeed");
+        state = model
+            .next_state(&state, Action::Build)
+            .expect("operation should succeed");
+        state = model
+            .next_state(&state, Action::ValidatePass)
+            .expect("operation should succeed");
+        state = model
+            .next_state(&state, Action::CommitEpoch)
+            .expect("operation should succeed");
 
         // Epoch ref moved, branch ref hasn't
         assert_eq!(state.epoch_ref, 2);
         assert_eq!(state.branch_ref, 1);
 
         // Crash
-        state = model.next_state(&state, Action::Crash).unwrap();
+        state = model
+            .next_state(&state, Action::Crash)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Crashed);
 
         // Recover — should finalize branch ref and go to Cleanup
-        state = model.next_state(&state, Action::Recover).unwrap();
+        state = model
+            .next_state(&state, Action::Recover)
+            .expect("operation should succeed");
         assert_eq!(state.phase, Phase::Cleanup);
         assert_eq!(state.branch_ref, 2);
         assert_eq!(state.epoch_ref, 2);

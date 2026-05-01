@@ -18,6 +18,7 @@
 //! PATH=NAME.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -91,6 +92,10 @@ fn parse_keep_specs(raw: &[String]) -> Result<Vec<KeepSpec>> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "resolve command coordinates legacy and structured resolution paths"
+)]
 pub fn run(
     workspace: &str,
     paths: &[String],
@@ -193,10 +198,10 @@ pub fn run(
             file_sides.keys().cloned().collect()
         } else if !block_sides.is_empty() && all_side.is_none() && file_sides.is_empty() {
             // Block-level specs only: need a file context. Use paths arg or find all.
-            if !paths.is_empty() {
-                paths.iter().map(PathBuf::from).collect()
-            } else {
+            if paths.is_empty() {
                 find_conflicted_files(&ws_path)?
+            } else {
+                paths.iter().map(PathBuf::from).collect()
             }
         } else {
             // All or mixed: process all conflicted files
@@ -234,7 +239,10 @@ pub fn run(
         }
 
         // Determine resolution for this file
-        let file_side = file_sides.get(rel_path).map(|s| s.as_str()).or(all_side);
+        let file_side = file_sides
+            .get(rel_path)
+            .map(std::string::String::as_str)
+            .or(all_side);
 
         let chunks = parse_file_conflicts(&content);
         let total_blocks = chunks
@@ -355,6 +363,10 @@ pub fn run(
 // List conflicts
 // ---------------------------------------------------------------------------
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "conflict listing renders legacy chunks and structured metadata together"
+)]
 fn list_conflicts(
     ws_path: &Path,
     workspace: &str,
@@ -379,12 +391,13 @@ fn list_conflicts(
         let mut file_entries = Vec::new();
         for f in &files {
             let full = ws_path.join(f);
-            let blocks = if let Ok(content) = std::fs::read_to_string(&full) {
-                let chunks = parse_file_conflicts(&content);
-                collect_block_info(&chunks)
-            } else {
-                vec![]
-            };
+            let blocks = std::fs::read_to_string(&full).map_or_else(
+                |_| vec![],
+                |content| {
+                    let chunks = parse_file_conflicts(&content);
+                    collect_block_info(&chunks)
+                },
+            );
             let blocks_json: Vec<String> = blocks
                 .iter()
                 .map(|b| {
@@ -442,15 +455,13 @@ fn list_conflicts(
         println!("{} conflicted file(s) in '{workspace}':", files.len());
         for f in &files {
             let full = ws_path.join(f);
-            let block_count = if let Ok(content) = std::fs::read_to_string(&full) {
+            let block_count = std::fs::read_to_string(&full).map_or(0, |content| {
                 let chunks = parse_file_conflicts(&content);
                 chunks
                     .iter()
                     .filter(|c| matches!(c, FileChunk::Conflict(_)))
                     .count()
-            } else {
-                0
-            };
+            });
             if block_count > 1 {
                 println!("  {} ({block_count} blocks)", f.display());
             } else {
@@ -520,7 +531,7 @@ fn collect_block_info(chunks: &[FileChunk]) -> Vec<BlockInfo> {
 // Find conflicted files (scan for conflict markers)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
+pub fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
     find_conflicted_files_filtered(ws_path, None)
 }
 
@@ -536,7 +547,7 @@ pub(crate) fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
 /// When `sidecar_paths` is `None` (no sidecar present — pre-gjm8 repos or
 /// non-rebase merges), the raw diff-scan result is returned. This preserves
 /// legacy behavior.
-pub(crate) fn find_conflicted_files_filtered(
+pub fn find_conflicted_files_filtered(
     ws_path: &Path,
     sidecar_paths: Option<&std::collections::BTreeSet<PathBuf>>,
 ) -> Result<Vec<PathBuf>> {
@@ -718,9 +729,8 @@ fn resolve_workspace_base_ref(ws_path: &Path) -> Option<String> {
 }
 
 fn walk_for_conflicts(base: &Path, dir: &Path, results: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
     };
 
     for entry in entries {
@@ -736,12 +746,11 @@ fn walk_for_conflicts(base: &Path, dir: &Path, results: &mut Vec<PathBuf>) -> Re
 
         if path.is_dir() {
             walk_for_conflicts(base, &path, results)?;
-        } else if path.is_file() {
-            if file_has_conflict_markers(&path) {
-                if let Ok(rel) = path.strip_prefix(base) {
-                    results.push(rel.to_path_buf());
-                }
-            }
+        } else if path.is_file()
+            && file_has_conflict_markers(&path)
+            && let Ok(rel) = path.strip_prefix(base)
+        {
+            results.push(rel.to_path_buf());
         }
     }
 
@@ -758,9 +767,8 @@ fn file_has_conflict_markers(path: &Path) -> bool {
     // Previously this read only the first 256KB, which silently missed
     // markers in large files like `tests/cve-registry/manifest.toml` with
     // thousands of entries (bn-3h90 follow-up).
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
     };
 
     // Upper-bound extremely large files so we don't hang on giant binaries
@@ -781,13 +789,12 @@ fn file_has_conflict_markers(path: &Path) -> bool {
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
-            Ok(0) => return false, // EOF
+            Ok(0) | Err(_) => return false, // EOF or I/O error — best-effort false
             Ok(_) => {
                 if line.starts_with(b"<<<<<<<") {
                     return true;
                 }
             }
-            Err(_) => return false, // I/O error — best-effort false
         }
     }
 }
@@ -820,14 +827,14 @@ fn push_content_line(
 
 fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
     let mut chunks = Vec::new();
-    let mut context = String::new();
-    let mut lines = content.lines().peekable();
+    let mut context_text = String::new();
+    let mut lines = content.lines();
 
     while let Some(line) = lines.next() {
         if line.starts_with("<<<<<<<") {
             // Flush context
-            if !context.is_empty() {
-                chunks.push(FileChunk::Context(std::mem::take(&mut context)));
+            if !context_text.is_empty() {
+                chunks.push(FileChunk::Context(std::mem::take(&mut context_text)));
             }
 
             let left_name = extract_name_from_marker(line);
@@ -901,16 +908,16 @@ fn parse_file_conflicts(content: &str) -> Vec<FileChunk> {
                 right_content,
             }));
         } else {
-            if !context.is_empty() {
-                context.push('\n');
+            if !context_text.is_empty() {
+                context_text.push('\n');
             }
-            context.push_str(line);
+            context_text.push_str(line);
         }
     }
 
     // Flush trailing context
-    if !context.is_empty() {
-        chunks.push(FileChunk::Context(context));
+    if !context_text.is_empty() {
+        chunks.push(FileChunk::Context(context_text));
     }
 
     chunks
@@ -947,7 +954,10 @@ fn resolve_chunks(
             }
             FileChunk::Conflict(block) => {
                 let block_id = format!("cf-{block_idx}");
-                let side = block_sides.get(&block_id).map(|s| s.as_str()).or(file_side);
+                let side = block_sides
+                    .get(&block_id)
+                    .map(std::string::String::as_str)
+                    .or(file_side);
 
                 if let Some(side_name) = side {
                     if side_name == "both" {
@@ -973,12 +983,13 @@ fn resolve_chunks(
                             );
                         };
                         output.push_str(chosen);
-                        output.push('\n');
                     }
+                    output.push('\n');
                     any_resolved = true;
                 } else {
                     // No resolution for this block — re-emit the markers
-                    output.push_str(&format!("<<<<<<< {}\n", block.left_name));
+                    writeln!(&mut output, "<<<<<<< {}", block.left_name)
+                        .expect("writing to string should not fail");
                     output.push_str(&block.left_content);
                     output.push('\n');
                     if !block.base_content.is_empty() {
@@ -989,7 +1000,8 @@ fn resolve_chunks(
                     output.push_str("=======\n");
                     output.push_str(&block.right_content);
                     output.push('\n');
-                    output.push_str(&format!(">>>>>>> {}\n", block.right_name));
+                    writeln!(&mut output, ">>>>>>> {}", block.right_name)
+                        .expect("writing to string should not fail");
                 }
 
                 block_idx += 1;
@@ -1025,16 +1037,15 @@ fn extract_name_from_marker(line: &str) -> String {
         .trim_start_matches('|')
         .trim();
 
-    if let Some(paren_pos) = trimmed.find('(') {
-        trimmed[..paren_pos].trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
+    trimmed.find('(').map_or_else(
+        || trimmed.to_string(),
+        |paren_pos| trimmed[..paren_pos].trim().to_string(),
+    )
 }
 
-/// Check if a keep_name matches a marker label.
+/// Check if a `keep_name` matches a marker label.
 ///
-/// For multi-workspace labels like "bn-2sc3, bn-4xyz", the keep_name
+/// For multi-workspace labels like "bn-2sc3, bn-4xyz", the `keep_name`
 /// matches if it equals the full label OR any individual workspace in it.
 fn name_matches(keep_name: &str, label: &str) -> bool {
     if keep_name == label {
@@ -1114,14 +1125,15 @@ mod tests {
 
     #[test]
     fn parse_keep_spec_all() {
-        let specs = parse_keep_specs(&["bn-2sc3".into()]).unwrap();
+        let specs = parse_keep_specs(&["bn-2sc3".into()]).expect("operation should succeed");
         assert_eq!(specs.len(), 1);
         assert!(matches!(&specs[0], KeepSpec::All(n) if n == "bn-2sc3"));
     }
 
     #[test]
     fn parse_keep_spec_file() {
-        let specs = parse_keep_specs(&["src/main.rs=bn-2sc3".into()]).unwrap();
+        let specs =
+            parse_keep_specs(&["src/main.rs=bn-2sc3".into()]).expect("operation should succeed");
         assert_eq!(specs.len(), 1);
         assert!(
             matches!(&specs[0], KeepSpec::File(p, n) if p == Path::new("src/main.rs") && n == "bn-2sc3")
@@ -1130,14 +1142,15 @@ mod tests {
 
     #[test]
     fn parse_keep_spec_block() {
-        let specs = parse_keep_specs(&["cf-0=bn-2sc3".into()]).unwrap();
+        let specs = parse_keep_specs(&["cf-0=bn-2sc3".into()]).expect("operation should succeed");
         assert_eq!(specs.len(), 1);
         assert!(matches!(&specs[0], KeepSpec::Block(id, n) if id == "cf-0" && n == "bn-2sc3"));
     }
 
     #[test]
     fn parse_keep_spec_mixed() {
-        let specs = parse_keep_specs(&["cf-0=ws-a".into(), "cf-1=default".into()]).unwrap();
+        let specs = parse_keep_specs(&["cf-0=ws-a".into(), "cf-1=default".into()])
+            .expect("operation should succeed");
         assert_eq!(specs.len(), 2);
         assert!(matches!(&specs[0], KeepSpec::Block(id, _) if id == "cf-0"));
         assert!(matches!(&specs[1], KeepSpec::Block(id, _) if id == "cf-1"));
@@ -1156,7 +1169,8 @@ local line
 >>>>>>> default (local edits)
 after";
         let chunks = parse_file_conflicts(content);
-        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(result.contains("merge line"));
         assert!(!result.contains("local line"));
         assert!(result.contains("before"));
@@ -1176,7 +1190,8 @@ local line
 >>>>>>> default (local edits)
 after";
         let chunks = parse_file_conflicts(content);
-        let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(!result.contains("merge line"));
         assert!(result.contains("local line"));
     }
@@ -1201,7 +1216,7 @@ line 3";
         let mut block_sides = BTreeMap::new();
         block_sides.insert("cf-0".into(), "ws-a".into());
         block_sides.insert("cf-1".into(), "default".into());
-        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        let result = resolve_chunks(&chunks, None, &block_sides).expect("operation should succeed");
         assert!(result.contains("merge A"), "block 0 should keep ws-a");
         assert!(!result.contains("local A"));
         assert!(!result.contains("merge B"));
@@ -1229,7 +1244,7 @@ local B
         let mut block_sides = BTreeMap::new();
         block_sides.insert("cf-0".into(), "ws-a".into());
         // cf-1 left unresolved
-        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        let result = resolve_chunks(&chunks, None, &block_sides).expect("operation should succeed");
         assert!(result.contains("merge A"));
         assert!(!result.contains("local A"));
         // Second block should still have markers
@@ -1248,7 +1263,7 @@ local
         let chunks = parse_file_conflicts(content);
         let result = resolve_chunks(&chunks, Some("nonexistent"), &BTreeMap::new());
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result.expect_err("operation should fail").to_string();
         assert!(err.contains("nonexistent"));
         assert!(err.contains("ws-a"));
         assert!(err.contains("default"));
@@ -1265,7 +1280,8 @@ base content
 local content
 >>>>>>> default (local edits)";
         let chunks = parse_file_conflicts(content);
-        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(result.contains("merged content"));
     }
 
@@ -1279,7 +1295,7 @@ merged
 local
 >>>>>>> default (local edits)
 more code";
-        let (left, right) = extract_side_names(content).unwrap();
+        let (left, right) = extract_side_names(content).expect("operation should succeed");
         assert_eq!(left, "bn-2sc3");
         assert_eq!(right, "default");
     }
@@ -1299,7 +1315,8 @@ local line 2
 >>>>>>> default (local edits)
 after";
         let chunks = parse_file_conflicts(content);
-        let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(result.contains("merge line 1"));
         assert!(result.contains("merge line 2"));
         assert!(result.contains("local line 1"));
@@ -1309,8 +1326,12 @@ after";
         assert!(!result.contains("<<<<<<<"));
         assert!(!result.contains(">>>>>>>"));
         // Left comes before right
-        let merge_pos = result.find("merge line 1").unwrap();
-        let local_pos = result.find("local line 1").unwrap();
+        let merge_pos = result
+            .find("merge line 1")
+            .expect("operation should succeed");
+        let local_pos = result
+            .find("local line 1")
+            .expect("operation should succeed");
         assert!(
             merge_pos < local_pos,
             "left side should come before right side"
@@ -1320,13 +1341,13 @@ after";
     /// Regression test for bn-2wnt (partial-resolution reporting bug).
     ///
     /// When `--keep cf-0=alice` is used on a file with 2 conflict blocks,
-    /// resolve_chunks returns Ok with block 1 as alice content and block 2
-    /// re-emitted as markers. The run() function would write the half-
+    /// `resolve_chunks` returns Ok with block 1 as alice content and block 2
+    /// re-emitted as markers. The `run()` function would write the half-
     /// resolved file and count it as "resolved" (+1 to `resolved_count`),
     /// then re-scan and see "1 file still has conflict markers", producing
     /// confusing output.
     ///
-    /// The fix (v0.58.6): run() inspects the resolved string for remaining
+    /// The fix (v0.58.6): `run()` inspects the resolved string for remaining
     /// `<<<<<<<` lines and reports partial resolutions separately from fully
     /// resolved ones.
     #[test]
@@ -1347,7 +1368,7 @@ ddd
         let mut block_sides = BTreeMap::new();
         block_sides.insert("cf-0".into(), "alice".into());
         // cf-1 is NOT specified — should remain as markers
-        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        let result = resolve_chunks(&chunks, None, &block_sides).expect("operation should succeed");
         assert!(result.contains("aaa"), "block 0 alice content missing");
         assert!(
             !result.contains("bbb"),
@@ -1373,7 +1394,7 @@ ddd
 
     /// Regression test for bn-2wnt (the multi-block --keep both path).
     ///
-    /// Sanity check that resolve_chunks with Some("both") on a 2-block file
+    /// Sanity check that `resolve_chunks` with Some("both") on a 2-block file
     /// fully resolves ALL blocks in a single pass. If this test fails, the
     /// original bn-2wnt agent report is a real parser/resolver bug.
     #[test]
@@ -1402,7 +1423,8 @@ after";
             "parser should see 2 conflict blocks, got {conflict_count}"
         );
 
-        let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("both"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(
             !result.contains("<<<<<<<"),
             "all markers should be gone in one pass, got:\n{result}"
@@ -1436,7 +1458,7 @@ local B
         let mut block_sides = BTreeMap::new();
         block_sides.insert("cf-0".into(), "both".into());
         block_sides.insert("cf-1".into(), "ws-a".into());
-        let result = resolve_chunks(&chunks, None, &block_sides).unwrap();
+        let result = resolve_chunks(&chunks, None, &block_sides).expect("operation should succeed");
         // Block 0: both
         assert!(result.contains("merge A"));
         assert!(result.contains("local A"));
@@ -1488,7 +1510,8 @@ more local code
         }
 
         // Resolving should not leave any >>>>>>> markers in the output.
-        let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("default"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(
             !result.contains(">>>>>>> default (local edits)"),
             "resolved output should not contain trailing >>>>>>> marker"
@@ -1536,7 +1559,8 @@ local content
             .count();
         assert_eq!(conflict_count, 1, "should parse as a single conflict block");
 
-        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new()).unwrap();
+        let result = resolve_chunks(&chunks, Some("ws-a"), &BTreeMap::new())
+            .expect("operation should succeed");
         assert!(result.contains("code with nested"));
         assert!(result.contains("end of merge"));
         assert!(!result.contains("local content"));
@@ -1617,7 +1641,7 @@ end";
         use std::collections::BTreeSet;
         use std::process::Command;
 
-        let td = tempfile::tempdir().unwrap();
+        let td = tempfile::tempdir().expect("operation should succeed");
         let root = td.path();
 
         // Init a git repo and commit a baseline file.
@@ -1625,28 +1649,28 @@ end";
             .args(["init", "-q"])
             .current_dir(root)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "t@t"])
             .current_dir(root)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "t"])
             .current_dir(root)
             .status()
-            .unwrap();
-        std::fs::write(root.join("seed"), b"seed\n").unwrap();
+            .expect("operation should succeed");
+        std::fs::write(root.join("seed"), b"seed\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "-A"])
             .current_dir(root)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-qm", "seed"])
             .current_dir(root)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Add a documentation file whose *new* content legitimately contains
         // a `<<<<<<<` line — the kind of file bn-3oau reports on.
@@ -1654,27 +1678,27 @@ end";
             root.join("tutorial.md"),
             b"# Merge conflicts\n<<<<<<< mine\nmy\n=======\ntheirs\n>>>>>>> theirs\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         // Add a genuinely-conflicted file the structured engine DOES flag.
         std::fs::write(
             root.join("real.rs"),
             b"<<<<<<< epoch (current)\nE\n=======\nW\n>>>>>>> ws\n",
         )
-        .unwrap();
+        .expect("operation should succeed");
         Command::new("git")
             .args(["add", "-A"])
             .current_dir(root)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-qm", "conflicts"])
             .current_dir(root)
             .status()
-            .unwrap();
+            .expect("operation should succeed");
 
         // Sanity: without a filter, BOTH files look like they added marker
         // lines (they're genuinely new commits).
-        let all = find_conflicted_files(root).unwrap();
+        let all = find_conflicted_files(root).expect("operation should succeed");
         assert!(
             all.iter().any(|p| p == Path::new("tutorial.md"))
                 && all.iter().any(|p| p == Path::new("real.rs")),
@@ -1684,19 +1708,22 @@ end";
         // Filter to only the real conflict — tutorial.md must be dropped.
         let mut sidecar: BTreeSet<PathBuf> = BTreeSet::new();
         sidecar.insert(PathBuf::from("real.rs"));
-        let filtered = find_conflicted_files_filtered(root, Some(&sidecar)).unwrap();
+        let filtered =
+            find_conflicted_files_filtered(root, Some(&sidecar)).expect("operation should succeed");
         assert_eq!(filtered, vec![PathBuf::from("real.rs")]);
 
         // Filter with an empty set — everything is filtered out.
         let empty: BTreeSet<PathBuf> = BTreeSet::new();
-        let filtered_empty = find_conflicted_files_filtered(root, Some(&empty)).unwrap();
+        let filtered_empty =
+            find_conflicted_files_filtered(root, Some(&empty)).expect("operation should succeed");
         assert!(
             filtered_empty.is_empty(),
             "empty sidecar filter should drop all paths, got: {filtered_empty:?}"
         );
 
         // No sidecar (None) — preserves legacy behavior, both reported.
-        let no_filter = find_conflicted_files_filtered(root, None).unwrap();
+        let no_filter =
+            find_conflicted_files_filtered(root, None).expect("operation should succeed");
         assert!(
             no_filter.iter().any(|p| p == Path::new("tutorial.md")),
             "None filter must preserve legacy behavior: {no_filter:?}"
@@ -1838,7 +1865,7 @@ mod proptest_tests {
             let chunks = parse_file_conflicts(&content);
             let conflict = chunks.iter().find_map(|c| match c {
                 FileChunk::Conflict(b) => Some(b),
-                _ => None,
+                FileChunk::Context(_) => None,
             }).expect("should parse one conflict block");
             prop_assert_eq!(&conflict.left_name, &left_name);
             prop_assert_eq!(&conflict.right_name, &right_name);
@@ -1901,7 +1928,7 @@ mod proptest_tests {
             // Expect exactly one top-level conflict chunk.
             let conflicts: Vec<_> = chunks.iter().filter_map(|c| match c {
                 FileChunk::Conflict(b) => Some(b),
-                _ => None,
+                FileChunk::Context(_) => None,
             }).collect();
             prop_assert_eq!(conflicts.len(), 1);
             let b = conflicts[0];

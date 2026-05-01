@@ -322,7 +322,7 @@ mod tests {
             conflicts: vec![],
             message: "Advanced successfully.".to_owned(),
         };
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"success\":true"));
         assert!(json.contains("\"conflicts\":[]"));
     }
@@ -340,7 +340,7 @@ mod tests {
             }],
             message: "Conflicts detected.".to_owned(),
         };
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"success\":false"));
         assert!(json.contains("\"conflict_type\":\"content\""));
         assert!(json.contains("\"path\":\"src/main.rs\""));

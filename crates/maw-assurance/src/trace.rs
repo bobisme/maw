@@ -24,7 +24,7 @@
 //! // ... run operation ...
 //! let post = capture_state(repo_root);
 //! let entry = TraceEntry::new(1, TraceOp::CommitEpoch, None, pre, post);
-//! logger.record(entry).unwrap();
+//! logger.record(&entry).expect("operation should succeed");
 //! ```
 
 use std::collections::BTreeMap;
@@ -175,7 +175,7 @@ impl TraceEntry {
     ) -> Self {
         let timestamp_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_micros() as u64);
+            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
 
         Self {
             seq,
@@ -230,8 +230,8 @@ impl TraceLogger {
     ///
     /// # Errors
     /// Returns an `io::Error` if serialization or writing fails.
-    pub fn record(&mut self, entry: TraceEntry) -> io::Result<()> {
-        let json = serde_json::to_string(&entry)
+    pub fn record(&mut self, entry: &TraceEntry) -> io::Result<()> {
+        let json = serde_json::to_string(entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.writer.write_all(json.as_bytes())?;
         self.writer.write_all(b"\n")?;
@@ -365,9 +365,9 @@ fn discover_workspaces(root: &Path) -> (Vec<String>, BTreeMap<String, bool>) {
     }
 
     names.sort();
-    names.iter().for_each(|n| {
+    for n in &names {
         dirty.entry(n.clone()).or_insert(false);
-    });
+    }
 
     (names, dirty)
 }
@@ -433,8 +433,8 @@ mod tests {
             TraceOp::Recover,
         ];
         for op in ops {
-            let json = serde_json::to_string(&op).unwrap();
-            let back: TraceOp = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&op).expect("TraceOp should serialize");
+            let back: TraceOp = serde_json::from_str(&json).expect("TraceOp should deserialize");
             assert_eq!(op, back);
         }
     }
@@ -447,8 +447,9 @@ mod tests {
             InvariantResult::Skip,
         ];
         for case in cases {
-            let json = serde_json::to_string(&case).unwrap();
-            let back: InvariantResult = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&case).expect("InvariantResult should serialize");
+            let back: InvariantResult =
+                serde_json::from_str(&json).expect("InvariantResult should deserialize");
             assert_eq!(case, back);
         }
     }
@@ -470,8 +471,9 @@ mod tests {
     #[test]
     fn state_snapshot_serde_roundtrip() {
         let snap = sample_snapshot();
-        let json = serde_json::to_string(&snap).unwrap();
-        let back: StateSnapshot = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&snap).expect("StateSnapshot should serialize");
+        let back: StateSnapshot =
+            serde_json::from_str(&json).expect("StateSnapshot should deserialize");
         assert_eq!(snap, back);
     }
 
@@ -487,8 +489,8 @@ mod tests {
             invariants: InvariantResults::all_pass(),
         };
 
-        let json = serde_json::to_string(&entry).unwrap();
-        let back: TraceEntry = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&entry).expect("TraceEntry should serialize");
+        let back: TraceEntry = serde_json::from_str(&json).expect("TraceEntry should deserialize");
         assert_eq!(entry, back);
     }
 
@@ -511,13 +513,13 @@ mod tests {
             },
         };
 
-        let json = serde_json::to_string(&entry).unwrap();
+        let json = serde_json::to_string(&entry).expect("TraceEntry should serialize");
         // Verify the failpoint shows up
         assert!(json.contains("build_crash_before_write"));
         // Verify the fail variant serializes with the message
         assert!(json.contains("recovery ref points to tree, not commit"));
 
-        let back: TraceEntry = serde_json::from_str(&json).unwrap();
+        let back: TraceEntry = serde_json::from_str(&json).expect("TraceEntry should deserialize");
         assert_eq!(entry, back);
     }
 
@@ -531,7 +533,10 @@ mod tests {
 
         impl Write for SharedBuf {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
+                self.0
+                    .lock()
+                    .expect("shared trace buffer mutex should not be poisoned")
+                    .extend_from_slice(buf);
                 Ok(buf.len())
             }
             fn flush(&mut self) -> io::Result<()> {
@@ -561,21 +566,27 @@ mod tests {
             invariants: InvariantResults::all_skip(),
         };
 
-        logger.record(entry1.clone()).unwrap();
-        logger.record(entry2.clone()).unwrap();
-        logger.flush().unwrap();
+        logger.record(&entry1).expect("entry1 should write");
+        logger.record(&entry2).expect("entry2 should write");
+        logger.flush().expect("trace logger should flush");
 
         // Extract the buffer contents
-        let bytes = shared.0.lock().unwrap().clone();
-        let output = String::from_utf8(bytes).unwrap();
+        let bytes = shared
+            .0
+            .lock()
+            .expect("shared trace buffer mutex should not be poisoned")
+            .clone();
+        let output = String::from_utf8(bytes).expect("trace output should be valid UTF-8");
 
         // Should be two lines
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 2);
 
         // Each line should parse as a valid TraceEntry
-        let parsed1: TraceEntry = serde_json::from_str(lines[0]).unwrap();
-        let parsed2: TraceEntry = serde_json::from_str(lines[1]).unwrap();
+        let parsed1: TraceEntry =
+            serde_json::from_str(lines[0]).expect("first JSONL entry should parse");
+        let parsed2: TraceEntry =
+            serde_json::from_str(lines[1]).expect("second JSONL entry should parse");
         assert_eq!(parsed1, entry1);
         assert_eq!(parsed2, entry2);
     }
@@ -631,7 +642,7 @@ mod tests {
         // This test uses the actual maw repo to verify capture_state can
         // read a real git repo. We just check that it doesn't panic and
         // returns plausible data.
-        let repo_root = std::env::current_dir().unwrap();
+        let repo_root = std::env::current_dir().expect("test process should have a cwd");
 
         // Walk up until we find a .git directory (handles worktree case)
         let mut root = repo_root.as_path();
@@ -685,7 +696,8 @@ mod tests {
             invariants: InvariantResults::all_pass(),
         };
 
-        let value: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        let value: serde_json::Value =
+            serde_json::to_value(&entry).expect("TraceEntry should convert to JSON value");
 
         // Verify top-level fields exist with correct types
         assert_eq!(value["seq"], 1);

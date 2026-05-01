@@ -1,10 +1,11 @@
 //! gix-backed status and dirty detection.
 
 use gix::bstr::ByteSlice;
+use gix::status::index_worktree::iter::Summary;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::*;
+use crate::types::{FileStatus, StatusEntry};
 
 pub fn is_dirty(repo: &GixRepo) -> Result<bool, GitError> {
     repo.repo.is_dirty().map_err(|e| GitError::BackendError {
@@ -106,24 +107,20 @@ pub fn count_dirty_tracked(repo: &GixRepo) -> Result<usize, GitError> {
         }
 
         let path_bytes = entry.path(&index);
-        let path_str = match std::str::from_utf8(path_bytes) {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Ok(path_str) = std::str::from_utf8(path_bytes) else {
+            continue;
         };
 
         let full_path = workdir.join(path_str);
-        let meta = match std::fs::symlink_metadata(&full_path) {
-            Ok(m) => m,
-            Err(_) => {
-                dirty += 1;
-                continue;
-            }
+        let Ok(meta) = std::fs::symlink_metadata(&full_path) else {
+            dirty += 1;
+            continue;
         };
 
         let stat = entry.stat;
-        let size_matches = meta.len() == stat.size as u64;
-        let mtime_matches =
-            meta.mtime() as u32 == stat.mtime.secs && meta.mtime_nsec() as u32 == stat.mtime.nsecs;
+        let size_matches = meta.len() == u64::from(stat.size);
+        let mtime_matches = u32::try_from(meta.mtime()).ok() == Some(stat.mtime.secs)
+            && u32::try_from(meta.mtime_nsec()).ok() == Some(stat.mtime.nsecs);
 
         if size_matches && mtime_matches {
             continue;
@@ -164,17 +161,14 @@ fn stat_matches_by_content(
         }
     };
 
-    match gix::objs::compute_hash(hash_kind, gix::objs::Kind::Blob, &data) {
-        Ok(actual) => actual == expected_oid,
-        Err(_) => false,
-    }
+    gix::objs::compute_hash(hash_kind, gix::objs::Kind::Blob, &data)
+        .is_ok_and(|actual| actual == expected_oid)
 }
 
 fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<StatusEntry> {
     let summary = item.summary()?;
     let path = item.rela_path().to_str().ok()?.to_owned();
 
-    use gix::status::index_worktree::iter::Summary;
     let status = match summary {
         Summary::Added | Summary::IntentToAdd | Summary::Copied => FileStatus::Added,
         Summary::Modified | Summary::TypeChange | Summary::Conflict => FileStatus::Modified,

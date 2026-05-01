@@ -14,6 +14,8 @@
 
 mod manifold_common;
 
+use std::fmt::Write as _;
+
 use manifold_common::TestRepo;
 
 /// Force a rebase conflict by having two workspaces both modify line 1 of
@@ -133,7 +135,7 @@ fn merge_force_bypasses_marker_scan() {
     // conflicts via its own diff3).
     let shared = repo.root().join("ws/b/shared.txt");
     // Just write a clean value without committing markers.
-    std::fs::write(&shared, "alice_forced\n").unwrap();
+    std::fs::write(&shared, "alice_forced\n").expect("operation should succeed");
     repo.git_in_workspace("b", &["add", "-A"]);
     repo.git_in_workspace("b", &["commit", "-m", "manual: force test"]);
 
@@ -211,7 +213,7 @@ fn sync_clears_stale_sidecar_after_manual_resolution_commit() {
     setup_rebase_conflict(&repo);
 
     let shared = repo.root().join("ws/b/shared.txt");
-    std::fs::write(&shared, "manually resolved\n").unwrap();
+    std::fs::write(&shared, "manually resolved\n").expect("operation should succeed");
     repo.git_in_workspace("b", &["add", "-A"]);
     repo.git_in_workspace("b", &["commit", "-m", "manual: resolve rebase conflict"]);
 
@@ -280,7 +282,7 @@ fn destroy_cleans_up_oplog_head_ref() {
             "--",
             "git",
             "-C",
-            repo.root().to_str().unwrap(),
+            repo.root().to_str().expect("operation should succeed"),
             "rev-parse",
             "--verify",
             "refs/manifold/head/alice",
@@ -292,7 +294,7 @@ fn destroy_cleans_up_oplog_head_ref() {
         .args(["rev-parse", "--verify", "refs/manifold/head/alice"])
         .current_dir(repo.root())
         .output()
-        .unwrap();
+        .expect("operation should succeed");
     assert!(
         !result.status.success(),
         "head ref should be gone after destroy (got success={}, stdout={}, stderr={})",
@@ -318,13 +320,16 @@ fn find_conflicted_files_detects_markers_past_256kb() {
     let large_path = ws_path.join("large.txt");
     let mut content = String::with_capacity(1_100_000);
     for i in 0..50_000 {
-        content.push_str(&format!("line {i}\n"));
+        writeln!(&mut content, "line {i}").expect("writing to String cannot fail");
     }
     // Markers at the END of the file, well past the old 256KB read limit.
     content.push_str("\n<<<<<<< alice\nalice_content\n=======\nbob_content\n>>>>>>> bob\n");
-    std::fs::write(&large_path, &content).unwrap();
+    std::fs::write(&large_path, &content).expect("operation should succeed");
     assert!(
-        std::fs::metadata(&large_path).unwrap().len() > 256 * 1024,
+        std::fs::metadata(&large_path)
+            .expect("operation should succeed")
+            .len()
+            > 256 * 1024,
         "test file should exceed 256KB"
     );
 
@@ -371,10 +376,10 @@ fn ws_merge_allows_embedded_markers_when_no_conflict_sidecar() {
 
     let mut large = String::with_capacity(600_000);
     for i in 0..30_000 {
-        large.push_str(&format!("entry {i}\n"));
+        writeln!(&mut large, "entry {i}").expect("writing to String cannot fail");
     }
     large.push_str("\n<<<<<<< HEAD\nours version\n=======\ntheirs version\n>>>>>>> other\n");
-    std::fs::write(ws_path.join("manifest.txt"), &large).unwrap();
+    std::fs::write(ws_path.join("manifest.txt"), &large).expect("operation should succeed");
 
     repo.git_in_workspace("a", &["add", "-A"]);
     repo.git_in_workspace("a", &["commit", "-m", "embed marker literals"]);
@@ -421,7 +426,7 @@ fn ws_conflicts_reports_embedded_markers_when_engine_is_clean() {
     // marker scan should still catch it.
     let ws_path = repo.root().join("ws").join("a");
     let marker_content = "head\n<<<<<<< alice\nx\n=======\ny\n>>>>>>> bob\ntail\n";
-    std::fs::write(ws_path.join("dirty.txt"), marker_content).unwrap();
+    std::fs::write(ws_path.join("dirty.txt"), marker_content).expect("operation should succeed");
     repo.git_in_workspace("a", &["add", "-A"]);
     repo.git_in_workspace("a", &["commit", "-m", "simulated rebase conflict"]);
 
@@ -451,7 +456,7 @@ fn file_has_conflict_markers_skips_files_over_256mb() {
         ws_path.join("ok.txt"),
         "line1\n<<<<<<< foo\nours\n=======\ntheirs\n>>>>>>> bar\nline2\n",
     )
-    .unwrap();
+    .expect("operation should succeed");
 
     let out = repo.maw_raw(&["ws", "resolve", "a", "--list"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -475,7 +480,7 @@ fn destroy_then_create_same_name_starts_fresh_oplog_chain() {
         .args(["rev-parse", "refs/manifold/head/worker"])
         .current_dir(repo.root())
         .output()
-        .unwrap();
+        .expect("operation should succeed");
     let first_head_oid = String::from_utf8_lossy(&first_head.stdout)
         .trim()
         .to_owned();
@@ -490,7 +495,7 @@ fn destroy_then_create_same_name_starts_fresh_oplog_chain() {
         .args(["rev-parse", "refs/manifold/head/worker"])
         .current_dir(repo.root())
         .output()
-        .unwrap();
+        .expect("operation should succeed");
     let second_head_oid = String::from_utf8_lossy(&second_head.stdout)
         .trim()
         .to_owned();
@@ -542,7 +547,7 @@ fn destroy_deletes_all_workspace_owned_refs() {
             .args(["rev-parse", "--verify", ref_name])
             .current_dir(repo.root())
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         if out.status.success() {
             existed_before += 1;
         }
@@ -563,7 +568,7 @@ fn destroy_deletes_all_workspace_owned_refs() {
             .args(["rev-parse", "--verify", ref_name])
             .current_dir(repo.root())
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             !out.status.success(),
             "owned ref {ref_name} still exists after destroy \
@@ -630,7 +635,7 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
 
     // Side branch off the epoch: modifies shared.txt differently.
     repo.git_in_workspace("feature", &["checkout", "-b", "side", &epoch_before]);
-    std::fs::write(ws_path.join("shared.txt"), "side-version\n").unwrap();
+    std::fs::write(ws_path.join("shared.txt"), "side-version\n").expect("operation should succeed");
     repo.git_in_workspace("feature", &["add", "-A"]);
     repo.git_in_workspace("feature", &["commit", "-m", "feat: side work"]);
 
@@ -656,7 +661,7 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
     // Sanity-check: HEAD is now a merge commit (two parents).
     let parents_line =
         repo.git_in_workspace("feature", &["rev-list", "--parents", "-n", "1", "HEAD"]);
-    let parent_count = parents_line.trim().split_whitespace().count() - 1;
+    let parent_count = parents_line.split_whitespace().count() - 1;
     assert!(
         parent_count >= 2,
         "setup failed: HEAD should be a merge commit, got {parent_count} parent(s): {parents_line}"
@@ -741,7 +746,7 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         sidecar.exists(),
         "rebase-conflicts.json should exist after a conflicted rebase"
     );
-    let sidecar_contents = std::fs::read_to_string(&sidecar).unwrap();
+    let sidecar_contents = std::fs::read_to_string(&sidecar).expect("operation should succeed");
     assert!(
         sidecar_contents.contains("shared.txt"),
         "sidecar should list the conflicted file. Got: {sidecar_contents}"

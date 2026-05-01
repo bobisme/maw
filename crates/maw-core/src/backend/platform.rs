@@ -196,8 +196,7 @@ fn command_available(cmd: &str) -> bool {
     Command::new("sh")
         .args(["-c", &format!("command -v {cmd} >/dev/null 2>&1")])
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 fn detect_reflink_support() -> bool {
@@ -222,8 +221,7 @@ fn detect_reflink_support() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 fn detect_overlay_userns_support(kernel_major: Option<u32>, kernel_minor: Option<u32>) -> bool {
@@ -271,8 +269,7 @@ fn detect_overlay_userns_support(kernel_major: Option<u32>, kernel_minor: Option
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 fn detect_fuse_overlayfs(kernel_major: Option<u32>, kernel_minor: Option<u32>) -> bool {
@@ -349,7 +346,7 @@ mod tests {
 
     #[test]
     fn cache_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation should succeed");
         let caps = PlatformCapabilities {
             schema_version: CACHE_SCHEMA_VERSION,
             reflink_supported: true,
@@ -359,8 +356,8 @@ mod tests {
             kernel_minor: Some(8),
         };
 
-        persist_cache(dir.path(), &caps).unwrap();
-        let loaded = load_cached(dir.path()).unwrap();
+        persist_cache(dir.path(), &caps).expect("operation should succeed");
+        let loaded = load_cached(dir.path()).expect("operation should succeed");
         assert_eq!(loaded, caps);
     }
 

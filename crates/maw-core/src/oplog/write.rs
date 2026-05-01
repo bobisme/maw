@@ -157,6 +157,10 @@ pub fn write_operation_blob(root: &Path, op: &Operation) -> Result<GitOid, OpLog
 ///
 /// This is the underlying implementation; [`write_operation_blob`] is a
 /// convenience wrapper that opens a repo at `root`.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails or if the blob write fails.
 pub fn write_operation_blob_via(
     repo: &dyn maw_git::GitRepo,
     op: &Operation,
@@ -276,59 +280,59 @@ mod tests {
 
     /// Create a fresh git repo with one commit.
     fn setup_repo() -> (TempDir, GitOid) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("operation should succeed");
         let root = dir.path();
 
         Command::new("git")
             .args(["init"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
-        fs::write(root.join("README.md"), "# Test\n").unwrap();
+        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
         Command::new("git")
             .args(["add", "README.md"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        let oid = GitOid::new(&oid_str).unwrap();
+        let oid = GitOid::new(&oid_str).expect("operation should succeed");
 
         (dir, oid)
     }
 
     fn epoch(c: char) -> EpochId {
-        EpochId::new(&c.to_string().repeat(40)).unwrap()
+        EpochId::new(&c.to_string().repeat(40)).expect("operation should succeed")
     }
 
     fn ws(name: &str) -> WorkspaceId {
-        WorkspaceId::new(name).unwrap()
+        WorkspaceId::new(name).expect("operation should succeed")
     }
 
     fn make_create_op(ws_id: &WorkspaceId) -> Operation {
@@ -362,7 +366,7 @@ mod tests {
         let ws_id = ws("agent-1");
         let op = make_create_op(&ws_id);
 
-        let oid = write_operation_blob(root, &op).unwrap();
+        let oid = write_operation_blob(root, &op).expect("operation should succeed");
         // OID should be a valid 40-char hex string
         assert_eq!(oid.as_str().len(), 40);
         assert!(
@@ -379,14 +383,14 @@ mod tests {
         let ws_id = ws("agent-1");
         let op = make_create_op(&ws_id);
 
-        let oid = write_operation_blob(root, &op).unwrap();
+        let oid = write_operation_blob(root, &op).expect("operation should succeed");
 
         // `git cat-file -p <oid>` should succeed and return valid JSON
         let out = Command::new("git")
             .args(["cat-file", "-p", oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "git cat-file should succeed: {}",
@@ -395,7 +399,7 @@ mod tests {
 
         let json_str = String::from_utf8_lossy(&out.stdout);
         // Should parse back to the original operation
-        let parsed = Operation::from_json(json_str.as_bytes()).unwrap();
+        let parsed = Operation::from_json(json_str.as_bytes()).expect("operation should succeed");
         assert_eq!(parsed, op);
     }
 
@@ -406,8 +410,8 @@ mod tests {
         let ws_id = ws("agent-1");
         let op = make_create_op(&ws_id);
 
-        let oid1 = write_operation_blob(root, &op).unwrap();
-        let oid2 = write_operation_blob(root, &op).unwrap();
+        let oid1 = write_operation_blob(root, &op).expect("operation should succeed");
+        let oid2 = write_operation_blob(root, &op).expect("operation should succeed");
         assert_eq!(
             oid1, oid2,
             "same operation must produce the same blob OID (content-addressed)"
@@ -428,8 +432,8 @@ mod tests {
             payload: OpPayload::Create { epoch: epoch('b') },
         };
 
-        let oid1 = write_operation_blob(root, &op1).unwrap();
-        let oid2 = write_operation_blob(root, &op2).unwrap();
+        let oid1 = write_operation_blob(root, &op1).expect("operation should succeed");
+        let oid2 = write_operation_blob(root, &op2).expect("operation should succeed");
         assert_ne!(
             oid1, oid2,
             "different operations must produce different OIDs"
@@ -447,11 +451,11 @@ mod tests {
         let ws_id = ws("agent-1");
         let op = make_create_op(&ws_id);
 
-        let oid = append_operation(root, &ws_id, &op, None).unwrap();
+        let oid = append_operation(root, &ws_id, &op, None).expect("operation should succeed");
 
         // The head ref should now point to the blob OID
         let ref_name = workspace_head_ref(ws_id.as_str());
-        let head = read_ref(root, &ref_name).unwrap();
+        let head = read_ref(root, &ref_name).expect("operation should succeed");
         assert_eq!(head, Some(oid));
     }
 
@@ -462,14 +466,14 @@ mod tests {
         let ws_id = ws("feature-x");
         let op = make_create_op(&ws_id);
 
-        let oid = append_operation(root, &ws_id, &op, None).unwrap();
+        let oid = append_operation(root, &ws_id, &op, None).expect("operation should succeed");
 
         // Verify via git show-ref
         let out = Command::new("git")
             .args(["show-ref", "refs/manifold/head/feature-x"])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             out.status.success(),
             "show-ref should find the ref: {}",
@@ -487,7 +491,7 @@ mod tests {
         let op = make_create_op(&ws_id);
 
         // Create the ref manually to simulate "already exists"
-        let oid1 = append_operation(root, &ws_id, &op, None).unwrap();
+        let oid1 = append_operation(root, &ws_id, &op, None).expect("operation should succeed");
 
         // Try to append again with old_head=None (should fail: ref now exists)
         let result = append_operation(root, &ws_id, &op, None);
@@ -498,7 +502,7 @@ mod tests {
 
         // Ref should still point to the original OID
         let ref_name = workspace_head_ref(ws_id.as_str());
-        let head = read_ref(root, &ref_name).unwrap();
+        let head = read_ref(root, &ref_name).expect("operation should succeed");
         assert_eq!(head, Some(oid1));
     }
 
@@ -514,15 +518,16 @@ mod tests {
 
         // First operation
         let op1 = make_create_op(&ws_id);
-        let oid1 = append_operation(root, &ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(root, &ws_id, &op1, None).expect("operation should succeed");
 
         // Second operation (parent = oid1)
         let op2 = make_describe_op(&ws_id, oid1.clone(), "implementing feature");
-        let oid2 = append_operation(root, &ws_id, &op2, Some(&oid1)).unwrap();
+        let oid2 =
+            append_operation(root, &ws_id, &op2, Some(&oid1)).expect("operation should succeed");
 
         // Head should now point to oid2
         let ref_name = workspace_head_ref(ws_id.as_str());
-        let head = read_ref(root, &ref_name).unwrap();
+        let head = read_ref(root, &ref_name).expect("operation should succeed");
         assert_eq!(head, Some(oid2));
     }
 
@@ -533,17 +538,19 @@ mod tests {
         let ws_id = ws("agent-1");
 
         let op1 = make_create_op(&ws_id);
-        let oid1 = append_operation(root, &ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(root, &ws_id, &op1, None).expect("operation should succeed");
 
         let op2 = make_describe_op(&ws_id, oid1.clone(), "step 2");
-        let oid2 = append_operation(root, &ws_id, &op2, Some(&oid1)).unwrap();
+        let oid2 =
+            append_operation(root, &ws_id, &op2, Some(&oid1)).expect("operation should succeed");
 
         let op3 = make_describe_op(&ws_id, oid2.clone(), "step 3");
-        let oid3 = append_operation(root, &ws_id, &op3, Some(&oid2)).unwrap();
+        let oid3 =
+            append_operation(root, &ws_id, &op3, Some(&oid2)).expect("operation should succeed");
 
         // Head should now be oid3
         let ref_name = workspace_head_ref(ws_id.as_str());
-        let head = read_ref(root, &ref_name).unwrap();
+        let head = read_ref(root, &ref_name).expect("operation should succeed");
         assert_eq!(head, Some(oid3));
 
         // Previous blobs are still accessible
@@ -551,14 +558,14 @@ mod tests {
             .args(["cat-file", "-t", oid1.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "blob");
 
         let out = Command::new("git")
             .args(["cat-file", "-t", oid2.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "blob");
     }
 
@@ -570,11 +577,12 @@ mod tests {
 
         // First op
         let op1 = make_create_op(&ws_id);
-        let oid1 = append_operation(root, &ws_id, &op1, None).unwrap();
+        let oid1 = append_operation(root, &ws_id, &op1, None).expect("operation should succeed");
 
         // Second op (advances head to oid2)
         let op2 = make_describe_op(&ws_id, oid1.clone(), "step 2");
-        let oid2 = append_operation(root, &ws_id, &op2, Some(&oid1)).unwrap();
+        let oid2 =
+            append_operation(root, &ws_id, &op2, Some(&oid1)).expect("operation should succeed");
 
         // Try to append a third op using stale old_head (oid1 instead of oid2)
         let op3 = make_describe_op(&ws_id, oid2.clone(), "step 3");
@@ -586,7 +594,7 @@ mod tests {
 
         // Head should still be oid2
         let ref_name = workspace_head_ref(ws_id.as_str());
-        let head = read_ref(root, &ref_name).unwrap();
+        let head = read_ref(root, &ref_name).expect("operation should succeed");
         assert_eq!(head, Some(oid2));
     }
 
@@ -601,13 +609,13 @@ mod tests {
         let ws_id = ws("default");
         let op = make_create_op(&ws_id);
 
-        let oid = write_operation_blob(root, &op).unwrap();
+        let oid = write_operation_blob(root, &op).expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["cat-file", "-p", oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
         // Content should be valid JSON
@@ -631,8 +639,8 @@ mod tests {
         // Use a complex operation with multiple parent IDs
         let op = Operation {
             parent_ids: vec![
-                GitOid::new(&"a".repeat(40)).unwrap(),
-                GitOid::new(&"b".repeat(40)).unwrap(),
+                GitOid::new(&"a".repeat(40)).expect("operation should succeed"),
+                GitOid::new(&"b".repeat(40)).expect("operation should succeed"),
             ],
             workspace_id: ws_id,
             timestamp: "2026-02-19T15:30:00Z".to_owned(),
@@ -641,16 +649,16 @@ mod tests {
             },
         };
 
-        let oid = write_operation_blob(root, &op).unwrap();
+        let oid = write_operation_blob(root, &op).expect("operation should succeed");
 
         let out = Command::new("git")
             .args(["cat-file", "-p", oid.as_str()])
             .current_dir(root)
             .output()
-            .unwrap();
+            .expect("operation should succeed");
         assert!(out.status.success());
 
-        let parsed = Operation::from_json(&out.stdout).unwrap();
+        let parsed = Operation::from_json(&out.stdout).expect("operation should succeed");
         assert_eq!(parsed, op);
     }
 

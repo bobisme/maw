@@ -48,9 +48,10 @@ struct RepoSnapshots {
 }
 
 fn artifact_root() -> PathBuf {
-    std::env::var_os("DST_ARTIFACT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("maw-dst-artifacts"))
+    std::env::var_os("DST_ARTIFACT_DIR").map_or_else(
+        || std::env::temp_dir().join("maw-dst-artifacts"),
+        PathBuf::from,
+    )
 }
 
 fn timestamp_millis() -> u128 {
@@ -136,6 +137,10 @@ fn collect_snapshots(repo: &TestRepo) -> RepoSnapshots {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test artifact bundle writer mirrors the emitted metadata fields"
+)]
 pub fn write_failure_bundle(
     harness: &str,
     seed: u64,

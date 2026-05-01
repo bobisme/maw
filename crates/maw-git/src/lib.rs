@@ -41,6 +41,10 @@ pub use gix_repo::GixRepo;
 ///
 /// This is the public entry point for callers outside maw-git (e.g. maw-cli
 /// merge code that needs to smudge after a `git checkout` CLI call).
+///
+/// # Errors
+/// Returns an error if the worktree cannot be opened or LFS objects cannot be
+/// materialized.
 #[cfg(feature = "lfs")]
 pub fn lfs_smudge_worktree_at(
     ws_path: &std::path::Path,

@@ -7,10 +7,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn rs_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let entry = entry.unwrap();
+    for entry in fs::read_dir(dir).expect("operation should succeed") {
+        let entry = entry.expect("operation should succeed");
         let path = entry.path();
-        let meta = entry.metadata().unwrap();
+        let meta = entry.metadata().expect("operation should succeed");
         if meta.is_dir() {
             // Skip common build/output dirs.
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -44,13 +44,10 @@ fn no_git_subprocess_in_lfs_code() {
 
     let mut offenses: Vec<String> = Vec::new();
     for file in &files {
-        let contents = fs::read_to_string(file).unwrap();
+        let contents = fs::read_to_string(file).expect("operation should succeed");
         for (lineno, line) in contents.lines().enumerate() {
             // Strip // comments — a doc mention of "Command::new" is fine.
-            let code = match line.find("//") {
-                Some(pos) => &line[..pos],
-                None => line,
-            };
+            let code = line.find("//").map_or(line, |pos| &line[..pos]);
             for pat in &forbidden {
                 if code.contains(pat) {
                     offenses.push(format!(
