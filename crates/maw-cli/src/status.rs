@@ -214,9 +214,6 @@ struct StatusSummary {
 impl StatusSummary {
     const fn issue_count(&self) -> usize {
         let mut count = 0;
-        if !self.stray_root_files.is_empty() {
-            count += 1;
-        }
         if !self.workspace_names.is_empty() {
             count += 1;
         }
@@ -242,7 +239,7 @@ impl StatusSummary {
         let untracked = self.untracked_files.len();
         let mut parts = Vec::new();
         if stray > 0 {
-            parts.push(format!("ROOT-NOT-BARE={stray}{warn}"));
+            parts.push(format!("root-extra={stray}"));
         }
         parts.push(format!("ws={ws}{}", if ws == 0 { &check } else { &warn }));
         parts.push(format!("chgsets={change_sets}{check}"));
@@ -281,7 +278,7 @@ impl StatusSummary {
             let n = self.stray_root_files.len();
             let _ = writeln!(
                 out,
-                "[WARN] ROOT NOT BARE: {n} unexpected file(s) at repo root: run maw init to fix"
+                "[INFO] Root extras: {n} non-structural item(s) at repo root; run maw doctor for details"
             );
             for name in &self.stray_root_files {
                 let _ = writeln!(out, "  - {name}");
@@ -378,10 +375,6 @@ impl StatusSummary {
         let mut out = String::new();
         out.push_str(face);
 
-        if !self.stray_root_files.is_empty() {
-            out.push_str(&colorize_light_red("ROOT!"));
-        }
-
         let ws = self.workspace_names.len();
         if ws > 0 {
             let workspace = format!("\u{f0645} {ws}");
@@ -418,10 +411,8 @@ impl StatusSummary {
             let n = self.stray_root_files.len();
             let _ = writeln!(
                 out,
-                "{} {}: {}",
-                colorize_light_red("⚠ ROOT NOT BARE"),
-                colorize_light_red(&format!("{n} unexpected file(s) at repo root")),
-                colorize_light_red("run maw init to fix"),
+                "{}: {n} non-structural item(s) at repo root; run maw doctor for details",
+                colorize_blue("Root extras"),
             );
             for name in &self.stray_root_files {
                 let _ = writeln!(out, "  - {name}");
@@ -727,9 +718,6 @@ fn collect_status_fast() -> Result<StatusSummary> {
     // Check main branch sync status vs origin.
     let main_sync = main_sync_status_inner(&root, branch);
 
-    // Check for stray files at repo root.
-    let stray_root_files = doctor::stray_root_entries(&root);
-
     Ok(StatusSummary {
         workspace_names,
         changes: Vec::new(),
@@ -737,7 +725,7 @@ fn collect_status_fast() -> Result<StatusSummary> {
         untracked_files,
         is_stale: false,
         main_sync,
-        stray_root_files,
+        stray_root_files: Vec::new(),
     })
 }
 
@@ -783,4 +771,64 @@ fn collect_git_status(ws_path: &Path) -> Result<(Vec<String>, Vec<String>)> {
     }
 
     Ok((changed, untracked))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_with_root_extras(stray_root_files: &[&str]) -> StatusSummary {
+        StatusSummary {
+            workspace_names: Vec::new(),
+            changes: Vec::new(),
+            changed_files: Vec::new(),
+            untracked_files: Vec::new(),
+            is_stale: false,
+            main_sync: SyncStatus::UpToDate,
+            stray_root_files: stray_root_files
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn root_extras_do_not_count_as_status_issues() {
+        let summary = summary_with_root_extras(&["AGENTS.md"]);
+
+        assert_eq!(summary.issue_count(), 0);
+    }
+
+    #[test]
+    fn status_bar_omits_root_extras() {
+        let summary = summary_with_root_extras(&["AGENTS.md", "notes"]);
+
+        let output = summary.render_status_bar(false);
+
+        assert!(!output.contains("ROOT"));
+        assert!(!output.contains("AGENTS.md"));
+        assert!(!output.contains("notes"));
+    }
+
+    #[test]
+    fn text_status_softens_root_extra_message() {
+        let summary = summary_with_root_extras(&["AGENTS.md"]);
+
+        let output = summary.render_text();
+
+        assert!(output.contains("[INFO] Root extras: 1 non-structural item(s)"));
+        assert!(output.contains("  - AGENTS.md"));
+        assert!(!output.contains("[WARN] ROOT NOT BARE"));
+        assert!(!output.contains("run maw init to fix"));
+    }
+
+    #[test]
+    fn oneline_status_uses_soft_root_extra_label() {
+        let summary = summary_with_root_extras(&["AGENTS.md"]);
+
+        let output = summary.render_oneline();
+
+        assert!(output.contains("root-extra=1"));
+        assert!(!output.contains("ROOT-NOT-BARE"));
+    }
 }
