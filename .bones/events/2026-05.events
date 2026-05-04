@@ -56,3 +56,7 @@
 1777916036499187	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy5Aw		item.move	bn-37aq	{"state":"doing"}	blake3:jaTCAOT0YHO11V4eovzUs0ciMzbVtW5cAn7DzhB9aRQ
 1777916036511596	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy5Qw		item.assign	bn-37aq	{"action":"assign","agent":"maw-dev"}	blake3:s2BF4Ub-VsZqRFe9rezeTaR23l-b0X1oGOcpIzsixJM
 1777916458649225	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy5gw		item.move	bn-37aq	{"state":"done"}	blake3:4f_t0s99zc_xRT-Qkun00-pRsXmKChPhZgLTQCZ9BUM
+1777919108141397	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy5ww		item.create	bn-3mw9	{"kind":"task","labels":["merge","workspace","status"],"size":"m","title":"Support branch-attached workspace merge targets"}	blake3:XhCms6EysqkJyG49RE1ZMaC7z0W7CBOe10E2J7cZweg
+1777919117497193	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy6Aw		item.move	bn-3mw9	{"state":"doing"}	blake3:LudRzFU_245oJotqvzftHqoyOr_k-F9ZGcbbTbUwZwY
+1777919117501492	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy6Qw		item.assign	bn-3mw9	{"action":"assign","agent":"maw-dev"}	blake3:mAxdGkSf_inDWjthWm2qUG_2fVAO_ZFiGRH-DzBYggQ
+1777920124269976	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy6gw		item.move	bn-3mw9	{"state":"done"}	blake3:RAJkqZgpcNmSjzJ0Tepz1Sn85UmpDd9AuX3sxD2KHPg
