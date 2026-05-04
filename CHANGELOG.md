@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.60.5 — Status and merge-target UX fixes (bn-35cg, bn-m7as)
+
+Patch release for two UX fixes found immediately after the brownfield init cleanup.
+
+- `maw status` now treats root extras such as root `AGENTS.md` as informational context instead of a repair-needed `ROOT NOT BARE` warning. The compact `maw status --status-bar` output no longer reports root extras at all.
+- `maw ws merge --help` now describes the actual supported `--into` targets: the default workspace, an active change id, or a workspace attached to an active change.
+- Attempting to merge into an unbound non-default workspace now explains the supported targets and points users toward merging into an active change target instead of implying arbitrary workspace targets are valid.
+
 ## v0.60.4 — Brownfield init root cleanup (bn-2qp5)
 
 Patch release fixing brownfield `maw init` cleanup for existing repos with project metadata already at the root.
