@@ -385,12 +385,12 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
                 stray.len(),
                 stray.join(", ")
             ),
-            fix: Some("Fix: maw init (moves tracked files) or move/remove manually".to_string()),
+            fix: Some("Fix: maw init (moves project files) or move/remove manually".to_string()),
         }
     }
 }
 
-const BARE_ROOT_ALLOWED: &[&str] = &["ws", "repo.git", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
+const BARE_ROOT_ALLOWED: &[&str] = &[".git", ".manifold", "repo.git", "ws"];
 
 fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
     let Some(root) = root else {
@@ -430,7 +430,7 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || BARE_ROOT_ALLOWED.contains(&name.as_str()) {
+            if BARE_ROOT_ALLOWED.contains(&name.as_str()) {
                 None
             } else {
                 Some(name)
@@ -746,6 +746,23 @@ fn scan_for_stubs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stray_root_entries_flags_project_dotfiles() {
+        let tmp = tempfile::tempdir().expect("operation should succeed");
+        let root = tmp.path();
+        std::fs::write(root.join(".git"), "gitdir: repo.git\n").expect("operation should succeed");
+        std::fs::create_dir_all(root.join(".manifold")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("repo.git")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("ws")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join(".bones")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("notes")).expect("operation should succeed");
+
+        let mut stray = stray_root_entries(root);
+        stray.sort();
+
+        assert_eq!(stray, [".bones", "notes"]);
+    }
 
     #[test]
     fn parse_standard_git_version() {

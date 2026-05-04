@@ -15,9 +15,8 @@
 //! │   ├── config.toml
 //! │   ├── epochs/
 //! │   └── artifacts/
-//! ├── ws/
-//! │   └── default/       ← main worktree (git worktree)
-//! └── .gitignore
+//! └── ws/
+//!     └── default/       ← main worktree (git worktree)
 //! ```
 
 use std::fmt;
@@ -838,9 +837,9 @@ pub struct BrownfieldInitResult {
     pub head_branch: Option<String>,
     /// `true` if Manifold was already initialized (idempotent no-op).
     pub already_initialized: bool,
-    /// Files with uncommitted changes kept at repo root.
+    /// Files with uncommitted changes moved into the default workspace.
     pub dirty_files_at_root: Vec<PathBuf>,
-    /// Count of tracked source files removed from root (now in `ws/default/`).
+    /// Count of root project entries moved into `ws/default/`.
     pub cleaned_root_files: usize,
 }
 
@@ -876,14 +875,14 @@ impl fmt::Display for BrownfieldInitResult {
         if self.cleaned_root_files > 0 {
             writeln!(
                 f,
-                "  Cleaned:   {} file(s) removed from root (now in ws/default/)",
+                "  Cleaned:   {} root item(s) moved into ws/default/",
                 self.cleaned_root_files
             )?;
         }
         if !self.dirty_files_at_root.is_empty() {
             writeln!(
                 f,
-                "  WARNING:   {} file(s) with uncommitted changes kept at root",
+                "  Dirty:     {} modified file(s) moved into ws/default/",
                 self.dirty_files_at_root.len()
             )?;
         }
@@ -904,11 +903,10 @@ impl fmt::Display for BrownfieldInitResult {
 /// Options for brownfield initialization.
 #[derive(Clone, Debug)]
 pub struct BrownfieldInitOptions {
-    /// Remove tracked files from repo root after creating `ws/default/`.
+    /// Move project files from repo root after creating `ws/default/`.
     ///
-    /// When enabled (default), tracked source files are moved out of the root
-    /// metadata directory and remain accessible in `ws/default/`. Dirty files
-    /// are still preserved at root.
+    /// When enabled (default), non-structural root entries are moved out of
+    /// the root metadata directory and into `ws/default/`.
     pub clean_root_tracked_files: bool,
 }
 
@@ -971,7 +969,7 @@ pub fn run() -> anyhow::Result<()> {
 /// 9. Create `.manifold/` directory structure
 /// 10. Set `refs/manifold/epoch/current` and `refs/manifold/ws/default`
 /// 11. Create `ws/default/` via `git worktree add` (attached to configured branch)
-/// 12. Remove tracked source files from root (dirty files are kept with warning)
+/// 12. Move project files from root into `ws/default/`
 ///
 /// # Errors
 /// Returns [`BrownfieldInitError`] if any step fails. Partial state may remain
@@ -1061,6 +1059,12 @@ pub fn brownfield_init(
         // Keep workspace state ref aligned with current ws/default HEAD.
         bf_set_default_workspace_ref(&root, &bf_get_workspace_head_oid(&ws_default)?)?;
 
+        let cleaned_count = if opts.clean_root_tracked_files {
+            bf_move_root_project_entries(&root, &ws_default, RootMoveMode::PreserveExisting)?
+        } else {
+            0
+        };
+
         let head_branch = bf_detect_head_branch(&root);
         return Ok(BrownfieldInitResult {
             repo_root: root,
@@ -1070,7 +1074,7 @@ pub fn brownfield_init(
             head_branch,
             already_initialized: true,
             dirty_files_at_root: Vec::new(),
-            cleaned_root_files: 0,
+            cleaned_root_files: cleaned_count,
         });
     }
 
@@ -1084,8 +1088,8 @@ pub fn brownfield_init(
         for f in &dirty_files {
             eprintln!("  M  {}", f.display());
         }
-        eprintln!("  Uncommitted changes are kept at root. The committed versions will");
-        eprintln!("  appear in ws/default/. Commit your changes to include them in epoch₀.");
+        eprintln!("  Uncommitted changes will be moved into ws/default/.");
+        eprintln!("  Commit them there if you want to include them in a later epoch.");
     }
 
     // 5. Get current HEAD as epoch₀
@@ -1123,16 +1127,12 @@ pub fn brownfield_init(
     std::fs::create_dir_all(&ws_dir)?;
     bf_create_default_workspace(&root, &ws_default)?;
 
-    // 12. Remove tracked source files from root (skip dirty ones)
+    // 12. Move all non-structural root project entries into ws/default/.
     let cleaned_count = if opts.clean_root_tracked_files {
-        let dirty_set: std::collections::HashSet<_> = dirty_files.iter().cloned().collect();
-        bf_clean_root_tracked_files(&root, &dirty_set)?
+        bf_move_root_project_entries(&root, &ws_default, RootMoveMode::ReplaceExisting)?
     } else {
         0
     };
-
-    // 12b. Warn about untracked files left behind
-    bf_warn_remaining_untracked_root_files(&root);
 
     Ok(BrownfieldInitResult {
         repo_root: root,
@@ -1725,157 +1725,154 @@ fn bf_create_default_workspace(root: &Path, ws_path: &Path) -> Result<(), Brownf
     )
 }
 
-/// Remove tracked source files from root that are NOT in the dirty set.
+/// Move every non-structural root entry into `ws/default/`.
 ///
-/// Uses `git ls-tree -r --name-only HEAD` to enumerate tracked files, then
-/// removes each file from root if it exists and is not dirty. Directories
-/// are cleaned up if empty after file removal.
-///
-/// Returns the count of removed files.
-fn bf_clean_root_tracked_files(
+/// This intentionally uses a small allowlist. Dot-prefixed project files such
+/// as `.bones/`, `.github/`, `.gitignore`, and `.maw.toml` are workspace
+/// content, not root metadata.
+fn bf_move_root_project_entries(
     root: &Path,
-    dirty: &std::collections::HashSet<PathBuf>,
+    ws_default: &Path,
+    mode: RootMoveMode,
 ) -> Result<usize, BrownfieldInitError> {
-    // List all files tracked at HEAD
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| BrownfieldInitError::GitCommand {
-            command: "git ls-tree -r --name-only HEAD".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
+    let mut moved = 0usize;
 
-    if !output.status.success() {
-        // Non-fatal — if listing fails, just skip cleanup
-        return Ok(0);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut removed = 0usize;
-
-    // Collect directories that may become empty (bottom-up cleanup)
-    let mut dirs_to_check: Vec<PathBuf> = Vec::new();
-
-    for name in stdout.lines() {
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let rel = PathBuf::from(name);
-
-        // Skip dirty files — leave them at root for the user to handle
-        if dirty.contains(&rel) {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if bf_is_structural_root_entry(&name) {
             continue;
         }
 
-        // Skip Manifold-owned paths (they belong at root)
-        if name.starts_with("ws/") || name.starts_with(".manifold/") || name == ".gitignore" {
-            continue;
-        }
-
-        let abs = root.join(&rel);
-        if abs.exists() && abs.is_file() && std::fs::remove_file(&abs).is_ok() {
-            removed += 1;
-            // Track parent directory for cleanup
-            if let Some(parent) = rel.parent()
-                && parent != Path::new("")
-            {
-                let abs_parent = root.join(parent);
-                if !dirs_to_check.contains(&abs_parent) {
-                    dirs_to_check.push(abs_parent);
-                }
-            }
-        }
+        let src = entry.path();
+        let dst = ws_default.join(name.as_ref());
+        bf_move_entry_into_workspace(&src, &dst, mode)?;
+        moved += 1;
     }
 
-    // Remove empty directories (deepest first)
-    dirs_to_check.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
-    for dir in &dirs_to_check {
-        // Only remove if empty
-        let _ = std::fs::remove_dir(dir); // silently ignore errors (not empty = fine)
-    }
-
-    Ok(removed)
+    Ok(moved)
 }
 
-/// Warn if untracked files are still present at repo root after brownfield cleanup.
-///
-/// In brownfield repos, partially-tracked directories can retain untracked
-/// files (locks/state/cache) even after tracked files are moved to ws/default/.
-/// We surface these explicitly so users don't miss manual cleanup.
-fn bf_warn_remaining_untracked_root_files(root: &Path) {
-    let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain=1", "--untracked-files=all"])
-        .current_dir(root)
-        .output()
-    else {
-        return;
-    };
+#[derive(Clone, Copy)]
+enum RootMoveMode {
+    ReplaceExisting,
+    PreserveExisting,
+}
 
-    if !output.status.success() {
-        return;
-    }
+fn bf_is_structural_root_entry(name: &str) -> bool {
+    matches!(name, ".git" | ".manifold" | REPO_GIT_DIR | "ws")
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let skip_prefixes = [
-        "ws/",
-        ".git/",
-        ".manifold/",
-        ".agents/",
-        ".claude/",
-        ".botbus/",
-        ".crit/",
-    ];
-    let skip_exact = [
-        "ws",
-        ".git",
-        ".manifold",
-        ".agents",
-        ".claude",
-        ".botbus",
-        ".crit",
-        "AGENTS.md",
-        "CLAUDE.md",
-    ];
-
-    let mut leftover: Vec<String> = stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("?? "))
-        .map(str::trim)
-        .filter(|path| {
-            !skip_exact.contains(path) && !skip_prefixes.iter().any(|pfx| path.starts_with(pfx))
-        })
-        .map(ToString::to_string)
-        .collect();
-
-    if leftover.is_empty() {
-        return;
-    }
-
-    leftover.sort();
-    leftover.dedup();
-
-    let preview = leftover
-        .iter()
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let more = if leftover.len() > 5 {
-        format!(" (+{} more)", leftover.len() - 5)
+fn bf_move_entry_into_workspace(
+    src: &Path,
+    dst: &Path,
+    mode: RootMoveMode,
+) -> Result<(), BrownfieldInitError> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        bf_move_dir_into_workspace(src, dst, mode)
     } else {
-        String::new()
-    };
+        bf_move_file_into_workspace(src, dst, mode)
+    }
+}
 
-    println!(
-        "[WARN] {} untracked root file(s)/dir(s) remained after init: {}{}",
-        leftover.len(),
-        preview,
-        more
-    );
-    println!("  To fix: move these into ws/default/ (or remove them), then re-run: maw init");
+fn bf_move_dir_into_workspace(
+    src: &Path,
+    dst: &Path,
+    mode: RootMoveMode,
+) -> Result<(), BrownfieldInitError> {
+    if dst.exists() {
+        if !dst.is_dir() {
+            if matches!(mode, RootMoveMode::PreserveExisting) {
+                let conflict_dst = bf_next_root_cleanup_path(dst);
+                return bf_move_dir_into_workspace(src, &conflict_dst, mode);
+            }
+            return Err(BrownfieldInitError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "cannot move directory {} over non-directory {}",
+                    src.display(),
+                    dst.display()
+                ),
+            )));
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(src, dst)?;
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let child_src = entry.path();
+        let child_dst = dst.join(entry.file_name());
+        bf_move_entry_into_workspace(&child_src, &child_dst, mode)?;
+    }
+
+    std::fs::remove_dir(src)?;
+    Ok(())
+}
+
+fn bf_move_file_into_workspace(
+    src: &Path,
+    dst: &Path,
+    mode: RootMoveMode,
+) -> Result<(), BrownfieldInitError> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if dst.exists() || std::fs::symlink_metadata(dst).is_ok() {
+        if matches!(mode, RootMoveMode::PreserveExisting) {
+            if bf_regular_files_match(src, dst)? {
+                std::fs::remove_file(src)?;
+                return Ok(());
+            }
+            let conflict_dst = bf_next_root_cleanup_path(dst);
+            return bf_move_file_into_workspace(src, &conflict_dst, RootMoveMode::PreserveExisting);
+        }
+
+        let dst_meta = std::fs::symlink_metadata(dst)?;
+        if dst_meta.is_dir() {
+            return Err(BrownfieldInitError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "cannot move file {} over directory {}",
+                    src.display(),
+                    dst.display()
+                ),
+            )));
+        }
+        std::fs::remove_file(dst)?;
+    }
+
+    std::fs::rename(src, dst)?;
+    Ok(())
+}
+
+fn bf_regular_files_match(src: &Path, dst: &Path) -> Result<bool, BrownfieldInitError> {
+    let src_meta = std::fs::symlink_metadata(src)?;
+    let dst_meta = std::fs::symlink_metadata(dst)?;
+    if !src_meta.is_file() || !dst_meta.is_file() {
+        return Ok(false);
+    }
+    if src_meta.len() != dst_meta.len() {
+        return Ok(false);
+    }
+    Ok(std::fs::read(src)? == std::fs::read(dst)?)
+}
+
+fn bf_next_root_cleanup_path(dst: &Path) -> PathBuf {
+    for suffix in ["root", "root-1", "root-2", "root-3", "root-4"] {
+        let candidate = PathBuf::from(format!("{}.{}", dst.display(), suffix));
+        if !candidate.exists() && std::fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+    }
+    PathBuf::from(format!("{}.root-extra", dst.display()))
 }
 
 /// Run a git command and check for success.
@@ -2034,6 +2031,29 @@ mod brownfield_tests {
             .collect()
     }
 
+    fn root_entries(root: &Path) -> Vec<String> {
+        let mut entries = fs::read_dir(root)
+            .expect("read repo root")
+            .map(|entry| {
+                entry
+                    .expect("read root entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    fn assert_root_contains_only_structural_entries(root: &Path) {
+        assert_eq!(
+            root_entries(root),
+            [".git", ".manifold", "repo.git", "ws"],
+            "repo root should contain only maw structural entries"
+        );
+    }
+
     #[test]
     fn brownfield_rejects_missing_git() {
         let dir = tempdir().expect("operation should succeed");
@@ -2187,6 +2207,88 @@ mod brownfield_tests {
     }
 
     #[test]
+    fn brownfield_moves_dotdirs_notes_and_ignored_files_into_default() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path();
+        setup_existing_repo(root);
+
+        fs::write(root.join(".gitignore"), ".bones/cache/\n").expect("write .gitignore");
+        fs::create_dir_all(root.join(".bones/events")).expect("create .bones events");
+        fs::write(
+            root.join(".bones/events/2026-05.events"),
+            "{\"event\":\"tracked\"}\n",
+        )
+        .expect("write tracked bones event");
+        fs::create_dir_all(root.join("notes")).expect("create notes");
+        fs::write(root.join("notes/plan.md"), "tracked notes\n").expect("write notes");
+
+        Command::new("git")
+            .args([
+                "add",
+                ".gitignore",
+                ".bones/events/2026-05.events",
+                "notes/plan.md",
+            ])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "add project metadata"])
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+
+        fs::create_dir_all(root.join(".bones/cache")).expect("create .bones cache");
+        fs::write(root.join(".bones/cache/state.db"), "ignored state\n")
+            .expect("write ignored bones state");
+        fs::write(root.join(".bones/local.json"), "{\"local\":true}\n")
+            .expect("write untracked bones file");
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
+
+        assert_root_contains_only_structural_entries(root);
+        assert!(result.cleaned_root_files > 0);
+
+        let ws = &result.default_workspace;
+        assert!(ws.join(".gitignore").is_file());
+        assert!(ws.join(".bones/events/2026-05.events").is_file());
+        assert_eq!(
+            fs::read_to_string(ws.join(".bones/cache/state.db")).expect("read ignored state"),
+            "ignored state\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join(".bones/local.json")).expect("read local bones file"),
+            "{\"local\":true}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("notes/plan.md")).expect("read notes"),
+            "tracked notes\n"
+        );
+    }
+
+    #[test]
+    fn brownfield_moves_dirty_tracked_files_into_default() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path();
+        setup_existing_repo(root);
+
+        fs::write(root.join("README.md"), "# My Project\nlocal edit\n")
+            .expect("write dirty README");
+
+        let result = brownfield_init(root, &BrownfieldInitOptions::default())
+            .expect("operation should succeed");
+
+        assert_root_contains_only_structural_entries(root);
+        assert_eq!(result.dirty_files_at_root, [PathBuf::from("README.md")]);
+        assert_eq!(
+            fs::read_to_string(result.default_workspace.join("README.md"))
+                .expect("read moved README"),
+            "# My Project\nlocal edit\n"
+        );
+    }
+
+    #[test]
     fn brownfield_can_preserve_root_tracked_files_when_cleanup_disabled() {
         let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
@@ -2197,7 +2299,7 @@ mod brownfield_tests {
         };
         let result = brownfield_init(root, &opts).expect("operation should succeed");
 
-        // Root tracked files are intentionally preserved.
+        // Root project entries are intentionally preserved.
         assert!(root.join("README.md").exists());
         assert!(root.join("main.rs").exists());
         assert_eq!(result.cleaned_root_files, 0);
@@ -2215,15 +2317,7 @@ mod brownfield_tests {
 
         brownfield_init(root, &BrownfieldInitOptions::default()).expect("operation should succeed");
 
-        // src/ should be removed since all its tracked files were cleaned
-        assert!(
-            !root.join("src").exists()
-                || fs::read_dir(root.join("src"))
-                    .expect("operation should succeed")
-                    .next()
-                    .is_none(),
-            "src/ should be empty or removed after tracked file cleanup"
-        );
+        assert_root_contains_only_structural_entries(root);
     }
 
     #[test]
@@ -2318,7 +2412,7 @@ mod brownfield_tests {
         assert!(s.contains("/tmp/myrepo"));
         assert!(s.contains("ws/default"));
         assert!(s.contains("main"));
-        assert!(s.contains("5 file(s)"));
+        assert!(s.contains("5 root item(s)"));
         assert!(s.contains("maw ws create --from main <agent-name>"));
     }
 
