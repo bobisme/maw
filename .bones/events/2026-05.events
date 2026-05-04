@@ -42,3 +42,7 @@
 1777906442770374	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy1ww		item.move	bn-55s1	{"state":"doing"}	blake3:Pd_TbOMoXzC04BnpHy6v7UsJzP7eAlktadu7yOjhN0A
 1777906442783616	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy2Aw		item.assign	bn-55s1	{"action":"assign","agent":"maw-dev"}	blake3:haHyCAPoTvu2iTerPWqh9r-vMjDGNckfpn7fI_hu5Ys
 1777906838394644	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy2Qw		item.move	bn-55s1	{"state":"done"}	blake3:HIGm_GGGgTTL0Z6B64HoJC0Gr1VBZG4dWIbj95Iho9A
+1777908481050579	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy2gw		item.create	bn-35cg	{"description":"Root AGENTS.md guidance stubs are expected in some maw repos, but status currently reports them as ROOT NOT BARE warnings. Keep root cleanup strict for real project files, but soften normal status output for guidance stubs and remove the warning entirely from status --status-bar.","kind":"bug","labels":["status","root-cleanup"],"size":"xs","title":"Soften root guidance stub warning in status"}	blake3:5yUTIaKenQZ44JoYA9QvxiVyhTKkOXBx1BL8OkpvQO4
+1777908481347771	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy2ww		item.move	bn-35cg	{"state":"doing"}	blake3:2GDD-ZvNrE_Vv1lVJKHV9jI2Bv_b6Fa4P7qZ14cfg0k
+1777908481351494	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy3Aw		item.assign	bn-35cg	{"action":"assign","agent":"maw-dev"}	blake3:m55cDhpvDxSVMhnvl3z2Howl50myX2wN5ARdNfKQu5Y
+1777908785881077	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy3Qw		item.move	bn-35cg	{"state":"done"}	blake3:ngVFj3A5sW6Z4m0U0tyH26gmozX9QeoOiXmy64mlST0
