@@ -68,3 +68,7 @@
 1777925768417803	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy8Aw		item.assign	bn-6ccl	{"action":"assign","agent":"maw-dev"}	blake3:Guji7ajS5twRgE4c45tHrN6V74I2hDJq_dY2qupiRbU
 1777926074754912	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy8Qw		item.move	bn-284w	{"state":"done"}	blake3:yBUmv0Y2OMrJkLVxJiujWoPyug5aQSuZoTaq8lFfFXA
 1777926074838443	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy8gw		item.move	bn-6ccl	{"state":"done"}	blake3:g6XTWuBDQBjae7l7mrhIdeUMcgrPasUAywdBHSZptMQ
+1777932232691116	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy8ww		item.create	bn-1v2r	{"kind":"task","labels":["release"],"size":"s","title":"Release v0.60.6"}	blake3:Peru5R9AXN0yJewS7htIg18cjl_TKcza942IVJAEB4k
+1777932288927690	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy9Aw		item.move	bn-1v2r	{"state":"doing"}	blake3:xQXuUh5expV-lAw06hlvgFPU9jf6X39yWRtU0fA-OSc
+1777932288931766	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy9Qw		item.assign	bn-1v2r	{"action":"assign","agent":"maw-dev"}	blake3:SEZlsmzeaKSYOQ2GfgQCU_l5H6aH54BLRLrLExQ7CP0
+1777932568341082	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy9gw		item.move	bn-1v2r	{"state":"done"}	blake3:SDoyK0E8eoUA8U3NbZwv9D-0qKnx-WB5jzlsyKMvUTI
