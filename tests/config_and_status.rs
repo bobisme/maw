@@ -113,6 +113,34 @@ fn status_shows_attached_workspace_branch() {
 }
 
 #[test]
+fn attach_branch_rejects_untracked_workspace_directory() {
+    let repo = TestRepo::new();
+
+    let epoch = repo.current_epoch();
+    repo.git(&["update-ref", "refs/heads/crib-graph", &epoch]);
+    std::fs::create_dir_all(repo.root().join("ws/not-a-worktree"))
+        .expect("failed to create fake workspace directory");
+
+    let out = repo.maw_raw(&["ws", "attach-branch", "not-a-worktree", "crib-graph"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "attach-branch should reject untracked directories\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("not tracked by maw"),
+        "expected tracked-workspace validation, got: {stderr}"
+    );
+
+    let list = repo.maw_ok(&["ws", "list", "--format", "json"]);
+    assert!(
+        !list.contains("not-a-worktree"),
+        "fake directory should not become a listed workspace: {list}"
+    );
+}
+
+#[test]
 fn status_does_not_flag_default_stale_when_branch_ahead_of_epoch() {
     let repo = TestRepo::new();
 

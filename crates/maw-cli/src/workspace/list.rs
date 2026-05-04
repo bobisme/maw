@@ -117,6 +117,9 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             if name == DEFAULT_WORKSPACE || ws.commits_ahead == 0 {
                 continue;
             }
+            if metadata::read(&root, ws.id.as_str()).is_ok_and(|meta| meta.branch.is_some()) {
+                continue;
+            }
             match super::merge::check_merge_result(std::slice::from_ref(&name)) {
                 Ok(result) => {
                     checks.insert(
@@ -159,6 +162,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             };
             // Read metadata for this workspace (defaults to ephemeral on error/missing).
             let ws_meta = metadata::read(&root, ws.id.as_str()).unwrap_or_default();
+            let branch = ws_meta.branch;
             let ws_mode = if is_default {
                 maw_core::model::types::WorkspaceMode::Persistent
             } else {
@@ -180,6 +184,8 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                     "active".to_owned()
                 } else if rebase_conflicts > 0 {
                     format!("conflicted ({rebase_conflicts} conflict(s))")
+                } else if branch.is_some() && ws.commits_ahead > 0 {
+                    format!("active (+{} on branch)", ws.commits_ahead)
                 } else if ws.commits_ahead > 0 {
                     format!("active (+{} to merge)", ws.commits_ahead)
                 } else {
@@ -191,7 +197,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 commits_ahead: ws.commits_ahead,
                 template: ws_meta.template.map(|t| t.to_string()),
                 template_defaults: ws_meta.template_defaults,
-                branch: ws_meta.branch,
+                branch,
                 merge_check: merge_checks.get(&name).map(|mc| MergeCheckSummary {
                     ready: mc.ready,
                     conflict_count: mc.conflict_count,
@@ -297,6 +303,8 @@ fn print_list_text(
         });
         let annotation = if ws.state.contains("stale") {
             " (stale)".to_string()
+        } else if ws.branch.is_some() && ws.commits_ahead > 0 {
+            format!(" (branch work +{})", ws.commits_ahead)
         } else if ws.commits_ahead > 0 {
             format!(
                 " (ready to merge){}",
@@ -327,7 +335,7 @@ fn print_list_text(
 
     let mergeable: Vec<&str> = workspaces
         .iter()
-        .filter(|ws| ws.commits_ahead > 0)
+        .filter(|ws| ws.commits_ahead > 0 && ws.branch.is_none())
         .map(|ws| ws.name.as_str())
         .collect();
     if !mergeable.is_empty() {

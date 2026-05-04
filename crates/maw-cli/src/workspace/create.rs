@@ -348,10 +348,18 @@ pub fn attach_branch(name: &str, branch: &str) -> Result<()> {
 
     let root = ensure_repo_root()?;
     let path = workspace_path(name)?;
+    let backend = get_backend()?;
+    let ws_id =
+        WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;
     if !path.exists() {
         bail!(
             "Workspace '{name}' does not exist at {}.\n  Check available workspaces: maw ws list",
             path.display()
+        );
+    }
+    if !backend.exists(&ws_id) {
+        bail!(
+            "Workspace '{name}' is not tracked by maw.\n  To fix: create it with `maw ws create {name} --from <branch>`, or reconnect it first with `maw ws attach {name}`."
         );
     }
 

@@ -819,6 +819,20 @@ fn merge_into_branch_attached_workspace_advances_branch_without_trunk_epoch() {
         stdout.contains("git push origin crib-graph"),
         "branch target next step should name the branch push, got: {stdout}"
     );
+
+    let list = repo.maw_ok(&["ws", "list", "--format", "text"]);
+    assert!(
+        list.contains("crib2") && list.contains("branch=crib-graph"),
+        "branch target should still show its attached branch, got: {list}"
+    );
+    assert!(
+        list.contains("crib2") && list.contains("(branch work +"),
+        "branch target should show branch-local work, got: {list}"
+    );
+    assert!(
+        !list.contains("Merge ready: maw ws merge crib2 --into default --destroy"),
+        "branch target should not be advertised as ready to merge into default, got: {list}"
+    );
 }
 
 #[test]
