@@ -10,6 +10,7 @@ use maw_cli::epoch;
 use maw_cli::epoch_gc;
 use maw_cli::exec;
 use maw_cli::format;
+use maw_cli::init;
 use maw_cli::merge_cmd;
 use maw_cli::push;
 use maw_cli::ref_gc;
@@ -20,7 +21,6 @@ use maw_cli::transport;
 #[cfg(feature = "tui")]
 use maw_cli::tui;
 use maw_cli::upgrade;
-use maw_cli::v2_init;
 use maw_cli::workspace;
 
 /// Multi-Agent Workspaces coordinator
@@ -317,7 +317,7 @@ fn main() {
         }),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Changes(ref cmd) => changes::run(cmd),
-        Commands::Init => v2_init::run(),
+        Commands::Init => init::run(),
         Commands::Upgrade => upgrade::run(),
         Commands::Doctor { format, json } => {
             doctor::run(format::OutputFormat::with_json_flag(format, json))

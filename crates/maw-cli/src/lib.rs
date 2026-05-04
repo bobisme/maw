@@ -13,6 +13,7 @@ pub mod epoch_gc;
 pub mod error;
 pub mod exec;
 pub mod format;
+pub mod init;
 #[cfg(feature = "lfs")]
 pub mod lfs_push;
 pub mod merge_cmd;
@@ -25,5 +26,4 @@ pub mod transport;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod upgrade;
-pub mod v2_init;
 pub mod workspace;

@@ -1586,7 +1586,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _cwd = CwdGuard::enter(&root);
-                crate::v2_init::run().expect("maw init should succeed in test repo");
+                crate::init::run().expect("maw init should succeed in test repo");
             }
 
             if with_origin_remote {
