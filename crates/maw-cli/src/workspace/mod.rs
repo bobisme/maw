@@ -197,7 +197,7 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
         let meta = metadata::read(root, into)?;
         let Some(change_id) = meta.change_id else {
             bail!(
-                "Workspace '{into}' is not bound to a change and cannot be used as --into target.\n  Use one of:\n    --into {default_workspace}\n    --into <change-id>"
+                "Workspace '{into}' is an unbound non-default workspace and cannot be used as --into target.\n  Supported targets:\n    --into {default_workspace}\n    --into <active-change-id>\n    --into <workspace-bound-to-active-change>\n  To target existing branch work, create or use an active change and merge with --into <change-id>."
             );
         };
 
@@ -219,7 +219,7 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
     }
 
     bail!(
-        "Unknown merge target '{into}'.\n  To fix: use --into {default_workspace} or --into <active-change-id>."
+        "Unknown merge target '{into}'.\n  Supported targets:\n    --into {default_workspace}\n    --into <active-change-id>\n    --into <workspace-bound-to-active-change>."
     )
 }
 
@@ -874,7 +874,7 @@ pub enum WorkspaceCommands {
         json: bool,
     },
 
-    /// Merge work from workspaces into default
+    /// Merge work from workspaces into default or an active change target
     ///
     /// Creates a merge commit combining work from the specified workspaces.
     /// Works with one or more workspaces. Stale workspaces are automatically
@@ -894,11 +894,12 @@ pub enum WorkspaceCommands {
     /// If the target workspace has uncommitted edits overlapping with
     /// merged files, the merge succeeds but leaves conflict markers in
     /// the target. Use `maw ws resolve` to resolve them:
-    ///   maw ws resolve default --list
-    ///   maw ws resolve default --keep-all alice
+    ///   maw ws resolve <target-workspace> --list
+    ///   maw ws resolve <target-workspace> --keep-all alice
     ///
     /// Examples:
     ///   maw ws merge alice --into default                       # adopt alice into default
+    ///   maw ws merge alice --into ch-1xr --destroy              # merge into active change ch-1xr
     ///   maw ws merge alice bob --into default                   # merge alice and bob into default
     ///   maw ws merge alice bob --into default --destroy         # merge and clean up
     ///   maw ws merge alice bob --into default --dry-run         # preview merge
@@ -915,7 +916,7 @@ pub enum WorkspaceCommands {
         #[arg(required = true)]
         workspaces: Vec<String>,
 
-        /// Explicit merge target (workspace name or change id).
+        /// Explicit merge target: default workspace, active change id, or change-bound workspace.
         #[arg(long)]
         into: String,
 
@@ -1840,7 +1841,15 @@ mod tests {
             .expect_err("operation should fail")
             .to_string();
         assert!(
-            err.contains("is not bound to a change"),
+            err.contains("unbound non-default workspace"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("--into <active-change-id>"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("workspace-bound-to-active-change"),
             "unexpected error: {err}"
         );
     }

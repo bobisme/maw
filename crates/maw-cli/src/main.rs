@@ -451,6 +451,27 @@ mod tests {
     }
 
     #[test]
+    fn ws_merge_help_describes_supported_into_targets() {
+        let mut help_texts = Vec::new();
+        collect_help_texts(Cli::command(), "maw".to_string(), &mut help_texts);
+        let help = help_texts
+            .iter()
+            .find_map(|(path, help)| (path == "maw ws merge").then_some(help))
+            .expect("maw ws merge help should be present");
+
+        assert!(
+            help.contains(
+                "Explicit merge target: default workspace, active change id, or change-bound workspace"
+            ),
+            "unexpected help:\n{help}"
+        );
+        assert!(
+            !help.contains("workspace name or change id"),
+            "unexpected help:\n{help}"
+        );
+    }
+
+    #[test]
     fn changes_subcommand_is_registered() {
         let cmd = Cli::command();
         let has_changes = cmd
