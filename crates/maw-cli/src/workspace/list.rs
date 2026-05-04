@@ -31,6 +31,9 @@ pub struct WorkspaceInfo {
     pub(crate) template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) template_defaults: Option<TemplateDefaults>,
+    /// Local branch this workspace is attached to for merge targeting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) branch: Option<String>,
     /// Merge check result (only present when --check is used).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) merge_check: Option<MergeCheckSummary>,
@@ -188,6 +191,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 commits_ahead: ws.commits_ahead,
                 template: ws_meta.template.map(|t| t.to_string()),
                 template_defaults: ws_meta.template_defaults,
+                branch: ws_meta.branch,
                 merge_check: merge_checks.get(&name).map(|mc| MergeCheckSummary {
                     ready: mc.ready,
                     conflict_count: mc.conflict_count,
@@ -308,7 +312,15 @@ fn print_list_text(
             .as_deref()
             .map(|d| format!("\t# {d}"))
             .unwrap_or_default();
-        println!("{}\t{}{}{}", ws.name, path, annotation, desc_suffix);
+        let branch_suffix = ws
+            .branch
+            .as_deref()
+            .map(|branch| format!("\tbranch={branch}"))
+            .unwrap_or_default();
+        println!(
+            "{}\t{}{}{}{}",
+            ws.name, path, annotation, branch_suffix, desc_suffix
+        );
     }
 
     print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
@@ -368,6 +380,11 @@ fn print_list_pretty(
         };
 
         let mode_tag = if is_persistent { " [persistent]" } else { "" };
+        let branch_tag = ws
+            .branch
+            .as_deref()
+            .map(|branch| format!(" [branch: {branch}]"))
+            .unwrap_or_default();
         let check_tag = ws
             .merge_check
             .as_ref()
@@ -392,8 +409,8 @@ fn print_list_pretty(
             })
             .unwrap_or_default();
         println!(
-            "{} {}{}{} {} {}{}{}",
-            glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag, check_tag
+            "{} {}{}{} {} {}{}{}{}",
+            glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag, branch_tag, check_tag
         );
 
         if let Some(desc) = &ws.description {

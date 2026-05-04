@@ -1202,12 +1202,14 @@ pub fn check_merge(
     target_workspace: &str,
     target_branch: &str,
     target_change_id: Option<&str>,
+    target_updates_epoch: bool,
 ) -> Result<()> {
     let result = match check_merge_result_for_target(
         workspaces,
         target_workspace,
         target_branch,
         target_change_id,
+        target_updates_epoch,
     ) {
         Ok(result) => result,
         Err(err) if format == OutputFormat::Json => {
@@ -1246,7 +1248,7 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     let maw_config = MawConfig::load(&root)?;
     let default_ws = maw_config.default_workspace().to_owned();
     let default_branch = maw_config.branch().to_owned();
-    check_merge_result_for_target(workspaces, &default_ws, &default_branch, None)
+    check_merge_result_for_target(workspaces, &default_ws, &default_branch, None, true)
 }
 
 #[expect(
@@ -1257,7 +1259,8 @@ fn check_merge_result_for_target(
     workspaces: &[String],
     target_workspace: &str,
     target_branch: &str,
-    target_change_id: Option<&str>,
+    _target_change_id: Option<&str>,
+    target_updates_epoch: bool,
 ) -> Result<CheckResult> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --check");
@@ -1303,7 +1306,7 @@ fn check_merge_result_for_target(
         workspace_dirs.insert(ws_id.clone(), ws_path);
     }
 
-    if target_change_id.is_none() {
+    if target_updates_epoch {
         guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
     }
 
@@ -1352,20 +1355,20 @@ fn check_merge_result_for_target(
             let frozen = run_prepare_phase(&root, &build_dir, &sources, &workspace_dirs)
                 .context("prepare phase failed for build check")?;
 
-            let merge_base_epoch = if target_change_id.is_some() {
+            let merge_base_epoch = if target_updates_epoch {
+                frozen.epoch
+            } else {
                 EpochId::new(branch_before_oid.as_str()).map_err(|e| {
                     anyhow::anyhow!(
                         "invalid target branch base OID '{}': {e}",
                         branch_before_oid.as_str()
                     )
                 })?
-            } else {
-                frozen.epoch
             };
             record_merge_target_context(
                 &build_dir,
                 target_branch,
-                target_change_id.map(|_| &merge_base_epoch),
+                (!target_updates_epoch).then_some(&merge_base_epoch),
             )
             .context("failed to persist merge target context for check")?;
 
@@ -1492,7 +1495,8 @@ pub fn plan_merge(
     format: OutputFormat,
     target_workspace: &str,
     target_branch: &str,
-    target_change_id: Option<&str>,
+    _target_change_id: Option<&str>,
+    target_updates_epoch: bool,
 ) -> Result<()> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --plan");
@@ -1532,7 +1536,7 @@ pub fn plan_merge(
     let sources = parse_workspace_ids(workspaces)?;
     validate_workspace_dirs(&sources, &backend)?;
 
-    if target_change_id.is_none() {
+    if target_updates_epoch {
         guard_unbound_sources_against_active_change_ancestry(&root, target_branch, workspaces)?;
     }
 
@@ -1549,20 +1553,20 @@ pub fn plan_merge(
     let partition = partition_by_path(&patch_sets);
     let (touched_paths, overlaps) = paths_from_partition(&partition);
 
-    let merge_base_epoch = if target_change_id.is_some() {
+    let merge_base_epoch = if target_updates_epoch {
+        frozen.epoch.clone()
+    } else {
         EpochId::new(branch_before_oid.as_str()).map_err(|e| {
             anyhow::anyhow!(
                 "invalid target branch base OID '{}': {e}",
                 branch_before_oid.as_str()
             )
         })?
-    } else {
-        frozen.epoch.clone()
     };
     if let Err(e) = record_merge_target_context(
         &manifold_dir,
         target_branch,
-        target_change_id.map(|_| &merge_base_epoch),
+        (!target_updates_epoch).then_some(&merge_base_epoch),
     ) {
         let _ = cleanup_plan_merge_state(&manifold_dir);
         bail!("failed to persist merge target context for plan: {e}");
@@ -2378,6 +2382,8 @@ pub struct MergeOptions<'a> {
     pub target_branch: &'a str,
     /// Optional change id associated with the merge destination.
     pub target_change_id: Option<&'a str>,
+    /// Whether this target should advance the global epoch in addition to the target branch.
+    pub target_updates_epoch: bool,
     /// Inline conflict resolutions. Each entry is `ID=STRATEGY`.
     pub resolve: Vec<String>,
     /// Resolve all remaining conflicts to this workspace name.
@@ -2492,6 +2498,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         target_workspace,
         target_branch,
         target_change_id,
+        target_updates_epoch,
         ref resolve,
         ref resolve_all,
         verbose,
@@ -2531,7 +2538,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Reject merge if default has direct commits ahead of epoch.
     // Without this check, the merge creates a new epoch from the OLD epoch,
     // and the direct commits' files appear as unstaged changes in default.
-    if target_change_id.is_none()
+    if target_updates_epoch
         && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root)
         && epoch_oid.as_str() != branch_before_oid.as_str()
     {
@@ -2742,7 +2749,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         }
     }
 
-    if target_change_id.is_none() {
+    if target_updates_epoch {
         guard_unbound_sources_against_active_change_ancestry(&root, branch, &ws_to_merge)?;
     }
 
@@ -2753,7 +2760,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     let frozen = run_prepare_phase(&root, &manifold_dir, &sources, &workspace_dirs)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     textln!("  Epoch: {}", &frozen.epoch.as_str()[..12]);
-    if target_change_id.is_some() {
+    if !target_updates_epoch {
         textln!(
             "  Target base ({branch}): {}",
             &branch_before_oid.as_str()[..12]
@@ -2763,21 +2770,21 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         textln!("  {}: {}", ws_id, &head.as_str()[..12]);
     }
 
-    let merge_base_epoch = if target_change_id.is_some() {
+    let merge_base_epoch = if target_updates_epoch {
+        frozen.epoch.clone()
+    } else {
         EpochId::new(branch_before_oid.as_str()).map_err(|e| {
             anyhow::anyhow!(
                 "invalid target branch base OID '{}': {e}",
                 branch_before_oid.as_str()
             )
         })?
-    } else {
-        frozen.epoch.clone()
     };
 
     if let Err(e) = record_merge_target_context(
         &manifold_dir,
         branch,
-        (target_change_id.is_some()).then_some(&merge_base_epoch),
+        (!target_updates_epoch).then_some(&merge_base_epoch),
     ) {
         abort_merge(
             &manifold_dir,
@@ -3212,10 +3219,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Phase 4: COMMIT — atomically update refs (point of no return)
     // -----------------------------------------------------------------------
     textln!();
-    if target_change_id.is_some() {
-        textln!("COMMIT: Updating target branch...");
-    } else {
+    if target_updates_epoch {
         textln!("COMMIT: Advancing epoch...");
+    } else {
+        textln!("COMMIT: Updating target branch...");
     }
 
     // Advance merge-state to Commit phase
@@ -3246,7 +3253,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         );
     }
 
-    if target_change_id.is_some() {
+    if !target_updates_epoch {
         match maw_core::refs::write_ref_cas(
             &root,
             &branch_ref,
@@ -3367,7 +3374,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             build_output.candidate.as_str(),
             target_base_epoch_before.as_deref(),
             &root,
-            target_change_id.is_none(),
+            target_updates_epoch,
             text_mode,
             &build_output.resolved_paths,
             &ws_to_merge,
@@ -3449,10 +3456,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Message is always provided by the caller (enforced in mod.rs dispatch).
     let msg = message.expect("merge message must be provided by caller");
-    let next_command = target_change_id.map_or_else(
-        || "maw push".to_string(),
-        |change_id| format!("maw changes pr {change_id} --draft"),
-    );
+    let next_command = if let Some(change_id) = target_change_id {
+        format!("maw changes pr {change_id} --draft")
+    } else if target_updates_epoch {
+        "maw push".to_string()
+    } else {
+        format!("git push origin {branch}")
+    };
 
     if format == OutputFormat::Json {
         let success = MergeSuccessOutput {
@@ -3477,9 +3487,12 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         if let Some(change_id) = target_change_id {
             textln!("Next: open or update PR for this change:");
             textln!("  maw changes pr {change_id} --draft");
-        } else {
+        } else if target_updates_epoch {
             textln!("Next: push to remote:");
             textln!("  maw push");
+        } else {
+            textln!("Next: push branch to remote:");
+            textln!("  git push origin {branch}");
         }
     }
 
@@ -4138,8 +4151,7 @@ fn update_default_workspace(
     // We need HEAD at the default workspace's own base epoch so the stash
     // captures only the ACTUAL user changes relative to that workspace state.
     //
-    // When the global epoch advances via a non-default target (for example
-    // merge --into <change-id>), default may legitimately lag behind
+    // When the global epoch advances via a non-default target, default may legitimately lag behind
     // epoch_before. Anchoring at epoch_before in that case turns legitimate
     // missing files into synthetic deletions during replay.
     //

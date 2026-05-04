@@ -90,6 +90,15 @@ fn create_with_output(
 
     // Determine source revision and optional change binding.
     let (source_revision, bound_change_id) = resolve_workspace_source(&root, from, change)?;
+    let attached_branch = if persistent || bound_change_id.is_some() {
+        resolve_attached_branch(
+            &root,
+            source_revision.as_deref(),
+            bound_change_id.as_deref(),
+        )?
+    } else {
+        None
+    };
 
     // Determine base epoch from resolved source revision.
     let epoch = resolve_epoch(&root, source_revision.as_deref())?;
@@ -114,6 +123,7 @@ fn create_with_output(
     if persistent
         || template_profile.is_some()
         || bound_change_id.is_some()
+        || attached_branch.is_some()
         || description.is_some()
     {
         let meta = metadata::WorkspaceMetadata {
@@ -121,6 +131,7 @@ fn create_with_output(
             template,
             template_defaults: template_profile.as_ref().map(|p| p.defaults.clone()),
             change_id: bound_change_id.clone(),
+            branch: attached_branch.clone(),
             description: description.map(str::to_owned),
         };
         metadata::write(&root, name, &meta)
@@ -161,6 +172,9 @@ fn create_with_output(
         if let Some(change_id) = bound_change_id.as_deref() {
             println!("  Change: {change_id}");
         }
+        if let Some(branch) = attached_branch.as_deref() {
+            println!("  Branch: {branch}");
+        }
         println!("  Epoch:  {short_oid} (base commit for this workspace)");
         println!("  Path:   {}/", info.path.display());
         println!();
@@ -177,10 +191,12 @@ fn create_with_output(
         if let Some(change_id) = bound_change_id.as_deref() {
             if name == change_id {
                 println!("  maw ws create --change {change_id} <agent-workspace>");
-                println!("  maw ws merge <agent-workspace> --into {change_id} --destroy");
+                println!("  maw ws merge <agent-workspace> --into change:{change_id} --destroy");
             } else {
-                println!("  maw ws merge {name} --into {change_id} --destroy");
+                println!("  maw ws merge {name} --into change:{change_id} --destroy");
             }
+        } else if attached_branch.is_some() && persistent {
+            println!("  maw ws merge <agent-workspace> --into {name} --destroy");
         } else {
             println!("  maw ws merge {name} --into default --destroy");
         }
@@ -276,6 +292,84 @@ fn remote_exists(root: &std::path::Path, remote: &str) -> Result<bool> {
         .output()
         .context("Failed to run git remote get-url")?;
     Ok(output.status.success())
+}
+
+fn resolve_attached_branch(
+    root: &std::path::Path,
+    source_revision: Option<&str>,
+    bound_change_id: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(change_id) = bound_change_id {
+        let store = ChangesStore::open(root);
+        let record = store.read_active_record(change_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Change '{change_id}' not found while resolving workspace branch attachment."
+            )
+        })?;
+        let branch = record.git.change_branch.trim();
+        if branch.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(branch.to_owned()));
+    }
+
+    let Some(source) = source_revision else {
+        return Ok(None);
+    };
+    let Some(branch) = local_branch_if_exists(root, source)? else {
+        return Ok(None);
+    };
+    let config = MawConfig::load(root).unwrap_or_default();
+    if branch == config.branch() {
+        return Ok(None);
+    }
+    Ok(Some(branch))
+}
+
+fn local_branch_if_exists(root: &std::path::Path, branch: &str) -> Result<Option<String>> {
+    let branch = branch.trim();
+    if branch.is_empty() || branch.starts_with('-') || branch.contains("..") {
+        return Ok(None);
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    let Some(_) = manifold_refs::read_ref(root, &branch_ref)
+        .map_err(|e| anyhow::anyhow!("Failed to read branch ref '{branch_ref}': {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(branch.to_owned()))
+}
+
+/// Attach an existing workspace to a local branch for `maw ws merge --into <workspace>`.
+pub fn attach_branch(name: &str, branch: &str) -> Result<()> {
+    if name == DEFAULT_WORKSPACE {
+        bail!("The default workspace already tracks the configured main branch.");
+    }
+
+    let root = ensure_repo_root()?;
+    let path = workspace_path(name)?;
+    if !path.exists() {
+        bail!(
+            "Workspace '{name}' does not exist at {}.\n  Check available workspaces: maw ws list",
+            path.display()
+        );
+    }
+
+    let branch = local_branch_if_exists(&root, branch)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Local branch '{branch}' does not exist.\n  Create it first, then retry: git branch {branch}"
+        )
+    })?;
+
+    let mut meta = metadata::read(&root, name)?;
+    meta.mode = WorkspaceMode::Persistent;
+    meta.branch = Some(branch.clone());
+    metadata::write(&root, name, &meta)
+        .with_context(|| format!("Failed to write metadata for workspace '{name}'"))?;
+
+    println!("Workspace '{name}' attached to branch '{branch}'.");
+    println!("Merge into it with: maw ws merge <workspace> --into {name} --destroy");
+    Ok(())
 }
 
 fn bind_workspace_to_change(

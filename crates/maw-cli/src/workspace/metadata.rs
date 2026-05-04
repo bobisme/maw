@@ -37,6 +37,9 @@ pub struct WorkspaceMetadata {
     /// Optional bound change id (`maw changes` model).
     #[serde(default)]
     pub change_id: Option<String>,
+    /// Optional local branch this workspace is attached to for branch-target merges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Human-readable description of the workspace's purpose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -149,6 +152,17 @@ mod tests {
         };
         let decoded = write_and_read(&meta);
         assert_eq!(decoded.mode, WorkspaceMode::Persistent);
+    }
+
+    #[test]
+    fn roundtrip_branch_attachment() {
+        let meta = WorkspaceMetadata {
+            mode: WorkspaceMode::Persistent,
+            branch: Some("feature/long-lived".to_string()),
+            ..WorkspaceMetadata::default()
+        };
+        let decoded = write_and_read(&meta);
+        assert_eq!(decoded.branch.as_deref(), Some("feature/long-lived"));
     }
 
     #[test]

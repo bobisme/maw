@@ -61,6 +61,58 @@ fn status_text_format() {
 }
 
 #[test]
+fn status_shows_attached_workspace_branch() {
+    let repo = TestRepo::new();
+
+    let epoch = repo.current_epoch();
+    repo.git(&["update-ref", "refs/heads/crib-graph", &epoch]);
+    repo.maw_ok(&[
+        "ws",
+        "create",
+        "crib2",
+        "--from",
+        "crib-graph",
+        "--persistent",
+    ]);
+
+    let text = repo.maw_ok(&["status", "--format=text"]);
+    assert!(
+        text.contains("  - crib2 [branch: crib-graph]"),
+        "status text should show attached branch, got: {text}"
+    );
+
+    let json = repo.maw_ok(&["status", "--format=json"]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json).expect("status --format=json should produce valid JSON");
+    assert_eq!(
+        parsed["workspace_details"][0]["name"].as_str(),
+        Some("crib2")
+    );
+    assert_eq!(
+        parsed["workspace_details"][0]["branch"].as_str(),
+        Some("crib-graph")
+    );
+    assert_eq!(
+        parsed["workspaces"][0].as_str(),
+        Some("crib2"),
+        "legacy workspace list should remain names only"
+    );
+
+    let list_json = repo.maw_ok(&["ws", "list", "--format=json"]);
+    let list: serde_json::Value =
+        serde_json::from_str(&list_json).expect("ws list --format=json should produce valid JSON");
+    let crib2 = list["workspaces"]
+        .as_array()
+        .and_then(|workspaces| {
+            workspaces
+                .iter()
+                .find(|workspace| workspace["name"].as_str() == Some("crib2"))
+        })
+        .expect("crib2 should be listed");
+    assert_eq!(crib2["branch"].as_str(), Some("crib-graph"));
+}
+
+#[test]
 fn status_does_not_flag_default_stale_when_branch_ahead_of_epoch() {
     let repo = TestRepo::new();
 

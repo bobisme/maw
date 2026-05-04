@@ -627,7 +627,7 @@ fn merge_into_default_after_change_target_keeps_trunk_isolated() {
         "merge",
         "worker",
         "--into",
-        "ch-clean",
+        "change:ch-clean",
         "--destroy",
         "--message",
         "merge worker into change",
@@ -713,7 +713,7 @@ fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
         "merge",
         "w1",
         "--into",
-        "ch-acc",
+        "change:ch-acc",
         "--destroy",
         "--message",
         "merge a",
@@ -728,7 +728,7 @@ fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
         "merge",
         "w2",
         "--into",
-        "ch-acc",
+        "change:ch-acc",
         "--destroy",
         "--message",
         "merge b",
@@ -754,6 +754,70 @@ fn merge_into_change_accumulates_on_change_branch_with_trunk_epoch_static() {
     assert!(
         change_tree.lines().any(|line| line == "src/b.rs"),
         "change branch should include second merged file"
+    );
+}
+
+#[test]
+fn merge_into_branch_attached_workspace_advances_branch_without_trunk_epoch() {
+    let repo = TestRepo::new();
+
+    let epoch_before = repo.current_epoch();
+    let main_before = repo
+        .git(&["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_owned();
+    repo.git(&["update-ref", "refs/heads/crib-graph", &epoch_before]);
+
+    repo.maw_ok(&[
+        "ws",
+        "create",
+        "crib2",
+        "--from",
+        "crib-graph",
+        "--persistent",
+    ]);
+    repo.maw_ok(&["ws", "create", "worker", "--from", "crib-graph"]);
+    repo.add_file("worker", "branch-only.txt", "branch target work\n");
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "worker",
+        "--into",
+        "crib2",
+        "--destroy",
+        "--message",
+        "merge worker into crib graph",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "branch workspace merge should succeed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    assert_eq!(
+        repo.current_epoch(),
+        epoch_before,
+        "global epoch should remain trunk-oriented after merge --into branch workspace"
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "refs/heads/main"]).trim(),
+        main_before,
+        "main should remain unchanged after merge --into branch workspace"
+    );
+    assert_eq!(
+        repo.git(&["show", "refs/heads/crib-graph:branch-only.txt"]),
+        "branch target work\n"
+    );
+    assert_eq!(
+        repo.read_file("crib2", "branch-only.txt").as_deref(),
+        Some("branch target work\n"),
+        "target workspace should be updated to the attached branch"
+    );
+    assert!(
+        stdout.contains("git push origin crib-graph"),
+        "branch target next step should name the branch push, got: {stdout}"
     );
 }
 
@@ -787,7 +851,7 @@ fn merge_into_default_blocks_unbound_workspace_with_active_change_ancestry() {
         "merge",
         "worker",
         "--into",
-        "ch-guard",
+        "change:ch-guard",
         "--destroy",
         "--message",
         "merge worker into change",
@@ -865,7 +929,7 @@ fn merge_check_is_target_aware_for_change_target_conflicts() {
         "merge",
         "change-worker",
         "--into",
-        "ch-check",
+        "change:ch-check",
         "--destroy",
         "--message",
         "merge change-side edit",
@@ -885,7 +949,7 @@ fn merge_check_is_target_aware_for_change_target_conflicts() {
         "merge",
         "main-worker",
         "--into",
-        "ch-check",
+        "change:ch-check",
         "--check",
         "--format",
         "json",
@@ -932,7 +996,7 @@ fn merge_check_blocks_contaminated_unbound_workspace_for_default_target() {
         "merge",
         "worker",
         "--into",
-        "ch-check-guard",
+        "change:ch-check-guard",
         "--destroy",
         "--message",
         "merge worker into change",
@@ -991,7 +1055,7 @@ fn merge_check_guardrail_failures_emit_json_payload_when_requested() {
         "merge",
         "worker",
         "--into",
-        "ch-json-guard",
+        "change:ch-json-guard",
         "--destroy",
         "--message",
         "merge worker into change",
@@ -1104,7 +1168,7 @@ fn merge_check_missing_workspace_with_active_change_stays_actionable() {
         "merge",
         "worker",
         "--into",
-        "ch-missing-check",
+        "change:ch-missing-check",
         "--destroy",
         "--message",
         "merge worker",
@@ -1202,7 +1266,7 @@ fn merge_plan_is_target_aware_for_change_target_conflicts() {
         "merge",
         "change-worker",
         "--into",
-        "ch-plan",
+        "change:ch-plan",
         "--destroy",
         "--message",
         "merge change-side edit",
@@ -1222,7 +1286,7 @@ fn merge_plan_is_target_aware_for_change_target_conflicts() {
         "merge",
         "main-worker",
         "--into",
-        "ch-plan",
+        "change:ch-plan",
         "--plan",
         "--format",
         "json",
@@ -1329,7 +1393,7 @@ fn merge_plan_guardrail_failures_emit_json_payload_when_requested() {
         "merge",
         "worker",
         "--into",
-        "ch-plan-guard",
+        "change:ch-plan-guard",
         "--destroy",
         "--message",
         "merge worker into change",
@@ -1398,7 +1462,7 @@ fn merge_plan_missing_workspace_with_active_change_stays_actionable() {
         "merge",
         "worker",
         "--into",
-        "ch-plan-missing",
+        "change:ch-plan-missing",
         "--destroy",
         "--message",
         "merge worker",
@@ -1464,7 +1528,7 @@ fn merge_into_default_blocks_unbound_workspace_with_stale_change_tip_ancestry() 
         "merge",
         "w1",
         "--into",
-        "ch-stale",
+        "change:ch-stale",
         "--destroy",
         "--message",
         "merge w1",
@@ -1484,7 +1548,7 @@ fn merge_into_default_blocks_unbound_workspace_with_stale_change_tip_ancestry() 
         "merge",
         "w2",
         "--into",
-        "ch-stale",
+        "change:ch-stale",
         "--destroy",
         "--message",
         "merge w2",
@@ -1562,7 +1626,7 @@ fn merge_into_change_outputs_change_specific_next_steps() {
         "merge",
         "worker",
         "--into",
-        "ch-msg",
+        "change:ch-msg",
         "--destroy",
         "--message",
         "merge msg",
@@ -1616,7 +1680,7 @@ fn changes_create_guidance_avoids_invalid_self_merge_instructions() {
     );
     assert!(
         stdout.contains("maw ws create --change ch-guide <agent-workspace>")
-            && stdout.contains("maw ws merge <agent-workspace> --into ch-guide --destroy"),
+            && stdout.contains("maw ws merge <agent-workspace> --into change:ch-guide --destroy"),
         "output should suggest worker-workspace merge flow, got: {stdout}"
     );
 }
@@ -1665,7 +1729,8 @@ fn changes_create_json_advice_avoids_invalid_self_merge_instructions() {
     );
     assert!(
         advice.contains(&"maw ws create --change ch-guide-json <agent-workspace>")
-            && advice.contains(&"maw ws merge <agent-workspace> --into ch-guide-json --destroy"),
+            && advice
+                .contains(&"maw ws merge <agent-workspace> --into change:ch-guide-json --destroy",),
         "JSON advice should include worker workspace merge guidance: {payload}"
     );
 }

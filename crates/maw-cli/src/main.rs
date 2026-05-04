@@ -85,7 +85,7 @@ enum Commands {
     ///
     /// A change is an explicit, named unit of work (for example `ch-1xr`).
     /// Use `maw changes create ... --from ...` to start one, then merge
-    /// workspaces into it with `maw ws merge ... --into <change-id>`.
+    /// workspaces into it with `maw ws merge ... --into change:<change-id>`.
     #[command(subcommand, verbatim_doc_comment)]
     Changes(changes::ChangesCommands),
 

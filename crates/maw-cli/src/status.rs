@@ -89,6 +89,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         let summary = collect_status()?;
         let envelope = StatusEnvelope {
             workspaces: summary.workspace_names.clone(),
+            workspace_details: summary.workspace_details.clone(),
             changes: summary.changes.clone(),
             open_changes: summary.changes.len(),
             changed_files: summary.changed_files.clone(),
@@ -158,6 +159,7 @@ fn watch_loop_inner(args: &StatusArgs) -> Result<()> {
 #[derive(Serialize)]
 struct StatusEnvelope {
     workspaces: Vec<String>,
+    workspace_details: Vec<WorkspaceStatusItem>,
     changes: Vec<ChangeStatusItem>,
     open_changes: usize,
     changed_files: Vec<String>,
@@ -166,6 +168,23 @@ struct StatusEnvelope {
     main_sync: String,
     stray_root_files: Vec<String>,
     advice: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceStatusItem {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+}
+
+impl WorkspaceStatusItem {
+    fn display(&self) -> String {
+        if let Some(branch) = self.branch.as_deref() {
+            format!("{} [branch: {branch}]", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -203,6 +222,7 @@ impl ChangeStatusItem {
 #[derive(Debug)]
 struct StatusSummary {
     workspace_names: Vec<String>,
+    workspace_details: Vec<WorkspaceStatusItem>,
     changes: Vec<ChangeStatusItem>,
     changed_files: Vec<String>,
     untracked_files: Vec<String>,
@@ -295,8 +315,8 @@ impl StatusSummary {
             },
             ws_count == 0,
         ));
-        for name in &self.workspace_names {
-            let _ = writeln!(out, "  - {name}");
+        for workspace in self.workspace_display_items() {
+            let _ = writeln!(out, "  - {workspace}");
         }
 
         let change_count = self.changes.len();
@@ -429,8 +449,8 @@ impl StatusSummary {
             },
             ws_count == 0,
         ));
-        for name in &self.workspace_names {
-            let _ = writeln!(out, "  - {name}");
+        for workspace in self.workspace_display_items() {
+            let _ = writeln!(out, "  - {workspace}");
         }
 
         let change_count = self.changes.len();
@@ -492,6 +512,16 @@ impl StatusSummary {
         ));
 
         out
+    }
+
+    fn workspace_display_items(&self) -> Vec<String> {
+        if self.workspace_details.is_empty() {
+            return self.workspace_names.clone();
+        }
+        self.workspace_details
+            .iter()
+            .map(WorkspaceStatusItem::display)
+            .collect()
     }
 }
 
@@ -612,16 +642,26 @@ fn collect_status() -> Result<StatusSummary> {
     let default_ws_name = config.default_workspace();
 
     // Get non-default workspace names from backend
-    let workspace_names = get_backend()
+    let workspace_details = get_backend()
         .ok()
         .and_then(|backend| backend.list().ok())
         .map_or_else(Vec::new, |infos| {
             infos
                 .into_iter()
                 .filter(|ws| ws.id.as_str() != default_ws_name)
-                .map(|ws| ws.id.as_str().to_string())
+                .map(|ws| {
+                    let name = ws.id.as_str().to_string();
+                    let branch = workspace::metadata::read(&root, ws.id.as_str())
+                        .ok()
+                        .and_then(|meta| meta.branch);
+                    WorkspaceStatusItem { name, branch }
+                })
                 .collect()
         });
+    let workspace_names = workspace_details
+        .iter()
+        .map(|workspace| workspace.name.clone())
+        .collect();
 
     // Get active changes from metadata store
     let changes = ChangesStore::open(&root)
@@ -657,6 +697,7 @@ fn collect_status() -> Result<StatusSummary> {
 
     Ok(StatusSummary {
         workspace_names,
+        workspace_details,
         changes,
         changed_files,
         untracked_files,
@@ -719,6 +760,13 @@ fn collect_status_fast() -> Result<StatusSummary> {
     let main_sync = main_sync_status_inner(&root, branch);
 
     Ok(StatusSummary {
+        workspace_details: workspace_names
+            .iter()
+            .map(|name| WorkspaceStatusItem {
+                name: name.clone(),
+                branch: None,
+            })
+            .collect(),
         workspace_names,
         changes: Vec::new(),
         changed_files,
@@ -780,6 +828,7 @@ mod tests {
     fn summary_with_root_extras(stray_root_files: &[&str]) -> StatusSummary {
         StatusSummary {
             workspace_names: Vec::new(),
+            workspace_details: Vec::new(),
             changes: Vec::new(),
             changed_files: Vec::new(),
             untracked_files: Vec::new(),

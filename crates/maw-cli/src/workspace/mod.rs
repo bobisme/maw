@@ -24,7 +24,7 @@ mod diff;
 mod history;
 mod list;
 mod merge;
-mod metadata;
+pub(crate) mod metadata;
 mod names;
 mod oplog_runtime;
 mod overlap;
@@ -155,9 +155,20 @@ struct MergeTarget {
     workspace: String,
     branch: String,
     change_id: Option<String>,
+    updates_epoch: bool,
 }
 
 fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
+    if let Some((prefix, value)) = into.split_once(':') {
+        return match prefix {
+            "ws" => resolve_merge_target_workspace(root, value),
+            "change" => resolve_merge_target_change(root, value),
+            _ => bail!(
+                "Unknown merge target prefix '{prefix}:'.\n  Supported prefixes: ws:<workspace>, change:<change-id>."
+            ),
+        };
+    }
+
     let config = MawConfig::load(root)?;
     let default_workspace = config.default_workspace().to_owned();
     if into == default_workspace {
@@ -165,61 +176,109 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
             workspace: default_workspace,
             branch: config.branch().to_owned(),
             change_id: None,
+            updates_epoch: true,
         });
     }
 
     let store = ChangesStore::open(root);
+    let change_record = store.read_active_record(into)?;
 
-    if let Some(change_record) = store.read_active_record(into)? {
-        let workspace = if change_record.workspaces.primary.trim().is_empty() {
-            into.to_owned()
-        } else {
-            change_record.workspaces.primary
-        };
-        let branch = change_record.git.change_branch;
-        if branch.trim().is_empty() {
-            bail!(
-                "Change '{into}' has no configured branch.\n  To fix: repair change metadata before merging."
-            );
-        }
+    validate_workspace_name(into)?;
+    let target_path = root.join("ws").join(into);
+    let workspace_exists = target_path.exists();
+
+    match (change_record, workspace_exists) {
+        (Some(_), true) => bail!(
+            "Ambiguous merge target '{into}':\n  - active change id {into}\n  - workspace {into}\nUse --into change:{into} or --into ws:{into}."
+        ),
+        (Some(_), false) => resolve_merge_target_change(root, into),
+        (None, true) => resolve_merge_target_workspace(root, into),
+        (None, false) => bail!(
+            "Unknown merge target '{into}'.\n  Supported targets:\n    --into {default_workspace}\n    --into <branch-attached-workspace>\n    --into <active-change-id>\n  Use ws:<workspace> or change:<change-id> to disambiguate."
+        ),
+    }
+}
+
+fn resolve_merge_target_change(root: &Path, change_id: &str) -> Result<MergeTarget> {
+    if change_id.trim().is_empty() {
+        bail!("Empty change merge target. Use --into change:<change-id>.");
+    }
+    let store = ChangesStore::open(root);
+    let change_record = store.read_active_record(change_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Change '{change_id}' is not active.\n  Check active changes: maw changes list"
+        )
+    })?;
+    let workspace = if change_record.workspaces.primary.trim().is_empty() {
+        change_id.to_owned()
+    } else {
+        change_record.workspaces.primary
+    };
+    let branch = change_record.git.change_branch;
+    if branch.trim().is_empty() {
+        bail!(
+            "Change '{change_id}' has no configured branch.\n  To fix: repair change metadata before merging."
+        );
+    }
+    Ok(MergeTarget {
+        workspace,
+        branch,
+        change_id: Some(change_id.to_owned()),
+        updates_epoch: false,
+    })
+}
+
+fn resolve_merge_target_workspace(root: &Path, workspace: &str) -> Result<MergeTarget> {
+    if workspace.trim().is_empty() {
+        bail!("Empty workspace merge target. Use --into ws:<workspace>.");
+    }
+
+    let config = MawConfig::load(root)?;
+    if workspace == config.default_workspace() {
         return Ok(MergeTarget {
-            workspace,
-            branch,
-            change_id: Some(into.to_owned()),
+            workspace: config.default_workspace().to_owned(),
+            branch: config.branch().to_owned(),
+            change_id: None,
+            updates_epoch: true,
         });
     }
 
-    // Workspace-name target: require an explicit change binding for non-default
-    // workspaces so branch destination is unambiguous.
-    validate_workspace_name(into)?;
-    let target_path = root.join("ws").join(into);
-    if target_path.exists() {
-        let meta = metadata::read(root, into)?;
-        let Some(change_id) = meta.change_id else {
-            bail!(
-                "Workspace '{into}' is an unbound non-default workspace and cannot be used as --into target.\n  Supported targets:\n    --into {default_workspace}\n    --into <active-change-id>\n    --into <workspace-bound-to-active-change>\n  To target existing branch work, create or use an active change and merge with --into <change-id>."
-            );
-        };
+    validate_workspace_name(workspace)?;
+    let target_path = root.join("ws").join(workspace);
+    if !target_path.exists() {
+        bail!("Workspace '{workspace}' does not exist.\n  Check available workspaces: maw ws list");
+    }
 
+    let meta = metadata::read(root, workspace)?;
+    if let Some(branch) = meta.branch.filter(|branch| !branch.trim().is_empty()) {
+        return Ok(MergeTarget {
+            workspace: workspace.to_owned(),
+            branch,
+            change_id: meta.change_id,
+            updates_epoch: false,
+        });
+    }
+
+    if let Some(change_id) = meta.change_id {
+        let store = ChangesStore::open(root);
         let change_record = store.read_active_record(&change_id)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "Workspace '{into}' is bound to change '{change_id}' but that change is not active."
+                "Workspace '{workspace}' is bound to change '{change_id}' but that change is not active."
             )
         })?;
-
         if change_record.git.change_branch.trim().is_empty() {
             bail!("Change '{change_id}' has no configured branch.");
         }
-
         return Ok(MergeTarget {
-            workspace: into.to_owned(),
+            workspace: workspace.to_owned(),
             branch: change_record.git.change_branch,
             change_id: Some(change_id),
+            updates_epoch: false,
         });
     }
 
     bail!(
-        "Unknown merge target '{into}'.\n  Supported targets:\n    --into {default_workspace}\n    --into <active-change-id>\n    --into <workspace-bound-to-active-change>."
+        "Workspace '{workspace}' is not attached to a branch and cannot be used as --into target.\n  To fix: maw ws attach-branch {workspace} <branch>"
     )
 }
 
@@ -836,6 +895,23 @@ pub enum WorkspaceCommands {
         revision: Option<String>,
     },
 
+    /// Attach a persistent workspace to a local branch for merge targeting
+    ///
+    /// Use this when a long-lived workspace represents branch/PR work and
+    /// should receive merges via `maw ws merge <source> --into <workspace>`.
+    ///
+    /// Examples:
+    ///   maw ws attach-branch crib2 crib-graph
+    ///   maw ws merge worker --into crib2 --destroy
+    #[command(verbatim_doc_comment, name = "attach-branch")]
+    AttachBranch {
+        /// Workspace to attach as a branch merge target
+        name: String,
+
+        /// Existing local branch the workspace should target
+        branch: String,
+    },
+
     /// Rebase a persistent workspace onto the latest epoch
     ///
     /// When the mainline epoch advances (a merge is committed), persistent
@@ -874,7 +950,7 @@ pub enum WorkspaceCommands {
         json: bool,
     },
 
-    /// Merge work from workspaces into default or an active change target
+    /// Merge work from workspaces into default, a branch workspace, or an active change
     ///
     /// Creates a merge commit combining work from the specified workspaces.
     /// Works with one or more workspaces. Stale workspaces are automatically
@@ -899,7 +975,9 @@ pub enum WorkspaceCommands {
     ///
     /// Examples:
     ///   maw ws merge alice --into default                       # adopt alice into default
-    ///   maw ws merge alice --into ch-1xr --destroy              # merge into active change ch-1xr
+    ///   maw ws merge alice --into crib2 --destroy               # merge into branch-attached workspace crib2
+    ///   maw ws merge alice --into ws:crib2 --destroy            # explicit workspace target
+    ///   maw ws merge alice --into change:ch-1xr --destroy       # explicit active change target
     ///   maw ws merge alice bob --into default                   # merge alice and bob into default
     ///   maw ws merge alice bob --into default --destroy         # merge and clean up
     ///   maw ws merge alice bob --into default --dry-run         # preview merge
@@ -916,7 +994,9 @@ pub enum WorkspaceCommands {
         #[arg(required = true)]
         workspaces: Vec<String>,
 
-        /// Explicit merge target: default workspace, active change id, or change-bound workspace.
+        /// Explicit merge target: default workspace, branch-attached workspace, or active change id.
+        ///
+        /// Use ws:<name> or change:<id> when a bare target is ambiguous.
         #[arg(long)]
         into: String,
 
@@ -1339,6 +1419,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             oplog_runtime::repair_oplog(&name, dry_run)
         }
         WorkspaceCommands::Attach { name, revision } => create::attach(&name, revision.as_deref()),
+        WorkspaceCommands::AttachBranch { name, branch } => create::attach_branch(&name, &branch),
         WorkspaceCommands::Advance { name, format, json } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             advance::advance(&name, fmt)
@@ -1381,6 +1462,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     &target.workspace,
                     &target.branch,
                     target.change_id.as_deref(),
+                    target.updates_epoch,
                 );
             }
             if plan {
@@ -1400,6 +1482,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                         &target.workspace,
                         &target.branch,
                         target.change_id.as_deref(),
+                        target.updates_epoch,
                     ) {
                         Ok(()) => Ok(()),
                         Err(err) => {
@@ -1418,6 +1501,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     &target.workspace,
                     &target.branch,
                     target.change_id.as_deref(),
+                    target.updates_epoch,
                 );
             }
 
@@ -1455,6 +1539,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     target_workspace: &target.workspace,
                     target_branch: &target.branch,
                     target_change_id: target.change_id.as_deref(),
+                    target_updates_epoch: target.updates_epoch,
                     resolve,
                     resolve_all,
                     verbose,
@@ -1765,7 +1850,7 @@ fn edit_merge_message(workspaces: &[String]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_merge_target;
+    use super::{metadata, resolve_merge_target};
     use crate::changes::store::{
         ChangeGit, ChangeRecord, ChangeSource, ChangeState, ChangeWorkspaces, ChangesStore,
     };
@@ -1810,6 +1895,7 @@ mod tests {
         assert_eq!(target.workspace, "default");
         assert_eq!(target.branch, "trunk");
         assert!(target.change_id.is_none());
+        assert!(target.updates_epoch);
     }
 
     #[test]
@@ -1828,10 +1914,11 @@ mod tests {
         assert_eq!(target.workspace, "agent-7");
         assert_eq!(target.branch, "changes/ch-1aa-topic");
         assert_eq!(target.change_id.as_deref(), Some("ch-1aa"));
+        assert!(!target.updates_epoch);
     }
 
     #[test]
-    fn resolve_merge_target_workspace_without_change_binding_fails() {
+    fn resolve_merge_target_workspace_without_branch_attachment_fails() {
         let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
@@ -1841,16 +1928,90 @@ mod tests {
             .expect_err("operation should fail")
             .to_string();
         assert!(
-            err.contains("unbound non-default workspace"),
+            err.contains("not attached to a branch"),
             "unexpected error: {err}"
         );
         assert!(
-            err.contains("--into <active-change-id>"),
+            err.contains("maw ws attach-branch agent-2 <branch>"),
             "unexpected error: {err}"
         );
-        assert!(
-            err.contains("workspace-bound-to-active-change"),
-            "unexpected error: {err}"
-        );
+    }
+
+    #[test]
+    fn resolve_merge_target_from_workspace_branch_attachment() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("ws/crib2")).expect("operation should succeed");
+        metadata::write(
+            root,
+            "crib2",
+            &metadata::WorkspaceMetadata {
+                branch: Some("crib-graph".to_string()),
+                ..metadata::WorkspaceMetadata::default()
+            },
+        )
+        .expect("operation should succeed");
+
+        let target = resolve_merge_target(root, "crib2").expect("operation should succeed");
+        assert_eq!(target.workspace, "crib2");
+        assert_eq!(target.branch, "crib-graph");
+        assert!(target.change_id.is_none());
+        assert!(!target.updates_epoch);
+    }
+
+    #[test]
+    fn resolve_merge_target_ambiguous_bare_target_requires_prefix() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("ws/ch-1aa")).expect("operation should succeed");
+
+        let store = ChangesStore::open(root);
+        let record = sample_change("ch-1aa", "changes/ch-1aa-topic", "agent-7");
+        store
+            .with_lock("test write", |locked| locked.write_active_record(&record))
+            .expect("operation should succeed");
+
+        let err = resolve_merge_target(root, "ch-1aa")
+            .expect_err("operation should fail")
+            .to_string();
+        assert!(err.contains("Ambiguous merge target 'ch-1aa'"));
+        assert!(err.contains("--into change:ch-1aa"));
+        assert!(err.contains("--into ws:ch-1aa"));
+    }
+
+    #[test]
+    fn resolve_merge_target_prefixes_disambiguate() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ws/default")).expect("operation should succeed");
+        std::fs::create_dir_all(root.join("ws/ch-1aa")).expect("operation should succeed");
+        metadata::write(
+            root,
+            "ch-1aa",
+            &metadata::WorkspaceMetadata {
+                branch: Some("workspace-branch".to_string()),
+                ..metadata::WorkspaceMetadata::default()
+            },
+        )
+        .expect("operation should succeed");
+
+        let store = ChangesStore::open(root);
+        let record = sample_change("ch-1aa", "changes/ch-1aa-topic", "agent-7");
+        store
+            .with_lock("test write", |locked| locked.write_active_record(&record))
+            .expect("operation should succeed");
+
+        let ws_target = resolve_merge_target(root, "ws:ch-1aa").expect("operation should succeed");
+        assert_eq!(ws_target.workspace, "ch-1aa");
+        assert_eq!(ws_target.branch, "workspace-branch");
+        assert!(ws_target.change_id.is_none());
+
+        let change_target =
+            resolve_merge_target(root, "change:ch-1aa").expect("operation should succeed");
+        assert_eq!(change_target.workspace, "agent-7");
+        assert_eq!(change_target.branch, "changes/ch-1aa-topic");
+        assert_eq!(change_target.change_id.as_deref(), Some("ch-1aa"));
     }
 }

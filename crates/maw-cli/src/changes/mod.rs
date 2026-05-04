@@ -436,7 +436,7 @@ fn create_change_advice(primary_workspace: &str, change_id: &str) -> Vec<String>
         return vec![
             format!("maw ws create --change {change_id} <agent-workspace>"),
             "maw exec <agent-workspace> -- git add -A && maw exec <agent-workspace> -- git commit -m \"...\"".to_owned(),
-            format!("maw ws merge <agent-workspace> --into {change_id} --destroy"),
+            format!("maw ws merge <agent-workspace> --into change:{change_id} --destroy"),
             format!("maw changes pr {change_id} --draft"),
         ];
     }
@@ -445,7 +445,7 @@ fn create_change_advice(primary_workspace: &str, change_id: &str) -> Vec<String>
         format!(
             "maw exec {primary_workspace} -- git add -A && maw exec {primary_workspace} -- git commit -m \"...\""
         ),
-        format!("maw ws merge {primary_workspace} --into {change_id} --destroy"),
+        format!("maw ws merge {primary_workspace} --into change:{change_id} --destroy"),
         format!("maw changes pr {change_id} --draft"),
     ]
 }
