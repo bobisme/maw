@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.60.4 — Brownfield init root cleanup (bn-2qp5)
+
+Patch release fixing brownfield `maw init` cleanup for existing repos with project metadata already at the root.
+
+- `maw init` now moves all non-structural root project entries into `ws/default/`, including dot-prefixed directories/files, ignored files, untracked files, and dirty tracked edits. The root is limited to `.git`, `.manifold`, `repo.git`, and `ws/`.
+- Rerunning `maw init` on an already-initialized repo also cleans stale root leftovers, so split trees like root `.bones/` plus `ws/default/.bones/` can be repaired in place.
+- `maw doctor` now reports project dotfiles/directories such as `.bones/` and `notes/` as stray root entries instead of accepting all dot-prefixed paths.
+- Internal cleanup: renamed the stabilized CLI init module from `v2_init.rs` to `init.rs`.
+
 ## v0.60.3 — Rebase clean-overlap fix and release hardening (bn-2oii)
 
 Patch release for correctness fixes found during fresh-eyes passes after v0.60.2.
