@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v0.60.6 — Branch-attached workspace targets (bn-3mw9, bn-284w, bn-6ccl)
+
+Patch release for long-lived workspaces that are attached to branches and receive follow-up merges.
+
+- `maw ws merge --into <workspace>` now works for a workspace attached to a branch, advancing the attached branch without moving trunk or the default workspace epoch.
+- Ambiguous merge targets can be disambiguated with `change:<id>` or `ws:<name>`, and invalid persistent workspace targets now point users toward `maw ws attach-branch`.
+- `maw status` and `maw ws list` now show branch attachments for workspaces, including branch-specific unmerged work without suggesting a default-workspace merge.
+- `maw ws attach-branch` now rejects plain directories under `ws/` that are not maw-tracked workspaces.
+
 ## v0.60.5 — Status and merge-target UX fixes (bn-35cg, bn-m7as)
 
 Patch release for two UX fixes found immediately after the brownfield init cleanup.
