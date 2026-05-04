@@ -38,3 +38,7 @@
 1777906266723602	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0ww		item.move	bn-8cpb	{"state":"doing"}	blake3:GhQJVb9kHs5mADaKCZ6LVbZun16nbvRjDxIRMwxh6pE
 1777906266728928	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy1Aw		item.assign	bn-8cpb	{"action":"assign","agent":"maw-dev"}	blake3:PQjyuotzdjp4kzmUK1PIelkZNJmom20dBNzw4bx0ao8
 1777906381462730	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy1Qw		item.move	bn-8cpb	{"state":"done"}	blake3:fIp0-BinIgZFfP_GsI6dZF1l_OrLV9okU9v9DZHW-rw
+1777906438344078	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy1gw		item.create	bn-55s1	{"description":"Cut patch release v0.60.4 for brownfield maw init root cleanup and init module rename.","kind":"task","labels":["release"],"size":"xs","title":"Release v0.60.4"}	blake3:Jpe21DKn6IF-eQL5Kq4uqjFYsGScfVrORVlzCGHKhsE
+1777906442770374	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy1ww		item.move	bn-55s1	{"state":"doing"}	blake3:Pd_TbOMoXzC04BnpHy6v7UsJzP7eAlktadu7yOjhN0A
+1777906442783616	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy2Aw		item.assign	bn-55s1	{"action":"assign","agent":"maw-dev"}	blake3:haHyCAPoTvu2iTerPWqh9r-vMjDGNckfpn7fI_hu5Ys
+1777906838394644	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy2Qw		item.move	bn-55s1	{"state":"done"}	blake3:HIGm_GGGgTTL0Z6B64HoJC0Gr1VBZG4dWIbj95Iho9A
