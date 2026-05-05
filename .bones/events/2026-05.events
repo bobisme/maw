@@ -84,3 +84,7 @@
 1778019780532468	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_ww		item.move	bn-qpr6	{"state":"doing"}	blake3:M1_AxsVyPoL4eO95sDsdZGIQC-Fe00TALzUAgPBILBY
 1778019780555496	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEygA0		item.assign	bn-qpr6	{"action":"assign","agent":"maw-dev"}	blake3:YZD_9rJLhLBGxlkAHx3z0_3X-6b7K2RThsXnG-kEji0
 1778019970807805	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEygQ0		item.move	bn-qpr6	{"state":"done"}	blake3:uVZizHZPssqUpIkM7oqSqjLciUDTdF4WjSg-hmjiq4g
+1778020249681268	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEygg0		item.create	bn-5ve9	{"description":"Second fresh-eyes exploratory pass through different connected code paths, fixing concrete issues found.","kind":"task","title":"Second exploratory bug-fix pass"}	blake3:sat0BSXrj2kyGOdS95M75QcV6B_ji1tatYCG6s3ykaQ
+1778020254149221	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEygw0		item.move	bn-5ve9	{"state":"doing"}	blake3:kKYU6Fr9kpaXAkiIptsh3wdmbE94qBMY-ev7ktuVHQc
+1778020254228526	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyhA0		item.assign	bn-5ve9	{"action":"assign","agent":"maw-dev"}	blake3:3zpazA5HK1s8eFMw1KrhX5QVglAEGKzkGafaEG0cxec
+1778020503678779	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyhQ0		item.move	bn-5ve9	{"state":"done"}	blake3:Ljdi4sXftr4ZFW4MkFXgXnDL0hb6A9xLlBtichiOHhQ
