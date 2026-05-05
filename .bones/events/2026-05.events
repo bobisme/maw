@@ -76,3 +76,7 @@
 1777945785052583	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy9ww		item.move	bn-1vno	{"state":"doing"}	blake3:RuhCGUcmUEHxGu7Y2aFlvaGk_syqhSb6Ahm-d62vGNU
 1777945785062119	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy-Aw		item.assign	bn-1vno	{"action":"assign","agent":"maw-dev"}	blake3:H9NE865ow1faZ-0x3q3lpJpkQ0DwRJDHz88b3Du3K-0
 1777946084199466	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy-Qw		item.move	bn-1vno	{"state":"done"}	blake3:GTQJtgVMfktrkQ1wnRnBE3k3AaARAmjYuTIZoeMKx3Y
+1777946163210181	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy-gw		item.create	bn-5gm1	{"description":"Cut v0.60.7 for bn-1vno: avoid status-triggered stash refresh so stale dirty maw exec git diff can run safely.","kind":"task","labels":["release"],"size":"s","title":"Release v0.60.7"}	blake3:wUx3UcPx-QDQxlqwOUDbTj9cS09t0CnZ7uqTk6c5gQY
+1777946168141304	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy-ww		item.move	bn-5gm1	{"state":"doing"}	blake3:u_hx8Y4Ro8QeYvYTiS_ZtCcXLJRtjFF3O3IqEeDiAzs
+1777946168151484	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_Aw		item.assign	bn-5gm1	{"action":"assign","agent":"maw-dev"}	blake3:2VGq6UhgHdNKmEJ7_Eu6EoALk-oQUuErdiErPTrJzIo
+1777946467078012	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_Qw		item.move	bn-5gm1	{"state":"done"}	blake3:FG1lR8oQkO2CdOeLyP9Mcvhll4ExaDVV34sK2pRHZtY
