@@ -80,3 +80,7 @@
 1777946168141304	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy-ww		item.move	bn-5gm1	{"state":"doing"}	blake3:u_hx8Y4Ro8QeYvYTiS_ZtCcXLJRtjFF3O3IqEeDiAzs
 1777946168151484	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_Aw		item.assign	bn-5gm1	{"action":"assign","agent":"maw-dev"}	blake3:2VGq6UhgHdNKmEJ7_Eu6EoALk-oQUuErdiErPTrJzIo
 1777946467078012	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_Qw		item.move	bn-5gm1	{"state":"done"}	blake3:FG1lR8oQkO2CdOeLyP9Mcvhll4ExaDVV34sK2pRHZtY
+1778019776199301	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_gw		item.create	bn-qpr6	{"description":"Fresh-eyes exploratory pass through connected code paths, tracing execution flow and fixing obvious bugs discovered.","kind":"task","title":"Explore and fix obvious code issues"}	blake3:S6n2d_2jV5Qji78bJxVW3PMLbLPu74EfMMH8KPa4EVs
+1778019780532468	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy_ww		item.move	bn-qpr6	{"state":"doing"}	blake3:M1_AxsVyPoL4eO95sDsdZGIQC-Fe00TALzUAgPBILBY
+1778019780555496	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEygA0		item.assign	bn-qpr6	{"action":"assign","agent":"maw-dev"}	blake3:YZD_9rJLhLBGxlkAHx3z0_3X-6b7K2RThsXnG-kEji0
+1778019970807805	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEygQ0		item.move	bn-qpr6	{"state":"done"}	blake3:uVZizHZPssqUpIkM7oqSqjLciUDTdF4WjSg-hmjiq4g
