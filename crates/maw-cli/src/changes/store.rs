@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const LOCK_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
 const LOCK_MAX_BACKOFF: Duration = Duration::from_millis(250);
+static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeIndex {
@@ -318,8 +320,7 @@ impl LockedChangesStore<'_> {
             return Ok(None);
         }
 
-        let archive_filename = format!("{}-{change_id}.toml", sanitize_stamp(archive_stamp));
-        let archive_path = self.store.archive_dir().join(archive_filename);
+        let archive_path = unique_archive_path(&self.store.archive_dir(), archive_stamp, change_id);
         let archive_parent = archive_path.parent().with_context(|| {
             format!(
                 "Archive path has no parent directory: {}",
@@ -358,7 +359,33 @@ fn validate_change_id(change_id: &str) -> Result<()> {
 }
 
 fn sanitize_stamp(stamp: &str) -> String {
-    stamp.replace(':', "-")
+    stamp
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn unique_archive_path(archive_dir: &Path, archive_stamp: &str, change_id: &str) -> PathBuf {
+    let base = format!("{}-{change_id}", sanitize_stamp(archive_stamp));
+    let first = archive_dir.join(format!("{base}.toml"));
+    if !first.exists() {
+        return first;
+    }
+
+    for attempt in 1..1000_u32 {
+        let candidate = archive_dir.join(format!("{base}-{attempt}.toml"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    archive_dir.join(format!("{base}-{}.toml", next_temp_nonce()))
 }
 
 fn write_toml_atomic<T: Serialize>(path: &Path, value: &T, context_name: &str) -> Result<()> {
@@ -402,8 +429,14 @@ fn temp_path_for(path: &Path) -> PathBuf {
         || "changes".to_owned(),
         |name| name.to_string_lossy().to_string(),
     );
-    let nonce = now_unix_millis();
+    let nonce = next_temp_nonce();
     path.with_file_name(format!(".{file_name}.{nonce}.tmp"))
+}
+
+fn next_temp_nonce() -> String {
+    let millis = now_unix_millis();
+    let seq = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+    format!("{millis}-{seq}")
 }
 
 fn now_unix_secs() -> u64 {
@@ -650,6 +683,59 @@ mod tests {
                 .expect("read active")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn archive_does_not_overwrite_existing_record_for_same_stamp() {
+        let temp = tempdir().expect("tempdir");
+        let store = ChangesStore::open(temp.path());
+        let stamp = "2026-03-05T20:11:00.000Z";
+
+        let first_path = store
+            .with_lock("archive first", |locked| {
+                locked.write_active_record(&sample_change("ch-1xr"))?;
+                locked.archive_active_record("ch-1xr", stamp)
+            })
+            .expect("archive first")
+            .expect("first archive path");
+
+        let first_content = fs::read_to_string(&first_path).expect("read first archive");
+
+        let second_path = store
+            .with_lock("archive second", |locked| {
+                locked.write_active_record(&sample_change("ch-1xr"))?;
+                locked.archive_active_record("ch-1xr", stamp)
+            })
+            .expect("archive second")
+            .expect("second archive path");
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            fs::read_to_string(&first_path).expect("read first archive again"),
+            first_content
+        );
+        assert!(second_path.exists());
+    }
+
+    #[test]
+    fn archive_stamp_is_filename_sanitized() {
+        let temp = tempdir().expect("tempdir");
+        let store = ChangesStore::open(temp.path());
+
+        let archived_path = store
+            .with_lock("archive sanitized", |locked| {
+                locked.write_active_record(&sample_change("ch-1xr"))?;
+                locked.archive_active_record("ch-1xr", "../bad/stamp:with spaces")
+            })
+            .expect("archive sanitized")
+            .expect("archive path");
+
+        assert_eq!(
+            archived_path.parent(),
+            Some(store.archive_dir().as_path()),
+            "archive stamp must not create nested paths"
+        );
+        assert!(archived_path.exists());
     }
 
     #[test]

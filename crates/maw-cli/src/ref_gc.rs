@@ -122,7 +122,7 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
         .duration_since(UNIX_EPOCH)
         .context("system time before UNIX epoch")?
         .as_secs();
-    let cutoff = now.saturating_sub(older_than_days * 86400);
+    let cutoff = now.saturating_sub(older_than_days.saturating_mul(86_400));
 
     for (ref_name, oid) in &recovery_refs {
         let commit_ts = get_commit_timestamp(root, oid.to_string().as_str());
@@ -273,6 +273,16 @@ mod tests {
         fs::create_dir_all(root.join("ws")).expect("operation should succeed");
 
         (dir, oid)
+    }
+
+    #[test]
+    fn ref_gc_handles_extreme_age_threshold_without_overflow() {
+        let (dir, _) = setup_repo();
+        let root = dir.path();
+
+        let report = run(root, u64::MAX, true).expect("ref gc should not overflow");
+        assert_eq!(report.head_refs_deleted, 0);
+        assert_eq!(report.recovery_refs_deleted, 0);
     }
 
     #[test]
