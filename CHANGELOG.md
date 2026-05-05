@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v0.60.7 — Stale dirty exec inspection fix (bn-1vno)
+
+Patch release for a stale-workspace inspection failure found during multi-agent work.
+
+- `maw exec <workspace> -- git diff ...` now runs in stale workspaces with uncommitted changes without first materializing `refs/manifold/ws/<workspace>` via `git stash create`.
+- `maw status`/workspace status queries no longer refresh Level 1 compatibility refs as a side effect, avoiding low-level index write failures during read-only status and auto-sync checks.
+- Level 1 compatibility refs are still materialized by snapshot paths, so `refs/manifold/ws/<workspace>` remains available for intentional workspace-state inspection.
+
 ## v0.60.6 — Branch-attached workspace targets (bn-3mw9, bn-284w, bn-6ccl)
 
 Patch release for long-lived workspaces that are attached to branches and receive follow-up merges.
