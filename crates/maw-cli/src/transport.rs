@@ -250,10 +250,10 @@ pub fn pull_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<Pu
     let mut summary = PullSummary::default();
 
     // Always start from a clean staging area so stale refs from an interrupted
-    // previous pull cannot be mistaken for freshly-fetched remote state.
-    if !dry_run {
-        cleanup_staging(root);
-    }
+    // previous pull cannot be mistaken for freshly-fetched remote state.  This
+    // also applies to dry-run: the preview fetches into staging, computes what
+    // would happen, and then removes the transient staging refs.
+    cleanup_staging(root);
 
     // Phase 1: Fetch remote manifold refs into staging area.
     fetch_into_staging(root, remote, dry_run)?;
@@ -273,9 +273,7 @@ pub fn pull_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<Pu
     summary.ws_state = ws_results;
 
     // Phase 3: Clean up staging area.
-    if !dry_run {
-        cleanup_staging(root);
-    }
+    cleanup_staging(root);
 
     Ok(summary)
 }
@@ -371,10 +369,11 @@ fn fetch_into_staging(root: &Path, remote: &str, dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!("[dry-run] git fetch {remote} '{refspec}'");
-        return Ok(());
     }
 
-    println!("Fetching refs/manifold/* from {remote}...");
+    if !dry_run {
+        println!("Fetching refs/manifold/* from {remote}...");
+    }
 
     let fetch = Command::new("git")
         .args(["fetch", remote, refspec])
@@ -1411,6 +1410,52 @@ mod tests {
             refs::read_ref(root, "refs/manifold/remote/epoch/current")
                 .expect("operation should succeed")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn dry_run_pull_ignores_and_cleans_stale_staging_refs() {
+        let dir = setup_repo();
+        let root = dir.path();
+
+        let remote_dir = TempDir::new().expect("operation should succeed");
+        StdCommand::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote_dir.path())
+            .output()
+            .expect("operation should succeed");
+
+        StdCommand::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote_dir
+                    .path()
+                    .to_str()
+                    .expect("operation should succeed"),
+            ])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+
+        let stale_epoch = make_commit(root, "stale-dry-run-epoch");
+        refs::write_ref(root, "refs/manifold/remote/epoch/current", &stale_epoch)
+            .expect("operation should succeed");
+
+        let summary = pull_manifold_refs(root, "origin", true).expect("operation should succeed");
+        assert_eq!(summary.epoch, RefMergeResult::NoRemote);
+        assert!(
+            refs::read_ref(root, "refs/manifold/epoch/current")
+                .expect("operation should succeed")
+                .is_none(),
+            "dry-run must not adopt stale staging as the local epoch"
+        );
+        assert!(
+            refs::read_ref(root, "refs/manifold/remote/epoch/current")
+                .expect("operation should succeed")
+                .is_none(),
+            "dry-run should clean transient/stale staging refs"
         );
     }
 
