@@ -56,6 +56,68 @@ fn exec_auto_syncs_stale_workspace_before_running_command() {
 }
 
 #[test]
+fn exec_git_diff_runs_in_stale_dirty_workspace_without_auto_sync() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("tracked.txt", "base\n")]);
+    repo.maw_ok(&["ws", "create", "alice"]);
+
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
+
+    let old_head = repo.workspace_head("alice");
+    assert_ne!(old_head, repo.current_epoch());
+
+    repo.modify_file("alice", "tracked.txt", "workspace edit\n");
+    repo.add_file("alice", "scratch.txt", "untracked\n");
+
+    let out = repo.maw_raw(&[
+        "exec",
+        "alice",
+        "--",
+        "git",
+        "diff",
+        "--",
+        "tracked.txt",
+        "scratch.txt",
+    ]);
+    assert!(
+        out.status.success(),
+        "exec git diff should run in stale dirty workspace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("-base") && stdout.contains("+workspace edit"),
+        "expected tracked diff output, got: {stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Skipping auto-sync to preserve uncommitted work"),
+        "expected dirty auto-sync skip warning, got: {stderr}"
+    );
+
+    let new_head = repo.workspace_head("alice");
+    assert_eq!(
+        new_head, old_head,
+        "stale dirty git diff must not auto-sync workspace HEAD"
+    );
+    assert_eq!(
+        repo.read_file("alice", "tracked.txt").as_deref(),
+        Some("workspace edit\n"),
+        "tracked dirty work should remain"
+    );
+    assert_eq!(
+        repo.read_file("alice", "scratch.txt").as_deref(),
+        Some("untracked\n"),
+        "untracked dirty work should remain"
+    );
+}
+
+#[test]
 fn exec_skips_auto_sync_for_non_git_commands() {
     let repo = TestRepo::new();
 
@@ -597,7 +659,7 @@ fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
         "merge",
         "worker",
         "--into",
-        "ch-sync",
+        "change:ch-sync",
         "--destroy",
         "--message",
         "merge worker",
@@ -662,7 +724,7 @@ fn sync_refuses_cross_target_update_for_unbound_workspace() {
         "merge",
         "worker",
         "--into",
-        "ch-sync2",
+        "change:ch-sync2",
         "--destroy",
         "--message",
         "merge worker",

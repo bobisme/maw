@@ -584,9 +584,6 @@ impl WorkspaceBackend for GitWorktreeBackend {
             !self.is_ancestor(current.as_str(), base_epoch.as_str())
         });
 
-        // Lazily materialize Level 1 workspace state ref for git inspection.
-        self.refresh_workspace_state_ref(name, &ws_path)?;
-
         Ok(WorkspaceStatus::new(
             base_epoch.into(),
             dirty_files,
@@ -1201,6 +1198,27 @@ mod tests {
         assert!(
             diff.lines().any(|l| l.trim() == "README.md"),
             "diff should include README.md: {diff}"
+        );
+    }
+
+    #[test]
+    fn test_status_does_not_materialize_workspace_state_ref() {
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path().to_path_buf();
+        let backend = GitWorktreeBackend::new(root.clone());
+        let ws_name = WorkspaceId::new("status-ref").expect("operation should succeed");
+        let info = backend
+            .create(&ws_name, &epoch)
+            .expect("operation should succeed");
+
+        fs::write(info.path.join("README.md"), "# changed from workspace")
+            .expect("operation should succeed");
+        let status = backend.status(&ws_name).expect("operation should succeed");
+
+        assert_eq!(status.dirty_files.len(), 1);
+        assert!(
+            read_ws_ref(&root, ws_name.as_str()).is_none(),
+            "status should not materialize a workspace ref"
         );
     }
 
