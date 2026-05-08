@@ -1,3 +1,4 @@
+pub(crate) mod auto_rebase;
 mod checks;
 mod cross_target;
 mod lock;
@@ -22,7 +23,9 @@ use checks::{
 use cross_target::cross_target_sync_risk;
 use rebase::rebase_workspace;
 
-pub use rebase::{RebaseConflict, RebaseConflicts, delete_rebase_conflicts, read_rebase_conflicts};
+pub use rebase::{
+    RebaseConflict, RebaseConflicts, RebaseOutcome, delete_rebase_conflicts, read_rebase_conflicts,
+};
 
 fn maybe_clear_stale_conflict_sidecars(root: &Path, ws_name: &str, ws_path: &Path) -> Result<bool> {
     let mut tracked_paths = std::collections::BTreeSet::new();

@@ -244,6 +244,7 @@ fn sync_all_no_rebase_returns_non_zero_when_stale_workspace_is_skipped_for_commi
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -293,6 +294,7 @@ fn sync_rebase_replays_commits_ahead_of_workspace_epoch() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -378,6 +380,7 @@ fn sync_no_rebase_refuses_stale_workspace_with_commits_and_preserves_head() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -532,6 +535,7 @@ fn sync_rebase_preserves_commits_after_epoch_advance() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -604,6 +608,7 @@ fn sync_rebase_preserves_multiple_commits_after_multiple_epoch_advances() {
             "merge",
             &name,
             "--destroy",
+            "--no-auto-rebase",
             "--message",
             &format!("merge adv{i}"),
         ]);
@@ -667,6 +672,7 @@ fn auto_sync_does_not_drop_commits_on_stale_workspace() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -714,6 +720,7 @@ fn batch_sync_all_no_rebase_does_not_drop_commits_on_stale_workspace() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -828,6 +835,7 @@ fn exec_does_not_auto_sync_unbound_workspace_to_active_change_epoch() {
         "--into",
         "change:ch-sync",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge worker",
     ]);
@@ -893,6 +901,7 @@ fn sync_refuses_cross_target_update_for_unbound_workspace() {
         "--into",
         "change:ch-sync2",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge worker",
     ]);

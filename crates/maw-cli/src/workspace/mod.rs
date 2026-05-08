@@ -986,8 +986,8 @@ pub enum WorkspaceCommands {
     /// Examples:
     ///   maw ws merge alice --into default                       # adopt alice into default
     ///   maw ws merge alice --into crib2 --destroy               # merge into branch-attached workspace crib2
-    ///   maw ws merge alice --into ws:crib2 --destroy            # explicit workspace target
-    ///   maw ws merge alice --into change:ch-1xr --destroy       # explicit active change target
+    ///   maw ws merge alice --into `ws:crib2` --destroy          # explicit workspace target
+    ///   maw ws merge alice --into `change:ch-1xr` --destroy     # explicit active change target
     ///   maw ws merge alice bob --into default                   # merge alice and bob into default
     ///   maw ws merge alice bob --into default --destroy         # merge and clean up
     ///   maw ws merge alice bob --into default --dry-run         # preview merge
@@ -1104,6 +1104,21 @@ pub enum WorkspaceCommands {
         /// worktree, but `--force` bypasses the check entirely.
         #[arg(long)]
         force: bool,
+
+        /// Disable post-merge auto-rebase of sibling workspaces (bn-3vf5).
+        ///
+        /// By default, after the merge advances the epoch, every other
+        /// workspace is automatically replayed onto the new epoch via the
+        /// existing rebase machinery (refs only — worktree files are
+        /// reconciled the next time the owning agent runs a workspace
+        /// command). Pass `--no-auto-rebase` to skip that step; siblings
+        /// remain stale and the user must run `maw ws sync --rebase <ws>`
+        /// per sibling to catch up.
+        ///
+        /// Equivalent to `merge.auto_rebase_siblings = false` in
+        /// `.manifold/config.toml`, but scoped to one invocation.
+        #[arg(long = "no-auto-rebase")]
+        no_auto_rebase: bool,
     },
 
     /// Show detailed conflict information for workspace(s)
@@ -1462,6 +1477,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             resolve_all,
             verbose,
             force,
+            no_auto_rebase,
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             let root = repo_root()?;
@@ -1566,6 +1582,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     resolve_all,
                     verbose,
                     force,
+                    auto_rebase_siblings: if no_auto_rebase { Some(false) } else { None },
                 },
             )
         }

@@ -79,6 +79,7 @@ fn advance_epoch(repo: &TestRepo, tag: &str, idx: usize) {
         "merge",
         &name,
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         &format!("merge advance {tag} {idx}"),
     ]);

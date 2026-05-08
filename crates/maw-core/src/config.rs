@@ -148,6 +148,15 @@ pub struct MergeConfig {
     /// epoch and branch errors out with a request to run `maw epoch sync`.
     #[serde(default = "default_auto_absorb_ff")]
     pub auto_absorb_ff: bool,
+
+    /// When `true` (default), after `maw ws merge` advances the epoch the
+    /// merge automatically rebases non-target sibling workspaces onto the
+    /// new epoch, advancing refs only (worktrees are not touched).
+    ///
+    /// Set to `false` (or pass `--no-auto-rebase`) to leave siblings stale;
+    /// users must then run `maw ws sync <ws>` per sibling to catch up.
+    #[serde(default = "default_auto_rebase_siblings")]
+    pub auto_rebase_siblings: bool,
 }
 
 impl Default for MergeConfig {
@@ -157,11 +166,16 @@ impl Default for MergeConfig {
             drivers: Vec::new(),
             ast: AstConfig::default(),
             auto_absorb_ff: default_auto_absorb_ff(),
+            auto_rebase_siblings: default_auto_rebase_siblings(),
         }
     }
 }
 
 const fn default_auto_absorb_ff() -> bool {
+    true
+}
+
+const fn default_auto_rebase_siblings() -> bool {
     true
 }
 

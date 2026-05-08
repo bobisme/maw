@@ -455,6 +455,7 @@ fn stale_workspace_merge_is_blocked_when_epoch_has_advanced() {
         "merge",
         "epoch-advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "test merge",
     ]);
@@ -509,6 +510,7 @@ fn stale_workspace_is_blocked_for_check_plan_dry_run_and_merge() {
         "merge",
         "base-advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "advance epoch",
     ]);

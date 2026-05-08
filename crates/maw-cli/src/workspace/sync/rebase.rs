@@ -128,12 +128,59 @@ pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
 // Rebase implementation — routed through maw-core::merge
 // ---------------------------------------------------------------------------
 
+/// Structured outcome from a rebase invocation.
+///
+/// Returned by the rebase core so callers (CLI flow, sibling auto-rebase) can
+/// surface results in their own format without parsing stdout. Stable enough
+/// to be exposed at crate root for downstream summarizers (bn-3vf5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RebaseOutcome {
+    /// Number of commits that were replayed onto the new epoch.
+    pub replayed: usize,
+    /// Number of unresolved conflict entries in the resulting state.
+    pub conflicts: usize,
+    /// Number of replay steps that introduced at least one conflict.
+    pub conflicted_steps: usize,
+    /// True when there were no commits to replay (workspace was already up
+    /// to date with the old epoch and just needed a fast-forward sync).
+    pub fast_forwarded: bool,
+}
+
+/// Tunables for [`rebase_workspace_run`]. The two existing CLI entry points
+/// (`maw ws sync --rebase` and the sibling auto-rebase orchestrator) differ
+/// only in whether they print progress and whether they sync the worktree.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RebaseRunOptions {
+    /// When true, emit progress / conflict-resolution help to stdout.
+    pub print: bool,
+    /// When true, advance HEAD via `set_head` AND `checkout_tree` so the
+    /// worktree files match. When false, only `set_head` runs — the worktree
+    /// is left at its old contents and will be reconciled the next time the
+    /// owning agent runs a workspace command. Sibling auto-rebase uses
+    /// `false` to avoid touching another agent's working files.
+    pub mutate_worktree: bool,
+    /// When true, the function may itself acquire the per-workspace lock.
+    /// Set to `false` by callers that have already acquired the lock so the
+    /// re-checks (dirty / merge-state) can be done under that same lock —
+    /// see `auto_rebase_siblings` in `super::auto_rebase`.
+    pub acquire_lock: bool,
+}
+
+impl Default for RebaseRunOptions {
+    fn default() -> Self {
+        Self {
+            print: true,
+            mutate_worktree: true,
+            acquire_lock: true,
+        }
+    }
+}
+
 /// Replay workspace commits onto the current epoch via the structured-merge
 /// engine. Zero shell-outs — everything goes through [`GitRepo`].
-#[expect(
-    clippy::too_many_lines,
-    reason = "rebase command follows the structured merge pipeline in order"
-)]
+///
+/// Thin wrapper preserving the `pub ws sync --rebase` user-visible output;
+/// real work happens in [`rebase_workspace_run`].
 pub(super) fn rebase_workspace(
     root: &Path,
     ws_name: &str,
@@ -142,6 +189,42 @@ pub(super) fn rebase_workspace(
     ws_path: &Path,
     ahead_count: u32,
 ) -> Result<()> {
+    rebase_workspace_run(
+        root,
+        ws_name,
+        old_epoch,
+        new_epoch,
+        ws_path,
+        ahead_count,
+        RebaseRunOptions::default(),
+    )
+    .map(|_| ())
+}
+
+/// Core rebase routine. Returns a structured [`RebaseOutcome`] so callers
+/// that don't want the full stdout flow (sibling auto-rebase) can summarize
+/// the result themselves.
+#[expect(
+    clippy::too_many_lines,
+    reason = "rebase command follows the structured merge pipeline in order"
+)]
+pub(super) fn rebase_workspace_run(
+    root: &Path,
+    ws_name: &str,
+    old_epoch: &str,
+    new_epoch: &str,
+    ws_path: &Path,
+    ahead_count: u32,
+    opts: RebaseRunOptions,
+) -> Result<RebaseOutcome> {
+    macro_rules! say {
+        ($($arg:tt)*) => {
+            if opts.print {
+                println!($($arg)*);
+            }
+        };
+    }
+
     // Serialize concurrent rebases on the same workspace (bn-1d1g). Without
     // this, two racing `maw ws sync --rebase <ws>` processes both rewrite
     // HEAD / the worktree and the loser aborts mid-pipeline with an internal
@@ -149,26 +232,31 @@ pub(super) fn rebase_workspace(
     // the workspace in a half-rebased state.
     //
     // Lock is scoped to this function — it drops (and releases the kernel
-    // flock) when the function returns or panics.
-    let _lock = match WorkspaceRebaseLock::try_acquire(root, ws_name) {
-        Ok(Some(guard)) => guard,
-        Ok(None) => {
-            bail!(
-                "Another rebase is in progress for workspace '{ws_name}'. \
-                 Wait for it to finish and retry. \
-                 (Lock file: {})",
-                root.join(".manifold")
-                    .join("locks")
-                    .join("rebase")
-                    .join(format!("{ws_name}.lock"))
-                    .display()
-            );
+    // flock) when the function returns or panics. Callers that have already
+    // acquired the lock pass `acquire_lock: false`.
+    let _lock = if opts.acquire_lock {
+        match WorkspaceRebaseLock::try_acquire(root, ws_name) {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => {
+                bail!(
+                    "Another rebase is in progress for workspace '{ws_name}'. \
+                     Wait for it to finish and retry. \
+                     (Lock file: {})",
+                    root.join(".manifold")
+                        .join("locks")
+                        .join("rebase")
+                        .join(format!("{ws_name}.lock"))
+                        .display()
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to acquire rebase lock for workspace '{ws_name}': {e}"
+                ));
+            }
         }
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Failed to acquire rebase lock for workspace '{ws_name}': {e}"
-            ));
-        }
+    } else {
+        None
     };
 
     // Safety: refuse to rebase if the workspace has uncommitted changes.
@@ -185,11 +273,11 @@ pub(super) fn rebase_workspace(
         );
     }
 
-    println!(
+    say!(
         "Rebasing workspace '{ws_name}' ({ahead_count} commit(s)) onto epoch {}...",
         &new_epoch[..std::cmp::min(12, new_epoch.len())]
     );
-    println!();
+    say!();
 
     // Open the repo **at the workspace path**. For a linked worktree this
     // makes `set_head` update the workspace's own HEAD (not the common-dir
@@ -223,11 +311,32 @@ pub(super) fn rebase_workspace(
         .map_err(|e| anyhow::anyhow!("Failed to walk commits {old_epoch}..HEAD: {e}"))?;
 
     if commits.is_empty() {
-        println!("No commits to replay. Performing normal sync.");
-        sync_worktree_to_epoch(root, ws_name, new_epoch)?;
-        println!();
-        println!("Workspace synced successfully.");
-        return Ok(());
+        say!("No commits to replay. Performing normal sync.");
+        if opts.mutate_worktree {
+            sync_worktree_to_epoch(root, ws_name, new_epoch)?;
+        } else {
+            // Sibling auto-rebase path: advance only the per-workspace epoch
+            // ref so `WorkspaceStatus::is_stale` clears. The worktree gets
+            // updated next time the owning agent runs a workspace command.
+            let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
+            if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    epoch_ref = %epoch_ref,
+                    oid = %new_core,
+                    error = %e,
+                    "failed to update workspace epoch ref during sibling auto-rebase"
+                );
+            }
+        }
+        say!();
+        say!("Workspace synced successfully.");
+        return Ok(RebaseOutcome {
+            replayed: 0,
+            conflicts: 0,
+            conflicted_steps: 0,
+            fast_forwarded: true,
+        });
     }
 
     // Read the new epoch's tree OID — we'll use it as the base for `edit_tree`.
@@ -266,7 +375,7 @@ pub(super) fn rebase_workspace(
         if parent_oids.is_empty() {
             // Root commit appearing in an old_epoch..HEAD range would mean
             // old_epoch is unrelated. Skip defensively.
-            println!(
+            say!(
                 "  [{}/{}] skipping root commit {short_sha} (no parents)",
                 i + 1,
                 total
@@ -413,23 +522,29 @@ pub(super) fn rebase_workspace(
 
         let summary = commit_msg.lines().next().unwrap_or("(no message)");
         if parent_oids.len() > 1 {
-            println!(
+            say!(
                 "  [{}/{}] Replayed (merge commit) {short_sha}: {summary}",
                 i + 1,
                 total
             );
         } else {
-            println!("  [{}/{}] Replayed {short_sha}: {summary}", i + 1, total);
+            say!("  [{}/{}] Replayed {short_sha}: {summary}", i + 1, total);
         }
     }
 
-    // Advance HEAD + worktree to the new chain tip.
+    // Advance HEAD to the new chain tip. The worktree files are only
+    // synchronized when `mutate_worktree` is set — sibling auto-rebase
+    // skips the checkout to avoid touching another agent's working tree
+    // (the worktree gets reconciled the next time that agent runs a
+    // workspace command).
     repo_dyn
         .set_head(parent_git)
         .map_err(|e| anyhow::anyhow!("set_head failed: {e}"))?;
-    repo_dyn
-        .checkout_tree(parent_git, ws_path)
-        .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
+    if opts.mutate_worktree {
+        repo_dyn
+            .checkout_tree(parent_git, ws_path)
+            .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
+    }
 
     // Step 3: Update the workspace's epoch ref to the new epoch. Silent
     // failure would leave a stale ref (bn-3pkx) — surface as a warn.
@@ -449,48 +564,49 @@ pub(super) fn rebase_workspace(
 
     // Write both sidecars. The legacy one is what `maw ws resolve` still
     // consumes; the structured one is for future tooling (bn-3rah).
-    if state.has_conflicts() {
-        let _ = conflicted_steps; // surfaced in stdout above
-
+    let conflict_count = state.conflicts.len();
+    let has_conflicts = state.has_conflicts();
+    if has_conflicts {
         write_legacy_sidecar(ws_path, &state, &old_core, &new_core)
             .map_err(|e| anyhow::anyhow!("failed to write legacy sidecar: {e}"))?;
         write_structured_sidecar(ws_path, &state)
             .map_err(|e| anyhow::anyhow!("failed to write structured sidecar: {e}"))?;
 
-        let conflict_count = state.conflicts.len();
-
-        println!();
-        println!(
-            "Rebase complete: {replayed} commit(s) replayed, {conflicted_steps} with conflicts.",
-        );
-        println!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
-        println!();
-        println!("Conflict markers use labeled sides:");
-        println!("  <<<<<<< epoch   — current epoch version");
-        println!("  ||||||| base");
-        println!("  =======");
-        println!("  >>>>>>> {ws_name}   — workspace changes");
-        println!();
-        println!("To resolve:");
-        println!("  maw ws resolve {ws_name} --list                  # list conflicts");
-        println!("  maw ws resolve {ws_name} --keep epoch            # keep epoch version");
-        println!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
-        println!("  maw ws resolve {ws_name} --keep both             # keep both sides");
-        println!();
-        println!("After resolving, commit and clear conflict state:");
-        println!(
+        say!();
+        say!("Rebase complete: {replayed} commit(s) replayed, {conflicted_steps} with conflicts.",);
+        say!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
+        say!();
+        say!("Conflict markers use labeled sides:");
+        say!("  <<<<<<< epoch   — current epoch version");
+        say!("  ||||||| base");
+        say!("  =======");
+        say!("  >>>>>>> {ws_name}   — workspace changes");
+        say!();
+        say!("To resolve:");
+        say!("  maw ws resolve {ws_name} --list                  # list conflicts");
+        say!("  maw ws resolve {ws_name} --keep epoch            # keep epoch version");
+        say!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
+        say!("  maw ws resolve {ws_name} --keep both             # keep both sides");
+        say!();
+        say!("After resolving, commit and clear conflict state:");
+        say!(
             "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\""
         );
-        println!("  maw ws sync {ws_name}");
+        say!("  maw ws sync {ws_name}");
     } else {
         // Clean run — clear any stale sidecar from a previous attempt.
         let _ = delete_rebase_conflicts(root, ws_name);
-        println!();
-        println!("Rebase complete: {replayed} commit(s) replayed cleanly.");
-        println!("Workspace '{ws_name}' is now up to date.");
+        say!();
+        say!("Rebase complete: {replayed} commit(s) replayed cleanly.");
+        say!("Workspace '{ws_name}' is now up to date.");
     }
 
-    Ok(())
+    Ok(RebaseOutcome {
+        replayed,
+        conflicts: if has_conflicts { conflict_count } else { 0 },
+        conflicted_steps,
+        fast_forwarded: false,
+    })
 }
 
 // ---------------------------------------------------------------------------

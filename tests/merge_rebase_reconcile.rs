@@ -44,6 +44,7 @@ fn setup_rebase_conflict(repo: &TestRepo) -> String {
         "--into",
         "default",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge a",
     ]);
@@ -114,6 +115,7 @@ fn merge_succeeds_after_supported_conflict_resolve() {
         "--into",
         "default",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge b after supported resolve",
     ]);
@@ -196,6 +198,7 @@ fn ws_resolve_keep_clears_sidecar_and_merge_proceeds() {
         "--into",
         "default",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "after resolve keep",
     ]);
@@ -241,6 +244,7 @@ fn sync_clears_stale_sidecar_after_manual_resolution_commit() {
         "--into",
         "default",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge b after manual resolve",
     ]);
@@ -403,6 +407,7 @@ fn ws_merge_allows_embedded_markers_when_no_conflict_sidecar() {
         "--into",
         "default",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge a with byte-level marker literals",
     ]);
@@ -599,6 +604,7 @@ fn destroy_deletes_all_workspace_owned_refs() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
     // bn-372v (original): `sync --rebase` must not silently drop merge
     // commits committed inside a workspace.
@@ -678,6 +684,7 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -708,6 +715,7 @@ fn sync_rebase_marks_workspace_conflicted_on_merge_commit() {
         "--into",
         "default",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "should fail: unresolved rebase conflict",
     ]);

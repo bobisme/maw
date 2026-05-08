@@ -4,6 +4,16 @@ All notable changes to maw.
 
 ## Unreleased
 
+### Behavior change: `maw ws merge` auto-rebases sibling workspaces (bn-3vf5)
+
+After `maw ws merge` advances the epoch, sibling (non-target) workspaces are automatically rebased onto the new epoch using the existing rebase machinery. Auto-rebase advances refs only — sibling worktrees are not touched. The next time an agent operates on a sibling, the worktree update happens then.
+
+Skip rules (per sibling): currently locked → skip "in use"; dirty → skip "dirty"; mid-merge → skip "in progress"; already at the new epoch → skip "up to date". Conflicts during sibling rebase are recorded as conflict-as-data state in the sibling and reported as `rebased with N conflicts`; they do not abort the parent merge.
+
+`rebase_workspace` now returns a structured `RebaseOutcome { replayed, conflicts, conflicted_steps, fast_forwarded }`; existing CLI callers preserve their previous output.
+
+Default-on; opt out with `merge.auto_rebase_siblings = false` in `.manifold/config.toml` or pass `--no-auto-rebase` to a single `maw ws merge` invocation.
+
 ### Behavior change: `maw ws merge` auto-absorbs fast-forward divergence (bn-11ip)
 
 `maw ws merge` no longer fails outright when the configured target branch is ahead of the epoch (the typical "someone ran `git push` outside maw" shape). If the divergence is a strict fast-forward AND no in-flight workspace's touched paths intersect the FF range, the upstream commits are silently absorbed into the epoch and the merge proceeds. A single line is printed to stderr — `Absorbed N upstream commit(s) into epoch (<short>..<short>).` — so the absorb is auditable.

@@ -2398,6 +2398,12 @@ pub struct MergeOptions<'a> {
     /// `find_conflicted_files`). `--force` lets the user override when
     /// markers are false positives (e.g., a test fixture with `<<<<<<<`).
     pub force: bool,
+    /// Per-invocation override for `merge.auto_rebase_siblings` (bn-3vf5).
+    ///
+    /// `Some(true)` forces auto-rebase on regardless of config.
+    /// `Some(false)` forces it off (matches `--no-auto-rebase`).
+    /// `None` defers to `MawConfig::merge.auto_rebase_siblings`.
+    pub auto_rebase_siblings: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2898,6 +2904,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         ref resolve_all,
         verbose,
         force: _force,
+        auto_rebase_siblings: auto_rebase_override,
     } = *opts;
     // `_force` is not used here — the check site reads `opts.force` directly
     // to avoid a shadowing conflict with the local `force` elsewhere.
@@ -3663,6 +3670,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         );
     }
 
+    #[allow(clippy::if_not_else, reason = "branch-only path is the simpler arm")]
     if !target_updates_epoch {
         match maw_core::refs::write_ref_cas(
             &root,
@@ -3752,6 +3760,43 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         record_merge_operations(&root, &sources, &merge_base_epoch, &build_output.candidate)
     {
         tracing::warn!("{warning}");
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-3vf5: auto-rebase sibling workspaces onto the new epoch.
+    //
+    // Default-on; opt-out via config (`merge.auto_rebase_siblings = false`)
+    // or per-invocation via `--no-auto-rebase`. Each sibling: try-lock →
+    // skip-rules → call the rebase core (no worktree mutation) → record a
+    // result line.
+    // -----------------------------------------------------------------------
+    if target_updates_epoch {
+        let manifold_config_path = root.join(".manifold").join("config.toml");
+        let manifold_cfg =
+            maw_core::config::ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
+        let auto_rebase_enabled =
+            auto_rebase_override.unwrap_or(manifold_cfg.merge.auto_rebase_siblings);
+        if auto_rebase_enabled {
+            let reports = super::sync::auto_rebase::auto_rebase_siblings(
+                &root,
+                &backend,
+                target_workspace,
+                &ws_to_merge,
+                build_output.candidate.as_str(),
+            );
+            if !reports.is_empty() && text_mode {
+                textln!();
+                textln!("AUTO-REBASE: replaying sibling workspaces onto new epoch...");
+                for report in &reports {
+                    textln!("  {} — {}", report.name, report.result.describe());
+                }
+            }
+            for report in &reports {
+                if let super::sync::auto_rebase::SiblingResult::Failed { reason } = &report.result {
+                    tracing::warn!(workspace = %report.name, error = %reason, "sibling auto-rebase failed");
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3866,13 +3911,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Message is always provided by the caller (enforced in mod.rs dispatch).
     let msg = message.expect("merge message must be provided by caller");
-    let next_command = if let Some(change_id) = target_change_id {
-        format!("maw changes pr {change_id} --draft")
-    } else if target_updates_epoch {
-        "maw push".to_string()
-    } else {
-        format!("git push origin {branch}")
-    };
+    let next_command = target_change_id.map_or_else(
+        || {
+            if target_updates_epoch {
+                "maw push".to_string()
+            } else {
+                format!("git push origin {branch}")
+            }
+        },
+        |change_id| format!("maw changes pr {change_id} --draft"),
+    );
 
     if format == OutputFormat::Json {
         let success = MergeSuccessOutput {

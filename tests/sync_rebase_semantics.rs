@@ -95,6 +95,7 @@ fn sync_rebase_preserves_commit_count() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -144,6 +145,7 @@ fn sync_rebase_preserves_commit_messages() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -205,6 +207,7 @@ fn sync_rebase_no_content_drops_on_clean_replay() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -266,6 +269,7 @@ fn sync_rebase_auto_merges_disjoint_same_file_edits() {
         "merge",
         "alice",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge alice",
     ]);
@@ -364,6 +368,7 @@ fn sync_rebase_preserves_executable_bit() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -441,6 +446,7 @@ fn sync_rebase_preserves_symlink() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -531,6 +537,7 @@ fn sync_rebase_merge_commit_regression_372v() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -611,6 +618,7 @@ fn sync_rebase_unilateral_edit_on_unrelated_path_preserves_structured_conflict()
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -714,6 +722,7 @@ fn rename_followed_by_epoch_modify_preserves_content_at_new_path() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -841,6 +850,7 @@ fn sync_rebase_handles_add_add_conflict() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -922,6 +932,7 @@ fn sync_rebase_handles_add_add_conflict() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -1002,6 +1013,7 @@ fn rebase_of_merge_with_identical_parent_content_is_clean() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -1114,6 +1126,7 @@ fn keep_with_unambiguous_parent_side_works() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
@@ -1176,6 +1189,7 @@ fn concurrent_rebase_races_are_serialized() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);

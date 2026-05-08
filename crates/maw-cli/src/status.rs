@@ -179,11 +179,10 @@ struct WorkspaceStatusItem {
 
 impl WorkspaceStatusItem {
     fn display(&self) -> String {
-        if let Some(branch) = self.branch.as_deref() {
-            format!("{} [branch: {branch}]", self.name)
-        } else {
-            self.name.clone()
-        }
+        self.branch.as_deref().map_or_else(
+            || self.name.clone(),
+            |branch| format!("{} [branch: {branch}]", self.name),
+        )
     }
 }
 
