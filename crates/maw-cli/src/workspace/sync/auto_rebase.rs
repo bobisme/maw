@@ -1,4 +1,4 @@
-//! Sibling auto-rebase orchestrator (bn-3vf5).
+//! Sibling auto-rebase orchestrator (bn-3vf5, refined in bn-103k).
 //!
 //! After `maw ws merge` advances the epoch, every other workspace becomes
 //! stale. This module enumerates every non-target workspace and replays its
@@ -14,9 +14,18 @@
 //!   authoritative.
 //! * Per-sibling failure does NOT abort the parent merge — we record the
 //!   error string and move on to the next sibling.
-//! * No worktree mutation. Only refs (`refs/manifold/epoch/ws/<name>` and
-//!   the workspace's HEAD) are advanced. The owning agent's worktree gets
-//!   reconciled the next time they run a workspace command.
+//! * Refs (`refs/manifold/epoch/ws/<name>` and the workspace's HEAD) are
+//!   always advanced when the sibling passes all skip rules.
+//! * Worktree mutation: when the sibling is provably clean (dirty re-check
+//!   under lock passed), the worktree is ALSO synchronized via a checkout
+//!   to the rebased HEAD. This keeps `git status` clean post-merge and
+//!   avoids the dirty-workspace guard tripping on the next `maw ws sync`.
+//!   The rebase routine performs ONE more dirty re-check immediately before
+//!   the destructive checkout to close the small race window that follows
+//!   the under-lock skip check.
+//! * Worktree-update failure (transient I/O, freshly-dirty file) NEVER
+//!   aborts the rebase — refs still advance and we report
+//!   `RebasedCleanRefsOnly` (or `RebasedWithConflictsRefsOnly`).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -43,12 +52,27 @@ pub enum SiblingResult {
     SkippedDirty,
     /// The sibling is named as a source in the in-progress merge state.
     SkippedInProgress,
-    /// All workspace commits replayed cleanly. `replayed` is the number of
-    /// commits.
+    /// All workspace commits replayed cleanly AND the worktree was
+    /// synchronized to the rebased HEAD (bn-103k). `replayed` is the number
+    /// of commits.
     RebasedClean { replayed: usize },
-    /// Rebase produced conflict-as-data state. `conflicts` is the number of
-    /// unresolved entries; `replayed` is the number of commits replayed.
+    /// All workspace commits replayed cleanly, but the worktree update
+    /// step was skipped or failed (refs still advanced). `reason` carries
+    /// a short diagnostic for the user.
+    RebasedCleanRefsOnly { replayed: usize, reason: String },
+    /// Rebase produced conflict-as-data state and the worktree was
+    /// synchronized — `maw ws resolve` will see the markers in the working
+    /// tree. `conflicts` is the number of unresolved entries; `replayed`
+    /// is the number of commits replayed.
     RebasedWithConflicts { replayed: usize, conflicts: usize },
+    /// Rebase produced conflict-as-data state but the worktree update was
+    /// skipped or failed — markers exist in the rebased HEAD's tree but
+    /// have not been written to disk yet.
+    RebasedWithConflictsRefsOnly {
+        replayed: usize,
+        conflicts: usize,
+        reason: String,
+    },
     /// Rebase machinery returned an error. The merge was NOT aborted.
     Failed { reason: String },
 }
@@ -63,12 +87,24 @@ impl SiblingResult {
             Self::SkippedDirty => "skipped: dirty".to_string(),
             Self::SkippedInProgress => "skipped: in progress".to_string(),
             Self::RebasedClean { replayed } => {
-                format!("rebased clean ({replayed} commit(s))")
+                format!("rebased clean ({replayed} commit(s), worktree synced)")
+            }
+            Self::RebasedCleanRefsOnly { replayed, reason } => {
+                format!("rebased clean ({replayed} commit(s), worktree update skipped: {reason})")
             }
             Self::RebasedWithConflicts {
                 replayed,
                 conflicts,
-            } => format!("rebased with {conflicts} conflict(s) ({replayed} commit(s))"),
+            } => format!(
+                "rebased with {conflicts} conflict(s) ({replayed} commit(s), worktree synced)"
+            ),
+            Self::RebasedWithConflictsRefsOnly {
+                replayed,
+                conflicts,
+                reason,
+            } => format!(
+                "rebased with {conflicts} conflict(s) ({replayed} commit(s), worktree update skipped: {reason})"
+            ),
             Self::Failed { reason } => format!("failed: {reason}"),
         }
     }
@@ -241,6 +277,13 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
     // decide.
     let ahead_count = committed_ahead_of_epoch(&ws_path, &status.base_epoch).unwrap_or(0);
 
+    // bn-103k: pass `mutate_worktree: true` so the sibling's worktree files
+    // also advance to the rebased HEAD. The under-lock dirty re-check above
+    // proved the worktree is clean, and `continue_past_worktree_failure`
+    // tells the rebase routine to do ONE more dirty re-check immediately
+    // before checkout — closing the small race window with a hypothetical
+    // editor save — and to log-and-continue rather than abort if the
+    // checkout itself fails. Refs always advance on Ok(...).
     let outcome_res = rebase_workspace_run(
         root,
         name,
@@ -250,26 +293,64 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
         ahead_count,
         RebaseRunOptions {
             print: false,
-            mutate_worktree: false,
+            mutate_worktree: true,
             acquire_lock: false,
+            continue_past_worktree_failure: true,
         },
     );
 
     drop(lock);
 
+    classify_outcome(name, outcome_res)
+}
+
+/// Map a [`RebaseOutcome`] (or rebase error) into the [`SiblingResult`]
+/// variant the orchestrator surfaces in the merge summary.
+fn classify_outcome(name: &str, outcome_res: anyhow::Result<RebaseOutcome>) -> SiblingResult {
     match outcome_res {
         Ok(RebaseOutcome {
             replayed,
             conflicts: 0,
+            worktree_updated: true,
             ..
         }) => SiblingResult::RebasedClean { replayed },
         Ok(RebaseOutcome {
             replayed,
+            conflicts: 0,
+            worktree_updated: false,
+            worktree_skip_reason,
+            ..
+        }) => SiblingResult::RebasedCleanRefsOnly {
+            replayed,
+            reason: if worktree_skip_reason.is_empty() {
+                "unknown".to_string()
+            } else {
+                worktree_skip_reason
+            },
+        },
+        Ok(RebaseOutcome {
+            replayed,
             conflicts,
+            worktree_updated: true,
             ..
         }) => SiblingResult::RebasedWithConflicts {
             replayed,
             conflicts,
+        },
+        Ok(RebaseOutcome {
+            replayed,
+            conflicts,
+            worktree_updated: false,
+            worktree_skip_reason,
+            ..
+        }) => SiblingResult::RebasedWithConflictsRefsOnly {
+            replayed,
+            conflicts,
+            reason: if worktree_skip_reason.is_empty() {
+                "unknown".to_string()
+            } else {
+                worktree_skip_reason
+            },
         },
         Err(e) => {
             tracing::warn!(workspace = %name, error = %e, "sibling auto-rebase failed");
@@ -288,7 +369,19 @@ mod tests {
     fn describe_clean() {
         assert_eq!(
             SiblingResult::RebasedClean { replayed: 3 }.describe(),
-            "rebased clean (3 commit(s))"
+            "rebased clean (3 commit(s), worktree synced)"
+        );
+    }
+
+    #[test]
+    fn describe_clean_refs_only() {
+        let r = SiblingResult::RebasedCleanRefsOnly {
+            replayed: 3,
+            reason: "dirty re-check before checkout".to_string(),
+        };
+        assert_eq!(
+            r.describe(),
+            "rebased clean (3 commit(s), worktree update skipped: dirty re-check before checkout)"
         );
     }
 
@@ -298,7 +391,23 @@ mod tests {
             replayed: 5,
             conflicts: 2,
         };
-        assert_eq!(r.describe(), "rebased with 2 conflict(s) (5 commit(s))");
+        assert_eq!(
+            r.describe(),
+            "rebased with 2 conflict(s) (5 commit(s), worktree synced)"
+        );
+    }
+
+    #[test]
+    fn describe_conflicts_refs_only() {
+        let r = SiblingResult::RebasedWithConflictsRefsOnly {
+            replayed: 5,
+            conflicts: 2,
+            reason: "checkout_tree: io".to_string(),
+        };
+        assert_eq!(
+            r.describe(),
+            "rebased with 2 conflict(s) (5 commit(s), worktree update skipped: checkout_tree: io)"
+        );
     }
 
     #[test]

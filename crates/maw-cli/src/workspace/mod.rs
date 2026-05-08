@@ -1109,11 +1109,14 @@ pub enum WorkspaceCommands {
         ///
         /// By default, after the merge advances the epoch, every other
         /// workspace is automatically replayed onto the new epoch via the
-        /// existing rebase machinery (refs only — worktree files are
-        /// reconciled the next time the owning agent runs a workspace
-        /// command). Pass `--no-auto-rebase` to skip that step; siblings
-        /// remain stale and the user must run `maw ws sync --rebase <ws>`
-        /// per sibling to catch up.
+        /// existing rebase machinery. As of bn-103k, when a sibling is
+        /// provably clean (under-lock dirty re-check passed) the worktree
+        /// files are also synced to the rebased HEAD so `git status` stays
+        /// clean post-merge; dirty siblings still get refs-only treatment
+        /// and are reconciled the next time the owning agent runs a
+        /// workspace command. Pass `--no-auto-rebase` to skip that step
+        /// entirely; siblings remain stale and the user must run
+        /// `maw ws sync --rebase <ws>` per sibling to catch up.
         ///
         /// Equivalent to `merge.auto_rebase_siblings = false` in
         /// `.manifold/config.toml`, but scoped to one invocation.

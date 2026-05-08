@@ -290,9 +290,10 @@ proptest! {
         // files must all be reachable.
         for i in 0..sibling_commits {
             let file = format!("s-{i}.txt");
-            // The sibling worktree is NOT updated by auto-rebase, so the
-            // file is reachable via the new HEAD's tree, not necessarily on
-            // disk. Walk via git to confirm reachability.
+            // As of bn-103k, the sibling worktree IS updated by auto-rebase
+            // when clean — but we walk via git here to remain agnostic to
+            // worktree state (this test still has to handle dirty siblings
+            // skipped by the orchestrator, where the worktree stays old).
             let head = repo.workspace_head("sibling");
             let out = std::process::Command::new("git")
                 .args(["cat-file", "-p", &format!("{head}:{file}")])

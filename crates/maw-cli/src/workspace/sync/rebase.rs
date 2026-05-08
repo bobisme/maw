@@ -144,11 +144,28 @@ pub struct RebaseOutcome {
     /// True when there were no commits to replay (workspace was already up
     /// to date with the old epoch and just needed a fast-forward sync).
     pub fast_forwarded: bool,
+    /// True iff the worktree files were synchronized to the new HEAD. When
+    /// `mutate_worktree` was false this is always false. When `mutate_worktree`
+    /// was true but `continue_past_worktree_failure` allowed the call to skip
+    /// the checkout (newly-dirty re-check or transient I/O), this is also
+    /// false and `worktree_skip_reason` carries the diagnostic.
+    pub worktree_updated: bool,
+    /// Diagnostic for callers that want to surface "refs synced, worktree
+    /// not". Empty when `worktree_updated` is true or worktree mutation was
+    /// not requested at all.
+    pub worktree_skip_reason: String,
 }
 
 /// Tunables for [`rebase_workspace_run`]. The two existing CLI entry points
 /// (`maw ws sync --rebase` and the sibling auto-rebase orchestrator) differ
-/// only in whether they print progress and whether they sync the worktree.
+/// in whether they print progress, whether they sync the worktree, whether
+/// they own the per-workspace lock, and whether worktree-update failure is
+/// fatal. The bools are independent caller-specific guarantees — a state-
+/// machine refactor would just rename the same product type.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four orthogonal caller-specific guarantees, not a state machine"
+)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RebaseRunOptions {
     /// When true, emit progress / conflict-resolution help to stdout.
@@ -156,14 +173,23 @@ pub(super) struct RebaseRunOptions {
     /// When true, advance HEAD via `set_head` AND `checkout_tree` so the
     /// worktree files match. When false, only `set_head` runs — the worktree
     /// is left at its old contents and will be reconciled the next time the
-    /// owning agent runs a workspace command. Sibling auto-rebase uses
-    /// `false` to avoid touching another agent's working files.
+    /// owning agent runs a workspace command.
     pub mutate_worktree: bool,
     /// When true, the function may itself acquire the per-workspace lock.
     /// Set to `false` by callers that have already acquired the lock so the
     /// re-checks (dirty / merge-state) can be done under that same lock —
     /// see `auto_rebase_siblings` in `super::auto_rebase`.
     pub acquire_lock: bool,
+    /// When true (and `mutate_worktree` is also true), failures during the
+    /// final worktree-update phase do NOT cause the function to return Err —
+    /// instead `RebaseOutcome::worktree_updated` is set to false and
+    /// `worktree_skip_reason` carries a short diagnostic. This is only used
+    /// by sibling auto-rebase (bn-103k): refs must advance even if a
+    /// transient I/O error or a freshly-dirty worktree blocks the checkout.
+    /// Also gates a final dirty re-check immediately before checkout, so a
+    /// worktree that becomes dirty between the lock acquisition and the
+    /// checkout is skipped (logged) rather than clobbered.
+    pub continue_past_worktree_failure: bool,
 }
 
 impl Default for RebaseRunOptions {
@@ -172,6 +198,7 @@ impl Default for RebaseRunOptions {
             print: true,
             mutate_worktree: true,
             acquire_lock: true,
+            continue_past_worktree_failure: false,
         }
     }
 }
@@ -312,12 +339,73 @@ pub(super) fn rebase_workspace_run(
 
     if commits.is_empty() {
         say!("No commits to replay. Performing normal sync.");
+        let mut worktree_updated = false;
+        let mut worktree_skip_reason = String::new();
         if opts.mutate_worktree {
-            sync_worktree_to_epoch(root, ws_name, new_epoch)?;
+            // Re-check dirty immediately before the worktree-touching phase
+            // (bn-103k race window: lock excludes other maw processes, but an
+            // editor save could have just landed). If we're allowed to skip,
+            // do so; otherwise let the original guard inside
+            // `sync_worktree_to_epoch` surface the error.
+            if opts.continue_past_worktree_failure {
+                match workspace_has_uncommitted_changes(ws_path) {
+                    Ok(true) => {
+                        worktree_skip_reason = "dirty re-check before checkout".to_string();
+                        let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
+                        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
+                            tracing::warn!(
+                                workspace = %ws_name,
+                                epoch_ref = %epoch_ref,
+                                oid = %new_core,
+                                error = %e,
+                                "failed to update workspace epoch ref during sibling auto-rebase"
+                            );
+                        }
+                    }
+                    Ok(false) => match sync_worktree_to_epoch(root, ws_name, new_epoch) {
+                        Ok(()) => worktree_updated = true,
+                        Err(e) => {
+                            tracing::warn!(
+                                workspace = %ws_name,
+                                error = %e,
+                                "sibling auto-rebase: worktree fast-forward failed; refs still advanced"
+                            );
+                            worktree_skip_reason = format!("worktree update: {e}");
+                            // Refs still need to advance even though checkout failed.
+                            let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
+                            if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
+                                tracing::warn!(
+                                    workspace = %ws_name,
+                                    epoch_ref = %epoch_ref,
+                                    oid = %new_core,
+                                    error = %e,
+                                    "failed to update workspace epoch ref during sibling auto-rebase"
+                                );
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        worktree_skip_reason = format!("dirty re-check failed: {e}");
+                        let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
+                        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
+                            tracing::warn!(
+                                workspace = %ws_name,
+                                epoch_ref = %epoch_ref,
+                                oid = %new_core,
+                                error = %e,
+                                "failed to update workspace epoch ref during sibling auto-rebase"
+                            );
+                        }
+                    }
+                }
+            } else {
+                sync_worktree_to_epoch(root, ws_name, new_epoch)?;
+                worktree_updated = true;
+            }
         } else {
-            // Sibling auto-rebase path: advance only the per-workspace epoch
-            // ref so `WorkspaceStatus::is_stale` clears. The worktree gets
-            // updated next time the owning agent runs a workspace command.
+            // Refs-only path: advance only the per-workspace epoch ref so
+            // `WorkspaceStatus::is_stale` clears. The worktree gets updated
+            // the next time the owning agent runs a workspace command.
             let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
             if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
                 tracing::warn!(
@@ -336,6 +424,8 @@ pub(super) fn rebase_workspace_run(
             conflicts: 0,
             conflicted_steps: 0,
             fast_forwarded: true,
+            worktree_updated,
+            worktree_skip_reason,
         });
     }
 
@@ -532,18 +622,66 @@ pub(super) fn rebase_workspace_run(
         }
     }
 
-    // Advance HEAD to the new chain tip. The worktree files are only
-    // synchronized when `mutate_worktree` is set — sibling auto-rebase
-    // skips the checkout to avoid touching another agent's working tree
-    // (the worktree gets reconciled the next time that agent runs a
-    // workspace command).
+    // Final dirty re-check BEFORE we move HEAD. Once `set_head` runs, the
+    // worktree (still at the old contents) will look "dirty" relative to the
+    // new HEAD even though no user write happened — so this check has to
+    // come first to be meaningful. The auto-rebase orchestrator already did
+    // one dirty check at lock acquisition; this closes the window between
+    // that and the destructive write. With `continue_past_worktree_failure`
+    // set we honour the result by skipping the checkout (refs still advance
+    // below). Without it, behave as the CLI sync path does — the user
+    // explicitly asked for a rebase, the dirty check at function entry has
+    // already passed, and `checkout_tree` is allowed to overwrite tracked
+    // edits.
+    let mut worktree_updated = false;
+    let mut worktree_skip_reason = String::new();
+    let mut skip_checkout = false;
+    if opts.mutate_worktree && opts.continue_past_worktree_failure {
+        match workspace_has_uncommitted_changes(ws_path) {
+            Ok(true) => {
+                worktree_skip_reason = "dirty re-check before checkout".to_string();
+                skip_checkout = true;
+                tracing::warn!(
+                    workspace = %ws_name,
+                    "sibling auto-rebase: worktree became dirty after lock-time check; \
+                     skipping worktree checkout"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                worktree_skip_reason = format!("dirty re-check failed: {e}");
+                skip_checkout = true;
+                tracing::warn!(
+                    workspace = %ws_name,
+                    error = %e,
+                    "sibling auto-rebase: dirty re-check failed; skipping worktree checkout"
+                );
+            }
+        }
+    }
+
+    // Advance HEAD to the new chain tip. This is a refs-only step, always
+    // performed even if we're going to skip the worktree checkout below.
     repo_dyn
         .set_head(parent_git)
         .map_err(|e| anyhow::anyhow!("set_head failed: {e}"))?;
-    if opts.mutate_worktree {
-        repo_dyn
-            .checkout_tree(parent_git, ws_path)
-            .map_err(|e| anyhow::anyhow!("checkout_tree failed: {e}"))?;
+
+    if opts.mutate_worktree && !skip_checkout {
+        match repo_dyn.checkout_tree(parent_git, ws_path) {
+            Ok(()) => worktree_updated = true,
+            Err(e) => {
+                if opts.continue_past_worktree_failure {
+                    tracing::warn!(
+                        workspace = %ws_name,
+                        error = %e,
+                        "sibling auto-rebase: checkout_tree failed; refs still advanced"
+                    );
+                    worktree_skip_reason = format!("checkout_tree: {e}");
+                } else {
+                    return Err(anyhow::anyhow!("checkout_tree failed: {e}"));
+                }
+            }
+        }
     }
 
     // Step 3: Update the workspace's epoch ref to the new epoch. Silent
@@ -606,6 +744,8 @@ pub(super) fn rebase_workspace_run(
         conflicts: if has_conflicts { conflict_count } else { 0 },
         conflicted_steps,
         fast_forwarded: false,
+        worktree_updated,
+        worktree_skip_reason,
     })
 }
 

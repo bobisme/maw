@@ -4,13 +4,30 @@ All notable changes to maw.
 
 ## Unreleased
 
+### Behavior change: auto-rebase syncs clean sibling worktrees too (bn-103k)
+
+bn-3vf5's auto-rebase advanced sibling refs but explicitly skipped worktree updates (`mutate_worktree: false`), to avoid clobbering uncommitted edits. The unintended consequence: ALL siblings showed phantom `M` files in `git status`, blocking subsequent `maw ws sync` via the dirty-workspace guard. Workaround in the field was a per-sibling `git stash` ceremony — exactly the toil auto-rebase was meant to remove.
+
+When a sibling passes the under-lock dirty re-check, the worktree is provably clean and a checkout is safe. Auto-rebase now updates both refs and worktree in that case. Dirty siblings still get refs-only treatment as before.
+
+The rebase routine performs ONE more dirty re-check immediately before the destructive checkout, closing the small race window between the orchestrator's lock-time check and the actual worktree write. If that check trips, OR if `checkout_tree` fails for any reason (transient I/O, permissions, freshly-introduced lockfile-style file), the rebase logs a warning, leaves the refs advanced, and reports the result as "worktree update skipped: <reason>" — never aborting the parent merge.
+
+Result categories surfaced in the `AUTO-REBASE` summary block:
+- `rebased clean (N commit(s), worktree synced)` — refs + worktree updated
+- `rebased clean (N commit(s), worktree update skipped: <reason>)` — refs only
+- `rebased with N conflict(s) (M commit(s), worktree synced)` — conflict markers visible on disk
+- `rebased with N conflict(s) (M commit(s), worktree update skipped: <reason>)` — markers in tree only
+- skips (`up to date`, `in use`, `dirty`, `in progress`) unchanged
+
+Internal API: `RebaseOutcome` gains `worktree_updated: bool` and `worktree_skip_reason: String`; `RebaseRunOptions` gains `continue_past_worktree_failure: bool` (set only by the auto-rebase orchestrator).
+
 ### Behavior change: `maw ws merge` auto-rebases sibling workspaces (bn-3vf5)
 
-After `maw ws merge` advances the epoch, sibling (non-target) workspaces are automatically rebased onto the new epoch using the existing rebase machinery. Auto-rebase advances refs only — sibling worktrees are not touched. The next time an agent operates on a sibling, the worktree update happens then.
+After `maw ws merge` advances the epoch, sibling (non-target) workspaces are automatically rebased onto the new epoch using the existing rebase machinery.
 
 Skip rules (per sibling): currently locked → skip "in use"; dirty → skip "dirty"; mid-merge → skip "in progress"; already at the new epoch → skip "up to date". Conflicts during sibling rebase are recorded as conflict-as-data state in the sibling and reported as `rebased with N conflicts`; they do not abort the parent merge.
 
-`rebase_workspace` now returns a structured `RebaseOutcome { replayed, conflicts, conflicted_steps, fast_forwarded }`; existing CLI callers preserve their previous output.
+`rebase_workspace` now returns a structured `RebaseOutcome { replayed, conflicts, conflicted_steps, fast_forwarded, worktree_updated, worktree_skip_reason }`; existing CLI callers preserve their previous output.
 
 Default-on; opt out with `merge.auto_rebase_siblings = false` in `.manifold/config.toml` or pass `--no-auto-rebase` to a single `maw ws merge` invocation.
 

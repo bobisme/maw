@@ -151,7 +151,9 @@ pub struct MergeConfig {
 
     /// When `true` (default), after `maw ws merge` advances the epoch the
     /// merge automatically rebases non-target sibling workspaces onto the
-    /// new epoch, advancing refs only (worktrees are not touched).
+    /// new epoch. As of bn-103k, clean siblings also get a worktree sync
+    /// (so `git status` stays clean post-merge); dirty siblings get
+    /// refs-only treatment.
     ///
     /// Set to `false` (or pass `--no-auto-rebase`) to leave siblings stale;
     /// users must then run `maw ws sync <ws>` per sibling to catch up.
