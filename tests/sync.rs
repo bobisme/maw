@@ -435,6 +435,7 @@ fn default_sync_rebases_stale_workspace_with_commits_ahead() {
         "merge",
         "advancer",
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         "merge advancer",
     ]);
