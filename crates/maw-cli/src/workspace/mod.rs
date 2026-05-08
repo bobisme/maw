@@ -21,6 +21,7 @@ pub(crate) mod create;
 mod describe;
 pub(crate) mod destroy_record;
 mod diff;
+pub(crate) mod ff_absorb;
 mod history;
 mod list;
 mod merge;

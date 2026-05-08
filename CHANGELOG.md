@@ -4,6 +4,14 @@ All notable changes to maw.
 
 ## Unreleased
 
+### Behavior change: `maw ws merge` auto-absorbs fast-forward divergence (bn-11ip)
+
+`maw ws merge` no longer fails outright when the configured target branch is ahead of the epoch (the typical "someone ran `git push` outside maw" shape). If the divergence is a strict fast-forward AND no in-flight workspace's touched paths intersect the FF range, the upstream commits are silently absorbed into the epoch and the merge proceeds. A single line is printed to stderr — `Absorbed N upstream commit(s) into epoch (<short>..<short>).` — so the absorb is auditable.
+
+When the predicate fails (e.g. an in-flight workspace touches a file the upstream commit also touched, or the divergence is a true fork), the legacy "diverged from the current epoch" error is preserved and now carries an `Affected workspace(s):` line listing the workspaces that block the auto-absorb. Fork divergence still requires a manual `maw epoch sync`.
+
+Default-on; opt out with `merge.auto_absorb_ff = false` in `.manifold/config.toml`.
+
 ### Behavior change: `maw ws sync` rebases by default (bn-3az5)
 
 `maw ws sync <name>` now replays committed work onto the new epoch by default when the workspace is stale and has commits ahead. The previous behavior was to print a warning telling the user to use `--rebase` and exit without doing anything.

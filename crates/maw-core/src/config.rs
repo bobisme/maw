@@ -127,7 +127,6 @@ impl fmt::Display for BackendKind {
 /// Merge behaviour settings.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[derive(Default)]
 pub struct MergeConfig {
     /// Post-merge validation settings.
     #[serde(default)]
@@ -140,6 +139,30 @@ pub struct MergeConfig {
     /// AST-aware merge settings (opt-in per language via tree-sitter).
     #[serde(default)]
     pub ast: AstConfig,
+
+    /// When `true` (default), `maw ws merge` transparently absorbs
+    /// fast-forward branch commits into the epoch when no in-flight
+    /// workspace's touched paths intersect the FF range.
+    ///
+    /// When `false`, the legacy behaviour applies: any divergence between
+    /// epoch and branch errors out with a request to run `maw epoch sync`.
+    #[serde(default = "default_auto_absorb_ff")]
+    pub auto_absorb_ff: bool,
+}
+
+impl Default for MergeConfig {
+    fn default() -> Self {
+        Self {
+            validation: ValidationConfig::default(),
+            drivers: Vec::new(),
+            ast: AstConfig::default(),
+            auto_absorb_ff: default_auto_absorb_ff(),
+        }
+    }
+}
+
+const fn default_auto_absorb_ff() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------

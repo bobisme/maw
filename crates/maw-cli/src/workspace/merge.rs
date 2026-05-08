@@ -2480,6 +2480,401 @@ pub fn find_tool_placeholder_blobs(
 }
 
 // ---------------------------------------------------------------------------
+// Fast-forward absorb (bn-11ip)
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`reconcile_epoch_with_branch`].
+#[allow(dead_code)] // Variant fields are documentary; callers only need the success/failure split.
+enum FfReconcile {
+    /// Epoch already matches branch; nothing to do.
+    InSync,
+    /// Epoch was strictly behind branch and the FF range was absorbed; epoch
+    /// has been advanced to `new_epoch`.
+    Absorbed { new_epoch: GitOid, count: usize },
+}
+
+/// Bridge between the existing pre/post-PREPARE divergence checks and the
+/// FF-absorb safety predicate (`super::ff_absorb`).
+///
+/// On entry, `epoch_oid` and `branch_oid` are the OIDs the caller has just
+/// observed. The function:
+///
+/// 1. Returns [`FfReconcile::InSync`] immediately if they match.
+/// 2. Bails with the legacy "diverged" error (augmented with the affected
+///    workspace list when relevant) if (a) `auto_absorb_ff` is disabled,
+///    (b) the divergence is not a pure FF, or (c) a non-target workspace
+///    has touched paths that intersect the FF range.
+/// 3. Otherwise advances `refs/manifold/epoch/current` from `epoch_oid` to
+///    `branch_oid` and returns [`FfReconcile::Absorbed`] with the count of
+///    upstream commits in the range.
+///
+/// `target_workspace_name` is excluded from the safety check — it is the
+/// merge target, not a source whose interpretation could change.
+fn reconcile_epoch_with_branch(
+    root: &Path,
+    branch: &str,
+    target_workspace_name: &str,
+    epoch_oid: &GitOid,
+    branch_oid: &GitOid,
+    auto_absorb_ff: bool,
+) -> Result<FfReconcile> {
+    if epoch_oid.as_str() == branch_oid.as_str() {
+        return Ok(FfReconcile::InSync);
+    }
+
+    let bail_diverged = |affected: &[String]| -> Result<FfReconcile> {
+        let base = format!(
+            "Target branch '{branch}' has diverged from the current epoch.\n\
+             \n  Branch:  {}\n  Epoch:   {}\n\
+             \n  Direct commits were made to {target_workspace_name} outside of maw.\n\
+             To fix: run `maw epoch sync` to absorb them into the epoch, then retry.",
+            &branch_oid.as_str()[..12],
+            &epoch_oid.as_str()[..12]
+        );
+        if affected.is_empty() {
+            bail!("{base}");
+        }
+        bail!("{base}\n  Affected workspace(s): {}", affected.join(", "));
+    };
+
+    if !auto_absorb_ff {
+        return bail_diverged(&[]);
+    }
+
+    let repo = super::ff_absorb::open_repo(root)?;
+    let epoch_git: maw_git::GitOid = epoch_oid
+        .as_str()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid epoch OID '{}': {e}", epoch_oid.as_str()))?;
+    let branch_git: maw_git::GitOid = branch_oid
+        .as_str()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid branch OID '{}': {e}", branch_oid.as_str()))?;
+
+    if !super::ff_absorb::is_strict_ancestor(&repo, &epoch_git, &branch_git)? {
+        // Fork divergence (or branch is an ancestor of epoch). Nothing to
+        // absorb — keep the original error message verbatim.
+        return bail_diverged(&[]);
+    }
+
+    let ff_paths = super::ff_absorb::compute_ff_changed_paths(&repo, &epoch_git, &branch_git)?;
+
+    let backend = get_backend()?;
+    let workspaces_info = backend
+        .list()
+        .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+
+    let mut ws_touched: Vec<super::ff_absorb::WorkspaceTouchedPaths> = Vec::new();
+    let mut target_touched: Option<super::ff_absorb::WorkspaceTouchedPaths> = None;
+    for info in workspaces_info {
+        let name = info.id.as_str();
+        let touched = super::touched::collect_touched_workspace(&backend, &info.id)?;
+        let entry = super::ff_absorb::WorkspaceTouchedPaths {
+            name: touched.workspace,
+            paths: touched.touched_paths.into_iter().collect(),
+        };
+        if name == target_workspace_name {
+            target_touched = Some(entry);
+        } else {
+            ws_touched.push(entry);
+        }
+    }
+
+    // The target workspace's uncommitted edits also need to clear the FF
+    // range — a hard FF of its HEAD would clobber dirty paths that overlap
+    // upstream changes. Include it in the safety check.
+    let mut safety_workspaces = ws_touched.clone();
+    if let Some(target) = target_touched.as_ref()
+        && !target.paths.is_empty()
+    {
+        safety_workspaces.push(target.clone());
+    }
+
+    match super::ff_absorb::evaluate_ff_safety(&ff_paths, &safety_workspaces) {
+        super::ff_absorb::FfAbsorbDecision::Blocked {
+            affected_workspaces,
+        } => bail_diverged(&affected_workspaces),
+        super::ff_absorb::FfAbsorbDecision::Safe => {
+            let count = repo
+                .walk_commits(epoch_git, branch_git, false)
+                .map_or(0, |walk| walk.len());
+            maw_core::refs::write_epoch_current(root, branch_oid)
+                .map_err(|e| anyhow::anyhow!("failed to advance epoch ref: {e}"))?;
+
+            // Safety predicate guarantees no in-flight workspace has touched
+            // a file in the FF range. To keep
+            // `is_stale = base_epoch == current_epoch` consistent, bump each
+            // workspace's per-workspace epoch ref to the new tip; otherwise
+            // the next gate (`stale_merge_sources`) would block the merge we
+            // just unblocked.
+            //
+            // Each workspace's worktree also needs to be FF'd for the
+            // absorbed paths only — the merge engine snapshots dirty files
+            // by diffing the worktree against the *current* epoch, and a
+            // workspace that still holds the pre-absorb content for an FF
+            // path would look like it is "reverting" the upstream change.
+            // The predicate makes this safe: dirty paths (if any) are
+            // disjoint from `ff_paths`, so per-path `git checkout` cannot
+            // clobber local edits.
+            for ws in &ws_touched {
+                let epoch_ref = maw_core::refs::workspace_epoch_ref(&ws.name);
+                if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
+                    tracing::warn!(
+                        workspace = %ws.name,
+                        error = %e,
+                        "failed to advance workspace epoch ref after FF absorb"
+                    );
+                }
+                let ws_path = root.join("ws").join(&ws.name);
+                sync_ff_paths_in_worktree(&ws_path, &ws.name, branch_oid, &ff_paths);
+            }
+
+            // Fast-forward the target workspace's worktree to the new branch
+            // tip. Without this, the merge BUILD/COMMIT pipeline would later
+            // diff the target worktree against the (post-absorb) epoch,
+            // observe the FF range as a "missing" delta, and replay it as a
+            // snapshot — overwriting the legitimate upstream content. Safety
+            // for this is guaranteed by the predicate: the target's dirty
+            // paths (if any) were already proven disjoint from the FF range.
+            sync_target_worktree_to_epoch(
+                &root.join("ws").join(target_workspace_name),
+                target_workspace_name,
+                branch_oid,
+            );
+
+            eprintln!(
+                "Absorbed {count} upstream commit(s) into epoch ({}..{}).",
+                &epoch_oid.as_str()[..12],
+                &branch_oid.as_str()[..12]
+            );
+            Ok(FfReconcile::Absorbed {
+                new_epoch: branch_oid.clone(),
+                count,
+            })
+        }
+    }
+}
+
+/// Best-effort fast-forward of the merge target's worktree to a new commit
+/// after an FF absorb.
+///
+/// On entry the worktree is detached at the pre-absorb epoch and may have
+/// uncommitted edits to paths the FF-absorb safety predicate has already
+/// proven disjoint from the FF range. Use `git checkout <oid> -- <path>` for
+/// every absorbed path to update only those paths, then move HEAD to the new
+/// commit so the workspace tracks the absorbed tip. Failures are logged but
+/// non-fatal: the merge can still proceed because the merge engine
+/// re-snapshots the target before BUILD.
+/// Update a non-target workspace's worktree to reflect an absorbed FF range.
+///
+/// Two coordinated updates happen:
+///
+/// 1. `git checkout <oid> -- <ff_paths>` materialises the absorbed content
+///    for every path in the FF range. The safety predicate guarantees the
+///    workspace has not edited any of these paths, so the checkout is
+///    non-destructive.
+/// 2. The worktree's `HEAD` is rewritten to point at `target_oid`, leaving
+///    the index reset to match. Without this step, downstream merge
+///    helpers that compare workspace `HEAD` to the (now-advanced) epoch
+///    would treat the workspace as having committed work — and read blobs
+///    from `HEAD:<path>` rather than the working copy, dropping
+///    uncommitted edits.
+///
+/// Failures are logged but non-fatal; the merge re-snapshots before BUILD
+/// and any drift will surface as a normal merge artefact rather than data
+/// loss.
+fn sync_ff_paths_in_worktree(
+    ws_path: &Path,
+    ws_name: &str,
+    target_oid: &GitOid,
+    ff_paths: &std::collections::BTreeSet<PathBuf>,
+) {
+    if !ws_path.exists() {
+        return;
+    }
+    let oid = target_oid.as_str();
+
+    if !ff_paths.is_empty() {
+        let mut args: Vec<String> = vec!["checkout".to_owned(), oid.to_owned(), "--".to_owned()];
+        for p in ff_paths {
+            args.push(p.to_string_lossy().into_owned());
+        }
+        match std::process::Command::new("git")
+            .args(&args)
+            .current_dir(ws_path)
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                    "git checkout for FF-absorbed paths failed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    error = %e,
+                    "failed to spawn git checkout for FF-absorbed paths"
+                );
+            }
+        }
+    }
+
+    // Move HEAD to the new epoch without touching the working tree (so
+    // uncommitted edits in disjoint paths survive). Mirrors the ANCHOR
+    // step of `update_default_workspace`: write the raw OID to the
+    // worktree's HEAD file via git plumbing, then `git reset` (no flags)
+    // to align the index.
+    let git_dir_out = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(ws_path)
+        .output();
+    let git_dir = match git_dir_out {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        Ok(out) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "git rev-parse --git-dir failed during FF absorb"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "failed to spawn git rev-parse during FF absorb"
+            );
+            return;
+        }
+    };
+    let head_path = std::path::Path::new(&git_dir).join("HEAD");
+    if let Err(e) = std::fs::write(&head_path, format!("{oid}\n")) {
+        tracing::warn!(
+            workspace = %ws_name,
+            path = %head_path.display(),
+            error = %e,
+            "failed to detach worktree HEAD during FF absorb"
+        );
+        return;
+    }
+
+    let _ = std::process::Command::new("git")
+        .args(["reset"])
+        .current_dir(ws_path)
+        .output();
+}
+
+fn sync_target_worktree_to_epoch(
+    target_ws_path: &Path,
+    target_workspace_name: &str,
+    target_oid: &GitOid,
+) {
+    if !target_ws_path.exists() {
+        return;
+    }
+    let oid = target_oid.as_str();
+
+    // `git reset --keep <oid>` advances HEAD and updates worktree files that
+    // differ between HEAD and <oid>, while preserving local uncommitted
+    // changes in disjoint paths. It refuses if any locally modified file
+    // also changed between HEAD and <oid> — exactly the predicate we just
+    // verified. (We still treat failure as non-fatal.)
+    let output = std::process::Command::new("git")
+        .args(["reset", "--keep", oid])
+        .current_dir(target_ws_path)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            tracing::warn!(
+                workspace = %target_workspace_name,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "git reset --keep failed during FF absorb"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace = %target_workspace_name,
+                error = %e,
+                "failed to spawn git reset --keep during FF absorb"
+            );
+        }
+    }
+}
+
+/// Diagnostic classification of a post-PREPARE branch divergence.
+///
+/// Runs the same predicate as [`reconcile_epoch_with_branch`] but never
+/// modifies state — by the time PREPARE has completed, the merge candidate's
+/// parent is pinned to the pre-PREPARE epoch and a mid-flight FF absorb
+/// would invalidate it. Returns a suffix to append to the existing
+/// "diverged since PREPARE" error message:
+///
+/// * empty string when the divergence is a fork or a safe FF with nothing
+///   useful to add,
+/// * a `\n  Affected workspace(s): …` line when a retry would be blocked
+///   by in-flight workspaces.
+fn classify_post_prepare_divergence(
+    root: &Path,
+    target_workspace_name: &str,
+    epoch_oid: &GitOid,
+    branch_oid: &GitOid,
+) -> Result<String> {
+    if epoch_oid.as_str() == branch_oid.as_str() {
+        return Ok(String::new());
+    }
+
+    let repo = super::ff_absorb::open_repo(root)?;
+    let epoch_git: maw_git::GitOid = epoch_oid
+        .as_str()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid epoch OID '{}': {e}", epoch_oid.as_str()))?;
+    let branch_git: maw_git::GitOid = branch_oid
+        .as_str()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid branch OID '{}': {e}", branch_oid.as_str()))?;
+
+    if !super::ff_absorb::is_strict_ancestor(&repo, &epoch_git, &branch_git)? {
+        return Ok(String::new());
+    }
+
+    let ff_paths = super::ff_absorb::compute_ff_changed_paths(&repo, &epoch_git, &branch_git)?;
+    let backend = get_backend()?;
+    let workspaces_info = backend
+        .list()
+        .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+
+    let mut ws_touched: Vec<super::ff_absorb::WorkspaceTouchedPaths> = Vec::new();
+    for info in workspaces_info {
+        let name = info.id.as_str();
+        if name == target_workspace_name {
+            continue;
+        }
+        let touched = super::touched::collect_touched_workspace(&backend, &info.id)?;
+        ws_touched.push(super::ff_absorb::WorkspaceTouchedPaths {
+            name: touched.workspace,
+            paths: touched.touched_paths.into_iter().collect(),
+        });
+    }
+
+    Ok(
+        match super::ff_absorb::evaluate_ff_safety(&ff_paths, &ws_touched) {
+            super::ff_absorb::FfAbsorbDecision::Safe => String::new(),
+            super::ff_absorb::FfAbsorbDecision::Blocked {
+                affected_workspaces,
+            } => format!(
+                "\n  Affected workspace(s): {}",
+                affected_workspaces.join(", ")
+            ),
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Main merge function
 // ---------------------------------------------------------------------------
 
@@ -2535,21 +2930,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         )
     })?;
 
-    // Reject merge if default has direct commits ahead of epoch.
-    // Without this check, the merge creates a new epoch from the OLD epoch,
-    // and the direct commits' files appear as unstaged changes in default.
-    if target_updates_epoch
-        && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root)
-        && epoch_oid.as_str() != branch_before_oid.as_str()
-    {
-        bail!(
-            "Target branch '{branch}' has diverged from the current epoch.\n\
-                     \n  Branch:  {}\n  Epoch:   {}\n\
-                     \n  Direct commits were made to {default_ws} outside of maw.\n\
-                     To fix: run `maw epoch sync` to absorb them into the epoch, then retry.",
-            &branch_before_oid.as_str()[..12],
-            &epoch_oid.as_str()[..12]
-        );
+    // Reconcile epoch with branch when they have diverged. If the branch is
+    // strictly ahead of the epoch (a fast-forward) and no in-flight workspace
+    // touches a file in the FF range, transparently absorb the upstream
+    // commits into the epoch (bn-11ip). Otherwise bail with the legacy
+    // "diverged" error, augmented with the affected workspace list when the
+    // FF was a candidate but blocked.
+    if target_updates_epoch && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root) {
+        let manifold_config =
+            ManifoldConfig::load(&root.join(".manifold").join("config.toml")).unwrap_or_default();
+        reconcile_epoch_with_branch(
+            &root,
+            branch,
+            default_ws,
+            &epoch_oid,
+            &branch_before_oid,
+            manifold_config.merge.auto_absorb_ff,
+        )?;
     }
 
     // Reject merging the default workspace
@@ -3237,6 +3634,18 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     if let Ok(Some(current_branch)) = maw_core::refs::read_ref(&root, &branch_ref)
         && current_branch != branch_before_oid
     {
+        // Re-evaluate the FF safety predicate purely as a diagnostic: even
+        // when the new advance is a strict FF, the merge candidate's parent
+        // is already pinned to the pre-PREPARE epoch, so we can't absorb
+        // mid-flight. Surface the affected workspaces (if any) so the user
+        // understands what a retry would have to drain.
+        let ff_diagnostic = classify_post_prepare_divergence(
+            &root,
+            default_ws,
+            &branch_before_oid,
+            &current_branch,
+        )
+        .unwrap_or_default();
         abort_merge(
             &manifold_dir,
             "branch diverged from target head since PREPARE (direct commits detected)",
@@ -3247,9 +3656,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                  Actual:   {}\n  \
                  Cause: commits were made directly to '{branch}' outside of maw.\n  \
                  Fix: retry after synchronizing target branch state, then rerun maw ws merge.\n  \
-                 For change branches, `maw changes sync <change-id>` can help before retry.",
+                 For change branches, `maw changes sync <change-id>` can help before retry.{}",
             &branch_before_oid.as_str()[..12],
             &current_branch.as_str()[..12],
+            ff_diagnostic,
         );
     }
 
