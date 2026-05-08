@@ -465,6 +465,7 @@ pub enum WorkspaceCommands {
     ///   maw ws recover alice --search "needle"      # search snapshots for one workspace
     ///   maw ws recover alice --show src/main.rs    # show a file from latest destroy snapshot
     ///   maw ws recover --ref <recovery-ref> --show src/main.rs
+    ///   maw ws recover alice --restore-file src/main.rs   # restore one file into ws/default/
     ///   maw ws recover alice --to alice-restored   # restore latest destroy snapshot
     ///   maw ws recover --ref <recovery-ref> --to scratch
     #[command(verbatim_doc_comment)]
@@ -525,6 +526,18 @@ pub enum WorkspaceCommands {
         /// Requires either <name> (latest destroy snapshot) or --ref.
         #[arg(long)]
         to: Option<String>,
+
+        /// Copy a single file from the snapshot into the default workspace's worktree.
+        ///
+        /// Requires either <name> (latest destroy snapshot) or --ref.
+        /// Refuses to overwrite a destination with uncommitted edits unless `--force`.
+        /// File mode (executable, symlink) is preserved.
+        #[arg(long, value_name = "PATH")]
+        restore_file: Option<String>,
+
+        /// Allow `--restore-file` to overwrite a destination that has uncommitted edits.
+        #[arg(long)]
+        force: bool,
 
         /// Clean up dangling snapshot refs that are no longer needed.
         ///
@@ -1281,6 +1294,8 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             text,
             show,
             to,
+            restore_file,
+            force,
             gc,
             all,
             dry_run,
@@ -1304,8 +1319,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
 
             // Search mode (content search across pinned recovery refs).
             if let Some(pattern) = search {
-                if show.is_some() || to.is_some() {
-                    anyhow::bail!("--search cannot be combined with --show or --to.")
+                if show.is_some() || to.is_some() || restore_file.is_some() {
+                    anyhow::bail!(
+                        "--search cannot be combined with --show, --to, or --restore-file."
+                    )
                 }
 
                 return recover::search(
@@ -1321,6 +1338,29 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 );
             }
 
+            // --restore-file dispatch (mutually exclusive with --show / --to).
+            if let Some(rf_path) = restore_file {
+                if show.is_some() || to.is_some() {
+                    anyhow::bail!("--restore-file cannot be combined with --show or --to.")
+                }
+                return match (name, recovery_ref) {
+                    (Some(n), None) => recover::restore_file(&n, &rf_path, force),
+                    (None, Some(r)) => recover::restore_file_by_ref(&r, &rf_path, force),
+                    (None, None) => anyhow::bail!(
+                        "--restore-file requires a workspace name or --ref.
+  Usage:
+    maw ws recover <name> --restore-file <path>
+    maw ws recover --ref <ref> --restore-file <path>"
+                    ),
+                    (Some(_), Some(_)) => unreachable!("guarded above"),
+                };
+            }
+
+            // --force without --restore-file is a usage error (no other flag uses it yet).
+            if force {
+                anyhow::bail!("--force is only meaningful with --restore-file.");
+            }
+
             match (name, recovery_ref, show, to) {
                 // Explicit ref: show file
                 (None, Some(r), Some(path), None) => recover::show_file_by_ref(&r, &path),
@@ -1329,9 +1369,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                 // Explicit ref without action
                 (None, Some(_), None, None) => {
                     anyhow::bail!(
-                        "--ref requires --show, --to, or --search.
+                        "--ref requires --show, --to, --restore-file, or --search.
     Examples:
     maw ws recover --ref <ref> --show <path>
+    maw ws recover --ref <ref> --restore-file <path>
     maw ws recover --ref <ref> --to <new-workspace>
     maw ws recover --ref <ref> --search <pattern>"
                     )

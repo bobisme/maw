@@ -91,7 +91,9 @@ pub fn list_destroyed(format: OutputFormat) -> Result<()> {
                 advice: vec![
                     "Inspect: maw ws recover <name>".to_string(),
                     "Show file: maw ws recover <name> --show <path>".to_string(),
-                    "Restore: maw ws recover <name> --to <new-name>".to_string(),
+                    "Restore file: maw ws recover <name> --restore-file <path>".to_string(),
+                    "Restore workspace: maw ws recover <name> --to <new-name>".to_string(),
+                    "Search: maw ws recover --search <pattern>".to_string(),
                 ],
             };
             println!("{}", serde_json::to_string_pretty(&envelope)?);
@@ -107,6 +109,22 @@ pub fn list_destroyed(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// Marker shown in the SNAPSHOT column for `capture: none` rows. The trailing
+/// `*` ties the row to the footnote printed below the table.
+const NONE_CAPTURE_MARKER: &str = "-*";
+
+fn has_none_capture(summaries: &[DestroyedWorkspaceSummary]) -> bool {
+    summaries.iter().any(|s| s.capture_mode == "none")
+}
+
+fn snapshot_display_for(s: &DestroyedWorkspaceSummary) -> &str {
+    if s.capture_mode == "none" {
+        NONE_CAPTURE_MARKER
+    } else {
+        s.snapshot_oid.as_deref().unwrap_or("-")
+    }
+}
+
 fn print_list_text(summaries: &[DestroyedWorkspaceSummary]) {
     println!("NAME\tDESTROYED_AT\tCAPTURE\tSNAPSHOT\tDIRTY_FILES");
     for s in summaries {
@@ -115,12 +133,12 @@ fn print_list_text(summaries: &[DestroyedWorkspaceSummary]) {
             s.name,
             s.destroyed_at,
             s.capture_mode,
-            s.snapshot_oid.as_deref().unwrap_or("-"),
+            snapshot_display_for(s),
             s.dirty_file_count,
         );
     }
     println!();
-    println!("Next: maw ws recover <name>");
+    print_list_footer(summaries, false);
 }
 
 fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputFormat) {
@@ -142,7 +160,7 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
         .max(4);
 
     for s in summaries {
-        let snapshot_display = s.snapshot_oid.as_deref().unwrap_or("-");
+        let snapshot_display = snapshot_display_for(s);
         let dirty_suffix = if s.dirty_file_count > 0 {
             format!(" ({} dirty files)", s.dirty_file_count)
         } else {
@@ -173,10 +191,32 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
     }
 
     println!();
-    if use_color {
-        println!("\x1b[90mNext: maw ws recover <name>\x1b[0m");
-    } else {
-        println!("Next: maw ws recover <name>");
+    print_list_footer(summaries, use_color);
+}
+
+fn print_list_footer(summaries: &[DestroyedWorkspaceSummary], use_color: bool) {
+    let lines = [
+        "Next: maw ws recover <name>                        # destroy history for one",
+        "      maw ws recover <name> --show <path>          # show a file from latest snapshot",
+        "      maw ws recover <name> --restore-file <path>  # restore a file into the default workspace",
+        "      maw ws recover --search <pattern>            # search across all snapshots",
+    ];
+    for line in lines {
+        if use_color {
+            println!("\x1b[90m{line}\x1b[0m");
+        } else {
+            println!("{line}");
+        }
+    }
+
+    if has_none_capture(summaries) {
+        println!();
+        let note = "* \"none\" capture: work was already merged at destroy time; check git log on the merge target.";
+        if use_color {
+            println!("\x1b[90m{note}\x1b[0m");
+        } else {
+            println!("{note}");
+        }
     }
 }
 
@@ -943,6 +983,240 @@ fn validate_show_path(path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Restore a single file from a snapshot into the default workspace
+// ---------------------------------------------------------------------------
+
+/// One entry from `git ls-tree -r <oid> -- <path>`.
+struct LsTreeEntry {
+    mode: String,
+    oid: String,
+}
+
+/// Look up `path` in the tree at `commit_oid`. Returns `None` if missing.
+fn ls_tree_entry(git_cwd: &Path, commit_oid: &str, path: &str) -> Result<Option<LsTreeEntry>> {
+    let output = Command::new("git")
+        .args(["ls-tree", "-z", commit_oid, "--", path])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git ls-tree")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git ls-tree failed: {}", stderr.trim());
+    }
+
+    if output.stdout.is_empty() {
+        return Ok(None);
+    }
+
+    // Format per record: <mode> SP <type> SP <oid> TAB <path> NUL
+    let record = output.stdout.split(|b| *b == 0).next().unwrap_or(&[]);
+    let line = String::from_utf8_lossy(record).into_owned();
+    let (meta, _name) = line
+        .split_once('\t')
+        .context("malformed git ls-tree output")?;
+    let mut parts = meta.split_whitespace();
+    let mode = parts.next().context("missing mode in ls-tree output")?;
+    let _kind = parts.next().context("missing kind in ls-tree output")?;
+    let oid = parts.next().context("missing oid in ls-tree output")?;
+    Ok(Some(LsTreeEntry {
+        mode: mode.to_owned(),
+        oid: oid.to_owned(),
+    }))
+}
+
+/// Read the raw bytes of a blob via `git cat-file blob <oid>`.
+fn cat_file_blob(git_cwd: &Path, blob_oid: &str) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .args(["cat-file", "blob", blob_oid])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git cat-file blob")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git cat-file blob failed: {}", stderr.trim());
+    }
+    Ok(output.stdout)
+}
+
+/// List blob/symlink paths reachable from `oid`. Used for the
+/// "available paths" hint when `--restore-file` cannot find the target.
+fn ls_tree_paths(git_cwd: &Path, oid: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "-z", oid])
+        .current_dir(git_cwd)
+        .output()
+        .context("failed to run git ls-tree -r")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git ls-tree -r failed: {}", stderr.trim());
+    }
+
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect())
+}
+
+/// Check whether the destination has uncommitted changes (porcelain output non-empty).
+fn dest_has_uncommitted(default_ws: &Path, path: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "--", path])
+        .current_dir(default_ws)
+        .output()
+        .context("failed to run git status --porcelain")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git status --porcelain failed: {}", stderr.trim());
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+#[cfg(unix)]
+fn write_with_mode(dest: &Path, content: &[u8], mode: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if mode == "120000" {
+        // Symlink: blob content is the target path.
+        let target = std::str::from_utf8(content).context("symlink target is not valid UTF-8")?;
+        if dest.exists() || dest.symlink_metadata().is_ok() {
+            std::fs::remove_file(dest)
+                .with_context(|| format!("remove existing {}", dest.display()))?;
+        }
+        std::os::unix::fs::symlink(target, dest)
+            .with_context(|| format!("create symlink {}", dest.display()))?;
+        return Ok(());
+    }
+
+    std::fs::write(dest, content).with_context(|| format!("write to {}", dest.display()))?;
+
+    let perm_bits: u32 = if mode == "100755" { 0o755 } else { 0o644 };
+    let perms = std::fs::Permissions::from_mode(perm_bits);
+    std::fs::set_permissions(dest, perms)
+        .with_context(|| format!("set permissions on {}", dest.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_with_mode(dest: &Path, content: &[u8], _mode: &str) -> Result<()> {
+    std::fs::write(dest, content).with_context(|| format!("write to {}", dest.display()))?;
+    Ok(())
+}
+
+/// Restore a single file from snapshot `oid` into the default workspace's worktree.
+fn restore_file_at_oid(
+    git_cwd: &Path,
+    default_ws: &Path,
+    oid: &str,
+    path: &str,
+    force: bool,
+    audit_ref: &str,
+) -> Result<()> {
+    let Some(entry) = ls_tree_entry(git_cwd, oid, path)? else {
+        let oid_short = &oid[..oid.len().min(12)];
+        // Best-effort hint: list paths in the snapshot, or suggest --search.
+        match ls_tree_paths(git_cwd, oid) {
+            Ok(mut listed) if !listed.is_empty() => {
+                listed.sort();
+                let preview: Vec<String> = listed.iter().take(20).cloned().collect();
+                let suffix = if listed.len() > preview.len() {
+                    format!("\n  ... and {} more", listed.len() - preview.len())
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "Path '{path}' not found in snapshot {oid_short}.\n  \
+                     Available paths in snapshot:\n  {}{suffix}\n  \
+                     Or search across snapshots: maw ws recover --search <pattern>",
+                    preview.join("\n  "),
+                )
+            }
+            _ => bail!(
+                "Path '{path}' not found in snapshot {oid_short}.\n  \
+                 Search across snapshots: maw ws recover --search <pattern>"
+            ),
+        }
+    };
+
+    if !force && dest_has_uncommitted(default_ws, path)? {
+        bail!(
+            "Refusing to overwrite '{path}' — destination has uncommitted changes.\n  \
+             Re-run with --force to overwrite, or commit/stash first."
+        );
+    }
+
+    let content = cat_file_blob(git_cwd, &entry.oid)?;
+
+    let dest = default_ws.join(path);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent dir for {}", dest.display()))?;
+    }
+
+    write_with_mode(&dest, &content, &entry.mode)?;
+
+    audit::log_audit(&AuditEvent::Show {
+        ref_name: audit_ref.to_string(),
+        path: path.to_string(),
+    });
+
+    let oid_short = &oid[..oid.len().min(12)];
+    println!("restored: {path} from {oid_short}");
+    println!("Next: maw exec default -- git diff {path}  # review before commit");
+    Ok(())
+}
+
+/// `maw ws recover --ref <recovery-ref> --restore-file <path>`.
+pub fn restore_file_by_ref(recovery_ref: &str, path: &str, force: bool) -> Result<()> {
+    validate_recovery_ref(recovery_ref)?;
+    validate_show_path(path)?;
+
+    let git_cwd = super::git_cwd()?;
+    let default_ws = workspace_path(super::DEFAULT_WORKSPACE)?;
+    if !default_ws.exists() {
+        bail!(
+            "Default workspace not found at {}.\n  \
+             --restore-file writes into the default workspace's worktree.",
+            default_ws.display()
+        );
+    }
+    let oid = resolve_ref_to_oid(&git_cwd, recovery_ref)?;
+    restore_file_at_oid(&git_cwd, &default_ws, &oid, path, force, recovery_ref)
+}
+
+/// `maw ws recover <name> --restore-file <path>` (latest destroy snapshot).
+pub fn restore_file(name: &str, path: &str, force: bool) -> Result<()> {
+    validate_workspace_name(name)?;
+    validate_show_path(path)?;
+    let root = repo_root()?;
+
+    let record = destroy_record::read_latest_record(&root, name)?
+        .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
+
+    let oid = resolve_recoverable_oid(&record)?;
+
+    let git_cwd = super::git_cwd()?;
+    let default_ws = workspace_path(super::DEFAULT_WORKSPACE)?;
+    if !default_ws.exists() {
+        bail!(
+            "Default workspace not found at {}.\n  \
+             --restore-file writes into the default workspace's worktree.",
+            default_ws.display()
+        );
+    }
+
+    let audit_ref = record
+        .snapshot_ref
+        .unwrap_or_else(|| format!("(workspace:{name})"));
+
+    restore_file_at_oid(&git_cwd, &default_ws, &oid, path, force, &audit_ref)
 }
 
 /// Resolve the OID to use for file retrieval from a destroy record.

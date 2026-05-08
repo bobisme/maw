@@ -525,3 +525,260 @@ fn recover_show_rejects_path_traversal() {
         "recover --show should reject path traversal, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-sgm8: --restore-file behavior
+// ---------------------------------------------------------------------------
+
+/// Helper: build the "Next:" footer signature.
+const RECOVER_LIST_FOOTER_HINT: &str = "--restore-file";
+
+#[test]
+fn recover_restore_file_writes_into_default_workspace() {
+    let repo = TestRepo::new();
+
+    repo.create_workspace("rf-ws");
+    repo.add_file("rf-ws", "important.txt", "needed bytes\n");
+    repo.maw_ok(&["ws", "destroy", "rf-ws", "--force"]);
+
+    // Pre-condition: file does not exist in default.
+    assert!(!repo.file_exists("default", "important.txt"));
+
+    let output = repo.maw_ok(&["ws", "recover", "rf-ws", "--restore-file", "important.txt"]);
+    assert!(
+        output.contains("restored: important.txt"),
+        "recover --restore-file should print 'restored: ...', got: {output}"
+    );
+    assert!(
+        output.contains("Next: maw exec default -- git diff important.txt"),
+        "recover --restore-file should print review hint, got: {output}"
+    );
+
+    assert_eq!(
+        repo.read_file("default", "important.txt").as_deref(),
+        Some("needed bytes\n"),
+        "restore-file should write content into ws/default/"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn recover_restore_file_preserves_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+
+    repo.create_workspace("rf-exec");
+    repo.add_file("rf-exec", "run.sh", "#!/bin/sh\necho hi\n");
+    // Set the executable bit on the worktree file. The capture pipeline runs
+    // `git add -A` internally, which preserves filesystem mode (100755).
+    // Leave the file untracked here — staging it makes worktree==index, which
+    // makes `repo.status()` return empty and the destroy capture mode become
+    // `none` (no snapshot pinned).
+    {
+        let p = repo.workspace_path("rf-exec").join("run.sh");
+        let mut perms = std::fs::metadata(&p)
+            .expect("operation should succeed")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&p, perms).expect("operation should succeed");
+    }
+    repo.maw_ok(&["ws", "destroy", "rf-exec", "--force"]);
+
+    repo.maw_ok(&["ws", "recover", "rf-exec", "--restore-file", "run.sh"]);
+
+    let dest = repo.workspace_path("default").join("run.sh");
+    let mode = std::fs::metadata(&dest)
+        .expect("file should exist after restore")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "restored executable should be 0755, got {mode:o}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn recover_restore_file_preserves_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TestRepo::new();
+
+    repo.create_workspace("rf-link");
+    repo.add_file("rf-link", "target.txt", "link target\n");
+
+    // Symlink as untracked — `git add -A` inside capture stages it with
+    // mode 120000, and the snapshot ref tree records the symlink properly.
+    let link_path = repo.workspace_path("rf-link").join("link.txt");
+    symlink("target.txt", &link_path).expect("create symlink");
+
+    repo.maw_ok(&["ws", "destroy", "rf-link", "--force"]);
+
+    repo.maw_ok(&["ws", "recover", "rf-link", "--restore-file", "link.txt"]);
+
+    let dest = repo.workspace_path("default").join("link.txt");
+    let meta = std::fs::symlink_metadata(&dest).expect("dest should exist after restore");
+    assert!(
+        meta.file_type().is_symlink(),
+        "restored entry should remain a symlink"
+    );
+    let target = std::fs::read_link(&dest).expect("read_link");
+    assert_eq!(target.to_str(), Some("target.txt"));
+}
+
+#[test]
+fn recover_restore_file_missing_path_lists_available_paths() {
+    let repo = TestRepo::new();
+
+    repo.create_workspace("rf-miss");
+    repo.add_file("rf-miss", "kept.txt", "yes\n");
+    repo.maw_ok(&["ws", "destroy", "rf-miss", "--force"]);
+
+    let stderr = repo.maw_fails(&["ws", "recover", "rf-miss", "--restore-file", "ghost.txt"]);
+    assert!(
+        stderr.contains("not found in snapshot"),
+        "missing path error should mention 'not found in snapshot', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("kept.txt") || stderr.contains("--search"),
+        "error should hint at available paths or --search, got: {stderr}"
+    );
+}
+
+#[test]
+fn recover_restore_file_refuses_dirty_destination() {
+    let repo = TestRepo::new();
+
+    // Seed a tracked file at the epoch so it can be locally modified.
+    repo.seed_files(&[("conflict.txt", "epoch content\n")]);
+
+    repo.create_workspace("rf-dirty");
+    // Modify the tracked file in the workspace before destroy. Leave it
+    // unstaged — the destroy capture pipeline runs `git add -A` itself; if
+    // we stage here, worktree==index and `status()` returns empty.
+    repo.modify_file("rf-dirty", "conflict.txt", "snapshot content\n");
+    repo.maw_ok(&["ws", "destroy", "rf-dirty", "--force"]);
+
+    // Make the default copy dirty (different from index).
+    repo.modify_file("default", "conflict.txt", "uncommitted local edit\n");
+    let porcelain = repo.git_in_workspace(
+        "default",
+        &["status", "--porcelain=v1", "--", "conflict.txt"],
+    );
+    assert!(
+        !porcelain.trim().is_empty(),
+        "setup: default should report uncommitted edits to conflict.txt"
+    );
+
+    let stderr = repo.maw_fails(&[
+        "ws",
+        "recover",
+        "rf-dirty",
+        "--restore-file",
+        "conflict.txt",
+    ]);
+    assert!(
+        stderr.contains("--force") && stderr.contains("uncommitted"),
+        "dirty refusal should mention --force and uncommitted, got: {stderr}"
+    );
+
+    // Destination must NOT have been overwritten.
+    assert_eq!(
+        repo.read_file("default", "conflict.txt").as_deref(),
+        Some("uncommitted local edit\n"),
+        "default content must be preserved when --restore-file refuses"
+    );
+}
+
+#[test]
+fn recover_restore_file_force_overrides_dirty_destination() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("conflict.txt", "epoch content\n")]);
+
+    repo.create_workspace("rf-force");
+    repo.modify_file("rf-force", "conflict.txt", "snapshot content\n");
+    repo.maw_ok(&["ws", "destroy", "rf-force", "--force"]);
+
+    repo.modify_file("default", "conflict.txt", "uncommitted local edit\n");
+
+    repo.maw_ok(&[
+        "ws",
+        "recover",
+        "rf-force",
+        "--restore-file",
+        "conflict.txt",
+        "--force",
+    ]);
+
+    assert_eq!(
+        repo.read_file("default", "conflict.txt").as_deref(),
+        Some("snapshot content\n"),
+        "--force should overwrite the dirty default copy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bn-sgm8: list output footer + capture-none footnote
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recover_list_emits_next_footer_with_destroyed_workspace() {
+    let repo = TestRepo::new();
+
+    repo.create_workspace("footer-ws");
+    repo.add_file("footer-ws", "data.txt", "x\n");
+    repo.maw_ok(&["ws", "destroy", "footer-ws", "--force"]);
+
+    let output = repo.maw_ok(&["ws", "recover"]);
+    assert!(
+        output.contains("Next: maw ws recover <name>"),
+        "list output should print Next: footer, got: {output}"
+    );
+    assert!(
+        output.contains(RECOVER_LIST_FOOTER_HINT),
+        "list footer should mention --restore-file, got: {output}"
+    );
+    assert!(
+        output.contains("--search"),
+        "list footer should mention --search, got: {output}"
+    );
+}
+
+#[test]
+fn recover_list_capture_none_footnote_appears_only_when_present() {
+    let repo = TestRepo::new();
+
+    // Case 1: only dirty workspaces — no footnote.
+    repo.create_workspace("dirty-only");
+    repo.add_file("dirty-only", "a.txt", "dirty\n");
+    repo.maw_ok(&["ws", "destroy", "dirty-only", "--force"]);
+
+    let dirty_only = repo.maw_ok(&["ws", "recover"]);
+    assert!(
+        !dirty_only.contains("\"none\" capture"),
+        "no capture:none rows should mean no footnote, got: {dirty_only}"
+    );
+
+    // Case 2: add a clean destroy (capture: none) — footnote present.
+    repo.create_workspace("clean-ws");
+    repo.maw_ok(&["ws", "destroy", "clean-ws"]);
+
+    let with_clean = repo.maw_ok(&["ws", "recover"]);
+    let mentions_none = with_clean
+        .lines()
+        .any(|l| l.contains("none") && l.contains("clean-ws"));
+    if mentions_none {
+        assert!(
+            with_clean.contains("\"none\" capture"),
+            "list output with capture:none row should include footnote, got: {with_clean}"
+        );
+        // Sanity: the marker `-*` ties the row to the footnote.
+        assert!(
+            with_clean.contains("-*"),
+            "capture:none row should render '-*' marker, got: {with_clean}"
+        );
+    }
+}

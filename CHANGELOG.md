@@ -4,22 +4,21 @@ All notable changes to maw.
 
 ## Unreleased
 
+### `maw ws recover` discoverability + `--restore-file` (bn-sgm8)
+
+Three small fixes that close the gap between maw's recovery surface and agents who reach for raw `git show <commit>:<path>`:
+
+- `maw ws recover` (list view, no args) now prints a `Next:` footer that hints at `<name>`, `--show`, `--restore-file`, and `--search`.
+- New flag `maw ws recover <name> --restore-file <path>` (or `--ref <ref> --restore-file <path>`) copies a single file from a recovery snapshot into the default workspace's worktree, preserving mode bits (executable, symlink). Refuses to overwrite a destination with uncommitted edits unless `--force` is also passed.
+- Rows with `capture: none` in the list view now render the SNAPSHOT column as `-*` and append a footnote explaining the work was already merged at destroy time; check `git log` on the merge target.
+
 ### Behavior change: auto-rebase syncs clean sibling worktrees too (bn-103k)
 
-bn-3vf5's auto-rebase advanced sibling refs but explicitly skipped worktree updates (`mutate_worktree: false`), to avoid clobbering uncommitted edits. The unintended consequence: ALL siblings showed phantom `M` files in `git status`, blocking subsequent `maw ws sync` via the dirty-workspace guard. Workaround in the field was a per-sibling `git stash` ceremony — exactly the toil auto-rebase was meant to remove.
+bn-3vf5's auto-rebase advanced sibling refs but explicitly skipped worktree updates (`mutate_worktree: false`), to avoid clobbering uncommitted edits. The unintended consequence: ALL siblings showed phantom `M` files in `git status`, blocking subsequent `maw ws sync` via the dirty-workspace guard. Auto-rebase now updates both refs and worktree when the sibling is clean (re-checked under lock); dirty siblings still get refs-only treatment as before. Worktree-update failure never aborts the parent merge.
 
-When a sibling passes the under-lock dirty re-check, the worktree is provably clean and a checkout is safe. Auto-rebase now updates both refs and worktree in that case. Dirty siblings still get refs-only treatment as before.
+### Bug fix: `maw ws resolve --keep <ws>` preserves workspace intent (bn-3mbj)
 
-The rebase routine performs ONE more dirty re-check immediately before the destructive checkout, closing the small race window between the orchestrator's lock-time check and the actual worktree write. If that check trips, OR if `checkout_tree` fails for any reason (transient I/O, permissions, freshly-introduced lockfile-style file), the rebase logs a warning, leaves the refs advanced, and reports the result as "worktree update skipped: <reason>" — never aborting the parent merge.
-
-Result categories surfaced in the `AUTO-REBASE` summary block:
-- `rebased clean (N commit(s), worktree synced)` — refs + worktree updated
-- `rebased clean (N commit(s), worktree update skipped: <reason>)` — refs only
-- `rebased with N conflict(s) (M commit(s), worktree synced)` — conflict markers visible on disk
-- `rebased with N conflict(s) (M commit(s), worktree update skipped: <reason>)` — markers in tree only
-- skips (`up to date`, `in use`, `dirty`, `in progress`) unchanged
-
-Internal API: `RebaseOutcome` gains `worktree_updated: bool` and `worktree_skip_reason: String`; `RebaseRunOptions` gains `continue_past_worktree_failure: bool` (set only by the auto-rebase orchestrator).
+Previously `--keep <ws>` wrote the workspace's pre-rebase blob directly, silently dropping any sibling-merged content from the new epoch. Now performs a three-way merge of (base, epoch, ws) with the workspace winning on overlap. Sidecars without a base blob (legacy or merge-side conflicts) fall back to the old behavior with a stderr warning.
 
 ### Behavior change: `maw ws merge` auto-rebases sibling workspaces (bn-3vf5)
 
