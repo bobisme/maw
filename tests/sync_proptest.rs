@@ -1,16 +1,17 @@
-//! Property-based tests for the `ws sync` decision gate (bn-3o7w).
+//! Property-based tests for the `ws sync` decision gate (bn-3o7w; flag
+//! semantics updated by bn-3az5).
 //!
 //! These tests fuzz random sequences of (`workspace_create`, `local_commit`*,
 //! `concurrent_merge`*, sync) and assert the core safety invariants that were
 //! violated by bn-18dj:
 //!
-//! 1. `sync` (without `--rebase`) on a workspace with local commits must NEVER
+//! 1. `sync --no-rebase` on a workspace with local commits must NEVER
 //!    change HEAD and must NEVER drop committed content.
-//! 2. `sync --rebase` must preserve every commit from `base..HEAD_before` —
-//!    the count ahead of the new epoch after rebase must equal the count ahead
-//!    of the old base before rebase.
+//! 2. `sync` (default, formerly `--rebase`) must preserve every commit from
+//!    `base..HEAD_before` — the count ahead of the new epoch after rebase
+//!    must equal the count ahead of the old base before rebase.
 //! 3. Auto-sync triggered by `maw exec` must never drop local commits.
-//! 4. `sync --all` must never drop local commits in any workspace.
+//! 4. `sync --all --no-rebase` must never drop local commits in any workspace.
 //!
 //! If any of these properties fail, file a bone — do NOT fix here.
 
@@ -67,10 +68,10 @@ proptest! {
         .. ProptestConfig::default()
     })]
 
-    /// Property 1: `sync` (without `--rebase`) must not change HEAD when the
+    /// Property 1: `sync --no-rebase` must not change HEAD when the
     /// workspace has local commits, no matter how many epoch advances happen.
     #[test]
-    fn sync_without_rebase_never_changes_head(
+    fn sync_no_rebase_never_changes_head(
         local_commits in 1usize..=4,
         epoch_advances in 1usize..=3,
     ) {
@@ -84,14 +85,14 @@ proptest! {
             advance_epoch(&repo, "a", i);
         }
 
-        // Run sync — must not drop commits.
-        let _ = repo.maw_raw(&["ws", "sync", "feature"]);
+        // Run sync --no-rebase — must refuse and not drop commits.
+        let _ = repo.maw_raw(&["ws", "sync", "feature", "--no-rebase"]);
 
         let head_after = repo.workspace_head("feature");
         prop_assert_eq!(
             head_before,
             head_after,
-            "sync without --rebase must not change HEAD"
+            "sync --no-rebase must not change HEAD"
         );
 
         // All local files must still be present.
@@ -99,17 +100,17 @@ proptest! {
             let file = format!("local_a_{i}.txt");
             prop_assert!(
                 repo.read_file("feature", &file).is_some(),
-                "local file {} missing after sync (refused path)",
+                "local file {} missing after sync --no-rebase (refused path)",
                 file
             );
         }
     }
 
-    /// Property 2: `sync --rebase` must preserve every commit from base..HEAD.
+    /// Property 2: default `sync` must preserve every commit from base..HEAD.
     /// After rebase, the workspace should have the same number of commits ahead
     /// of the new epoch as it had before ahead of the old base.
     #[test]
-    fn sync_rebase_preserves_commit_count_and_content(
+    fn sync_default_preserves_commit_count_and_content(
         local_commits in 1usize..=4,
         epoch_advances in 1usize..=3,
     ) {
@@ -128,10 +129,10 @@ proptest! {
             advance_epoch(&repo, "b", i);
         }
 
-        let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
+        let out = repo.maw_raw(&["ws", "sync", "feature"]);
         prop_assert!(
             out.status.success(),
-            "sync --rebase should succeed\nstdout: {}\nstderr: {}",
+            "default sync should rebase committed work\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
@@ -141,7 +142,7 @@ proptest! {
             let file = format!("local_b_{i}.txt");
             prop_assert!(
                 repo.read_file("feature", &file).is_some(),
-                "local file {} missing after sync --rebase",
+                "local file {} missing after default sync rebase",
                 file
             );
         }
@@ -151,7 +152,7 @@ proptest! {
             let file = format!("epoch_b_{i}.txt");
             prop_assert!(
                 repo.read_file("feature", &file).is_some(),
-                "epoch file {} missing after sync --rebase",
+                "epoch file {} missing after default sync rebase",
                 file
             );
         }
@@ -203,10 +204,10 @@ proptest! {
         }
     }
 
-    /// Property 4: `ws sync --all` must never drop commits in any workspace,
-    /// even across multiple workspaces with varying states.
+    /// Property 4: `ws sync --all --no-rebase` must never drop commits in any
+    /// workspace, even across multiple workspaces with varying states.
     #[test]
-    fn batch_sync_all_never_drops_commits(
+    fn batch_sync_all_no_rebase_never_drops_commits(
         ws_a_commits in 1usize..=3,
         ws_b_commits in 0usize..=2,
         epoch_advances in 1usize..=2,
@@ -227,19 +228,19 @@ proptest! {
             advance_epoch(&repo, "d", i);
         }
 
-        let _ = repo.maw_raw(&["ws", "sync", "--all"]);
+        let _ = repo.maw_raw(&["ws", "sync", "--all", "--no-rebase"]);
 
         // alpha has local commits — HEAD must not change.
         prop_assert_eq!(
             alpha_head_before,
             repo.workspace_head("alpha"),
-            "sync --all must not change HEAD of workspace with local commits (alpha)"
+            "sync --all --no-rebase must not change HEAD of workspace with local commits (alpha)"
         );
         for i in 0..ws_a_commits {
             let file = format!("local_d_{i}.txt");
             prop_assert!(
                 repo.read_file("alpha", &file).is_some(),
-                "alpha local file {} missing after sync --all",
+                "alpha local file {} missing after sync --all --no-rebase",
                 file
             );
         }
@@ -249,13 +250,13 @@ proptest! {
             prop_assert_eq!(
                 beta_head_before,
                 repo.workspace_head("beta"),
-                "sync --all must not change HEAD of workspace with local commits (beta)"
+                "sync --all --no-rebase must not change HEAD of workspace with local commits (beta)"
             );
             for i in 0..ws_b_commits {
                 let file = format!("local_e_{i}.txt");
                 prop_assert!(
                     repo.read_file("beta", &file).is_some(),
-                    "beta local file {} missing after sync --all",
+                    "beta local file {} missing after sync --all --no-rebase",
                     file
                 );
             }

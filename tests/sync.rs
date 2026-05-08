@@ -30,9 +30,8 @@ fn stale_workspace_detected_and_sync_clears_it() {
 
     let out = repo.maw_ok(&["ws", "sync", "alice"]);
     assert!(
-        out.contains("Workspace synced successfully.")
-            && out.contains("maw ws sync alice --rebase"),
-        "expected post-sync rebase hint, got stdout: {out}"
+        out.contains("Workspace synced successfully."),
+        "expected synced confirmation, got stdout: {out}"
     );
 
     assert!(!workspace_state(&repo, "alice").contains("stale"));
@@ -227,7 +226,7 @@ fn sync_all_returns_non_zero_when_any_workspace_fails_sync() {
 }
 
 #[test]
-fn sync_all_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead() {
+fn sync_all_no_rebase_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead() {
     let repo = TestRepo::new();
 
     repo.maw_ok(&["ws", "create", "ahead"]);
@@ -249,10 +248,10 @@ fn sync_all_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead()
         "merge advancer",
     ]);
 
-    let out = repo.maw_raw(&["ws", "sync", "--all"]);
+    let out = repo.maw_raw(&["ws", "sync", "--all", "--no-rebase"]);
     assert!(
         !out.status.success(),
-        "sync --all should fail when stale workspace is skipped\nstdout: {}\nstderr: {}",
+        "sync --all --no-rebase should fail when stale workspace is skipped\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -261,7 +260,7 @@ fn sync_all_returns_non_zero_when_stale_workspace_is_skipped_for_commits_ahead()
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stdout.contains("Skipped (committed work not yet merged")
-            && stdout.contains("ahead (1 commit(s) ahead)")
+            && stdout.contains("ahead (1 commit(s) ahead")
             && stdout.contains("Results:")
             && stdout.contains("1 skipped")
             && stdout.contains("Result: INCOMPLETE")
@@ -356,10 +355,11 @@ fn sync_rebase_replays_commits_ahead_of_workspace_epoch() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sync_without_rebase_refuses_stale_workspace_with_commits_and_preserves_head() {
-    // bn-18dj regression: when a workspace is stale AND has local commits,
-    // `sync` (without --rebase) must detect the commits and refuse, not
-    // silently fast-forward and drop them.
+fn sync_no_rebase_refuses_stale_workspace_with_commits_and_preserves_head() {
+    // bn-18dj regression (now via --no-rebase): when a workspace is stale
+    // AND has local commits, `sync --no-rebase` must refuse, not silently
+    // fast-forward and drop the commits. The default sync (without --no-rebase)
+    // now rebases instead of refusing — see bn-3az5.
     let repo = TestRepo::new();
 
     repo.maw_ok(&["ws", "create", "feature"]);
@@ -382,19 +382,25 @@ fn sync_without_rebase_refuses_stale_workspace_with_commits_and_preserves_head()
         "merge advancer",
     ]);
 
-    // sync WITHOUT --rebase should refuse.
-    let out = repo.maw_raw(&["ws", "sync", "feature"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // sync --no-rebase should refuse with a non-zero exit and a clear message.
+    let out = repo.maw_raw(&["ws", "sync", "feature", "--no-rebase"]);
     assert!(
-        stdout.contains("commit(s) not yet merged"),
-        "sync should warn about unmerged commits, got: {stdout}"
+        !out.status.success(),
+        "sync --no-rebase must fail when there are commits ahead\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--no-rebase would discard committed work"),
+        "expected clear --no-rebase error, got stderr: {stderr}"
     );
 
-    // HEAD must not have changed.
+    // HEAD must not have changed (no destructive reset).
     let head_after = repo.workspace_head("feature");
     assert_eq!(
         head_after, original_head,
-        "sync without --rebase must not change workspace HEAD"
+        "sync --no-rebase must not change workspace HEAD"
     );
 
     // File must still exist.
@@ -402,6 +408,106 @@ fn sync_without_rebase_refuses_stale_workspace_with_commits_and_preserves_head()
         repo.read_file("feature", "work.txt").as_deref(),
         Some("precious work\n"),
         "local file must survive refused sync"
+    );
+}
+
+#[test]
+fn default_sync_rebases_stale_workspace_with_commits_ahead() {
+    // bn-3az5: default `maw ws sync <ws>` now replays committed work onto the
+    // new epoch (formerly gated behind --rebase, which was a warn-and-bail).
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "work.txt", "precious work\n");
+    repo.git_in_workspace("feature", &["add", "work.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: precious work"]);
+
+    // Advance epoch via another workspace.
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let new_epoch = repo.current_epoch();
+
+    // Default sync: must rebase, must succeed.
+    let out = repo.maw_raw(&["ws", "sync", "feature"]);
+    assert!(
+        out.status.success(),
+        "default sync should rebase committed work\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Local file survived, epoch file is present, exactly one commit ahead.
+    assert_eq!(
+        repo.read_file("feature", "work.txt").as_deref(),
+        Some("precious work\n"),
+        "workspace file must survive default-rebase sync"
+    );
+    assert_eq!(
+        repo.read_file("feature", "epoch.txt").as_deref(),
+        Some("advance\n"),
+        "epoch file must be present after default-rebase sync"
+    );
+    assert_eq!(
+        repo.git_in_workspace(
+            "feature",
+            &["rev-list", "--count", &format!("{new_epoch}..HEAD")]
+        )
+        .trim(),
+        "1",
+        "default-rebase sync should leave 1 commit ahead of new epoch"
+    );
+    assert!(
+        !workspace_state(&repo, "feature").contains("stale"),
+        "rebased workspace should not be stale"
+    );
+}
+
+#[test]
+fn deprecated_rebase_flag_is_accepted_as_noop() {
+    // bn-3az5: --rebase is now the default. The flag is still accepted for
+    // backward compat but emits a one-line deprecation note on stderr.
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "work.txt", "keep me\n");
+    repo.git_in_workspace("feature", &["add", "work.txt"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feat: work"]);
+
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let out = repo.maw_raw(&["ws", "sync", "feature", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "--rebase (deprecated alias) must still succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--rebase is now the default"),
+        "expected deprecation note on stderr, got: {stderr}"
     );
 }
 
@@ -584,9 +690,10 @@ fn auto_sync_does_not_drop_commits_on_stale_workspace() {
 }
 
 #[test]
-fn batch_sync_all_does_not_drop_commits_on_stale_workspace() {
-    // bn-18dj regression: sync --all must skip workspaces with local commits,
-    // not fast-forward them.
+fn batch_sync_all_no_rebase_does_not_drop_commits_on_stale_workspace() {
+    // bn-18dj regression (now via --no-rebase): sync --all --no-rebase must
+    // skip workspaces with local commits, not fast-forward them. The default
+    // sync --all now rebases such workspaces — see bn-3az5.
     let repo = TestRepo::new();
 
     repo.maw_ok(&["ws", "create", "with-commits"]);
@@ -611,25 +718,85 @@ fn batch_sync_all_does_not_drop_commits_on_stale_workspace() {
         "merge advancer",
     ]);
 
-    // Sync all.
-    repo.maw_raw(&["ws", "sync", "--all"]);
+    repo.maw_raw(&["ws", "sync", "--all", "--no-rebase"]);
 
     // with-commits must be untouched.
     let head_after = repo.workspace_head("with-commits");
     assert_eq!(
         head_after, original_head,
-        "batch sync must not change HEAD of workspace with local commits"
+        "batch sync --no-rebase must not change HEAD of workspace with local commits"
     );
     assert_eq!(
         repo.read_file("with-commits", "work.txt").as_deref(),
         Some("keep me\n"),
-        "local file must survive batch sync"
+        "local file must survive batch sync --no-rebase"
     );
 
     // clean should have been synced.
     assert!(
         !workspace_state(&repo, "clean").contains("stale"),
         "clean workspace should have been synced"
+    );
+}
+
+#[test]
+fn batch_sync_all_default_rebases_committed_work() {
+    // bn-3az5: default `sync --all` rebases stale workspaces with committed
+    // work onto the new epoch instead of skipping them.
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "with-commits"]);
+    repo.maw_ok(&["ws", "create", "clean"]);
+
+    repo.add_file("with-commits", "work.txt", "keep me\n");
+    repo.git_in_workspace("with-commits", &["add", "work.txt"]);
+    repo.git_in_workspace("with-commits", &["commit", "-m", "feat: work"]);
+
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "epoch.txt", "advance\n");
+    repo.git_in_workspace("advancer", &["add", "epoch.txt"]);
+    repo.git_in_workspace("advancer", &["commit", "-m", "chore: advance"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let new_epoch = repo.current_epoch();
+
+    let out = repo.maw_raw(&["ws", "sync", "--all"]);
+    assert!(
+        out.status.success(),
+        "default sync --all should succeed by rebasing stale workspaces\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Workspace with commits got rebased: file kept, exactly 1 commit ahead.
+    assert_eq!(
+        repo.read_file("with-commits", "work.txt").as_deref(),
+        Some("keep me\n"),
+        "local file must survive default rebasing batch sync"
+    );
+    assert_eq!(
+        repo.git_in_workspace(
+            "with-commits",
+            &["rev-list", "--count", &format!("{new_epoch}..HEAD")]
+        )
+        .trim(),
+        "1",
+        "rebased workspace should have 1 commit ahead of new epoch"
+    );
+    assert!(
+        !workspace_state(&repo, "with-commits").contains("stale"),
+        "rebased workspace should not be stale after default batch sync"
+    );
+    assert!(
+        !workspace_state(&repo, "clean").contains("stale"),
+        "clean workspace should also be synced"
     );
 }
 

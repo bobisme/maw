@@ -2,6 +2,17 @@
 
 All notable changes to maw.
 
+## Unreleased
+
+### Behavior change: `maw ws sync` rebases by default (bn-3az5)
+
+`maw ws sync <name>` now replays committed work onto the new epoch by default when the workspace is stale and has commits ahead. The previous behavior was to print a warning telling the user to use `--rebase` and exit without doing anything.
+
+- The old `--rebase` flag is now a no-op accepted for backward compatibility, with a one-line deprecation note on stderr. It will be removed in a future version.
+- A new `--no-rebase` flag opts out of the default replay. With committed work ahead it refuses with a clear error and leaves the workspace untouched (no destructive reset).
+- `maw ws sync --all` mirrors the same default-rebase behavior; `--all --no-rebase` falls back to skipping workspaces with committed work.
+- `maw ws sync` against a clean stale workspace still fast-forwards (unchanged), and the dirty-workspace refusal is preserved.
+
 ## v0.60.7 — Stale dirty exec inspection fix (bn-1vno)
 
 Patch release for a stale-workspace inspection failure found during multi-agent work.

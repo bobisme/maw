@@ -730,23 +730,32 @@ pub enum WorkspaceCommands {
     /// Use --all to sync all workspaces at once, useful after epoch
     /// advancement or when multiple workspaces may be stale.
     ///
-    /// Use --rebase to replay workspace commits onto the current epoch.
-    /// If the workspace has committed work that hasn't been merged yet,
-    /// normal sync refuses. With --rebase, commits are cherry-picked onto
-    /// the new epoch. Conflicts are recorded as data (not workflow blockers):
-    /// conflict markers are written to the working tree and the workspace
-    /// is marked as 'conflicted'. The agent can then edit conflicted files,
-    /// remove markers, and commit to resolve.
+    /// When the workspace has committed work ahead of the epoch, sync
+    /// replays those commits onto the new epoch by default (formerly
+    /// gated behind --rebase). Conflicts are recorded as data (not
+    /// workflow blockers): conflict markers are written to the working
+    /// tree and the workspace is marked as 'conflicted'. The agent can
+    /// then edit conflicted files, remove markers, and commit to resolve.
+    ///
+    /// Pass --no-rebase to refuse the sync if the workspace has commits
+    /// ahead — the workspace is left untouched (no destructive reset).
     Sync {
         /// Name of the workspace to sync (defaults to current workspace)
         name: Option<String>,
 
         /// Sync all workspaces instead of just the current one
-        #[arg(long, conflicts_with = "name", conflicts_with = "rebase")]
+        #[arg(long, conflicts_with = "name")]
         all: bool,
 
-        /// Replay workspace commits onto the current epoch (conflict-as-data rebase)
-        #[arg(long, conflicts_with = "all")]
+        /// Refuse to sync if the workspace has committed work ahead of the
+        /// epoch (does not perform a destructive reset; merge or
+        /// hand-resolve the workspace instead).
+        #[arg(long)]
+        no_rebase: bool,
+
+        /// Deprecated: rebasing is now the default. Accepted as a no-op for
+        /// backward compatibility; will be removed in a future version.
+        #[arg(long, conflicts_with = "no_rebase", hide = true)]
         rebase: bool,
     },
 
@@ -1405,7 +1414,19 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             overlap::overlap(&ws1, &ws2, fmt)
         }
-        WorkspaceCommands::Sync { name, all, rebase } => sync::sync(name.as_deref(), all, rebase),
+        WorkspaceCommands::Sync {
+            name,
+            all,
+            no_rebase,
+            rebase,
+        } => {
+            if rebase {
+                eprintln!(
+                    "note: --rebase is now the default; flag will be removed in a future version"
+                );
+            }
+            sync::sync(name.as_deref(), all, no_rebase)
+        }
         WorkspaceCommands::History {
             name,
             limit,

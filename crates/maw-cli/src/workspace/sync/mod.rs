@@ -77,13 +77,9 @@ fn maybe_clear_stale_conflict_sidecars(root: &Path, ws_name: &str, ws_path: &Pat
 /// # Errors
 ///
 /// Returns an error if workspace synchronization fails.
-#[expect(
-    clippy::too_many_lines,
-    reason = "sync command handles stale detection, optional rebase, and reporting"
-)]
-pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
+pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     if all {
-        return sync_all();
+        return sync_all(no_rebase);
     }
 
     let root = repo_root()?;
@@ -134,8 +130,9 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     }
 
     // Safety: don't sync over committed work. If the workspace has commits not
-    // yet in epoch (diverged after a concurrent merge), syncing would wipe them.
-    // The lead agent must merge the workspace first — unless --rebase is used.
+    // yet in epoch (diverged after a concurrent merge), default behavior is to
+    // rebase those commits onto the new epoch. With --no-rebase, refuse rather
+    // than discard committed work — the destructive path is not silent.
     // NOTE: We compare against the workspace's *original* base epoch, not the
     // current epoch. The workspace HEAD is based on the old epoch, so comparing
     // against the new epoch would report 0 commits ahead (HEAD is behind it),
@@ -151,25 +148,23 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
             return Ok(());
         }
         Some(ahead) if ahead > 0 => {
-            if rebase {
-                // --rebase: replay workspace commits onto the new epoch
-                return rebase_workspace(
-                    &root,
-                    &workspace_name,
-                    ws_status.base_epoch.as_str(),
-                    current_epoch.as_str(),
-                    &ws_path,
-                    ahead,
+            if no_rebase {
+                anyhow::bail!(
+                    "Workspace '{workspace_name}' has {ahead} committed commit(s) ahead of epoch; \
+                     --no-rebase would discard committed work.\n  \
+                     Run `maw ws sync {workspace_name}` (default rebases) to replay them onto the \
+                     new epoch, or destroy and recreate the workspace if you really want to drop \
+                     these commits."
                 );
             }
-            println!(
-                "Workspace '{workspace_name}' is stale but has {ahead} committed commit(s) not yet \
-                 merged into epoch."
+            return rebase_workspace(
+                &root,
+                &workspace_name,
+                ws_status.base_epoch.as_str(),
+                current_epoch.as_str(),
+                &ws_path,
+                ahead,
             );
-            println!("  Merge the workspace first: maw ws merge {workspace_name} --into default");
-            println!("  Or rebase onto current epoch: maw ws sync {workspace_name} --rebase");
-            println!("  Then sync: maw ws sync {workspace_name}");
-            return Ok(());
         }
         Some(_) => {}
     }
@@ -197,12 +192,6 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
         return Ok(());
     }
 
-    if rebase {
-        println!("Workspace '{workspace_name}' has no commits ahead of epoch; nothing to rebase.");
-        println!("Performing normal sync instead.");
-        println!();
-    }
-
     println!("Workspace '{workspace_name}' is stale (behind current epoch), syncing...");
     println!();
 
@@ -212,11 +201,6 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
 
     println!();
     println!("Workspace synced successfully.");
-    if !rebase {
-        println!(
-            "  If you expected committed workspace changes to be replayed onto the new epoch, run: maw ws sync {workspace_name} --rebase"
-        );
-    }
 
     Ok(())
 }
@@ -226,7 +210,7 @@ pub fn sync(name: Option<&str>, all: bool, rebase: bool) -> Result<()> {
     clippy::too_many_lines,
     reason = "sync-all command aggregates per-workspace outcomes for reporting"
 )]
-fn sync_all() -> Result<()> {
+fn sync_all(no_rebase: bool) -> Result<()> {
     let root = repo_root()?;
     let backend = get_backend()?;
 
@@ -263,6 +247,7 @@ fn sync_all() -> Result<()> {
     println!();
 
     let mut synced = 0;
+    let mut rebased = 0;
     let mut skipped_with_work: Vec<String> = Vec::new();
     let mut skipped_cross_target: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -274,15 +259,14 @@ fn sync_all() -> Result<()> {
 
         let name = ws.id.as_str();
 
-        // Safety: skip workspaces with committed work not yet in epoch.
-        // Syncing over them would wipe those commits.
-        // If git fails (None), treat as "has work" to prevent data loss.
-        // NOTE: Compare against the workspace's base epoch, not current epoch.
-        // The workspace HEAD is based on the old epoch — comparing against the
-        // new epoch would report 0 ahead (HEAD is behind it), missing local commits.
+        // Per-workspace decision: rebase committed work by default; with
+        // --no-rebase, skip workspaces with committed work (no destructive
+        // reset). If git fails (None), treat as "has work" to prevent data
+        // loss. Compare against the workspace's base epoch (not current
+        // epoch) — see committed_ahead_of_epoch docs.
         let ws_path = root.join("ws").join(name);
         let ws_status = backend.status(&ws.id).map_err(|e| anyhow::anyhow!("{e}"))?;
-        match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
+        let ahead_count = match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
             None => {
                 skipped_with_work.push(format!(
                     "{name} (could not determine commit count \u{2014} skipped for safety)"
@@ -290,11 +274,15 @@ fn sync_all() -> Result<()> {
                 continue;
             }
             Some(ahead) if ahead > 0 => {
-                skipped_with_work.push(format!("{name} ({ahead} commit(s) ahead)"));
-                continue;
+                if no_rebase {
+                    skipped_with_work
+                        .push(format!("{name} ({ahead} commit(s) ahead; --no-rebase)"));
+                    continue;
+                }
+                Some(ahead)
             }
-            Some(_) => {}
-        }
+            Some(_) => None,
+        };
 
         if let Some(active_change) = cross_target_sync_risk(
             &root,
@@ -309,15 +297,34 @@ fn sync_all() -> Result<()> {
             continue;
         }
 
-        match sync_worktree_to_epoch(&root, name, current_epoch.as_str()) {
-            Ok(()) => synced += 1,
-            Err(e) => errors.push(format!("{name}: {e}")),
+        if let Some(ahead) = ahead_count {
+            match rebase_workspace(
+                &root,
+                name,
+                ws_status.base_epoch.as_str(),
+                current_epoch.as_str(),
+                &ws_path,
+                ahead,
+            ) {
+                Ok(()) => rebased += 1,
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        } else {
+            match sync_worktree_to_epoch(&root, name, current_epoch.as_str()) {
+                Ok(()) => synced += 1,
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
         }
     }
 
     if !skipped_with_work.is_empty() {
         println!();
-        println!("Skipped (committed work not yet merged \u{2014} merge first):");
+        let header = if no_rebase {
+            "Skipped (committed work not yet merged; --no-rebase prevents replay):"
+        } else {
+            "Skipped (committed work not yet merged \u{2014} merge first):"
+        };
+        println!("{header}");
         for s in &skipped_with_work {
             println!("  - {s}");
         }
@@ -335,8 +342,9 @@ fn sync_all() -> Result<()> {
 
     println!();
     println!(
-        "Results: {} synced, {} already current, {} skipped, {} errors",
+        "Results: {} synced, {} rebased, {} already current, {} skipped, {} errors",
         synced,
+        rebased,
         workspaces.len() - stale_count,
         skipped_total,
         errors.len()
