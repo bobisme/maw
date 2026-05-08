@@ -896,9 +896,25 @@ fn promote_overlaps_to_conflicts(
                 // hint is what matters for symlink-aware resolution in V1.
                 let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
                     change.mode.and_then(std::convert::Into::into);
-                let ours =
-                    ConflictSide::new("epoch".to_owned(), epoch_side_blob.clone(), ord.clone());
-                let theirs = ConflictSide::with_mode(ws_name.to_owned(), ws_blob, ord, ws_mode);
+                // bn-3mbj: thread the merge-base blob into both sides so the
+                // resolver can run a 3-way merge during `--keep <ws>`. The
+                // base is whatever `try_clean_three_way_overlap` had above
+                // — `ref_old`, the old epoch's blob at this path. When it's
+                // `None` (rename / no-common-ancestor path), the resolver
+                // falls back to legacy blob-replace with a stderr warning.
+                let ours = ConflictSide::with_base(
+                    "epoch".to_owned(),
+                    epoch_side_blob.clone(),
+                    ord.clone(),
+                    ref_old.clone(),
+                );
+                let theirs = ConflictSide::with_mode_and_base(
+                    ws_name.to_owned(),
+                    ws_blob,
+                    ord,
+                    ws_mode,
+                    ref_old.clone(),
+                );
 
                 let file_id = change.file_id.unwrap_or_else(|| {
                     FileId::new(merge_file_id_seed(
@@ -1187,8 +1203,24 @@ fn plan_rename_overlap(
         // bn-mg0j: propagate the workspace-side mode into the conflict.
         let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
             change.mode.and_then(std::convert::Into::into);
-        let ours = ConflictSide::new("epoch".to_owned(), epoch_new_blob, ord.clone());
-        let theirs = ConflictSide::with_mode(ws_name.to_owned(), ws_blob, ord, ws_mode);
+        // bn-3mbj: thread the merge-base blob into both sides so the
+        // resolver can run a 3-way merge during `--keep <ws>`. For
+        // rename-vs-modify, `epoch_old` is the original blob at the rename
+        // source — the workspace's pre-rebase content at `to` was derived
+        // from it.
+        let ours = ConflictSide::with_base(
+            "epoch".to_owned(),
+            epoch_new_blob,
+            ord.clone(),
+            epoch_old.clone(),
+        );
+        let theirs = ConflictSide::with_mode_and_base(
+            ws_name.to_owned(),
+            ws_blob,
+            ord,
+            ws_mode,
+            epoch_old.clone(),
+        );
 
         let file_id = change.file_id.unwrap_or_else(|| {
             FileId::new(merge_file_id_seed(

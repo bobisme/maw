@@ -119,10 +119,26 @@ pub struct ConflictSide {
     /// sidecars written by older versions continue to deserialize cleanly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ConflictSideMode>,
+
+    /// Optional merge-base blob OID for this side (bn-3mbj).
+    ///
+    /// When present (typical for content conflicts produced by the rebase
+    /// engine after gjm8), this is the common-ancestor blob shared by every
+    /// side. The resolver uses it to run a 3-way merge during
+    /// `--keep <ws-name>` so the workspace's intent (its diff against base)
+    /// is applied on top of the new epoch's content rather than wholesale
+    /// replacing it with the workspace's pre-rebase blob.
+    ///
+    /// Defaults to `None` and is omitted from serialized JSON when unset so
+    /// sidecars written by older versions continue to deserialize cleanly.
+    /// When `None`, `--keep <ws>` falls back to the legacy "write the
+    /// workspace blob directly" behaviour with a stderr warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_content: Option<GitOid>,
 }
 
 impl ConflictSide {
-    /// Create a new conflict side without a mode hint.
+    /// Create a new conflict side without a mode or base-content hint.
     #[must_use]
     pub const fn new(workspace: String, content: GitOid, timestamp: OrderingKey) -> Self {
         Self {
@@ -130,6 +146,7 @@ impl ConflictSide {
             content,
             timestamp,
             mode: None,
+            base_content: None,
         }
     }
 
@@ -150,6 +167,55 @@ impl ConflictSide {
             content,
             timestamp,
             mode,
+            base_content: None,
+        }
+    }
+
+    /// Create a new conflict side carrying the merge-base blob OID (bn-3mbj).
+    ///
+    /// Used by the rebase engine when promoting overlapping edits to a
+    /// `Conflict::Content`: the workspace side carries the merge base so
+    /// `--keep <ws>` can run a 3-way merge of (base, epoch, ws) at
+    /// resolution time and apply the workspace's intent on top of any
+    /// sibling-merged content already present in the new epoch.
+    #[must_use]
+    pub const fn with_base(
+        workspace: String,
+        content: GitOid,
+        timestamp: OrderingKey,
+        base_content: Option<GitOid>,
+    ) -> Self {
+        Self {
+            workspace,
+            content,
+            timestamp,
+            mode: None,
+            base_content,
+        }
+    }
+
+    /// Create a new conflict side with both a mode hint and a base-content
+    /// hint (bn-3mbj).
+    ///
+    /// Used by the rebase engine for the workspace side of a content
+    /// conflict where both pieces of information are available — file mode
+    /// (so the resolver re-establishes symlinks/exec-bit correctly) and the
+    /// merge-base blob (so `--keep <ws>` can run a 3-way merge instead of
+    /// blob-replace).
+    #[must_use]
+    pub const fn with_mode_and_base(
+        workspace: String,
+        content: GitOid,
+        timestamp: OrderingKey,
+        mode: Option<ConflictSideMode>,
+        base_content: Option<GitOid>,
+    ) -> Self {
+        Self {
+            workspace,
+            content,
+            timestamp,
+            mode,
+            base_content,
         }
     }
 }
@@ -653,6 +719,12 @@ impl fmt::Display for ConflictAtom {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "variant sizes already differ by ConflictSide; bn-3mbj's base_content widens \
+              ConflictSide further but boxing here would change sidecar JSON \
+              representation, breaking compatibility with on-disk conflict-tree files"
+)]
 pub enum Conflict {
     /// Two or more workspaces modified the same region of the same file.
     ///
@@ -955,6 +1027,71 @@ mod tests {
         assert_eq!(decoded.workspace, side.workspace);
         assert_eq!(decoded.content, side.content);
         assert_eq!(decoded.timestamp.seq, side.timestamp.seq);
+        // bn-3mbj: default base_content is None and is omitted from JSON.
+        assert!(decoded.base_content.is_none());
+        assert!(
+            !json.contains("base_content"),
+            "base_content should be omitted when None: {json}"
+        );
+    }
+
+    #[test]
+    fn conflict_side_with_base_serde_roundtrip() {
+        // bn-3mbj: a side carrying base_content round-trips as JSON and the
+        // field appears in the serialized output.
+        let side = ConflictSide::with_base(
+            "alice".into(),
+            test_oid('a'),
+            test_ordering_key("alice", 1),
+            Some(test_oid('0')),
+        );
+        let json = serde_json::to_string(&side).expect("operation should succeed");
+        assert!(
+            json.contains("base_content"),
+            "base_content should be present: {json}"
+        );
+        let decoded: ConflictSide = serde_json::from_str(&json).expect("operation should succeed");
+        assert_eq!(decoded.workspace, "alice");
+        assert_eq!(decoded.base_content, Some(test_oid('0')));
+    }
+
+    #[test]
+    fn conflict_side_with_mode_and_base_serde_roundtrip() {
+        // bn-3mbj: a side carrying both mode and base_content round-trips.
+        let side = ConflictSide::with_mode_and_base(
+            "bob".into(),
+            test_oid('b'),
+            test_ordering_key("bob", 7),
+            Some(ConflictSideMode::BlobExecutable),
+            Some(test_oid('0')),
+        );
+        let json = serde_json::to_string(&side).expect("operation should succeed");
+        let decoded: ConflictSide = serde_json::from_str(&json).expect("operation should succeed");
+        assert_eq!(decoded.mode, Some(ConflictSideMode::BlobExecutable));
+        assert_eq!(decoded.base_content, Some(test_oid('0')));
+    }
+
+    #[test]
+    fn conflict_side_legacy_json_without_base_content_decodes() {
+        // bn-3mbj: a sidecar produced by an older maw version that didn't
+        // know about `base_content` must still deserialize cleanly. The
+        // resolver uses the absence as a signal to fall back to legacy
+        // blob-replace behaviour with a warning.
+        let legacy = r#"{
+            "workspace": "old-ws",
+            "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "timestamp": {
+                "epoch_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "workspace_id": "old-ws",
+                "seq": 1,
+                "wall_clock_ms": 1700000000000
+            }
+        }"#;
+        let decoded: ConflictSide =
+            serde_json::from_str(legacy).expect("legacy ConflictSide should decode");
+        assert_eq!(decoded.workspace, "old-ws");
+        assert!(decoded.mode.is_none());
+        assert!(decoded.base_content.is_none());
     }
 
     // -----------------------------------------------------------------------

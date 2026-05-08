@@ -413,12 +413,32 @@ enum PathOutcome {
     Wrote {
         bytes: Vec<u8>,
         mode: Option<ConflictSideMode>,
+        /// bn-3mbj: how this resolution was produced. Used by the caller to
+        /// print a human-readable "non-trivial resolve" note when a 3-way
+        /// merge ran.
+        kind: ResolveKind,
     },
     /// Removed the file from the worktree (modify/delete → accept delete).
     Deleted,
     /// Caller asked for a side that doesn't exist / can't resolve. The
     /// carried message is logged by the caller into the skipped list.
     Skipped(#[allow(dead_code)] String),
+}
+
+/// bn-3mbj: how a single-side `--keep <ws>` resolution was produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolveKind {
+    /// Plain blob-replace — either `--keep epoch`, `--keep both`, or a
+    /// legacy sidecar that didn't carry `base_content`.
+    BlobReplace,
+    /// 3-way merge of (base, epoch, ws) succeeded cleanly.
+    ThreeWayClean,
+    /// 3-way merge had internal conflicts; we resolved them with the
+    /// workspace winning (`ConflictResolution::Theirs` against epoch=ours).
+    ThreeWayWsWins,
+    /// Sidecar lacked `base_content` for the picked side — fell back to
+    /// blob-replace and emitted a warning.
+    LegacyBlobReplaceWarned,
 }
 
 /// Scan all sides of a conflict and return the first mode hint found.
@@ -471,7 +491,18 @@ fn pick_single_side_mode(conflict: &Conflict, target: &str) -> Option<ConflictSi
 }
 
 /// Apply a resolution for a single `(path, conflict)` and produce the output.
-fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Result<PathOutcome> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "single decision dispatch covers --keep both, 3-way (bn-3mbj), legacy fallback, \
+              and single-side blob-replace; splitting fragments the control flow"
+)]
+fn apply_decision(
+    repo: &dyn GitRepo,
+    conflict: &Conflict,
+    target: &str,
+    rel_path: &Path,
+    workspace: &str,
+) -> Result<PathOutcome> {
     if target == "both" {
         // bn-2pry: ModifyDelete has no meaningful "both" — the deleter side
         // carries the *pre-delete* blob OID (the base content) in its
@@ -493,6 +524,7 @@ fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Resu
             return Ok(PathOutcome::Wrote {
                 bytes,
                 mode: modifier.mode,
+                kind: ResolveKind::BlobReplace,
             });
         }
 
@@ -524,6 +556,7 @@ fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Resu
             // Concat of multiple sides is never a valid symlink target. Fall
             // back to a regular file write.
             mode: None,
+            kind: ResolveKind::BlobReplace,
         });
     }
 
@@ -531,6 +564,137 @@ fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Resu
     // The sidecar seeds the epoch side with `workspace == "epoch"` (see
     // `sync::rebase::promote_overlaps_to_conflicts`), so no aliasing required.
     let mode_hint = pick_single_side_mode(conflict, target);
+
+    // bn-3mbj: `--keep <ws-name>` (anything that isn't the literal `epoch`
+    // label) should re-apply the workspace's intent on top of the new epoch
+    // rather than wholesale replacing the file with the workspace's
+    // pre-rebase blob. We only attempt the 3-way merge for `Conflict::Content`
+    // (where there's a meaningful epoch side and merge base) and only when
+    // both the picked side carries `base_content` AND the conflict has a
+    // matching `epoch` side. If either is missing we fall back to the legacy
+    // blob-replace path with a one-line stderr warning so old in-flight
+    // sidecars keep resolving.
+    if target != EPOCH_LABEL
+        && let Conflict::Content { sides, .. } = conflict
+        && let SideMatch::One(ws_side) = match_sides(sides, target)
+    {
+        let epoch_side = sides.iter().find(|s| s.workspace == EPOCH_LABEL);
+        if let (Some(base_oid), Some(epoch_side)) = (ws_side.base_content.as_ref(), epoch_side) {
+            // Three-way path: read all three blobs and run merge_text. The
+            // primary call uses `Diff3` so a clean merge stays clean. On
+            // an internal conflict, retry with `Theirs` (workspace wins) —
+            // this preserves the workspace's intent on overlapping hunks
+            // while still picking up sibling-merged content elsewhere.
+            let base_oid_git: git::GitOid = base_oid
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid base blob oid {base_oid}: {e}"))?;
+            let epoch_oid_git: git::GitOid = epoch_side.content.as_str().parse().map_err(|e| {
+                anyhow::anyhow!("invalid epoch blob oid {}: {e}", epoch_side.content)
+            })?;
+            let ws_oid_git: git::GitOid = ws_side
+                .content
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid ws blob oid {}: {e}", ws_side.content))?;
+
+            let base_bytes = repo
+                .read_blob(base_oid_git)
+                .map_err(|e| anyhow::anyhow!("read_blob({base_oid}) failed: {e}"))?;
+            let epoch_bytes = repo
+                .read_blob(epoch_oid_git)
+                .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", epoch_side.content))?;
+            let ws_bytes = repo
+                .read_blob(ws_oid_git)
+                .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", ws_side.content))?;
+
+            // Try the diff3 merge first — this is the same primitive
+            // `try_clean_three_way_overlap` uses during rebase. We use
+            // `epoch` as the "ours" label and the workspace name as the
+            // "theirs" label for human-readable output / consistent
+            // ordering with rebase's own labelling.
+            let clean_attempt = maw_git::merge::merge_text(
+                &base_bytes,
+                &epoch_bytes,
+                &ws_bytes,
+                EPOCH_LABEL,
+                "base",
+                target,
+            )
+            .map_err(|e| anyhow::anyhow!("3-way merge failed for {}: {e}", rel_path.display()))?;
+
+            match clean_attempt {
+                maw_git::merge::MergeResult::Clean(bytes) => {
+                    return Ok(PathOutcome::Wrote {
+                        bytes,
+                        mode: mode_hint,
+                        kind: ResolveKind::ThreeWayClean,
+                    });
+                }
+                maw_git::merge::MergeResult::Conflict(_) => {
+                    // ws-wins on internal conflicts. With epoch as `ours`
+                    // and ws as `theirs`, `ConflictResolution::Theirs`
+                    // resolves overlapping hunks by taking the ws side —
+                    // exactly the "workspace wins" semantics the spec
+                    // calls for. Non-overlapping epoch edits stay.
+                    let resolved = maw_git::merge::merge_text_with_style(
+                        &base_bytes,
+                        &epoch_bytes,
+                        &ws_bytes,
+                        EPOCH_LABEL,
+                        "base",
+                        target,
+                        maw_git::merge::ConflictResolution::Theirs,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "ws-wins 3-way merge failed for {}: {e}",
+                            rel_path.display()
+                        )
+                    })?;
+                    let bytes = match resolved {
+                        // Should not happen — `Theirs` always resolves —
+                        // but defensively accept either shape and use the
+                        // bytes the merger produced.
+                        maw_git::merge::MergeResult::Clean(b)
+                        | maw_git::merge::MergeResult::Conflict(b) => b,
+                    };
+                    return Ok(PathOutcome::Wrote {
+                        bytes,
+                        mode: mode_hint,
+                        kind: ResolveKind::ThreeWayWsWins,
+                    });
+                }
+            }
+        }
+
+        // Legacy sidecar (no `base_content` on the picked side) — fall
+        // through to blob-replace, but emit a one-line warning so the user
+        // knows to verify and so future debugging has a paper trail.
+        if ws_side.base_content.is_none() {
+            eprintln!(
+                "warning: --keep {target} is using legacy blob-replace semantics for {}; \
+                 sibling content from the target branch may be dropped. Verify with: \
+                 maw exec {workspace} -- git diff HEAD~1 -- {}",
+                rel_path.display(),
+                rel_path.display(),
+            );
+            let oid = ws_side.content.clone();
+            let git_oid: git::GitOid = oid
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid blob oid {oid}: {e}"))?;
+            let bytes = repo
+                .read_blob(git_oid)
+                .map_err(|e| anyhow::anyhow!("read_blob({oid}) failed: {e}"))?;
+            return Ok(PathOutcome::Wrote {
+                bytes,
+                mode: mode_hint,
+                kind: ResolveKind::LegacyBlobReplaceWarned,
+            });
+        }
+    }
+
     match pick_single_side_oid(conflict, target)? {
         Some(oid) => {
             let git_oid: git::GitOid = oid
@@ -543,6 +707,7 @@ fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Resu
             Ok(PathOutcome::Wrote {
                 bytes,
                 mode: mode_hint,
+                kind: ResolveKind::BlobReplace,
             })
         }
         None => Ok(PathOutcome::Deleted),
@@ -550,9 +715,13 @@ fn apply_decision(repo: &dyn GitRepo, conflict: &Conflict, target: &str) -> Resu
 }
 
 /// Apply `PathOutcome` to the worktree at `ws_path.join(rel)`.
-fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<bool> {
+///
+/// Returns `Ok((true, kind))` when the worktree was updated, or `Ok((false,
+/// _))` when the outcome was `Skipped`. The `kind` only carries meaning when
+/// `bool` is `true`; callers use it to print a "non-trivial resolve" note.
+fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<(bool, ResolveKind)> {
     match outcome {
-        PathOutcome::Wrote { bytes, mode } => {
+        PathOutcome::Wrote { bytes, mode, kind } => {
             let full = ws_path.join(rel);
             if let Some(dir) = full.parent() {
                 std::fs::create_dir_all(dir)?;
@@ -594,7 +763,7 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
                     std::fs::write(&full, &bytes)
                         .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
                 }
-                return Ok(true);
+                return Ok((true, kind));
             }
 
             std::fs::write(&full, &bytes)
@@ -609,7 +778,7 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
                     .map_err(|e| anyhow::anyhow!("chmod +x {}: {e}", full.display()))?;
             }
 
-            Ok(true)
+            Ok((true, kind))
         }
         PathOutcome::Deleted => {
             let full = ws_path.join(rel);
@@ -617,9 +786,9 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<boo
                 std::fs::remove_file(&full)
                     .map_err(|e| anyhow::anyhow!("remove {}: {e}", full.display()))?;
             }
-            Ok(true)
+            Ok((true, ResolveKind::BlobReplace))
         }
-        PathOutcome::Skipped(_) => Ok(false),
+        PathOutcome::Skipped(_) => Ok((false, ResolveKind::BlobReplace)),
     }
 }
 
@@ -705,6 +874,8 @@ pub fn run_structured(
     }
 
     let mut resolved = Vec::<PathBuf>::new();
+    let mut three_way_clean = Vec::<PathBuf>::new();
+    let mut three_way_ws_wins = Vec::<PathBuf>::new();
     let mut skipped = Vec::<(PathBuf, String)>::new();
 
     // Iterate over a snapshot of target paths; mutate `tree` as we go.
@@ -717,15 +888,21 @@ pub fn run_structured(
             skipped.push((rel.clone(), "no --keep side chosen for path".into()));
             continue;
         };
-        match apply_decision(repo_dyn, &conflict, &target) {
-            Ok(outcome) => {
-                if apply_outcome(ws_path, rel, outcome)? {
+        match apply_decision(repo_dyn, &conflict, &target, rel, workspace) {
+            Ok(outcome) => match apply_outcome(ws_path, rel, outcome)? {
+                (true, kind) => {
                     tree.conflicts.remove(rel);
                     resolved.push(rel.clone());
-                } else {
+                    match kind {
+                        ResolveKind::ThreeWayClean => three_way_clean.push(rel.clone()),
+                        ResolveKind::ThreeWayWsWins => three_way_ws_wins.push(rel.clone()),
+                        ResolveKind::BlobReplace | ResolveKind::LegacyBlobReplaceWarned => {}
+                    }
+                }
+                (false, _) => {
                     skipped.push((rel.clone(), "decision produced no output".into()));
                 }
-            }
+            },
             Err(e) => {
                 skipped.push((rel.clone(), e.to_string()));
             }
@@ -799,7 +976,23 @@ pub fn run_structured(
         );
     } else {
         for p in &resolved {
-            println!("  resolved: {}", p.display());
+            // bn-3mbj: when the resolution went through a 3-way merge,
+            // surface that to the user so they know the result is
+            // workspace-intent-on-top-of-epoch rather than a wholesale
+            // blob replacement.
+            if three_way_clean.contains(p) {
+                println!(
+                    "  resolved: {} (3-way merge: ws intent on top of epoch)",
+                    p.display()
+                );
+            } else if three_way_ws_wins.contains(p) {
+                println!(
+                    "  resolved: {} (3-way merge: ws intent on top of epoch, ws wins on overlap)",
+                    p.display()
+                );
+            } else {
+                println!("  resolved: {}", p.display());
+            }
         }
         for (p, r) in &skipped {
             eprintln!("  skipped: {} — {r}", p.display());
