@@ -41,12 +41,15 @@ tracing-opentelemetry = { version = "0.32", optional = true }
 proptest = "1"
 
 [features]
-default = ["otel", "tui", "lfs"]
+default = ["otel", "tui", "lfs", "ast-merge"]
 # `lfs` is kept as a no-op feature — maw-lfs is an unconditional dep now,
 # but the #[cfg(feature = "lfs")] gates throughout the codebase still key on it.
 lfs = []
 tui = ["dep:maw-tui"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing", "dep:tracing-opentelemetry"]
+# bn-2upt: expose the upstream ast-merge feature so the post-rebase
+# sanity check can call into maw's tree-sitter integration.
+ast-merge = ["maw/ast-merge"]
 
 [lints]
 workspace = true

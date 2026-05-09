@@ -16,7 +16,7 @@ use serde::Deserialize;
 ///
 /// Parsed from `.manifold/config.toml`. Missing fields use sensible defaults.
 /// Missing file → all defaults (no error).
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(Default)]
 pub struct ManifoldConfig {
@@ -125,7 +125,7 @@ impl fmt::Display for BackendKind {
 // ---------------------------------------------------------------------------
 
 /// Merge behaviour settings.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeConfig {
     /// Post-merge validation settings.
@@ -159,6 +159,29 @@ pub struct MergeConfig {
     /// users must then run `maw ws sync <ws>` per sibling to catch up.
     #[serde(default = "default_auto_rebase_siblings")]
     pub auto_rebase_siblings: bool,
+
+    /// Defense-in-depth (bn-2upt): after a clean three-way overlap merge
+    /// during rebase produces a single merged blob, sanity-check it before
+    /// accepting it as clean. If the merged output is implausibly large
+    /// relative to the inputs (size delta), or fails to AST-parse when
+    /// both inputs parsed cleanly (where applicable), refuse the clean
+    /// resolution and fall through to the conflict-tree path so the user
+    /// can resolve manually.
+    ///
+    /// Default `true`. Disable with
+    /// `[merge] strict_post_rebase_check = false` if false positives block
+    /// legitimate merges; the check still emits a stderr warning so the
+    /// pattern is visible in logs.
+    #[serde(default = "default_strict_post_rebase_check")]
+    pub strict_post_rebase_check: bool,
+
+    /// Maximum allowed `merged_size / max(ours, theirs, base)` ratio before
+    /// the size-delta sanity check (bn-2upt) flags a clean merge as
+    /// suspicious. Default `1.5` — gives ample headroom for legitimate
+    /// "both sides added content" merges while catching the bn-4c6g
+    /// triplication pattern (~2.83×).
+    #[serde(default = "default_post_rebase_size_ratio_max")]
+    pub post_rebase_size_ratio_max: f64,
 }
 
 impl Default for MergeConfig {
@@ -169,6 +192,8 @@ impl Default for MergeConfig {
             ast: AstConfig::default(),
             auto_absorb_ff: default_auto_absorb_ff(),
             auto_rebase_siblings: default_auto_rebase_siblings(),
+            strict_post_rebase_check: default_strict_post_rebase_check(),
+            post_rebase_size_ratio_max: default_post_rebase_size_ratio_max(),
         }
     }
 }
@@ -179,6 +204,14 @@ const fn default_auto_absorb_ff() -> bool {
 
 const fn default_auto_rebase_siblings() -> bool {
     true
+}
+
+const fn default_strict_post_rebase_check() -> bool {
+    true
+}
+
+const fn default_post_rebase_size_ratio_max() -> f64 {
+    1.5
 }
 
 // ---------------------------------------------------------------------------

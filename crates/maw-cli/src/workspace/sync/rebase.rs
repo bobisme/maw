@@ -37,11 +37,12 @@
 //! This module does **no** shelling out to `git` — all git operations
 //! flow through the [`GitRepo`] trait.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use maw_core::config::ManifoldConfig;
 use maw_core::merge::apply::apply_unilateral_patchset;
 use maw_core::merge::diff_extract::diff_patchset;
 use maw_core::merge::materialize::{materialize, write_legacy_sidecar, write_structured_sidecar};
@@ -141,6 +142,14 @@ pub struct RebaseOutcome {
     pub conflicts: usize,
     /// Number of replay steps that introduced at least one conflict.
     pub conflicted_steps: usize,
+    /// Number of replay steps where the post-rebase sanity check (bn-2upt)
+    /// flagged at least one path. Distinct from `conflicted_steps`: a
+    /// step might fall into both buckets if it had a textual conflict
+    /// AND a sanity flag on a different path. With
+    /// `merge.strict_post_rebase_check = true` (default) sanity-flagged
+    /// paths are converted into conflicts and contribute to
+    /// `conflicted_steps` too.
+    pub sanity_flagged_steps: usize,
     /// True when there were no commits to replay (workspace was already up
     /// to date with the old epoch and just needed a fast-forward sync).
     pub fast_forwarded: bool,
@@ -423,6 +432,7 @@ pub(super) fn rebase_workspace_run(
             replayed: 0,
             conflicts: 0,
             conflicted_steps: 0,
+            sanity_flagged_steps: 0,
             fast_forwarded: true,
             worktree_updated,
             worktree_skip_reason,
@@ -446,6 +456,17 @@ pub(super) fn rebase_workspace_run(
     // overwriting the epoch version. See the doc for
     // `promote_overlaps_to_conflicts` for the full rationale.
     let epoch_delta = build_epoch_delta_map(repo_dyn, old_git, new_git)?;
+
+    // bn-2upt — load merge sanity config once and thread through the
+    // overlap path. If the config file fails to load (or just isn't
+    // there) we use defaults — i.e. strict ON, ratio 1.5x. Failing
+    // closed: a config we can't parse is not a license to skip the
+    // check.
+    let manifold_config =
+        ManifoldConfig::load(&root.join(".manifold").join("config.toml")).unwrap_or_default();
+    let sanity_cfg = PostRebaseSanityConfig::from_merge(&manifold_config.merge);
+    let mut sanity_flagged_steps = 0usize;
+    let mut sanity_flagged_paths_total: Vec<PathBuf> = Vec::new();
 
     let total = commits.len();
     let mut parent_git = new_git;
@@ -497,6 +518,7 @@ pub(super) fn rebase_workspace_run(
         // This pass may also mutate the patch (e.g. drop `Modified(to)` for
         // rename pairs that were resolved into a pre-installed clean entry
         // at `to` — see `promote_overlaps_to_conflicts` for the rationale).
+        let mut sanity_flagged_this_step: Vec<PathBuf> = Vec::new();
         promote_overlaps_to_conflicts(
             repo_dyn,
             &mut state,
@@ -504,8 +526,14 @@ pub(super) fn rebase_workspace_run(
             &epoch_delta,
             ws_name,
             &base_epoch_id,
+            sanity_cfg,
+            &mut sanity_flagged_this_step,
         )
         .map_err(|e| anyhow::anyhow!("{e} (while replaying {short_sha})"))?;
+        if !sanity_flagged_this_step.is_empty() {
+            sanity_flagged_steps += 1;
+            sanity_flagged_paths_total.extend(sanity_flagged_this_step);
+        }
 
         // Snapshot for sidecar before apply_unilateral_patchset's V1 "modifed
         // replaces/collapses" semantics collapse the newly-injected conflicts
@@ -711,7 +739,17 @@ pub(super) fn rebase_workspace_run(
             .map_err(|e| anyhow::anyhow!("failed to write structured sidecar: {e}"))?;
 
         say!();
-        say!("Rebase complete: {replayed} commit(s) replayed, {conflicted_steps} with conflicts.",);
+        if sanity_flagged_steps > 0 {
+            say!(
+                "Rebase complete: {replayed} commit(s) replayed, \
+                 {conflicted_steps} with conflicts ({sanity_flagged_steps} sanity-flagged).",
+            );
+        } else {
+            say!(
+                "Rebase complete: {replayed} commit(s) replayed, \
+                 {conflicted_steps} with conflicts.",
+            );
+        }
         say!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
         say!();
         say!("Conflict markers use labeled sides:");
@@ -735,14 +773,34 @@ pub(super) fn rebase_workspace_run(
         // Clean run — clear any stale sidecar from a previous attempt.
         let _ = delete_rebase_conflicts(root, ws_name);
         say!();
-        say!("Rebase complete: {replayed} commit(s) replayed cleanly.");
+        if sanity_flagged_steps > 0 {
+            // Reachable only with strict_post_rebase_check = false: the
+            // check tripped but we accepted the merge anyway. Surface
+            // the flag count alongside the clean count so it's visible.
+            say!(
+                "Rebase complete: {replayed} commit(s) replayed cleanly \
+                 ({sanity_flagged_steps} sanity-flagged but accepted; \
+                 set merge.strict_post_rebase_check = true to refuse)."
+            );
+        } else {
+            say!("Rebase complete: {replayed} commit(s) replayed cleanly.");
+        }
         say!("Workspace '{ws_name}' is now up to date.");
+    }
+    if !sanity_flagged_paths_total.is_empty() {
+        tracing::warn!(
+            workspace = %ws_name,
+            count = sanity_flagged_paths_total.len(),
+            paths = ?sanity_flagged_paths_total,
+            "post-rebase sanity check flagged paths"
+        );
     }
 
     Ok(RebaseOutcome {
         replayed,
         conflicts: if has_conflicts { conflict_count } else { 0 },
         conflicted_steps,
+        sanity_flagged_steps,
         fast_forwarded: false,
         worktree_updated,
         worktree_skip_reason,
@@ -908,6 +966,10 @@ fn build_epoch_delta_map(
     clippy::too_many_lines,
     reason = "rename overlap promotion keeps planning and mutation together"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "promotion plumbs explicit sanity-check state through to the three-way helper"
+)]
 fn promote_overlaps_to_conflicts(
     repo: &dyn GitRepo,
     tree: &mut ConflictTree,
@@ -915,6 +977,8 @@ fn promote_overlaps_to_conflicts(
     epoch_delta: &EpochDelta,
     ws_name: &str,
     base_epoch_id: &EpochId,
+    sanity_cfg: PostRebaseSanityConfig,
+    sanity_flagged: &mut Vec<PathBuf>,
 ) -> Result<()> {
     use maw_core::merge::types::ChangeKind;
 
@@ -1020,6 +1084,8 @@ fn promote_overlaps_to_conflicts(
                     tree.clean.get(&change.path).map(|e| e.mode),
                     change.mode,
                     ws_name,
+                    sanity_cfg,
+                    sanity_flagged,
                 )? {
                     tree.conflicts.remove(&change.path);
                     tree.clean.insert(change.path.clone(), resolved);
@@ -1152,6 +1218,201 @@ fn promote_overlaps_to_conflicts(
     Ok(())
 }
 
+/// Configuration for the post-rebase sanity check (bn-2upt).
+///
+/// Built from `MergeConfig` and passed through the rebase machinery so the
+/// per-three-way-merge code can decide whether a "clean" output looks
+/// implausible — and if so, route through the conflict-tree path instead
+/// of silently accepting it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PostRebaseSanityConfig {
+    /// When true (default), a tripped sanity check makes the three-way
+    /// overlap merge fall through to the conflict-tree path. When false,
+    /// trips are emitted as stderr warnings and the merge is accepted as
+    /// clean anyway.
+    pub strict: bool,
+    /// Maximum allowed `merged_size / max(ours, theirs, base)` ratio
+    /// before the size-delta check flags the merge.
+    pub size_ratio_max: f64,
+}
+
+impl PostRebaseSanityConfig {
+    pub(super) const fn from_merge(cfg: &maw_core::config::MergeConfig) -> Self {
+        Self {
+            strict: cfg.strict_post_rebase_check,
+            size_ratio_max: cfg.post_rebase_size_ratio_max,
+        }
+    }
+
+    /// Disabled config: never trips. Used by callers that explicitly opt
+    /// out (config-load failure path treats this like "load defaults
+    /// instead of bypass" — see `rebase_workspace_run`).
+    #[allow(
+        dead_code,
+        reason = "used by integration tests that construct rebase machinery directly"
+    )]
+    pub(super) const fn disabled() -> Self {
+        Self {
+            strict: false,
+            size_ratio_max: f64::INFINITY,
+        }
+    }
+}
+
+/// Why a clean merge was flagged as suspicious by the post-rebase sanity
+/// check (bn-2upt).
+#[derive(Clone, Debug)]
+pub(super) enum SanityFailure {
+    /// The merged blob's byte length exceeded
+    /// `size_ratio_max * max(ours, theirs, base)`.
+    SizeDelta {
+        merged_len: usize,
+        max_input: usize,
+        ratio: f64,
+    },
+    /// Both inputs parsed cleanly under the file's tree-sitter grammar
+    /// but the merged output did not. Strong signal of structured-merge
+    /// corruption.
+    AstParse { reason: &'static str },
+}
+
+impl std::fmt::Display for SanityFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SizeDelta {
+                merged_len,
+                max_input,
+                ratio,
+            } => write!(
+                f,
+                "merged output is {merged_len} bytes; \
+                 {ratio:.2}x larger than the largest input ({max_input} bytes)"
+            ),
+            Self::AstParse { reason } => write!(
+                f,
+                "tree-sitter parse of the merged output reported {reason} \
+                 even though both inputs parsed cleanly"
+            ),
+        }
+    }
+}
+
+/// Pure-function size-delta check (bn-2upt).
+///
+/// Compares `merged.len()` against `max(ours.len(), theirs.len(), base.len())`
+/// and returns `Err(SanityFailure::SizeDelta { .. })` if the ratio exceeds
+/// `size_ratio_max`. Otherwise returns `Ok(())`.
+///
+/// Pure: no I/O, no allocation beyond the failure-payload struct itself.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "blob sizes far below f64 mantissa headroom; ratio is for thresholding only"
+)]
+pub(super) fn check_size_delta(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    merged: &[u8],
+    size_ratio_max: f64,
+) -> Result<(), SanityFailure> {
+    // Expected upper bound for a legitimate clean merge: the larger of the
+    // two sides, plus the sum of additions each side made over the base.
+    // Two agents independently adding K bytes apiece to the same file
+    // should land near max(o,t) + (o-base) + (t-base), not 1.5x max input.
+    // Without accounting for side-additions, the simpler `max(o,t,b)`
+    // ratio false-flags the most common "two disjoint adds" pattern.
+    let max_input = ours.len().max(theirs.len()).max(base.len());
+    let ours_added = ours.len().saturating_sub(base.len());
+    let theirs_added = theirs.len().saturating_sub(base.len());
+    let expected = ours.len().max(theirs.len()) + ours_added + theirs_added;
+    if expected == 0 {
+        if merged.is_empty() {
+            return Ok(());
+        }
+        return Err(SanityFailure::SizeDelta {
+            merged_len: merged.len(),
+            max_input,
+            ratio: f64::INFINITY,
+        });
+    }
+    let ratio = (merged.len() as f64) / (expected as f64);
+    if ratio > size_ratio_max {
+        return Err(SanityFailure::SizeDelta {
+            merged_len: merged.len(),
+            max_input,
+            ratio,
+        });
+    }
+    Ok(())
+}
+
+/// AST-parse sanity check (bn-2upt).
+///
+/// Returns `Err(SanityFailure::AstParse { .. })` only when:
+///   * The path matches a supported tree-sitter language; AND
+///   * Both `ours` and `theirs` parsed without errors; AND
+///   * The merged blob did NOT parse without errors.
+///
+/// In every other case (unsupported language, an input already had parse
+/// errors, the merge also parses cleanly) we return `Ok(())` and let the
+/// merge proceed. This avoids false positives on languages we don't have
+/// a grammar for and on inputs that were already broken.
+#[cfg(feature = "ast-merge")]
+fn check_ast_parse(
+    path: &std::path::Path,
+    ours: &[u8],
+    theirs: &[u8],
+    merged: &[u8],
+) -> Result<(), SanityFailure> {
+    use maw::merge::ast_merge::{AstLanguage, AstParseStatus, parse_status};
+
+    let Some(lang) = AstLanguage::from_path(path) else {
+        return Ok(());
+    };
+
+    let ours_status = parse_status(ours, lang);
+    let theirs_status = parse_status(theirs, lang);
+    if ours_status != AstParseStatus::Clean || theirs_status != AstParseStatus::Clean {
+        // Inputs were already broken — the merge can't be blamed.
+        return Ok(());
+    }
+
+    match parse_status(merged, lang) {
+        AstParseStatus::Clean => Ok(()),
+        AstParseStatus::HasErrors => Err(SanityFailure::AstParse {
+            reason: "syntax errors",
+        }),
+        AstParseStatus::Unparseable => Err(SanityFailure::AstParse {
+            reason: "an unrecoverable parse failure",
+        }),
+    }
+}
+
+/// Stub for builds without the `ast-merge` feature: skip the AST check.
+#[cfg(not(feature = "ast-merge"))]
+fn check_ast_parse(
+    _path: &std::path::Path,
+    _ours: &[u8],
+    _theirs: &[u8],
+    _merged: &[u8],
+) -> Result<(), SanityFailure> {
+    Ok(())
+}
+
+/// Compose the size-delta and AST-parse checks. Order: cheapest first.
+fn run_post_merge_sanity(
+    path: &std::path::Path,
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    merged: &[u8],
+    cfg: PostRebaseSanityConfig,
+) -> Result<(), SanityFailure> {
+    check_size_delta(base, ours, theirs, merged, cfg.size_ratio_max)?;
+    check_ast_parse(path, ours, theirs, merged)?;
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "three-way overlap helper takes explicit blob identities"
@@ -1165,6 +1426,8 @@ fn try_clean_three_way_overlap(
     epoch_mode: Option<EntryMode>,
     workspace_mode: Option<EntryMode>,
     ws_name: &str,
+    sanity_cfg: PostRebaseSanityConfig,
+    sanity_flagged: &mut Vec<PathBuf>,
 ) -> Result<Option<MaterializedEntry>> {
     let Some(base_blob) = base_blob else {
         return Ok(None);
@@ -1188,6 +1451,43 @@ fn try_clean_three_way_overlap(
             MergeResult::Clean(bytes) => bytes,
             MergeResult::Conflict(_) => return Ok(None),
         };
+
+    // bn-2upt — defense-in-depth: even when `merge_text` reports clean,
+    // sanity-check the output before accepting it. If it looks
+    // implausible (size or AST parse), route through the conflict-tree
+    // path. Fail closed: under `strict=true` any sanity failure → defer
+    // to conflict path (return Ok(None)). Under `strict=false` we still
+    // log a warning but accept the merge.
+    if let Err(failure) =
+        run_post_merge_sanity(path, &base, &epoch, &workspace, &merged, sanity_cfg)
+    {
+        if sanity_cfg.strict {
+            eprintln!(
+                "warning: post-rebase sanity check tripped for {}: {failure}; \
+                 routing through conflict-tree path (set merge.strict_post_rebase_check = false to override)",
+                path.display()
+            );
+            tracing::warn!(
+                workspace = %ws_name,
+                path = %path.display(),
+                failure = %failure,
+                "post-rebase sanity check tripped — converting clean merge to conflict"
+            );
+            sanity_flagged.push(path.to_path_buf());
+            return Ok(None);
+        }
+        eprintln!(
+            "warning: post-rebase sanity check tripped for {}: {failure}; \
+             accepting merge anyway (merge.strict_post_rebase_check = false)",
+            path.display()
+        );
+        tracing::warn!(
+            workspace = %ws_name,
+            path = %path.display(),
+            failure = %failure,
+            "post-rebase sanity check tripped but strict mode is off — accepting clean merge"
+        );
+    }
 
     let rel_path = path.to_string_lossy().replace('\\', "/");
     let merged_git_oid = repo
@@ -1886,5 +2186,173 @@ mod tests {
     #[test]
     fn sides_all_same_empty_is_false() {
         assert!(!sides_all_same(&[]));
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2upt — post-rebase output sanity check
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_size_delta_passes_when_merge_is_reasonable() {
+        // base ~ 5 bytes, ours/theirs each add a couple of lines, merged is
+        // a sensible accumulation of both. Expected = max(o,t) + (o-base) +
+        // (t-base) = 17 + 10 + 12 = 39. Merged = 27 → ratio 0.69, well
+        // under 1.5x.
+        let base = b"BASE\n";
+        let ours = b"BASE\nOURS-LINE\n";
+        let theirs = b"BASE\nTHEIRS-LINE\n";
+        let merged = b"BASE\nOURS-LINE\nTHEIRS-LINE\n";
+        check_size_delta(base, ours, theirs, merged, 1.5)
+            .expect("legitimate disjoint-add merge must not trip default 1.5x ratio");
+    }
+
+    #[test]
+    fn check_size_delta_flags_implausible_inflation() {
+        let base = b"x\n";
+        let ours = b"x\n";
+        let theirs = b"x\n";
+        // Merged ~ 60 bytes vs max input 2 bytes. ratio = 30. Way over 1.5.
+        let merged = b"this is a much larger body that did not come from any input\n";
+        let err = check_size_delta(base, ours, theirs, merged, 1.5)
+            .expect_err("3x merge result must trip");
+        match err {
+            SanityFailure::SizeDelta {
+                merged_len,
+                max_input,
+                ratio,
+            } => {
+                assert_eq!(merged_len, merged.len());
+                assert_eq!(max_input, 2);
+                assert!(ratio > 1.5);
+            }
+            SanityFailure::AstParse { .. } => panic!("size-delta check unexpectedly returned AST"),
+        }
+    }
+
+    #[test]
+    fn check_size_delta_borderline_ratio_does_not_trip() {
+        // base=3, ours=4 (+1), theirs=2 (-0 saturating). Expected =
+        // max(4,2) + 1 + 0 = 5. Merged = 4 → ratio 0.8. Must pass.
+        let base = b"abc";
+        let ours = b"abcd";
+        let theirs = b"ab";
+        let merged = b"wxyz";
+        check_size_delta(base, ours, theirs, merged, 1.5)
+            .expect("merged within expected envelope must not trip 1.5 threshold");
+    }
+
+    #[test]
+    fn check_size_delta_zero_input_zero_merged_passes() {
+        // All-empty inputs → empty merged output. Trivially fine.
+        check_size_delta(&[], &[], &[], &[], 1.5).expect("empty in / empty out is not suspicious");
+    }
+
+    #[test]
+    fn check_size_delta_zero_input_nonempty_merged_flags() {
+        // All-empty inputs but non-empty merged is suspicious — there's
+        // nothing the merge could have legitimately drawn from.
+        let merged = b"surprise content";
+        let err = check_size_delta(&[], &[], &[], merged, 1.5)
+            .expect_err("conjuring content from empty inputs must trip");
+        match err {
+            SanityFailure::SizeDelta {
+                merged_len,
+                max_input,
+                ratio,
+            } => {
+                assert_eq!(merged_len, merged.len());
+                assert_eq!(max_input, 0);
+                assert!(ratio.is_infinite());
+            }
+            SanityFailure::AstParse { .. } => panic!("expected SizeDelta"),
+        }
+    }
+
+    #[cfg(feature = "ast-merge")]
+    #[test]
+    fn check_ast_parse_flags_unbalanced_braces_when_inputs_parse_cleanly() {
+        // Both sides are valid Rust; the "merged" output has unbalanced
+        // braces — this is exactly the bn-4c6g triplication shape.
+        let ours = b"fn main() { println!(\"a\"); }\n";
+        let theirs = b"fn main() { println!(\"b\"); }\n";
+        // Two opening fns, one closing brace. tree-sitter Rust will flag.
+        let merged = b"fn main() { println!(\"a\"); fn main() { println!(\"b\"); }\n";
+        let path = std::path::Path::new("src/main.rs");
+        let err = check_ast_parse(path, ours, theirs, merged)
+            .expect_err("merged output with unbalanced braces must trip the AST check");
+        match err {
+            SanityFailure::AstParse { reason } => {
+                assert!(
+                    !reason.is_empty(),
+                    "AstParse reason should describe the failure"
+                );
+            }
+            SanityFailure::SizeDelta { .. } => panic!("expected AstParse failure"),
+        }
+    }
+
+    #[cfg(feature = "ast-merge")]
+    #[test]
+    fn check_ast_parse_passes_when_merged_parses_cleanly() {
+        let ours = b"fn a() {}\n";
+        let theirs = b"fn b() {}\n";
+        let merged = b"fn a() {}\nfn b() {}\n";
+        let path = std::path::Path::new("src/lib.rs");
+        check_ast_parse(path, ours, theirs, merged).expect("clean concat must not trip");
+    }
+
+    #[cfg(feature = "ast-merge")]
+    #[test]
+    fn check_ast_parse_skips_unsupported_extensions() {
+        // No tree-sitter grammar for .txt — the check must early-return Ok.
+        let merged = b"this {{{ would not parse as anything";
+        check_ast_parse(
+            std::path::Path::new("notes.txt"),
+            b"any\n",
+            b"any\n",
+            merged,
+        )
+        .expect("unsupported extension must skip the check");
+    }
+
+    #[cfg(feature = "ast-merge")]
+    #[test]
+    fn check_ast_parse_skips_when_inputs_already_broken() {
+        // Inputs themselves don't parse — the check must NOT blame the
+        // merge; return Ok regardless of the merged output's parse state.
+        let broken = b"fn main() {{{ this is broken\n";
+        let merged_also_broken = b"this is more broken }}}\n";
+        check_ast_parse(
+            std::path::Path::new("src/main.rs"),
+            broken,
+            broken,
+            merged_also_broken,
+        )
+        .expect("can't blame a merge when both inputs were already broken");
+    }
+
+    #[test]
+    fn post_rebase_sanity_config_disabled_never_trips_via_run() {
+        // Compose: even with a wildly oversized merge, a disabled config
+        // must let it pass the size check. (AST check is independent.)
+        let cfg = PostRebaseSanityConfig::disabled();
+        let res = check_size_delta(
+            b"a",
+            b"a",
+            b"a",
+            b"a".repeat(100).as_slice(),
+            cfg.size_ratio_max,
+        );
+        assert!(res.is_ok(), "infinity ratio must accept any size");
+    }
+
+    #[test]
+    fn post_rebase_sanity_config_from_merge_uses_defaults() {
+        let cfg = PostRebaseSanityConfig::from_merge(&maw_core::config::MergeConfig::default());
+        assert!(cfg.strict, "strict_post_rebase_check defaults to true");
+        assert!(
+            (cfg.size_ratio_max - 1.5).abs() < 1e-9,
+            "size ratio defaults to 1.5"
+        );
     }
 }

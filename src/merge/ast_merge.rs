@@ -357,6 +357,52 @@ fn parse_and_extract(
     Ok((tree, items))
 }
 
+/// Outcome of a quick "does this blob parse?" check (bn-2upt).
+///
+/// Used by the post-merge sanity check in `rebase_workspace_run` to detect
+/// when a "clean" three-way merge produced output that fails to parse —
+/// a strong signal of structured-conflict-layer corruption that the
+/// existing diff3 path silently accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AstParseStatus {
+    /// The blob parsed without any tree-sitter errors.
+    Clean,
+    /// The blob parsed but the resulting tree contained one or more
+    /// `ERROR` nodes (i.e. tree-sitter recovered but flagged syntax
+    /// problems). Treated as suspicious.
+    HasErrors,
+    /// The parser couldn't be set up or the parse returned `None`.
+    /// Treated as suspicious (fail closed).
+    Unparseable,
+}
+
+/// Attempt to parse `source` as language `lang` and report whether the
+/// resulting tree-sitter tree contains any error nodes.
+///
+/// This is intentionally cheaper than [`parse_and_extract`] — it doesn't
+/// walk the tree to extract top-level items, it just runs the parser and
+/// checks `tree.root_node().has_error()`.
+///
+/// Used by the bn-2upt post-rebase sanity check: parsing OURS, THEIRS, and
+/// the merged blob and only flagging when both inputs parsed cleanly but
+/// the merge result didn't lets us tell "merge corruption" apart from
+/// "the inputs were already broken".
+#[must_use]
+pub fn parse_status(source: &[u8], lang: AstLanguage) -> AstParseStatus {
+    let mut parser = Parser::new();
+    if parser.set_language(&lang.tree_sitter_language()).is_err() {
+        return AstParseStatus::Unparseable;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return AstParseStatus::Unparseable;
+    };
+    if tree.root_node().has_error() {
+        AstParseStatus::HasErrors
+    } else {
+        AstParseStatus::Clean
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Edit script computation
 // ---------------------------------------------------------------------------
