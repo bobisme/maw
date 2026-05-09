@@ -4760,7 +4760,11 @@ impl SynthHandler for Synth050 {
     }
 
     fn warmup(&mut self) {
+        // Synth050: bn-3r8s reproduction edit — the 5-line addition that
+        // the original bn-4c6g rebase allegedly triplicated.
         let _ = self.internal_state();
+        let _ = self.precompute("warmup");
+        eprintln!("warming up: {}", self.label());
     }
 }
 
