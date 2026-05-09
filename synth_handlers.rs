@@ -7110,7 +7110,10 @@ impl SynthHandler for Synth075 {
     }
 
     fn warmup(&mut self) {
+        // Synth075: sibling edit on the epoch side (different block from
+        // the workspace's Synth050 edit).
         let _ = self.internal_state();
+        let _ = self.precompute("epoch-warmup");
     }
 }
 
