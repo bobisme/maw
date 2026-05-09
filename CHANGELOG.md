@@ -4,6 +4,10 @@ All notable changes to maw.
 
 ## Unreleased
 
+### Bug fix: FF-absorb predicate excludes merge target's committed paths (bn-28q2)
+
+`maw ws merge` no longer self-blocks when the user has committed directly to the merge target's branch. The bn-11ip safety predicate was treating the target's committed touched-paths as if they were a sibling's edits — but those committed paths ARE the FF range, so the intersection was always non-empty and absorb was always refused. Now the target's committed paths are excluded from the predicate, while its UNCOMMITTED dirty edits are still checked (so a hard FF checkout cannot silently overwrite local work). The common "I made a small docs commit on main and now my workspace merge is blocked" friction is gone.
+
 ### `maw ws recover` discoverability + `--restore-file` (bn-sgm8)
 
 Three small fixes that close the gap between maw's recovery surface and agents who reach for raw `git show <commit>:<path>`:

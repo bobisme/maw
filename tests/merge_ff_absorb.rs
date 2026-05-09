@@ -351,3 +351,121 @@ fn opt_out_disables_absorb() {
         "opt-out should not surface the affected list.\nstderr: {stderr}"
     );
 }
+
+/// Advance `refs/heads/main` AND default's HEAD to a new commit, leaving
+/// default's worktree at the new tip — i.e. the direct-commit shape the
+/// real bn-28q2 regression reported. Returns the OID of the new branch tip.
+fn push_branch_ahead_keeping_default(
+    repo: &TestRepo,
+    file_path: &str,
+    content: &str,
+    message: &str,
+) -> String {
+    let ws_default = repo.default_workspace();
+    let epoch_before = repo.current_epoch();
+    let main_before = git_ok(repo.root(), &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        epoch_before, main_before,
+        "test setup expects epoch and main to match before push_branch_ahead_keeping_default"
+    );
+
+    std::fs::write(ws_default.join(file_path), content)
+        .unwrap_or_else(|e| panic!("write {file_path}: {e}"));
+    git_ok(&ws_default, &["add", "-A"]);
+    git_ok(&ws_default, &["commit", "-m", message]);
+
+    let new_oid = git_ok(&ws_default, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    git_ok(repo.root(), &["update-ref", "refs/heads/main", &new_oid]);
+    // NOTE: default is NOT reset; HEAD stays at new_oid. This is the bn-28q2
+    // regression shape: target_touched.paths == ff_paths.
+    new_oid
+}
+
+#[test]
+fn ff_absorb_succeeds_when_only_target_committed_directly() {
+    // bn-28q2 regression: direct commit on default with no dirty edits
+    // elsewhere previously self-blocked because default's touched paths
+    // tautologically equalled the FF range.
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.modify_file("alice", "src/lib.rs", "// lib\n// alice's tweak\n");
+
+    push_branch_ahead_keeping_default(
+        &repo,
+        "docs/README.md",
+        "# README\n\nupdated\n",
+        "docs: update",
+    );
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "merge alice",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        out.status.success(),
+        "merge should succeed despite default holding the FF commit.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Absorbed") && stderr.contains("upstream commit"),
+        "stderr should announce absorb.\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn ff_absorb_blocks_when_target_has_dirty_edits_to_ff_path() {
+    // Target's UNCOMMITTED edits to an FF-range path would be clobbered by
+    // the post-absorb worktree checkout — predicate must still block.
+    let repo = TestRepo::new();
+    repo.seed_files(&[("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("alice", "alice.txt", "alice\n");
+
+    push_branch_ahead_keeping_default(
+        &repo,
+        "docs/README.md",
+        "# README\n\nupdated\n",
+        "docs: update",
+    );
+
+    // Now make a DIRTY edit to docs/README.md in default, on top of the
+    // committed FF tip. The FF range touches docs/README.md too (that's how
+    // it got there), so the predicate must catch this and refuse to absorb.
+    let ws_default = repo.default_workspace();
+    std::fs::write(
+        ws_default.join("docs/README.md"),
+        "# README\n\nupdated\n\nlocal scratch\n",
+    )
+    .expect("write dirty edit");
+
+    let stderr = repo.maw_fails(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "merge alice",
+    ]);
+
+    assert!(
+        stderr.contains("diverged from the current epoch"),
+        "dirty-on-FF path should fall back to legacy diverged error.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Affected workspace(s):") && stderr.contains("default"),
+        "should list default as the blocking workspace.\nstderr: {stderr}"
+    );
+}

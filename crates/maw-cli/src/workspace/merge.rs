@@ -2571,32 +2571,33 @@ fn reconcile_epoch_with_branch(
         .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
 
     let mut ws_touched: Vec<super::ff_absorb::WorkspaceTouchedPaths> = Vec::new();
-    let mut target_touched: Option<super::ff_absorb::WorkspaceTouchedPaths> = None;
     for info in workspaces_info {
         let name = info.id.as_str();
+        if name == target_workspace_name {
+            // Target's committed paths between base_epoch and HEAD are the FF
+            // range itself when the user committed directly on the target's
+            // branch — including them makes the predicate tautologically
+            // self-block. What matters for safety is whether the target's
+            // *uncommitted* edits would be clobbered by the FF-range checkout
+            // in `sync_target_worktree_to_epoch`. Check only those.
+            let target_path = root.join("ws").join(target_workspace_name);
+            let dirty = dirty_paths_in_workspace(&target_path);
+            if !dirty.is_empty() {
+                ws_touched.push(super::ff_absorb::WorkspaceTouchedPaths {
+                    name: target_workspace_name.to_owned(),
+                    paths: dirty,
+                });
+            }
+            continue;
+        }
         let touched = super::touched::collect_touched_workspace(&backend, &info.id)?;
-        let entry = super::ff_absorb::WorkspaceTouchedPaths {
+        ws_touched.push(super::ff_absorb::WorkspaceTouchedPaths {
             name: touched.workspace,
             paths: touched.touched_paths.into_iter().collect(),
-        };
-        if name == target_workspace_name {
-            target_touched = Some(entry);
-        } else {
-            ws_touched.push(entry);
-        }
+        });
     }
 
-    // The target workspace's uncommitted edits also need to clear the FF
-    // range — a hard FF of its HEAD would clobber dirty paths that overlap
-    // upstream changes. Include it in the safety check.
-    let mut safety_workspaces = ws_touched.clone();
-    if let Some(target) = target_touched.as_ref()
-        && !target.paths.is_empty()
-    {
-        safety_workspaces.push(target.clone());
-    }
-
-    match super::ff_absorb::evaluate_ff_safety(&ff_paths, &safety_workspaces) {
+    match super::ff_absorb::evaluate_ff_safety(&ff_paths, &ws_touched) {
         super::ff_absorb::FfAbsorbDecision::Blocked {
             affected_workspaces,
         } => bail_diverged(&affected_workspaces),
@@ -2659,6 +2660,54 @@ fn reconcile_epoch_with_branch(
             })
         }
     }
+}
+
+/// Paths in `ws_path`'s worktree whose content differs from the index/HEAD
+/// (modified, added, deleted, or untracked-but-not-ignored).
+///
+/// Used by the FF-absorb safety check to identify paths that a hard checkout
+/// of the FF range would clobber. Returns an empty set on any git error so
+/// callers fail closed (treat as "no dirty paths to worry about" — the worst
+/// case is the absorb proceeds and a downstream PREPARE-phase dirty check
+/// catches genuinely dirty state).
+fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBuf> {
+    use std::collections::BTreeSet;
+
+    let Ok(out) = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-z"])
+        .current_dir(ws_path)
+        .output()
+    else {
+        return BTreeSet::new();
+    };
+    if !out.status.success() {
+        return BTreeSet::new();
+    }
+
+    let mut paths = BTreeSet::new();
+    let stdout = out.stdout;
+    let mut iter = stdout.split(|b| *b == 0).peekable();
+    while let Some(entry) = iter.next() {
+        if entry.len() < 3 {
+            continue;
+        }
+        let xy = &entry[..2];
+        let path_bytes = &entry[3..];
+        if path_bytes.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(path_bytes).into_owned());
+        paths.insert(path);
+        // Renames/copies have a second NUL-terminated path: "old".
+        if matches!(xy[0], b'R' | b'C') || matches!(xy[1], b'R' | b'C') {
+            if let Some(old) = iter.next() {
+                if !old.is_empty() {
+                    paths.insert(PathBuf::from(String::from_utf8_lossy(old).into_owned()));
+                }
+            }
+        }
+    }
+    paths
 }
 
 /// Best-effort fast-forward of the merge target's worktree to a new commit
