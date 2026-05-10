@@ -7110,7 +7110,9 @@ impl SynthHandler for Synth075 {
     }
 
     fn warmup(&mut self) {
+        // Synth075: epoch-side direct commit.
         let _ = self.internal_state();
+        let _ = self.precompute("epoch-warmup");
     }
 }
 
