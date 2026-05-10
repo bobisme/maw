@@ -268,6 +268,28 @@ fn merge_without_message_fails_in_non_tty() {
 }
 
 #[test]
+fn merge_with_empty_message_fails_in_non_tty() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "empty-msg-a"]);
+    repo.add_file("empty-msg-a", "note.txt", "content\n");
+    repo.maw_ok(&["ws", "create", "empty-msg-b"]);
+    repo.add_file("empty-msg-b", "note2.txt", "content\n");
+
+    for blank in ["", "   "] {
+        let stderr = repo.maw_fails(&["ws", "merge", "empty-msg-a", "--message", blank]);
+        assert!(
+            stderr.contains("No --message provided"),
+            "expected same message-required diagnostic for --message {blank:?}, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--message"),
+            "expected --message usage hint for --message {blank:?}, got:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn merge_json_conflict_stdout_is_pure_json() {
     let repo = TestRepo::new();
 

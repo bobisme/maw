@@ -1593,8 +1593,12 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             // Deferred until after merge() validates basic preconditions (e.g.
             // rejecting default workspace, empty list) so those errors surface
             // before the editor opens or the "no --message" error fires.
-            let resolved_message = if message.is_some() || dry_run {
-                message.unwrap_or_default()
+            // Treat empty/whitespace-only --message the same as omitting it.
+            let message = message.filter(|m| !m.trim().is_empty());
+            let resolved_message = if let Some(m) = message {
+                m
+            } else if dry_run {
+                String::new()
             } else if std::io::stdin().is_terminal() {
                 edit_merge_message(&workspaces)?
             } else {
