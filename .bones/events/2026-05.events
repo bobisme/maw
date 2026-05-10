@@ -141,3 +141,7 @@
 1778451789098613	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyuA0		item.move	bn-6q05	{"state":"doing"}	blake3:lG1m88PH9RpR4P-aSXbiMgUfD56tcVXlgv2ks1auhZw
 1778451789108506	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyuQ0		item.assign	bn-6q05	{"action":"assign","agent":"maw-dev"}	blake3:XLzVUHk_CUCL8QlgjfKXiPVtLnxFVLGiSZsYe5cfGFk
 1778452645127207	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyug0		item.move	bn-6q05	{"state":"done"}	blake3:qU-YK4jZw0Xr4t5-FJG-BMzgFGKbG-pAqUt5jMbDcFc
+1778453173953215	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyuw0		item.create	bn-ske8	{"description":"Roll up bn-3r8s, bn-2upt, bn-28q2, bn-sgm8, bn-103k, bn-3mbj, bn-3vf5, bn-11ip, bn-3az5, bn-17km, bn-qw4i, bn-3fhj, bn-6q05 into v0.60.8.","kind":"task","size":"s","title":"release v0.60.8"}	blake3:8cQevZ8GXiuWiinbtMrMATuUL-7icJhwgCyBN8x9-ts
+1778453177319080	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyvA0		item.move	bn-ske8	{"state":"doing"}	blake3:AaV1fjfCdfj-pSk_Q-tiMRvobToDr7YiXHfxO7-zyt0
+1778453177328456	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyvQ0		item.assign	bn-ske8	{"action":"assign","agent":"maw-dev"}	blake3:TZQOzrE0W3j2qkyPNWQxiMxK9npgKKQNVCMriDyywG4
+1778453529962513	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyvg0		item.move	bn-ske8	{"state":"done"}	blake3:UMRspc1W4u48ozE18NoaD3FuTU43jMMlkMQLRKhjFms
