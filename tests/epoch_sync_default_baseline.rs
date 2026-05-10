@@ -93,4 +93,3 @@ fn epoch_sync_advances_default_baseline_so_merge_does_not_duplicate() {
         "default's direct edit should be preserved in the merged worktree.\nGot:\n{merged}",
     );
 }
-

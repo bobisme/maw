@@ -2487,23 +2487,23 @@ fn assert_sources_clean_for_merge(
                         paths.len()
                     );
                 }
-            } else if let Some(legacy) = super::sync::read_rebase_conflicts(root, ws_name) {
-                if !legacy.conflicts.is_empty() {
-                    let file_list = legacy
-                        .conflicts
-                        .iter()
-                        .map(|c| format!("  - {}", c.path))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    bail!(
-                        "Workspace '{ws_name}' has {} unresolved rebase conflict(s) \
-                         (legacy sidecar):\n\
-                         {file_list}\n  \
-                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                        legacy.conflicts.len()
-                    );
-                }
+            } else if let Some(legacy) = super::sync::read_rebase_conflicts(root, ws_name)
+                && !legacy.conflicts.is_empty()
+            {
+                let file_list = legacy
+                    .conflicts
+                    .iter()
+                    .map(|c| format!("  - {}", c.path))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!(
+                    "Workspace '{ws_name}' has {} unresolved rebase conflict(s) \
+                     (legacy sidecar):\n\
+                     {file_list}\n  \
+                     Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                     To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                    legacy.conflicts.len()
+                );
             }
         }
     }
@@ -2657,6 +2657,10 @@ enum FfReconcile {
 ///
 /// `target_workspace_name` is excluded from the safety check — it is the
 /// merge target, not a source whose interpretation could change.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear FF-absorb pipeline; splitting hides the staged sequence"
+)]
 fn reconcile_epoch_with_branch(
     root: &Path,
     branch: &str,
@@ -2842,7 +2846,7 @@ fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBu
 
     let mut paths = BTreeSet::new();
     let stdout = out.stdout;
-    let mut iter = stdout.split(|b| *b == 0).peekable();
+    let mut iter = stdout.split(|b| *b == 0);
     while let Some(entry) = iter.next() {
         if entry.len() < 3 {
             continue;
@@ -2855,12 +2859,11 @@ fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBu
         let path = PathBuf::from(String::from_utf8_lossy(path_bytes).into_owned());
         paths.insert(path);
         // Renames/copies have a second NUL-terminated path: "old".
-        if matches!(xy[0], b'R' | b'C') || matches!(xy[1], b'R' | b'C') {
-            if let Some(old) = iter.next() {
-                if !old.is_empty() {
-                    paths.insert(PathBuf::from(String::from_utf8_lossy(old).into_owned()));
-                }
-            }
+        if (matches!(xy[0], b'R' | b'C') || matches!(xy[1], b'R' | b'C'))
+            && let Some(old) = iter.next()
+            && !old.is_empty()
+        {
+            paths.insert(PathBuf::from(String::from_utf8_lossy(old).into_owned()));
         }
     }
     paths

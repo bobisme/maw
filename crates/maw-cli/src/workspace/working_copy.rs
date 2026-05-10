@@ -829,9 +829,8 @@ pub fn replay_snapshot_with_merge_protection(
                 // this check, a bug that fabricates 2x or 3x content
                 // through a diff3 misalignment would be written to disk
                 // and the user would only notice when their build fails.
-                let sanity = super::sync::rebase::PostRebaseSanityConfig::from_merge(
-                    &sanity_cfg.merge,
-                );
+                let sanity =
+                    super::sync::rebase::PostRebaseSanityConfig::from_merge(&sanity_cfg.merge);
                 let size_check = super::sync::rebase::check_size_delta(
                     &base_content,
                     merge_content,

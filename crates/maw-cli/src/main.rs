@@ -461,7 +461,7 @@ mod tests {
 
         assert!(
             help.contains(
-                "Explicit merge target: default workspace, active change id, or change-bound workspace"
+                "Explicit merge target: default workspace, branch-attached workspace, or active change id"
             ),
             "unexpected help:\n{help}"
         );
