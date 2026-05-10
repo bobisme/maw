@@ -2,7 +2,32 @@
 
 All notable changes to maw.
 
-## Unreleased
+## v0.60.8 — Silent-corruption hardening, conflict-as-data merge contract, auto-rebase defaults (2026-05-10)
+
+Patch release rolling up safety fixes that close the last known silent-corruption shapes in `maw ws merge` and `maw ws sync`, plus new default behaviors that absorb routine divergence rather than refusing.
+
+Highlights:
+- **No more silent doubling on merge after a direct commit**: per-workspace baseline refs now advance with the epoch (bn-3r8s, bn-28q2).
+- **Post-rebase sanity check** runs on every clean three-way merge — size-delta + AST parse — so the same family of bug cannot reappear undetected (bn-2upt).
+- **`maw ws merge` auto-absorbs upstream FF divergence** and **auto-rebases sibling workspaces** by default, eliminating the "you have to run `epoch sync` first" and "your peers' workspaces went stale" papercuts (bn-11ip, bn-3vf5, bn-103k).
+- **`maw ws sync` rebases by default**; `--no-rebase` opts back into refs-only behavior (bn-3az5).
+- **`maw ws resolve --keep <ws>` preserves sibling-merged content** via three-way merge (bn-3mbj).
+- **`maw ws merge --check` is now a faithful dry-run** — same source-conflict gate as the real merge (bn-qw4i).
+- **Missing worktrees surfaced explicitly** in `ws list` / `merge --check` with a clear recovery hint (bn-3fhj).
+- **`maw ws merge --message ""`** now rejected like a missing message (bn-17km).
+- **`maw ws recover` discoverability** + new `--restore-file` flag for surgical recovery (bn-sgm8).
+
+### Bug fix: `maw ws merge --check` honors source-conflict precondition (bn-qw4i)
+
+`maw ws merge <ws> --check` no longer reports `[OK] Ready to merge` for a workspace whose HEAD still carries unresolved structured conflicts. The sidecar gate and the HEAD-tree placeholder tripwire are now factored into a shared `assert_sources_clean_for_merge` helper called from both the real-merge and `--check` paths, so they agree on what "ready to merge" means. `--force` bypasses the sidecar gate on `--check` exactly the way it does on the real merge; the placeholder tripwire remains non-bypassable.
+
+### Bug fix: missing worktrees surfaced as MISSING in list/check (bn-3fhj)
+
+If `ws/<name>/` is deleted while `.manifold/` metadata remains, `maw ws list` now flags the row as `MISSING` and includes the exact recovery command (`maw ws destroy <name> --force`) instead of advertising the workspace as ready to merge. `maw ws merge --check` mirrors the same diagnostic. `maw ws destroy --force` now also purges residual registry entries, per-workspace refs, and `.manifold` artifacts when the worktree directory is gone, so cleanup is always one command.
+
+### Bug fix: `maw ws merge --message ""` rejected like a missing message (bn-17km)
+
+Empty and whitespace-only `--message` values are now treated identically to omitting the flag — same `No --message provided` diagnostic — instead of being accepted and producing a commit with no subject or body.
 
 ### Bug fix: silent worktree corruption from stale per-workspace baseline (bn-3r8s)
 
