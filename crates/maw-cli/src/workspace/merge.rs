@@ -2636,6 +2636,24 @@ fn reconcile_epoch_with_branch(
                 sync_ff_paths_in_worktree(&ws_path, &ws.name, branch_oid, &ff_paths);
             }
 
+            // Also advance the target's per-workspace epoch ref. Otherwise
+            // the merge's snapshot-replay anchor logic uses the stale ref,
+            // treats the FF range as "uncommitted local edits", and double-
+            // applies it onto the merge result — silent corruption (bn-3r8s).
+            // The non-target loop above advanced sibling refs; the target
+            // needs the same treatment.
+            let target_epoch_ref =
+                maw_core::refs::workspace_epoch_ref(target_workspace_name);
+            if let Err(e) =
+                maw_core::refs::write_ref(root, &target_epoch_ref, branch_oid)
+            {
+                tracing::warn!(
+                    workspace = %target_workspace_name,
+                    error = %e,
+                    "failed to advance target workspace epoch ref after FF absorb"
+                );
+            }
+
             // Fast-forward the target workspace's worktree to the new branch
             // tip. Without this, the merge BUILD/COMMIT pipeline would later
             // diff the target worktree against the (post-absorb) epoch,

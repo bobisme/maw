@@ -1225,7 +1225,7 @@ fn promote_overlaps_to_conflicts(
 /// implausible — and if so, route through the conflict-tree path instead
 /// of silently accepting it.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct PostRebaseSanityConfig {
+pub(crate) struct PostRebaseSanityConfig {
     /// When true (default), a tripped sanity check makes the three-way
     /// overlap merge fall through to the conflict-tree path. When false,
     /// trips are emitted as stderr warnings and the merge is accepted as
@@ -1237,7 +1237,7 @@ pub(super) struct PostRebaseSanityConfig {
 }
 
 impl PostRebaseSanityConfig {
-    pub(super) const fn from_merge(cfg: &maw_core::config::MergeConfig) -> Self {
+    pub(crate) const fn from_merge(cfg: &maw_core::config::MergeConfig) -> Self {
         Self {
             strict: cfg.strict_post_rebase_check,
             size_ratio_max: cfg.post_rebase_size_ratio_max,
@@ -1262,7 +1262,7 @@ impl PostRebaseSanityConfig {
 /// Why a clean merge was flagged as suspicious by the post-rebase sanity
 /// check (bn-2upt).
 #[derive(Clone, Debug)]
-pub(super) enum SanityFailure {
+pub(crate) enum SanityFailure {
     /// The merged blob's byte length exceeded
     /// `size_ratio_max * max(ours, theirs, base)`.
     SizeDelta {
@@ -1308,7 +1308,7 @@ impl std::fmt::Display for SanityFailure {
     clippy::cast_precision_loss,
     reason = "blob sizes far below f64 mantissa headroom; ratio is for thresholding only"
 )]
-pub(super) fn check_size_delta(
+pub(crate) fn check_size_delta(
     base: &[u8],
     ours: &[u8],
     theirs: &[u8],

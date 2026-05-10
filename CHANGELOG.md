@@ -4,6 +4,18 @@ All notable changes to maw.
 
 ## Unreleased
 
+### Bug fix: silent worktree corruption from stale per-workspace baseline (bn-3r8s)
+
+Reproduced as the bn-4c6g report shape: after a direct commit on the configured branch + `maw epoch sync` + `maw ws merge <other> --into default`, the merge committed a clean tree but left the default workspace's worktree as a `<<<<<<< / ||||||| / ======= / >>>>>>>` block wrapping a duplicated copy of the merged file (~2× expected size, no `<<<<<<<` warning). Builds against the worktree saw garbage; the user blamed the merge but the commit itself was correct.
+
+Root cause: `maw epoch sync` only advanced `refs/manifold/epoch/current`. The default workspace's per-workspace baseline (`refs/manifold/epoch/ws/default`) stayed at the OLD epoch. The next `maw ws merge` anchored HEAD at the stale baseline during snapshot/replay, treated the direct commit's content as "uncommitted local edits" relative to that baseline, and double-applied it onto the merge result via the snapshot replay. Same family of bug as bn-28q2 — direct commits on the target's branch leaving per-workspace baselines stale.
+
+Fix:
+- `maw epoch sync` now advances the default workspace's per-workspace baseline ref alongside `refs/manifold/epoch/current`.
+- The FF-absorb path (`reconcile_epoch_with_branch`) now advances the target workspace's per-workspace baseline ref too. Without that fix, the same shape could sneak through automatic absorb without an explicit `epoch sync`.
+- bn-2upt's post-merge size-delta sanity check is now also wired into `replay_snapshot_with_merge_protection`'s per-file three-way merge — defense-in-depth for any future bug of the same shape that doesn't go through the same root cause.
+- Sanity check threshold formula corrected from `merged.len() / max(o,t,b) > 1.5` to `merged.len() / (max(o,t) + ours_added + theirs_added) > 1.5`. The simpler ratio false-flagged the most common legitimate shape (two agents adding to disjoint regions of a small file) at ~1.74× while still missing some real corruption shapes.
+
 ### Defense in depth: post-merge output sanity check during rebase (bn-2upt)
 
 After three reports of the structured-conflict layer producing silently-wrong "clean" output (bn-2ghz, bn-4c6g, and an earlier sibling), `maw ws sync --rebase` now sanity-checks every clean three-way overlap merge before accepting it.

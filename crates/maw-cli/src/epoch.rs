@@ -55,6 +55,23 @@ pub fn sync() -> Result<()> {
     manifold_refs::write_epoch_current(&root, &branch_oid)
         .map_err(|e| anyhow::anyhow!("Failed to update epoch ref: {e}"))?;
 
+    // Also advance the default workspace's per-workspace baseline. The
+    // default workspace IS the working copy of the configured branch — its
+    // baseline must equal `refs/manifold/epoch/current`. Without this step,
+    // direct commit + epoch sync leaves the default workspace's ref at the
+    // OLD epoch; subsequent `maw ws merge` anchors HEAD at the stale
+    // baseline during snapshot-replay, treats the direct commit's content
+    // as "uncommitted local edits", and double-applies it onto the merge
+    // result — producing diff3 markers wrapping duplicated file content in
+    // the worktree (silent corruption — bn-3r8s).
+    let default_ws = config.default_workspace();
+    let default_ws_ref = manifold_refs::workspace_epoch_ref(default_ws);
+    if let Err(e) = manifold_refs::write_ref(&root, &default_ws_ref, &branch_oid) {
+        eprintln!(
+            "  warning: failed to advance default workspace baseline ref '{default_ws_ref}': {e}"
+        );
+    }
+
     println!(
         "Epoch synced: {} → {} (branch '{branch}')",
         &epoch_oid.as_str()[..12],

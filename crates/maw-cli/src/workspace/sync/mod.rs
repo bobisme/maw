@@ -2,7 +2,7 @@ pub(crate) mod auto_rebase;
 mod checks;
 mod cross_target;
 mod lock;
-mod rebase;
+pub(crate) mod rebase;
 
 use std::path::Path;
 

@@ -694,6 +694,17 @@ pub fn replay_snapshot_with_merge_protection(
         "stash overlaps with merged paths — using merge-file for overlapping files"
     );
 
+    // Load the manifold config once so the bn-2upt sanity check below can
+    // honor `merge.strict_post_rebase_check` and `merge.post_rebase_size_ratio_max`.
+    // Resolve the repo root from `ws_path`: ws/<name>/ → repo_root.
+    let sanity_cfg = ws_path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map_or_else(maw_core::config::ManifoldConfig::default, |root| {
+            maw_core::config::ManifoldConfig::load(&root.join(".manifold").join("config.toml"))
+                .unwrap_or_default()
+        });
+
     // Step 3: Save the merge versions of overlapping files BEFORE stash apply.
     // After checkout, these files contain the correct merge result.
     let mut merge_versions: Vec<(PathBuf, Vec<u8>)> = Vec::new();
@@ -812,6 +823,50 @@ pub fn replay_snapshot_with_merge_protection(
             driver.as_deref(),
         ) {
             Ok((merged, false)) => {
+                // Apply the bn-2upt post-merge sanity check to this clean
+                // result before writing. The snapshot-replay path is the
+                // surface that produced bn-3r8s's silent doubling; without
+                // this check, a bug that fabricates 2x or 3x content
+                // through a diff3 misalignment would be written to disk
+                // and the user would only notice when their build fails.
+                let sanity = super::sync::rebase::PostRebaseSanityConfig::from_merge(
+                    &sanity_cfg.merge,
+                );
+                let size_check = super::sync::rebase::check_size_delta(
+                    &base_content,
+                    merge_content,
+                    &stash_content,
+                    &merged,
+                    sanity.size_ratio_max,
+                );
+                if let Err(failure) = size_check {
+                    if sanity.strict {
+                        // Strict: reject the suspicious-but-clean result and
+                        // fall through to the marker path so the user gets
+                        // a chance to resolve manually.
+                        eprintln!(
+                            "  WARNING: post-merge sanity check tripped on '{}': {failure}. Routing through conflict markers.",
+                            path.display()
+                        );
+                        let markers = write_diff3_markers(
+                            &base_content,
+                            merge_content,
+                            &stash_content,
+                            &merge_label,
+                            &local_label,
+                        );
+                        let _ = std::fs::write(&full, &markers);
+                        conflicts.push(WorkingCopyConflict {
+                            path: path.display().to_string(),
+                            conflict_type: "sanity-flag".to_owned(),
+                        });
+                        continue;
+                    }
+                    eprintln!(
+                        "  WARNING: post-merge sanity check tripped on '{}': {failure}. Accepting (strict_post_rebase_check is off).",
+                        path.display()
+                    );
+                }
                 // Non-overlapping edits merged cleanly — write the result.
                 if let Err(e) = std::fs::write(&full, &merged) {
                     tracing::warn!("failed to write merged file {}: {e}", path.display());

@@ -43,8 +43,13 @@ fn write_merge_config(repo: &TestRepo, strict: bool, size_ratio_max: Option<f64>
 
 /// Build a "both sides add disjoint big content to the same file" scenario.
 /// The base file is small; ours and theirs each add a large block at
-/// different anchor lines. The clean three-way merge concatenates both
-/// adds into a single output that exceeds the 1.5x size-ratio threshold.
+/// different anchor lines. With the additions-aware envelope formula
+/// (`expected = max(o,t) + ours_added + theirs_added`) the resulting clean
+/// merge is well within bounds — that's the legitimate-merge shape we do
+/// NOT want to flag. The strict/opt-out routing tests therefore use an
+/// artificially tight `post_rebase_size_ratio_max = 0.5` to force the
+/// check to trip, exercising the conflict-tree-routing logic without
+/// depending on an actual corruption pattern.
 const BASE_CONTENT: &str = "\
 section_alpha:\n\
   // alpha anchor\n\
@@ -96,7 +101,7 @@ fn strict_mode_routes_inflated_merge_through_conflict_tree() {
 
     // strict_post_rebase_check defaults to true; assert that explicitly to
     // make the test's intent clear if defaults ever change.
-    write_merge_config(&repo, true, Some(1.5));
+    write_merge_config(&repo, true, Some(0.5));
 
     repo.maw_ok(&["ws", "create", "alice"]);
     repo.modify_file("alice", "data.txt", OURS_CONTENT);
@@ -170,7 +175,7 @@ fn opt_out_accepts_inflated_merge_with_warning() {
 
     // Same scenario as the strict test, but with the sanity check made
     // non-blocking via config.
-    write_merge_config(&repo, false, Some(1.5));
+    write_merge_config(&repo, false, Some(0.5));
 
     repo.maw_ok(&["ws", "create", "alice"]);
     repo.modify_file("alice", "data.txt", OURS_CONTENT);
@@ -235,7 +240,7 @@ fn reasonable_merge_is_not_flagged() {
     // a 1.5x threshold.
     repo.seed_files(&[("notes.txt", "alpha\nbeta\ngamma\n")]);
 
-    // Default config — strict on, ratio 1.5.
+    // Default config — strict on, ratio 1.5 (the production default).
     write_merge_config(&repo, true, Some(1.5));
 
     repo.maw_ok(&["ws", "create", "alice"]);
