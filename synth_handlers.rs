@@ -4760,7 +4760,10 @@ impl SynthHandler for Synth050 {
     }
 
     fn warmup(&mut self) {
+        // Synth050: bn-3r8s fix verification edit.
         let _ = self.internal_state();
+        let _ = self.precompute("warmup");
+        eprintln!("warming up: {}", self.label());
     }
 }
 
