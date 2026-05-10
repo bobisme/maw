@@ -1147,8 +1147,7 @@ fn merge_check_missing_workspace_has_actionable_error_text() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("does not exist at")
-            && stderr.contains("Check available workspaces: maw ws list"),
+        stderr.contains("MISSING") && stderr.contains("maw ws destroy missing --force"),
         "expected actionable missing-workspace error, got: {stderr}"
     );
 }
@@ -1222,8 +1221,8 @@ fn merge_check_missing_workspace_with_active_change_stays_actionable() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("does not exist at")
-            && stderr.contains("Check available workspaces: maw ws list")
+        stderr.contains("MISSING")
+            && stderr.contains("maw ws destroy missing --force")
             && !stderr.contains("failed to run git rev-parse HEAD"),
         "expected actionable missing-workspace error even with active changes, got: {stderr}"
     );

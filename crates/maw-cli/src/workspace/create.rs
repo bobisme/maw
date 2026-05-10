@@ -542,6 +542,12 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     let path = workspace_path(name)?;
 
     if !path.exists() {
+        // bn-3fhj: if the worktree dir was removed but registry/metadata
+        // still tracks the workspace, `--force` should purge that residual
+        // state so `ws list` stops advertising a MISSING workspace forever.
+        if force && workspace_has_residual_state(&root, name) {
+            return destroy_residual_state(&root, name);
+        }
         println!(
             "Workspace '{name}' is already absent at {}.",
             path.display()
@@ -883,5 +889,51 @@ fn restore_backup_overwrite(backup: &std::path::Path, workspace: &std::path::Pat
             )
         })?;
     }
+    Ok(())
+}
+
+/// Check whether stale registry/metadata still references a workspace whose
+/// worktree dir is gone (bn-3fhj). Returns true if any of:
+///   - `.manifold/workspaces/<name>.toml` exists
+///   - any `refs/manifold/.../<name>` ref exists
+///   - the git worktree admin dir `<repo>/worktrees/<name>` exists
+fn workspace_has_residual_state(root: &std::path::Path, name: &str) -> bool {
+    let meta_path = metadata::metadata_path(root, name);
+    if meta_path.exists() {
+        return true;
+    }
+    for ref_name in manifold_refs::workspace_owned_refs(name) {
+        if matches!(manifold_refs::read_ref(root, &ref_name), Ok(Some(_))) {
+            return true;
+        }
+    }
+    let worktree_admin = root.join("repo.git").join("worktrees").join(name);
+    if worktree_admin.exists() {
+        return true;
+    }
+    let worktree_admin_alt = root.join(".git").join("worktrees").join(name);
+    worktree_admin_alt.exists()
+}
+
+/// Purge registry/metadata residue for a workspace whose worktree dir is
+/// already gone (bn-3fhj). Used by `maw ws destroy --force <name>` when the
+/// normal destroy path's `path.exists()` precondition fails.
+fn destroy_residual_state(root: &std::path::Path, name: &str) -> Result<()> {
+    // Run `git worktree prune` to drop the stale worktree admin dir for the
+    // missing worktree. We run it from the repo root so git finds .git/repo.git.
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(root)
+        .output();
+
+    // Best-effort cleanup of refs owned by this workspace.
+    for ref_name in manifold_refs::workspace_owned_refs(name) {
+        let _ = manifold_refs::delete_ref(root, &ref_name);
+    }
+
+    // Best-effort cleanup of metadata.
+    let _ = metadata::delete(root, name);
+
+    println!("Workspace '{name}' was missing on disk; cleaned up registry and metadata.");
     Ok(())
 }

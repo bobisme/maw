@@ -43,6 +43,13 @@ pub struct WorkspaceInfo {
     /// Human-readable description of the workspace's purpose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
+    /// True when the workspace's worktree directory is gone from disk while
+    /// registry/metadata still advertises it (bn-3fhj). The CLI registry can
+    /// diverge from disk when a user manually deletes the worktree dir;
+    /// surfacing this as a distinct state prevents misleading "ready to merge"
+    /// guidance.
+    #[serde(skip_serializing_if = "is_false")]
+    pub(crate) missing: bool,
 }
 
 /// Compact merge-check result for ws list output.
@@ -59,6 +66,14 @@ pub struct MergeCheckSummary {
 )]
 const fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive fields by reference"
+)]
+const fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Envelope for `maw ws list --format json` output.
@@ -117,6 +132,13 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             if name == DEFAULT_WORKSPACE || ws.commits_ahead == 0 {
                 continue;
             }
+            // bn-3fhj: skip merge-check for workspaces whose worktree dir is
+            // gone from disk — the check would crash with the same "does not
+            // exist" error that --check is meant to surface cleanly via the
+            // MISSING state in list output.
+            if !ws.path.exists() {
+                continue;
+            }
             if metadata::read(&root, ws.id.as_str()).is_ok_and(|meta| meta.branch.is_some()) {
                 continue;
             }
@@ -168,7 +190,13 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             } else {
                 ws_meta.mode
             };
-            let rebase_conflicts = {
+            // bn-3fhj: registry/git can advertise a workspace whose worktree
+            // dir is gone from disk. Detect that here so we don't claim "ready
+            // to merge" when the merge would error with "does not exist".
+            let missing = !is_default && !ws.path.exists();
+            let rebase_conflicts = if missing {
+                0
+            } else {
                 let ws_path = root.join("ws").join(ws.id.as_str());
                 super::resolve::find_conflicted_files(&ws_path)
                     .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
@@ -178,7 +206,9 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 epoch: ws.epoch.as_str()[..12].to_string(),
                 // Quarantine workspaces show as "quarantine" regardless of
                 // their staleness state — they are a special class of workspace.
-                state: if is_quarantine {
+                state: if missing {
+                    "MISSING".to_owned()
+                } else if is_quarantine {
                     "quarantine".to_owned()
                 } else if is_default {
                     "active".to_owned()
@@ -205,6 +235,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 }),
                 rebase_conflicts,
                 description: ws_meta.description,
+                missing,
                 name,
             }
         })
@@ -251,12 +282,19 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
         .map(|ws| ws.id.as_str().to_string())
         .collect();
 
+    let missing_workspaces: Vec<String> = workspaces
+        .iter()
+        .filter(|ws| ws.missing)
+        .map(|ws| ws.name.clone())
+        .collect();
+
     match format {
         OutputFormat::Text => print_list_text(
             &workspaces,
             &stale_workspaces,
             &stale_persistent,
             &stale_ephemeral,
+            &missing_workspaces,
             verbose,
         ),
         OutputFormat::Pretty => print_list_pretty(
@@ -264,6 +302,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             &stale_workspaces,
             &stale_persistent,
             &stale_ephemeral,
+            &missing_workspaces,
             format,
             verbose,
         ),
@@ -272,6 +311,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             stale_workspaces,
             stale_persistent,
             stale_ephemeral,
+            missing_workspaces,
             format,
         ),
     }
@@ -288,6 +328,7 @@ fn print_list_text(
     stale: &[String],
     stale_persistent: &[String],
     stale_ephemeral: &[String],
+    missing: &[String],
     _verbose: bool,
 ) {
     for ws in workspaces {
@@ -301,7 +342,9 @@ fn print_list_text(
                 format!(" [{} conflict(s)]", mc.conflict_count)
             }
         });
-        let annotation = if ws.state.contains("stale") {
+        let annotation = if ws.missing {
+            format!(" (MISSING — fix: maw ws destroy {} --force)", ws.name)
+        } else if ws.state.contains("stale") {
             " (stale)".to_string()
         } else if ws.branch.is_some() && ws.commits_ahead > 0 {
             format!(" (branch work +{})", ws.commits_ahead)
@@ -332,10 +375,11 @@ fn print_list_text(
     }
 
     print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
+    print_missing_warning_text(missing);
 
     let mergeable: Vec<&str> = workspaces
         .iter()
-        .filter(|ws| ws.commits_ahead > 0 && ws.branch.is_none())
+        .filter(|ws| ws.commits_ahead > 0 && ws.branch.is_none() && !ws.missing)
         .map(|ws| ws.name.as_str())
         .collect();
     if !mergeable.is_empty() {
@@ -356,6 +400,7 @@ fn print_list_pretty(
     stale: &[String],
     stale_persistent: &[String],
     stale_ephemeral: &[String],
+    missing: &[String],
     format: OutputFormat,
     verbose: bool,
 ) {
@@ -364,10 +409,12 @@ fn print_list_pretty(
     for ws in workspaces {
         let is_stale = ws.state.contains("stale");
         let is_persistent = ws.mode == "persistent";
-        let has_work = ws.commits_ahead > 0;
+        let has_work = ws.commits_ahead > 0 && !ws.missing;
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
                 ("\u{25cf}", "\x1b[1;32m", "\x1b[0m") // Green bold for default
+            } else if ws.missing {
+                ("\u{2718}", "\x1b[1;31m", "\x1b[0m") // Red X for missing
             } else if ws.state == "quarantine" {
                 ("\u{26a0}", "\x1b[1;31m", "\x1b[0m") // Red bold for quarantine
             } else if is_stale {
@@ -379,6 +426,8 @@ fn print_list_pretty(
             }
         } else if ws.is_default {
             ("\u{25cf}", "", "")
+        } else if ws.missing {
+            ("\u{2718}", "", "")
         } else if ws.state == "quarantine" {
             ("\u{26a0}", "", "")
         } else if has_work {
@@ -426,6 +475,15 @@ fn print_list_pretty(
                 println!("    \x1b[90m{desc}\x1b[0m");
             } else {
                 println!("    {desc}");
+            }
+        }
+
+        if ws.missing {
+            let fix = format!("maw ws destroy {} --force", ws.name);
+            if use_color {
+                println!("    \x1b[31mworktree dir is gone — fix: {fix}\x1b[0m");
+            } else {
+                println!("    worktree dir is gone — fix: {fix}");
             }
         }
 
@@ -478,6 +536,22 @@ fn print_list_pretty(
         );
     }
 
+    if !missing.is_empty() {
+        println!();
+        if use_color {
+            println!(
+                "\x1b[1;31m\u{2718} MISSING worktree(s):\x1b[0m {}",
+                missing.join(", ")
+            );
+        } else {
+            println!("\u{2718} MISSING worktree(s): {}", missing.join(", "));
+        }
+        println!("  Worktree directory was removed but registry still tracks it.");
+        for ws in missing {
+            println!("  Fix: maw ws destroy {ws} --force");
+        }
+    }
+
     // Legacy: combined stale notice if nothing split above.
     if stale.is_empty() && !workspaces.is_empty() {
         // Nothing stale.
@@ -516,9 +590,25 @@ fn print_list_json(
     stale_workspaces: Vec<String>,
     stale_persistent: Vec<String>,
     stale_ephemeral: Vec<String>,
+    missing: Vec<String>,
     format: OutputFormat,
 ) {
     let mut advice = vec![];
+
+    if !missing.is_empty() {
+        advice.push(Advice {
+            level: "warn",
+            message: format!(
+                "{} workspace(s) MISSING — worktree dir gone, registry stale: {}",
+                missing.len(),
+                missing.join(", ")
+            ),
+            details: Some(AdviceDetails {
+                workspaces: missing,
+                fix: "maw ws destroy <name> --force".to_string(),
+            }),
+        });
+    }
 
     if !stale_persistent.is_empty() {
         advice.push(Advice {
@@ -610,5 +700,18 @@ fn print_stale_warning_text(
             stale.join(", ")
         );
         println!("  Fix: maw ws sync --all");
+    }
+}
+
+/// Print MISSING-worktree warnings for text output mode (bn-3fhj).
+fn print_missing_warning_text(missing: &[String]) {
+    if missing.is_empty() {
+        return;
+    }
+    println!();
+    println!("MISSING worktree(s): {}", missing.join(", "));
+    println!("  Worktree directory was removed but registry still tracks it.");
+    for ws in missing {
+        println!("  Fix: maw ws destroy {ws} --force");
     }
 }

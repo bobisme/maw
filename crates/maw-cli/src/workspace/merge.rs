@@ -1299,11 +1299,17 @@ fn check_merge_result_for_target(
     for ws_id in &sources {
         let ws_path = backend.workspace_path(ws_id);
         if !ws_path.exists() {
+            // bn-3fhj: distinct MISSING diagnostic for workspaces whose
+            // worktree dir was deleted while registry/metadata still
+            // advertises them. Surfaces the same recovery hint as `ws list`.
             bail!(
-                "Workspace '{}' does not exist at {}\n  \
-                 Check available workspaces: maw ws list",
+                "MISSING: workspace '{}' worktree dir is gone from disk at {}\n  \
+                 The CLI registry still references this workspace.\n  \
+                 Fix: maw ws destroy {} --force\n  \
+                 Then: maw ws list",
                 ws_id,
-                ws_path.display()
+                ws_path.display(),
+                ws_id
             );
         }
         workspace_dirs.insert(ws_id.clone(), ws_path);
