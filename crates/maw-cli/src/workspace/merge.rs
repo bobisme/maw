@@ -1203,6 +1203,7 @@ pub fn check_merge(
     target_branch: &str,
     target_change_id: Option<&str>,
     target_updates_epoch: bool,
+    force: bool,
 ) -> Result<()> {
     let result = match check_merge_result_for_target(
         workspaces,
@@ -1210,6 +1211,7 @@ pub fn check_merge(
         target_branch,
         target_change_id,
         target_updates_epoch,
+        force,
     ) {
         Ok(result) => result,
         Err(err) if format == OutputFormat::Json => {
@@ -1248,7 +1250,7 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     let maw_config = MawConfig::load(&root)?;
     let default_ws = maw_config.default_workspace().to_owned();
     let default_branch = maw_config.branch().to_owned();
-    check_merge_result_for_target(workspaces, &default_ws, &default_branch, None, true)
+    check_merge_result_for_target(workspaces, &default_ws, &default_branch, None, true, false)
 }
 
 #[expect(
@@ -1261,6 +1263,7 @@ fn check_merge_result_for_target(
     target_branch: &str,
     _target_change_id: Option<&str>,
     target_updates_epoch: bool,
+    force: bool,
 ) -> Result<CheckResult> {
     if workspaces.is_empty() {
         bail!("No workspaces specified for --check");
@@ -1325,6 +1328,31 @@ fn check_merge_result_for_target(
             ready: false,
             conflicts: Vec::new(),
             stale: true,
+            workspace: ws_info,
+            description: String::new(),
+        });
+    }
+
+    // bn-qw4i: apply the same source-conflict precondition the real merge
+    // applies. Without this, `--check` would report "Ready to merge" for a
+    // workspace whose HEAD still carries unresolved structured conflicts,
+    // and the actual merge would then refuse. `--check` must be a faithful
+    // dry-run: same gates, same diagnostics. Mirror the `--force` bypass
+    // semantics exactly (sidecar gate bypassable; HEAD-tree tripwire is
+    // not).
+    if let Err(err) =
+        assert_sources_clean_for_merge(&root, workspaces, &workspace_dirs, force, target_workspace)
+    {
+        return Ok(CheckResult {
+            ready: false,
+            conflicts: vec![ConflictInfo {
+                path: String::new(),
+                reason: err.to_string(),
+                sides: Vec::new(),
+                line_start: None,
+                line_end: None,
+            }],
+            stale: false,
             workspace: ws_info,
             description: String::new(),
         });
@@ -2407,6 +2435,113 @@ pub struct MergeOptions<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// bn-qw4i: shared merge precondition gate
+// ---------------------------------------------------------------------------
+
+/// Refuse to proceed if any source workspace is in an unresolved conflict
+/// state.
+///
+/// Runs the same two gates the real merge applies, in the same order:
+///
+/// 1. **Sidecar gate (bn-m6ad / bn-3pgl / bn-3oau)** — refuses when the
+///    structured `conflict-tree.json` (or legacy `rebase-conflicts.json`)
+///    sidecar has any entries. Bypassable by `force = true`.
+/// 2. **Tamper-resistance tripwire (bn-28d1)** — refuses when any source
+///    workspace's HEAD tree contains a tool-authored conflict placeholder
+///    blob. Not bypassable by `force` — committing such a blob into the
+///    target branch would corrupt it.
+///
+/// Both `merge::merge` (the real merge) and
+/// `merge::check_merge_result_for_target` (the `--check` dry-run) call this
+/// helper so the two paths agree on what "ready to merge" means (bn-qw4i).
+fn assert_sources_clean_for_merge(
+    root: &Path,
+    sources: &[String],
+    workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
+    force: bool,
+    into_target: &str,
+) -> Result<()> {
+    if !force {
+        for ws_name in sources {
+            let sidecar = super::resolve_structured::read_conflict_tree_sidecar(root, ws_name);
+
+            if let Some(tree) = sidecar.as_ref() {
+                if !tree.conflicts.is_empty() {
+                    let paths: Vec<&PathBuf> = tree.conflicts.keys().collect();
+                    let file_list = paths
+                        .iter()
+                        .map(|p| format!("  - {}", p.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bail!(
+                        "Workspace '{ws_name}' has {} unresolved conflict(s):\n\
+                         {file_list}\n  \
+                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                        paths.len()
+                    );
+                }
+            } else if let Some(legacy) = super::sync::read_rebase_conflicts(root, ws_name) {
+                if !legacy.conflicts.is_empty() {
+                    let file_list = legacy
+                        .conflicts
+                        .iter()
+                        .map(|c| format!("  - {}", c.path))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bail!(
+                        "Workspace '{ws_name}' has {} unresolved rebase conflict(s) \
+                         (legacy sidecar):\n\
+                         {file_list}\n  \
+                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                        legacy.conflicts.len()
+                    );
+                }
+            }
+        }
+    }
+
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    for (ws_id, ws_path) in workspace_dirs {
+        let ws_name = ws_id.as_str();
+        if !ws_path.exists() {
+            continue;
+        }
+        let Ok(head_oid_str) = resolve_workspace_head_oid(ws_path) else {
+            continue;
+        };
+        let head_oid: maw_git::GitOid = head_oid_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid workspace HEAD OID '{head_oid_str}': {e}"))?;
+        let commit = repo
+            .read_commit(head_oid)
+            .map_err(|e| anyhow::anyhow!("read_commit({head_oid}) failed: {e}"))?;
+        let tainted = find_tool_placeholder_blobs(&repo, commit.tree_oid)?;
+        if !tainted.is_empty() {
+            let file_list = tainted
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
+                 tool-authored conflict placeholders:\n\
+                 {file_list}\n  \
+                 Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                 Possible cause: the conflict sidecar was deleted or corrupted. \
+                 This check cannot be bypassed by --force because merging placeholder \
+                 blobs would corrupt the target branch.",
+                tainted.len()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // bn-28d1: tamper-resistance tripwire for the merge gate
 // ---------------------------------------------------------------------------
 
@@ -2642,11 +2777,8 @@ fn reconcile_epoch_with_branch(
             // applies it onto the merge result — silent corruption (bn-3r8s).
             // The non-target loop above advanced sibling refs; the target
             // needs the same treatment.
-            let target_epoch_ref =
-                maw_core::refs::workspace_epoch_ref(target_workspace_name);
-            if let Err(e) =
-                maw_core::refs::write_ref(root, &target_epoch_ref, branch_oid)
-            {
+            let target_epoch_ref = maw_core::refs::workspace_epoch_ref(target_workspace_name);
+            if let Err(e) = maw_core::refs::write_ref(root, &target_epoch_ref, branch_oid) {
                 tracing::warn!(
                     workspace = %target_workspace_name,
                     error = %e,
@@ -3093,132 +3225,18 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Refuse merge if any source workspace has unresolved rebase conflicts.
     //
-    // bn-m6ad / bn-3pgl: the authoritative source of truth for "unresolved
-    // conflict state" is the structured `conflict-tree.json` sidecar. If the
-    // sidecar exists and has any entries, the workspace is unresolved — full
-    // stop. Marker-text scanning was used here historically but produced
-    // both false positives (bn-m6ad: a tutorial file containing `<<<<<<<`
-    // literals tripped the gate when no sidecar was present) and false
-    // negatives (bn-3pgl: binary-conflict placeholder blobs slipped past
-    // depending on exact diff-scan behavior). Gating on the structured
-    // sidecar eliminates both failure modes: rebase writes the sidecar for
-    // every conflicted path (text or binary), and successful resolve
-    // deletes it. No other code path mutates it.
-    //
-    // Legacy fallback: very old pre-gjm8 repos only had the flat
-    // `rebase-conflicts.json`. If neither structured sidecar is present
-    // but the legacy one is and non-empty, also refuse.
-    //
-    // `--force` bypasses the check as an escape hatch for operators who
-    // have verified the state is safe (e.g., the sidecar was left behind
-    // by a buggy tool and the worktree is actually clean).
-    if !opts.force {
-        for ws_name in &ws_to_merge {
-            let sidecar = super::resolve_structured::read_conflict_tree_sidecar(&root, ws_name);
-
-            if let Some(tree) = sidecar.as_ref() {
-                if !tree.conflicts.is_empty() {
-                    let paths: Vec<&PathBuf> = tree.conflicts.keys().collect();
-                    let file_list = paths
-                        .iter()
-                        .map(|p| format!("  - {}", p.display()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    bail!(
-                        "Workspace '{ws_name}' has {} unresolved conflict(s):\n\
-                         {file_list}\n  \
-                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                        paths.len()
-                    );
-                }
-            } else if let Some(legacy) = super::sync::read_rebase_conflicts(&root, ws_name) {
-                // Pre-gjm8 repos: only the legacy flat sidecar exists. Same
-                // semantics — if non-empty, refuse.
-                if !legacy.conflicts.is_empty() {
-                    let file_list = legacy
-                        .conflicts
-                        .iter()
-                        .map(|c| format!("  - {}", c.path))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    bail!(
-                        "Workspace '{ws_name}' has {} unresolved rebase conflict(s) \
-                         (legacy sidecar):\n\
-                         {file_list}\n  \
-                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                        legacy.conflicts.len()
-                    );
-                }
-            }
-        }
-    }
-
-    // bn-28d1: tamper-resistance tripwire.
-    //
-    // Even if the sidecar check passed (absent, empty, or `--force`), we
-    // never merge a workspace whose HEAD tree still carries a
-    // tool-authored conflict-placeholder blob. These byte prefixes are
-    // written exclusively by `materialize.rs` for unresolved conflicts;
-    // legitimate source code never starts with them.
-    //
-    // The previous gate (bn-m6ad/bn-3pgl) trusted the sidecar as the sole
-    // authority. If the sidecar file was deleted or its `conflicts` map was
-    // emptied (malicious tampering, or a buggy tool), the gate would let
-    // placeholder-markered blobs through and commit silent data corruption
-    // into the default branch. This cross-check closes that hole.
-    //
-    // The scan looks only at specific byte prefixes — not the generic
-    // `<<<<<<<` marker — so tutorials/fixtures with conflict-marker content
-    // (bn-m6ad) still merge cleanly. Unlike the sidecar gate, `--force`
-    // does NOT bypass the tripwire: if HEAD contains a placeholder blob,
-    // merging it is by definition corruption.
-    //
-    // We resolve each workspace's actual git HEAD from the worktree rather
-    // than `refs/manifold/head/<name>` (which is a blob holding the oplog,
-    // not a commit). The rebase pipeline commits the placeholder-bearing
-    // tree to the detached HEAD inside `ws/<name>/` — that's the commit
-    // the merge would adopt, so that's the tree we scan.
-    {
-        let repo = maw_git::GixRepo::open(&root)
-            .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-        for (ws_id, ws_path) in &workspace_dirs {
-            let ws_name = ws_id.as_str();
-            if !ws_path.exists() {
-                // Worktree missing — the downstream validation will
-                // report a clearer error. Don't double-fail here.
-                continue;
-            }
-            let Ok(head_oid_str) = resolve_workspace_head_oid(ws_path) else {
-                continue; // empty worktree / no commits yet
-            };
-            let head_oid: maw_git::GitOid = head_oid_str
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid workspace HEAD OID '{head_oid_str}': {e}"))?;
-            let commit = repo
-                .read_commit(head_oid)
-                .map_err(|e| anyhow::anyhow!("read_commit({head_oid}) failed: {e}"))?;
-            let tainted = find_tool_placeholder_blobs(&repo, commit.tree_oid)?;
-            if !tainted.is_empty() {
-                let file_list = tainted
-                    .iter()
-                    .map(|p| format!("  - {}", p.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                bail!(
-                    "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
-                     tool-authored conflict placeholders:\n\
-                     {file_list}\n  \
-                     Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                     Possible cause: the conflict sidecar was deleted or corrupted. \
-                     This check cannot be bypassed by --force because merging placeholder \
-                     blobs would corrupt the target branch.",
-                    tainted.len()
-                );
-            }
-        }
-    }
+    // The two gates (sidecar + HEAD-tree placeholder tripwire) are extracted
+    // into `assert_sources_clean_for_merge` so `--check` (bn-qw4i) and the
+    // real merge agree on what "ready to merge" means. See that helper's
+    // doc comment for the per-gate rationale (bn-m6ad/bn-3pgl/bn-3oau for
+    // the sidecar; bn-28d1 for the tripwire).
+    assert_sources_clean_for_merge(
+        &root,
+        &ws_to_merge,
+        &workspace_dirs,
+        opts.force,
+        into_target,
+    )?;
 
     if target_updates_epoch {
         guard_unbound_sources_against_active_change_ancestry(&root, branch, &ws_to_merge)?;

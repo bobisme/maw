@@ -1545,6 +1545,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
                     &target.branch,
                     target.change_id.as_deref(),
                     target.updates_epoch,
+                    force,
                 );
             }
             if plan {

@@ -573,3 +573,141 @@ fn merge_gate_tripwire_ignores_legitimate_content() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-qw4i: --check honors the source-conflict precondition
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_check_refuses_workspace_with_unresolved_rebase_conflict() {
+    // bn-qw4i repro: two workspaces edit the same line. Merge the first to
+    // advance the epoch; the second auto-rebases into a conflicted state
+    // (sidecar non-empty, HEAD blob holds a tool-authored placeholder).
+    //
+    // `maw ws merge <second> --into default --check` must refuse with the
+    // same diagnostic the real merge would produce — not "Ready to merge".
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "original\n")]);
+
+    repo.maw_ok(&["ws", "create", "alpha"]);
+    repo.add_file("alpha", "shared.txt", "alpha\n");
+    repo.git_in_workspace("alpha", &["add", "-A"]);
+    repo.git_in_workspace("alpha", &["commit", "-m", "alpha"]);
+
+    repo.maw_ok(&["ws", "create", "beta"]);
+    repo.add_file("beta", "shared.txt", "beta\n");
+    repo.git_in_workspace("beta", &["add", "-A"]);
+    repo.git_in_workspace("beta", &["commit", "-m", "beta"]);
+
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "alpha",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge alpha",
+    ]);
+
+    let _ = repo.maw_raw(&["ws", "sync", "beta", "--rebase"]);
+
+    let sidecar = repo
+        .read_conflict_tree_sidecar("beta")
+        .expect("rebase should have written conflict-tree.json");
+    let conflicts = sidecar
+        .get("conflicts")
+        .and_then(|v| v.as_object())
+        .expect("tree should have a `conflicts` object");
+    assert!(
+        !conflicts.is_empty(),
+        "precondition: sidecar should list at least one conflict"
+    );
+
+    let out = repo.maw_raw(&["ws", "merge", "beta", "--into", "default", "--check"]);
+    assert!(
+        !out.status.success(),
+        "--check must refuse when sidecar has entries — \
+         the real merge would refuse, so --check must too\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("unresolved conflict") || combined.contains("shared.txt"),
+        "error should cite the sidecar-reported conflict; got: {combined}"
+    );
+    assert!(
+        !combined.contains("Ready to merge"),
+        "--check must NOT report 'Ready to merge' when sidecar has entries; got: {combined}"
+    );
+}
+
+#[test]
+fn merge_check_with_force_bypasses_sidecar_gate_like_real_merge() {
+    // bn-qw4i: --force bypasses the sidecar gate on the real merge path,
+    // so it must also bypass on --check. Without --force, the gate refuses.
+    // With --force, the sidecar gate is skipped and --check proceeds to the
+    // build phase — which (for this scenario) produces structured engine
+    // conflicts, so --check still reports BLOCKED but with a different,
+    // post-gate diagnostic. The point: --force changes the failure mode in
+    // the same way it changes it on the real merge.
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "original\n")]);
+
+    repo.maw_ok(&["ws", "create", "alpha"]);
+    repo.add_file("alpha", "shared.txt", "alpha\n");
+    repo.git_in_workspace("alpha", &["add", "-A"]);
+    repo.git_in_workspace("alpha", &["commit", "-m", "alpha"]);
+
+    repo.maw_ok(&["ws", "create", "beta"]);
+    repo.add_file("beta", "shared.txt", "beta\n");
+    repo.git_in_workspace("beta", &["add", "-A"]);
+    repo.git_in_workspace("beta", &["commit", "-m", "beta"]);
+
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "alpha",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "merge alpha",
+    ]);
+
+    let _ = repo.maw_raw(&["ws", "sync", "beta", "--rebase"]);
+
+    let no_force = repo.maw_raw(&["ws", "merge", "beta", "--into", "default", "--check"]);
+    let no_force_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&no_force.stdout),
+        String::from_utf8_lossy(&no_force.stderr)
+    );
+    assert!(
+        !no_force.status.success(),
+        "without --force, --check must refuse: {no_force_combined}"
+    );
+    assert!(
+        no_force_combined.contains("unresolved conflict")
+            || no_force_combined.contains("shared.txt"),
+        "without --force, --check must cite the sidecar conflict; got: {no_force_combined}"
+    );
+
+    let with_force = repo.maw_raw(&[
+        "ws", "merge", "beta", "--into", "default", "--check", "--force",
+    ]);
+    let with_force_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&with_force.stdout),
+        String::from_utf8_lossy(&with_force.stderr)
+    );
+    assert!(
+        !with_force_combined.contains("unresolved conflict"),
+        "with --force, --check must bypass the sidecar gate (no 'unresolved conflict' \
+         diagnostic); got: {with_force_combined}"
+    );
+}
