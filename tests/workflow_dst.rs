@@ -509,19 +509,27 @@ fn workflow_stale_sync_skip(repo: &TestRepo, state: &mut ScenarioState) -> Resul
         &format!("feat: {advancer}"),
     );
 
+    // Two updates required by bn-6q05:
+    // 1. Disable post-merge auto-rebase on the advancer merge so the sibling
+    //    `ahead` workspace stays stale-and-ahead (post-bn-3vf5 default would
+    //    transparently rebase it, defeating this scenario).
+    // 2. Probe `sync --all` with `--no-rebase` so we exercise the skip-and-warn
+    //    contract; default `sync --all` now rebases ahead workspaces so the
+    //    INCOMPLETE-with-skip path is only reachable via --no-rebase.
     repo.maw_ok(&[
         "ws",
         "merge",
         &advancer,
         "--destroy",
+        "--no-auto-rebase",
         "--message",
         &format!("merge {advancer}"),
     ]);
 
-    let out = repo.maw_raw(&["ws", "sync", "--all"]);
+    let out = repo.maw_raw(&["ws", "sync", "--all", "--no-rebase"]);
     if out.status.success() {
         return Err(format!(
-            "sync --all should fail when {ahead} is stale and ahead\nstdout: {}\nstderr: {}",
+            "sync --all --no-rebase should fail when {ahead} is stale and ahead\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ));
@@ -534,7 +542,7 @@ fn workflow_stale_sync_skip(repo: &TestRepo, state: &mut ScenarioState) -> Resul
         && stderr.contains("sync --all incomplete"))
     {
         return Err(format!(
-            "sync --all contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
+            "sync --all --no-rebase contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
         ));
     }
 
@@ -635,12 +643,17 @@ fn workflow_change_isolation(repo: &TestRepo, state: &mut ScenarioState) -> Resu
         "feat: change worker",
     );
 
+    // The change was created with `--workspace <change_id>`, so a workspace
+    // with the same name as the change id exists. A bare `--into <change_id>`
+    // is correctly rejected as ambiguous; the `change:` prefix disambiguates
+    // (bn-6q05).
+    let change_target = format!("change:{change_id}");
     let merge_out = repo.maw_ok(&[
         "ws",
         "merge",
         &worker,
         "--into",
-        &change_id,
+        &change_target,
         "--destroy",
         "--message",
         "feat: merge into change",

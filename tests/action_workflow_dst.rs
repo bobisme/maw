@@ -895,12 +895,17 @@ fn run_action(
             state
                 .tracked_commit_oids
                 .insert(repo.workspace_head(&worker));
+            // The change was created with `--workspace <change_id>`, so a
+            // workspace with the same name as the change id exists. A bare
+            // `--into <change_id>` is correctly rejected as ambiguous; the
+            // `change:` prefix disambiguates (bn-6q05).
+            let change_target = format!("change:{change_id}");
             let merge_out = repo.maw_ok(&[
                 "ws",
                 "merge",
                 &worker,
                 "--into",
-                &change_id,
+                &change_target,
                 "--destroy",
                 "--message",
                 "feat: merge into change",
@@ -929,11 +934,17 @@ fn run_action(
                 repo.git_in_workspace(name, &["commit", "-m", &format!("feat: {name}")]);
                 state.tracked_commit_oids.insert(repo.workspace_head(name));
             }
+            // bn-3vf5 made post-merge auto-rebase default behavior; without
+            // --no-auto-rebase, the sibling `ahead` workspace would be
+            // transparently brought current at this merge, defeating this
+            // scenario's intent of creating a stale-ahead workspace whose
+            // existence sync --all must refuse to silently ignore (bn-6q05).
             let merge_out = repo.maw_ok(&[
                 "ws",
                 "merge",
                 &advancer,
                 "--destroy",
+                "--no-auto-rebase",
                 "--message",
                 "feat: advance epoch",
             ]);
@@ -945,10 +956,16 @@ fn run_action(
             Ok(format!("created stale-ahead sync case for {ahead}"))
         }
         ActionKind::SyncAll => {
-            let out = repo.maw_raw(&["ws", "sync", "--all"]);
+            // The safety contract being tested is: a workspace with ahead
+            // commits is not silently clobbered. Default `sync --all` now
+            // rebases ahead workspaces (post bn-3vf5 era), so to exercise
+            // the skip-and-warn path explicitly, drive `--no-rebase` and
+            // assert the ahead workspace is the one that gets skipped
+            // (bn-6q05).
+            let out = repo.maw_raw(&["ws", "sync", "--all", "--no-rebase"]);
             if out.status.success() {
                 return Err(format!(
-                    "sync --all should fail when stale ahead cases exist\nstdout: {}\nstderr: {}",
+                    "sync --all --no-rebase should fail when stale ahead cases exist\nstdout: {}\nstderr: {}",
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 ));
@@ -962,7 +979,7 @@ fn run_action(
                     || stderr.contains("sync --all failed")))
             {
                 return Err(format!(
-                    "sync --all contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
+                    "sync --all --no-rebase contract mismatch\nstdout: {stdout}\nstderr: {stderr}"
                 ));
             }
             let status = parse_json(
