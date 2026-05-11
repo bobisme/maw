@@ -25,9 +25,8 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
-use maw_git::{GitRepo, GixRepo, RefName};
+use maw_git::{GitRepo, GixRepo};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::file_id::FileIdMap;
@@ -276,26 +275,32 @@ fn collect_one<B: WorkspaceBackend>(
     // Deleted files: no content; look up FileId from epoch map.
     //
     // Phantom-deletion filter: the snapshot diffs the working tree against the
-    // *current* epoch, but this workspace may be based on an older epoch.
-    // Files added by other workspaces (and already merged into the current
-    // epoch) show up as "Deleted" here because the worker never had them.
+    // *current* (global) epoch, but this workspace may be based on a different
+    // commit. Files added by another path (e.g., merged into a branch-attached
+    // workspace target) that the worker never had show up as "Deleted" here.
     // These are phantom deletions — skip them so the merge engine doesn't
     // remove files the worker never touched.
     //
-    // IMPORTANT: We must check against the workspace's *creation* epoch, not
-    // its current HEAD. Agents may commit changes inside a workspace (e.g.
-    // `git rm foo && git commit`), advancing HEAD beyond the creation epoch.
-    // If a committed deletion moves HEAD to a commit where the file is absent,
-    // checking HEAD would incorrectly classify the deletion as phantom.
+    // The right tree to check existence against is `epoch` — i.e.
+    // `status.base_epoch`, the workspace's per-workspace baseline ref. That
+    // ref tracks the commit the workspace was created from (and advanced to
+    // by sync / auto-rebase), and is unaffected by agent commits inside the
+    // workspace — so a committed `git rm foo` still correctly resolves "did
+    // foo exist at this workspace's creation point?" without confusing the
+    // filter.
     //
-    // `workspace_creation_epoch()` finds the original epoch by computing the
-    // merge-base of the workspace HEAD with the current epoch ref. This is
-    // the commit the workspace was initially created from.
-    let creation_epoch = workspace_creation_epoch(root_repo.as_ref(), &epoch);
+    // bn-3bl2: previously this used `merge_base(epoch, global_current_epoch)`
+    // to compute a "creation epoch". When the global epoch lagged behind the
+    // workspace's per-workspace baseline (the typical shape for cleanup
+    // workspaces created from a branch-attached merge target), the merge-base
+    // walked past the workspace's true creation point all the way back to
+    // the global epoch, where the file never existed — so real deletions
+    // were silently dropped. The merge-base step solved a problem that
+    // no longer exists once `epoch` is the per-workspace baseline.
     for path in &snapshot.deleted {
         if !root_repo
             .as_ref()
-            .is_some_and(|r| path_exists_at_commit(r, &creation_epoch, path))
+            .is_some_and(|r| path_exists_at_commit(r, &epoch, path))
         {
             // File doesn't exist at the workspace's creation epoch — it was
             // added after this workspace was created. Not a real deletion.
@@ -312,46 +317,6 @@ fn collect_one<B: WorkspaceBackend>(
     }
 
     Ok(PatchSet::new(ws_id.clone(), epoch, changes))
-}
-
-/// Determine the epoch a workspace was originally created from.
-///
-/// Agents may commit changes inside a workspace, advancing HEAD beyond the
-/// epoch the workspace was created at. The `status().base_epoch` returns HEAD,
-/// which is wrong for the phantom-deletion filter when the agent has committed
-/// deletions.
-///
-/// Computes `merge_base(ws_head, current_epoch)` to find the fork point — the
-/// original creation epoch. Falls back to `ws_head` when:
-/// - The repo is unavailable
-/// - The epoch ref does not exist
-/// - HEAD equals the current epoch (no agent commits)
-/// - The merge-base lookup fails
-fn workspace_creation_epoch(root_repo: Option<&GixRepo>, ws_head: &EpochId) -> EpochId {
-    let Some(repo) = root_repo else {
-        return ws_head.clone();
-    };
-
-    // Read the current epoch ref from the bare repo's ref store.
-    let epoch_ref = RefName::new("refs/manifold/epoch/current").expect("static ref name is valid");
-    let Ok(Some(current_epoch)) = repo.read_ref(&epoch_ref) else {
-        return ws_head.clone();
-    };
-
-    // If HEAD already equals the current epoch, no agent commits were made.
-    if ws_head.as_str() == current_epoch.to_string() {
-        return ws_head.clone();
-    }
-
-    // Compute merge-base(ws_head, current_epoch). Refs are shared with the
-    // workspace worktree, so we can use the bare repo here.
-    let Ok(head_oid) = maw_git::GitOid::from_str(ws_head.as_str()) else {
-        return ws_head.clone();
-    };
-    match repo.merge_base(head_oid, current_epoch) {
-        Ok(Some(mb)) => EpochId::new(&mb.to_string()).unwrap_or_else(|_| ws_head.clone()),
-        _ => ws_head.clone(),
-    }
 }
 
 /// Check whether a file path exists in a given git commit's tree.
@@ -782,6 +747,100 @@ mod tests {
             change.kind
         );
         assert!(change.content.is_none(), "deletions have no content");
+    }
+
+    /// bn-3bl2 regression: when a workspace's per-workspace baseline is at a
+    /// commit *ahead* of the global epoch ref (the typical shape for a
+    /// cleanup workspace created from a branch-attached merge target), an
+    /// agent's committed deletion of a file that exists at the baseline but
+    /// not at the global epoch must still be captured. Previously the
+    /// phantom-deletion filter walked back to the global epoch via merge-base
+    /// and classified the deletion as phantom because the file didn't exist
+    /// at that earlier tree, silently dropping it.
+    #[test]
+    fn collect_committed_deletion_when_baseline_ahead_of_global_epoch() {
+        let (temp_dir, global_epoch) = setup_git_repo();
+        let root = temp_dir.path();
+        let backend = GitWorktreeBackend::new(root.to_path_buf());
+
+        // Add a second commit that introduces `a.go`. This is the workspace's
+        // per-workspace baseline — ahead of `global_epoch`, which is still the
+        // initial commit.
+        fs::write(root.join("a.go"), "a content").expect("operation should succeed");
+        Command::new("git")
+            .args(["add", "a.go"])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+        Command::new("git")
+            .args(["commit", "-m", "add a.go"])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+        let ws_baseline_oid = git_head_oid(root);
+        let ws_baseline = EpochId::new(&ws_baseline_oid).expect("operation should succeed");
+
+        // Wire refs: global epoch lags at the initial commit; the per-workspace
+        // baseline points at the commit that has `a.go`.
+        Command::new("git")
+            .args([
+                "update-ref",
+                "refs/manifold/epoch/current",
+                global_epoch.as_str(),
+            ])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+
+        let ws_id = WorkspaceId::new("ahead-baseline").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &ws_baseline)
+            .expect("operation should succeed");
+        Command::new("git")
+            .args([
+                "update-ref",
+                "refs/manifold/epoch/ws/ahead-baseline",
+                ws_baseline.as_str(),
+            ])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+
+        // Sanity: a.go exists in the workspace worktree (it was at HEAD when
+        // the workspace was created).
+        assert!(
+            info.path.join("a.go").exists(),
+            "workspace should start with a.go materialized"
+        );
+
+        // Agent commits a deletion inside the workspace.
+        Command::new("git")
+            .args(["rm", "a.go"])
+            .current_dir(&info.path)
+            .output()
+            .expect("operation should succeed");
+        Command::new("git")
+            .args(["commit", "-m", "delete a.go"])
+            .current_dir(&info.path)
+            .output()
+            .expect("operation should succeed");
+
+        let results =
+            collect_snapshots(root, &backend, &[ws_id]).expect("operation should succeed");
+        let ps = &results[0];
+
+        let deletions: Vec<_> = ps
+            .changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Deleted))
+            .collect();
+        assert_eq!(
+            deletions.len(),
+            1,
+            "deletion of a.go must be captured even though it doesn't exist at the global epoch: {:?}",
+            ps.changes
+        );
+        assert_eq!(deletions[0].path, PathBuf::from("a.go"));
     }
 
     /// Deletion-only workspace: `PatchSet` reports all deletions, none are filtered.

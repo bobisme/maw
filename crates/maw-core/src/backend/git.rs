@@ -170,6 +170,20 @@ impl GitWorktreeBackend {
         EpochId::new(&oid_str).ok()
     }
 
+    /// Get the workspace's per-workspace baseline OID from
+    /// `refs/manifold/epoch/ws/<name>`, if the ref exists.
+    ///
+    /// This is the commit the workspace was created from (or advanced to by
+    /// sync / auto-rebase); used as the diff base for `snapshot()` so that
+    /// branch-attached-target work flows correctly diff against their actual
+    /// starting tree rather than the lagging global epoch (bn-3bl2).
+    fn workspace_baseline_opt(&self, name: &WorkspaceId) -> Option<String> {
+        let ref_str = manifold_refs::workspace_epoch_ref(name.as_str());
+        let ref_name = maw_git::RefName::new(&ref_str).ok()?;
+        let git_oid = self.repo.read_ref(&ref_name).ok()??;
+        Some(git_oid.to_string())
+    }
+
     /// Returns true if `ancestor` is an ancestor of (or equal to) `descendant`.
     ///
     /// Returns `false` on any error (e.g., unparseable OID).
@@ -599,13 +613,25 @@ impl WorkspaceBackend for GitWorktreeBackend {
     ///
     /// # Implementation
     ///
-    /// The diff base is the **epoch** (from `refs/manifold/epoch/current`), NOT
-    /// the workspace's HEAD. Agents may commit changes inside a workspace,
-    /// which advances HEAD beyond the epoch. If we diffed against HEAD, those
-    /// committed changes would be invisible and the merge engine would see an
-    /// empty workspace.
+    /// The diff base is the **workspace's per-workspace baseline**
+    /// (`refs/manifold/epoch/ws/<name>`), NOT the workspace's HEAD. Agents may
+    /// commit changes inside a workspace, which advances HEAD beyond the
+    /// baseline. If we diffed against HEAD, those committed changes would be
+    /// invisible and the merge engine would see an empty workspace.
     ///
-    /// 1. `git diff --name-status <epoch>` — all changes (committed + uncommitted)
+    /// bn-3bl2: prior versions diffed against the **global** epoch ref
+    /// (`refs/manifold/epoch/current`), which is fine when the workspace's
+    /// baseline equals the global epoch but silently loses changes when they
+    /// diverge — the canonical shape being a cleanup workspace created from a
+    /// branch-attached merge target. There, files were introduced into the
+    /// target (and the workspace's baseline) without advancing the global
+    /// epoch; when the cleanup workspace committed `git rm <file>`, the diff
+    /// against the global epoch (which never had the file) showed no change,
+    /// and the deletion was silently dropped at merge time.
+    ///
+    /// Resolution order: per-workspace baseline → global epoch → HEAD.
+    ///
+    /// 1. `git diff --name-status <baseline>` — all changes (committed + uncommitted)
     /// 2. `git ls-files --others --exclude-standard` — untracked files
     fn snapshot(&self, name: &WorkspaceId) -> Result<SnapshotResult, Self::Error> {
         let ws_path = self.workspace_path(name);
@@ -615,10 +641,14 @@ impl WorkspaceBackend for GitWorktreeBackend {
             });
         }
 
-        // Use the epoch as the diff base, not HEAD.
-        // If the epoch ref is missing, fall back to HEAD (pre-Manifold compat).
+        // Prefer the workspace's per-workspace baseline ref (set at creation,
+        // advanced by sync / auto-rebase); fall back to the global epoch for
+        // legacy workspaces created before the per-workspace ref existed; and
+        // finally to HEAD if neither ref is set (pre-Manifold compat).
         let ws_repo = open_repo_at(&ws_path)?;
-        let base_oid = if let Some(epoch) = self.current_epoch_opt() {
+        let base_oid = if let Some(ws_baseline) = self.workspace_baseline_opt(name) {
+            ws_baseline
+        } else if let Some(epoch) = self.current_epoch_opt() {
             epoch.as_str().to_owned()
         } else {
             let head = ws_repo
