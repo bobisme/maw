@@ -55,7 +55,9 @@ use maw_core::refs as manifold_refs;
 use maw_git::merge::{MergeResult, merge_text};
 use maw_git::{self as git, GitRepo, TreeEdit};
 
-use super::checks::{sync_worktree_to_epoch, workspace_has_uncommitted_changes};
+use super::checks::{
+    sync_worktree_to_epoch, sync_worktree_to_epoch_quiet, workspace_has_uncommitted_changes,
+};
 use super::lock::WorkspaceRebaseLock;
 
 // ---------------------------------------------------------------------------
@@ -371,28 +373,41 @@ pub(super) fn rebase_workspace_run(
                             );
                         }
                     }
-                    Ok(false) => match sync_worktree_to_epoch(root, ws_name, new_epoch) {
-                        Ok(()) => worktree_updated = true,
-                        Err(e) => {
-                            tracing::warn!(
-                                workspace = %ws_name,
-                                error = %e,
-                                "sibling auto-rebase: worktree fast-forward failed; refs still advanced"
-                            );
-                            worktree_skip_reason = format!("worktree update: {e}");
-                            // Refs still need to advance even though checkout failed.
-                            let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
-                            if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &new_core) {
+                    Ok(false) => {
+                        // Sibling auto-rebase calls with print=false so the
+                        // chatty `  ✓ <ws> - synced ...` line doesn't leak
+                        // into the merge summary (regression from bn-103k
+                        // flipping mutate_worktree to true).
+                        let sync_res = if opts.print {
+                            sync_worktree_to_epoch(root, ws_name, new_epoch)
+                        } else {
+                            sync_worktree_to_epoch_quiet(root, ws_name, new_epoch)
+                        };
+                        match sync_res {
+                            Ok(()) => worktree_updated = true,
+                            Err(e) => {
                                 tracing::warn!(
                                     workspace = %ws_name,
-                                    epoch_ref = %epoch_ref,
-                                    oid = %new_core,
                                     error = %e,
-                                    "failed to update workspace epoch ref during sibling auto-rebase"
+                                    "sibling auto-rebase: worktree fast-forward failed; refs still advanced"
                                 );
+                                worktree_skip_reason = format!("worktree update: {e}");
+                                // Refs still need to advance even though checkout failed.
+                                let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
+                                if let Err(e) =
+                                    manifold_refs::write_ref(root, &epoch_ref, &new_core)
+                                {
+                                    tracing::warn!(
+                                        workspace = %ws_name,
+                                        epoch_ref = %epoch_ref,
+                                        oid = %new_core,
+                                        error = %e,
+                                        "failed to update workspace epoch ref during sibling auto-rebase"
+                                    );
+                                }
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         worktree_skip_reason = format!("dirty re-check failed: {e}");
                         let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
@@ -408,7 +423,11 @@ pub(super) fn rebase_workspace_run(
                     }
                 }
             } else {
-                sync_worktree_to_epoch(root, ws_name, new_epoch)?;
+                if opts.print {
+                    sync_worktree_to_epoch(root, ws_name, new_epoch)?;
+                } else {
+                    sync_worktree_to_epoch_quiet(root, ws_name, new_epoch)?;
+                }
                 worktree_updated = true;
             }
         } else {
@@ -1264,10 +1283,18 @@ impl PostRebaseSanityConfig {
 #[derive(Clone, Debug)]
 pub enum SanityFailure {
     /// The merged blob's byte length exceeded
-    /// `size_ratio_max * max(ours, theirs, base)`.
+    /// `size_ratio_max * expected_size`, where `expected_size` is the
+    /// upper bound for a legitimate clean merge:
+    /// `max(ours, theirs) + (ours - base) + (theirs - base)` (saturating).
     SizeDelta {
         merged_len: usize,
+        /// `max(base, ours, theirs)` — surfaced as informational context;
+        /// the threshold check itself is against `expected_size`.
         max_input: usize,
+        /// `max(ours, theirs) + (ours-base) + (theirs-base)`, the upper
+        /// bound used as the threshold's divisor. `ratio = merged_len /
+        /// expected_size`.
+        expected_size: usize,
         ratio: f64,
     },
     /// Both inputs parsed cleanly under the file's tree-sitter grammar
@@ -1282,11 +1309,13 @@ impl std::fmt::Display for SanityFailure {
             Self::SizeDelta {
                 merged_len,
                 max_input,
+                expected_size,
                 ratio,
             } => write!(
                 f,
                 "merged output is {merged_len} bytes; \
-                 {ratio:.2}x larger than the largest input ({max_input} bytes)"
+                 {ratio:.2}x larger than the expected upper bound \
+                 ({expected_size} bytes; largest input was {max_input} bytes)"
             ),
             Self::AstParse { reason } => write!(
                 f,
@@ -1332,6 +1361,7 @@ pub fn check_size_delta(
         return Err(SanityFailure::SizeDelta {
             merged_len: merged.len(),
             max_input,
+            expected_size: expected,
             ratio: f64::INFINITY,
         });
     }
@@ -1340,6 +1370,7 @@ pub fn check_size_delta(
         return Err(SanityFailure::SizeDelta {
             merged_len: merged.len(),
             max_input,
+            expected_size: expected,
             ratio,
         });
     }
@@ -2219,10 +2250,14 @@ mod tests {
             SanityFailure::SizeDelta {
                 merged_len,
                 max_input,
+                expected_size,
                 ratio,
             } => {
                 assert_eq!(merged_len, merged.len());
                 assert_eq!(max_input, 2);
+                // base=2, ours=2, theirs=2 → ours_added=0, theirs_added=0;
+                // expected = max(2,2) + 0 + 0 = 2.
+                assert_eq!(expected_size, 2);
                 assert!(ratio > 1.5);
             }
             SanityFailure::AstParse { .. } => panic!("size-delta check unexpectedly returned AST"),
@@ -2258,10 +2293,12 @@ mod tests {
             SanityFailure::SizeDelta {
                 merged_len,
                 max_input,
+                expected_size,
                 ratio,
             } => {
                 assert_eq!(merged_len, merged.len());
                 assert_eq!(max_input, 0);
+                assert_eq!(expected_size, 0);
                 assert!(ratio.is_infinite());
             }
             SanityFailure::AstParse { .. } => panic!("expected SizeDelta"),

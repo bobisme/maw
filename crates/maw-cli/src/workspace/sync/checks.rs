@@ -92,7 +92,33 @@ pub(super) fn workspace_has_uncommitted_changes(ws_path: &Path) -> Result<bool> 
 /// via snapshot before any merge, so uncommitted changes are not lost
 /// during the normal workflow. However, this function is only called
 /// explicitly by the user/agent via `maw ws sync`.
+///
+/// Emits a success line to stdout. Internal callers that need silence
+/// (sibling auto-rebase, bn-3vf5) should call [`sync_worktree_to_epoch_quiet`]
+/// instead so the merge summary stays clean.
 pub(super) fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str) -> Result<()> {
+    sync_worktree_to_epoch_inner(root, ws_name, epoch_oid, true)
+}
+
+/// Quiet variant of [`sync_worktree_to_epoch`]: same effect, no stdout output.
+///
+/// Used by the sibling auto-rebase orchestrator so its per-sibling summary is
+/// the only line emitted for each sibling — the CLI sync paths still use the
+/// chatty wrapper above.
+pub(super) fn sync_worktree_to_epoch_quiet(
+    root: &Path,
+    ws_name: &str,
+    epoch_oid: &str,
+) -> Result<()> {
+    sync_worktree_to_epoch_inner(root, ws_name, epoch_oid, false)
+}
+
+fn sync_worktree_to_epoch_inner(
+    root: &Path,
+    ws_name: &str,
+    epoch_oid: &str,
+    announce: bool,
+) -> Result<()> {
     let ws_path = root.join("ws").join(ws_name);
     if !ws_path.exists() {
         bail!("Workspace directory does not exist: {}", ws_path.display());
@@ -151,10 +177,12 @@ pub(super) fn sync_worktree_to_epoch(root: &Path, ws_name: &str, epoch_oid: &str
         }
     }
 
-    println!(
-        "  \u{2713} {ws_name} - synced to epoch {}",
-        &epoch_oid[..12]
-    );
+    if announce {
+        println!(
+            "  \u{2713} {ws_name} - synced to epoch {}",
+            &epoch_oid[..12]
+        );
+    }
     Ok(())
 }
 
