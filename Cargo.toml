@@ -2,7 +2,7 @@
 members = [".", "crates/maw-git", "crates/maw-lfs", "crates/maw-core", "crates/maw-cli", "crates/maw-tui", "crates/maw-assurance"]
 
 [workspace.package]
-version = "0.60.8"
+version = "0.60.9"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/bobisme/maw"

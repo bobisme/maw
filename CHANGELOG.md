@@ -2,6 +2,25 @@
 
 All notable changes to maw.
 
+## v0.60.9 — Branch-attached-target deletion drop fix (2026-05-11)
+
+Patch release for a silent regression in `maw ws merge` against branch-attached merge targets, plus a quality-of-life output cleanup.
+
+### Bug fix: deletions silently dropped on cleanup workspaces created from branch-attached merge targets (bn-3bl2)
+
+Regression of bn-129d. `maw ws merge <cleanup> --into change:<id>` silently dropped `git rm` deletions when the cleanup workspace was created from a branch-attached merge target (e.g. `crib2`) whose HEAD had advanced past the global epoch. The canonical reproduction: worker A merges into the change target and deletes files; workers B/C trigger modify/delete conflicts and a `--resolve-all=<worker>` resolution re-introduces the files; a fresh cleanup workspace then `git rm`s and commits them; the merge of cleanup → target reports `0 unique path(s), 0 resolved` and leaves the files in place.
+
+Two converging bugs that the crate-split refactor surfaced:
+
+1. `backend.snapshot()` diffed against the **global** epoch (`refs/manifold/epoch/current`) instead of the workspace's per-workspace baseline (`refs/manifold/epoch/ws/<name>`). When the global epoch lagged behind the workspace baseline — the normal shape after a branch-attached merge — files that were absent at the global epoch but present at the baseline produced an empty diff, so deletions of those files never reached the merge engine.
+2. The phantom-deletion gate in `collect_one` then ran `workspace_creation_epoch(ws_head=status.base_epoch)` which walked back to the global epoch via merge-base. Even if the snapshot did surface a deletion (via a different path), the gate would classify it as phantom because the file didn't exist at that older tree. The merge-base step was originally written when `ws_head` was the workspace's actual git HEAD; the refactor changed the caller to pass the per-workspace baseline, making the merge-base walk past the workspace's true creation point.
+
+Fix: `snapshot()` now reads `refs/manifold/epoch/ws/<name>` first (falling back to the global epoch, then HEAD); the phantom-deletion gate checks existence directly at `status.base_epoch` and drops the merge-base step. Regression test in `crates/maw-core/src/merge/collect.rs` (`collect_committed_deletion_when_baseline_ahead_of_global_epoch`).
+
+### Sibling auto-rebase output is now quieter
+
+New `sync_worktree_to_epoch_quiet` helper is now used by the sibling auto-rebase orchestrator (bn-3vf5 / bn-103k), so a `maw ws merge` summary contains exactly one line per sibling — the per-sibling rebase verdict — instead of also emitting the chatty `synced to epoch <oid>` line for each. CLI sync paths (`maw ws sync`) still use the chatty wrapper.
+
 ## v0.60.8 — Silent-corruption hardening, conflict-as-data merge contract, auto-rebase defaults (2026-05-10)
 
 Patch release rolling up safety fixes that close the last known silent-corruption shapes in `maw ws merge` and `maw ws sync`, plus new default behaviors that absorb routine divergence rather than refusing.

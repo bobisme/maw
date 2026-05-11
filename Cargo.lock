@@ -308,9 +308,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.4"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3e962dae2b1e5007fe9e3db363ddc43a8bf25546d279f7a8a4401204690e80c"
+checksum = "e0a7a9bfdb35811f9e59832f0f05975114d2251b415fb534108e6f34060fd772"
 dependencies = [
  "clap",
 ]
@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "maw-assurance"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "maw-cli"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "maw-core"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "anyhow",
  "maw-git",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "maw-git"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "filetime",
  "gix",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "maw-lfs"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "gix",
  "maw-git",
@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "maw-tui"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "maw-workspaces"
-version = "0.60.8"
+version = "0.60.9"
 dependencies = [
  "anyhow",
  "clap",
