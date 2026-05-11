@@ -149,3 +149,7 @@
 1778533148959269	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyvw0		item.move	bn-3bl2	{"state":"doing"}	blake3:Di5Dqz47Zsx6fLxbtrXOfZzQsWjhya5pnCaaKaA2Rhw
 1778533148965229	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywA0		item.assign	bn-3bl2	{"action":"assign","agent":"maw-dev"}	blake3:VH3dQZjxBFfVGm7xezDgAzeleS6JAmEytC4M5J9N8c0
 1778534073558823	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywQ0		item.move	bn-3bl2	{"state":"done"}	blake3:QJFJ5yK_SKaLlJFol6L-kLu6zkf20vbTmo605xR_Xz8
+1778538413403602	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEywg0		item.create	bn-1ev0	{"description":"Patch release for bn-3bl2 (silent deletion drop on branch-attached-target cleanup workspaces) + sync auto-rebase output cleanup.","kind":"task","size":"s","title":"release v0.60.9"}	blake3:5V03qPt8SwF5w_CUocIomRMqV3HRGnqNmxGYJqTYni0
+1778538419022101	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyww0		item.move	bn-1ev0	{"state":"doing"}	blake3:8J3nk77Bqmn8ad6mGBd-OovvBgsItd7ucyD2JVzK4So
+1778538419025652	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyxA0		item.assign	bn-1ev0	{"action":"assign","agent":"maw-dev"}	blake3:qvl8453v5tbWpeLqGr1RfTg3riBsSQfCUgHW70DltmA
+1778538821505467	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyxQ0		item.move	bn-1ev0	{"state":"done"}	blake3:1s-hQBAm9sUEDRMo-TehrNJXQAACtbWEdtLAG2nGJUc
