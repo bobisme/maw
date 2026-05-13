@@ -547,10 +547,19 @@ pub fn worktree_state_commit(repo: &GixRepo, message: &str) -> Result<Option<Git
                     let target = std::fs::read_link(&full).map_err(|e| GitError::BackendError {
                         message: format!("read symlink '{}': {e}", entry.path),
                     })?;
-                    (
-                        target.to_string_lossy().into_owned().into_bytes(),
-                        EntryMode::Link,
-                    )
+                    // Hash the raw bytes of the symlink target. On Unix the
+                    // target's OsString may legitimately contain non-UTF-8
+                    // bytes; `to_string_lossy()` would replace them with
+                    // U+FFFD and corrupt the blob (mismatching `git stash
+                    // create`).
+                    #[cfg(unix)]
+                    let bytes = {
+                        use std::os::unix::ffi::OsStrExt;
+                        target.as_os_str().as_bytes().to_vec()
+                    };
+                    #[cfg(not(unix))]
+                    let bytes = target.to_string_lossy().into_owned().into_bytes();
+                    (bytes, EntryMode::Link)
                 } else if meta.is_file() {
                     let bytes = std::fs::read(&full).map_err(|e| GitError::BackendError {
                         message: format!("read file '{}': {e}", entry.path),

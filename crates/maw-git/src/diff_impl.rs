@@ -434,16 +434,32 @@ pub fn diff_name_status_pairs(repo: &GixRepo, base: GitOid) -> Result<NameStatus
         }
     }
 
-    // Apply the same precedence the legacy porcelain pipeline used: a path
-    // that appears as Added overrides a Modified classification.
-    let added_vec: Vec<String> = added.into_iter().collect();
-    let deleted_vec: Vec<String> = deleted.into_iter().collect();
-    let mut modified_vec: Vec<String> = modified.into_iter().collect();
-    modified_vec.retain(|p| !added_vec.contains(p));
+    // Reconcile cross-bucket overlaps so each path lives in exactly one
+    // bucket. A path appearing in both `added` and `deleted` was deleted
+    // between base→HEAD and re-added in the worktree (or vice versa) — that
+    // is logically a modification. A path appearing in both `modified` and
+    // `deleted` ended up deleted in the worktree, so deleted wins. A path
+    // in both `added` and `modified` was newly added overall, so added wins.
+    let mut reclassified_modified: BTreeSet<String> = BTreeSet::new();
+    let cross_added_deleted: Vec<String> = added.intersection(&deleted).cloned().collect();
+    for p in &cross_added_deleted {
+        added.remove(p);
+        deleted.remove(p);
+        reclassified_modified.insert(p.clone());
+    }
+    // Deleted wins over Modified.
+    for p in &deleted {
+        modified.remove(p);
+    }
+    // Added wins over Modified.
+    for p in &added {
+        modified.remove(p);
+    }
+    modified.extend(reclassified_modified);
 
     Ok(NameStatusPairs {
-        added: added_vec,
-        modified: modified_vec,
-        deleted: deleted_vec,
+        added: added.into_iter().collect(),
+        modified: modified.into_iter().collect(),
+        deleted: deleted.into_iter().collect(),
     })
 }

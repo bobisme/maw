@@ -548,13 +548,22 @@ fn commit_quarantine_edits(
         return Ok(original_candidate.clone());
     };
     // Quarantine worktrees are created detached (HEAD = raw OID), so we
-    // advance HEAD by rewriting the file directly. Re-aligning the index is
-    // not required here: the on-disk state is already what we just committed.
+    // advance HEAD by rewriting the file directly. We then rebuild the
+    // index from the new HEAD's tree — the old git CLI path ran
+    // `git add -A && git commit`, which left the index matching HEAD.
+    // Without this step the index would still match the pre-fix-forward
+    // commit, causing downstream `git status` / index-vs-HEAD checks to
+    // report phantom staged changes.
     let head_path = ws_repo.git_dir().join("HEAD");
     std::fs::write(&head_path, format!("{new_head}\n")).map_err(|e| {
         QuarantineError::Git(format!(
             "failed to advance HEAD to {new_head} at {}: {e}",
             head_path.display()
+        ))
+    })?;
+    ws_repo.unstage_all().map_err(|e| {
+        QuarantineError::Git(format!(
+            "failed to rebuild index after quarantine commit: {e}"
         ))
     })?;
     GitOid::new(&new_head.to_string())

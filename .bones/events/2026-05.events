@@ -165,3 +165,5 @@
 1778682738142459	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyzw0		item.move	bn-28ky	{"state":"done"}	blake3:hkqrzZDeNih7Uloof1hIA0yd-eJ1r9BU8BzhowsIvEM
 1778682775721000	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0A0		item.move	bn-14gc	{"state":"done"}	blake3:Xg7NZLBPicDKqQRe-UF1lbNF6thzhbfULkXZrwctITI
 1778682806263449	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0Q0		item.move	bn-3lcl	{"state":"done"}	blake3:9cekdJBIpfSkxzBEiHv4MMmTZDBOuOG4hmcbQB24JaQ
+1778684842147515	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0g0		item.move	bn-5rdz	{"state":"done"}	blake3:2_lK7P0uDsgZn0GbLcyUfUj4h4NNFXhwZzQzhin9gpQ
+1778684842263241	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEy0w0		item.move	bn-5kad	{"reason":"auto-completed: all children of bn-5kad are done","state":"done"}	blake3:_pRO8jAv74JDG0P1bw8Btjmj6zy02WaVaRh-GHF77bE
