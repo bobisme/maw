@@ -2956,6 +2956,7 @@ fn sync_ff_paths_in_worktree(
     let _ = ws_repo_post.unstage_all();
 }
 
+#[allow(clippy::too_many_lines)]
 fn sync_target_worktree_to_epoch(
     target_ws_path: &Path,
     target_workspace_name: &str,
@@ -4479,16 +4480,14 @@ fn is_ancestor_commit(
 fn merge_base_commit(ws_path: &Path, left: &str, right: &str) -> Result<Option<String>> {
     let repo = maw_git::GixRepo::open(ws_path)
         .with_context(|| format!("failed to open repo at {}", ws_path.display()))?;
-    let l = match repo.rev_parse_opt(left).context("rev-parse left failed")? {
-        Some(o) => o,
-        None => return Ok(None),
+    let Some(l) = repo.rev_parse_opt(left).context("rev-parse left failed")? else {
+        return Ok(None);
     };
-    let r = match repo
+    let Some(r) = repo
         .rev_parse_opt(right)
         .context("rev-parse right failed")?
-    {
-        Some(o) => o,
-        None => return Ok(None),
+    else {
+        return Ok(None);
     };
     let base = repo.merge_base(l, r).context("merge_base failed")?;
     Ok(base.map(|o| o.to_string()))
