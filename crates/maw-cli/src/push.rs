@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -7,7 +6,7 @@ use maw_git::GitRepo as _;
 use tracing::instrument;
 
 use crate::changes::store::ChangesStore;
-use crate::transport::ManifoldPushArgs;
+use crate::transport::{ManifoldPushArgs, carveout};
 use crate::workspace::{MawConfig, git_cwd, repo_root};
 use maw_core::merge_state::MergeStateFile;
 
@@ -58,10 +57,11 @@ pub fn run(args: &PushArgs) -> Result<()> {
 
     // Step 0: Fetch to ensure we have latest remote state
     // (silently — we just need refs, not a full pull)
-    let _ = Command::new("git")
-        .args(["fetch", "origin", "--no-tags", "--quiet"])
-        .current_dir(&root)
-        .output();
+    let _ = carveout::git_fetch_protocol(
+        &root,
+        &["origin", "--no-tags", "--quiet"],
+        "origin pre-push refresh",
+    );
 
     // Step 1: If --advance, move the branch ref to the current epoch
     if args.advance {
@@ -135,11 +135,7 @@ pub fn run(args: &PushArgs) -> Result<()> {
         #[cfg(feature = "lfs")]
         crate::lfs_push::run(&root, branch, "origin")?;
 
-        let push = Command::new("git")
-            .args(["push", "origin", branch])
-            .current_dir(&root)
-            .output()
-            .context("Failed to run git push")?;
+        let push = carveout::git_push_protocol(&root, &["origin", branch], branch)?;
 
         if !push.status.success() {
             let stderr = String::from_utf8_lossy(&push.stderr);
@@ -188,28 +184,12 @@ pub fn run(args: &PushArgs) -> Result<()> {
 }
 
 fn origin_remote_url(root: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(root)
-        .output()
-        .context("Failed to inspect origin remote")?;
-
-    if out.status.success() {
-        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if url.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(url))
-        }
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let err = stderr.trim();
-        if err.contains("No such remote") {
-            Ok(None)
-        } else {
-            bail!("Failed to inspect origin remote: {err}");
-        }
-    }
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    let url = repo
+        .read_config("remote.origin.url")
+        .map_err(|e| anyhow::anyhow!("Failed to inspect origin remote: {e}"))?;
+    Ok(url.filter(|s| !s.trim().is_empty()))
 }
 
 /// Move the local branch ref to the current epoch.
@@ -402,24 +382,15 @@ fn suggest_advance(root: &std::path::Path, branch: &str) {
             return;
         }
 
-        // Check if epoch is ahead of branch
-        // TODO(gix): rev-list --count has no GitRepo equivalent. Keep CLI for count.
-        let count = Command::new("git")
-            .args(["rev-list", "--count", &format!("{branch_oid}..{epoch_oid}")])
-            .current_dir(root)
-            .output();
-        if let Ok(c) = count {
-            let n: usize = String::from_utf8_lossy(&c.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(0);
-            if n > 0 {
-                println!();
-                println!(
-                    "Hint: epoch is {n} commit(s) ahead of {branch}.\n  \
-                         To push latest work: maw push --advance"
-                );
-            }
+        // Check if epoch is ahead of branch via gix count.
+        if let Ok(n) = repo.count_commits_between(branch_oid, epoch_oid)
+            && n > 0
+        {
+            println!();
+            println!(
+                "Hint: epoch is {n} commit(s) ahead of {branch}.\n  \
+                     To push latest work: maw push --advance"
+            );
         }
     }
 }
@@ -459,28 +430,29 @@ fn active_change_for_epoch(
 
 /// Push unpushed git tags to origin.
 fn push_tags(root: &std::path::Path) -> Result<()> {
-    // Find tags that exist locally but not on the remote
-    let local_tags = Command::new("git")
-        .args(["tag", "--list"])
-        .current_dir(root)
-        .output()
-        .context("Failed to list local tags")?;
+    // Find tags that exist locally (gix list_refs over refs/tags/).
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
-    let remote_tags = Command::new("git")
-        .args(["ls-remote", "--tags", "origin"])
-        .current_dir(root)
-        .output()
-        .context("Failed to list remote tags")?;
+    let Ok(local_refs) = repo.list_refs("refs/tags/") else {
+        return Ok(()); // Silently skip if local tag state is unavailable.
+    };
 
-    if !local_tags.status.success() || !remote_tags.status.success() {
-        return Ok(()); // Silently skip if we can't determine tag state
-    }
-
-    let local: Vec<String> = String::from_utf8_lossy(&local_tags.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+    let local: Vec<String> = local_refs
+        .into_iter()
+        .filter_map(|(name, _)| {
+            name.as_str()
+                .strip_prefix("refs/tags/")
+                .map(std::string::ToString::to_string)
+        })
         .collect();
+
+    // Find tags on the remote via ls-remote (transport carveout).
+    let remote_tags = carveout::git_ls_remote_tags(root, "origin")?;
+
+    if !remote_tags.status.success() {
+        return Ok(()); // Silently skip if we can't determine remote tag state.
+    }
 
     let remote_str = String::from_utf8_lossy(&remote_tags.stdout);
     let remote: Vec<String> = remote_str
@@ -502,17 +474,9 @@ fn push_tags(root: &std::path::Path) -> Result<()> {
 
     println!("Pushing {} tag(s)...", unpushed.len());
     for tag in &unpushed {
-        let push = Command::new("git")
-            .args(["push", "origin", tag])
-            .current_dir(root)
-            .output()
-            .context("Failed to push tag")?;
-
-        if push.status.success() {
-            println!("  Pushed tag: {tag}");
-        } else {
-            let stderr = String::from_utf8_lossy(&push.stderr);
-            tracing::warn!(tag = %tag, "Failed to push tag: {}", stderr.trim());
+        match repo.push_tag("origin", tag) {
+            Ok(()) => println!("  Pushed tag: {tag}"),
+            Err(e) => tracing::warn!(tag = %tag, "Failed to push tag: {e}"),
         }
     }
 
@@ -586,14 +550,14 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
 
     // Check if local branch exists
     let local_oid = match repo.rev_parse_opt(&branch_ref) {
-        Ok(Some(oid)) => oid.to_string(),
+        Ok(Some(oid)) => oid,
         Ok(None) => return SyncStatus::NoLocal,
         Err(e) => return SyncStatus::Unknown(format!("rev-parse {branch_ref} failed: {e}")),
     };
 
     // Check if remote branch exists
     let remote_oid = match repo.rev_parse_opt(&remote_ref) {
-        Ok(Some(oid)) => oid.to_string(),
+        Ok(Some(oid)) => oid,
         Ok(None) => return SyncStatus::NoRemote,
         Err(e) => return SyncStatus::Unknown(format!("rev-parse {remote_ref} failed: {e}")),
     };
@@ -602,61 +566,15 @@ pub fn main_sync_status_inner(root: &std::path::Path, branch: &str) -> SyncStatu
         return SyncStatus::UpToDate;
     }
 
-    // Count commits ahead and behind using rev-list
-    let ahead = Command::new("git")
-        .args(["rev-list", "--count", &format!("{remote_oid}..{local_oid}")])
-        .current_dir(root)
-        .output();
-
-    let behind = Command::new("git")
-        .args(["rev-list", "--count", &format!("{local_oid}..{remote_oid}")])
-        .current_dir(root)
-        .output();
-
-    let ahead_n: usize = match ahead {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            match stdout.trim().parse::<usize>() {
-                Ok(n) => n,
-                Err(e) => {
-                    return SyncStatus::Unknown(format!(
-                        "failed to parse ahead count from git rev-list output {stdout:?}: {e}"
-                    ));
-                }
-            }
-        }
-        Ok(o) => {
-            return SyncStatus::Unknown(format!(
-                "git rev-list ahead check failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ));
-        }
-        Err(e) => {
-            return SyncStatus::Unknown(format!("failed to run git rev-list ahead check: {e}"));
-        }
+    // Count commits ahead and behind via gix.
+    let ahead_n = match repo.count_commits_between(remote_oid, local_oid) {
+        Ok(n) => n as usize,
+        Err(e) => return SyncStatus::Unknown(format!("count_commits_between ahead failed: {e}")),
     };
 
-    let behind_n: usize = match behind {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            match stdout.trim().parse::<usize>() {
-                Ok(n) => n,
-                Err(e) => {
-                    return SyncStatus::Unknown(format!(
-                        "failed to parse behind count from git rev-list output {stdout:?}: {e}"
-                    ));
-                }
-            }
-        }
-        Ok(o) => {
-            return SyncStatus::Unknown(format!(
-                "git rev-list behind check failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ));
-        }
-        Err(e) => {
-            return SyncStatus::Unknown(format!("failed to run git rev-list behind check: {e}"));
-        }
+    let behind_n = match repo.count_commits_between(local_oid, remote_oid) {
+        Ok(n) => n as usize,
+        Err(e) => return SyncStatus::Unknown(format!("count_commits_between behind failed: {e}")),
     };
 
     match (ahead_n, behind_n) {

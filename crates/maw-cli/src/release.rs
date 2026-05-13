@@ -1,9 +1,8 @@
-use std::process::Command;
-
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args;
 use maw_git::GitRepo as _;
 
+use crate::transport::carveout;
 use crate::workspace::{MawConfig, git_cwd, repo_root};
 
 #[derive(Args)]
@@ -119,13 +118,9 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     let commit_info = get_commit_info(&root, &release_oid)?;
     println!("  {branch} -> {commit_info}");
 
-    // Step 2: Push branch to origin
+    // Step 2: Push branch to origin (transport carveout via wrapper).
     println!("Pushing {branch} to origin...");
-    let push = Command::new("git")
-        .args(["push", "origin", branch])
-        .current_dir(&root)
-        .output()
-        .context("Failed to push branch")?;
+    let push = carveout::git_push_protocol(&root, &["origin", branch], branch)?;
 
     if !push.status.success() {
         let stderr = String::from_utf8_lossy(&push.stderr);
@@ -148,13 +143,9 @@ pub fn run(args: &ReleaseArgs) -> Result<()> {
     println!("Creating tag {tag}...");
     create_or_verify_tag(&root, tag, &release_oid)?;
 
-    // Step 4: Push git tag to origin
+    // Step 4: Push git tag to origin (transport carveout via wrapper).
     println!("Pushing tag {tag} to origin...");
-    let push_tag = Command::new("git")
-        .args(["push", "origin", tag])
-        .current_dir(&root)
-        .output()
-        .context("Failed to push git tag")?;
+    let push_tag = carveout::git_push_protocol(&root, &["origin", tag], &format!("tag {tag}"))?;
 
     if !push_tag.status.success() {
         let stderr = String::from_utf8_lossy(&push_tag.stderr);
@@ -230,57 +221,71 @@ fn create_or_verify_tag(root: &std::path::Path, tag: &str, release_oid: &str) ->
         );
     }
 
-    let git_tag = Command::new("git")
-        .args(["tag", tag, release_oid])
-        .current_dir(root)
-        .output()
-        .context("Failed to create git tag")?;
+    // Create a lightweight tag via gix: write refs/tags/<tag> pointing at the
+    // release commit. Atomic ref update gives us the same "create-if-not-exists"
+    // semantics as `git tag <name> <oid>` (errors out if the ref already exists).
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
 
-    if git_tag.status.success() {
-        return Ok(());
-    }
+    let tag_ref = format!("refs/tags/{tag}");
+    let ref_name = maw_git::RefName::new(&tag_ref)
+        .map_err(|e| anyhow::anyhow!("invalid tag ref '{tag_ref}': {e}"))?;
+    let oid: maw_git::GitOid = release_oid
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid release OID '{release_oid}': {e}"))?;
 
-    let stderr = String::from_utf8_lossy(&git_tag.stderr);
-    if stderr.contains("already exists") {
-        let existing_oid = resolve_tag_target_oid(root, tag)?.ok_or_else(|| {
-            anyhow::anyhow!("Git reported that tag {tag} exists, but it could not be resolved")
-        })?;
-        if existing_oid == release_oid {
-            println!(
-                "  Git tag {tag} already exists at {}.",
-                short_oid(release_oid)
-            );
-            return Ok(());
+    // Use atomic_ref_update with `expected_old_oid = ZERO` to assert the tag
+    // does not yet exist — matches `git tag <name>` "already exists" behavior.
+    let edit = maw_git::RefEdit {
+        name: ref_name,
+        new_oid: oid,
+        expected_old_oid: maw_git::GitOid::ZERO,
+    };
+    match repo.atomic_ref_update(&[edit]) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("conflict")
+                || msg.contains("exists")
+                || msg.contains("expected")
+                || msg.contains("MustNotExist")
+            {
+                // Race: another process just wrote the tag. Re-check.
+                let existing_oid = resolve_tag_target_oid(root, tag)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Git reported that tag {tag} exists, but it could not be resolved"
+                    )
+                })?;
+                if existing_oid == release_oid {
+                    println!(
+                        "  Git tag {tag} already exists at {}.",
+                        short_oid(release_oid)
+                    );
+                    return Ok(());
+                }
+                bail!(
+                    "Git tag {tag} was created concurrently at {}, but this release targets {}.\n  \
+                     Refusing to push a tag that points at the wrong commit.",
+                    short_oid(&existing_oid),
+                    short_oid(release_oid)
+                );
+            }
+            bail!("Failed to create git tag: {msg}");
         }
-        bail!(
-            "Git tag {tag} was created concurrently at {}, but this release targets {}.\n  \
-             Refusing to push a tag that points at the wrong commit.",
-            short_oid(&existing_oid),
-            short_oid(release_oid)
-        );
     }
-
-    bail!("Failed to create git tag: {}", stderr.trim());
 }
 
 fn resolve_tag_target_oid(root: &std::path::Path, tag: &str) -> Result<Option<String>> {
-    let tag_ref = format!("refs/tags/{tag}^{{}}");
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &tag_ref])
-        .current_dir(root)
-        .output()
-        .context("Failed to inspect git tag")?;
-
-    if output.status.success() {
-        let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if oid.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(oid))
-        }
-    } else {
-        Ok(None)
-    }
+    let repo = maw_git::GixRepo::open(root)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+    // `<ref>^{}` peels annotated tags to the underlying commit; for lightweight
+    // tags the peel is the commit itself. Use rev_parse_opt to mirror the
+    // previous `git rev-parse --verify --quiet refs/tags/<tag>^{}` behavior.
+    let spec = format!("refs/tags/{tag}^{{}}");
+    let oid = repo
+        .rev_parse_opt(&spec)
+        .map_err(|e| anyhow::anyhow!("Failed to inspect git tag: {e}"))?;
+    Ok(oid.map(|o| o.to_string()))
 }
 
 #[cfg(test)]

@@ -1,7 +1,15 @@
-//! Push operations via git CLI fallback.
+//! Push operations: permanent push/fetch protocol carveouts.
 //!
-//! Push is the one operation kept as a CLI subprocess because gix
-//! does not yet provide a high-level push API.
+//! Push is **kept permanently** as a `git` CLI subprocess: gix-protocol is
+//! too low-level to host a maintained high-level push API today. These
+//! functions are the single chokepoint for outgoing protocol traffic from
+//! `maw-git` and are referenced as "carveout" calls in
+//! `docs/git-subprocess-inventory.md` (bn-28ky).
+//!
+//! Any new push/fetch protocol shellout must live here (or in
+//! `maw-cli`'s `transport::carveout` wrapper), be annotated with
+//! `// CARVEOUT(transport): <reason>`, and be enumerated in the inventory
+//! doc.
 
 use std::process::Command;
 
@@ -24,6 +32,9 @@ fn repo_dir(repo: &GixRepo) -> Result<std::path::PathBuf, GitError> {
         })
 }
 
+/// CARVEOUT(transport): `git push <remote> <refspec>` — gix-protocol push API
+/// is too low-level to host here. Kept permanently. See module docs and
+/// `docs/git-subprocess-inventory.md`.
 pub fn push_branch(
     repo: &GixRepo,
     remote: &str,
@@ -34,6 +45,8 @@ pub fn push_branch(
     let dir = repo_dir(repo)?;
     let refspec = format!("{local_ref}:{remote_ref}");
 
+    // CARVEOUT(transport): outbound git push protocol; gix-protocol is too
+    // low-level for a maintained high-level push API. Kept permanently.
     let mut cmd = Command::new("git");
     cmd.arg("push");
     if force {
@@ -54,9 +67,14 @@ pub fn push_branch(
     Ok(())
 }
 
+/// CARVEOUT(transport): `git push <remote> <tag>` — gix-protocol push API
+/// is too low-level to host here. Kept permanently. See module docs and
+/// `docs/git-subprocess-inventory.md`.
 pub fn push_tag(repo: &GixRepo, remote: &str, tag: &str) -> Result<(), GitError> {
     let dir = repo_dir(repo)?;
 
+    // CARVEOUT(transport): outbound git push protocol for a tag ref. Kept
+    // permanently for the same reason as `push_branch`.
     let output = Command::new("git")
         .args(["push", remote, tag])
         .current_dir(&dir)

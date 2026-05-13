@@ -52,7 +52,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -63,6 +62,76 @@ use maw_core::model::types::{GitOid, WorkspaceId};
 use maw_core::oplog::types::{OpPayload, Operation};
 use maw_core::oplog::write::write_operation_blob;
 use maw_core::refs;
+
+// ---------------------------------------------------------------------------
+// Carveout wrapper — single chokepoint for remaining push/fetch shellouts.
+// ---------------------------------------------------------------------------
+
+/// Push/fetch protocol carveouts.
+///
+/// These functions are the **only** place in `maw-cli` that shells out to
+/// `git push` / `git fetch` / `git ls-remote`. They are kept permanently
+/// because gix-protocol is too low-level to host a maintained high-level
+/// transport API. Every call here is annotated `// CARVEOUT(transport)` and
+/// enumerated in `docs/git-subprocess-inventory.md`.
+///
+/// Local-only queries that used to live alongside push/fetch (rev-list
+/// counts, tag listing, remote-URL lookup, status checks) have been migrated
+/// to `maw-git` gix primitives and must not call into this module.
+pub(crate) mod carveout {
+    use std::path::Path;
+    use std::process::{Command, Output};
+
+    use anyhow::{Context, Result};
+
+    /// CARVEOUT(transport): wrapper for `git push <args>` — kept permanently
+    /// because gix-protocol push is too low-level. All push protocol traffic
+    /// from `maw-cli` flows through this function.
+    pub fn git_push_protocol(root: &Path, argv: &[&str], what: &str) -> Result<Output> {
+        let mut full = Vec::with_capacity(argv.len() + 1);
+        full.push("push");
+        full.extend_from_slice(argv);
+
+        // CARVEOUT(transport): outbound git push protocol. gix-protocol push
+        // is too low-level to wrap. Kept permanently.
+        Command::new("git")
+            .args(&full)
+            .current_dir(root)
+            .output()
+            .with_context(|| format!("Failed to run git push for {what}"))
+    }
+
+    /// CARVEOUT(transport): wrapper for `git fetch <args>` — kept permanently
+    /// because gix-protocol fetch is too low-level for the staging-area
+    /// workflow used by Manifold transport.
+    pub fn git_fetch_protocol(root: &Path, argv: &[&str], what: &str) -> Result<Output> {
+        let mut full = Vec::with_capacity(argv.len() + 1);
+        full.push("fetch");
+        full.extend_from_slice(argv);
+
+        // CARVEOUT(transport): outbound git fetch protocol. gix-protocol fetch
+        // is too low-level to wrap. Kept permanently.
+        Command::new("git")
+            .args(&full)
+            .current_dir(root)
+            .output()
+            .with_context(|| format!("Failed to run git fetch for {what}"))
+    }
+
+    /// CARVEOUT(transport): wrapper for `git ls-remote --tags <remote>` —
+    /// kept permanently because gix has no high-level ls-remote API yet.
+    /// Talks to the remote over the smart protocol, so it is part of the
+    /// transport surface and not a local query.
+    pub fn git_ls_remote_tags(root: &Path, remote: &str) -> Result<Output> {
+        // CARVEOUT(transport): outbound smart-protocol query (ls-remote).
+        // Kept permanently for the same reason as fetch.
+        Command::new("git")
+            .args(["ls-remote", "--tags", remote])
+            .current_dir(root)
+            .output()
+            .context("Failed to list remote tags")
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CLI argument types
@@ -156,11 +225,7 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
     }
 
     // Step 1: Push epoch ref without --force to prevent remote regression.
-    let epoch_push = Command::new("git")
-        .args(["push", remote, epoch_refspec])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git push for epoch ref")?;
+    let epoch_push = carveout::git_push_protocol(root, &[remote, epoch_refspec], "epoch ref")?;
 
     if !epoch_push.status.success() {
         let stderr = String::from_utf8_lossy(&epoch_push.stderr);
@@ -187,11 +252,11 @@ pub fn push_manifold_refs(root: &Path, remote: &str, dry_run: bool) -> Result<()
 
     // Step 2: Push op log heads and workspace state refs with --force.
     // These refs point to blob OIDs where ancestry checks don't apply.
-    let force_push = Command::new("git")
-        .args(["push", "--force", remote, head_refspec, ws_refspec])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git push for manifold head/ws refs")?;
+    let force_push = carveout::git_push_protocol(
+        root,
+        &["--force", remote, head_refspec, ws_refspec],
+        "manifold head/ws refs",
+    )?;
 
     if !force_push.status.success() {
         let stderr = String::from_utf8_lossy(&force_push.stderr);
@@ -375,11 +440,7 @@ fn fetch_into_staging(root: &Path, remote: &str, dry_run: bool) -> Result<()> {
         println!("Fetching refs/manifold/* from {remote}...");
     }
 
-    let fetch = Command::new("git")
-        .args(["fetch", remote, refspec])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git fetch for manifold refs")?;
+    let fetch = carveout::git_fetch_protocol(root, &[remote, refspec], "manifold refs")?;
 
     if !fetch.status.success() {
         let stderr = String::from_utf8_lossy(&fetch.stderr);
