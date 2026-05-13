@@ -307,8 +307,11 @@ fn remove_old_workspaces_dir() -> Result<()> {
     Ok(())
 }
 
-// TODO(gix): symbolic-ref HEAD is not available via GitRepo trait.
-// Keep CLI for now.
+// TODO(gix): writing a *symbolic* HEAD (HEAD -> refs/heads/<branch>) is not in
+// the GitRepo trait — `set_head` only sets detached HEAD. The read side is
+// equally awkward via the trait (no `read_symbolic_ref`). Keep two CLI calls
+// here until a `symbolic_ref(name, target)` primitive lands; this is upgrade
+// path, run once per repo.
 fn fix_git_head() -> Result<()> {
     let head = Command::new("git").args(["symbolic-ref", "HEAD"]).output();
     if let Ok(out) = &head
@@ -343,26 +346,23 @@ fn set_conflict_marker_style() {
     println!("[OK] Skipping jj conflict-marker-style (not required in Manifold mode)");
 }
 
-// TODO(gix): `git ls-tree -r --name-only HEAD` requires recursive tree walk.
-// Keep CLI.
 fn clean_root_source_files() -> Result<()> {
-    let list = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "HEAD"])
-        .output()
-        .context("Failed to list tracked files at HEAD")?;
+    let cwd = std::env::current_dir().context("Could not determine current directory")?;
+    let repo = maw_git::GixRepo::open(&cwd)
+        .map_err(|e| anyhow::anyhow!("Failed to open repo for ls-tree: {e}"))?;
+    let head_oid = repo
+        .rev_parse_opt("HEAD")
+        .map_err(|e| anyhow::anyhow!("Failed to resolve HEAD: {e}"))?
+        .context("Failed to list tracked files: HEAD is missing")?;
 
-    if !list.status.success() {
-        let stderr = String::from_utf8_lossy(&list.stderr);
-        bail!(
-            "Failed to list tracked files: {}\n  Try: git ls-tree -r --name-only HEAD",
-            stderr.trim()
-        );
-    }
+    let entries = repo
+        .walk_tree_blob_paths(head_oid)
+        .map_err(|e| anyhow::anyhow!("Failed to walk HEAD tree: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&list.stdout);
     let mut removed = 0usize;
 
-    for rel in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
+    for entry in &entries {
+        let rel = entry.path.as_str();
         if rel.starts_with("ws/") || rel.starts_with(".manifold/") || rel == ".gitignore" {
             continue;
         }
@@ -386,24 +386,19 @@ fn clean_root_source_files() -> Result<()> {
 /// files (locks/state/cache) even after tracked files are moved to ws/default/.
 /// We surface these explicitly so users don't miss manual cleanup.
 fn warn_remaining_untracked_root_files() {
-    let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain=1", "--untracked-files=all"])
-        .output()
-    else {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Ok(repo) = maw_git::GixRepo::open(&cwd) else {
+        return;
+    };
+    let Ok(untracked) = repo.list_untracked() else {
         return;
     };
 
-    if !output.status.success() {
-        return;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut leftover: Vec<String> = stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("?? "))
-        .map(str::trim)
+    let mut leftover: Vec<String> = untracked
+        .into_iter()
         .filter(|path| !is_ignored_untracked_root_path(path))
-        .map(ToString::to_string)
         .collect();
 
     if leftover.is_empty() {

@@ -41,6 +41,10 @@ fn parse_git_version(version_output: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Get the installed git version by running `git --version`.
+///
+/// Diagnostic carveout: the whole point of this check is to inspect the
+/// user's installed git CLI binary. gix's compiled-in version is irrelevant
+/// for the warn-if-old check.
 fn get_git_version() -> Option<(u32, u32, u32)> {
     let output = Command::new("git").arg("--version").output().ok()?;
     if !output.status.success() {
@@ -159,6 +163,10 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     Ok(())
 }
 
+/// Diagnostic carveout: probes the user's installed `<name>` binary (here:
+/// "git", "git-lfs", etc.) to surface its presence and version in `maw doctor`.
+/// This is intentionally a subprocess: it's checking the external tool, not
+/// performing a repo operation.
 fn check_tool(name: &str, args: &[&str], install_url: &str) -> DoctorCheck {
     match Command::new(name).args(args).output() {
         Ok(output) if output.status.success() => {
@@ -313,47 +321,55 @@ fn is_valid_default_worktree(root: &Path, default_ws: &Path) -> bool {
     is_registered_worktree(root, default_ws)
 }
 
-// TODO(gix): `git rev-parse --is-inside-work-tree` has no GitRepo equivalent. Keep CLI.
+/// Returns true if `path` resolves to a git work tree.
+///
+/// Replaces `git rev-parse --is-inside-work-tree`. We open the repo at
+/// `path` (which walks parents) and confirm the discovered `.git` dir is a
+/// linked-worktree gitdir or a non-bare repo — i.e. there is a real working
+/// tree associated with the path. Bare repos have no gitdir distinct from
+/// their root, so we fall back to checking that `path` resolves under a
+/// listed worktree's directory.
 fn is_inside_worktree(path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(path)
-        .output();
+    use maw_git::GitRepo as _;
 
-    let Ok(output) = output else {
+    // A linked worktree has a `.git` file that points at
+    // <common-dir>/worktrees/<name>/. If `.git` exists at the path (as either
+    // a file or directory), it's a working tree.
+    if path.join(".git").exists() {
+        return true;
+    }
+    // Fallback: ask the repo for its worktree list and check if `path` is in it.
+    let Ok(canon) = std::fs::canonicalize(path) else {
         return false;
     };
-
-    if !output.status.success() {
+    let Ok(repo) = maw_git::GixRepo::open(path) else {
         return false;
-    }
-
-    String::from_utf8_lossy(&output.stdout).trim() == "true"
+    };
+    let Ok(worktrees) = repo.worktree_list() else {
+        return false;
+    };
+    worktrees.iter().any(|wt| {
+        let listed = std::fs::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone());
+        listed == canon
+    })
 }
 
-// TODO(gix): could use GitRepo::worktree_list() but would need repo open.
+/// Returns true if `ws_path` is a registered worktree of the repo at `root`.
+///
+/// Uses `GitRepo::worktree_list` and compares canonicalized paths.
 fn is_registered_worktree(root: &Path, ws_path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(root)
-        .output();
+    use maw_git::GitRepo as _;
 
-    let Ok(output) = output else {
+    let Ok(repo) = maw_git::GixRepo::open(root) else {
+        return false;
+    };
+    let Ok(worktrees) = repo.worktree_list() else {
         return false;
     };
 
-    if !output.status.success() {
-        return false;
-    }
-
     let ws_path = std::fs::canonicalize(ws_path).unwrap_or_else(|_| ws_path.to_path_buf());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().any(|line| {
-        let Some(path) = line.strip_prefix("worktree ") else {
-            return false;
-        };
-        let listed = Path::new(path.trim());
-        let listed = std::fs::canonicalize(listed).unwrap_or_else(|_| listed.to_path_buf());
+    worktrees.iter().any(|wt| {
+        let listed = std::fs::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone());
         listed == ws_path
     })
 }
@@ -512,19 +528,16 @@ fn check_stale_head_refs(root: Option<&Path>) -> DoctorCheck {
 }
 
 fn check_git_head() -> DoctorCheck {
-    let output = Command::new("git").args(["symbolic-ref", "HEAD"]).output();
+    // Read the HEAD file directly to determine if it's symbolic. A symbolic
+    // HEAD has the form "ref: refs/heads/<branch>\n"; a detached HEAD contains
+    // only an OID. We read the common-dir HEAD because that's the canonical
+    // location for the maw bare repo's branch pointer.
+    let head_ref_name = crate::workspace::repo_root()
+        .ok()
+        .and_then(|root| read_symbolic_head_target(&root));
 
-    match output {
-        Ok(out) if out.status.success() => {
-            let head_ref = String::from_utf8_lossy(&out.stdout);
-            DoctorCheck {
-                name: "git HEAD".to_string(),
-                status: "ok".to_string(),
-                message: format!("git HEAD: {}", head_ref.trim()),
-                fix: None,
-            }
-        }
-        _ => {
+    head_ref_name.map_or_else(
+        || {
             let root = crate::workspace::repo_root().unwrap_or_else(|_| ".".into());
             let branch = crate::workspace::MawConfig::load(&root)
                 .map_or_else(|_| "main".to_string(), |c| c.branch().to_string());
@@ -536,8 +549,27 @@ fn check_git_head() -> DoctorCheck {
                     "Fix: git symbolic-ref HEAD refs/heads/{branch}  (or run: maw init)"
                 )),
             }
-        }
-    }
+        },
+        |name| DoctorCheck {
+            name: "git HEAD".to_string(),
+            status: "ok".to_string(),
+            message: format!("git HEAD: {name}"),
+            fix: None,
+        },
+    )
+}
+
+/// Returns the symbolic ref target of HEAD (e.g. `refs/heads/main`), or `None`
+/// if HEAD is detached or cannot be read.
+///
+/// Open the repo via gix so we honour the same common-dir discovery that
+/// `git symbolic-ref HEAD` uses (worktrees, repo.git layout, etc.).
+fn read_symbolic_head_target(root: &Path) -> Option<String> {
+    let repo = maw_git::GixRepo::open(root).ok()?;
+    let head_path = repo.common_dir().join("HEAD");
+    let content = std::fs::read_to_string(&head_path).ok()?;
+    let target = content.trim().strip_prefix("ref:")?;
+    Some(format!("ref: {}", target.trim()))
 }
 
 // ---------------------------------------------------------------------------

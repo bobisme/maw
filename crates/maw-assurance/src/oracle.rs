@@ -244,6 +244,12 @@ pub fn capture_state(root: &Path) -> Result<AssuranceState, AssuranceViolation> 
 }
 
 /// Read all refs from the repository.
+//
+// TODO(gix): assurance carveout — the oracle is intentionally an *independent*
+// verifier. Using git CLI for the oracle keeps its code path distinct from the
+// production gix code paths it is verifying, so a bug in gix cannot mask a
+// genuine invariant violation. Migrating these calls to maw-git would couple
+// the verifier to its subject. Keep CLI here.
 fn read_all_refs(root: &Path) -> Result<HashMap<String, String>, AssuranceViolation> {
     let output = Command::new("git")
         .args(["for-each-ref", "--format=%(refname) %(objectname)"])
@@ -323,6 +329,7 @@ fn discover_workspaces(
 }
 
 /// Read the HEAD OID for a workspace directory.
+// TODO(gix): assurance carveout — see read_all_refs above. CLI kept on purpose.
 fn read_workspace_head(repo_root: &Path, ws_path: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -339,6 +346,7 @@ fn read_workspace_head(repo_root: &Path, ws_path: &Path) -> Option<String> {
 }
 
 /// Check if a workspace has dirty (uncommitted) changes.
+// TODO(gix): assurance carveout — see read_all_refs above.
 fn check_workspace_dirty(ws_path: &Path) -> bool {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -393,6 +401,7 @@ pub fn check_g1_reachability(
 }
 
 /// Check if an OID is an ancestor of any ref target in the given ref set.
+// TODO(gix): assurance carveout — independent ancestry check via git CLI.
 fn is_oid_reachable(
     root: &Path,
     oid: &str,
@@ -534,6 +543,7 @@ pub fn check_g3_commit_monotonicity(
     }
 
     // Post epoch must be a descendant of pre epoch
+    // TODO(gix): assurance carveout — see read_all_refs.
     let output = Command::new("git")
         .args(["merge-base", "--is-ancestor", pre_epoch, post_epoch])
         .current_dir(&post.repo_root)
@@ -603,6 +613,7 @@ pub fn check_g4_destructive_gate(
 /// Returns `AssuranceViolation::RecoveryNotDiscoverable` if a recovery ref
 /// cannot be resolved.
 pub fn check_g5_discoverability(post: &AssuranceState) -> Result<(), AssuranceViolation> {
+    // TODO(gix): assurance carveout — git CLI provides independent verification.
     for (ref_name, expected_oid) in &post.recovery_refs {
         let output = Command::new("git")
             .args(["rev-parse", "--verify", ref_name])
@@ -646,6 +657,7 @@ pub fn check_g5_discoverability(post: &AssuranceState) -> Result<(), AssuranceVi
 /// Returns `AssuranceViolation::RecoveryNotSearchable` if a recovery ref
 /// points to a non-commit or unreadable object.
 pub fn check_g6_searchability(post: &AssuranceState) -> Result<(), AssuranceViolation> {
+    // TODO(gix): assurance carveout — git CLI provides independent verification.
     for (ref_name, oid) in &post.recovery_refs {
         let output = Command::new("git")
             .args(["cat-file", "-t", oid])

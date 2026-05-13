@@ -388,6 +388,11 @@ pub struct CommitInfo {
     pub author: String,
     /// Committer identity string.
     pub committer: String,
+    /// Committer time as Unix epoch seconds (UTC).
+    ///
+    /// Mirrors `git log -1 --format=%ct`. Used by ref GC to threshold recovery
+    /// refs by age. `0` is a sentinel for "missing/unparseable timestamp".
+    pub committer_time: i64,
 }
 
 // ---------------------------------------------------------------------------

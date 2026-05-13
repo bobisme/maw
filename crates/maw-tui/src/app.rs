@@ -472,6 +472,12 @@ impl App {
         }
 
         // Epoch hash from refs/manifold/epoch/current
+        // TODO(gix): maw-tui has no maw-git dependency by design (kept lean for
+        // ratatui-only consumers). Migrating these read-only diagnostic queries
+        // would require either depending on maw-git or extending the
+        // RepoDataSource trait with ref/diff/log primitives. Tracked under
+        // bn-5kad as a follow-up; CLI subprocess is acceptable for a read-only
+        // TUI dashboard.
         if let Some(output) = Command::new("git")
             .args(["rev-parse", "--short=7", "refs/manifold/epoch/current"])
             .current_dir(&repo_root)
@@ -542,6 +548,7 @@ impl App {
     }
 
     /// Get files changed between epoch and workspace head.
+    // TODO(gix): see fetch_header_info — no maw-git dep on maw-tui by design.
     fn fetch_epoch_diff(repo_root: &Path, ws_path: &Path) -> Vec<(FileStatus, String)> {
         let output = Command::new("git")
             .args([
@@ -584,6 +591,7 @@ impl App {
     }
 
     /// Get commit count and last activity (seconds ago) for a workspace.
+    // TODO(gix): see fetch_header_info — no maw-git dep on maw-tui by design.
     fn fetch_commit_info(repo_root: &Path, ws_path: &Path) -> (u32, Option<u64>) {
         // Commit count: number of commits between epoch and HEAD
         let count_output = Command::new("git")
@@ -627,6 +635,7 @@ impl App {
     }
 
     /// Get dirty (uncommitted) files in a workspace as status entries.
+    // TODO(gix): see fetch_header_info — no maw-git dep on maw-tui by design.
     fn fetch_dirty_files(ws_path: &Path) -> Vec<(FileStatus, String)> {
         let output = Command::new("git")
             .args(["status", "--porcelain"])
@@ -671,6 +680,7 @@ impl App {
     }
 
     /// Check if workspace has uncommitted changes.
+    // TODO(gix): see fetch_header_info — no maw-git dep on maw-tui by design.
     fn check_dirty(ws_path: &Path) -> bool {
         let output = Command::new("git")
             .args(["status", "--porcelain"])

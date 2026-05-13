@@ -16,7 +16,6 @@
 //! (default: 30 days), based on the commit timestamp of the referenced commit.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -125,7 +124,7 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
     let cutoff = now.saturating_sub(older_than_days.saturating_mul(86_400));
 
     for (ref_name, oid) in &recovery_refs {
-        let commit_ts = get_commit_timestamp(root, oid.to_string().as_str());
+        let commit_ts = get_commit_timestamp(&repo, *oid);
         match commit_ts {
             Some(ts) if ts <= cutoff => {
                 report
@@ -149,22 +148,11 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
 
 /// Get the commit timestamp (committer date as unix epoch seconds) for a given OID.
 ///
-/// Uses `git log -1 --format=%ct <oid>` because `CommitInfo` does not expose
-/// a timestamp field. Marked TODO(gix) for future migration.
-// TODO(gix): Add committer_time to CommitInfo and use read_commit instead.
-fn get_commit_timestamp(root: &Path, oid: &str) -> Option<u64> {
-    let output = Command::new("git")
-        .args(["log", "-1", "--format=%ct", oid])
-        .current_dir(root)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<u64>().ok()
+/// Returns `None` if the commit cannot be read or the timestamp is negative
+/// (which we treat as "missing"). Replaces `git log -1 --format=%ct <oid>`.
+fn get_commit_timestamp(repo: &maw_git::GixRepo, oid: maw_git::GitOid) -> Option<u64> {
+    let info = repo.read_commit(oid).ok()?;
+    u64::try_from(info.committer_time).ok()
 }
 
 /// CLI entry point for `maw gc --refs`.

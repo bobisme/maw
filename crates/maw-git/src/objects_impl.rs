@@ -99,6 +99,7 @@ pub fn read_commit(repo: &GixRepo, oid: GitOid) -> Result<CommitInfo, GitError> 
 
     let author = format!("{} <{}>", author_sig.name, author_sig.email);
     let committer = format!("{} <{}>", committer_sig.name, committer_sig.email);
+    let committer_time = committer_sig.seconds();
 
     Ok(CommitInfo {
         tree_oid,
@@ -106,6 +107,7 @@ pub fn read_commit(repo: &GixRepo, oid: GitOid) -> Result<CommitInfo, GitError> 
         message,
         author,
         committer,
+        committer_time,
     })
 }
 

@@ -289,6 +289,10 @@ pub fn capture_state(repo_root: &Path) -> StateSnapshot {
 }
 
 /// Resolve a ref to its OID via `git rev-parse`.
+//
+// TODO(gix): assurance carveout — trace capture is part of the formal-verification
+// surface and uses git CLI deliberately for independent verification (see
+// oracle.rs::read_all_refs for the full rationale).
 fn git_rev_parse(root: &Path, refspec: &str) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--verify", refspec])
@@ -373,6 +377,7 @@ fn discover_workspaces(root: &Path) -> (Vec<String>, BTreeMap<String, bool>) {
 }
 
 /// Check if a workspace directory has uncommitted changes.
+// TODO(gix): assurance carveout — see git_rev_parse above.
 fn check_dirty(ws_path: &Path) -> bool {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -386,6 +391,7 @@ fn check_dirty(ws_path: &Path) -> bool {
 }
 
 /// List recovery ref names under `refs/manifold/recovery/`.
+// TODO(gix): assurance carveout — see git_rev_parse above.
 fn list_recovery_refs(root: &Path) -> Vec<String> {
     let output = Command::new("git")
         .args([
