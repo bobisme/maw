@@ -331,6 +331,60 @@ fn canonicalize_existing(path: &Path) -> Result<PathBuf, GitError> {
     })
 }
 
+/// Prune worktree admin directories whose linked worktree no longer exists.
+///
+/// Scans `<common-git-dir>/worktrees/<name>/` and removes each admin
+/// directory whose `gitdir` file points at a `.git` link that has been
+/// deleted out of band (e.g., a stale worktree directory was removed
+/// manually). Mirrors `git worktree prune`.
+///
+/// This is idempotent and best-effort: per-entry failures are logged via the
+/// returned error only if the whole `worktrees/` directory cannot be read;
+/// individual prune failures are silently skipped so a corrupt admin dir
+/// does not block cleanup of healthy ones.
+pub fn worktree_prune(repo: &GixRepo) -> Result<(), GitError> {
+    let common_dir = repo.repo.common_dir().to_path_buf();
+    let worktrees_dir = common_dir.join("worktrees");
+    if !worktrees_dir.exists() {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(&worktrees_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return Err(GitError::BackendError {
+                message: format!(
+                    "failed to read worktrees dir {}: {e}",
+                    worktrees_dir.display()
+                ),
+            });
+        }
+    };
+    for entry in entries.flatten() {
+        let admin_dir = entry.path();
+        if !admin_dir.is_dir() {
+            continue;
+        }
+        let gitdir_file = admin_dir.join("gitdir");
+        // No gitdir file means a partially-constructed or non-conforming
+        // admin dir — leave it alone.
+        let Ok(content) = std::fs::read_to_string(&gitdir_file) else {
+            continue;
+        };
+        let gitdir_path = PathBuf::from(content.trim());
+        // The stored path is <worktree>/.git (either a file or a directory).
+        // If that path does not exist (or its parent worktree dir is gone),
+        // the admin dir is stale and should be removed.
+        let worktree_root = gitdir_path
+            .parent()
+            .map_or_else(|| gitdir_path.clone(), std::path::Path::to_path_buf);
+        let is_stale = !gitdir_path.exists() && !worktree_root.exists();
+        if is_stale {
+            let _ = std::fs::remove_dir_all(&admin_dir);
+        }
+    }
+    Ok(())
+}
+
 pub fn worktree_list(repo: &GixRepo) -> Result<Vec<WorktreeInfo>, GitError> {
     let git_dir = repo.repo.git_dir().to_path_buf();
     let worktrees_dir = git_dir.join("worktrees");

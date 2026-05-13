@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::diff_impl::NameStatusPairs;
 use crate::error::GitError;
 use crate::repo::GitRepo;
 use crate::types::{
@@ -313,6 +314,10 @@ impl GitRepo for GixRepo {
         crate::diff_impl::diff_trees_with_renames(self, old, new, similarity_pct)
     }
 
+    fn diff_name_status_pairs(&self, base: GitOid) -> Result<NameStatusPairs, GitError> {
+        crate::diff_impl::diff_name_status_pairs(self, base)
+    }
+
     // === Worktrees ===
     fn worktree_add(&self, name: &str, target: GitOid, path: &Path) -> Result<(), GitError> {
         crate::worktree_impl::worktree_add(self, name, target, path)
@@ -326,6 +331,10 @@ impl GitRepo for GixRepo {
         crate::worktree_impl::worktree_list(self)
     }
 
+    fn worktree_prune(&self) -> Result<(), GitError> {
+        crate::worktree_impl::worktree_prune(self)
+    }
+
     // === Stash ===
     fn stash_create(&self) -> Result<Option<GitOid>, GitError> {
         crate::stash_impl::stash_create(self)
@@ -333,6 +342,10 @@ impl GitRepo for GixRepo {
 
     fn stash_apply(&self, oid: GitOid) -> Result<(), GitError> {
         crate::stash_impl::stash_apply(self, oid)
+    }
+
+    fn worktree_state_commit(&self, message: &str) -> Result<Option<GitOid>, GitError> {
+        crate::stash_impl::worktree_state_commit(self, message)
     }
 
     fn unstage_all(&self) -> Result<(), GitError> {
@@ -379,6 +392,10 @@ impl GitRepo for GixRepo {
         reverse: bool,
     ) -> Result<Vec<GitOid>, GitError> {
         crate::rev_walk_impl::walk_commits(self, from, to, reverse)
+    }
+
+    fn count_commits_between(&self, from: GitOid, to: GitOid) -> Result<u32, GitError> {
+        crate::rev_walk_impl::count_commits_between(self, from, to)
     }
 
     // === HEAD ===

@@ -57,6 +57,7 @@ pub fn lfs_smudge_worktree_at(
 
 // Re-export the main trait and commonly used types at the crate root for
 // ergonomic imports: `use maw_git::{GitRepo, GitOid, GitError};`
+pub use diff_impl::NameStatusPairs;
 pub use error::GitError;
 pub use repo::GitRepo;
 pub use types::{

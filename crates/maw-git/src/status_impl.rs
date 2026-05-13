@@ -14,12 +14,18 @@ pub fn is_dirty(repo: &GixRepo) -> Result<bool, GitError> {
 }
 
 pub fn status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
-    let platform =
-        repo.repo
-            .status(gix::progress::Discard)
-            .map_err(|e| GitError::BackendError {
-                message: e.to_string(),
-            })?;
+    // Force per-file emission for untracked entries (matches the porcelain
+    // `git status --porcelain` behaviour and `git ls-files --others
+    // --exclude-standard`). The gix default collapses untracked
+    // subdirectories into a single directory entry, which loses the leaf
+    // paths the workspace backend needs (bn-p5z5).
+    let platform = repo
+        .repo
+        .status(gix::progress::Discard)
+        .map_err(|e| GitError::BackendError {
+            message: e.to_string(),
+        })?
+        .untracked_files(gix::status::UntrackedFiles::Files);
 
     let iter =
         platform
@@ -177,6 +183,77 @@ fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<Statu
     };
 
     Some(StatusEntry { path, status })
+}
+
+#[cfg(test)]
+mod tests_bn_p5z5 {
+    //! Regression tests for the workspace backend gix migration (bn-p5z5).
+
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::types::FileStatus;
+
+    fn setup_repo() -> (TempDir, crate::GixRepo) {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "t@t"])
+            .current_dir(root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(root)
+            .output()
+            .expect("git config name");
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .output()
+            .expect("disable gpg");
+        std::fs::write(root.join("README.md"), "init").expect("write seed file");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        let repo = crate::GixRepo::open(root).expect("open repo");
+        (dir, repo)
+    }
+
+    /// Untracked files inside untracked subdirectories must be emitted as
+    /// individual leaf paths, matching `git status --porcelain` and
+    /// `git ls-files --others --exclude-standard`. The gix default
+    /// (`UntrackedFiles::Collapsed`) reports only the parent directory,
+    /// which loses leaf paths the workspace snapshot needs.
+    #[test]
+    fn untracked_in_subdir_appears_as_added() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("created")).expect("mkdir created/");
+        std::fs::write(root.join("created/new_0.txt"), "hi").expect("write file");
+        let entries = status(&repo).expect("status");
+        assert!(
+            entries
+                .iter()
+                .filter(|e| e.status == FileStatus::Added)
+                .any(|e| e.path == "created/new_0.txt"),
+            "expected per-file untracked emission, got: {entries:#?}",
+        );
+    }
 }
 
 /// List untracked files (paths not in the index and not ignored).

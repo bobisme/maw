@@ -4,7 +4,7 @@ use gix::objs::TreeRefIter;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::{ChangeType, DiffEntry, EntryMode, GitOid};
+use crate::types::{ChangeType, DiffEntry, EntryMode, FileStatus, GitOid};
 
 /// Clamp a user-supplied similarity percentage (0-100) to a `[0.0, 1.0]`
 /// `f32` suitable for `gix_diff::Rewrites::percentage`.
@@ -308,4 +308,142 @@ pub fn diff_trees_with_renames(
     }
 
     Ok(entries)
+}
+
+/// Resolve a commit or tree OID to a tree OID.
+///
+/// If `oid` is a commit, returns its tree OID. If `oid` is already a tree,
+/// returns it unchanged. Other object kinds produce an error.
+fn resolve_to_tree_oid(repo: &GixRepo, oid: GitOid) -> Result<GitOid, GitError> {
+    let gix_oid = to_gix_oid(oid);
+    let obj = repo
+        .repo
+        .find_object(gix_oid)
+        .map_err(|e| GitError::NotFound {
+            message: format!("object {oid}: {e}"),
+        })?;
+    match obj.kind {
+        gix::object::Kind::Commit => {
+            let commit = obj.into_commit();
+            let tree_id = commit
+                .tree_id()
+                .map_err(|e| GitError::BackendError {
+                    message: format!("failed to get tree from commit {oid}: {e}"),
+                })?
+                .detach();
+            Ok(from_gix_oid(tree_id))
+        }
+        gix::object::Kind::Tree => Ok(oid),
+        other => Err(GitError::BackendError {
+            message: format!("expected commit or tree, got {other}"),
+        }),
+    }
+}
+
+/// Categorized name-status pairs between a commit (or tree) and the current
+/// working tree, including untracked files.
+///
+/// Mirrors the union of:
+/// - `git diff --name-status <base>` (committed + uncommitted changes vs base)
+/// - `git ls-files --others --exclude-standard` (untracked files)
+///
+/// `base` may be either a commit OID or a tree OID. The current working tree
+/// is sampled at the repository's workdir.
+///
+/// Path conflicts are resolved with the same precedence as the legacy
+/// porcelain pipeline: a path that appears as Added wins over Modified.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameStatusPairs {
+    /// Paths that exist in the worktree but not in `base` (additions and
+    /// untracked files).
+    pub added: Vec<String>,
+    /// Paths whose blob content or mode differs between `base` and the
+    /// worktree.
+    pub modified: Vec<String>,
+    /// Paths present in `base` but missing from the worktree.
+    pub deleted: Vec<String>,
+}
+
+/// Compute add/modify/delete pairs between a commit and the current working
+/// tree, including untracked files.
+///
+/// Combines [`diff_trees`] (tree-to-tree, commit→HEAD) with [`crate::status_impl::status`]
+/// (HEAD→worktree, including untracked) to produce the same categorized output
+/// the legacy `git diff --name-status <base>` + `git ls-files --others
+/// --exclude-standard` pipeline produced.
+///
+/// Path deduplication rules:
+/// - A path Added in tree-diff and Modified in status → Added.
+/// - A path Modified in tree-diff and Deleted in status → Deleted.
+/// - A path Deleted in tree-diff and Added in status (re-added) → Modified.
+///
+/// Used by the git workspace backend's `snapshot()` to detect agent changes
+/// relative to the workspace's base epoch.
+///
+/// # Errors
+/// Returns a `GitError` if either the tree diff or the worktree status
+/// pipeline fails.
+pub fn diff_name_status_pairs(repo: &GixRepo, base: GitOid) -> Result<NameStatusPairs, GitError> {
+    use std::collections::BTreeSet;
+
+    let base_tree = resolve_to_tree_oid(repo, base)?;
+
+    // HEAD tree for the committed-changes portion of the diff.
+    // No HEAD (orphan or pre-init) → fall back to `base`, yielding an empty
+    // committed-changes diff.
+    let head_oid = crate::refs_impl::rev_parse_opt(repo, "HEAD")?.unwrap_or(base);
+    let head_tree = resolve_to_tree_oid(repo, head_oid)?;
+
+    let mut added: BTreeSet<String> = BTreeSet::new();
+    let mut modified: BTreeSet<String> = BTreeSet::new();
+    let mut deleted: BTreeSet<String> = BTreeSet::new();
+
+    // 1. Committed changes: diff base_tree → head_tree.
+    let tree_changes = diff_trees(repo, Some(base_tree), head_tree)?;
+    for change in tree_changes {
+        match change.change_type {
+            ChangeType::Added => {
+                added.insert(change.path);
+            }
+            ChangeType::Modified => {
+                modified.insert(change.path);
+            }
+            ChangeType::Deleted => {
+                deleted.insert(change.path);
+            }
+            ChangeType::Renamed { from } => {
+                deleted.insert(from);
+                added.insert(change.path);
+            }
+        }
+    }
+
+    // 2. Working-tree changes: HEAD → worktree (incl. untracked).
+    let status_entries = crate::status_impl::status(repo)?;
+    for entry in status_entries {
+        match entry.status {
+            FileStatus::Added | FileStatus::Renamed | FileStatus::Untracked => {
+                added.insert(entry.path);
+            }
+            FileStatus::Modified => {
+                modified.insert(entry.path);
+            }
+            FileStatus::Deleted => {
+                deleted.insert(entry.path);
+            }
+        }
+    }
+
+    // Apply the same precedence the legacy porcelain pipeline used: a path
+    // that appears as Added overrides a Modified classification.
+    let added_vec: Vec<String> = added.into_iter().collect();
+    let deleted_vec: Vec<String> = deleted.into_iter().collect();
+    let mut modified_vec: Vec<String> = modified.into_iter().collect();
+    modified_vec.retain(|p| !added_vec.contains(p));
+
+    Ok(NameStatusPairs {
+        added: added_vec,
+        modified: modified_vec,
+        deleted: deleted_vec,
+    })
 }

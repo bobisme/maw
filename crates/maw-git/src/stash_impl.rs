@@ -10,7 +10,7 @@ use gix::objs::TreeRefIter;
 
 use crate::error::GitError;
 use crate::gix_repo::GixRepo;
-use crate::types::GitOid;
+use crate::types::{EntryMode, FileStatus, GitOid, TreeEdit};
 
 /// Convert a `GitOid` to a `gix::ObjectId`.
 fn to_gix_oid(oid: GitOid) -> gix::ObjectId {
@@ -420,6 +420,173 @@ pub fn stash_apply(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
         })?;
 
     Ok(())
+}
+
+/// Materialize the current working tree (including untracked files) into a
+/// commit, without modifying the index, the worktree, or any ref.
+///
+/// Equivalent to `git stash create`: snapshots HEAD with all working-tree
+/// modifications and untracked files applied on top, then writes a commit
+/// with `parents = [HEAD]` and the supplied message. Returns the new commit
+/// OID, or `None` if there is nothing to capture (clean worktree).
+///
+/// # How
+/// 1. Read HEAD tree.
+/// 2. Run [`status`](crate::status_impl::status) to enumerate working-tree
+///    changes (modified, deleted, added, untracked).
+/// 3. Hash each modified/added/untracked file in the worktree and apply
+///    [`TreeEdit::Upsert`] edits to the HEAD tree; apply [`TreeEdit::Remove`]
+///    for each deleted entry.
+/// 4. [`create_commit`](crate::objects_impl::create_commit) with the resulting
+///    tree, `parents=[HEAD]`, and `message`.
+///
+/// # Limitations
+/// - Symlinks: their target text is hashed as the blob (matches gix tree
+///   semantics for mode `120000`).
+/// - File modes: regular vs executable vs symlink is inferred from
+///   `symlink_metadata` on Unix; on other platforms all non-symlink files
+///   are treated as regular blobs.
+/// - Like `git stash create`, the resulting commit is detached — it is not
+///   reachable from any ref unless the caller writes one.
+///
+/// # Errors
+/// Returns a `GitError` if HEAD cannot be resolved, the worktree cannot be
+/// scanned, any blob cannot be hashed, or the commit cannot be written.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single pass capturing HEAD tree + status edits + commit"
+)]
+pub fn worktree_state_commit(repo: &GixRepo, message: &str) -> Result<Option<GitOid>, GitError> {
+    // 1. Resolve HEAD; without a HEAD there is nothing meaningful to capture.
+    let Some(head_oid) = crate::refs_impl::rev_parse_opt(repo, "HEAD")? else {
+        return Ok(None);
+    };
+
+    // 2. Enumerate worktree changes vs HEAD (incl. untracked).
+    let status = crate::status_impl::status(repo)?;
+    if status.is_empty() {
+        return Ok(None);
+    }
+
+    // 3. Resolve HEAD's tree.
+    let head_tree_oid = {
+        let gix_head = gix::ObjectId::from_bytes_or_panic(head_oid.as_bytes());
+        let obj = repo
+            .repo
+            .find_object(gix_head)
+            .map_err(|e| GitError::NotFound {
+                message: format!("HEAD object {head_oid}: {e}"),
+            })?;
+        match obj.kind {
+            gix::object::Kind::Commit => {
+                let commit = obj.into_commit();
+                let tree_id = commit
+                    .tree_id()
+                    .map_err(|e| GitError::BackendError {
+                        message: format!("failed to get HEAD tree: {e}"),
+                    })?
+                    .detach();
+                from_gix_oid(tree_id)
+            }
+            gix::object::Kind::Tree => from_gix_oid(gix_head),
+            other => {
+                return Err(GitError::BackendError {
+                    message: format!("HEAD points to unexpected kind: {other}"),
+                });
+            }
+        }
+    };
+
+    let workdir = repo
+        .workdir
+        .as_ref()
+        .ok_or_else(|| GitError::BackendError {
+            message: "repository has no working directory".to_string(),
+        })?
+        .clone();
+
+    // 4. Walk status entries; hash content for upserts.
+    let mut edits: Vec<TreeEdit> = Vec::new();
+    for entry in status {
+        // Reject paths with .. components (path traversal protection).
+        if entry.path.split('/').any(|c| c == "..") {
+            return Err(GitError::BackendError {
+                message: format!("refusing path with '..' component: '{}'", entry.path),
+            });
+        }
+        match entry.status {
+            FileStatus::Deleted => {
+                edits.push(TreeEdit::Remove {
+                    path: entry.path.clone(),
+                });
+            }
+            FileStatus::Added
+            | FileStatus::Modified
+            | FileStatus::Renamed
+            | FileStatus::Untracked => {
+                let full = workdir.join(&entry.path);
+                let Ok(meta) = std::fs::symlink_metadata(&full) else {
+                    // File enumerated by status but missing on disk — treat
+                    // as a deletion so the snapshot stays internally
+                    // consistent.
+                    edits.push(TreeEdit::Remove {
+                        path: entry.path.clone(),
+                    });
+                    continue;
+                };
+
+                #[cfg(unix)]
+                let is_executable = {
+                    use std::os::unix::fs::PermissionsExt;
+                    !meta.is_symlink() && (meta.permissions().mode() & 0o111) != 0
+                };
+                #[cfg(not(unix))]
+                let is_executable = false;
+
+                let (data, mode) = if meta.is_symlink() {
+                    let target = std::fs::read_link(&full).map_err(|e| GitError::BackendError {
+                        message: format!("read symlink '{}': {e}", entry.path),
+                    })?;
+                    (
+                        target.to_string_lossy().into_owned().into_bytes(),
+                        EntryMode::Link,
+                    )
+                } else if meta.is_file() {
+                    let bytes = std::fs::read(&full).map_err(|e| GitError::BackendError {
+                        message: format!("read file '{}': {e}", entry.path),
+                    })?;
+                    let mode = if is_executable {
+                        EntryMode::BlobExecutable
+                    } else {
+                        EntryMode::Blob
+                    };
+                    (bytes, mode)
+                } else {
+                    // Directory or other non-blob type — skip; gix's status
+                    // pipeline only surfaces file-like entries, but guard
+                    // anyway.
+                    continue;
+                };
+
+                let blob_oid = crate::objects_impl::write_blob(repo, &data)?;
+                edits.push(TreeEdit::Upsert {
+                    path: entry.path.clone(),
+                    mode,
+                    oid: blob_oid,
+                });
+            }
+        }
+    }
+
+    if edits.is_empty() {
+        return Ok(None);
+    }
+
+    // 5. Apply edits to the HEAD tree and commit.
+    let new_tree = crate::objects_impl::edit_tree(repo, head_tree_oid, &edits)?;
+    let commit_oid =
+        crate::objects_impl::create_commit(repo, new_tree, &[head_oid], message, None)?;
+    Ok(Some(commit_oid))
 }
 
 #[cfg(test)]

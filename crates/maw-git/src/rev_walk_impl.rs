@@ -94,3 +94,14 @@ pub fn walk_commits(
 
     Ok(result)
 }
+
+/// Count commits reachable from `to` that are not reachable from `from`.
+///
+/// Mirrors `git rev-list --count from..to`. Returns `0` when `from == to`
+/// or when neither is reachable from the other (no commits in the range).
+///
+/// Implemented on top of [`walk_commits`] for consistency.
+pub fn count_commits_between(repo: &GixRepo, from: GitOid, to: GitOid) -> Result<u32, GitError> {
+    let commits = walk_commits(repo, from, to, false)?;
+    Ok(u32::try_from(commits.len()).unwrap_or(u32::MAX))
+}

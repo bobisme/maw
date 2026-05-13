@@ -5,6 +5,11 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+// `std::process::Command` is only used in test fixtures (#[cfg(test)] mod
+// tests below); the production code now goes through the maw-git GitRepo
+// trait. Keep the import test-gated so the production build stays free of
+// process-spawning machinery (bn-p5z5).
+#[cfg(test)]
 use std::process::Command;
 
 use super::{SnapshotResult, WorkspaceBackend, WorkspaceStatus};
@@ -141,7 +146,11 @@ impl GitWorktreeBackend {
     }
 
     /// Run a git command in a specific directory and return stdout.
-    // TODO(gix): remove when all callers use GitRepo trait methods
+    ///
+    /// Test-only fixture helper: tests use this to invoke the real `git`
+    /// binary to set up scenarios (e.g. advancing the epoch ref). Production
+    /// code does not spawn `git` subprocesses (bn-p5z5).
+    #[cfg(test)]
     fn git_stdout_in(dir: &std::path::Path, args: &[&str]) -> Result<String, GitBackendError> {
         let output = Command::new("git")
             .args(args)
@@ -200,20 +209,12 @@ impl GitWorktreeBackend {
     /// Count how many commits are reachable from `to_oid` but not from `from_oid`.
     ///
     /// Used to determine how many epoch advancements a workspace is behind.
-    /// Returns `None` on error (e.g., either OID is not reachable).
-    // TODO(gix): replace with GitRepo trait method when rev-list --count is available
+    /// Returns `None` on error (e.g., either OID is not parseable or
+    /// unreachable).
     fn count_commits_between(&self, from_oid: &str, to_oid: &str) -> Option<u32> {
-        let range = format!("{from_oid}..{to_oid}");
-        let output = Command::new("git")
-            .args(["rev-list", "--count", &range])
-            .current_dir(&self.root)
-            .output()
-            .ok()?;
-        if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).trim().parse().ok()
-        } else {
-            None
-        }
+        let from = from_oid.parse::<maw_git::GitOid>().ok()?;
+        let to = to_oid.parse::<maw_git::GitOid>().ok()?;
+        self.repo.count_commits_between(from, to).ok()
     }
 
     /// Whether Level 1 workspace refs are enabled in `.manifold/config.toml`.
@@ -227,9 +228,10 @@ impl GitWorktreeBackend {
     /// Refresh `refs/manifold/ws/<name>` to point at a commit representing the
     /// current workspace state.
     ///
-    /// Uses `git stash create` to lazily materialize a commit without mutating
-    /// the workspace's index or working tree. If there are no local changes,
-    /// falls back to `HEAD`.
+    /// Uses [`maw_git::GitRepo::worktree_state_commit`] to lazily materialize
+    /// a commit that captures both index and working-tree changes (including
+    /// untracked files) — the same semantics as `git stash create`. When the
+    /// workspace is clean, the ref is set to `HEAD`.
     fn refresh_workspace_state_ref(
         &self,
         name: &WorkspaceId,
@@ -241,26 +243,24 @@ impl GitWorktreeBackend {
 
         let ref_name = manifold_refs::workspace_state_ref(name.as_str());
 
-        // `git stash create` captures both index AND working-tree changes as a
-        // merge commit, without modifying HEAD or the stash list. The gix-based
-        // stash_create only captures index state, so we keep the CLI call here.
-        // TODO(gix): replace when gix stash captures working tree state
-        let stash_oid = Self::git_stdout_in(ws_path, &["stash", "create"])?;
-        let oid_str = stash_oid.trim();
-
-        let materialized = if oid_str.is_empty() {
-            // Nothing to stash — fall back to HEAD via GitRepo trait.
-            let ws_repo = open_repo_at(ws_path)?;
+        // Materialize the worktree state via the gix-backed primitive.
+        // Returns None for a clean worktree; in that case fall back to HEAD
+        // so the ref always exists once we've gotten this far.
+        let ws_repo = open_repo_at(ws_path)?;
+        let materialized = if let Some(oid) = ws_repo
+            .worktree_state_commit("workspace state")
+            .map_err(|e| map_git_error("worktree state commit", &e))?
+        {
+            oid.to_string()
+        } else {
             let head_oid = ws_repo
                 .rev_parse("HEAD")
                 .map_err(|e| map_git_error("rev-parse HEAD", &e))?;
             head_oid.to_string()
-        } else {
-            oid_str.to_owned()
         };
 
         let oid = GitOid::new(&materialized).map_err(|e| GitBackendError::GitCommand {
-            command: "stash create / rev-parse HEAD".to_owned(),
+            command: "worktree-state-commit / rev-parse HEAD".to_owned(),
             stderr: format!("invalid OID while materializing workspace ref: {e}"),
             exit_code: None,
         })?;
@@ -298,12 +298,10 @@ impl WorkspaceBackend for GitWorktreeBackend {
             std::fs::remove_dir_all(&path)?;
         }
 
-        // Cleanup: if git thinks it exists but directory is gone (prune)
-        // TODO(gix): replace with GitRepo trait method when worktree_prune is available
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&self.root)
-            .output();
+        // Cleanup: if git thinks it exists but directory is gone (prune).
+        // Best-effort: ignore errors so a healthy create flow is not blocked
+        // by an unrelated prune failure.
+        let _ = self.repo.worktree_prune();
 
         // Ensure parent directory exists
         let ws_dir = self.workspaces_dir();
@@ -381,11 +379,7 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // Step 3: Prune stale worktree entries. This cleans up the
         // .git/worktrees/<name> administrative directory even if
         // the worktree directory was removed out of band.
-        // TODO(gix): replace with GitRepo trait method when worktree_prune is available
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&self.root)
-            .output();
+        let _ = self.repo.worktree_prune();
 
         // Prune every ref owned by this workspace. Iterates the single
         // source of truth in `manifold_refs::workspace_owned_refs` so that
@@ -577,9 +571,16 @@ impl WorkspaceBackend for GitWorktreeBackend {
         };
 
         // Collect dirty files: tracked modifications + untracked files.
-        // TODO(gix): replace with GitRepo trait method when full porcelain status is available
-        let status_output = Self::git_stdout_in(&ws_path, &["status", "--porcelain"])?;
-        let dirty_files = parse_porcelain_status(&status_output);
+        // Uses the gix-backed `status()` primitive which natively includes
+        // untracked files (mapped to `FileStatus::Added`), matching the
+        // `git status --porcelain` set the legacy implementation parsed.
+        let ws_repo_for_status = open_repo_at(&ws_path)?;
+        let dirty_files: Vec<PathBuf> = ws_repo_for_status
+            .status()
+            .map_err(|e| map_git_error("status", &e))?
+            .into_iter()
+            .map(|entry| PathBuf::from(entry.path))
+            .collect();
 
         // Stale = the workspace's recorded base epoch is behind/diverged from
         // the current epoch.
@@ -657,63 +658,36 @@ impl WorkspaceBackend for GitWorktreeBackend {
             head.to_string()
         };
 
-        let mut added = Vec::new();
-        let mut modified = Vec::new();
-        let mut deleted = Vec::new();
+        // 1+2. All changes (committed + working tree) relative to the base,
+        // plus untracked files. Replaces the legacy
+        //   git diff --name-status <base>
+        //   git ls-files --others --exclude-standard
+        // pipeline with a single gix-backed primitive that unions tree-diff
+        // (base→HEAD) with status (HEAD→worktree, incl. untracked).
+        let base_git_oid =
+            base_oid
+                .parse::<maw_git::GitOid>()
+                .map_err(|e| GitBackendError::GitCommand {
+                    command: "diff base parse".to_owned(),
+                    stderr: format!("invalid base OID '{base_oid}': {e}"),
+                    exit_code: None,
+                })?;
+        let pairs = ws_repo
+            .diff_name_status_pairs(base_git_oid)
+            .map_err(|e| map_git_error("diff_name_status_pairs", &e))?;
 
-        // 1. All changes (committed + working tree) relative to the epoch.
-        // `git diff <epoch>` compares the epoch tree against the current working
-        // tree, capturing both committed and uncommitted modifications.
-        // TODO(gix): replace with GitRepo trait method when working-tree diff is available
-        // -c core.quotePath=false: output raw UTF-8 paths without escaping
-        // non-ASCII characters (default git behavior wraps them in quotes
-        // with octal escapes like \303\251, breaking PathBuf::from).
-        let diff_output = Self::git_stdout_in(
-            &ws_path,
-            &[
-                "-c",
-                "core.quotePath=false",
-                "diff",
-                "--name-status",
-                &base_oid,
-            ],
-        )?;
+        let mut added: Vec<PathBuf> = pairs.added.into_iter().map(PathBuf::from).collect();
+        let mut modified: Vec<PathBuf> = pairs.modified.into_iter().map(PathBuf::from).collect();
+        let mut deleted: Vec<PathBuf> = pairs.deleted.into_iter().map(PathBuf::from).collect();
 
-        parse_name_status(&diff_output, &mut added, &mut modified, &mut deleted);
-
-        // 2. Untracked files (not in .gitignore)
-        // TODO(gix): replace with GitRepo trait method when untracked file detection is available
-        let untracked_output = Self::git_stdout_in(
-            &ws_path,
-            &[
-                "-c",
-                "core.quotePath=false",
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-            ],
-        )?;
-
-        for line in untracked_output.lines() {
-            let path = line.trim();
-            if !path.is_empty() {
-                let p = PathBuf::from(path);
-                if !added.contains(&p) {
-                    added.push(p);
-                }
-            }
-        }
-
-        // Deduplicate
+        // Deduplicate (BTreeSet inside the primitive already sorts/dedups,
+        // but keep the explicit guard for the conversion boundary).
         added.sort();
         added.dedup();
         modified.sort();
         modified.dedup();
         deleted.sort();
         deleted.dedup();
-
-        // Remove from modified/deleted if also in added (file was added then modified)
-        modified.retain(|p| !added.contains(p));
 
         // Lazily materialize Level 1 workspace state ref for git inspection.
         self.refresh_workspace_state_ref(name, &ws_path)?;
@@ -815,7 +789,10 @@ fn parse_worktree_porcelain(raw: &str) -> Vec<WorktreeEntry> {
 ///
 /// Paths containing spaces are returned verbatim; quoted paths (git uses
 /// quoting for special characters) are returned with the quotes stripped.
-// TODO(gix): remove when gix status properly reports untracked files
+///
+/// Retained only for test coverage of the legacy parser. Production code
+/// now uses [`maw_git::GitRepo::status`] (bn-p5z5).
+#[cfg(test)]
 fn parse_porcelain_status(output: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for line in output.lines() {
@@ -845,6 +822,10 @@ fn parse_porcelain_status(output: &str) -> Vec<PathBuf> {
     paths
 }
 /// Parse `git diff --name-status` output into add/modify/delete lists.
+///
+/// Retained only for test coverage of the legacy parser. Production code now
+/// uses [`maw_git::GitRepo::diff_name_status_pairs`] (bn-p5z5).
+#[cfg(test)]
 fn parse_name_status(
     output: &str,
     added: &mut Vec<PathBuf>,

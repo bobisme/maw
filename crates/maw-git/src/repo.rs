@@ -25,6 +25,7 @@
 
 use std::path::Path;
 
+use crate::diff_impl::NameStatusPairs;
 use crate::error::GitError;
 use crate::types::{
     CommitInfo, DiffEntry, GitOid, IndexEntry, RefEdit, RefName, StatusEntry, TreeEdit, TreeEntry,
@@ -390,6 +391,20 @@ pub trait GitRepo {
         similarity_pct: u32,
     ) -> Result<Vec<DiffEntry>, GitError>;
 
+    /// Categorized add/modify/delete pairs between a commit (or tree) and
+    /// the current working tree, including untracked files.
+    ///
+    /// Mirrors the union of:
+    /// - `git diff --name-status <base>` (committed + uncommitted vs base)
+    /// - `git ls-files --others --exclude-standard` (untracked files)
+    ///
+    /// Used by the workspace backend's `snapshot()` to detect changes relative
+    /// to a workspace's base epoch without parsing porcelain text.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if either the tree diff or worktree status fails.
+    fn diff_name_status_pairs(&self, base: GitOid) -> Result<NameStatusPairs, GitError>;
+
     // -----------------------------------------------------------------------
     // Worktrees (~20 call sites)
     //
@@ -422,6 +437,19 @@ pub trait GitRepo {
     /// Returns a `GitError` if the backend operation fails.
     fn worktree_list(&self) -> Result<Vec<WorktreeInfo>, GitError>;
 
+    /// Remove stale linked-worktree admin directories.
+    ///
+    /// Walks `<common-git-dir>/worktrees/<name>/` and removes each admin
+    /// directory whose `gitdir` file points to a `.git` link that no longer
+    /// exists on disk (e.g., the linked worktree was deleted out of band).
+    ///
+    /// Replaces: `git worktree prune`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the worktrees directory cannot be enumerated.
+    /// Individual prune failures are best-effort and do not abort the scan.
+    fn worktree_prune(&self) -> Result<(), GitError>;
+
     // -----------------------------------------------------------------------
     // Stash (~15 call sites)
     //
@@ -449,6 +477,26 @@ pub trait GitRepo {
     /// # Errors
     /// Returns a `GitError` if the backend operation fails.
     fn stash_apply(&self, oid: GitOid) -> Result<(), GitError>;
+
+    /// Materialize the current working tree (including untracked files) into
+    /// a detached commit, without modifying the index, the worktree, or any
+    /// ref.
+    ///
+    /// Returns `None` for a clean worktree (no changes to capture).
+    ///
+    /// Unlike [`stash_create`](Self::stash_create), which only snapshots the
+    /// index, this captures both working-tree modifications *and* untracked
+    /// files — matching `git stash create` semantics. Used by the workspace
+    /// backend to maintain the materialized workspace-state ref for git
+    /// inspection.
+    ///
+    /// Replaces: `git stash create` (when the caller needs working-tree
+    /// content, not just index state).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if HEAD is missing, the worktree cannot be
+    /// scanned, or the commit cannot be written.
+    fn worktree_state_commit(&self, message: &str) -> Result<Option<GitOid>, GitError>;
 
     /// Reset the index to match HEAD, unstaging all staged changes.
     ///
@@ -558,6 +606,17 @@ pub trait GitRepo {
         to: GitOid,
         reverse: bool,
     ) -> Result<Vec<GitOid>, GitError>;
+
+    /// Count commits in the range `from..to`.
+    ///
+    /// Returns the number of commits reachable from `to` but not from `from`,
+    /// matching `git rev-list --count from..to`. When `from == to`, returns 0.
+    ///
+    /// Replaces: `git rev-list --count from..to`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
+    fn count_commits_between(&self, from: GitOid, to: GitOid) -> Result<u32, GitError>;
 
     // -----------------------------------------------------------------------
     // HEAD manipulation
