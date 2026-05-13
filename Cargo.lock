@@ -2290,6 +2290,7 @@ version = "0.60.9"
 dependencies = [
  "filetime",
  "gix",
+ "maw-git",
  "maw-lfs",
  "sha2",
  "tempfile",

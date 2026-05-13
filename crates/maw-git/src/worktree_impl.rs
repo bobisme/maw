@@ -476,45 +476,15 @@ fn parse_worktree_head(repo: &GixRepo, trimmed: &str) -> (Option<GitOid>, bool) 
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
-
     use tempfile::TempDir;
 
     use super::*;
     use crate::repo::GitRepo as _;
 
     fn setup_repo() -> (TempDir, GixRepo, GitOid) {
-        let dir = TempDir::new().expect("tempdir");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(root)
-            .output()
-            .expect("git init");
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(root)
-            .output()
-            .expect("git config email");
-        Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(root)
-            .output()
-            .expect("git config name");
-        std::fs::write(root.join("README.md"), "hello\n").expect("write readme");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(root)
-            .output()
-            .expect("git add");
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(root)
-            .output()
-            .expect("git commit");
-
-        let repo = GixRepo::open(root).expect("open repo");
+        // bn-5rdz: shared init + seed-commit helper.
+        let (dir, root, _oid) = crate::test_support::init_test_repo_with_commit();
+        let repo = GixRepo::open(&root).expect("open repo");
         let head = repo.rev_parse("HEAD").expect("resolve HEAD");
         (dir, repo, head)
     }

@@ -443,41 +443,8 @@ mod tests {
     /// Returns `(TempDir, EpochId)` where `EpochId` is the initial commit OID.
     /// The `TempDir` must outlive the `GitWorktreeBackend` that uses it.
     fn setup_git_repo() -> (TempDir, EpochId) {
-        let temp_dir = TempDir::new().expect("operation should succeed");
-        let root = temp_dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        for (key, val) in [
-            ("user.name", "Test User"),
-            ("user.email", "test@example.com"),
-            ("commit.gpgsign", "false"),
-        ] {
-            Command::new("git")
-                .args(["config", key, val])
-                .current_dir(root)
-                .output()
-                .expect("operation should succeed");
-        }
-
-        // Write an initial file so the repo has at least one tracked file.
-        fs::write(root.join("README.md"), "# Test Repo").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let oid_str = git_head_oid(root);
+        // bn-5rdz: use shared init + seed-commit helper from maw-git.
+        let (temp_dir, _root, oid_str) = maw_git::test_support::init_test_repo_with_commit();
         let epoch = EpochId::new(&oid_str).expect("operation should succeed");
         (temp_dir, epoch)
     }

@@ -539,73 +539,28 @@ mod tests {
 
     /// Create a fresh git repo with one commit and return the HEAD OID.
     fn setup_repo() -> (TempDir, GitOid) {
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        // bn-5rdz: shared init + seed-commit helper.
+        let (dir, _root, oid_str) = maw_git::test_support::init_test_repo_with_commit();
         let oid = GitOid::new(&oid_str).expect("operation should succeed");
-
         (dir, oid)
     }
 
-    /// Create a second commit in the repo and return its OID.
+    /// Create a new commit in the repo and return its OID.
+    ///
+    /// bn-5rdz: writes a unique file per call so successive `add_commit`s
+    /// produce distinct commits. (The pre-refactor inline version always
+    /// wrote `extra.txt`; if called twice in a row the second `git commit`
+    /// silently failed with `nothing to commit` and `rev-parse HEAD`
+    /// returned the previous OID — harmless for the existing tests but
+    /// brittle. The shared `commit_all` helper now asserts on commit
+    /// success, so use unique paths to keep the contract intact.)
     fn add_commit(root: &std::path::Path) -> GitOid {
-        fs::write(root.join("extra.txt"), "extra\n").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "extra.txt"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "second"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let filename = format!("extra_{n}.txt");
+        fs::write(root.join(&filename), format!("extra {n}\n")).expect("operation should succeed");
+        let oid_str = maw_git::test_support::commit_all(root, &filename);
         GitOid::new(&oid_str).expect("operation should succeed")
     }
 

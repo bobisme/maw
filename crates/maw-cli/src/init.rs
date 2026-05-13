@@ -1854,55 +1854,20 @@ mod brownfield_tests {
 
     /// Set up a real git repo with an initial commit and some tracked files.
     fn setup_existing_repo(dir: &Path) -> EpochId {
-        // git init
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir)
-            .output()
-            .expect("git init");
+        use maw_git::test_support::{commit_all, init_test_repo_at};
 
-        // Set identity
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(dir)
-            .output()
-            .expect("operation should succeed");
+        // bn-5rdz: use shared helpers — `init_test_repo_at` runs `git init`
+        // + identity config + disables gpgsign in one call; `commit_all`
+        // stages all changes and returns the new HEAD oid.
+        init_test_repo_at(dir);
 
-        // Create files
+        // Seed files
         fs::write(dir.join("README.md"), "# My Project\n").expect("operation should succeed");
         fs::write(dir.join("main.rs"), "fn main() {}\n").expect("operation should succeed");
         fs::create_dir_all(dir.join("src")).expect("operation should succeed");
         fs::write(dir.join("src/lib.rs"), "// lib\n").expect("operation should succeed");
 
-        // Commit
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "initial commit"])
-            .current_dir(dir)
-            .output()
-            .expect("initial commit");
-
-        // Read HEAD OID
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(dir)
-            .output()
-            .expect("operation should succeed");
-        let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let oid = commit_all(dir, "initial commit");
         EpochId::new(&oid).expect("operation should succeed")
     }
 
@@ -2016,27 +1981,8 @@ mod brownfield_tests {
         let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
 
-        // Init git but make no commits
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
+        // bn-5rdz: init via shared helper; no commits yet so this stays empty.
+        maw_git::test_support::init_test_repo_at(root);
 
         let err = brownfield_init(root, &BrownfieldInitOptions::default())
             .expect_err("operation should fail");

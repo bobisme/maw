@@ -40,6 +40,8 @@ tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# bn-5rdz: shared test-repo setup helpers from maw-git.
+maw-git = { path = "../maw-git", features = ["test-support", "lfs"] }
 
 [features]
 default = ["otel", "tui", "lfs", "ast-merge"]

@@ -2,6 +2,14 @@
 //!
 //! Verifies that standard git tools (log, blame, bisect, grep, diff) continue
 //! to work with Manifold metadata refs present.
+//!
+//! # Intentional `Command::new("git")` usage (bn-5rdz)
+//!
+//! This file is the single compat-assertion file in the maw test suite.
+//! Every `Command::new("git")` here is **deliberate**: the test asserts
+//! that maw-produced repository state is observable via the stock `git`
+//! binary. Do NOT replace these calls with `maw_git::test_support` helpers
+//! or trait calls — that would defeat the purpose of the test.
 
 mod manifold_common;
 
@@ -9,6 +17,9 @@ use std::process::Command;
 
 use manifold_common::TestRepo;
 
+/// Deliberate stock-`git` CLI invocation (see module-level note). Asserts
+/// that maw-produced refs and objects are observable via the standard git
+/// binary; do not replace with a `maw_git` trait call.
 fn git_ok_in(dir: &std::path::Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

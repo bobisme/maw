@@ -151,78 +151,17 @@ mod tests {
     use super::*;
 
     fn setup_repo() -> (TempDir, String) {
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        fs::write(root.join("README.md"), "# test\n").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        let oid = String::from_utf8(out.stdout)
-            .expect("operation should succeed")
-            .trim()
-            .to_string();
-
+        // bn-5rdz: init + seed-commit via shared helper, plus this test's
+        // `.manifold/epochs` marker dir for `GitWorktreeBackend`.
+        let (dir, root, oid) = maw_git::test_support::init_test_repo_with_commit();
         fs::create_dir_all(root.join(".manifold/epochs")).expect("operation should succeed");
-
         (dir, oid)
     }
 
     fn commit(root: &Path, file: &str) -> String {
         fs::write(root.join(file), file).expect("operation should succeed");
-        Command::new("git")
-            .args(["add", file])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", file])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        String::from_utf8(out.stdout)
-            .expect("operation should succeed")
-            .trim()
-            .to_string()
+        // bn-5rdz: shared commit_all wraps add -A + commit -m + rev-parse.
+        maw_git::test_support::commit_all(root, file)
     }
 
     #[test]

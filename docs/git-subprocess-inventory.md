@@ -1,6 +1,6 @@
 # Git subprocess inventory (bn-3471)
 
-Refreshed: 2026-05-13
+Refreshed: 2026-05-13 (post bn-5rdz)
 Parent goal: bn-5kad
 
 ## Method
@@ -14,9 +14,7 @@ rg 'Command::new("git")' -n crates src tests benches
 This regex matches both `Command::new("git")` and `StdCommand::new("git")` because the
 latter contains the former as a substring. The two spellings refer to the same shape
 of subprocess call (`std::process::Command`); the `Std` alias is used in modules
-where another `Command` type is in scope. A separate sweep with
-`rg 'StdCommand::new("git")'` confirms the breakdown (24 of the 543 matches use the
-`StdCommand::` alias).
+where another `Command` type is in scope.
 
 Per-call classification is determined by file structure: a match is treated as a
 crate-local test fixture if it appears inside a `#[cfg(test)]` block in a crate
@@ -24,30 +22,28 @@ source file (the `mod tests { ... }` region at the bottom of the file), and as
 production otherwise. Top-level `tests/` files are always test code; everything
 under them is integration-test fixture or compatibility assertion.
 
-## Headline counts (2026-05-13)
+## Headline counts (2026-05-13, post bn-5rdz)
 
 | Bucket | Calls |
 | --- | ---: |
-| Total `Command::new("git")` substring matches | **543** |
-|   of which `StdCommand::new("git")` alias spellings | 24 |
-| Production (replace-now or carveout) | **259** |
-| Test code (in-file `#[cfg(test)]` + top-level `tests/` + benches) | **284** |
-| Crate `src` and `benches` (production scope) | 471 |
-| Top-level `tests/` (always test) | 72 |
+| Total `Command::new("git")` substring matches | **347** |
+| Production (replace-now or carveout) | **76** |
+| Test code (in-file `#[cfg(test)]` + top-level `tests/` + benches) | **270** |
+| Intentional git-compat assertion | **1** |
 
-Production breakdown (259):
+Production breakdown (76):
 
 | Sub-bucket | Calls | Notes |
 | --- | ---: | --- |
-| Production replace-now (local object/ref/index/worktree ops) | **251** | candidates for maw-git/gix migration |
+| Production replace-now (local object/ref/index/worktree ops) | **~68** | remaining gix-migration candidates |
 | Production temporary remote carveout (push/fetch protocol) | **8** | see "Carveout" section |
 
-Test code breakdown (284):
+Test code breakdown (270):
 
 | Sub-bucket | Calls | Notes |
 | --- | ---: | --- |
-| Crate-local `#[cfg(test)]` fixture/setup inside source files | 212 |
-| Top-level integration-test fixture/setup in `tests/` | 71 |
+| Crate-local `#[cfg(test)]` fixture/setup inside source files | 188 |
+| Top-level integration-test fixture/setup in `tests/` + benches | 82 |
 | Intentional git-compatibility assertion | 1 | `tests/git_compatibility.rs` only |
 
 The single compat-assertion file is the only place where the test deliberately
@@ -55,6 +51,73 @@ runs `git` to assert that maw output is observable via the stock `git` toolchain
 Every other `tests/` hit is fixture/setup (seeding repos, reading refs, hash-
 object, rev-parse) and could in principle migrate to maw-git helpers, but that is
 strictly lower priority than reducing the production count.
+
+## Test-fixture consolidation (bn-5rdz)
+
+The previous 2026-05-01 snapshot conflated production and test-fixture debt:
+many "top files" were *only* heavy because their `mod tests` block repeated the
+same `git init` + `config user.email` + `config user.name` + `config commit.gpgsign=false`
++ `add` + `commit` boilerplate across multiple helpers.
+
+bn-5rdz extracts that boilerplate into `maw_git::test_support`, exposed behind a
+new `test-support` cargo feature on the `maw-git` crate. The helper module lives
+at `crates/maw-git/src/test_support.rs` and provides:
+
+- `init_test_repo()` → `(TempDir, PathBuf)` — fresh repo, identity set,
+  gpgsign disabled, `--initial-branch=main`.
+- `init_test_repo_at(&Path)` — variant when the caller already owns the dir
+  (e.g. a manually-crafted brownfield layout).
+- `init_test_repo_with_commit()` → `(TempDir, PathBuf, String)` — seeds
+  `README.md` and returns the initial HEAD oid.
+- `commit_all(&Path, message)` → `String` — `add -A && commit -m && rev-parse HEAD`.
+- `git_capture(&Path, args)` → `String` — escape hatch for one-off `git` reads
+  in tests (rev-parse, cat-file, etc.).
+
+Refactored files (per-file `Command::new("git")` count before → after, all
+inside `#[cfg(test)]`):
+
+| File | Before | After | Notes |
+| --- | ---: | ---: | --- |
+| `crates/maw-cli/src/init.rs` | 41 | 30 | `brownfield_tests::setup_existing_repo` |
+| `crates/maw-cli/src/workspace/working_copy.rs` | 16 | 9 | `tests::setup_repo`, `make_second_commit` |
+| `crates/maw-cli/src/workspace/recover.rs` | 23 | 11 | 3 inline fixtures + `setup_dangling_test_repo` |
+| `crates/maw-cli/src/epoch_gc.rs` | 12 | 5 | `setup_repo` + `commit` |
+| `crates/maw-core/src/backend/git.rs` | 25 | 25 | `setup_git_repo` (kept other helpers) |
+| `crates/maw-core/src/refs.rs` | 11 | 0 | `setup_repo`, `add_commit` |
+| `crates/maw-core/src/oplog/write.rs` | 13 | 6 | `setup_repo` only |
+| `crates/maw-core/src/oplog/read.rs` | 7 | 0 | `setup_repo` |
+| `crates/maw-core/src/oplog/checkpoint.rs` | 6 | 0 | `setup_repo` |
+| `crates/maw-core/src/merge/build.rs` | 9 | 6 | `setup_git_repo` (kept `git_oid` etc. for log/show assertions) |
+| `crates/maw-git/src/status_impl.rs` | 6 | 0 | `tests_bn_p5z5::setup_repo` |
+| `crates/maw-git/src/stash_impl.rs` | 10 | 5 | `setup_repo` |
+| `crates/maw-git/src/worktree_impl.rs` | 5 | 0 | `setup_repo` |
+| `crates/maw-git/tests/integration_test.rs` | 13 | 1 | `setup_repo`, `setup_repo_with_commit` |
+| `src/merge/collect.rs` | 17 | 13 | `setup_git_repo` (kept `git_head_oid` helper) |
+| **Total reduction** | **214** | **111** | **-103 (-48%)** |
+
+Combined with the production-call migration (Wave 1 + 2), the overall inventory
+fell from 543 (2026-05-01) → 347 (2026-05-13).
+
+### Test files intentionally retaining inline `git` CLI
+
+These are kept as-is and should NOT be replaced by `test_support` helpers:
+
+- `tests/git_compatibility.rs` (1 call) — **deliberate compat assertion**:
+  it asserts that maw-produced refs are observable to stock `git`. Annotated
+  inline.
+- `tests/manifold_common/mod.rs` — Manifold v2 test harness building a full
+  bare-repo + worktree layout with `.manifold/` skeleton, refs, and remote
+  setup. The git invocations are part of the harness's identity, not just
+  setup boilerplate.
+- `tests/dst_harness.rs`, `tests/concurrent_safety.rs`, etc. — these use
+  `manifold_common::TestRepo` for setup but make additional inline `git`
+  calls to probe specific behaviors (worktree add, push round-trip, etc.).
+- Each `crates/maw-core/src/backend/git.rs` test that exercises a specific
+  worktree command (worktree add/remove/list, branch ops, rev-parse with
+  options) — these are testing git behavior, not setting up a fixture.
+- `crates/maw-cli/src/init.rs` greenfield tests — they go through
+  `greenfield_init()` (the production function) and then make `git rev-parse` /
+  `git config --get` calls to verify the result.
 
 ## Definition of done: permanent push/fetch carveouts
 

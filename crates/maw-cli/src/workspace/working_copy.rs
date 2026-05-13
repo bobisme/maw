@@ -1520,77 +1520,19 @@ mod tests {
 
     /// Create a fresh git repo with one initial commit.
     fn setup_repo() -> (TempDir, std::path::PathBuf, String) {
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path().to_path_buf();
-
-        for (args, _label) in [
-            (vec!["init"], "init"),
-            (vec!["config", "user.name", "Test"], "config name"),
-            (
-                vec!["config", "user.email", "test@test.com"],
-                "config email",
-            ),
-            (vec!["config", "commit.gpgsign", "false"], "config gpgsign"),
-        ] {
-            let out = Command::new("git")
-                .args(&args)
-                .current_dir(&root)
-                .output()
-                .expect("operation should succeed");
-            assert!(out.status.success(), "git {args:?} failed");
-        }
-
-        // Create `.manifold/` so `repo_root_from_worktree`'s layout validation
-        // (bn-2bow) recognizes this as a maw repo root.
+        // bn-5rdz: shared helper from maw_git::test_support, plus this
+        // crate's specific need: a `.manifold/` marker dir so
+        // `repo_root_from_worktree`'s layout validation (bn-2bow) recognizes
+        // this as a maw repo root.
+        let (dir, root, oid) = maw_git::test_support::init_test_repo_with_commit();
         fs::create_dir_all(root.join(".manifold")).expect("operation should succeed");
-
-        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
-        let out = Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        assert!(out.status.success());
-
-        let out = Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        assert!(out.status.success());
-
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-
         (dir, root, oid)
     }
 
     fn make_second_commit(root: &Path) -> String {
         fs::write(root.join("epoch2.txt"), "epoch2 content\n").expect("operation should succeed");
-        let out = Command::new("git")
-            .args(["add", "epoch2.txt"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        assert!(out.status.success());
-
-        let out = Command::new("git")
-            .args(["commit", "-m", "epoch2"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        assert!(out.status.success());
-
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        // bn-5rdz: stage + commit + rev-parse consolidated in commit_all.
+        maw_git::test_support::commit_all(root, "epoch2")
     }
 
     #[test]

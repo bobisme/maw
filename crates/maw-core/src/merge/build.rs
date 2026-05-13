@@ -570,22 +570,13 @@ mod tests {
 
     /// Set up a fresh git repo with git identity configured.
     fn setup_git_repo() -> (TempDir, EpochId, Box<dyn maw_git::GitRepo>) {
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path();
-
-        run_git(root, &["init"]);
-        run_git(root, &["config", "user.name", "Test"]);
-        run_git(root, &["config", "user.email", "test@test.com"]);
-        run_git(root, &["config", "commit.gpgsign", "false"]);
-
-        // Initial commit with README.md
-        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
-        run_git(root, &["add", "README.md"]);
-        run_git(root, &["commit", "-m", "initial"]);
-
-        let oid = git_oid(root, "HEAD");
-        let epoch = EpochId::new(oid.as_str()).expect("operation should succeed");
-        let repo = open_test_repo(root);
+        // bn-5rdz: shared init + seed-commit helper. The local `run_git`,
+        // `git_oid`, etc. helpers below are kept because the rest of this
+        // module's tests reach for git CLI specifically (ls-tree, log, show)
+        // to assert on history shape — not just setup.
+        let (dir, root, oid_str) = maw_git::test_support::init_test_repo_with_commit();
+        let epoch = EpochId::new(&oid_str).expect("operation should succeed");
+        let repo = open_test_repo(&root);
         (dir, epoch, repo)
     }
 

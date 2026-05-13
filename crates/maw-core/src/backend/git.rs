@@ -883,54 +883,9 @@ mod tests {
 
     /// Helper: set up a fresh git repo with one commit.
     fn setup_git_repo() -> (TempDir, EpochId) {
-        let temp_dir = TempDir::new().expect("operation should succeed");
-        let root = temp_dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        fs::write(root.join("README.md"), "# Test Repo").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        let oid_str = String::from_utf8(output.stdout)
-            .expect("operation should succeed")
-            .trim()
-            .to_string();
+        // bn-5rdz: use shared init_test_repo_with_commit helper.
+        let (temp_dir, _root, oid_str) = maw_git::test_support::init_test_repo_with_commit();
         let epoch = EpochId::new(&oid_str).expect("operation should succeed");
-
         (temp_dir, epoch)
     }
 

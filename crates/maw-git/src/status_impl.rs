@@ -229,48 +229,16 @@ pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
 mod tests_bn_p5z5 {
     //! Regression tests for the workspace backend gix migration (bn-p5z5).
 
-    use std::process::Command;
-
     use tempfile::TempDir;
 
     use super::*;
+    use crate::test_support::init_test_repo_with_commit;
     use crate::types::FileStatus;
 
     fn setup_repo() -> (TempDir, crate::GixRepo) {
-        let dir = TempDir::new().expect("tempdir");
-        let root = dir.path();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("git init");
-        Command::new("git")
-            .args(["config", "user.email", "t@t"])
-            .current_dir(root)
-            .output()
-            .expect("git config email");
-        Command::new("git")
-            .args(["config", "user.name", "t"])
-            .current_dir(root)
-            .output()
-            .expect("git config name");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("disable gpg");
-        std::fs::write(root.join("README.md"), "init").expect("write seed file");
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .expect("git add");
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(root)
-            .output()
-            .expect("git commit");
-        let repo = crate::GixRepo::open(root).expect("open repo");
+        // bn-5rdz: use shared test-repo helper instead of inline git CLI.
+        let (dir, root, _oid) = init_test_repo_with_commit();
+        let repo = crate::GixRepo::open(&root).expect("open repo");
         (dir, repo)
     }
 

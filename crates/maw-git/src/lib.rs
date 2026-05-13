@@ -17,6 +17,9 @@ pub mod merge;
 pub mod repo;
 pub mod types;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 // gix-backed implementation modules
 mod checkout_impl;
 mod config_impl;

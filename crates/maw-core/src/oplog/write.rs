@@ -270,7 +270,6 @@ mod tests {
     use crate::model::types::{EpochId, WorkspaceId};
     use crate::oplog::types::{OpPayload, Operation};
     use crate::refs::{read_ref, workspace_head_ref};
-    use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -280,50 +279,9 @@ mod tests {
 
     /// Create a fresh git repo with one commit.
     fn setup_repo() -> (TempDir, GitOid) {
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        let oid_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        // bn-5rdz: shared init + seed-commit helper.
+        let (dir, _root, oid_str) = maw_git::test_support::init_test_repo_with_commit();
         let oid = GitOid::new(&oid_str).expect("operation should succeed");
-
         (dir, oid)
     }
 

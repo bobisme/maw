@@ -1765,32 +1765,8 @@ mod tests {
 
     #[test]
     fn list_and_grep_recovery_refs_in_temp_repo() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path();
-
-        // init repo
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
+        // bn-5rdz: init + identity + commit via shared helper.
+        let (_dir, root) = maw_git::test_support::init_test_repo();
 
         fs::write(
             root.join("a.txt"),
@@ -1800,48 +1776,31 @@ three
 ",
         )
         .expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "a.txt"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-qm", "init"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
-        let oid_out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        assert!(oid_out.status.success());
-        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
+        let oid = maw_git::test_support::commit_all(&root, "init");
 
         // pin recovery ref
         let ref_name = "refs/manifold/recovery/alice/2025-01-01T00-00-00Z";
         let upd = Command::new("git")
             .args(["update-ref", ref_name, &oid])
-            .current_dir(root)
+            .current_dir(&root)
             .output()
             .expect("operation should succeed");
         assert!(upd.status.success());
 
-        let refs = list_recovery_refs(root).expect("operation should succeed");
+        let refs = list_recovery_refs(&root).expect("operation should succeed");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].ref_name, ref_name);
         assert_eq!(refs[0].workspace, "alice");
         assert_eq!(refs[0].oid, oid);
 
-        let hits = grep_snapshot(root, &oid, "needle", false, false, false)
+        let hits = grep_snapshot(&root, &oid, "needle", false, false, false)
             .expect("operation should succeed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "a.txt");
         assert_eq!(hits[0].line, 2);
 
         let mut cache = HashMap::new();
-        let snippet = build_snippet(root, &oid, "a.txt", 2, 1, &hits[0].line_text, &mut cache)
+        let snippet = build_snippet(&root, &oid, "a.txt", 2, 1, &hits[0].line_text, &mut cache)
             .expect("operation should succeed");
         assert_eq!(snippet.len(), 3);
         assert_eq!(snippet[1].line, 2);
@@ -1850,54 +1809,13 @@ three
 
     #[test]
     fn grep_snapshot_handles_paths_with_colons() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("operation should succeed");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-
+        // bn-5rdz: init + identity via shared helper, then seed + commit.
+        let (_dir, root) = maw_git::test_support::init_test_repo();
         fs::write(root.join("with:colon.txt"), "first\ncolon-needle\n")
             .expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "with:colon.txt"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-qm", "colon path"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
+        let oid = maw_git::test_support::commit_all(&root, "colon path");
 
-        let oid_out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("operation should succeed");
-        assert!(oid_out.status.success());
-        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
-
-        let hits = grep_snapshot(root, &oid, "colon-needle", false, false, false)
+        let hits = grep_snapshot(&root, &oid, "colon-needle", false, false, false)
             .expect("operation should succeed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "with:colon.txt");
@@ -1912,52 +1830,12 @@ three
     /// Helper: create a git repo with a commit and ws/ directory structure.
     /// Returns (tempdir, root, HEAD oid).
     fn setup_dangling_test_repo() -> (tempfile::TempDir, std::path::PathBuf, String) {
-        let dir = tempfile::TempDir::new().expect("operation should succeed");
-        let root = dir.path().to_path_buf();
-
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-
+        // bn-5rdz: init + identity + commit via shared helpers; then add the
+        // file this test cares about and the `ws/` marker dir.
+        let (dir, root) = maw_git::test_support::init_test_repo();
         fs::write(root.join("a.txt"), "content\n").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "a.txt"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-qm", "init"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-
-        let oid_out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
-
-        // Create ws/ directory
+        let oid = maw_git::test_support::commit_all(&root, "init");
         fs::create_dir_all(root.join("ws")).expect("operation should succeed");
-
         (dir, root, oid)
     }
 

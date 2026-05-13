@@ -1131,44 +1131,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn setup_repo() -> (tempfile::TempDir, std::path::PathBuf) {
-        use std::process::Command;
-
-        let dir = tempfile::TempDir::new().expect("operation should succeed");
-        let root = dir.path().to_path_buf();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-
-        std::fs::write(root.join("README.md"), "# Test\n").expect("operation should succeed");
-        Command::new("git")
-            .args(["add", "README.md"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&root)
-            .output()
-            .expect("operation should succeed");
-
+        // bn-5rdz: shared init + seed-commit helper.
+        let (dir, root, _oid) = maw_git::test_support::init_test_repo_with_commit();
         (dir, root)
     }
 

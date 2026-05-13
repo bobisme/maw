@@ -25,6 +25,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 proptest = "1"
+# bn-5rdz: shared test-repo setup helpers from maw-git.
+maw-git = { path = "../maw-git", version = "0.60.9", features = ["test-support"] }
 
 [lints]
 workspace = true

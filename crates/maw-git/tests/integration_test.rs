@@ -6,6 +6,7 @@ use tempfile::TempDir;
 use maw_git::{
     ChangeType, EntryMode, FileStatus, GitError, GitOid, GitRepo, GixRepo, IndexEntry, RefEdit,
     RefName, TreeEdit, TreeEntry,
+    test_support::{git_capture, init_test_repo},
 };
 
 // ---------------------------------------------------------------------------
@@ -13,25 +14,9 @@ use maw_git::{
 // ---------------------------------------------------------------------------
 
 fn setup_repo() -> (TempDir, GixRepo) {
-    let dir = TempDir::new().expect("test setup should succeed");
-    std::process::Command::new("git")
-        .args([
-            "init",
-            dir.path().to_str().expect("test setup should succeed"),
-        ])
-        .output()
-        .expect("test setup should succeed");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(dir.path())
-        .output()
-        .expect("test setup should succeed");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(dir.path())
-        .output()
-        .expect("test setup should succeed");
-    let repo = GixRepo::open(dir.path()).expect("test setup should succeed");
+    // bn-5rdz: use shared init_test_repo() instead of inline `git init` + config.
+    let (dir, root) = init_test_repo();
+    let repo = GixRepo::open(&root).expect("test setup should succeed");
     (dir, repo)
 }
 
@@ -62,11 +47,10 @@ fn setup_repo_with_commit() -> (TempDir, GixRepo, GitOid, GitOid) {
         .create_commit(tree_oid, &[], "initial commit", Some(&head_ref))
         .expect("test setup should succeed");
     // Also point HEAD at refs/heads/main via symbolic ref so rev_parse("HEAD") works.
-    std::process::Command::new("git")
-        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
-        .current_dir(dir.path())
-        .output()
-        .expect("test setup should succeed");
+    // bn-5rdz: kept as `git symbolic-ref` CLI for now — gix exposes this via
+    // `Repository::edit_reference` but the existing test wires it through the
+    // CLI to mirror what `git init` would do in a normal user repo.
+    let _ = git_capture(dir.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
     (dir, repo, commit_oid, tree_oid)
 }
 

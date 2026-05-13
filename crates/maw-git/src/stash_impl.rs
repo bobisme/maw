@@ -596,38 +596,12 @@ mod tests {
 
     /// Helper: init a git repo with an initial commit, return (tempdir, `GixRepo`).
     fn setup_repo() -> (tempfile::TempDir, GixRepo) {
-        let dir = tempfile::tempdir().expect("test setup should succeed");
-        let root = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(root)
-            .output()
-            .expect("test setup should succeed");
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .expect("test setup should succeed");
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .expect("test setup should succeed");
-
-        std::fs::write(root.join("init.txt"), "init\n").expect("test setup should succeed");
-        Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(root)
-            .output()
-            .expect("test setup should succeed");
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(root)
-            .output()
-            .expect("test setup should succeed");
-
-        let repo = GixRepo::open(root).expect("test setup should succeed");
+        // bn-5rdz: shared init + seed-commit helper. The helper writes
+        // README.md as its seed file; the tests below don't depend on the
+        // specific seed-file name (they create their own .bones/events,
+        // links, etc.) so swapping `init.txt` for `README.md` is safe.
+        let (dir, root, _oid) = crate::test_support::init_test_repo_with_commit();
+        let repo = GixRepo::open(&root).expect("test setup should succeed");
         (dir, repo)
     }
 

@@ -11,6 +11,9 @@ categories = ["development-tools"]
 [features]
 default = ["lfs"]
 lfs = ["dep:maw-lfs"]
+# Exposes `maw_git::test_support` — shared fixtures for tests in maw-git
+# and downstream crates (bn-5rdz). Off by default; enable in dev-dependencies.
+test-support = ["dep:tempfile"]
 
 [dependencies]
 thiserror = "2"
@@ -27,11 +30,17 @@ gix = { version = "0.72", default-features = false, features = [
     "merge",
 ] }
 maw-lfs = { path = "../maw-lfs", version = "0.60.9", optional = true }
+# Used by `test_support` when the `test-support` feature is enabled.
+# Also pulled in via [dev-dependencies] for the crate's own tests.
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 sha2 = "0.10"
 filetime = "0.2"
+# bn-5rdz: self-dev-dep so integration tests in `tests/` can use the
+# `test_support` module without users needing to enable the feature.
+maw-git = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true
