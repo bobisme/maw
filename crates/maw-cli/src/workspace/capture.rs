@@ -196,10 +196,12 @@ fn capture_dirty_worktree(
     // However, `git stash create` only captures tracked files + staged
     // changes. Untracked files are missed unless we stage them first.
     // We use `git add -A` to stage everything, then `git stash create`
-    // to build the commit, then `git reset` to restore the index.
+    // to build the commit, then unstage to restore the index.
     //
-    // TODO(gix): replace git add -A and git reset with GitRepo trait methods
-    // when full working-tree staging is available.
+    // TODO(gix): the `git add -A` step still shells to git because gix has
+    // no equivalent that walks the worktree, hashes new content, stages
+    // modifications/deletions, and handles embedded repo directories. Once
+    // that primitive exists, replace `stage_all_for_capture` too.
 
     // Stage all files (including untracked). Embedded git directories can make
     // `git add -A` fail with "does not have a commit checked out". Retry while
@@ -210,8 +212,7 @@ fn capture_dirty_worktree(
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let stash_result = repo.stash_create().map_err(|e| {
-        // Restore index state before bailing
-        // TODO(gix): replace git reset with GitRepo trait method
+        // Restore index state before bailing.
         warn_on_reset_failure(ws_path, "capture-stash-create-failure");
         anyhow::anyhow!("git stash create failed during capture: {e}")
     })?;
@@ -242,7 +243,6 @@ fn capture_dirty_worktree(
         //    scenario guarded by bn-3mpx — return `Err` so callers
         //    abort rather than proceed over user work.
         //
-        // TODO(gix): replace git reset with GitRepo trait method
         warn_on_reset_failure(ws_path, "capture-stash-create-none");
         if capturable_dirty_paths.is_empty() {
             tracing::debug!(
@@ -270,8 +270,7 @@ fn capture_dirty_worktree(
         GitOid::new(&stash_oid_str).map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
 
     // Restore the index to its pre-add state (don't leave staged changes
-    // behind — the workspace is about to be destroyed, but be clean anyway)
-    // TODO(gix): replace git reset with GitRepo trait method
+    // behind — the workspace is about to be destroyed, but be clean anyway).
     warn_on_reset_failure(ws_path, "capture-restore-index");
 
     let captured_dirty_paths = capturable_dirty_paths;
@@ -304,39 +303,37 @@ fn capture_dirty_worktree(
     }))
 }
 
-/// Run `git reset` and surface any failure via `tracing::warn!` rather than
-/// silently swallowing it (bn-2blj). We're always in a cleanup path here so
-/// the caller continues regardless, but a visible warning is needed to debug
-/// cases where the index is left dirty for the next operation.
+/// Reset the index to HEAD and surface any failure via `tracing::warn!` rather
+/// than silently swallowing it (bn-2blj). We're always in a cleanup path here
+/// so the caller continues regardless, but a visible warning is needed to
+/// debug cases where the index is left dirty for the next operation.
 fn warn_on_reset_failure(ws_path: &Path, context: &str) {
-    // TODO(gix): replace git reset with GitRepo trait method
-    match Command::new("git")
-        .args(["reset"])
-        .current_dir(ws_path)
-        .output()
-    {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            tracing::warn!(
-                context = %context,
-                ws_path = %ws_path.display(),
-                exit = ?out.status.code(),
-                stderr = %stderr.trim(),
-                "git reset failed during capture cleanup — index may be dirty"
-            );
-        }
+    let repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!(
                 context = %context,
                 ws_path = %ws_path.display(),
                 error = %e,
-                "failed to invoke git reset during capture cleanup"
+                "failed to open repo during capture cleanup"
             );
+            return;
         }
+    };
+    if let Err(e) = repo.unstage_all() {
+        tracing::warn!(
+            context = %context,
+            ws_path = %ws_path.display(),
+            error = %e,
+            "unstage_all failed during capture cleanup — index may be dirty"
+        );
     }
 }
 
+// TODO(gix): replace `git add -A` and its `:(exclude)` retry below with a
+// maw-git primitive. gix currently has no equivalent that walks the worktree,
+// hashes new content, stages modifications/deletions, and handles embedded
+// repo directories. Until that primitive exists, we shell to git.
 fn stage_all_for_capture(ws_path: &Path) -> Result<Vec<String>> {
     let add_output = Command::new("git")
         .args(["add", "-A"])
@@ -406,22 +403,17 @@ fn path_is_under_excluded(path: &str, excluded: &str) -> bool {
 
 /// Resolve the repo root from a worktree path.
 ///
-/// Uses `git rev-parse --git-common-dir` to find the shared git directory,
-/// then derives the repo root from it.
-// TODO(gix): replace with a dedicated GitRepo method for repo-root discovery
+/// Uses gix's `common_dir()` to find the shared git directory, then derives
+/// the repo root from it.
 fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to determine git common dir")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-parse --git-common-dir failed: {}", stderr.trim());
-    }
-
-    let common_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let common_dir = std::fs::canonicalize(repo.common_dir()).with_context(|| {
+        format!(
+            "failed to canonicalize git common dir for {}",
+            ws_path.display()
+        )
+    })?;
     let mut root = common_dir
         .parent()
         .context("cannot determine repo root from git common dir")?

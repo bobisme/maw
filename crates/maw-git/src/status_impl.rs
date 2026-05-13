@@ -178,3 +178,39 @@ fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<Statu
 
     Some(StatusEntry { path, status })
 }
+
+/// List untracked files (paths not in the index and not ignored).
+///
+/// Walks the working tree applying `.gitignore` rules and returns the
+/// repo-relative paths that are not currently tracked.
+///
+/// Replaces: `git ls-files --others --exclude-standard`.
+pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
+    let platform =
+        repo.repo
+            .status(gix::progress::Discard)
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to start status: {e}"),
+            })?;
+
+    let iter =
+        platform
+            .into_index_worktree_iter(Vec::new())
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to iterate status: {e}"),
+            })?;
+
+    let mut paths = Vec::new();
+    for item in iter {
+        let item = item.map_err(|e| GitError::BackendError {
+            message: format!("status item failed: {e}"),
+        })?;
+        if let gix::status::index_worktree::Item::DirectoryContents { entry, .. } = item
+            && matches!(entry.status, gix::dir::entry::Status::Untracked)
+            && let Ok(path) = entry.rela_path.to_str()
+        {
+            paths.push(path.to_owned());
+        }
+    }
+    Ok(paths)
+}

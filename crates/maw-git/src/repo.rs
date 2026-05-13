@@ -308,6 +308,17 @@ pub trait GitRepo {
     /// Returns a `GitError` if the backend operation fails.
     fn status_tracked_only(&self) -> Result<Vec<StatusEntry>, GitError>;
 
+    /// List untracked files (paths not in the index, not ignored).
+    ///
+    /// Returns repo-relative paths discovered by the directory walk that are
+    /// not currently tracked. Files filtered by `.gitignore` are not included.
+    ///
+    /// Replaces: `git ls-files --others --exclude-standard`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
+    fn list_untracked(&self) -> Result<Vec<String>, GitError>;
+
     /// Count dirty tracked files using index stat cache comparison.
     ///
     /// The fastest dirty check: reads the index once, does one `stat()` per
@@ -316,6 +327,29 @@ pub trait GitRepo {
     /// # Errors
     /// Returns a `GitError` if the backend operation fails.
     fn count_dirty_tracked(&self) -> Result<usize, GitError>;
+
+    /// Read a file's blob content at a path within a commit's tree.
+    ///
+    /// Resolves `commit_spec` via `rev_parse` (accepts hex OIDs, refs, or any
+    /// other rev spec the backend supports), descends into the commit's tree
+    /// to `rel_path`, and returns the blob bytes.
+    ///
+    /// Returns `Ok(None)` if the path does not exist, the commit cannot be
+    /// resolved, or the entry at the path is not a blob/symlink. This mirrors
+    /// the `git show <commit>:<path>` behavior of "missing → None".
+    ///
+    /// Symlinks return their target text (matching `git show` semantics).
+    ///
+    /// Replaces: `git show <commit>:<path>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails for reasons other
+    /// than the path or commit being missing.
+    fn read_file_at_commit(
+        &self,
+        commit_spec: &str,
+        rel_path: &Path,
+    ) -> Result<Option<Vec<u8>>, GitError>;
 
     // -----------------------------------------------------------------------
     // Diff (~20 call sites)

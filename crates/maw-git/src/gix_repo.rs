@@ -218,6 +218,18 @@ impl GitRepo for GixRepo {
         crate::status_impl::count_dirty_tracked(self)
     }
 
+    fn list_untracked(&self) -> Result<Vec<String>, GitError> {
+        crate::status_impl::list_untracked(self)
+    }
+
+    fn read_file_at_commit(
+        &self,
+        commit_spec: &str,
+        rel_path: &Path,
+    ) -> Result<Option<Vec<u8>>, GitError> {
+        crate::objects_impl::read_file_at_commit(self, commit_spec, rel_path)
+    }
+
     // === Diff ===
     fn diff_trees(&self, old: Option<GitOid>, new: GitOid) -> Result<Vec<DiffEntry>, GitError> {
         crate::diff_impl::diff_trees(self, old, new)

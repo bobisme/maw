@@ -459,14 +459,21 @@ pub fn snapshot_working_copy(
     repo_root: &Path,
     ws_name: &str,
 ) -> Result<Option<SnapshotRef>> {
-    // Step 1: Check for dirty state using `git status --porcelain`.
+    // Step 1: Check for dirty state via `GixRepo::status()`.
     //
-    // We use porcelain output instead of gix's `is_dirty()` because gix
-    // does not detect untracked files. Without this, untracked files in
-    // the target workspace are silently destroyed by the checkout step
-    // since no snapshot is created to preserve them. (bn-2fk0)
-    let porcelain = git_status_porcelain(ws_path)?;
-    let is_dirty = !porcelain.trim().is_empty();
+    // We avoid gix's `is_dirty()` because it does not detect untracked
+    // files. Without untracked detection, untracked files in the target
+    // workspace would be silently destroyed by the checkout step since no
+    // snapshot would be created to preserve them. (bn-2fk0)
+    //
+    // `status()` includes untracked entries as `FileStatus::Added`, matching
+    // the `git status --porcelain` behavior we used previously.
+    let status_repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let status_entries = status_repo
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to query workspace status: {e}"))?;
+    let is_dirty = !status_entries.is_empty();
 
     if !is_dirty {
         tracing::debug!("working copy is clean, skipping snapshot");
@@ -503,11 +510,7 @@ pub fn snapshot_working_copy(
     // Step 3: Create a stash commit (does NOT modify HEAD or stash list).
     let stash_result = repo.stash_create().map_err(|e| {
         // Restore index before bailing.
-        // TODO(gix): replace git reset with GitRepo trait method
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
+        let _ = repo.unstage_all();
         anyhow::anyhow!("stash_create failed during snapshot: {e}")
     })?;
 
@@ -515,11 +518,7 @@ pub fn snapshot_working_copy(
         oid.to_string()
     } else {
         // Shouldn't happen since we checked status, but be defensive.
-        // TODO(gix): replace git reset with GitRepo trait method
-        let _ = Command::new("git")
-            .args(["reset"])
-            .current_dir(ws_path)
-            .output();
+        let _ = repo.unstage_all();
         tracing::warn!("stash_create returned None despite dirty status");
         return Ok(None);
     };
@@ -981,8 +980,11 @@ fn load_stash_replay_attrs(ws_path: &Path, anchor_epoch: &str) -> Option<maw_lfs
 ///   - Parent 3 (optional): untracked files
 ///
 /// We use `git stash show --include-untracked --name-only` as the primary
-/// method since it handles all three parents. Falls back to `git diff` if
+/// method since it handles all three parents. Falls back to `diff_trees` if
 /// stash show fails.
+// TODO(gix): gix has no stash-aware diff that walks the optional untracked
+// third parent of a stash commit. Keep the `git stash show` CLI call as the
+// primary path; the fallback now uses gix's `diff_trees`.
 fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> {
     // Primary: git stash show --include-untracked captures all stash content
     // including untracked files (third parent).
@@ -1009,21 +1011,19 @@ fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> 
         }
     }
 
-    // Fallback: git diff against first parent (misses untracked files but
+    // Fallback: diff stash commit's tree against its first parent's tree
+    // (misses untracked files captured as the stash's third parent, but
     // better than nothing).
-    let diff_spec = format!("{stash_oid}^..{stash_oid}");
-    let output = Command::new("git")
-        .args(["diff", "--name-only", &diff_spec])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git diff on stash")?;
-
-    if output.status.success() {
-        let paths: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(PathBuf::from)
-            .collect();
+    if let Ok(repo) = maw_git::GixRepo::open(ws_path)
+        && let Ok(stash_gix) = stash_oid.parse::<maw_git::GitOid>()
+        && let Ok(stash_commit) = repo.read_commit(stash_gix)
+        && let Some(parent_gix) = stash_commit.parents.first().copied()
+        && let Ok(parent_commit) = repo.read_commit(parent_gix)
+    {
+        let entries = repo
+            .diff_trees(Some(parent_commit.tree_oid), stash_commit.tree_oid)
+            .unwrap_or_default();
+        let paths: Vec<PathBuf> = entries.into_iter().map(|e| PathBuf::from(e.path)).collect();
         if !paths.is_empty() {
             return Ok(paths);
         }
@@ -1034,17 +1034,8 @@ fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> 
 
 /// Read a file's content from a specific git commit.
 fn read_file_at_commit(ws_path: &Path, commit: &str, path: &Path) -> Option<Vec<u8>> {
-    let rev = format!("{commit}:{}", path.display());
-    let output = Command::new("git")
-        .args(["show", &rev])
-        .current_dir(ws_path)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(output.stdout)
-    } else {
-        None
-    }
+    let repo = maw_git::GixRepo::open(ws_path).ok()?;
+    repo.read_file_at_commit(commit, path).ok()?
 }
 
 /// Write diff3-style conflict markers for a file.
@@ -1186,14 +1177,12 @@ pub fn preserve_checkout_replay(
         .current_dir(ws_path)
         .status()?
         .success();
-    let untracked_output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git ls-files")?;
-    let untracked_empty = String::from_utf8_lossy(&untracked_output.stdout)
-        .trim()
-        .is_empty();
+    let untracked_repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let untracked_paths = untracked_repo
+        .list_untracked()
+        .map_err(|e| anyhow::anyhow!("failed to list untracked files: {e}"))?;
+    let untracked_empty = untracked_paths.is_empty();
 
     if is_index_clean && is_worktree_clean && untracked_empty {
         tracing::debug!("no user work detected (clean vs base), fast-path checkout");
@@ -1384,23 +1373,11 @@ fn extract_user_deltas(ws_path: &Path, base_epoch: &str) -> Result<UserDeltas> {
 
     // Untracked files.
     let untracked = {
-        let output = Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard"])
-            .current_dir(ws_path)
-            .output()
-            .context("failed to run git ls-files --others")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git ls-files --others failed: {}", stderr.trim());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let files: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect();
+        let repo = maw_git::GixRepo::open(ws_path)
+            .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+        let files = repo
+            .list_untracked()
+            .map_err(|e| anyhow::anyhow!("failed to list untracked files: {e}"))?;
 
         if files.is_empty() {
             None

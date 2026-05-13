@@ -243,3 +243,60 @@ pub fn edit_tree(repo: &GixRepo, base: GitOid, edits: &[TreeEdit]) -> Result<Git
     })?;
     Ok(from_gix_oid(new_id.detach()))
 }
+
+/// Read a file's blob content at a path within a commit's tree.
+///
+/// Resolves `commit_spec` via gix `rev_parse_single` (so it accepts hex
+/// OIDs, ref names, or any other rev spec gix supports), descends into the
+/// commit's tree to the entry at `rel_path`, and returns the blob bytes.
+///
+/// Returns `Ok(None)` if the path does not exist in the commit's tree, the
+/// commit cannot be resolved, or the entry at the path is not a blob/link.
+/// This mirrors the previous `git show <commit>:<path>` behavior of "missing
+/// → None" used by the stash-replay helpers.
+///
+/// Symlinks are returned as their target text (matching `git show` semantics).
+///
+/// Replaces: `git show <commit>:<path>`.
+pub fn read_file_at_commit(
+    repo: &GixRepo,
+    commit_spec: &str,
+    rel_path: &std::path::Path,
+) -> Result<Option<Vec<u8>>, GitError> {
+    // Resolve the commit-ish spec to an object id. We don't return errors
+    // here — the upstream behavior for missing/invalid commits is `None`.
+    let Ok(obj_id) = repo.repo.rev_parse_single(commit_spec) else {
+        return Ok(None);
+    };
+
+    let Ok(commit) = repo.repo.find_commit(obj_id) else {
+        return Ok(None);
+    };
+
+    let Ok(tree) = commit.tree() else {
+        return Ok(None);
+    };
+
+    // Use lookup_entry_by_path so nested paths (a/b/c.txt) resolve via
+    // intermediate trees — same semantics as `git show <commit>:<path>`.
+    let Ok(Some(entry)) = tree.lookup_entry_by_path(rel_path) else {
+        return Ok(None);
+    };
+
+    // Only return content for blob-shaped entries (regular files, executables,
+    // symlinks). Trees and commit (submodule) entries return None.
+    match entry.mode().kind() {
+        gix::objs::tree::EntryKind::Blob
+        | gix::objs::tree::EntryKind::BlobExecutable
+        | gix::objs::tree::EntryKind::Link => {}
+        _ => return Ok(None),
+    }
+
+    let blob = repo
+        .repo
+        .find_blob(entry.oid())
+        .map_err(|e| GitError::BackendError {
+            message: format!("failed to read blob at '{}': {e}", rel_path.display()),
+        })?;
+    Ok(Some(blob.data.clone()))
+}
