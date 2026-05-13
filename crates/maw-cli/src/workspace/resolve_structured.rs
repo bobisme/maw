@@ -1037,13 +1037,17 @@ pub fn run_structured(
 /// with an external actor), or an error when `git add` / `git commit`
 /// actually failed.
 ///
-/// We intentionally shell out to `git` here rather than going through the
-/// `GitRepo` trait because: (a) the workspace is a regular worktree with a
-/// standard HEAD; (b) `git commit` handles the index + HEAD update
-/// atomically and respects existing user config (author/committer, hooks,
-/// signing); (c) the structured-resolve path has to succeed on
-/// `core.symlinks=true` worktrees where staging a symlink via the gix index
-/// surface would need more care.
+// TODO(gix): we intentionally shell out to `git` here rather than going
+// through the `GitRepo` trait because: (a) the workspace is a regular
+// worktree with a standard HEAD; (b) `git commit` handles the index + HEAD
+// update atomically and respects existing user config (author/committer,
+// hooks, signing); (c) the structured-resolve path has to succeed on
+// `core.symlinks=true` worktrees where staging a symlink via the gix index
+// surface would need more care. The symlink/mode preservation tests
+// (`resolve_preserves_symlink_mode_on_keep`, bn-mg0j) depend on this CLI
+// codepath. Migrating requires either porting hook/signing config plumbing
+// into maw-git or accepting that resolve auto-commits skip user hooks —
+// neither is in scope for bn-15wt.
 fn auto_commit_resolution(
     ws_path: &Path,
     workspace: &str,

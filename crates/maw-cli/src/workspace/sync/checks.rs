@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 
 use maw_core::model::types::{BaseEpoch, WorkspaceId};
 use maw_core::refs as manifold_refs;
+use maw_git::GitRepo as _;
 
 use crate::workspace::DEFAULT_WORKSPACE;
 
@@ -46,43 +47,30 @@ pub(super) fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
 /// Returns `None` if git fails for any reason (invalid repo, unknown OID, etc.).
 /// Callers MUST treat `None` as "has committed work" (i.e. refuse to sync) to
 /// prevent data loss when the workspace state cannot be determined.
-// TODO(gix): GitRepo doesn't have a rev-list --count equivalent. Keep CLI.
 //
 // Takes a [`BaseEpoch`] explicitly (not a bare `&str` or `CurrentEpoch`) so
 // that the compiler catches accidental swaps. See bn-18dj for the bug this
 // newtype is meant to prevent: passing the current epoch here would silently
 // return 0 on stale workspaces and wipe their local commits on sync.
 pub(super) fn committed_ahead_of_epoch(ws_path: &Path, base: &BaseEpoch) -> Option<u32> {
-    let range = format!("{}..HEAD", base.as_str());
-    let output = Command::new("git")
-        .args(["rev-list", "--count", &range])
-        .current_dir(ws_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    let repo = maw_git::GixRepo::open(ws_path).ok()?;
+    let base_oid = repo.rev_parse_opt(base.as_str()).ok().flatten()?;
+    let head_oid = repo.rev_parse_opt("HEAD").ok().flatten()?;
+    repo.count_commits_between(base_oid, head_oid).ok()
 }
 
 pub(super) fn workspace_has_uncommitted_changes(ws_path: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git status in {}: {e}", ws_path.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git status failed in {}: {}",
-            ws_path.display(),
-            stderr.trim()
-        );
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    // `status()` includes untracked entries (matches `--untracked-files=all`).
+    // Any non-empty result means the workspace has uncommitted changes.
+    let entries = repo
+        .status()
+        .map_err(|e| anyhow::anyhow!("status failed in {}: {e}", ws_path.display()))?;
+    if !entries.is_empty() {
+        return Ok(true);
     }
-
-    Ok(!output.stdout.is_empty())
+    Ok(false)
 }
 
 /// Sync a single worktree to the given epoch commit.

@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use maw_git::GitRepo as _;
+
 use crate::format::OutputFormat;
 
 use super::repo_root;
@@ -600,7 +602,6 @@ pub fn find_conflicted_files_filtered(
 /// test fixtures) are not flagged because those lines aren't in the diff.
 fn find_files_with_new_conflict_markers(ws_path: &Path, base: &str) -> Vec<PathBuf> {
     use std::collections::BTreeSet;
-    use std::process::Command;
 
     let mut files: BTreeSet<PathBuf> = BTreeSet::new();
 
@@ -613,25 +614,16 @@ fn find_files_with_new_conflict_markers(ws_path: &Path, base: &str) -> Vec<PathB
     // Uncommitted changes (staged + unstaged).
     run_diff_and_collect_marker_files(ws_path, &["diff", "-U0", "--no-color", "HEAD"], &mut files);
     // Untracked files: scan their full content, since there's no diff base.
-    if let Ok(out) = Command::new("git")
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-        ])
-        .current_dir(ws_path)
-        .output()
-        && out.status.success()
+    if let Ok(repo) = maw_git::GixRepo::open(ws_path)
+        && let Ok(untracked) = repo.list_untracked()
     {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if line.is_empty() {
+        for path in untracked {
+            if path.is_empty() {
                 continue;
             }
-            let full = ws_path.join(line);
+            let full = ws_path.join(&path);
             if full.is_file() && file_has_conflict_markers(&full) {
-                files.insert(PathBuf::from(line));
+                files.insert(PathBuf::from(&path));
             }
         }
     }
@@ -652,6 +644,13 @@ fn find_files_with_new_conflict_markers(ws_path: &Path, base: &str) -> Vec<PathB
 /// Skips the `+++ b/<path>` header (3 pluses + space) so it isn't mistaken
 /// for content. Marker pattern starts with `<`, so `+<<<<<<<` doesn't
 /// collide with `+++ ` anyway, but we're explicit.
+//
+// TODO(gix): the gix `diff` surface produces tree-level change records but
+// has no high-level unified-diff text generator (the equivalent of
+// `git diff --unified=0`). Replacing this with a per-blob line-by-line
+// "added lines starting with prefix" scan is feasible but a separate piece
+// of work — see bn-5kad follow-ups. Keep the `git diff` invocation here for
+// the conflict-marker gate until a unified-diff helper lands in maw-git.
 fn run_diff_and_collect_marker_files(
     ws_path: &Path,
     args: &[&str],
@@ -702,27 +701,18 @@ fn run_diff_and_collect_marker_files(
 /// 2. `refs/manifold/epoch/current` — the repo's current epoch
 /// 3. The first commit on HEAD's history — fallback
 fn resolve_workspace_base_ref(ws_path: &Path) -> Option<String> {
-    use std::process::Command;
-
     let ws_name = ws_path.file_name()?.to_str()?;
 
     // Walk up to the repo root to run ref queries against the common git dir.
     let repo_root = ws_path.parent()?.parent()?;
+    let repo = maw_git::GixRepo::open(repo_root).ok()?;
 
     for candidate in [
         format!("refs/manifold/epoch/ws/{ws_name}"),
         "refs/manifold/epoch/current".to_owned(),
     ] {
-        if let Ok(out) = Command::new("git")
-            .args(["rev-parse", "--verify", &candidate])
-            .current_dir(repo_root)
-            .output()
-            && out.status.success()
-        {
-            let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            if !oid.is_empty() {
-                return Some(oid);
-            }
+        if let Ok(Some(oid)) = repo.rev_parse_opt(&candidate) {
+            return Some(oid.to_string());
         }
     }
     None

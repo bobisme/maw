@@ -512,15 +512,21 @@ fn ensure_branch_absent(root: &Path, branch: &str) -> Result<()> {
 }
 
 fn create_branch_from_oid(root: &Path, branch: &str, source_oid: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["branch", branch, source_oid])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git branch")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to create branch '{}': {}", branch, stderr.trim());
-    }
+    let repo = maw_git::GixRepo::open(root)
+        .with_context(|| format!("Failed to open repo at {}", root.display()))?;
+    let ref_name = maw_git::RefName::new(&format!("refs/heads/{branch}"))
+        .with_context(|| format!("Invalid branch ref name: refs/heads/{branch}"))?;
+    let oid: maw_git::GitOid = source_oid
+        .parse()
+        .with_context(|| format!("Invalid source oid '{source_oid}'"))?;
+    // CAS against ZERO ensures we don't clobber an existing branch — caller
+    // is responsible for `ensure_branch_absent` first; this is belt-and-braces.
+    repo.atomic_ref_update(&[maw_git::RefEdit {
+        name: ref_name,
+        new_oid: oid,
+        expected_old_oid: maw_git::GitOid::ZERO,
+    }])
+    .with_context(|| format!("Failed to create branch '{branch}'"))?;
     Ok(())
 }
 
@@ -537,10 +543,12 @@ fn rollback_change_create(
         locked.delete_active_record(change_id)
     })?;
 
-    let _ = Command::new("git")
-        .args(["branch", "-D", branch])
-        .current_dir(root)
-        .output();
+    // Best-effort branch delete during rollback; ignore errors.
+    if let Ok(repo) = maw_git::GixRepo::open(root)
+        && let Ok(ref_name) = maw_git::RefName::new(&format!("refs/heads/{branch}"))
+    {
+        let _ = repo.delete_ref(&ref_name);
+    }
     Ok(())
 }
 
@@ -937,20 +945,36 @@ fn delete_change_branch_if_requested(
         );
     }
 
-    let local_flag = if force { "-D" } else { "-d" };
-    let local = Command::new("git")
-        .args(["branch", local_flag, branch])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git branch delete")?;
-    if !local.status.success() {
-        let stderr = String::from_utf8_lossy(&local.stderr);
-        bail!(
-            "Failed to delete local branch '{}': {}\n  To fix: inspect branch state, or re-run with --force",
-            branch,
-            stderr.trim()
-        );
+    // Local branch delete via gix. `git branch -d` refuses to delete a branch
+    // not merged into HEAD; we replicate that with an explicit ancestry check.
+    let repo = maw_git::GixRepo::open(root)
+        .with_context(|| format!("Failed to open repo at {}", root.display()))?;
+    let ref_name = maw_git::RefName::new(&format!("refs/heads/{branch}"))
+        .with_context(|| format!("Invalid branch ref name: refs/heads/{branch}"))?;
+    let branch_oid = repo
+        .read_ref(&ref_name)
+        .with_context(|| format!("Failed to read branch ref '{branch}'"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("Failed to delete local branch '{branch}': branch does not exist")
+        })?;
+    if !force {
+        // Safe delete: refuse unless the branch is reachable from HEAD
+        // (i.e. fully merged). Mirrors `git branch -d` semantics.
+        let head_oid = repo
+            .rev_parse_opt("HEAD")
+            .with_context(|| "Failed to resolve HEAD".to_string())?
+            .ok_or_else(|| anyhow::anyhow!("HEAD is unborn or unresolvable"))?;
+        let merged = repo
+            .is_ancestor(branch_oid, head_oid)
+            .with_context(|| format!("Failed to check ancestry for branch '{branch}'"))?;
+        if !merged {
+            bail!(
+                "Failed to delete local branch '{branch}': branch is not fully merged into HEAD\n  To fix: inspect branch state, or re-run with --force"
+            );
+        }
     }
+    repo.delete_ref(&ref_name)
+        .with_context(|| format!("Failed to delete local branch '{branch}'"))?;
 
     if !delete_remote {
         return Ok((true, false));
@@ -1402,48 +1426,52 @@ fn resolve_source_ref(root: &Path, source_spec: &str) -> Result<ResolvedSource> 
 }
 
 fn remote_exists(root: &Path, remote: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["remote", "get-url", remote])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git remote get-url")?;
-    Ok(output.status.success())
+    let repo = maw_git::GixRepo::open(root)
+        .with_context(|| format!("Failed to open repo at {}", root.display()))?;
+    let key = format!("remote.{remote}.url");
+    Ok(repo
+        .read_config(&key)
+        .with_context(|| format!("Failed to read config key '{key}'"))?
+        .is_some())
 }
 
 fn add_detached_worktree(root: &Path, temp_path: &Path, start_oid: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "--detach",
-            &temp_path.display().to_string(),
-            start_oid,
-        ])
-        .current_dir(root)
-        .output()
-        .context("Failed to run git worktree add")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to create temporary sync worktree: {}",
-            stderr.trim()
-        );
-    }
+    let repo = maw_git::GixRepo::open(root)
+        .with_context(|| format!("Failed to open repo at {}", root.display()))?;
+    let oid: maw_git::GitOid = start_oid
+        .parse()
+        .with_context(|| format!("Invalid start oid '{start_oid}'"))?;
+    let name = temp_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "temp worktree path has no usable basename: {}",
+                temp_path.display()
+            )
+        })?;
+    repo.worktree_add(name, oid, temp_path)
+        .with_context(|| "Failed to create temporary sync worktree".to_string())?;
     Ok(())
 }
 
 fn cleanup_temp_worktree(root: &Path, temp_path: &Path) {
-    let _ = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &temp_path.display().to_string(),
-        ])
-        .current_dir(root)
-        .output();
+    // Best-effort cleanup: prune any stale admin entries, then attempt remove.
+    if let Ok(repo) = maw_git::GixRepo::open(root) {
+        if let Some(name) = temp_path.file_name().and_then(|n| n.to_str()) {
+            let _ = repo.worktree_remove(name);
+        }
+        // Always prune in case the worktree directory was already gone but
+        // the admin entry lingered.
+        let _ = repo.worktree_prune();
+    }
 }
 
+// TODO(gix): `git_output` is used to drive `git rebase` and `git merge` on a
+// temp worktree for `maw changes sync`. gix has no high-level rebase/merge
+// driver — replicating either would require porting the entire conflict-
+// detection + interactive-resolution surface. Keep CLI for these compound
+// commands; primitive ref/object ops in this module are migrated to gix.
 fn git_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
     Command::new("git")
         .args(args)
@@ -1453,41 +1481,46 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
 }
 
 fn git_rev_parse(cwd: &Path, rev: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", rev])
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("Failed to run git rev-parse {rev}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to resolve '{rev}': {}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let repo = maw_git::GixRepo::open(cwd)
+        .with_context(|| format!("Failed to open repo at {}", cwd.display()))?;
+    let oid = repo
+        .rev_parse(rev)
+        .with_context(|| format!("Failed to resolve '{rev}'"))?;
+    Ok(oid.to_string())
 }
 
 fn has_ref(cwd: &Path, git_ref: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", git_ref])
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("Failed to check ref '{git_ref}'"))?;
-    Ok(output.status.success())
+    let repo = maw_git::GixRepo::open(cwd)
+        .with_context(|| format!("Failed to open repo at {}", cwd.display()))?;
+    let ref_name =
+        maw_git::RefName::new(git_ref).with_context(|| format!("Invalid ref name: {git_ref}"))?;
+    Ok(repo
+        .read_ref(&ref_name)
+        .with_context(|| format!("Failed to check ref '{git_ref}'"))?
+        .is_some())
 }
 
 fn update_ref_cas(cwd: &Path, git_ref: &str, new_oid: &str, old_oid: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["update-ref", git_ref, new_oid, old_oid])
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("Failed to update ref '{git_ref}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to update branch ref '{}': {}\n  To fix: retry sync after refreshing refs.",
-            git_ref,
-            stderr.trim()
-        );
-    }
+    let repo = maw_git::GixRepo::open(cwd)
+        .with_context(|| format!("Failed to open repo at {}", cwd.display()))?;
+    let ref_name =
+        maw_git::RefName::new(git_ref).with_context(|| format!("Invalid ref name: {git_ref}"))?;
+    let new: maw_git::GitOid = new_oid
+        .parse()
+        .with_context(|| format!("Invalid new oid '{new_oid}'"))?;
+    let old: maw_git::GitOid = old_oid
+        .parse()
+        .with_context(|| format!("Invalid old oid '{old_oid}'"))?;
+    repo.atomic_ref_update(&[maw_git::RefEdit {
+        name: ref_name,
+        new_oid: new,
+        expected_old_oid: old,
+    }])
+    .with_context(|| {
+        format!(
+            "Failed to update branch ref '{git_ref}'\n  To fix: retry sync after refreshing refs."
+        )
+    })?;
     Ok(())
 }
 
