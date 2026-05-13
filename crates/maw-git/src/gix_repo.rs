@@ -49,6 +49,14 @@ impl GixRepo {
         self.repo.git_dir()
     }
 
+    /// Path to this repository's working directory, or `None` for a bare repo.
+    ///
+    /// Mirrors `gix::Repository::workdir`. Used by callers (e.g. brownfield
+    /// init) that need to know whether a path opens as a non-bare worktree.
+    pub fn workdir(&self) -> Option<&Path> {
+        self.workdir.as_deref()
+    }
+
     /// Path to the common git directory (shared across all worktrees).
     ///
     /// For a worktree, this is the upstream `repo.git/` rather than
@@ -163,6 +171,64 @@ impl GixRepo {
         F: FnMut(&crate::BlobEntry, &[u8]) -> Result<(), GitError>,
     {
         crate::objects_impl::walk_tree_blobs(self, tree_or_commit_oid, visit)
+    }
+
+    /// Initialize a brand-new (non-bare) git repository at `directory`.
+    ///
+    /// Creates intermediate parent directories as needed. Fails if
+    /// `directory/.git` already exists.
+    ///
+    /// Replaces: `git init <directory>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the directory cannot be created or gix cannot
+    /// initialize the repository.
+    pub fn init_repo(directory: &Path) -> Result<Self, GitError> {
+        crate::init_impl::init_repo(directory)
+    }
+
+    /// Return the short branch name HEAD points at, or `None` when detached.
+    ///
+    /// Replaces: `git symbolic-ref --short HEAD` (with `Ok(None)` mapping to
+    /// the "HEAD is detached" exit-code path).
+    ///
+    /// # Errors
+    /// Returns a `GitError` only if reading HEAD fails for a reason other
+    /// than the ref being detached or missing.
+    pub fn init_head_branch(&self) -> Result<Option<String>, GitError> {
+        crate::init_impl::init_head_branch(self)
+    }
+
+    /// Point HEAD symbolically at `refs/heads/<branch>`.
+    ///
+    /// Atomic (temp file + rename). Does not require the branch ref to
+    /// already exist — mirroring `git symbolic-ref` semantics.
+    ///
+    /// Replaces: `git symbolic-ref HEAD refs/heads/<branch>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if writing the HEAD file fails.
+    pub fn init_set_head_to_branch(&self, branch: &str) -> Result<(), GitError> {
+        crate::init_impl::init_set_head_to_branch(self, branch)
+    }
+
+    /// Create an empty-tree commit, optionally updating `refs/heads/<branch>`.
+    ///
+    /// Bootstraps a fresh repository with an `--allow-empty` commit. When
+    /// `branch` is `Some`, the named branch is created / fast-forwarded to
+    /// the new commit OID.
+    ///
+    /// Replaces: `git commit --allow-empty -m "..."` after `git init`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if writing the tree, the commit, or updating
+    /// the branch ref fails (e.g., no author/committer identity).
+    pub fn init_create_empty_commit(
+        &self,
+        message: &str,
+        branch: Option<&str>,
+    ) -> Result<GitOid, GitError> {
+        crate::init_impl::init_create_empty_commit(self, message, branch)
     }
 
     /// Load a `.gitattributes` matcher from the tree at the given commit.

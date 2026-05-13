@@ -23,6 +23,7 @@ mod config_impl;
 mod diff_impl;
 mod gix_repo;
 mod index_impl;
+mod init_impl;
 #[cfg(feature = "lfs")]
 mod lfs_clean;
 mod objects_impl;

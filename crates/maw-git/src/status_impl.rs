@@ -222,6 +222,10 @@ pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "pre-existing in-file test mod (bn-p5z5); list_untracked follows below"
+)]
 mod tests_bn_p5z5 {
     //! Regression tests for the workspace backend gix migration (bn-p5z5).
 

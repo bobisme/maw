@@ -23,6 +23,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr as _;
 
 use maw_git::GitRepo as _;
 
@@ -240,47 +241,72 @@ pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, In
 
 /// Run `git init` in the target directory.
 fn git_init(root: &Path) -> Result<(), InitError> {
-    run_git(root, &["init"])?;
+    maw_git::GixRepo::init_repo(root).map_err(|e| InitError::GitCommand {
+        command: "git init".to_owned(),
+        stderr: e.to_string(),
+        exit_code: None,
+    })?;
     Ok(())
 }
 
 /// Create an initial empty commit on the given branch.
 ///
-/// Uses `git commit --allow-empty` to create an empty commit that serves
-/// as epoch₀. Returns the commit OID as an `EpochId`.
+/// Writes an empty-tree commit via gix that serves as epoch₀, points HEAD
+/// symbolically at the configured branch, and returns the commit OID as
+/// an `EpochId`.
 fn create_initial_commit(root: &Path, branch: &str) -> Result<EpochId, InitError> {
-    // Ensure we're on the right branch (git init may default to "master")
-    // Use checkout -B to create/reset the branch
-    run_git(root, &["checkout", "-B", branch])?;
+    let repo = maw_git::GixRepo::open(root).map_err(|e| InitError::GitCommand {
+        command: "open repo".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+
+    // Point HEAD at refs/heads/<branch>. gix::init defaults to refs/heads/main,
+    // but the caller may have configured a different branch. This is the gix
+    // equivalent of `git checkout -B <branch>` *before* the first commit — it
+    // never has to touch the index/worktree because there is no prior commit.
+    repo.init_set_head_to_branch(branch)
+        .map_err(|e| InitError::GitCommand {
+            command: format!("git symbolic-ref HEAD refs/heads/{branch}"),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
     // Configure a committer identity for the initial commit if not set.
-    // git commit fails without user.name/email. Use repo-local config
+    // The commit fails without user.name/email. Use repo-local config
     // so we don't pollute the user's global config.
     ensure_git_identity(root)?;
 
     // Disable GPG signing for this repo — the initial commit must not
     // require user interaction (e.g., pinentry). Users can re-enable it
     // after init if desired.
-    run_git(root, &["config", "commit.gpgsign", "false"])?;
+    repo.write_config("commit.gpgsign", "false")
+        .map_err(|e| InitError::GitCommand {
+            command: "git config commit.gpgsign false".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
-    // Create the empty commit
-    run_git(
-        root,
-        &[
-            "commit",
-            "--allow-empty",
-            "-m",
-            "manifold: epoch₀ (initial empty commit)",
-        ],
-    )?;
+    // Re-open the repo so the new config is picked up by the gix author
+    // resolver (gix snapshots config at open time).
+    let repo = maw_git::GixRepo::open(root).map_err(|e| InitError::GitCommand {
+        command: "open repo".to_owned(),
+        stderr: format!("failed to re-open repo: {e}"),
+        exit_code: None,
+    })?;
 
-    // Read the commit OID
-    let oid_str = run_git_stdout(root, &["rev-parse", "HEAD"])?;
-    let oid_str = oid_str.trim();
+    // Create the empty-tree commit and update refs/heads/<branch> to point at it.
+    let oid = repo
+        .init_create_empty_commit("manifold: epoch₀ (initial empty commit)", Some(branch))
+        .map_err(|e| InitError::GitCommand {
+            command: "git commit --allow-empty".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?;
 
-    EpochId::new(oid_str).map_err(|e| InitError::GitCommand {
-        command: "git rev-parse HEAD".to_owned(),
-        stderr: format!("invalid OID from git: {e}"),
+    EpochId::new(&oid.to_string()).map_err(|e| InitError::GitCommand {
+        command: "create_commit".to_owned(),
+        stderr: format!("invalid OID from gix: {e}"),
         exit_code: None,
     })
 }
@@ -345,8 +371,17 @@ fn normalize_common_dir_to_repo_git(root: &Path) -> Result<(), InitError> {
 
 /// Set `core.bare = true` so git treats the root as a bare repo.
 fn set_bare_mode(root: &Path) -> Result<(), InitError> {
-    run_git(root, &["config", "core.bare", "true"])?;
-    Ok(())
+    let repo = maw_git::GixRepo::open(root).map_err(|e| InitError::GitCommand {
+        command: "open repo".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+    repo.write_config("core.bare", "true")
+        .map_err(|e| InitError::GitCommand {
+            command: "git config core.bare true".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })
 }
 
 /// Clean up root working tree artifacts after setting bare mode.
@@ -364,11 +399,12 @@ fn clean_root_worktree(root: &Path) -> Result<(), InitError> {
 }
 
 fn git_common_dir(root: &Path) -> Result<PathBuf, InitError> {
-    let path = run_git_stdout(
-        root,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    Ok(PathBuf::from(path.trim()))
+    let repo = maw_git::GixRepo::open(root).map_err(|e| InitError::GitCommand {
+        command: "open repo".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+    Ok(repo.common_dir().to_path_buf())
 }
 
 /// Set `refs/manifold/epoch/current` to the given epoch commit.
@@ -397,70 +433,35 @@ fn create_default_workspace(root: &Path, branch: &str) -> Result<PathBuf, InitEr
 
     let ws_path = ws_dir.join("default");
 
-    // Create the default workspace attached to the configured branch.
-    // This keeps HEAD on the branch so that `update-ref refs/heads/{branch}`
-    // during merge keeps the worktree in sync.
-    run_git(
-        root,
-        &[
+    // TODO(gix): `git worktree add <path> <branch>` creates an attached-HEAD
+    // worktree. maw_git::worktree_add only supports detached HEAD (target is
+    // an OID, not a ref). Until an attached variant lands, keep CLI here so
+    // the default workspace stays on the configured branch — required for
+    // `update-ref refs/heads/{branch}` during merge to keep the worktree in
+    // sync.
+    let output = Command::new("git")
+        .args([
             "worktree",
             "add",
             ws_path.to_str().unwrap_or("ws/default"),
             branch,
-        ],
-    )?;
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|e| InitError::GitCommand {
+            command: format!("git worktree add {} {branch}", ws_path.display()),
+            stderr: format!("failed to spawn: {e}"),
+            exit_code: None,
+        })?;
+    if !output.status.success() {
+        return Err(InitError::GitCommand {
+            command: format!("git worktree add {} {branch}", ws_path.display()),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            exit_code: output.status.code(),
+        });
+    }
 
     Ok(ws_path)
-}
-
-// ---------------------------------------------------------------------------
-// Git command helpers
-// ---------------------------------------------------------------------------
-
-/// Run a git command and check for success.
-fn run_git(root: &Path, args: &[&str]) -> Result<(), InitError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| InitError::GitCommand {
-            command: format!("git {}", args.join(" ")),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(InitError::GitCommand {
-            command: format!("git {}", args.join(" ")),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        })
-    }
-}
-
-/// Run a git command and return its stdout as a string.
-fn run_git_stdout(root: &Path, args: &[&str]) -> Result<String, InitError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| InitError::GitCommand {
-            command: format!("git {}", args.join(" ")),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(InitError::GitCommand {
-            command: format!("git {}", args.join(" ")),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,92 +1153,42 @@ pub fn brownfield_init(
 
 /// Verify that the directory is a valid git repository.
 fn bf_verify_git_repo(root: &Path) -> Result<(), BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| BrownfieldInitError::GitCommand {
-            command: "git rev-parse --git-dir".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
-
-    if !output.status.success() {
-        return Err(BrownfieldInitError::GitCommand {
-            command: "git rev-parse --git-dir".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
+    maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git rev-parse --git-dir".to_owned(),
+        stderr: format!("not a git repository at {}: {e}", root.display()),
+        exit_code: None,
+    })?;
     Ok(())
 }
 
 /// Detect the current branch name. Returns `None` if HEAD is detached.
 fn bf_detect_head_branch(root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if branch.is_empty() {
-            None
-        } else {
-            Some(branch)
-        }
-    } else {
-        None
-    }
+    let repo = maw_git::GixRepo::open(root).ok()?;
+    repo.init_head_branch().ok().flatten()
 }
 
 /// List files with uncommitted changes (modified, added, or deleted in working tree).
 fn bf_get_dirty_files(root: &Path) -> Result<Vec<PathBuf>, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .output()
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git status --porcelain".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+    // `status_tracked_only` skips the dirwalk for untracked files — matching
+    // the legacy porcelain parser which intentionally excluded `??` lines.
+    let entries = repo
+        .status_tracked_only()
         .map_err(|e| BrownfieldInitError::GitCommand {
             command: "git status --porcelain".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
+            stderr: e.to_string(),
             exit_code: None,
         })?;
 
-    if !output.status.success() {
-        return Err(BrownfieldInitError::GitCommand {
-            command: "git status --porcelain".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut dirty = Vec::new();
-    for line in stdout.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        // Porcelain format: XY path (first two chars are index/worktree status)
-        let worktree_status = line.chars().nth(1).unwrap_or(' ');
-        if worktree_status != ' ' && worktree_status != '?' {
-            // Modified or deleted in worktree
-            let path_part = line[3..].trim();
-            dirty.push(PathBuf::from(path_part));
-        } else if line.starts_with("??") {
-            // Untracked files — not dirty in the git sense, but notable
-            // We don't include untracked files in dirty_files since they
-            // won't conflict with the worktree checkout.
-        } else {
-            // Staged changes (index status != ' ')
-            let index_status = line.chars().next().unwrap_or(' ');
-            if index_status != ' ' && index_status != '?' {
-                let path_part = line[3..].trim();
-                dirty.push(PathBuf::from(path_part));
-            }
-        }
-    }
-    // Deduplicate (a file can appear in both index and worktree columns)
+    let mut dirty: Vec<PathBuf> = entries
+        .into_iter()
+        .filter(|e| !matches!(e.status, maw_git::FileStatus::Untracked))
+        .map(|e| PathBuf::from(e.path))
+        .collect();
     dirty.sort();
     dirty.dedup();
     Ok(dirty)
@@ -1245,43 +1196,44 @@ fn bf_get_dirty_files(root: &Path) -> Result<Vec<PathBuf>, BrownfieldInitError> 
 
 /// Get current HEAD OID. Returns `EmptyRepo` error if there are no commits.
 fn bf_get_head_oid(root: &Path) -> Result<EpochId, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root)
-        .output()
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git rev-parse HEAD".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+
+    // rev_parse_opt returns Ok(None) for unresolvable specs (including unborn
+    // HEAD / empty repo). Map that to EmptyRepo so brownfield init can give a
+    // helpful "no commits yet" error.
+    let oid = repo
+        .rev_parse_opt("HEAD")
         .map_err(|e| BrownfieldInitError::GitCommand {
             command: "git rev-parse HEAD".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
+            stderr: e.to_string(),
             exit_code: None,
-        })?;
+        })?
+        .ok_or(BrownfieldInitError::EmptyRepo)?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // git rev-parse HEAD fails with "unknown revision" when there are no commits
-        if stderr.contains("unknown revision")
-            || stderr.contains("ambiguous argument 'HEAD'")
-            || stderr.contains("does not have any commits")
-        {
-            return Err(BrownfieldInitError::EmptyRepo);
-        }
-        return Err(BrownfieldInitError::GitCommand {
-            command: "git rev-parse HEAD".to_owned(),
-            stderr: stderr.trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
-
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    EpochId::new(&oid).map_err(|e| BrownfieldInitError::GitCommand {
+    EpochId::new(&oid.to_string()).map_err(|e| BrownfieldInitError::GitCommand {
         command: "git rev-parse HEAD".to_owned(),
-        stderr: format!("invalid OID from git: {e}"),
+        stderr: format!("invalid OID from gix: {e}"),
         exit_code: None,
     })
 }
 
 /// Set `core.bare = true`.
 fn bf_set_bare_mode(root: &Path) -> Result<(), BrownfieldInitError> {
-    bf_run_git(root, &["config", "core.bare", "true"])
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "open repo".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+    repo.write_config("core.bare", "true")
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: "git config core.bare true".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })
 }
 
 fn bf_normalize_common_dir_to_repo_git(root: &Path) -> Result<(), BrownfieldInitError> {
@@ -1323,58 +1275,56 @@ fn bf_maybe_migrate_legacy_common_dir(root: &Path) -> Result<bool, BrownfieldIni
 }
 
 fn bf_prune_worktrees(root: &Path) -> Result<(), BrownfieldInitError> {
-    bf_run_git(root, &["worktree", "prune"])
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git worktree prune".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+    repo.worktree_prune()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: "git worktree prune".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })
 }
 
 fn bf_is_registered_worktree(root: &Path, ws_path: &Path) -> Result<bool, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(root)
-        .output()
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git worktree list --porcelain".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+
+    // worktree_list() does NOT include the main worktree — only linked ones.
+    // The brownfield default workspace is always a linked worktree (created
+    // via `git worktree add`), so this matches the legacy CLI behavior for
+    // the only caller (`bf_ensure_default_workspace_registered`).
+    let worktrees = repo
+        .worktree_list()
         .map_err(|e| BrownfieldInitError::GitCommand {
             command: "git worktree list --porcelain".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
+            stderr: e.to_string(),
             exit_code: None,
         })?;
 
-    if !output.status.success() {
-        return Err(BrownfieldInitError::GitCommand {
-            command: "git worktree list --porcelain".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
-
-    let ws_path = std::fs::canonicalize(ws_path).unwrap_or_else(|_| ws_path.to_path_buf());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            let listed = PathBuf::from(path.trim());
-            let listed = std::fs::canonicalize(&listed).unwrap_or(listed);
-            if listed == ws_path {
-                return Ok(true);
-            }
+    let target = std::fs::canonicalize(ws_path).unwrap_or_else(|_| ws_path.to_path_buf());
+    for wt in worktrees {
+        let listed = std::fs::canonicalize(&wt.path).unwrap_or(wt.path);
+        if listed == target {
+            return Ok(true);
         }
     }
-
     Ok(false)
 }
 
 fn bf_workspace_git_usable(ws_path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(ws_path)
-        .output();
-
-    let Ok(output) = output else {
-        return false;
-    };
-
-    if !output.status.success() {
-        return false;
-    }
-
-    String::from_utf8_lossy(&output.stdout).trim() == "true"
+    // gix opens both linked-worktree .git files and full .git directories.
+    // A successful open with a workdir is the gix equivalent of
+    // `git rev-parse --is-inside-work-tree` printing `true`.
+    maw_git::GixRepo::open(ws_path)
+        .ok()
+        .and_then(|r| r.workdir().map(std::path::Path::to_path_buf))
+        .is_some()
 }
 
 fn bf_configured_branch(root: &Path) -> String {
@@ -1382,35 +1332,36 @@ fn bf_configured_branch(root: &Path) -> String {
 }
 
 fn bf_ref_exists(root: &Path, ref_name: &str) -> bool {
-    Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", ref_name])
-        .current_dir(root)
-        .output()
-        .is_ok_and(|o| o.status.success())
+    let Ok(repo) = maw_git::GixRepo::open(root) else {
+        return false;
+    };
+    matches!(repo.rev_parse_opt(ref_name), Ok(Some(_)))
 }
 
 fn bf_get_ref_oid(root: &Path, ref_name: &str) -> Result<Option<EpochId>, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", ref_name])
-        .current_dir(root)
-        .output()
-        .map_err(|e| BrownfieldInitError::GitCommand {
-            command: format!("git rev-parse --verify {ref_name}"),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let oid = EpochId::new(&oid).map_err(|e| BrownfieldInitError::GitCommand {
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
         command: format!("git rev-parse --verify {ref_name}"),
-        stderr: format!("invalid OID from git: {e}"),
+        stderr: format!("failed to open repo: {e}"),
         exit_code: None,
     })?;
-    Ok(Some(oid))
+
+    let Some(oid) = repo
+        .rev_parse_opt(ref_name)
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: format!("git rev-parse --verify {ref_name}"),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?
+    else {
+        return Ok(None);
+    };
+
+    let epoch = EpochId::new(&oid.to_string()).map_err(|e| BrownfieldInitError::GitCommand {
+        command: format!("git rev-parse --verify {ref_name}"),
+        stderr: format!("invalid OID from gix: {e}"),
+        exit_code: None,
+    })?;
+    Ok(Some(epoch))
 }
 
 fn bf_is_ancestor(
@@ -1418,55 +1369,47 @@ fn bf_is_ancestor(
     ancestor: &EpochId,
     descendant: &EpochId,
 ) -> Result<bool, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args([
-            "merge-base",
-            "--is-ancestor",
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: format!(
+            "git merge-base --is-ancestor {} {}",
             ancestor.as_str(),
-            descendant.as_str(),
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(|e| BrownfieldInitError::GitCommand {
-            command: format!(
-                "git merge-base --is-ancestor {} {}",
-                ancestor.as_str(),
-                descendant.as_str()
-            ),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
+            descendant.as_str()
+        ),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
 
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(BrownfieldInitError::GitCommand {
-            command: format!(
-                "git merge-base --is-ancestor {} {}",
-                ancestor.as_str(),
-                descendant.as_str()
-            ),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        }),
-    }
+    let cmd = format!(
+        "git merge-base --is-ancestor {} {}",
+        ancestor.as_str(),
+        descendant.as_str()
+    );
+    let ancestor_oid = maw_git::GitOid::from_str(ancestor.as_str()).map_err(|e| {
+        BrownfieldInitError::GitCommand {
+            command: cmd.clone(),
+            stderr: format!("invalid ancestor OID: {e}"),
+            exit_code: None,
+        }
+    })?;
+    let descendant_oid = maw_git::GitOid::from_str(descendant.as_str()).map_err(|e| {
+        BrownfieldInitError::GitCommand {
+            command: cmd.clone(),
+            stderr: format!("invalid descendant OID: {e}"),
+            exit_code: None,
+        }
+    })?;
+
+    repo.is_ancestor(ancestor_oid, descendant_oid)
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: cmd,
+            stderr: e.to_string(),
+            exit_code: None,
+        })
 }
 
 fn bf_workspace_branch(ws_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
-    }
+    let repo = maw_git::GixRepo::open(ws_path).ok()?;
+    repo.init_head_branch().ok().flatten()
 }
 
 fn bf_align_default_workspace_to_configured_branch(
@@ -1486,9 +1429,15 @@ fn bf_align_default_workspace_to_configured_branch(
     if bf_workspace_branch(ws_path).is_none() {
         // Detached default workspace: move detached HEAD/index to the
         // configured branch tip without touching worktree files, then attach.
+        // TODO(gix): `git reset --mixed` and `git switch` (detached-HEAD →
+        // attached-branch conversion) have no GitRepo trait equivalents; keep
+        // CLI until attached-HEAD worktree primitives land.
         bf_run_git(ws_path, &["reset", "--mixed", &branch_ref])?;
     }
 
+    // TODO(gix): see reset comment above. `git switch <branch>` requires
+    // attaching HEAD to a branch ref with worktree/index sync; not yet in
+    // GitRepo. Keep CLI.
     bf_run_git(ws_path, &["switch", &branch])
 }
 
@@ -1532,6 +1481,9 @@ fn bf_repair_default_workspace_registration(
     let _ = bf_prune_worktrees(root);
 
     let branch = bf_configured_branch(root);
+    // TODO(gix): `git worktree add <path> <branch>` is an attached-HEAD
+    // operation. maw_git::worktree_add only supports detached HEAD; keep
+    // CLI until an attached variant lands.
     let add_result = bf_run_git(
         root,
         &[
@@ -1640,27 +1592,12 @@ fn bf_clean_root_index(root: &Path) -> Result<(), BrownfieldInitError> {
 }
 
 fn bf_git_common_dir(root: &Path) -> Result<PathBuf, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| BrownfieldInitError::GitCommand {
-            command: "git rev-parse --path-format=absolute --git-common-dir".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
-            exit_code: None,
-        })?;
-
-    if !output.status.success() {
-        return Err(BrownfieldInitError::GitCommand {
-            command: "git rev-parse --path-format=absolute --git-common-dir".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
-
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+    let repo = maw_git::GixRepo::open(root).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git rev-parse --path-format=absolute --git-common-dir".to_owned(),
+        stderr: format!("failed to open repo: {e}"),
+        exit_code: None,
+    })?;
+    Ok(repo.common_dir().to_path_buf())
 }
 
 /// Set `refs/manifold/epoch/current` to the given epoch commit.
@@ -1685,28 +1622,28 @@ fn bf_set_default_workspace_ref(root: &Path, epoch: &EpochId) -> Result<(), Brow
 }
 
 fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
+    let repo = maw_git::GixRepo::open(ws_path).map_err(|e| BrownfieldInitError::GitCommand {
+        command: "git rev-parse HEAD".to_owned(),
+        stderr: format!("failed to open workspace repo: {e}"),
+        exit_code: None,
+    })?;
+
+    let oid = repo
+        .rev_parse_opt("HEAD")
         .map_err(|e| BrownfieldInitError::GitCommand {
             command: "git rev-parse HEAD".to_owned(),
-            stderr: format!("failed to spawn: {e}"),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?
+        .ok_or_else(|| BrownfieldInitError::GitCommand {
+            command: "git rev-parse HEAD".to_owned(),
+            stderr: "workspace HEAD is unborn".to_owned(),
             exit_code: None,
         })?;
 
-    if !output.status.success() {
-        return Err(BrownfieldInitError::GitCommand {
-            command: "git rev-parse HEAD".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            exit_code: output.status.code(),
-        });
-    }
-
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    EpochId::new(&oid).map_err(|e| BrownfieldInitError::GitCommand {
+    EpochId::new(&oid.to_string()).map_err(|e| BrownfieldInitError::GitCommand {
         command: "git rev-parse HEAD".to_owned(),
-        stderr: format!("invalid OID from git: {e}"),
+        stderr: format!("invalid OID from gix: {e}"),
         exit_code: None,
     })
 }
@@ -1714,6 +1651,9 @@ fn bf_get_workspace_head_oid(ws_path: &Path) -> Result<EpochId, BrownfieldInitEr
 /// Create the default workspace at `ws/default/` using `git worktree add`.
 fn bf_create_default_workspace(root: &Path, ws_path: &Path) -> Result<(), BrownfieldInitError> {
     let branch = bf_configured_branch(root);
+    // TODO(gix): `git worktree add <path> <branch>` is an attached-HEAD
+    // operation. maw_git::worktree_add only supports detached HEAD; keep
+    // CLI until an attached variant lands.
     bf_run_git(
         root,
         &[
@@ -1876,6 +1816,10 @@ fn bf_next_root_cleanup_path(dst: &Path) -> PathBuf {
 }
 
 /// Run a git command and check for success.
+///
+/// Used only by attached-HEAD worktree operations (`worktree add <path>
+/// <branch>`, `reset --mixed <branch>`, `switch <branch>`) that have no
+/// `GitRepo` trait equivalent yet — see TODO(gix) markers at call sites.
 fn bf_run_git(root: &Path, args: &[&str]) -> Result<(), BrownfieldInitError> {
     let output = Command::new("git")
         .args(args)
