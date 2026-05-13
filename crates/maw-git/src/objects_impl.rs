@@ -204,6 +204,234 @@ pub fn create_commit(
     }
 }
 
+/// Information about a single blob discovered while walking a tree.
+///
+/// Returned by [`walk_tree_blob_paths`] and [`walk_tree_blobs`]. Paths are
+/// slash-separated and relative to the root tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobEntry {
+    /// Slash-separated path from the root tree.
+    pub path: String,
+    /// File mode of the blob (`Blob`, `BlobExecutable`, or `Link`).
+    pub mode: EntryMode,
+    /// OID of the blob object.
+    pub oid: GitOid,
+}
+
+/// Resolve a slash-separated `path` inside the tree at `tree_or_commit_oid`.
+///
+/// If the OID names a commit, its tree is resolved first. Returns `None` if
+/// the path is missing.
+///
+/// Replaces: `git ls-tree -z <tree-or-commit> -- <path>`.
+pub fn find_entry_at_path(
+    repo: &GixRepo,
+    tree_or_commit_oid: GitOid,
+    path: &str,
+) -> Result<Option<(EntryMode, GitOid)>, GitError> {
+    let tree_oid = resolve_to_tree_oid(repo, tree_or_commit_oid)?;
+    let mut current_tree =
+        repo.repo
+            .find_tree(to_gix_oid(tree_oid))
+            .map_err(|e| GitError::NotFound {
+                message: format!("tree {tree_oid}: {e}"),
+            })?;
+
+    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if components.is_empty() {
+        return Ok(None);
+    }
+
+    let last_idx = components.len() - 1;
+    for (i, component) in components.iter().enumerate() {
+        let entries: Vec<_> =
+            current_tree
+                .iter()
+                .collect::<Result<_, _>>()
+                .map_err(|e| GitError::BackendError {
+                    message: format!("failed to decode tree entries: {e}"),
+                })?;
+        let needle = component.as_bytes();
+        let Some(entry) = entries
+            .into_iter()
+            .find(|e| AsRef::<[u8]>::as_ref(e.inner.filename) == needle)
+        else {
+            return Ok(None);
+        };
+
+        let mode = from_gix_entry_mode(entry.inner.mode);
+        let oid_bytes: [u8; 20] = entry
+            .inner
+            .oid
+            .as_bytes()
+            .try_into()
+            .expect("SHA1 is 20 bytes");
+        let oid = GitOid::from_bytes(oid_bytes);
+
+        if i == last_idx {
+            return Ok(Some((mode, oid)));
+        }
+
+        // Intermediate component must be a tree.
+        if !matches!(mode, EntryMode::Tree) {
+            return Ok(None);
+        }
+        current_tree = repo
+            .repo
+            .find_tree(to_gix_oid(oid))
+            .map_err(|e| GitError::NotFound {
+                message: format!("subtree {oid} at component '{component}': {e}"),
+            })?;
+    }
+
+    Ok(None)
+}
+
+/// Read a blob located at `path` inside the tree at `tree_or_commit_oid`.
+///
+/// Returns the raw blob bytes plus its mode and OID, or `None` if the path
+/// is missing or names a non-blob entry (subtree or submodule).
+///
+/// Replaces: `git show <oid>:<path>` and `git cat-file blob <oid>` combined.
+pub fn read_blob_at_path(
+    repo: &GixRepo,
+    tree_or_commit_oid: GitOid,
+    path: &str,
+) -> Result<Option<(EntryMode, GitOid, Vec<u8>)>, GitError> {
+    let Some((mode, oid)) = find_entry_at_path(repo, tree_or_commit_oid, path)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        mode,
+        EntryMode::Blob | EntryMode::BlobExecutable | EntryMode::Link
+    ) {
+        return Ok(None);
+    }
+    let data = read_blob(repo, oid)?;
+    Ok(Some((mode, oid, data)))
+}
+
+/// Recursively walk every blob/symlink path reachable from `tree_or_commit_oid`.
+///
+/// Yields metadata only (no blob content). Paths are returned in tree-walk
+/// order. Submodules (gitlinks) are skipped.
+///
+/// Replaces: `git ls-tree -r --name-only -z <oid>`.
+pub fn walk_tree_blob_paths(
+    repo: &GixRepo,
+    tree_or_commit_oid: GitOid,
+) -> Result<Vec<BlobEntry>, GitError> {
+    let tree_oid = resolve_to_tree_oid(repo, tree_or_commit_oid)?;
+    let mut out = Vec::new();
+    let tree = repo
+        .repo
+        .find_tree(to_gix_oid(tree_oid))
+        .map_err(|e| GitError::NotFound {
+            message: format!("tree {tree_oid}: {e}"),
+        })?;
+    walk_blobs_recursive(repo, &tree, "", &mut out)?;
+    Ok(out)
+}
+
+/// Recursively walk every blob reachable from `tree_or_commit_oid`, invoking
+/// `visit` with each blob's path, OID, and raw content.
+///
+/// If `visit` returns `Err`, traversal stops and the error propagates.
+/// Symlinks are included; submodules (gitlinks) are skipped.
+///
+/// Useful for content-search workloads (replaces `git grep -z -n <oid>`).
+pub fn walk_tree_blobs<F>(
+    repo: &GixRepo,
+    tree_or_commit_oid: GitOid,
+    mut visit: F,
+) -> Result<(), GitError>
+where
+    F: FnMut(&BlobEntry, &[u8]) -> Result<(), GitError>,
+{
+    let entries = walk_tree_blob_paths(repo, tree_or_commit_oid)?;
+    for entry in &entries {
+        let data = read_blob(repo, entry.oid)?;
+        visit(entry, &data)?;
+    }
+    Ok(())
+}
+
+fn resolve_to_tree_oid(repo: &GixRepo, oid: GitOid) -> Result<GitOid, GitError> {
+    let gix_oid = to_gix_oid(oid);
+    let obj = repo
+        .repo
+        .find_object(gix_oid)
+        .map_err(|e| GitError::NotFound {
+            message: format!("object {oid}: {e}"),
+        })?;
+    match obj.kind {
+        gix::object::Kind::Tree => Ok(oid),
+        gix::object::Kind::Commit => {
+            let commit = obj.into_commit();
+            let tree_id = commit.tree_id().map_err(|e| GitError::BackendError {
+                message: format!("commit {oid} has no tree: {e}"),
+            })?;
+            Ok(from_gix_oid(tree_id.detach()))
+        }
+        other => Err(GitError::BackendError {
+            message: format!("expected commit or tree at {oid}, got {other}"),
+        }),
+    }
+}
+
+fn walk_blobs_recursive(
+    repo: &GixRepo,
+    tree: &gix::Tree<'_>,
+    prefix: &str,
+    out: &mut Vec<BlobEntry>,
+) -> Result<(), GitError> {
+    for entry_result in tree.iter() {
+        let entry = entry_result.map_err(|e| GitError::BackendError {
+            message: format!("failed to decode tree entry: {e}"),
+        })?;
+        let name =
+            String::from_utf8_lossy(AsRef::<[u8]>::as_ref(entry.inner.filename)).into_owned();
+        let rel_path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let mode = from_gix_entry_mode(entry.inner.mode);
+        let oid_bytes: [u8; 20] = entry
+            .inner
+            .oid
+            .as_bytes()
+            .try_into()
+            .expect("SHA1 is 20 bytes");
+        let oid = GitOid::from_bytes(oid_bytes);
+
+        match mode {
+            EntryMode::Tree => {
+                let subtree =
+                    repo.repo
+                        .find_tree(to_gix_oid(oid))
+                        .map_err(|e| GitError::NotFound {
+                            message: format!("subtree {oid} at '{rel_path}': {e}"),
+                        })?;
+                walk_blobs_recursive(repo, &subtree, &rel_path, out)?;
+            }
+            EntryMode::Blob | EntryMode::BlobExecutable | EntryMode::Link => {
+                out.push(BlobEntry {
+                    path: rel_path,
+                    mode,
+                    oid,
+                });
+            }
+            EntryMode::Commit => {
+                // Submodule / gitlink — skip (matches `git ls-tree -r --name-only`
+                // behavior: gitlinks are listed but they have no content; for our
+                // recovery use-cases we only care about file content).
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn edit_tree(repo: &GixRepo, base: GitOid, edits: &[TreeEdit]) -> Result<GitOid, GitError> {
     let gix_oid = to_gix_oid(base);
     let tree = repo

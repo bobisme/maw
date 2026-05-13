@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::error::GitError;
 use crate::repo::GitRepo;
 use crate::types::{
-    CommitInfo, DiffEntry, GitOid, IndexEntry, RefEdit, RefName, StatusEntry, TreeEdit, TreeEntry,
-    WorktreeInfo,
+    CommitInfo, DiffEntry, EntryMode, GitOid, IndexEntry, RefEdit, RefName, StatusEntry, TreeEdit,
+    TreeEntry, WorktreeInfo,
 };
 
 /// A [`GitRepo`] implementation backed by [gix](https://github.com/GitoxideLabs/gitoxide).
@@ -93,6 +93,75 @@ impl GixRepo {
     #[cfg(feature = "lfs")]
     pub fn clear_pending_gitattributes(&mut self) {
         self.pending_gitattributes = None;
+    }
+
+    /// Resolve a slash-separated `path` inside the tree at `tree_or_commit_oid`.
+    ///
+    /// Returns `(mode, oid)` for the entry, or `None` if the path is missing.
+    /// Accepts a commit OID (whose tree is resolved automatically) or a tree
+    /// OID directly.
+    ///
+    /// Replaces: `git ls-tree -z <tree-or-commit> -- <path>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
+    pub fn find_entry_at_path(
+        &self,
+        tree_or_commit_oid: GitOid,
+        path: &str,
+    ) -> Result<Option<(EntryMode, GitOid)>, GitError> {
+        crate::objects_impl::find_entry_at_path(self, tree_or_commit_oid, path)
+    }
+
+    /// Read a blob located at `path` inside the tree at `tree_or_commit_oid`.
+    ///
+    /// Returns `(mode, oid, content)`, or `None` if the path is missing or
+    /// names a non-blob entry. Accepts a commit OID or a tree OID directly.
+    ///
+    /// Replaces: `git show <oid>:<path>` (combined ls-tree + cat-file blob).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
+    pub fn read_blob_at_path(
+        &self,
+        tree_or_commit_oid: GitOid,
+        path: &str,
+    ) -> Result<Option<(EntryMode, GitOid, Vec<u8>)>, GitError> {
+        crate::objects_impl::read_blob_at_path(self, tree_or_commit_oid, path)
+    }
+
+    /// Recursively list every blob / symlink reachable from `tree_or_commit_oid`.
+    ///
+    /// Returns one [`BlobEntry`] per file (or symlink), in tree-walk order.
+    /// Submodules (gitlinks) are skipped. Use [`Self::walk_tree_blobs`] when
+    /// you also need blob contents.
+    ///
+    /// Replaces: `git ls-tree -r --name-only -z <oid>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
+    pub fn walk_tree_blob_paths(
+        &self,
+        tree_or_commit_oid: GitOid,
+    ) -> Result<Vec<crate::BlobEntry>, GitError> {
+        crate::objects_impl::walk_tree_blob_paths(self, tree_or_commit_oid)
+    }
+
+    /// Recursively visit every blob reachable from `tree_or_commit_oid`,
+    /// invoking `visit(entry, content)` with each blob's metadata and raw
+    /// bytes.
+    ///
+    /// Useful for content-search workloads (replaces `git grep -z -n <oid>`).
+    /// Submodules (gitlinks) are skipped.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if any backend operation or visitor invocation
+    /// fails.
+    pub fn walk_tree_blobs<F>(&self, tree_or_commit_oid: GitOid, visit: F) -> Result<(), GitError>
+    where
+        F: FnMut(&crate::BlobEntry, &[u8]) -> Result<(), GitError>,
+    {
+        crate::objects_impl::walk_tree_blobs(self, tree_or_commit_oid, visit)
     }
 
     /// Load a `.gitattributes` matcher from the tree at the given commit.

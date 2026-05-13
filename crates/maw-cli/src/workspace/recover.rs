@@ -18,10 +18,9 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use maw_git::GitRepo as _;
+use maw_git::{EntryMode, GitOid, GitRepo as _};
 use serde::Serialize;
 
 use crate::audit::{self, AuditEvent};
@@ -350,7 +349,7 @@ pub fn search(
 
     maw::fp!("FP_RECOVER_BEFORE_SEARCH")?;
     'scan: for r in &refs {
-        let grep_hits = git_grep_hits(&git_cwd, &r.oid, pattern, regex, ignore_case, text)?;
+        let grep_hits = grep_snapshot(&git_cwd, &r.oid, pattern, regex, ignore_case, text)?;
         for gh in grep_hits {
             let snippet = build_snippet(
                 &git_cwd,
@@ -463,7 +462,34 @@ fn list_recovery_refs(git_cwd: &Path) -> Result<Vec<RecoveryRef>> {
     Ok(out)
 }
 
-fn git_grep_hits(
+/// Open a `GixRepo` at `git_cwd` with a uniform error message.
+fn open_repo(git_cwd: &Path) -> Result<maw_git::GixRepo> {
+    maw_git::GixRepo::open(git_cwd)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", git_cwd.display()))
+}
+
+/// Parse a 40-char hex OID string from a recovery snapshot.
+fn parse_oid(oid: &str) -> Result<GitOid> {
+    oid.parse::<GitOid>()
+        .map_err(|e| anyhow::anyhow!("invalid OID '{oid}': {e}"))
+}
+
+/// Mirror `git grep -I`'s binary detection: a blob is "binary" if any of the
+/// first 8000 bytes is a NUL.
+fn looks_binary(content: &[u8]) -> bool {
+    let probe_len = content.len().min(8000);
+    content[..probe_len].contains(&0)
+}
+
+/// Walk all blobs in the snapshot at `oid` and return one [`GrepHit`] per
+/// matching line. Mirrors the semantics of
+/// `git grep -z -n [-I|-a] [-i] [-F] -e <pattern> <oid>`.
+///
+/// - When `text` is false, blobs that look binary are skipped (matches `-I`).
+/// - When `text` is true, binary blobs are searched as text (matches `-a`).
+/// - `regex` toggles regex vs. fixed-string search.
+/// - `ignore_case` makes matching case-insensitive.
+fn grep_snapshot(
     git_cwd: &Path,
     oid: &str,
     pattern: &str,
@@ -471,120 +497,116 @@ fn git_grep_hits(
     ignore_case: bool,
     text: bool,
 ) -> Result<Vec<GrepHit>> {
-    let mut args: Vec<&str> = vec!["grep", "-z", "-n", "--no-color"];
+    let repo = open_repo(git_cwd)?;
+    let tree_oid = parse_oid(oid)?;
 
-    if ignore_case {
-        args.push("-i");
-    }
-    if !regex {
-        args.push("-F");
-    }
-    if text {
-        // Search binary blobs as if they were text.
-        args.push("-a");
+    let matcher = if regex {
+        let mut builder = regex::RegexBuilder::new(pattern);
+        builder.case_insensitive(ignore_case);
+        let re = builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("invalid regex pattern: {e}"))?;
+        Matcher::Regex(re)
+    } else if ignore_case {
+        Matcher::FixedFold(pattern.to_lowercase())
     } else {
-        // Default: ignore binary files.
-        args.push("-I");
-    }
+        Matcher::Fixed(pattern.to_string())
+    };
 
-    // Always use -e so patterns beginning with '-' can't be interpreted as flags.
-    args.push("-e");
-    args.push(pattern);
-    args.push(oid);
-
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git grep")?;
-
-    match output.status.code() {
-        Some(0) => {}
-        Some(1) => return Ok(vec![]),
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git grep failed: {}", stderr.trim());
-        }
-    }
-
-    Ok(parse_git_grep_z(&output.stdout, oid))
-}
-
-fn parse_git_grep_z(stdout: &[u8], oid: &str) -> Vec<GrepHit> {
     let mut hits: Vec<GrepHit> = Vec::new();
-    let prefix = format!("{oid}:").into_bytes();
-    let mut cursor = 0;
-
-    while cursor < stdout.len() {
-        let Some(path_end) = stdout[cursor..].iter().position(|b| *b == b'\0') else {
-            break;
-        };
-        let path_end = cursor + path_end;
-        let header = &stdout[cursor..path_end];
-        cursor = path_end + 1;
-
-        let Some(line_end) = stdout[cursor..].iter().position(|b| *b == b'\0') else {
-            break;
-        };
-        let line_end = cursor + line_end;
-        let line_str = String::from_utf8_lossy(&stdout[cursor..line_end]);
-        cursor = line_end + 1;
-
-        let text_end = stdout[cursor..]
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(stdout.len(), |offset| cursor + offset);
-        let mut text = &stdout[cursor..text_end];
-        if let Some(stripped) = text.strip_suffix(b"\r") {
-            text = stripped;
+    repo.walk_tree_blobs(tree_oid, |entry, content| {
+        // Skip symlinks (their "content" is a target path, not file text).
+        if entry.mode == EntryMode::Link {
+            return Ok(());
         }
-        cursor = if text_end < stdout.len() {
-            text_end + 1
-        } else {
-            text_end
+        if !text && looks_binary(content) {
+            return Ok(());
+        }
+
+        // Split on '\n', preserving git grep's CRLF stripping for line text.
+        let text_str = match std::str::from_utf8(content) {
+            Ok(s) => s,
+            // If content isn't UTF-8 but we're in -a mode, fall back to lossy
+            // matching: do a lossy decode of the whole blob in one allocation.
+            // The decoded length differs from the raw bytes when invalid
+            // sequences are replaced with U+FFFD; line numbers stay correct
+            // because invalid bytes never form `\n`.
+            Err(_) if text => {
+                let lossy = String::from_utf8_lossy(content);
+                for (idx, line) in lossy.split('\n').enumerate() {
+                    let line_no = idx + 1;
+                    let stripped = line.strip_suffix('\r').unwrap_or(line);
+                    if matcher.matches(stripped) {
+                        hits.push(GrepHit {
+                            path: entry.path.clone(),
+                            line: line_no,
+                            line_text: stripped.to_string(),
+                        });
+                    }
+                }
+                return Ok(());
+            }
+            // Non-UTF8 and not in -a mode: skip (matches `-I` "treat as binary"
+            // behavior for un-decodable bytes).
+            Err(_) => return Ok(()),
         };
 
-        let path = header.strip_prefix(prefix.as_slice()).unwrap_or(header);
+        for (idx, line) in text_str.split('\n').enumerate() {
+            let line_no = idx + 1;
+            let stripped = line.strip_suffix('\r').unwrap_or(line);
+            if matcher.matches(stripped) {
+                hits.push(GrepHit {
+                    path: entry.path.clone(),
+                    line: line_no,
+                    line_text: stripped.to_string(),
+                });
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| anyhow::anyhow!("snapshot blob walk failed: {e}"))?;
 
-        let line_no: usize = match line_str.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        hits.push(GrepHit {
-            path: String::from_utf8_lossy(path).to_string(),
-            line: line_no,
-            line_text: String::from_utf8_lossy(text).to_string(),
-        });
-    }
-
-    hits
+    Ok(hits)
 }
 
-// TODO(gix): `git show <oid>:<path>` requires tree-walking to find a blob at a nested
-// path. GitRepo has read_tree() + read_blob() but no "resolve path in tree" helper.
-// Keep CLI until a path-resolution helper is added.
-fn read_file_lines(git_cwd: &Path, oid: &str, path: &str) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["show", &format!("{oid}:{path}")])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git show for snippet")?;
+/// Pattern matcher used by [`grep_snapshot`].
+enum Matcher {
+    /// Literal substring, case-sensitive.
+    Fixed(String),
+    /// Literal substring, case-insensitive (pre-lowercased pattern).
+    FixedFold(String),
+    /// Compiled regular expression.
+    Regex(regex::Regex),
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+impl Matcher {
+    fn matches(&self, line: &str) -> bool {
+        match self {
+            Self::Fixed(pat) => line.contains(pat.as_str()),
+            Self::FixedFold(pat) => line.to_lowercase().contains(pat.as_str()),
+            Self::Regex(re) => re.is_match(line),
+        }
+    }
+}
+
+/// Read the snapshot file at `oid:path` and return its lines.
+///
+/// Uses gix tree traversal — equivalent to `git show <oid>:<path>` but with no
+/// subprocess. Returns an empty list if the path is missing or names a tree.
+fn read_file_lines(git_cwd: &Path, oid: &str, path: &str) -> Result<Vec<String>> {
+    let repo = open_repo(git_cwd)?;
+    let tree_oid = parse_oid(oid)?;
+    let Some((_mode, _blob_oid, content)) = repo
+        .read_blob_at_path(tree_oid, path)
+        .map_err(|e| anyhow::anyhow!("read_blob_at_path failed: {e}"))?
+    else {
         bail!(
-            "git show failed while building snippet for {oid_short}:{path}: {}",
-            stderr.trim(),
+            "Path '{path}' not found in snapshot {oid_short}",
             oid_short = &oid[..oid.len().min(12)]
         );
-    }
-
-    let content = String::from_utf8_lossy(&output.stdout);
-    Ok(content
-        .lines()
-        .map(std::string::ToString::to_string)
-        .collect())
+    };
+    let text = String::from_utf8_lossy(&content);
+    Ok(text.lines().map(std::string::ToString::to_string).collect())
 }
 
 fn build_snippet(
@@ -894,24 +916,19 @@ fn resolve_ref_to_oid(git_cwd: &Path, reference: &str) -> Result<String> {
     Ok(oid.to_string())
 }
 
-// TODO(gix): same as read_file_lines — needs path-resolution in tree.
+/// Write the snapshot file at `oid:path` to stdout (binary-safe).
 fn show_file_at_oid(git_cwd: &Path, oid: &str, path: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["show", &format!("{oid}:{path}")])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git show")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to show file '{path}' from snapshot {oid_short}: {}",
-            stderr.trim(),
-            oid_short = &oid[..oid.len().min(12)]
-        );
-    }
-
-    std::io::stdout().write_all(&output.stdout)?;
+    let repo = open_repo(git_cwd)?;
+    let tree_oid = parse_oid(oid)?;
+    let oid_short = &oid[..oid.len().min(12)];
+    let Some((_mode, _blob_oid, content)) =
+        repo.read_blob_at_path(tree_oid, path).map_err(|e| {
+            anyhow::anyhow!("Failed to show file '{path}' from snapshot {oid_short}: {e}")
+        })?
+    else {
+        bail!("Failed to show file '{path}' from snapshot {oid_short}: path not found");
+    };
+    std::io::stdout().write_all(&content)?;
     Ok(())
 }
 
@@ -935,31 +952,25 @@ pub fn show_file(name: &str, path: &str) -> Result<()> {
 
     let oid = resolve_recoverable_oid(&record)?;
 
-    // Use git show <oid>:<path> to retrieve the file content.
+    // Resolve <oid>:<path> via gix tree traversal.
     // Run from the git common dir (repo root) so the ref resolves.
-    // TODO(gix): needs path-resolution in tree (read_commit + tree walk + read_blob).
     let git_cwd = super::git_cwd()?;
-    let output = Command::new("git")
-        .args(["show", &format!("{oid}:{path}")])
-        .current_dir(&git_cwd)
-        .output()
-        .context("failed to run git show")?;
+    let repo = open_repo(&git_cwd)?;
+    let tree_oid = parse_oid(&oid)?;
+    let Some((_mode, _blob_oid, content)) = repo
+        .read_blob_at_path(tree_oid, path)
+        .map_err(|e| anyhow::anyhow!("snapshot lookup failed: {e}"))?
+    else {
+        bail!(
+            "File '{path}' not found in snapshot {oid_short} for workspace '{name}'.\n  \
+             List dirty files: maw ws recover {name}",
+            oid_short = &oid[..oid.len().min(12)],
+        );
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("does not exist") || stderr.contains("exists on disk, but not in") {
-            bail!(
-                "File '{path}' not found in snapshot {oid_short} for workspace '{name}'.\n  \
-                 List dirty files: maw ws recover {name}",
-                oid_short = &oid[..oid.len().min(12)],
-            );
-        }
-        bail!("git show failed: {}", stderr.trim());
-    }
-
-    // Write raw content to stdout (binary-safe isn't needed for text, but let's be correct)
+    // Write raw content to stdout (binary-safe).
     std::io::stdout()
-        .write_all(&output.stdout)
+        .write_all(&content)
         .context("write to stdout")?;
 
     Ok(())
@@ -989,94 +1000,76 @@ fn validate_show_path(path: &str) -> Result<()> {
 // Restore a single file from a snapshot into the default workspace
 // ---------------------------------------------------------------------------
 
-/// One entry from `git ls-tree -r <oid> -- <path>`.
+/// One entry resolved from the tree at a snapshot commit OID.
+///
+/// `mode` mirrors the `git ls-tree` mode string (`"100644"`, `"100755"`,
+/// `"120000"`, ...) so it can be passed straight to [`write_with_mode`].
 struct LsTreeEntry {
     mode: String,
     oid: String,
 }
 
-/// Look up `path` in the tree at `commit_oid`. Returns `None` if missing.
+/// Look up `path` in the tree at `commit_oid`. Returns `None` if missing or
+/// when the entry is a tree / submodule.
 fn ls_tree_entry(git_cwd: &Path, commit_oid: &str, path: &str) -> Result<Option<LsTreeEntry>> {
-    let output = Command::new("git")
-        .args(["ls-tree", "-z", commit_oid, "--", path])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git ls-tree")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git ls-tree failed: {}", stderr.trim());
-    }
-
-    if output.stdout.is_empty() {
+    let repo = open_repo(git_cwd)?;
+    let tree_oid = parse_oid(commit_oid)?;
+    let Some((mode, oid)) = repo
+        .find_entry_at_path(tree_oid, path)
+        .map_err(|e| anyhow::anyhow!("find_entry_at_path failed: {e}"))?
+    else {
         return Ok(None);
-    }
-
-    // Format per record: <mode> SP <type> SP <oid> TAB <path> NUL
-    let record = output.stdout.split(|b| *b == 0).next().unwrap_or(&[]);
-    let line = String::from_utf8_lossy(record).into_owned();
-    let (meta, _name) = line
-        .split_once('\t')
-        .context("malformed git ls-tree output")?;
-    let mut parts = meta.split_whitespace();
-    let mode = parts.next().context("missing mode in ls-tree output")?;
-    let _kind = parts.next().context("missing kind in ls-tree output")?;
-    let oid = parts.next().context("missing oid in ls-tree output")?;
+    };
+    let mode_str = match mode {
+        EntryMode::Blob => "100644",
+        EntryMode::BlobExecutable => "100755",
+        EntryMode::Link => "120000",
+        // Restoring a directory or submodule via --restore-file isn't meaningful.
+        EntryMode::Tree | EntryMode::Commit => return Ok(None),
+    };
     Ok(Some(LsTreeEntry {
-        mode: mode.to_owned(),
-        oid: oid.to_owned(),
+        mode: mode_str.to_owned(),
+        oid: oid.to_string(),
     }))
 }
 
-/// Read the raw bytes of a blob via `git cat-file blob <oid>`.
+/// Read the raw bytes of a blob (replaces `git cat-file blob <oid>`).
 fn cat_file_blob(git_cwd: &Path, blob_oid: &str) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .args(["cat-file", "blob", blob_oid])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git cat-file blob")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git cat-file blob failed: {}", stderr.trim());
-    }
-    Ok(output.stdout)
+    let repo = open_repo(git_cwd)?;
+    let oid = parse_oid(blob_oid)?;
+    repo.read_blob(oid)
+        .map_err(|e| anyhow::anyhow!("read_blob failed: {e}"))
 }
 
 /// List blob/symlink paths reachable from `oid`. Used for the
 /// "available paths" hint when `--restore-file` cannot find the target.
 fn ls_tree_paths(git_cwd: &Path, oid: &str) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "-z", oid])
-        .current_dir(git_cwd)
-        .output()
-        .context("failed to run git ls-tree -r")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git ls-tree -r failed: {}", stderr.trim());
-    }
-
-    Ok(output
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect())
+    let repo = open_repo(git_cwd)?;
+    let tree_oid = parse_oid(oid)?;
+    let entries = repo
+        .walk_tree_blob_paths(tree_oid)
+        .map_err(|e| anyhow::anyhow!("walk_tree_blob_paths failed: {e}"))?;
+    Ok(entries.into_iter().map(|e| e.path).collect())
 }
 
-/// Check whether the destination has uncommitted changes (porcelain output non-empty).
+/// Check whether the destination has uncommitted changes affecting `path`.
 fn dest_has_uncommitted(default_ws: &Path, path: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "--", path])
-        .current_dir(default_ws)
-        .output()
-        .context("failed to run git status --porcelain")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git status --porcelain failed: {}", stderr.trim());
-    }
-    Ok(!output.stdout.is_empty())
+    let repo = open_repo(default_ws)?;
+    let entries = repo
+        .status()
+        .map_err(|e| anyhow::anyhow!("status failed: {e}"))?;
+    // Match git's `git status --porcelain -- <path>` semantics: a path is
+    // "uncommitted" if it appears in status output exactly, or if a directory
+    // path was requested and any tracked file under it has changes.
+    let path_has_trailing = path.ends_with('/');
+    let dir_prefix = if path_has_trailing {
+        path.to_string()
+    } else {
+        format!("{path}/")
+    };
+    Ok(entries
+        .iter()
+        .any(|e| e.path == path || e.path.starts_with(&dir_prefix)))
 }
 
 #[cfg(unix)]
@@ -1345,18 +1338,17 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
 ///
 /// Restores the workspace to the exact snapshot commit with tracked index +
 /// working tree state, so recovered files are not left as untracked dirtiness.
+///
+/// Equivalent to `git checkout --detach <oid>`: writes the snapshot tree into
+/// the worktree (and index), then points HEAD at the snapshot commit so the
+/// workspace is detached at the exact recovered revision.
 fn populate_from_snapshot(ws_path: &std::path::Path, oid: &str) -> Result<()> {
-    let checkout = Command::new("git")
-        .args(["checkout", "--detach", oid])
-        .current_dir(ws_path)
-        .output()
-        .context("git checkout --detach failed")?;
-
-    if !checkout.status.success() {
-        let stderr = String::from_utf8_lossy(&checkout.stderr);
-        bail!("git checkout --detach {oid} failed: {}", stderr.trim());
-    }
-
+    let repo = open_repo(ws_path)?;
+    let target = parse_oid(oid)?;
+    repo.checkout_tree(target, ws_path)
+        .map_err(|e| anyhow::anyhow!("checkout_tree {oid} failed: {e}"))?;
+    repo.set_head(target)
+        .map_err(|e| anyhow::anyhow!("set_head {oid} failed: {e}"))?;
     Ok(())
 }
 
@@ -1663,6 +1655,7 @@ fn active_merge_workspaces(root: &Path) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::Command;
 
     use super::*;
 
@@ -1841,7 +1834,7 @@ three
         assert_eq!(refs[0].workspace, "alice");
         assert_eq!(refs[0].oid, oid);
 
-        let hits = git_grep_hits(root, &oid, "needle", false, false, false)
+        let hits = grep_snapshot(root, &oid, "needle", false, false, false)
             .expect("operation should succeed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "a.txt");
@@ -1856,7 +1849,7 @@ three
     }
 
     #[test]
-    fn git_grep_hits_handles_paths_with_colons() {
+    fn grep_snapshot_handles_paths_with_colons() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().expect("operation should succeed");
@@ -1904,7 +1897,7 @@ three
         assert!(oid_out.status.success());
         let oid = String::from_utf8_lossy(&oid_out.stdout).trim().to_string();
 
-        let hits = git_grep_hits(root, &oid, "colon-needle", false, false, false)
+        let hits = grep_snapshot(root, &oid, "colon-needle", false, false, false)
             .expect("operation should succeed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "with:colon.txt");

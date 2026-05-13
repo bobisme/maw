@@ -26,6 +26,8 @@ mod index_impl;
 #[cfg(feature = "lfs")]
 mod lfs_clean;
 mod objects_impl;
+
+pub use objects_impl::BlobEntry;
 mod push_impl;
 mod refs_impl;
 mod rev_walk_impl;
