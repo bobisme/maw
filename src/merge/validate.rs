@@ -37,6 +37,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use maw_git::{GitRepo as _, GixRepo};
+
 use crate::config::{LanguagePreset, OnFailure, ValidationConfig};
 use crate::merge_state::{CommandResult, MergeStateError, ValidationResult};
 use crate::model::types::GitOid;
@@ -143,54 +145,51 @@ impl From<MergeStateError> for ValidateError {
 // Temp worktree helpers
 // ---------------------------------------------------------------------------
 
+/// Stable admin-directory name for the merge VALIDATE temp worktree.
+///
+/// VALIDATE uses a single fixed path (`.manifold/validate-tmp`) so a fixed
+/// admin name is fine; we prune any stale entry before re-creating.
+const VALIDATE_WORKTREE_NAME: &str = "manifold-validate-tmp";
+
 /// Create a temporary detached git worktree at the given commit.
 fn create_temp_worktree(
     repo_root: &Path,
     candidate_oid: &GitOid,
     worktree_path: &Path,
 ) -> Result<(), ValidateError> {
-    let output = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "--detach",
-            &worktree_path.to_string_lossy(),
-            candidate_oid.as_str(),
-        ])
-        .current_dir(repo_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| ValidateError::WorktreeCreate(format!("spawn git: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(ValidateError::WorktreeCreate(stderr));
+    let repo = GixRepo::open(repo_root)
+        .map_err(|e| ValidateError::WorktreeCreate(format!("open repo: {e}")))?;
+    // Idempotent cleanup of any previous attempt's admin dir so worktree_add succeeds.
+    let admin_dir = repo
+        .common_dir()
+        .join("worktrees")
+        .join(VALIDATE_WORKTREE_NAME);
+    if admin_dir.exists() {
+        let _ = std::fs::remove_dir_all(&admin_dir);
     }
-
+    let target: maw_git::GitOid = candidate_oid
+        .as_str()
+        .parse()
+        .map_err(|e| ValidateError::WorktreeCreate(format!("parse candidate oid: {e}")))?;
+    repo.worktree_add(VALIDATE_WORKTREE_NAME, target, worktree_path)
+        .map_err(|e| ValidateError::WorktreeCreate(e.to_string()))?;
     Ok(())
 }
 
 /// Remove a temporary git worktree.
 fn remove_temp_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), ValidateError> {
-    let output = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &worktree_path.to_string_lossy(),
-        ])
-        .current_dir(repo_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| ValidateError::WorktreeRemove(format!("spawn git: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(ValidateError::WorktreeRemove(stderr));
+    let _ = worktree_path; // path is fixed at the well-known admin name
+    let repo = GixRepo::open(repo_root)
+        .map_err(|e| ValidateError::WorktreeRemove(format!("open repo: {e}")))?;
+    let admin_dir = repo
+        .common_dir()
+        .join("worktrees")
+        .join(VALIDATE_WORKTREE_NAME);
+    if !admin_dir.exists() {
+        return Ok(());
     }
-
+    repo.worktree_remove(VALIDATE_WORKTREE_NAME)
+        .map_err(|e| ValidateError::WorktreeRemove(e.to_string()))?;
     Ok(())
 }
 

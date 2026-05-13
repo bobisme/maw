@@ -40,8 +40,8 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use maw_git::{GitRepo as _, GixRepo};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ValidationConfig;
@@ -293,25 +293,22 @@ pub fn create_quarantine_workspace(
     let ws_dir = repo_root.join("ws");
     fs::create_dir_all(&ws_dir).map_err(|e| QuarantineError::Io(format!("create ws/ dir: {e}")))?;
 
-    // Create a detached git worktree at the candidate commit
-    let output = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "--detach",
-            &workspace_path.to_string_lossy(),
-            candidate.as_str(),
-        ])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| QuarantineError::Git(format!("spawn git worktree add: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(QuarantineError::Git(format!(
-            "git worktree add for quarantine failed: {stderr}"
-        )));
+    // Create a detached git worktree at the candidate commit.
+    let repo =
+        GixRepo::open(repo_root).map_err(|e| QuarantineError::Git(format!("open repo: {e}")))?;
+    // If a prior partial attempt left an admin dir, remove it so worktree_add succeeds.
+    let admin_dir = repo.common_dir().join("worktrees").join(&workspace_name);
+    if admin_dir.exists() {
+        let _ = std::fs::remove_dir_all(&admin_dir);
     }
+    let target: maw_git::GitOid = candidate
+        .as_str()
+        .parse()
+        .map_err(|e| QuarantineError::Git(format!("parse candidate oid: {e}")))?;
+    repo.worktree_add(&workspace_name, target, &workspace_path)
+        .map_err(|e| {
+            QuarantineError::Git(format!("git worktree add for quarantine failed: {e}"))
+        })?;
 
     // Write validation diagnostics to the quarantine directory
     let _ = write_quarantine_diagnostics(manifold_dir, merge_id, &validation_result);
@@ -533,91 +530,60 @@ fn commit_quarantine_edits(
     ws_path: &Path,
     original_candidate: &GitOid,
 ) -> Result<GitOid, QuarantineError> {
-    // Check if there are any uncommitted changes
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| QuarantineError::Git(format!("spawn git status: {e}")))?;
+    // Open the quarantine worktree as its own gix repo.
+    let ws_repo = GixRepo::open(ws_path)
+        .map_err(|e| QuarantineError::Git(format!("open quarantine worktree: {e}")))?;
 
-    let status_str = String::from_utf8_lossy(&status_output.stdout);
-
-    if status_str.trim().is_empty() {
-        // No uncommitted changes — use the original candidate as-is
+    // worktree_state_commit() captures all status edits (mod/add/del/untracked)
+    // and returns the new commit OID — but, like `git stash create`, it does
+    // NOT advance HEAD. The original CLI implementation used `git commit`,
+    // which DOES move HEAD, and downstream `git show HEAD` / re-validation
+    // depends on that. So after producing the commit we manually advance the
+    // detached HEAD to it (parents = [previous HEAD]).
+    let new_oid_opt = ws_repo
+        .worktree_state_commit("quarantine: fix-forward")
+        .map_err(|e| QuarantineError::Git(format!("worktree_state_commit failed: {e}")))?;
+    let Some(new_head) = new_oid_opt else {
+        // No edits — keep original candidate.
         return Ok(original_candidate.clone());
-    }
-
-    // Stage all changes
-    let add_output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| QuarantineError::Git(format!("spawn git add: {e}")))?;
-
-    if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr)
-            .trim()
-            .to_owned();
-        return Err(QuarantineError::Git(format!("git add -A failed: {stderr}")));
-    }
-
-    // Commit the staged changes
-    let commit_output = Command::new("git")
-        .args(["commit", "--no-verify", "-m", "quarantine: fix-forward"])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| QuarantineError::Git(format!("spawn git commit: {e}")))?;
-
-    if !commit_output.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_output.stderr)
-            .trim()
-            .to_owned();
-        return Err(QuarantineError::Git(format!("git commit failed: {stderr}")));
-    }
-
-    // Get the new HEAD OID
-    let head_output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| QuarantineError::Git(format!("spawn git rev-parse: {e}")))?;
-
-    if !head_output.status.success() {
-        let stderr = String::from_utf8_lossy(&head_output.stderr)
-            .trim()
-            .to_owned();
-        return Err(QuarantineError::Git(format!(
-            "git rev-parse HEAD failed: {stderr}"
-        )));
-    }
-
-    let oid_str = String::from_utf8_lossy(&head_output.stdout)
-        .trim()
-        .to_string();
-    GitOid::new(&oid_str).map_err(|e| QuarantineError::Git(format!("parse HEAD OID: {e}")))
+    };
+    // Quarantine worktrees are created detached (HEAD = raw OID), so we
+    // advance HEAD by rewriting the file directly. Re-aligning the index is
+    // not required here: the on-disk state is already what we just committed.
+    let head_path = ws_repo.git_dir().join("HEAD");
+    std::fs::write(&head_path, format!("{new_head}\n")).map_err(|e| {
+        QuarantineError::Git(format!(
+            "failed to advance HEAD to {new_head} at {}: {e}",
+            head_path.display()
+        ))
+    })?;
+    GitOid::new(&new_head.to_string())
+        .map_err(|e| QuarantineError::Git(format!("parse HEAD OID: {e}")))
 }
 
-/// Remove a git worktree (force) at the given path.
+/// Remove a quarantine git worktree.
 ///
-/// Idempotent: if the worktree is not registered with git, silently succeeds.
+/// Idempotent: if no admin dir exists at `<git_dir>/worktrees/<basename>`,
+/// silently succeeds. The admin-dir name is derived from `path.file_name()`
+/// because [`create_quarantine_workspace`] always registers the worktree under
+/// the quarantine workspace name (which is the basename of the worktree
+/// directory).
 fn remove_worktree(repo_root: &Path, path: &Path) -> Result<(), QuarantineError> {
-    let output = Command::new("git")
-        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| QuarantineError::Git(format!("spawn git worktree remove: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        // If the worktree isn't registered, that's fine (already removed)
-        if stderr.contains("is not a working tree") || stderr.contains("not a worktree") {
-            return Ok(());
-        }
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return Err(QuarantineError::Git(format!(
-            "git worktree remove failed: {stderr}"
+            "invalid quarantine worktree path (no basename): {}",
+            path.display()
         )));
+    };
+    let repo =
+        GixRepo::open(repo_root).map_err(|e| QuarantineError::Git(format!("open repo: {e}")))?;
+    let admin_dir = repo.common_dir().join("worktrees").join(name);
+    if !admin_dir.exists() {
+        // Already pruned/never registered — match the prior "not a worktree" branch.
+        return Ok(());
     }
-
+    repo.worktree_remove(name)
+        .map_err(|e| QuarantineError::Git(format!("git worktree remove failed: {e}")))?;
     Ok(())
 }
 

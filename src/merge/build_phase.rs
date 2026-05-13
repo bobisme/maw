@@ -36,6 +36,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glob::Pattern;
+use maw_git::GitRepo as _;
 use tempfile::Builder;
 
 use crate::backend::WorkspaceBackend;
@@ -373,68 +374,67 @@ fn open_gix_repo(root: &Path) -> Result<maw_git::GixRepo, BuildPhaseError> {
 ///
 /// Falls back to `ws_epoch` if merge-base fails or if the two OIDs are equal.
 fn workspace_merge_base(repo_root: &Path, ws_epoch: &EpochId, current_epoch: &EpochId) -> EpochId {
-    // Fast path: if they're already equal, no need to shell out.
+    // Fast path: if they're already equal, no need to query gix.
     if ws_epoch.as_str() == current_epoch.as_str() {
         return current_epoch.clone();
     }
-
-    let output = Command::new("git")
-        .args(["merge-base", ws_epoch.as_str(), current_epoch.as_str()])
-        .current_dir(repo_root)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            EpochId::new(&oid).unwrap_or_else(|_| ws_epoch.clone())
-        }
-        _ => ws_epoch.clone(),
+    let fallback = ws_epoch.clone();
+    let Ok(repo) = maw_git::GixRepo::open(repo_root) else {
+        return fallback;
+    };
+    let Ok(a) = ws_epoch.as_str().parse::<maw_git::GitOid>() else {
+        return fallback;
+    };
+    let Ok(b) = current_epoch.as_str().parse::<maw_git::GitOid>() else {
+        return fallback;
+    };
+    match repo.merge_base(a, b) {
+        Ok(Some(base)) => EpochId::new(&base.to_string()).unwrap_or(fallback),
+        _ => fallback,
     }
 }
 
 /// Compute the set of file paths that changed between two epoch commits.
 ///
-/// Uses `git diff-tree -r --no-commit-id` to enumerate changed paths.
-/// Returns a set of relative paths (as `PathBuf`s).
+/// Resolves each epoch commit to its tree OID via `read_commit`, then diffs
+/// the two trees with gix `diff_trees`. Returns a set of relative paths.
 fn epoch_delta_paths(
     repo_root: &Path,
     old_epoch: &EpochId,
     new_epoch: &EpochId,
 ) -> Result<BTreeSet<PathBuf>, BuildPhaseError> {
-    let output = Command::new("git")
-        .args([
-            "diff-tree",
-            "-r",
-            "--no-commit-id",
-            "--name-only",
-            old_epoch.as_str(),
-            new_epoch.as_str(),
-        ])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| {
-            BuildPhaseError::Build(BuildError::GitCommand {
-                command: format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str()),
-                stderr: e.to_string(),
-                exit_code: None,
-            })
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(BuildPhaseError::Build(BuildError::GitCommand {
-            command: format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str()),
-            stderr: stderr.trim().to_string(),
-            exit_code: output.status.code(),
-        }));
+    let cmd_label = || format!("diff-tree {} {}", old_epoch.as_str(), new_epoch.as_str());
+    let mk_err = |stderr: String| {
+        BuildPhaseError::Build(BuildError::GitCommand {
+            command: cmd_label(),
+            stderr,
+            exit_code: None,
+        })
+    };
+    let repo = maw_git::GixRepo::open(repo_root).map_err(|e| mk_err(e.to_string()))?;
+    let old_commit: maw_git::GitOid = old_epoch
+        .as_str()
+        .parse()
+        .map_err(|e: maw_git::OidParseError| mk_err(e.to_string()))?;
+    let new_commit: maw_git::GitOid = new_epoch
+        .as_str()
+        .parse()
+        .map_err(|e: maw_git::OidParseError| mk_err(e.to_string()))?;
+    let old_tree = repo
+        .read_commit(old_commit)
+        .map_err(|e| mk_err(e.to_string()))?
+        .tree_oid;
+    let new_tree = repo
+        .read_commit(new_commit)
+        .map_err(|e| mk_err(e.to_string()))?
+        .tree_oid;
+    let entries = repo
+        .diff_trees(Some(old_tree), new_tree)
+        .map_err(|e| mk_err(e.to_string()))?;
+    let mut paths = BTreeSet::new();
+    for entry in entries {
+        paths.insert(PathBuf::from(entry.path.clone()));
     }
-
-    let paths = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| PathBuf::from(l.trim()))
-        .collect();
-
     Ok(paths)
 }
 
@@ -1017,42 +1017,63 @@ fn run_regenerate_drivers(
     }
 }
 
+/// Build a worktree admin-dir name from the tempdir path's basename.
+///
+/// `worktree_add` rejects names containing `/`, so we use the final path
+/// component (which `tempfile::Builder` already makes unique via random
+/// suffix). Falls back to a generic name when the path has no basename.
+fn temp_worktree_admin_name(worktree_path: &Path) -> String {
+    worktree_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map_or_else(
+            || "maw-build-regenerate".to_owned(),
+            std::borrow::ToOwned::to_owned,
+        )
+}
+
 fn create_temp_worktree(
     repo_root: &Path,
     candidate: &GitOid,
     worktree_path: &Path,
 ) -> Result<(), BuildPhaseError> {
-    let path = worktree_path.to_string_lossy().to_string();
-    let output = Command::new("git")
-        .args(["worktree", "add", "--detach", &path, candidate.as_str()])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| BuildPhaseError::Driver(format!("spawn git worktree add: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(BuildPhaseError::Driver(format!(
-            "git worktree add for regenerate driver failed: {stderr}"
-        )));
+    let repo = maw_git::GixRepo::open(repo_root)
+        .map_err(|e| BuildPhaseError::Driver(format!("open repo: {e}")))?;
+    let name = temp_worktree_admin_name(worktree_path);
+    let admin_dir = repo.common_dir().join("worktrees").join(&name);
+    if admin_dir.exists() {
+        let _ = std::fs::remove_dir_all(&admin_dir);
     }
+    let target: maw_git::GitOid =
+        candidate
+            .as_str()
+            .parse()
+            .map_err(|e: maw_git::OidParseError| {
+                BuildPhaseError::Driver(format!("parse candidate oid: {e}"))
+            })?;
+    repo.worktree_add(&name, target, worktree_path)
+        .map_err(|e| {
+            BuildPhaseError::Driver(format!(
+                "git worktree add for regenerate driver failed: {e}"
+            ))
+        })?;
 
     Ok(())
 }
 
 fn remove_temp_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), BuildPhaseError> {
-    let path = worktree_path.to_string_lossy().to_string();
-    let output = Command::new("git")
-        .args(["worktree", "remove", "--force", &path])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| BuildPhaseError::Driver(format!("spawn git worktree remove: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(BuildPhaseError::Driver(format!(
-            "git worktree remove for regenerate driver failed: {stderr}"
-        )));
+    let repo = maw_git::GixRepo::open(repo_root)
+        .map_err(|e| BuildPhaseError::Driver(format!("open repo: {e}")))?;
+    let name = temp_worktree_admin_name(worktree_path);
+    let admin_dir = repo.common_dir().join("worktrees").join(&name);
+    if !admin_dir.exists() {
+        return Ok(());
     }
+    repo.worktree_remove(&name).map_err(|e| {
+        BuildPhaseError::Driver(format!(
+            "git worktree remove for regenerate driver failed: {e}"
+        ))
+    })?;
 
     Ok(())
 }
@@ -1110,36 +1131,25 @@ enum ReadBaseError {
 
 /// Read a single file's content from the epoch commit.
 ///
-/// Uses `git show <epoch>:<path>` which outputs raw file content to stdout.
+/// Resolves the path inside the epoch's tree via gix `read_file_at_commit`.
+/// Returns [`ReadBaseError::NotFound`] when the path is missing from the
+/// tree, matching the prior `git show <epoch>:<path>` semantics.
 fn read_file_at_epoch(
     repo_root: &Path,
     epoch: &EpochId,
     path: &Path,
 ) -> Result<Vec<u8>, ReadBaseError> {
-    let spec = format!("{}:{}", epoch.as_str(), path.display());
-
-    let output = Command::new("git")
-        .args(["show", &spec])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| ReadBaseError::GitError(format!("spawn git show: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // git show returns 128 when the path doesn't exist
-        if stderr.contains("does not exist")
-            || stderr.contains("path")
-            || output.status.code() == Some(128)
-        {
-            return Err(ReadBaseError::NotFound);
-        }
-        return Err(ReadBaseError::GitError(format!(
-            "git show {spec} failed: {}",
-            stderr.trim()
-        )));
+    let repo = maw_git::GixRepo::open(repo_root)
+        .map_err(|e| ReadBaseError::GitError(format!("open repo: {e}")))?;
+    match repo.read_file_at_commit(epoch.as_str(), path) {
+        Ok(Some(content)) => Ok(content),
+        Ok(None) => Err(ReadBaseError::NotFound),
+        Err(e) => Err(ReadBaseError::GitError(format!(
+            "read {}:{}: {e}",
+            epoch.as_str(),
+            path.display()
+        ))),
     }
-
-    Ok(output.stdout)
 }
 
 // ---------------------------------------------------------------------------

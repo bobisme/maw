@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -639,12 +638,12 @@ fn resolve_atoms(
 
 /// Patch the candidate tree with resolved file contents, producing a new commit OID.
 ///
-/// Uses a temporary index to handle nested directory structures correctly:
-/// 1. `git hash-object -w --stdin` → new blob OIDs for resolved content
-/// 2. `git read-tree` → populate temp index from candidate tree
-/// 3. `git update-index` → replace blobs for resolved paths
-/// 4. `git write-tree` → new tree OID from the patched index
-/// 5. `git commit-tree` → new commit (same parent as candidate)
+/// Pure-gix pipeline (no `read-tree`/`update-index`/`write-tree`):
+/// 1. Open the repo and resolve `candidate` to its tree OID via `read_commit`.
+/// 2. Write each resolved file as a blob with `write_blob_with_path` (so LFS
+///    smudge/clean semantics match the rest of the merge engine).
+/// 3. `edit_tree(candidate_tree, &[Upsert ...])` produces a new tree OID.
+/// 4. `create_commit` writes the new commit with the candidate's parent.
 fn patch_candidate_tree(
     root: &Path,
     candidate: &GitOid,
@@ -654,85 +653,53 @@ fn patch_candidate_tree(
         return Ok(candidate.clone());
     }
 
-    // 1. Hash resolved contents as blobs
-    let mut new_blobs: BTreeMap<String, String> = BTreeMap::new();
-    for (path, content) in resolved {
-        let blob_oid = git_hash_object(root, content).ok_or_else(|| {
-            anyhow::anyhow!("Failed to hash resolved content for {}", path.display())
-        })?;
-        new_blobs.insert(
-            path.to_string_lossy().to_string(),
-            blob_oid.as_str().to_string(),
-        );
-    }
-
-    // 2. Create a temporary index from the candidate tree
-    let tmp_index = tempfile::NamedTempFile::new().context("Failed to create temp index file")?;
-    let tmp_index_path = tmp_index.path().to_string_lossy().to_string();
-
-    let read_tree = Command::new("git")
-        .args(["read-tree", candidate.as_str()])
-        .env("GIT_INDEX_FILE", &tmp_index_path)
-        .current_dir(root)
-        .output()
-        .context("Failed to run git read-tree")?;
-    if !read_tree.status.success() {
-        bail!(
-            "git read-tree failed: {}",
-            String::from_utf8_lossy(&read_tree.stderr).trim()
-        );
-    }
-
-    // 3. Update the index with resolved blobs
-    for (path, blob_oid) in &new_blobs {
-        let cacheinfo = format!("100644,{blob_oid},{path}");
-        let update = Command::new("git")
-            .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
-            .env("GIT_INDEX_FILE", &tmp_index_path)
-            .current_dir(root)
-            .output()
-            .context("Failed to run git update-index")?;
-        if !update.status.success() {
-            bail!(
-                "git update-index failed for {}: {}",
-                path,
-                String::from_utf8_lossy(&update.stderr).trim()
-            );
-        }
-    }
-
-    // 4. Write the patched tree from the index
-    let write_tree = Command::new("git")
-        .arg("write-tree")
-        .env("GIT_INDEX_FILE", &tmp_index_path)
-        .current_dir(root)
-        .output()
-        .context("Failed to run git write-tree")?;
-    if !write_tree.status.success() {
-        bail!(
-            "git write-tree failed: {}",
-            String::from_utf8_lossy(&write_tree.stderr).trim()
-        );
-    }
-    let new_tree_oid = String::from_utf8_lossy(&write_tree.stdout)
-        .trim()
-        .to_string();
-
-    // 5. commit-tree with the same parent as the candidate
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
+
+    // 1. Resolve candidate commit → tree OID + parent.
+    let candidate_git_oid: maw_git::GitOid =
+        candidate
+            .as_str()
+            .parse()
+            .map_err(|e: maw_git::OidParseError| {
+                anyhow::anyhow!("invalid candidate OID '{}': {e}", candidate.as_str())
+            })?;
+    let candidate_commit = repo
+        .read_commit(candidate_git_oid)
+        .map_err(|e| anyhow::anyhow!("failed to read candidate commit {candidate}: {e}"))?;
+    let candidate_tree = candidate_commit.tree_oid;
+
+    // 2. Hash resolved contents as blobs and build the TreeEdit list.
+    let mut edits: Vec<maw_git::TreeEdit> = Vec::with_capacity(resolved.len());
+    for (path, content) in resolved {
+        let path_str = path.to_string_lossy().to_string();
+        let blob_oid = repo.write_blob_with_path(content, &path_str).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to hash resolved content for {}: {e}",
+                path.display()
+            )
+        })?;
+        edits.push(maw_git::TreeEdit::Upsert {
+            path: path_str,
+            mode: maw_git::EntryMode::Blob,
+            oid: blob_oid,
+        });
+    }
+
+    // 3. Apply the edits to the candidate tree to produce a new tree OID.
+    let new_tree_oid = repo
+        .edit_tree(candidate_tree, &edits)
+        .map_err(|e| anyhow::anyhow!("edit_tree failed: {e}"))?;
+
+    // 4. commit-tree with the same parent as the candidate.
     let parent_spec = format!("{candidate}^");
     let parent_git_oid = repo
         .rev_parse(&parent_spec)
         .map_err(|e| anyhow::anyhow!("Failed to get candidate parent: {e}"))?;
 
-    let new_tree_git_oid: maw_git::GitOid = new_tree_oid
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid tree OID '{new_tree_oid}': {e}"))?;
-
     let new_commit_git_oid = repo
         .create_commit(
-            new_tree_git_oid,
+            new_tree_oid,
             &[parent_git_oid],
             "epoch: merge with conflict resolutions",
             None,
@@ -2833,38 +2800,21 @@ fn reconcile_epoch_with_branch(
 fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBuf> {
     use std::collections::BTreeSet;
 
-    let Ok(out) = std::process::Command::new("git")
-        .args(["status", "--porcelain", "-z"])
-        .current_dir(ws_path)
-        .output()
-    else {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
         return BTreeSet::new();
     };
-    if !out.status.success() {
+    let Ok(entries) = repo.status() else {
         return BTreeSet::new();
-    }
-
+    };
     let mut paths = BTreeSet::new();
-    let stdout = out.stdout;
-    let mut iter = stdout.split(|b| *b == 0);
-    while let Some(entry) = iter.next() {
-        if entry.len() < 3 {
-            continue;
-        }
-        let xy = &entry[..2];
-        let path_bytes = &entry[3..];
-        if path_bytes.is_empty() {
-            continue;
-        }
-        let path = PathBuf::from(String::from_utf8_lossy(path_bytes).into_owned());
-        paths.insert(path);
-        // Renames/copies have a second NUL-terminated path: "old".
-        if (matches!(xy[0], b'R' | b'C') || matches!(xy[1], b'R' | b'C'))
-            && let Some(old) = iter.next()
-            && !old.is_empty()
-        {
-            paths.insert(PathBuf::from(String::from_utf8_lossy(old).into_owned()));
-        }
+    for entry in entries {
+        // Modified/Added/Deleted/Untracked/Renamed all flag the path as dirty
+        // for the FF-absorb safety predicate. Renames only surface the new
+        // path here; this loses the legacy "include old name" behaviour, but
+        // FF-absorb only ever cares about the *current* worktree state — a
+        // rename's old path is no longer present and so cannot collide with
+        // the absorbed range.
+        paths.insert(PathBuf::from(entry.path));
     }
     paths
 }
@@ -2908,30 +2858,70 @@ fn sync_ff_paths_in_worktree(
     }
     let oid = target_oid.as_str();
 
-    if !ff_paths.is_empty() {
-        let mut args: Vec<String> = vec!["checkout".to_owned(), oid.to_owned(), "--".to_owned()];
-        for p in ff_paths {
-            args.push(p.to_string_lossy().into_owned());
+    // Open the workspace as its own gix repo (per-worktree git dir).
+    let ws_repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "failed to open workspace repo during FF absorb"
+            );
+            return;
         }
-        match std::process::Command::new("git")
-            .args(&args)
-            .current_dir(ws_path)
-            .output()
-        {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => {
-                tracing::warn!(
-                    workspace = %ws_name,
-                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                    "git checkout for FF-absorbed paths failed"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    workspace = %ws_name,
-                    error = %e,
-                    "failed to spawn git checkout for FF-absorbed paths"
-                );
+    };
+
+    if !ff_paths.is_empty() {
+        // Materialize each FF-absorbed path from the target tree by reading
+        // the blob and writing it directly to the worktree. Deletions
+        // (path missing at target_oid) remove the file. The pre-FF safety
+        // predicate proved these paths are not user-edited, so overwriting
+        // them is non-destructive.
+        for rel in ff_paths {
+            let full = ws_path.join(rel);
+            match ws_repo.read_file_at_commit(oid, rel) {
+                Ok(Some(content)) => {
+                    if let Some(parent) = full.parent()
+                        && let Err(e) = std::fs::create_dir_all(parent)
+                    {
+                        tracing::warn!(
+                            workspace = %ws_name,
+                            path = %rel.display(),
+                            error = %e,
+                            "FF absorb: mkdir failed"
+                        );
+                        continue;
+                    }
+                    if let Err(e) = std::fs::write(&full, &content) {
+                        tracing::warn!(
+                            workspace = %ws_name,
+                            path = %rel.display(),
+                            error = %e,
+                            "FF absorb: write failed"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // Path was deleted at target_oid; remove from worktree.
+                    if full.exists()
+                        && let Err(e) = std::fs::remove_file(&full)
+                    {
+                        tracing::warn!(
+                            workspace = %ws_name,
+                            path = %rel.display(),
+                            error = %e,
+                            "FF absorb: unlink failed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %ws_name,
+                        path = %rel.display(),
+                        error = %e,
+                        "FF absorb: read blob at target failed"
+                    );
+                }
             }
         }
     }
@@ -2939,32 +2929,8 @@ fn sync_ff_paths_in_worktree(
     // Move HEAD to the new epoch without touching the working tree (so
     // uncommitted edits in disjoint paths survive). Mirrors the ANCHOR
     // step of `update_default_workspace`: write the raw OID to the
-    // worktree's HEAD file via git plumbing, then `git reset` (no flags)
-    // to align the index.
-    let git_dir_out = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(ws_path)
-        .output();
-    let git_dir = match git_dir_out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        Ok(out) => {
-            tracing::warn!(
-                workspace = %ws_name,
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "git rev-parse --git-dir failed during FF absorb"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(
-                workspace = %ws_name,
-                error = %e,
-                "failed to spawn git rev-parse during FF absorb"
-            );
-            return;
-        }
-    };
-    let head_path = std::path::Path::new(&git_dir).join("HEAD");
+    // worktree's HEAD file directly, then unstage_all() to align the index.
+    let head_path = ws_repo.git_dir().join("HEAD");
     if let Err(e) = std::fs::write(&head_path, format!("{oid}\n")) {
         tracing::warn!(
             workspace = %ws_name,
@@ -2975,10 +2941,19 @@ fn sync_ff_paths_in_worktree(
         return;
     }
 
-    let _ = std::process::Command::new("git")
-        .args(["reset"])
-        .current_dir(ws_path)
-        .output();
+    // Re-open after HEAD rewrite so unstage_all() sees the new HEAD.
+    let ws_repo_post = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "failed to re-open workspace repo after FF HEAD rewrite"
+            );
+            return;
+        }
+    };
+    let _ = ws_repo_post.unstage_all();
 }
 
 fn sync_target_worktree_to_epoch(
@@ -2991,32 +2966,132 @@ fn sync_target_worktree_to_epoch(
     }
     let oid = target_oid.as_str();
 
-    // `git reset --keep <oid>` advances HEAD and updates worktree files that
-    // differ between HEAD and <oid>, while preserving local uncommitted
-    // changes in disjoint paths. It refuses if any locally modified file
-    // also changed between HEAD and <oid> — exactly the predicate we just
-    // verified. (We still treat failure as non-fatal.)
-    let output = std::process::Command::new("git")
-        .args(["reset", "--keep", oid])
-        .current_dir(target_ws_path)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            tracing::warn!(
-                workspace = %target_workspace_name,
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "git reset --keep failed during FF absorb"
-            );
-        }
+    // Equivalent to `git reset --keep <oid>` in our setting: the caller has
+    // already proven that no locally modified path also changed between HEAD
+    // and `<oid>` (via `dirty_paths_in_workspace` ∩ FF-range = ∅), so
+    // materialising every (HEAD, target) diff path from the target tree is
+    // safe and never clobbers user edits in disjoint paths. We then move
+    // HEAD and reset the index. Failures are logged non-fatally.
+    let ws_repo = match maw_git::GixRepo::open(target_ws_path) {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!(
                 workspace = %target_workspace_name,
                 error = %e,
-                "failed to spawn git reset --keep during FF absorb"
+                "failed to open target workspace repo during FF absorb"
             );
+            return;
         }
+    };
+
+    let head_oid = match ws_repo.rev_parse_opt("HEAD") {
+        Ok(Some(h)) => Some(h),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %target_workspace_name,
+                error = %e,
+                "rev-parse HEAD failed during FF absorb"
+            );
+            return;
+        }
+    };
+    let target_git: maw_git::GitOid = match oid.parse() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %target_workspace_name,
+                error = %e,
+                "invalid target OID during FF absorb"
+            );
+            return;
+        }
+    };
+    // Resolve commit OIDs to tree OIDs so diff_trees compares the trees, not
+    // the commit headers.
+    let head_tree = head_oid.and_then(|h| ws_repo.read_commit(h).ok().map(|c| c.tree_oid));
+    let target_tree = match ws_repo.read_commit(target_git).map(|c| c.tree_oid) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %target_workspace_name,
+                error = %e,
+                "read target commit failed during FF absorb"
+            );
+            return;
+        }
+    };
+    let diff = match ws_repo.diff_trees(head_tree, target_tree) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %target_workspace_name,
+                error = %e,
+                "diff_trees failed during FF absorb"
+            );
+            return;
+        }
+    };
+    for entry in diff {
+        let rel = std::path::PathBuf::from(&entry.path);
+        let full = target_ws_path.join(&rel);
+        match ws_repo.read_file_at_commit(oid, &rel) {
+            Ok(Some(content)) => {
+                if let Some(parent) = full.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    tracing::warn!(
+                        workspace = %target_workspace_name,
+                        path = %rel.display(),
+                        error = %e,
+                        "FF absorb (target): mkdir failed"
+                    );
+                    continue;
+                }
+                if let Err(e) = std::fs::write(&full, &content) {
+                    tracing::warn!(
+                        workspace = %target_workspace_name,
+                        path = %rel.display(),
+                        error = %e,
+                        "FF absorb (target): write failed"
+                    );
+                }
+            }
+            Ok(None) => {
+                if full.exists()
+                    && let Err(e) = std::fs::remove_file(&full)
+                {
+                    tracing::warn!(
+                        workspace = %target_workspace_name,
+                        path = %rel.display(),
+                        error = %e,
+                        "FF absorb (target): unlink failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace = %target_workspace_name,
+                    path = %rel.display(),
+                    error = %e,
+                    "FF absorb (target): read blob failed"
+                );
+            }
+        }
+    }
+    // Move HEAD and align the index with the new HEAD.
+    let head_path = ws_repo.git_dir().join("HEAD");
+    if let Err(e) = std::fs::write(&head_path, format!("{oid}\n")) {
+        tracing::warn!(
+            workspace = %target_workspace_name,
+            path = %head_path.display(),
+            error = %e,
+            "FF absorb (target): failed to write HEAD"
+        );
+        return;
+    }
+    if let Ok(repo_post) = maw_git::GixRepo::open(target_ws_path) {
+        let _ = repo_post.unstage_all();
     }
 }
 
@@ -4389,48 +4464,34 @@ fn is_ancestor_commit(
     maybe_ancestor: &str,
     maybe_descendant: &str,
 ) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            maybe_ancestor,
-            maybe_descendant,
-        ])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git merge-base --is-ancestor")?;
-
-    if output.status.success() {
-        return Ok(true);
-    }
-    if output.status.code() == Some(1) {
-        return Ok(false);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!("git merge-base --is-ancestor failed: {}", stderr.trim());
+    let repo = maw_git::GixRepo::open(ws_path)
+        .with_context(|| format!("failed to open repo at {}", ws_path.display()))?;
+    let ancestor = repo
+        .rev_parse(maybe_ancestor)
+        .with_context(|| format!("rev-parse '{maybe_ancestor}' failed"))?;
+    let descendant = repo
+        .rev_parse(maybe_descendant)
+        .with_context(|| format!("rev-parse '{maybe_descendant}' failed"))?;
+    repo.is_ancestor(ancestor, descendant)
+        .context("is_ancestor failed")
 }
 
 fn merge_base_commit(ws_path: &Path, left: &str, right: &str) -> Result<Option<String>> {
-    let output = std::process::Command::new("git")
-        .args(["merge-base", left, right])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git merge-base")?;
-
-    if output.status.success() {
-        let oid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if oid.is_empty() {
-            return Ok(None);
-        }
-        return Ok(Some(oid));
-    }
-    if output.status.code() == Some(1) {
-        return Ok(None);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!("git merge-base failed: {}", stderr.trim());
+    let repo = maw_git::GixRepo::open(ws_path)
+        .with_context(|| format!("failed to open repo at {}", ws_path.display()))?;
+    let l = match repo.rev_parse_opt(left).context("rev-parse left failed")? {
+        Some(o) => o,
+        None => return Ok(None),
+    };
+    let r = match repo
+        .rev_parse_opt(right)
+        .context("rev-parse right failed")?
+    {
+        Some(o) => o,
+        None => return Ok(None),
+    };
+    let base = repo.merge_base(l, r).context("merge_base failed")?;
+    Ok(base.map(|o| o.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -4441,16 +4502,12 @@ struct ActiveChangeHead {
 }
 
 pub fn resolve_workspace_head_oid(ws_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git rev-parse HEAD")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to resolve workspace HEAD: {}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let repo = maw_git::GixRepo::open(ws_path)
+        .with_context(|| format!("failed to open repo at {}", ws_path.display()))?;
+    let oid = repo
+        .rev_parse("HEAD")
+        .context("failed to resolve workspace HEAD")?;
+    Ok(oid.to_string())
 }
 
 fn active_change_heads_not_on_branch(
@@ -4712,34 +4769,24 @@ fn update_default_workspace(
     // Instead we write the raw OID to the worktree's HEAD file — the
     // standard git plumbing for detaching without a tree update.
     {
-        let git_dir = {
-            let output = std::process::Command::new("git")
-                .args(["rev-parse", "--git-dir"])
-                .current_dir(default_ws_path)
-                .output()
-                .context("failed to locate worktree git dir")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("git rev-parse --git-dir failed: {}", stderr.trim());
-            }
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        };
-        let head_path = std::path::Path::new(&git_dir).join("HEAD");
+        let ws_repo = maw_git::GixRepo::open(default_ws_path)
+            .with_context(|| format!("failed to open repo at {}", default_ws_path.display()))?;
+        let head_path = ws_repo.git_dir().join("HEAD");
         std::fs::write(&head_path, format!("{anchor_epoch}\n"))
             .with_context(|| format!("failed to write detached HEAD to {}", head_path.display()))?;
 
-        // Reset the index to match HEAD (epoch_before) without touching working tree.
-        // This ensures `git status` and `git stash create` see only user changes.
-        let reset_output = std::process::Command::new("git")
-            .args(["reset"])
-            .current_dir(default_ws_path)
-            .output()
-            .context("failed to run git reset for index sync")?;
-        if !reset_output.status.success() {
-            tracing::warn!(
-                "git reset failed during anchor step: {}",
-                String::from_utf8_lossy(&reset_output.stderr).trim()
-            );
+        // Reset the index to match HEAD (anchor_epoch) without touching the
+        // working tree. This ensures gix `status()` / `worktree_state_commit`
+        // see only user changes. Re-open after the HEAD rewrite so unstage_all
+        // observes the new HEAD.
+        let ws_repo_post = maw_git::GixRepo::open(default_ws_path).with_context(|| {
+            format!(
+                "failed to re-open repo at {} after HEAD rewrite",
+                default_ws_path.display()
+            )
+        })?;
+        if let Err(e) = ws_repo_post.unstage_all() {
+            tracing::warn!("unstage_all failed during anchor step: {e}");
         }
     }
 
@@ -4918,33 +4965,44 @@ fn update_default_workspace(
 /// This is the nuclear option — it destroys any uncommitted changes.
 /// Only used when the snapshot-based path itself has errored.
 fn force_checkout_fallback(ws_path: &Path, ws_name: &str, branch: &str, text_mode: bool) {
-    let output = std::process::Command::new("git")
-        .args(["checkout", "--force", branch])
-        .current_dir(ws_path)
-        .output();
+    // Pure-gix equivalent of `git checkout --force <branch>`:
+    //   1. Resolve `<branch>` to a commit OID.
+    //   2. `checkout_tree` materialises the branch tree onto the worktree
+    //      (overwrite_existing = true; removes stale files).
+    //   3. Write HEAD as a symbolic ref to `refs/heads/<branch>` so the
+    //      worktree tracks the branch (not detached).
+    let try_fallback = || -> Result<()> {
+        let repo = maw_git::GixRepo::open(ws_path)
+            .with_context(|| format!("failed to open workspace repo at {}", ws_path.display()))?;
+        let commit = repo
+            .rev_parse(branch)
+            .with_context(|| format!("rev-parse '{branch}' failed"))?;
+        repo.checkout_tree(commit, ws_path)
+            .with_context(|| format!("checkout_tree to {branch} failed"))?;
+        let head_path = repo.git_dir().join("HEAD");
+        let head_target = if branch.starts_with("refs/") {
+            format!("ref: {branch}\n")
+        } else {
+            format!("ref: refs/heads/{branch}\n")
+        };
+        std::fs::write(&head_path, head_target)
+            .with_context(|| format!("failed to write HEAD at {}", head_path.display()))?;
+        Ok(())
+    };
 
-    match output {
-        Ok(o) if o.status.success() => {
+    match try_fallback() {
+        Ok(()) => {
             if text_mode {
                 println!("  Workspace '{ws_name}' updated via force checkout fallback.");
             }
         }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
+        Err(e) => {
             eprintln!(
-                "  WARNING: Fallback checkout also failed: {}\n  \
+                "  WARNING: Fallback checkout also failed: {e:#}\n  \
                  The merge COMMIT succeeded (refs are updated), but workspace '{}' \
                  working copy could not be checked out.\n  \
                  To fix: git -C {} checkout {branch}",
-                stderr.trim(),
                 ws_name,
-                ws_path.display(),
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "  WARNING: Could not run fallback checkout: {e}\n  \
-                 To fix: git -C {} checkout {branch}",
                 ws_path.display(),
             );
         }

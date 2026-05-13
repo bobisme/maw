@@ -32,8 +32,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use maw_git::{GitRepo as _, GixRepo};
 
 use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
@@ -129,50 +130,36 @@ impl From<MergeStateError> for PrepareError {
 
 /// Read the current epoch OID from `refs/manifold/epoch/current`.
 ///
-/// Uses `git rev-parse` in the given repo root directory.
+/// Resolves via gix `rev_parse` against the bare repository at `repo_root`.
 fn read_epoch_ref(repo_root: &Path) -> Result<EpochId, PrepareError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "refs/manifold/epoch/current"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| PrepareError::GitError(format!("spawn git: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(PrepareError::EpochNotFound(stderr));
-    }
-
-    let hex = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    EpochId::new(&hex).map_err(|e| PrepareError::InvalidOid(e.to_string()))
+    let repo =
+        GixRepo::open(repo_root).map_err(|e| PrepareError::GitError(format!("open repo: {e}")))?;
+    let oid = repo
+        .rev_parse("refs/manifold/epoch/current")
+        .map_err(|e| PrepareError::EpochNotFound(e.to_string()))?;
+    EpochId::new(&oid.to_string()).map_err(|e| PrepareError::InvalidOid(e.to_string()))
 }
 
 /// Read the HEAD commit OID of a workspace directory.
 ///
-/// Uses `git rev-parse HEAD` in the workspace directory.
+/// Opens the workspace as a `GixRepo` (per-worktree git dir) and resolves
+/// `HEAD` via gix.
 fn read_workspace_head(
     _repo_root: &Path,
     workspace: &WorkspaceId,
     workspace_dir: &Path,
 ) -> Result<GitOid, PrepareError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(workspace_dir)
-        .output()
+    let repo = GixRepo::open(workspace_dir).map_err(|e| PrepareError::WorkspaceHeadNotFound {
+        workspace: workspace.clone(),
+        detail: format!("open workspace: {e}"),
+    })?;
+    let oid = repo
+        .rev_parse("HEAD")
         .map_err(|e| PrepareError::WorkspaceHeadNotFound {
             workspace: workspace.clone(),
-            detail: format!("spawn git: {e}"),
+            detail: e.to_string(),
         })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(PrepareError::WorkspaceHeadNotFound {
-            workspace: workspace.clone(),
-            detail: stderr,
-        });
-    }
-
-    let hex = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    GitOid::new(&hex).map_err(|e| PrepareError::InvalidOid(e.to_string()))
+    GitOid::new(&oid.to_string()).map_err(|e| PrepareError::InvalidOid(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
