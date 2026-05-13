@@ -300,7 +300,7 @@ where
 
 /// Read a patch set blob from the git object store.
 ///
-/// Uses `git cat-file -p <oid>` to fetch the blob, then deserializes
+/// Uses [`maw_git::GitRepo::read_blob`] to fetch the blob, then deserializes
 /// the JSON content as a [`PatchSet`].
 ///
 /// # Errors
@@ -309,23 +309,43 @@ where
 /// deserialized.
 #[allow(dead_code)]
 pub fn read_patch_set_blob(root: &Path, oid: &GitOid) -> Result<PatchSet, ViewError> {
-    let output = std::process::Command::new("git")
-        .args(["cat-file", "-p", oid.as_str()])
-        .current_dir(root)
-        .output()
+    let repo = maw_git::GixRepo::open(root).map_err(|e| ViewError::PatchSetRead {
+        oid: oid.as_str().to_owned(),
+        detail: format!("open repo: {e}"),
+    })?;
+    read_patch_set_blob_via(&repo, oid)
+}
+
+/// Read a patch set blob via a `GitRepo` trait object.
+///
+/// This is the underlying implementation; [`read_patch_set_blob`] is a
+/// convenience wrapper that opens a repo at `root`.
+///
+/// # Errors
+///
+/// Returns `ViewError::PatchSetRead` if the blob cannot be read or
+/// deserialized.
+#[allow(dead_code)]
+pub fn read_patch_set_blob_via(
+    repo: &dyn maw_git::GitRepo,
+    oid: &GitOid,
+) -> Result<PatchSet, ViewError> {
+    let git_oid = oid
+        .as_str()
+        .parse::<maw_git::GitOid>()
         .map_err(|e| ViewError::PatchSetRead {
             oid: oid.as_str().to_owned(),
-            detail: format!("spawn git: {e}"),
+            detail: format!("invalid OID: {e}"),
         })?;
 
-    if !output.status.success() {
-        return Err(ViewError::PatchSetRead {
+    let data = repo
+        .read_blob(git_oid)
+        .map_err(|e| ViewError::PatchSetRead {
             oid: oid.as_str().to_owned(),
-            detail: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
+            detail: e.to_string(),
+        })?;
 
-    serde_json::from_slice(&output.stdout).map_err(|e| ViewError::PatchSetRead {
+    serde_json::from_slice(&data).map_err(|e| ViewError::PatchSetRead {
         oid: oid.as_str().to_owned(),
         detail: format!("JSON parse: {e}"),
     })
