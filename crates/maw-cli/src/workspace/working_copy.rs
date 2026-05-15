@@ -459,19 +459,23 @@ pub fn snapshot_working_copy(
     repo_root: &Path,
     ws_name: &str,
 ) -> Result<Option<SnapshotRef>> {
-    // Step 1: Check for dirty state via `GixRepo::status()`.
+    // Step 1: Check for dirty state via `status_head_to_worktree()`.
     //
     // We avoid gix's `is_dirty()` because it does not detect untracked
     // files. Without untracked detection, untracked files in the target
     // workspace would be silently destroyed by the checkout step since no
     // snapshot would be created to preserve them. (bn-2fk0)
     //
-    // `status()` includes untracked entries as `FileStatus::Added`, matching
-    // the `git status --porcelain` behavior we used previously.
+    // Must be HEAD→worktree, not the plain index→worktree `status()`: a
+    // file `git add`-ed but not re-edited (worktree == staged blob) is
+    // invisible to `status()`, so a staged-only-dirty workspace would skip
+    // the recovery snapshot entirely and lose staged work on the subsequent
+    // checkout (bn-pfh7 class — Prime Invariant). `status_head_to_worktree`
+    // is the true `git status --porcelain` set, incl. staged + untracked.
     let status_repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let status_entries = status_repo
-        .status()
+        .status_head_to_worktree()
         .map_err(|e| anyhow::anyhow!("failed to query workspace status: {e}"))?;
     let is_dirty = !status_entries.is_empty();
 

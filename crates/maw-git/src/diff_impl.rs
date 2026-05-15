@@ -438,9 +438,18 @@ pub fn diff_name_status_pairs(repo: &GixRepo, base: GitOid) -> Result<NameStatus
     }
 
     // Reconcile cross-bucket overlaps so each path lives in exactly one
-    // bucket. A path appearing in both `added` and `deleted` was deleted
-    // between base→HEAD and re-added in the worktree (or vice versa) — that
-    // is logically a modification. A path appearing in both `modified` and
+    // bucket. This function reconstructs the legacy *single* `git diff
+    // --name-status <base>` (a direct base→worktree diff) by composing two
+    // half-diffs: base→HEAD (tree) ∪ HEAD→worktree (status). Composition
+    // cannot observe base↔worktree cancellation: a path Added base→HEAD and
+    // then Deleted in the worktree nets to "absent in base, absent in
+    // worktree" — a direct base→worktree diff emits *nothing*, but the
+    // composed sets place it in BOTH `added` and `deleted`. Blindly
+    // reclassifying every such path to Modified resurrects a user-deleted
+    // file into the merge (collect.rs reads `HEAD:<path>`), losing the
+    // deletion. Resolve each cross path by its TRUE net state vs `base`
+    // (presence in `base_tree` vs the worktree), exactly as a direct
+    // base→worktree diff would. A path appearing in both `modified` and
     // `deleted` ended up deleted in the worktree, so deleted wins. A path
     // in both `added` and `modified` was newly added overall, so added wins.
     let mut reclassified_modified: BTreeSet<String> = BTreeSet::new();
@@ -448,7 +457,32 @@ pub fn diff_name_status_pairs(repo: &GixRepo, base: GitOid) -> Result<NameStatus
     for p in &cross_added_deleted {
         added.remove(p);
         deleted.remove(p);
-        reclassified_modified.insert(p.clone());
+        let in_base =
+            crate::objects_impl::read_blob_at_path(repo, base_tree, p.as_str())?.is_some();
+        let on_disk = repo
+            .workdir()
+            .is_some_and(|wd| wd.join(p).symlink_metadata().is_ok());
+        match (in_base, on_disk) {
+            // Absent in base AND absent in worktree → no net change vs
+            // base (e.g. a scratch file committed in the workspace then
+            // `rm`-ed without committing the removal). Legacy `git diff
+            // --name-status <base>` emits nothing; dropping it here stops
+            // the merge from resurrecting the deleted path.
+            (false, false) => {}
+            // Present in base, gone from the worktree → net deletion.
+            (true, false) => {
+                deleted.insert(p.clone());
+            }
+            // Absent in base, present in the worktree → net addition.
+            (false, true) => {
+                added.insert(p.clone());
+            }
+            // Present in both (deleted on one half, re-added on the
+            // other) → a modification, matching the documented rule.
+            (true, true) => {
+                reclassified_modified.insert(p.clone());
+            }
+        }
     }
     // Deleted wins over Modified.
     for p in &deleted {
@@ -465,4 +499,67 @@ pub fn diff_name_status_pairs(repo: &GixRepo, base: GitOid) -> Result<NameStatus
         modified: modified.into_iter().collect(),
         deleted: deleted.into_iter().collect(),
     })
+}
+
+#[cfg(test)]
+mod tests_bn_uyk3 {
+    //! Regression: `diff_name_status_pairs` reconstructs the legacy single
+    //! `git diff --name-status <base>` (a direct base→worktree diff) by
+    //! composing base→HEAD (tree) ∪ HEAD→worktree (status). The
+    //! composition must not resurrect a path that was added base→HEAD and
+    //! then deleted in the worktree (net: absent vs base) — a direct
+    //! base→worktree diff emits nothing for it.
+
+    use super::*;
+    use crate::test_support::{commit_all, init_test_repo_with_commit};
+
+    fn pairs_for(root: &std::path::Path, base: &str) -> NameStatusPairs {
+        let repo = crate::GixRepo::open(root).expect("open repo");
+        let base_oid: GitOid = base.parse().expect("parse base oid");
+        diff_name_status_pairs(&repo, base_oid).expect("diff_name_status_pairs")
+    }
+
+    /// A file added in a commit *after* base, then `rm`-ed from the
+    /// worktree without committing the removal, nets to "absent in base,
+    /// absent in worktree". It must appear in NONE of the buckets — the
+    /// pre-fix code reclassified it to `modified`, causing the merge to
+    /// re-inject the user-deleted file from `HEAD:<path>`.
+    #[test]
+    fn added_then_worktree_deleted_is_dropped() {
+        let (dir, root, base) = init_test_repo_with_commit();
+        std::fs::write(root.join("scratch.txt"), "temp").expect("write scratch");
+        let _ = commit_all(&root, "add scratch.txt");
+        std::fs::remove_file(root.join("scratch.txt")).expect("rm scratch");
+
+        let p = pairs_for(&root, &base);
+        assert!(
+            !p.added.iter().any(|x| x == "scratch.txt")
+                && !p.modified.iter().any(|x| x == "scratch.txt")
+                && !p.deleted.iter().any(|x| x == "scratch.txt"),
+            "added-then-worktree-deleted must net to no change vs base, got: {p:#?}",
+        );
+        drop(dir);
+    }
+
+    /// Normal-case sanity: a genuinely new file (absent in base, present
+    /// in the worktree) is still reported as `added`, and a file present
+    /// in base but removed from the worktree is still `deleted`.
+    #[test]
+    fn normal_add_and_delete_still_classified() {
+        let (dir, root, base) = init_test_repo_with_commit();
+        // README.md is the committed seed from the shared helper.
+        std::fs::write(root.join("brand_new.txt"), "new").expect("write new");
+        std::fs::remove_file(root.join("README.md")).expect("rm seed");
+
+        let p = pairs_for(&root, &base);
+        assert!(
+            p.added.iter().any(|x| x == "brand_new.txt"),
+            "genuinely new file must be `added`, got: {p:#?}",
+        );
+        assert!(
+            p.deleted.iter().any(|x| x == "README.md"),
+            "base file removed from worktree must be `deleted`, got: {p:#?}",
+        );
+        drop(dir);
+    }
 }

@@ -1174,10 +1174,13 @@ fn bf_get_dirty_files(root: &Path) -> Result<Vec<PathBuf>, BrownfieldInitError> 
         stderr: format!("failed to open repo: {e}"),
         exit_code: None,
     })?;
-    // `status_tracked_only` skips the dirwalk for untracked files — matching
-    // the legacy porcelain parser which intentionally excluded `??` lines.
+    // HEAD→worktree incl. staged: the legacy `git status --porcelain`
+    // parser kept staged-index entries and only excluded untracked (`??`)
+    // lines. `status_tracked_only()` is index→worktree only and silently
+    // drops staged-but-not-re-edited paths; the untracked exclusion is done
+    // by the filter below, so use the true porcelain set here (bn-pfh7).
     let entries = repo
-        .status_tracked_only()
+        .status_head_to_worktree()
         .map_err(|e| BrownfieldInitError::GitCommand {
             command: "git status --porcelain".to_owned(),
             stderr: e.to_string(),

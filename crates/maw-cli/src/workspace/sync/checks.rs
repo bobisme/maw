@@ -62,10 +62,14 @@ pub(super) fn committed_ahead_of_epoch(ws_path: &Path, base: &BaseEpoch) -> Opti
 pub(super) fn workspace_has_uncommitted_changes(ws_path: &Path) -> Result<bool> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    // `status()` includes untracked entries (matches `--untracked-files=all`).
-    // Any non-empty result means the workspace has uncommitted changes.
+    // HEAD→worktree, including *staged* changes — the true `git status
+    // --porcelain` set. The plain `status()` is index→worktree only, so a
+    // `git add`-ed file whose worktree copy still equals the staged blob is
+    // invisible to it; this is the data-loss gate before `git checkout
+    // --detach <epoch>`, so under-reporting here lets sync clobber/orphan
+    // staged work (bn-pfh7 class — Prime Invariant: no staged work is lost).
     let entries = repo
-        .status()
+        .status_head_to_worktree()
         .map_err(|e| anyhow::anyhow!("status failed in {}: {e}", ws_path.display()))?;
     if !entries.is_empty() {
         return Ok(true);

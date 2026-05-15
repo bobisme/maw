@@ -336,12 +336,21 @@ fn convert_status_item(item: &gix::status::index_worktree::Item) -> Option<Statu
 ///
 /// Replaces: `git ls-files --others --exclude-standard`.
 pub fn list_untracked(repo: &GixRepo) -> Result<Vec<String>, GitError> {
-    let platform =
-        repo.repo
-            .status(gix::progress::Discard)
-            .map_err(|e| GitError::BackendError {
-                message: format!("failed to start status: {e}"),
-            })?;
+    // Force per-file emission. The gix default (`UntrackedFiles::Collapsed`)
+    // collapses an untracked subdirectory into a single directory entry
+    // (e.g. `newdir/`), losing the leaf paths — exactly the bug bn-p5z5
+    // fixed for `status()`. `git ls-files --others --exclude-standard`
+    // always emits individual files. Callers (recovery-snapshot capture in
+    // `working_copy.rs`, conflict-marker scan in `resolve.rs`) `fs::copy`
+    // each returned path, so a collapsed directory entry would abort the
+    // pre-destroy recovery snapshot (Prime Invariant: no work is ever lost).
+    let platform = repo
+        .repo
+        .status(gix::progress::Discard)
+        .map_err(|e| GitError::BackendError {
+            message: format!("failed to start status: {e}"),
+        })?
+        .untracked_files(gix::status::UntrackedFiles::Files);
 
     let iter =
         platform
@@ -476,6 +485,39 @@ mod tests_bn_p5z5 {
         assert!(
             !hw.iter().any(|e| e.path == "ephemeral.txt"),
             "staged-add-then-worktree-delete must net to no change, got: {hw:#?}",
+        );
+    }
+
+    /// `list_untracked` must emit individual leaf paths inside untracked
+    /// subdirectories, matching `git ls-files --others --exclude-standard`.
+    /// The gix default (`UntrackedFiles::Collapsed`) reports only the
+    /// parent directory (`created/`); the recovery-snapshot capture then
+    /// `fs::copy`s that directory path and aborts the pre-destroy snapshot
+    /// (Prime Invariant: no work is ever lost).
+    #[test]
+    fn list_untracked_emits_leaf_paths_in_subdirs() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("created/sub")).expect("mkdir created/sub");
+        std::fs::write(root.join("created/top.txt"), "a").expect("write top");
+        std::fs::write(root.join("created/sub/deep.txt"), "b").expect("write deep");
+
+        let untracked = list_untracked(&repo).expect("list_untracked");
+
+        assert!(
+            untracked.iter().any(|p| p == "created/top.txt"),
+            "expected leaf 'created/top.txt', got: {untracked:#?}",
+        );
+        assert!(
+            untracked.iter().any(|p| p == "created/sub/deep.txt"),
+            "expected nested leaf 'created/sub/deep.txt', got: {untracked:#?}",
+        );
+        assert!(
+            !untracked.iter().any(|p| p == "created"
+                || p == "created/"
+                || p == "created/sub"
+                || p == "created/sub/"),
+            "must not collapse to a directory entry, got: {untracked:#?}",
         );
     }
 }

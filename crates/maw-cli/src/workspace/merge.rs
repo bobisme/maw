@@ -2819,6 +2819,133 @@ fn dirty_paths_in_workspace(ws_path: &Path) -> std::collections::BTreeSet<PathBu
     paths
 }
 
+/// Materialize one tree blob into the worktree **preserving its git mode**.
+///
+/// FF-absorb previously materialized every path via `std::fs::write`, which
+/// always produces a `0644` regular file. That (a) drops the executable bit
+/// for `100755` entries and (b) turns a `120000` symlink entry into a
+/// regular file whose contents are the raw link target — the exact
+/// symlink-corruption class already fixed for `stash_apply`. `git checkout
+/// -- <path>` / `git reset --keep` (the commands this code replaced)
+/// materialize each path with its recorded mode, so we must too. The mode
+/// comes from [`maw_git::GixRepo::read_blob_at_path`].
+#[cfg(unix)]
+fn ff_materialize_blob(
+    full: &Path,
+    mode: maw_git::EntryMode,
+    content: &[u8],
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    match mode {
+        maw_git::EntryMode::Link => {
+            let target = std::str::from_utf8(content)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            // symlink(2) fails with EEXIST if anything is already there
+            // (regular file from the old buggy write, or a stale link).
+            if full.symlink_metadata().is_ok() {
+                std::fs::remove_file(full)?;
+            }
+            std::os::unix::fs::symlink(target, full)
+        }
+        maw_git::EntryMode::Blob | maw_git::EntryMode::BlobExecutable => {
+            // If the destination is currently a symlink, `fs::write` would
+            // follow it and clobber the link's target file. Replace it.
+            if full
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                std::fs::remove_file(full)?;
+            }
+            std::fs::write(full, content)?;
+            let bits = if mode == maw_git::EntryMode::BlobExecutable {
+                0o755
+            } else {
+                0o644
+            };
+            std::fs::set_permissions(full, std::fs::Permissions::from_mode(bits))
+        }
+        // Not file paths in a name-status / FF-diff set; nothing to write.
+        maw_git::EntryMode::Tree | maw_git::EntryMode::Commit => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn ff_materialize_blob(
+    full: &Path,
+    _mode: maw_git::EntryMode,
+    content: &[u8],
+) -> std::io::Result<()> {
+    std::fs::write(full, content)
+}
+
+/// Materialize (or delete) one FF-absorbed path in `ws_path` from
+/// `target_git`'s tree, preserving its git mode. Best-effort: every failure
+/// is logged and swallowed (the merge re-snapshots before BUILD).
+fn ff_apply_one_path(
+    ws_repo: &maw_git::GixRepo,
+    ws_name: &str,
+    ws_path: &Path,
+    target_git: maw_git::GitOid,
+    rel: &Path,
+) {
+    let full = ws_path.join(rel);
+    let Some(rel_str) = rel.to_str() else {
+        tracing::warn!(
+            workspace = %ws_name,
+            path = %rel.display(),
+            "FF absorb: skipping non-UTF-8 path"
+        );
+        return;
+    };
+    // read_blob_at_path yields the entry mode so we can materialize
+    // symlinks and the executable bit faithfully — a plain `fs::write`
+    // corrupts both (see `ff_materialize_blob`).
+    match ws_repo.read_blob_at_path(target_git, rel_str) {
+        Ok(Some((mode, _oid, content))) => {
+            if let Some(parent) = full.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    path = %rel.display(),
+                    error = %e,
+                    "FF absorb: mkdir failed"
+                );
+                return;
+            }
+            if let Err(e) = ff_materialize_blob(&full, mode, &content) {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    path = %rel.display(),
+                    error = %e,
+                    "FF absorb: write failed"
+                );
+            }
+        }
+        Ok(None) => {
+            // Path was deleted at target_oid; remove from worktree.
+            if full.exists()
+                && let Err(e) = std::fs::remove_file(&full)
+            {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    path = %rel.display(),
+                    error = %e,
+                    "FF absorb: unlink failed"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                path = %rel.display(),
+                error = %e,
+                "FF absorb: read blob at target failed"
+            );
+        }
+    }
+}
+
 /// Best-effort fast-forward of the merge target's worktree to a new commit
 /// after an FF absorb.
 ///
@@ -2871,58 +2998,26 @@ fn sync_ff_paths_in_worktree(
         }
     };
 
+    // maw-git OID for blob reads (the param is maw-core's String-backed
+    // GitOid; read_blob_at_path wants maw-git's byte-backed one).
+    let target_git: maw_git::GitOid = match oid.parse() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "invalid target OID during FF absorb"
+            );
+            return;
+        }
+    };
+
     if !ff_paths.is_empty() {
-        // Materialize each FF-absorbed path from the target tree by reading
-        // the blob and writing it directly to the worktree. Deletions
-        // (path missing at target_oid) remove the file. The pre-FF safety
-        // predicate proved these paths are not user-edited, so overwriting
-        // them is non-destructive.
+        // Materialize each FF-absorbed path from the target tree. The
+        // pre-FF safety predicate proved these paths are not user-edited,
+        // so overwriting them is non-destructive.
         for rel in ff_paths {
-            let full = ws_path.join(rel);
-            match ws_repo.read_file_at_commit(oid, rel) {
-                Ok(Some(content)) => {
-                    if let Some(parent) = full.parent()
-                        && let Err(e) = std::fs::create_dir_all(parent)
-                    {
-                        tracing::warn!(
-                            workspace = %ws_name,
-                            path = %rel.display(),
-                            error = %e,
-                            "FF absorb: mkdir failed"
-                        );
-                        continue;
-                    }
-                    if let Err(e) = std::fs::write(&full, &content) {
-                        tracing::warn!(
-                            workspace = %ws_name,
-                            path = %rel.display(),
-                            error = %e,
-                            "FF absorb: write failed"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    // Path was deleted at target_oid; remove from worktree.
-                    if full.exists()
-                        && let Err(e) = std::fs::remove_file(&full)
-                    {
-                        tracing::warn!(
-                            workspace = %ws_name,
-                            path = %rel.display(),
-                            error = %e,
-                            "FF absorb: unlink failed"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        workspace = %ws_name,
-                        path = %rel.display(),
-                        error = %e,
-                        "FF absorb: read blob at target failed"
-                    );
-                }
-            }
+            ff_apply_one_path(&ws_repo, ws_name, ws_path, target_git, rel);
         }
     }
 
@@ -3036,8 +3131,11 @@ fn sync_target_worktree_to_epoch(
     for entry in diff {
         let rel = std::path::PathBuf::from(&entry.path);
         let full = target_ws_path.join(&rel);
-        match ws_repo.read_file_at_commit(oid, &rel) {
-            Ok(Some(content)) => {
+        // Mode-faithful materialization (symlink / exec bit), matching the
+        // `git reset --keep <oid>` this replaced; a plain write corrupts
+        // symlinks and drops the executable bit (see `ff_materialize_blob`).
+        match ws_repo.read_blob_at_path(target_git, &entry.path) {
+            Ok(Some((mode, _oid, content))) => {
                 if let Some(parent) = full.parent()
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {
@@ -3049,7 +3147,7 @@ fn sync_target_worktree_to_epoch(
                     );
                     continue;
                 }
-                if let Err(e) = std::fs::write(&full, &content) {
+                if let Err(e) = ff_materialize_blob(&full, mode, &content) {
                     tracing::warn!(
                         workspace = %target_workspace_name,
                         path = %rel.display(),
