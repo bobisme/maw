@@ -1177,8 +1177,8 @@ fn bf_get_dirty_files(root: &Path) -> Result<Vec<PathBuf>, BrownfieldInitError> 
     // HEAD→worktree incl. staged: the legacy `git status --porcelain`
     // parser kept staged-index entries and only excluded untracked (`??`)
     // lines. `status_tracked_only()` is index→worktree only and silently
-    // drops staged-but-not-re-edited paths; the untracked exclusion is done
-    // by the filter below, so use the true porcelain set here (bn-pfh7).
+    // drops staged-but-not-re-edited paths; use the true porcelain set
+    // here (bn-pfh7).
     let entries = repo
         .status_head_to_worktree()
         .map_err(|e| BrownfieldInitError::GitCommand {
@@ -1187,9 +1187,31 @@ fn bf_get_dirty_files(root: &Path) -> Result<Vec<PathBuf>, BrownfieldInitError> 
             exit_code: None,
         })?;
 
+    // Exclude untracked paths (the legacy `??` exclusion). We can NOT do
+    // this by filtering on `FileStatus::Untracked`: `status_head_to_worktree`
+    // maps every untracked file to `FileStatus::Added` (gix `Summary::Added`
+    // covers untracked dirwalk entries) and never yields
+    // `FileStatus::Untracked`, so that predicate is dead — every untracked
+    // file would leak into `dirty_files_at_root`. Brownfield step 2b has
+    // already renamed `.git` → `repo.git`, and gix's dirwalk does not
+    // auto-exclude a non-`.git`-named common dir, so the leak would drag the
+    // entire `repo.git/` object store into `ws/default/`. Subtract the
+    // explicit `list_untracked()` set instead — a staged-added file is in
+    // the index and therefore never appears there, so staged adds are kept
+    // exactly as the legacy parser did (bn-oas3).
+    let untracked: std::collections::HashSet<String> = repo
+        .list_untracked()
+        .map_err(|e| BrownfieldInitError::GitCommand {
+            command: "git ls-files --others --exclude-standard".to_owned(),
+            stderr: e.to_string(),
+            exit_code: None,
+        })?
+        .into_iter()
+        .collect();
+
     let mut dirty: Vec<PathBuf> = entries
         .into_iter()
-        .filter(|e| !matches!(e.status, maw_git::FileStatus::Untracked))
+        .filter(|e| !untracked.contains(&e.path))
         .map(|e| PathBuf::from(e.path))
         .collect();
     dirty.sort();

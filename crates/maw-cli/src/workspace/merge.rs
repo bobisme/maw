@@ -2924,7 +2924,14 @@ fn ff_apply_one_path(
         }
         Ok(None) => {
             // Path was deleted at target_oid; remove from worktree.
-            if full.exists()
+            // Use symlink_metadata().is_ok() (not exists(), which follows
+            // symlinks and reports false for a *dangling* link): the
+            // `git reset --keep` / `git checkout` this replaced removed a
+            // stale (possibly broken) symlink, and leaving one behind lets
+            // the next merge snapshot re-inject it as an untracked add,
+            // undoing the epoch deletion. Matches `stash_apply` /
+            // `ff_materialize_blob`.
+            if full.symlink_metadata().is_ok()
                 && let Err(e) = std::fs::remove_file(&full)
             {
                 tracing::warn!(
@@ -3157,7 +3164,12 @@ fn sync_target_worktree_to_epoch(
                 }
             }
             Ok(None) => {
-                if full.exists()
+                // symlink_metadata().is_ok() (not exists(), which follows
+                // symlinks and is false for a *dangling* link) so a stale
+                // broken symlink at an epoch-deleted path is removed, as
+                // the replaced `git reset --keep` did. See the matching
+                // comment in `ff_apply_one_path`.
+                if full.symlink_metadata().is_ok()
                     && let Err(e) = std::fs::remove_file(&full)
                 {
                     tracing::warn!(
@@ -6166,6 +6178,50 @@ mod tests {
         assert!(
             !json_str.contains("\"id\""),
             "id should be omitted when None"
+        );
+    }
+
+    /// bn-35mr (Prime-Invariant adjacent): when an FF-absorbed path no
+    /// longer exists at the target epoch, `ff_apply_one_path` must remove
+    /// it from the worktree even when it is currently a *dangling*
+    /// symlink. The pre-fix `Path::exists()` guard follows symlinks and
+    /// reports `false` for a broken link, leaving a stale symlink that the
+    /// next merge snapshot re-injects as an untracked add — undoing the
+    /// epoch deletion. `git reset --keep` / `git checkout` (the commands
+    /// the gix migration replaced) removed it; `symlink_metadata().is_ok()`
+    /// restores that behaviour.
+    #[cfg(unix)]
+    #[test]
+    fn ff_apply_one_path_removes_dangling_symlink_for_deleted_path() {
+        // Seeded commit contains README.md but NOT `gone.txt`, so
+        // read_blob_at_path(target, "gone.txt") => Ok(None) (deleted at
+        // target), exercising the Ok(None) deletion branch.
+        let (_dir, root, oid) = maw_git::test_support::init_test_repo_with_commit();
+        let repo = maw_git::GixRepo::open(&root).expect("open repo");
+        let target_git: maw_git::GitOid = oid.parse().expect("parse oid");
+
+        let link = root.join("gone.txt");
+        std::os::unix::fs::symlink("does-not-exist-target", &link)
+            .expect("create dangling symlink");
+        // Precondition: the link is dangling — exists() (the old guard)
+        // sees nothing, but symlink_metadata() (the fix) sees the link.
+        assert!(!link.exists(), "symlink target must be absent (dangling)");
+        assert!(
+            link.symlink_metadata().is_ok(),
+            "the symlink itself must exist"
+        );
+
+        ff_apply_one_path(
+            &repo,
+            "test-ws",
+            &root,
+            target_git,
+            std::path::Path::new("gone.txt"),
+        );
+
+        assert!(
+            link.symlink_metadata().is_err(),
+            "dangling symlink at an epoch-deleted path must be removed",
         );
     }
 }
