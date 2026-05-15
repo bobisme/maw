@@ -346,6 +346,10 @@ impl GitRepo for GixRepo {
         crate::status_impl::status(self)
     }
 
+    fn status_head_to_worktree(&self) -> Result<Vec<StatusEntry>, GitError> {
+        crate::status_impl::status_head_to_worktree(self)
+    }
+
     fn status_tracked_only(&self) -> Result<Vec<StatusEntry>, GitError> {
         crate::status_impl::status_tracked_only(self)
     }

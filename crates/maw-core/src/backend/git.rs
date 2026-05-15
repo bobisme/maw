@@ -570,13 +570,15 @@ impl WorkspaceBackend for GitWorktreeBackend {
             }
         };
 
-        // Collect dirty files: tracked modifications + untracked files.
-        // Uses the gix-backed `status()` primitive which natively includes
-        // untracked files (mapped to `FileStatus::Added`), matching the
+        // Collect dirty files: staged + tracked modifications + untracked.
+        // Must be HEAD→worktree (not index→worktree): the plain `status()`
+        // omits staged-but-not-re-edited files, so `maw ws status`/`list`
+        // would under-report dirtiness and a sync/destroy safety gate could
+        // miss staged work. `status_head_to_worktree` is the true
         // `git status --porcelain` set the legacy implementation parsed.
         let ws_repo_for_status = open_repo_at(&ws_path)?;
         let dirty_files: Vec<PathBuf> = ws_repo_for_status
-            .status()
+            .status_head_to_worktree()
             .map_err(|e| map_git_error("status", &e))?
             .into_iter()
             .map(|entry| PathBuf::from(entry.path))

@@ -1055,8 +1055,11 @@ fn ls_tree_paths(git_cwd: &Path, oid: &str) -> Result<Vec<String>> {
 /// Check whether the destination has uncommitted changes affecting `path`.
 fn dest_has_uncommitted(default_ws: &Path, path: &str) -> Result<bool> {
     let repo = open_repo(default_ws)?;
+    // HEAD→worktree (incl. staged): `git status --porcelain` reports staged
+    // changes too, so the plain index→worktree `status()` would under-report
+    // and let `--restore-file` clobber staged work without `--force`.
     let entries = repo
-        .status()
+        .status_head_to_worktree()
         .map_err(|e| anyhow::anyhow!("status failed: {e}"))?;
     // Match git's `git status --porcelain -- <path>` semantics: a path is
     // "uncommitted" if it appears in status output exactly, or if a directory

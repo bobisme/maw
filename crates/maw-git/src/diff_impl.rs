@@ -367,10 +367,13 @@ pub struct NameStatusPairs {
 /// Compute add/modify/delete pairs between a commit and the current working
 /// tree, including untracked files.
 ///
-/// Combines [`diff_trees`] (tree-to-tree, commit→HEAD) with [`crate::status_impl::status`]
-/// (HEAD→worktree, including untracked) to produce the same categorized output
+/// Combines [`diff_trees`] (tree-to-tree, commit→HEAD) with
+/// [`crate::status_impl::status_head_to_worktree`] (HEAD→worktree,
+/// including staged and untracked) to produce the same categorized output
 /// the legacy `git diff --name-status <base>` + `git ls-files --others
-/// --exclude-standard` pipeline produced.
+/// --exclude-standard` pipeline produced. Using the plain index→worktree
+/// `status` here would silently drop staged-but-not-re-edited changes,
+/// losing user work at merge time (bn-pfh7).
 ///
 /// Path deduplication rules:
 /// - A path Added in tree-diff and Modified in status → Added.
@@ -418,8 +421,8 @@ pub fn diff_name_status_pairs(repo: &GixRepo, base: GitOid) -> Result<NameStatus
         }
     }
 
-    // 2. Working-tree changes: HEAD → worktree (incl. untracked).
-    let status_entries = crate::status_impl::status(repo)?;
+    // 2. Working-tree changes: HEAD → worktree (incl. staged + untracked).
+    let status_entries = crate::status_impl::status_head_to_worktree(repo)?;
     for entry in status_entries {
         match entry.status {
             FileStatus::Added | FileStatus::Renamed | FileStatus::Untracked => {

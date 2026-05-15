@@ -46,6 +46,136 @@ pub fn status(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
     Ok(entries)
 }
 
+/// Net working-tree status **relative to HEAD** — the true `git status
+/// --porcelain` semantics, *including staged changes*.
+///
+/// [`status`] only diffs the index against the worktree, so a path that
+/// was staged (`git add`) but whose worktree copy still matches the
+/// staged blob is invisible to it. Three merge-critical callers must not
+/// miss such changes (Prime Invariant: no committed/staged work is ever
+/// lost):
+///
+/// * [`crate::stash_impl::worktree_state_commit`] — quarantine fix-forward
+///   and recovery snapshots; missing a staged fix promotes the *unfixed*
+///   tree to the epoch.
+/// * [`crate::diff_impl::diff_name_status_pairs`] — the workspace
+///   backend's `snapshot()`; a staged-only change would be silently
+///   dropped from the merge.
+/// * `recover::dest_has_uncommitted` — the `--restore-file` safety gate;
+///   under-reporting lets a restore clobber staged work without
+///   `--force`.
+///
+/// Combines the HEAD→index (staged) diff with the index→worktree
+/// (unstaged + untracked) diff, then reduces each path to its single net
+/// status relative to HEAD.
+pub fn status_head_to_worktree(repo: &GixRepo) -> Result<Vec<StatusEntry>, GitError> {
+    use std::collections::BTreeMap;
+
+    // The default status platform carries `head_tree: Some(None)`, so
+    // `into_iter` emits the HEAD→index (staged) half automatically — it is
+    // `into_index_worktree_iter` that deliberately suppresses it.
+    let platform = repo
+        .repo
+        .status(gix::progress::Discard)
+        .map_err(|e| GitError::BackendError {
+            message: e.to_string(),
+        })?
+        .untracked_files(gix::status::UntrackedFiles::Files);
+
+    let iter = platform
+        .into_iter(Vec::new())
+        .map_err(|e| GitError::BackendError {
+            message: e.to_string(),
+        })?;
+
+    // Per path: (staged HEAD→index status, unstaged index→worktree status).
+    let mut acc: BTreeMap<String, (Option<FileStatus>, Option<FileStatus>)> = BTreeMap::new();
+
+    for item in iter {
+        let item = item.map_err(|e| GitError::BackendError {
+            message: e.to_string(),
+        })?;
+        match item {
+            gix::status::Item::IndexWorktree(iw) => {
+                if let Some(entry) = convert_status_item(&iw) {
+                    acc.entry(entry.path).or_default().1 = Some(entry.status);
+                }
+            }
+            gix::status::Item::TreeIndex(change) => {
+                // A Rewrite is the fusion of a deletion of the source and
+                // an addition of the destination; record both so the old
+                // path is not lost (matches `git diff --name-status`
+                // default, i.e. no `-M`).
+                if let gix::diff::index::ChangeRef::Rewrite {
+                    source_location,
+                    location,
+                    ..
+                } = &change
+                {
+                    if let Ok(src) = source_location.to_str() {
+                        acc.entry(src.to_owned()).or_default().0 = Some(FileStatus::Deleted);
+                    }
+                    if let Ok(dst) = location.to_str() {
+                        acc.entry(dst.to_owned()).or_default().0 = Some(FileStatus::Added);
+                    }
+                    continue;
+                }
+                let status = match &change {
+                    gix::diff::index::ChangeRef::Addition { .. } => FileStatus::Added,
+                    gix::diff::index::ChangeRef::Deletion { .. } => FileStatus::Deleted,
+                    gix::diff::index::ChangeRef::Modification { .. } => FileStatus::Modified,
+                    gix::diff::index::ChangeRef::Rewrite { .. } => unreachable!("handled above"),
+                };
+                let (loc, ..) = change.fields();
+                if let Ok(path) = loc.to_str() {
+                    acc.entry(path.to_owned()).or_default().0 = Some(status);
+                }
+            }
+        }
+    }
+
+    let mut entries = Vec::with_capacity(acc.len());
+    for (path, (staged, unstaged)) in acc {
+        if let Some(status) = net_head_to_worktree(staged, unstaged) {
+            entries.push(StatusEntry { path, status });
+        }
+    }
+    Ok(entries)
+}
+
+/// Reduce a path's `(HEAD→index, index→worktree)` status pair to its net
+/// status relative to HEAD. `None` means the path is identical to HEAD
+/// (e.g. added to the index then deleted from the worktree).
+const fn net_head_to_worktree(
+    staged: Option<FileStatus>,
+    unstaged: Option<FileStatus>,
+) -> Option<FileStatus> {
+    use FileStatus::{Added, Deleted, Modified};
+    match (staged, unstaged) {
+        // No staged term ⇒ HEAD == index, so the index→worktree status
+        // *is* the HEAD→worktree status (Untracked is pre-mapped to Added
+        // by `convert_status_item`). No worktree term ⇒ index == worktree,
+        // so the staged status *is* the HEAD→worktree status — the case
+        // the plain index→worktree `status` missed. Both collapse to
+        // "whichever side is populated".
+        (None, x) | (x, None) => x,
+        // Added to the index, then removed from the worktree → absent from
+        // both HEAD and the worktree: no net change.
+        (Some(Added), Some(Deleted)) => None,
+        // New vs HEAD regardless of later worktree edits.
+        (Some(Added), Some(_)) => Some(Added),
+        // Staged-modified or staged-deleted, then deleted in the worktree
+        // → gone relative to HEAD.
+        (Some(Modified | Deleted), Some(Deleted)) => Some(Deleted),
+        // Staged-modified and still present, or staged-deleted but
+        // re-created/edited in the worktree → present and differs from HEAD.
+        (Some(Modified | Deleted), Some(_)) => Some(Modified),
+        // `Renamed`/`Untracked` only arise from the index→worktree half;
+        // fall back to the staged classification consumers already expect.
+        (Some(other), Some(_)) => Some(other),
+    }
+}
+
 /// Fast status: only check tracked files (index vs worktree), skip dirwalk.
 ///
 /// This avoids walking the entire directory tree for untracked files, which
@@ -157,7 +287,21 @@ fn stat_matches_by_content(
 ) -> bool {
     let data = if meta.file_type().is_symlink() {
         match std::fs::read_link(path) {
-            Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
+            // Hash the raw bytes of the link target. `to_string_lossy()`
+            // would replace non-UTF-8 bytes with U+FFFD, mismatching the
+            // stored blob OID and spuriously counting the symlink dirty
+            // (same class of bug fixed in `worktree_state_commit`, 6627a3ea).
+            Ok(target) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStrExt;
+                    target.as_os_str().as_bytes().to_vec()
+                }
+                #[cfg(not(unix))]
+                {
+                    target.to_string_lossy().into_owned().into_bytes()
+                }
+            }
             Err(_) => return false,
         }
     } else {
@@ -260,6 +404,78 @@ mod tests_bn_p5z5 {
                 .filter(|e| e.status == FileStatus::Added)
                 .any(|e| e.path == "created/new_0.txt"),
             "expected per-file untracked emission, got: {entries:#?}",
+        );
+    }
+
+    /// bn-pfh7 (Prime Invariant): a file that was `git add`-ed but whose
+    /// worktree copy still equals the staged blob is invisible to the
+    /// plain index→worktree `status()`. `status_head_to_worktree` must
+    /// still report it as `Added` — otherwise `worktree_state_commit`
+    /// (quarantine fix-forward / recovery snapshots) and `snapshot()`
+    /// would silently drop the staged work.
+    #[test]
+    fn staged_only_addition_visible_to_head_to_worktree() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::write(root.join("staged_new.txt"), "fresh content").expect("write file");
+        let _ = crate::test_support::git_capture(root, &["add", "staged_new.txt"]);
+
+        // The bug: plain index↔worktree status does NOT see it.
+        let plain = status(&repo).expect("status");
+        assert!(
+            !plain.iter().any(|e| e.path == "staged_new.txt"),
+            "precondition: plain status() must miss staged-only adds (got {plain:#?})",
+        );
+
+        // The fix: HEAD→worktree status DOES see it as Added.
+        let hw = status_head_to_worktree(&repo).expect("status_head_to_worktree");
+        assert!(
+            hw.iter()
+                .any(|e| e.path == "staged_new.txt" && e.status == FileStatus::Added),
+            "staged-only addition must be reported as Added, got: {hw:#?}",
+        );
+    }
+
+    /// bn-pfh7: a tracked file modified and then `git add`-ed (worktree
+    /// == index) must surface as `Modified` via `status_head_to_worktree`.
+    #[test]
+    fn staged_only_modification_visible_to_head_to_worktree() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        // README.md is the committed seed file from the shared helper.
+        std::fs::write(root.join("README.md"), "totally different body").expect("rewrite seed");
+        let _ = crate::test_support::git_capture(root, &["add", "README.md"]);
+
+        let plain = status(&repo).expect("status");
+        assert!(
+            !plain.iter().any(|e| e.path == "README.md"),
+            "precondition: plain status() must miss staged-only mods (got {plain:#?})",
+        );
+
+        let hw = status_head_to_worktree(&repo).expect("status_head_to_worktree");
+        assert!(
+            hw.iter()
+                .any(|e| e.path == "README.md" && e.status == FileStatus::Modified),
+            "staged-only modification must be reported as Modified, got: {hw:#?}",
+        );
+    }
+
+    /// bn-pfh7: added to the index then removed from the worktree — the
+    /// path is absent from both HEAD and the worktree, so the net status
+    /// is "no change" and it must NOT be reported (avoids a spurious
+    /// add/delete pair leaking into the merge snapshot).
+    #[test]
+    fn staged_addition_then_worktree_delete_is_net_none() {
+        let (dir, repo) = setup_repo();
+        let root = dir.path();
+        std::fs::write(root.join("ephemeral.txt"), "x").expect("write file");
+        let _ = crate::test_support::git_capture(root, &["add", "ephemeral.txt"]);
+        std::fs::remove_file(root.join("ephemeral.txt")).expect("rm file");
+
+        let hw = status_head_to_worktree(&repo).expect("status_head_to_worktree");
+        assert!(
+            !hw.iter().any(|e| e.path == "ephemeral.txt"),
+            "staged-add-then-worktree-delete must net to no change, got: {hw:#?}",
         );
     }
 }

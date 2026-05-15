@@ -127,11 +127,16 @@ pub fn capture_before_destroy(
 // ---------------------------------------------------------------------------
 
 /// List all dirty paths in the workspace (staged + unstaged + untracked).
+///
+/// Must be HEAD→worktree, not index→worktree: this feeds the recovery
+/// snapshot taken before a workspace is destroyed, so a staged-but-not-
+/// re-edited file dropped here would be permanently lost on destroy
+/// (Prime Invariant: no work is ever lost).
 fn list_dirty_paths(ws_path: &Path) -> Result<Vec<String>> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
     let entries = repo
-        .status()
+        .status_head_to_worktree()
         .map_err(|e| anyhow::anyhow!("git status failed: {e}"))?;
 
     let paths: Vec<String> = entries.into_iter().map(|entry| entry.path).collect();

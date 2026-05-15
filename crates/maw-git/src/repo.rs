@@ -299,6 +299,19 @@ pub trait GitRepo {
     /// Returns a `GitError` if the backend operation fails.
     fn status(&self) -> Result<Vec<StatusEntry>, GitError>;
 
+    /// Net working-tree status **relative to HEAD**, including *staged*
+    /// changes — the true `git status --porcelain` semantics.
+    ///
+    /// Unlike [`status()`](Self::status) (index → worktree only), this also
+    /// folds in the HEAD → index (staged) diff, so a file that was
+    /// `git add`-ed but whose worktree copy still equals the staged blob
+    /// is reported. Required by safety-critical callers that must not lose
+    /// staged work (recovery snapshots, merge snapshot, restore gating).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the backend operation fails.
+    fn status_head_to_worktree(&self) -> Result<Vec<StatusEntry>, GitError>;
+
     /// Fast status: only check tracked files (index vs worktree), skip dirwalk.
     ///
     /// Much faster than [`status()`](Self::status) for large repos because it

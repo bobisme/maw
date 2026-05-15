@@ -239,7 +239,14 @@ pub fn find_entry_at_path(
                 message: format!("tree {tree_oid}: {e}"),
             })?;
 
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // Normalize away empty and `.` components, matching git pathspec
+    // normalization (`git ls-tree -- foo/./bar` resolves). `validate_show_path`
+    // explicitly blesses `.` components, so rejecting them here would make
+    // `--show foo/./bar` pass validation then spuriously report "not found".
+    let components: Vec<&str> = path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
     if components.is_empty() {
         return Ok(None);
     }
@@ -529,4 +536,39 @@ pub fn read_file_at_commit(
             message: format!("failed to read blob at '{}': {e}", rel_path.display()),
         })?;
     Ok(Some(blob.data.clone()))
+}
+
+#[cfg(test)]
+mod tests_bn_pfh7 {
+    //! Regression: `find_entry_at_path` must normalize `.` path
+    //! components, matching git pathspec semantics and `validate_show_path`
+    //! (which explicitly blesses `foo/./bar`). Before bn-pfh7 a `.`
+    //! component made the lookup fail with a spurious "not found".
+
+    use super::*;
+    use crate::test_support::{commit_all, init_test_repo};
+
+    #[test]
+    fn find_entry_at_path_normalizes_dot_components() {
+        let (dir, root) = init_test_repo();
+        std::fs::create_dir_all(root.join("foo")).expect("mkdir foo");
+        std::fs::write(root.join("foo/bar.txt"), b"payload").expect("write nested file");
+        let head = commit_all(&root, "add nested file");
+        let repo = crate::GixRepo::open(&root).expect("open repo");
+        let oid: GitOid = head.parse().expect("parse HEAD oid");
+
+        let plain = read_blob_at_path(&repo, oid, "foo/bar.txt").expect("read plain path");
+        assert!(plain.is_some(), "baseline path must resolve");
+
+        for variant in ["foo/./bar.txt", "./foo/bar.txt", "foo//bar.txt"] {
+            let got = read_blob_at_path(&repo, oid, variant)
+                .unwrap_or_else(|e| panic!("read {variant}: {e}"));
+            assert_eq!(
+                got.as_ref().map(|(_, _, data)| data.clone()),
+                plain.as_ref().map(|(_, _, data)| data.clone()),
+                "`{variant}` must resolve identically to `foo/bar.txt`",
+            );
+        }
+        drop(dir);
+    }
 }

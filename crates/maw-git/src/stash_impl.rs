@@ -462,8 +462,11 @@ pub fn worktree_state_commit(repo: &GixRepo, message: &str) -> Result<Option<Git
         return Ok(None);
     };
 
-    // 2. Enumerate worktree changes vs HEAD (incl. untracked).
-    let status = crate::status_impl::status(repo)?;
+    // 2. Enumerate worktree changes vs HEAD (incl. staged + untracked).
+    //    Must be HEAD→worktree, not index→worktree: a staged-but-not-
+    //    re-edited fix would otherwise be dropped, promoting the unfixed
+    //    tree (Prime Invariant: no staged work is ever lost).
+    let status = crate::status_impl::status_head_to_worktree(repo)?;
     if status.is_empty() {
         return Ok(None);
     }
