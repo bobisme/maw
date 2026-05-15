@@ -305,7 +305,8 @@ pub fn run_build_phase_with_inputs<B: WorkspaceBackend>(
     let mut repo = open_gix_repo(repo_root)?;
     set_pending_attrs_from_resolved(&mut repo, &resolved);
     let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().clone()).collect();
-    let candidate = build_merge_commit(&repo, epoch, sources, &resolved, None)?;
+    let modes = modes_from_partition(&partition);
+    let candidate = build_merge_commit(&repo, epoch, sources, &resolved, &modes, None)?;
 
     Ok(BuildPhaseOutput {
         candidate,
@@ -360,6 +361,46 @@ fn open_gix_repo(root: &Path) -> Result<maw_git::GixRepo, BuildPhaseError> {
             exit_code: None,
         })
     })
+}
+
+/// Build a `path -> git EntryMode` map from the partitioned patch sets.
+///
+/// bn-1tl6: `ResolvedChange` does not carry a mode, so the executable bit /
+/// symlink mode captured by `collect.rs` into `FileChange.mode` (and threaded
+/// into `PathEntry.mode` by `partition_by_path`) would be lost before
+/// `build_merge_commit` constructs the tree. This recovers it out-of-band:
+/// every non-deleted entry whose mode is known contributes a `path -> mode`
+/// pair, which `build_merge_commit` then applies verbatim to the committed
+/// tree.
+///
+/// Determinism on collision: a unique path has exactly one entry. A shared
+/// path has its entries pre-sorted by workspace id (by `partition_by_path`);
+/// we take the first entry's mode, a deterministic choice. Mode-only
+/// disagreement between two workspaces on the same path is rare (it already
+/// surfaces as a content conflict in the resolve step) and any deterministic
+/// pick keeps the build reproducible. Deletions carry no meaningful new-side
+/// mode and are skipped (the path is removed from the tree anyway).
+fn modes_from_partition(partition: &PartitionResult) -> BTreeMap<PathBuf, maw_git::EntryMode> {
+    let mut modes = BTreeMap::new();
+    let mut record = |path: &Path, entry: &PathEntry| {
+        if matches!(entry.kind, ChangeKind::Deleted) {
+            return;
+        }
+        if let Some(m) = entry.mode {
+            modes
+                .entry(path.to_path_buf())
+                .or_insert_with(|| maw_git::EntryMode::from(m));
+        }
+    };
+    for (path, entry) in &partition.unique {
+        record(path, entry);
+    }
+    for (path, entries) in &partition.shared {
+        if let Some(first) = entries.first() {
+            record(path, first);
+        }
+    }
+    modes
 }
 
 // ---------------------------------------------------------------------------
@@ -642,11 +683,13 @@ fn run_pipeline<B: WorkspaceBackend>(
     let mut repo = open_gix_repo(repo_root)?;
     set_pending_attrs_from_resolved(&mut repo, &resolved);
     let resolved_paths: Vec<PathBuf> = resolved.iter().map(|c| c.path().clone()).collect();
+    let modes = modes_from_partition(&partition);
     let candidate = build_merge_commit(
         &repo,
         &state.epoch_before,
         &state.sources,
         &resolved,
+        &modes,
         state.commit_message.as_deref(),
     )?;
 
@@ -780,8 +823,15 @@ fn apply_merge_drivers(
             resolved_by_path.values().cloned().collect();
         let mut repo = open_gix_repo(repo_root)?;
         set_pending_attrs_from_resolved(&mut repo, &provisional_resolved);
-        let provisional_candidate =
-            build_merge_commit(&repo, epoch, sources, &provisional_resolved, None)?;
+        let provisional_modes = modes_from_partition(partition);
+        let provisional_candidate = build_merge_commit(
+            &repo,
+            epoch,
+            sources,
+            &provisional_resolved,
+            &provisional_modes,
+            None,
+        )?;
 
         let regenerated = run_regenerate_drivers(
             repo_root,

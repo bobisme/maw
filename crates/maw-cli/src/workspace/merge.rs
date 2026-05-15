@@ -670,6 +670,16 @@ fn patch_candidate_tree(
     let candidate_tree = candidate_commit.tree_oid;
 
     // 2. Hash resolved contents as blobs and build the TreeEdit list.
+    //
+    // bn-1tl6: preserve the resolved path's existing mode. The candidate tree
+    // already carries the (correct) mode for this path — it was produced by
+    // the build phase from the now-mode-aware collect path. Hardcoding
+    // `EntryMode::Blob` here silently demoted conflict-resolved executables
+    // (100755) and symlinks (120000) to regular files (100644) in the
+    // committed merge tree. Look the entry up in the candidate tree and reuse
+    // its mode; fall back to `Blob` only if the path is absent there (a
+    // genuinely new resolved path, which conflict resolution does not
+    // normally produce — every conflicting path existed on at least one side).
     let mut edits: Vec<maw_git::TreeEdit> = Vec::with_capacity(resolved.len());
     for (path, content) in resolved {
         let path_str = path.to_string_lossy().to_string();
@@ -679,9 +689,14 @@ fn patch_candidate_tree(
                 path.display()
             )
         })?;
+        let mode = repo
+            .find_entry_at_path(candidate_tree, &path_str)
+            .ok()
+            .flatten()
+            .map_or(maw_git::EntryMode::Blob, |(m, _oid)| m);
         edits.push(maw_git::TreeEdit::Upsert {
             path: path_str,
-            mode: maw_git::EntryMode::Blob,
+            mode,
             oid: blob_oid,
         });
     }

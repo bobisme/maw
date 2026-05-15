@@ -174,6 +174,14 @@ impl From<std::io::Error> for BuildError {
 /// * `workspace_ids` — IDs of the workspaces that contributed to this merge
 ///   (used to construct the commit message).
 /// * `resolved` — Resolved file changes to apply to the epoch tree.
+/// * `modes` — Per-path git tree-entry mode captured from the source
+///   workspace(s) at collect time (executable bit / symlink / regular).
+///   bn-1tl6: an upsert for a path present in this map is written with that
+///   exact mode. This is what preserves a new/changed executable or symlink
+///   in the *committed* merge tree. When a path is absent (legacy / test
+///   callers that pass an empty map), the previous behavior is used:
+///   preserve the epoch tree's mode if the path already existed there,
+///   otherwise default to regular-file `100644`.
 /// * `message` — Optional custom commit message. If `None`, a default message
 ///   is generated from `workspace_ids`.
 ///
@@ -194,6 +202,7 @@ pub fn build_merge_commit(
     epoch: &EpochId,
     workspace_ids: &[WorkspaceId],
     resolved: &[ResolvedChange],
+    modes: &BTreeMap<PathBuf, maw_git::EntryMode>,
     message: Option<&str>,
 ) -> Result<GitOid, BuildError> {
     // Step 1: Read the epoch tree into a flat map path -> (mode, blob_oid).
@@ -207,11 +216,23 @@ pub fn build_merge_commit(
         match change {
             ResolvedChange::Upsert { path, content } => {
                 let blob_oid = write_blob_at(repo, content, &path.to_string_lossy())?;
-                // Regular file mode. We preserve original mode if the file
-                // already exists in the tree; otherwise use 100644.
-                let mode = tree
-                    .get(path)
-                    .map_or_else(|| "100644".to_owned(), |(m, _)| m.clone());
+                // bn-1tl6: prefer the mode captured from the source workspace
+                // at collect time. This is what preserves a new or changed
+                // executable / symlink in the COMMITTED merge tree. Falling
+                // back to the epoch tree's mode (and 100644 for new paths)
+                // silently demoted exec/symlink to a regular file — a
+                // Prime-Invariant violation (committed work corrupted).
+                let mode = modes.get(path).map_or_else(
+                    || {
+                        // No explicit mode (legacy/test caller, or path not in
+                        // any source patch set). Preserve the epoch tree's
+                        // mode if the file already existed there; otherwise
+                        // default to a regular file.
+                        tree.get(path)
+                            .map_or_else(|| "100644".to_owned(), |(m, _)| m.clone())
+                    },
+                    |m| git_mode_str(*m).to_owned(),
+                );
                 tree.insert(path.clone(), (mode, blob_oid.as_str().to_owned()));
             }
             ResolvedChange::Delete { path } => {
@@ -307,17 +328,28 @@ fn walk_tree_recursive(
             walk_tree_recursive(repo, entry.oid, &entry_path, flat)?;
         } else {
             // Blob, executable, symlink, gitlink — collect as flat entry.
-            let mode_str = match entry.mode {
-                maw_git::EntryMode::Blob => "100644",
-                maw_git::EntryMode::BlobExecutable => "100755",
-                maw_git::EntryMode::Link => "120000",
-                maw_git::EntryMode::Commit => "160000",
-                maw_git::EntryMode::Tree => unreachable!(),
-            };
-            flat.insert(entry_path, (mode_str.to_owned(), entry.oid.to_string()));
+            flat.insert(
+                entry_path,
+                (git_mode_str(entry.mode).to_owned(), entry.oid.to_string()),
+            );
         }
     }
     Ok(())
+}
+
+/// Render a [`maw_git::EntryMode`] as its git octal mode string.
+///
+/// `Tree` is included for totality but never reached by callers here
+/// (subtrees are recursed into / built separately, not stored as flat
+/// entries).
+const fn git_mode_str(mode: maw_git::EntryMode) -> &'static str {
+    match mode {
+        maw_git::EntryMode::Blob => "100644",
+        maw_git::EntryMode::BlobExecutable => "100755",
+        maw_git::EntryMode::Link => "120000",
+        maw_git::EntryMode::Commit => "160000",
+        maw_git::EntryMode::Tree => "040000",
+    }
 }
 
 /// Write a blob via the attribute-aware entry point so LFS-tracked paths
@@ -678,7 +710,7 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // The new commit should have the same tree as the epoch.
@@ -704,7 +736,7 @@ mod tests {
             content: b"fn main() {}".to_vec(),
         }];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // File should be present in the new commit.
@@ -735,7 +767,7 @@ mod tests {
             content: b"# Updated\n".to_vec(),
         }];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         let content = git_file_content(root, commit_oid.as_str(), "README.md");
@@ -755,7 +787,7 @@ mod tests {
             path: PathBuf::from("README.md"),
         }];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // File should be absent from the new tree.
@@ -796,7 +828,7 @@ mod tests {
             },
         ];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["a", "b"]), &resolved, None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["a", "b"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // README.md modified
@@ -826,7 +858,7 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["beta", "alpha"]), &[], None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["beta", "alpha"]), &[], &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         let log_out = Command::new("git")
@@ -850,6 +882,7 @@ mod tests {
             &epoch,
             &ws_ids(&["a"]),
             &[],
+            &BTreeMap::new(),
             Some("custom: my merge"),
         )
         .expect("operation should succeed");
@@ -872,7 +905,7 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // New commit's parent must be the epoch.
@@ -906,9 +939,9 @@ mod tests {
             },
         ];
 
-        let oid1 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None)
+        let oid1 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
-        let oid2 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, None)
+        let oid2 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // Tree OIDs must be identical (content-addressed).
@@ -931,7 +964,7 @@ mod tests {
             .expect("operation should succeed")
             .as_secs();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         let after = std::time::SystemTime::now()
@@ -976,7 +1009,7 @@ mod tests {
             },
         ];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         let files = git_ls_tree_flat(root, commit_oid.as_str());
@@ -1000,7 +1033,7 @@ mod tests {
         let root = dir.path();
 
         let commit_oid =
-            build_merge_commit(&*repo, &epoch, &[], &[], None).expect("operation should succeed");
+            build_merge_commit(&*repo, &epoch, &[], &[], &BTreeMap::new(), None).expect("operation should succeed");
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
@@ -1025,7 +1058,7 @@ mod tests {
         }];
 
         // Should succeed (deleting absent path is harmless)
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, None)
+        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, &BTreeMap::new(), None)
             .expect("operation should succeed");
 
         // README.md should still be present
@@ -1071,5 +1104,126 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("test context"), "missing context: {msg}");
         assert!(msg.contains("not-an-oid"), "missing raw: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1tl6: build_merge_commit must honor the per-path modes map
+    //
+    // The end-to-end bug was that the production build path
+    // (collect → partition → resolve → build) discarded FileChange.mode:
+    // `ResolvedChange` carries no mode and `build_merge_commit` hardcoded
+    // 100644 for new paths. Now an explicit `modes` map is threaded in;
+    // these tests pin the contract at the build boundary.
+    // -----------------------------------------------------------------------
+
+    /// `git ls-tree` mode column for a single path at a commit.
+    fn git_ls_tree_mode(root: &Path, commit: &str, path: &str) -> String {
+        let out = Command::new("git")
+            .args(["ls-tree", "-r", "--full-tree", commit, "--", path])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+        assert!(out.status.success(), "git ls-tree failed");
+        let line = String::from_utf8_lossy(&out.stdout);
+        let first = line.lines().next().unwrap_or_default();
+        // Format: "<mode> <type> <oid>\t<path>"
+        first
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// A new executable upsert with `modes[path] = BlobExecutable` must land
+    /// as `100755`; a symlink with `Link` as `120000`; a plain file with no
+    /// modes entry stays `100644`.
+    #[test]
+    fn build_honors_modes_map_for_new_exec_symlink_and_plain() {
+        let (dir, epoch, repo) = setup_git_repo();
+        let root = dir.path();
+
+        let resolved = vec![
+            ResolvedChange::Upsert {
+                path: PathBuf::from("tool.sh"),
+                content: b"#!/bin/sh\necho hi\n".to_vec(),
+            },
+            ResolvedChange::Upsert {
+                path: PathBuf::from("alias.sh"),
+                content: b"tool.sh".to_vec(),
+            },
+            ResolvedChange::Upsert {
+                path: PathBuf::from("regular.txt"),
+                content: b"realfile\n".to_vec(),
+            },
+        ];
+
+        let mut modes: BTreeMap<PathBuf, maw_git::EntryMode> = BTreeMap::new();
+        modes.insert(
+            PathBuf::from("tool.sh"),
+            maw_git::EntryMode::BlobExecutable,
+        );
+        modes.insert(PathBuf::from("alias.sh"), maw_git::EntryMode::Link);
+        // regular.txt deliberately absent → must default to 100644.
+
+        let commit = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws"]),
+            &resolved,
+            &modes,
+            None,
+        )
+        .expect("operation should succeed");
+
+        assert_eq!(
+            git_ls_tree_mode(root, commit.as_str(), "tool.sh"),
+            "100755",
+            "new executable must be 100755 in the committed merge tree (bn-1tl6)"
+        );
+        assert_eq!(
+            git_ls_tree_mode(root, commit.as_str(), "alias.sh"),
+            "120000",
+            "new symlink must be 120000 in the committed merge tree (bn-1tl6)"
+        );
+        assert_eq!(
+            git_ls_tree_mode(root, commit.as_str(), "regular.txt"),
+            "100644",
+            "plain file with no modes entry must stay 100644 (safe-case must not regress)"
+        );
+        // The symlink blob is the target text.
+        assert_eq!(
+            git_file_content(root, commit.as_str(), "alias.sh"),
+            "tool.sh"
+        );
+    }
+
+    /// An empty modes map preserves the legacy behavior: an existing tracked
+    /// path keeps the epoch tree's mode (here: README.md stays 100644 after
+    /// an edit). Guards the back-compat / test-fixture path.
+    #[test]
+    fn build_empty_modes_map_preserves_epoch_mode() {
+        let (dir, epoch, repo) = setup_git_repo();
+        let root = dir.path();
+
+        let resolved = vec![ResolvedChange::Upsert {
+            path: PathBuf::from("README.md"),
+            content: b"# edited\n".to_vec(),
+        }];
+
+        let commit = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
+
+        assert_eq!(
+            git_ls_tree_mode(root, commit.as_str(), "README.md"),
+            "100644",
+            "edited tracked file keeps its epoch mode when no modes map entry"
+        );
     }
 }

@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use crate::model::patch::FileId;
 use crate::model::types::{GitOid, WorkspaceId};
 
-use super::types::{ChangeKind, PatchSet};
+use super::types::{ChangeKind, EntryMode, PatchSet};
 
 // ---------------------------------------------------------------------------
 // PathEntry
@@ -61,6 +61,11 @@ pub struct PathEntry {
     /// Git blob OID for the new content (Add/Modify only; `None` for Delete
     /// and paths collected without git access).
     pub blob: Option<GitOid>,
+    /// Git tree-entry mode captured from the source workspace (executable
+    /// bit / symlink / regular). `None` for legacy/test paths without mode
+    /// info. bn-1tl6: threaded through so `build_merge_commit` can write the
+    /// correct mode into the committed merge tree.
+    pub mode: Option<EntryMode>,
 }
 
 impl PathEntry {
@@ -77,10 +82,12 @@ impl PathEntry {
             content,
             file_id: None,
             blob: None,
+            mode: None,
         }
     }
 
-    /// Create a `PathEntry` with full identity metadata (Phase 3+).
+    /// Create a `PathEntry` with full identity metadata (Phase 3+) but no
+    /// mode. Prefer [`PathEntry::with_mode`] on the production collect path.
     #[must_use]
     pub const fn with_identity(
         workspace_id: WorkspaceId,
@@ -95,6 +102,29 @@ impl PathEntry {
             content,
             file_id,
             blob,
+            mode: None,
+        }
+    }
+
+    /// Create a `PathEntry` with full identity metadata *and* a git
+    /// tree-entry mode (bn-1tl6). Used by `partition_by_path` so the mode
+    /// captured at collect time survives into `build_merge_commit`.
+    #[must_use]
+    pub const fn with_mode(
+        workspace_id: WorkspaceId,
+        kind: ChangeKind,
+        content: Option<Vec<u8>>,
+        file_id: Option<FileId>,
+        blob: Option<GitOid>,
+        mode: Option<EntryMode>,
+    ) -> Self {
+        Self {
+            workspace_id,
+            kind,
+            content,
+            file_id,
+            blob,
+            mode,
         }
     }
 
@@ -188,12 +218,13 @@ pub fn partition_by_path(patch_sets: &[PatchSet]) -> PartitionResult {
             // Propagate FileId and blob OID from FileChange so that the
             // resolve step can use OID equality and FileId-based rename
             // tracking (§5.8).
-            let entry = PathEntry::with_identity(
+            let entry = PathEntry::with_mode(
                 ps.workspace_id.clone(),
                 change.kind.clone(),
                 change.content.clone(),
                 change.file_id,
                 change.blob.clone(),
+                change.mode,
             );
             index.entry(change.path.clone()).or_default().push(entry);
         }

@@ -841,7 +841,23 @@ fn run_full_merge(
     // Only build if we have resolved changes (skip conflicts for this test).
     let ws_ids: Vec<WorkspaceId> = scenarios.iter().map(|s| ws(&s.name)).collect();
 
-    build_merge_commit(root, epoch, &ws_ids, &result.resolved, None).expect("build should succeed")
+    // bn-1tl6: thread per-path modes from the partition, mirroring the
+    // production `modes_from_partition` helper, so determinism still holds
+    // with the mode-aware build path.
+    let mut modes: BTreeMap<PathBuf, maw_git::EntryMode> = BTreeMap::new();
+    for (path, entry) in &partition.unique {
+        if let Some(m) = entry.mode {
+            modes.insert(path.clone(), maw_git::EntryMode::from(m));
+        }
+    }
+    for (path, entries) in &partition.shared {
+        if let Some(m) = entries.first().and_then(|e| e.mode) {
+            modes.entry(path.clone()).or_insert(maw_git::EntryMode::from(m));
+        }
+    }
+
+    build_merge_commit(root, epoch, &ws_ids, &result.resolved, &modes, None)
+        .expect("build should succeed")
 }
 
 /// End-to-end determinism: 2 workspaces with disjoint file additions.

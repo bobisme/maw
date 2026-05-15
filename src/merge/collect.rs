@@ -26,14 +26,21 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use maw_git::{GitRepo, GixRepo};
+use maw_git::{EntryMode as GitEntryMode, GitRepo, GixRepo};
 
 use crate::backend::WorkspaceBackend;
 use crate::model::file_id::FileIdMap;
 use crate::model::patch::FileId;
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 
-use super::types::{ChangeKind, FileChange, PatchSet};
+use super::types::{ChangeKind, EntryMode, FileChange, PatchSet};
+
+/// Collected file bytes plus an optional git tree-entry mode.
+///
+/// `None` mode means the producer could not determine the mode (rare; e.g.
+/// `symlink_metadata` failed while a plain read succeeded). Downstream then
+/// degrades to its prior default rather than failing the merge.
+type ContentAndMode = (Vec<u8>, Option<EntryMode>);
 
 // ---------------------------------------------------------------------------
 // CollectError
@@ -214,9 +221,9 @@ fn collect_one<B: WorkspaceBackend>(
         .as_ref()
         .is_some_and(|r| ws_head_differs_from_epoch(r, &epoch));
 
-    // Added files: read content, generate fresh FileId, compute blob OID.
+    // Added files: read content + mode, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
-        let Some(content) = read_committed_or_workspace_file(
+        let Some((content, mode)) = read_content_and_mode(
             ws_repo.as_ref(),
             &ws_path,
             path,
@@ -235,18 +242,20 @@ fn collect_one<B: WorkspaceBackend>(
         // won't have an entry yet; the FileId is minted here and would be
         // persisted by the workspace's oplog in a full implementation.
         let file_id = Some(FileId::random());
-        changes.push(FileChange::with_identity(
+        changes.push(FileChange::with_mode(
             path.clone(),
             ChangeKind::Added,
             Some(content),
             file_id,
             blob,
+            mode,
         ));
     }
 
-    // Modified files: read current content, look up existing FileId, compute blob OID.
+    // Modified files: read current content + mode, look up existing FileId,
+    // compute blob OID.
     for path in &snapshot.modified {
-        let Some(content) = read_committed_or_workspace_file(
+        let Some((content, mode)) = read_content_and_mode(
             ws_repo.as_ref(),
             &ws_path,
             path,
@@ -263,12 +272,13 @@ fn collect_one<B: WorkspaceBackend>(
             .and_then(|r| git_hash_object(r, &content));
         // Modified files existed in the epoch, so their FileId is in the map.
         let file_id = file_id_map.id_for_path(path);
-        changes.push(FileChange::with_identity(
+        changes.push(FileChange::with_mode(
             path.clone(),
             ChangeKind::Modified,
             Some(content),
             file_id,
             blob,
+            mode,
         ));
     }
 
@@ -335,33 +345,47 @@ fn path_exists_at_commit(repo: &GixRepo, commit: &EpochId, path: &Path) -> bool 
     )
 }
 
-/// Read file content for the merge, preferring committed blobs when the
-/// workspace has commits ahead of the epoch.
+/// Read file content **and git tree-entry mode** for the merge, preferring
+/// committed blobs when the workspace has commits ahead of the epoch.
 ///
 /// When `ws_has_commits` is true, the workspace HEAD has advanced beyond the
 /// epoch — meaning the user/agent committed changes. In this case we read
 /// from the committed tree (`HEAD:<path>`) to get the clean (non-smudged)
-/// content. This is critical for LFS correctness: the working tree contains
-/// smudged real binary content, but the committed blob holds the LFS pointer
-/// bytes that the merge must store.
+/// content **and the committed mode**. This is critical for LFS correctness:
+/// the working tree contains smudged real binary content, but the committed
+/// blob holds the LFS pointer bytes that the merge must store.
 ///
 /// When `ws_has_commits` is false, all changes are uncommitted working-tree
-/// edits, so we read directly from disk.
-fn read_committed_or_workspace_file(
+/// edits, so we read directly from disk and derive the mode from
+/// `symlink_metadata` (symlink / executable bit), mirroring the canonical
+/// `worktree_state_commit` logic in `maw-git`.
+///
+/// bn-1tl6: previously this returned content only and never recorded a mode,
+/// so every `FileChange` from the production collect path had `mode == None`.
+/// Downstream (`apply.rs`) then defaulted new/added paths to `Blob` (100644)
+/// and reused the base-epoch mode for modified paths — silently corrupting the
+/// executable bit and symlink/file mode flips in the *committed* merge tree
+/// (a Prime-Invariant violation).
+///
+/// Returns `Ok(None)` for directory entries (which the caller skips). The
+/// returned mode is `None` only when it genuinely cannot be determined (e.g.
+/// a path read from disk whose metadata is unavailable but content read
+/// succeeded — rare); downstream then falls back to its prior behavior.
+fn read_content_and_mode(
     ws_repo: Option<&GixRepo>,
     ws_path: &Path,
     rel_path: &Path,
     ws_id: &WorkspaceId,
     ws_has_commits: bool,
-) -> Result<Option<Vec<u8>>, CollectError> {
+) -> Result<Option<ContentAndMode>, CollectError> {
     if ws_has_commits
         && let Some(repo) = ws_repo
-        && let Some(blob) = read_committed_blob(repo, rel_path)
+        && let Some((blob, mode)) = read_committed_blob_and_mode(repo, rel_path)
     {
-        return Ok(Some(blob));
+        return Ok(Some((blob, Some(EntryMode::from(mode)))));
     }
     // Fallback: workspace has no commits, or file not in HEAD (uncommitted).
-    read_workspace_file(ws_path, rel_path, ws_id)
+    read_workspace_file_and_mode(ws_path, rel_path, ws_id)
 }
 
 /// Check whether the workspace HEAD has advanced beyond the epoch.
@@ -376,30 +400,101 @@ fn ws_head_differs_from_epoch(ws_repo: &GixRepo, epoch: &EpochId) -> bool {
     }
 }
 
-/// Read a blob from `HEAD:<rel_path>` in the workspace worktree.
+/// Read a blob **and its tree-entry mode** from `HEAD:<rel_path>` in the
+/// workspace worktree.
 ///
 /// Returns `None` if the file is not in the HEAD tree (e.g., untracked), if
-/// the path is not valid UTF-8, or if any gix lookup fails.
-fn read_committed_blob(ws_repo: &GixRepo, rel_path: &Path) -> Option<Vec<u8>> {
+/// the path is not valid UTF-8, if it names a non-blob entry (subtree /
+/// submodule), or if any gix lookup fails.
+///
+/// The committed blob is already mode-correct for symlinks: `HEAD:<symlink>`
+/// stores the link *target text* as the blob, which is exactly what a
+/// `Link`-mode tree entry must contain. No special-casing is needed here
+/// (contrast the working-tree path, which must `read_link`).
+fn read_committed_blob_and_mode(
+    ws_repo: &GixRepo,
+    rel_path: &Path,
+) -> Option<(Vec<u8>, GitEntryMode)> {
     let path_str = rel_path.to_str()?;
-    let oid = ws_repo.rev_parse_opt(&format!("HEAD:{path_str}")).ok()??;
-    ws_repo.read_blob(oid).ok()
+    let head = ws_repo.rev_parse_opt("HEAD").ok()??;
+    let (mode, _oid, data) = ws_repo.read_blob_at_path(head, path_str).ok()??;
+    Some((data, mode))
 }
 
-/// Read the current content of a file from a workspace's working tree.
-fn read_workspace_file(
+/// Read the current content of a file from a workspace's working tree, along
+/// with its git tree-entry mode.
+///
+/// Mode derivation mirrors the canonical `worktree_state_commit` logic in
+/// `maw-git/src/stash_impl.rs`:
+///
+/// - **Symlink** → [`EntryMode::Link`]. The git blob for a symlink is the
+///   *link target text*, not the target file's content. `std::fs::read`
+///   follows the link and would read the target file's bytes — corrupting
+///   the blob (a regular file's content masquerading as a symlink target).
+///   So for symlinks we read the link via `std::fs::read_link` and use the
+///   target path's raw bytes (on unix, the `OsStr` bytes verbatim — no lossy
+///   UTF-8 conversion, matching `git stash create`).
+/// - **Regular file with any execute bit** (`mode & 0o111 != 0` on unix) →
+///   [`EntryMode::BlobExecutable`].
+/// - **Regular file otherwise** → [`EntryMode::Blob`].
+///
+/// Returns `Ok(None)` for directories. If `symlink_metadata` itself fails but
+/// a plain `read` succeeds, the mode is reported as `None` (rare; downstream
+/// degrades to its prior default) rather than failing the whole merge.
+fn read_workspace_file_and_mode(
     ws_path: &Path,
     rel_path: &Path,
     ws_id: &WorkspaceId,
-) -> Result<Option<Vec<u8>>, CollectError> {
+) -> Result<Option<ContentAndMode>, CollectError> {
     let full_path = ws_path.join(rel_path);
 
-    if full_path.is_dir() {
+    // Path enumerated by snapshot but missing on disk, or metadata
+    // unavailable → `None`; fall back to the plain-read path below, which
+    // will surface a precise error or skip a directory.
+    let meta = std::fs::symlink_metadata(&full_path).ok();
+
+    if meta.as_ref().is_some_and(std::fs::Metadata::is_dir) || full_path.is_dir() {
         return Ok(None);
     }
 
+    // Symlink: the blob must be the link target text, NOT the (followed)
+    // target file's content. Mirror `worktree_state_commit`.
+    if meta.as_ref().is_some_and(std::fs::Metadata::is_symlink) {
+        let target = std::fs::read_link(&full_path).map_err(|e| CollectError::ReadFailed {
+            workspace_id: ws_id.clone(),
+            path: rel_path.to_path_buf(),
+            reason: format!("read symlink: {e}"),
+        })?;
+        #[cfg(unix)]
+        let bytes = {
+            use std::os::unix::ffi::OsStrExt;
+            target.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let bytes = target.to_string_lossy().into_owned().into_bytes();
+        return Ok(Some((bytes, Some(EntryMode::Link))));
+    }
+
+    #[cfg(unix)]
+    let exec_mode = meta.as_ref().and_then(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        if m.is_file() {
+            Some(if m.permissions().mode() & 0o111 != 0 {
+                EntryMode::BlobExecutable
+            } else {
+                EntryMode::Blob
+            })
+        } else {
+            None
+        }
+    });
+    #[cfg(not(unix))]
+    let exec_mode = meta
+        .as_ref()
+        .and_then(|m| m.is_file().then_some(EntryMode::Blob));
+
     match std::fs::read(&full_path) {
-        Ok(content) => Ok(Some(content)),
+        Ok(content) => Ok(Some((content, exec_mode))),
         Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Ok(None),
         Err(e) => Err(CollectError::ReadFailed {
             workspace_id: ws_id.clone(),
@@ -1178,6 +1273,292 @@ mod tests {
             change.file_id,
             Some(known_id),
             "modified file should inherit FileId from epoch FileIdMap"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1tl6: file modes (exec bit, symlink) must survive collect
+    //
+    // Before bn-1tl6, collect_one always built FileChanges with mode == None,
+    // so the merge engine dropped the executable bit on new scripts/binaries
+    // and corrupted symlink<->file mode flips in the committed merge tree
+    // (a Prime-Invariant violation). These tests pin the four producing
+    // paths: worktree exec, worktree symlink, committed-HEAD exec,
+    // committed-HEAD symlink — content AND mode.
+    // -----------------------------------------------------------------------
+
+    /// An uncommitted (working-tree) executable file collected as Added must
+    /// carry `mode == Some(BlobExecutable)`.
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_added_executable_has_exec_mode() {
+        use crate::merge::types::EntryMode;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("wt-exec-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+
+        let script = info.path.join("tool.sh");
+        fs::write(&script, "#!/bin/sh\necho hi\n").expect("operation should succeed");
+        let mut perms = fs::metadata(&script)
+            .expect("operation should succeed")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("operation should succeed");
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
+        let change = results[0]
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("tool.sh"))
+            .expect("tool.sh should be collected");
+
+        assert!(matches!(change.kind, ChangeKind::Added));
+        assert_eq!(
+            change.mode,
+            Some(EntryMode::BlobExecutable),
+            "new worktree executable must keep the exec bit (bn-1tl6)"
+        );
+        assert_eq!(
+            change.content.as_deref(),
+            Some(b"#!/bin/sh\necho hi\n".as_ref())
+        );
+    }
+
+    /// An uncommitted (working-tree) symlink collected as Added must carry
+    /// `mode == Some(Link)` AND its content must be the link *target text*,
+    /// not the (followed) target file's bytes.
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_added_symlink_has_link_mode_and_target_content() {
+        use crate::merge::types::EntryMode;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("wt-link-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+
+        // Target file with DISTINCT content so a follow-the-link bug is
+        // detectable: a corrupted symlink would carry "TARGET BYTES\n"
+        // instead of the link path "tool.sh".
+        fs::write(info.path.join("tool.sh"), "TARGET BYTES\n").expect("operation should succeed");
+        std::os::unix::fs::symlink("tool.sh", info.path.join("alias.sh"))
+            .expect("operation should succeed");
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
+        let link = results[0]
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("alias.sh"))
+            .expect("alias.sh should be collected");
+
+        assert!(matches!(link.kind, ChangeKind::Added));
+        assert_eq!(
+            link.mode,
+            Some(EntryMode::Link),
+            "new worktree symlink must be Link mode (bn-1tl6)"
+        );
+        assert_eq!(
+            link.content.as_deref(),
+            Some(b"tool.sh".as_ref()),
+            "symlink blob must be the link target text, NOT the target file's content (bn-1tl6)"
+        );
+    }
+
+    /// A committed (HEAD-tree) executable collected as Added must carry
+    /// `mode == Some(BlobExecutable)` (read from the HEAD tree entry, not the
+    /// working tree).
+    #[cfg(unix)]
+    #[test]
+    fn collect_committed_added_executable_has_exec_mode() {
+        use crate::merge::types::EntryMode;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path();
+        let backend = GitWorktreeBackend::new(root.to_path_buf());
+
+        Command::new("git")
+            .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+
+        let ws_id = WorkspaceId::new("hd-exec-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+
+        let script = info.path.join("tool.sh");
+        fs::write(&script, "#!/bin/sh\necho hi\n").expect("operation should succeed");
+        let mut perms = fs::metadata(&script)
+            .expect("operation should succeed")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("operation should succeed");
+
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&info.path)
+            .output()
+            .expect("operation should succeed");
+        Command::new("git")
+            .args(["commit", "-m", "add tool.sh"])
+            .current_dir(&info.path)
+            .output()
+            .expect("operation should succeed");
+
+        let ws_head = git_head_oid(&info.path);
+        assert_ne!(ws_head, epoch.as_str(), "HEAD should have advanced");
+
+        let results =
+            collect_snapshots(root, &backend, &[ws_id]).expect("operation should succeed");
+        let change = results[0]
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("tool.sh"))
+            .expect("tool.sh should be collected");
+
+        assert!(matches!(change.kind, ChangeKind::Added));
+        assert_eq!(
+            change.mode,
+            Some(EntryMode::BlobExecutable),
+            "committed executable must keep the exec bit from the HEAD tree (bn-1tl6)"
+        );
+    }
+
+    /// A committed (HEAD-tree) symlink collected as Added must carry
+    /// `mode == Some(Link)` and content == link target text. (The committed
+    /// blob is already the target text; this pins that the mode is read.)
+    #[cfg(unix)]
+    #[test]
+    fn collect_committed_added_symlink_has_link_mode_and_target_content() {
+        use crate::merge::types::EntryMode;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let root = temp_dir.path();
+        let backend = GitWorktreeBackend::new(root.to_path_buf());
+
+        Command::new("git")
+            .args(["update-ref", "refs/manifold/epoch/current", epoch.as_str()])
+            .current_dir(root)
+            .output()
+            .expect("operation should succeed");
+
+        let ws_id = WorkspaceId::new("hd-link-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+
+        fs::write(info.path.join("tool.sh"), "TARGET BYTES\n").expect("operation should succeed");
+        std::os::unix::fs::symlink("tool.sh", info.path.join("alias.sh"))
+            .expect("operation should succeed");
+
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&info.path)
+            .output()
+            .expect("operation should succeed");
+        Command::new("git")
+            .args(["commit", "-m", "add tool.sh + alias.sh"])
+            .current_dir(&info.path)
+            .output()
+            .expect("operation should succeed");
+
+        let ws_head = git_head_oid(&info.path);
+        assert_ne!(ws_head, epoch.as_str(), "HEAD should have advanced");
+
+        let results =
+            collect_snapshots(root, &backend, &[ws_id]).expect("operation should succeed");
+        let link = results[0]
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("alias.sh"))
+            .expect("alias.sh should be collected");
+
+        assert!(matches!(link.kind, ChangeKind::Added));
+        assert_eq!(
+            link.mode,
+            Some(EntryMode::Link),
+            "committed symlink must be Link mode read from the HEAD tree (bn-1tl6)"
+        );
+        assert_eq!(
+            link.content.as_deref(),
+            Some(b"tool.sh".as_ref()),
+            "committed symlink blob is the link target text"
+        );
+    }
+
+    /// A plain (non-exec) regular file added in the worktree must stay
+    /// `mode == Some(Blob)` — the safe case must NOT regress.
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_added_regular_file_stays_blob_mode() {
+        use crate::merge::types::EntryMode;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("wt-reg-add").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+
+        fs::write(info.path.join("regular.txt"), "realfile\n").expect("operation should succeed");
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
+        let change = results[0]
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("regular.txt"))
+            .expect("regular.txt should be collected");
+
+        assert_eq!(
+            change.mode,
+            Some(EntryMode::Blob),
+            "plain new file must remain Blob (100644) — safe case must not regress"
+        );
+    }
+
+    /// Editing an existing tracked non-exec file (Modified) keeps `Blob`
+    /// mode — confirms the modified path also threads the (correct) mode and
+    /// the common safe case is unaffected.
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_modified_regular_file_stays_blob_mode() {
+        use crate::merge::types::EntryMode;
+
+        let (temp_dir, epoch) = setup_git_repo();
+        let backend = GitWorktreeBackend::new(temp_dir.path().to_path_buf());
+        let ws_id = WorkspaceId::new("wt-reg-mod").expect("operation should succeed");
+        let info = backend
+            .create(&ws_id, &epoch)
+            .expect("operation should succeed");
+
+        // README.md exists in the seed commit; edit it in place.
+        fs::write(info.path.join("README.md"), "# edited\n").expect("operation should succeed");
+
+        let results = collect_snapshots(temp_dir.path(), &backend, &[ws_id])
+            .expect("operation should succeed");
+        let change = results[0]
+            .changes
+            .iter()
+            .find(|c| c.path == PathBuf::from("README.md"))
+            .expect("README.md should be collected");
+
+        assert!(matches!(change.kind, ChangeKind::Modified));
+        assert_eq!(
+            change.mode,
+            Some(EntryMode::Blob),
+            "edited plain file must stay Blob (100644)"
         );
     }
 }
