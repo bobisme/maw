@@ -122,7 +122,7 @@ pub fn write_blob(repo: &GixRepo, data: &[u8]) -> Result<GitOid, GitError> {
 }
 
 pub fn write_tree(repo: &GixRepo, entries: &[TreeEntry]) -> Result<GitOid, GitError> {
-    let tree = gix::objs::Tree {
+    let mut tree = gix::objs::Tree {
         entries: entries
             .iter()
             .map(|e| gix::objs::tree::Entry {
@@ -132,6 +132,20 @@ pub fn write_tree(repo: &GixRepo, entries: &[TreeEntry]) -> Result<GitOid, GitEr
             })
             .collect(),
     };
+    // Git tree objects MUST be in canonical sort order (entries ordered by
+    // filename, with tree entries compared as if they had a trailing `/`).
+    // `gix::objs::Tree::write_to` does NOT sort — it only `debug_assert!`s
+    // sortedness, which is compiled out in release builds. Writing unsorted
+    // entries there produces a non-canonical, corrupt tree object: the wrong
+    // OID, `git fsck` "not properly sorted" failures, and broken content
+    // addressing (the same logical tree hashing to different OIDs depending
+    // on caller iteration order). Sort here using gix's own canonical
+    // `Entry: Ord` so `write_tree` is correct-by-construction for every
+    // caller instead of relying on each one to pre-sort (a Prime-Invariant
+    // risk: a corrupt merge/recovery tree silently loses committed work).
+    // Already-sorted callers (e.g. the merge `build.rs` path) are unaffected
+    // — this is a no-op for them.
+    tree.entries.sort();
     let id = repo
         .repo
         .write_object(&tree)
@@ -569,6 +583,97 @@ mod tests_bn_pfh7 {
                 "`{variant}` must resolve identically to `foo/bar.txt`",
             );
         }
+        drop(dir);
+    }
+}
+
+#[cfg(test)]
+mod tests_bn_phv1 {
+    //! Regression: `write_tree` must canonicalize entry order itself.
+    //!
+    //! `gix::objs::Tree::write_to` only `debug_assert!`s sortedness, so
+    //! before bn-phv1 a caller passing unsorted entries produced a
+    //! non-canonical (corrupt) tree in release builds — wrong OID, broken
+    //! content addressing, `git fsck` failures. The output OID must be
+    //! independent of caller input order and must equal the OID real git
+    //! computes for the same logical tree (including the tree-vs-blob
+    //! ordering trap where `lib/` sorts *after* `lib.rs`).
+
+    use super::*;
+    use crate::test_support::{git_capture, init_test_repo};
+
+    #[test]
+    fn write_tree_canonicalizes_entry_order() {
+        let (dir, root) = init_test_repo();
+        let repo = crate::GixRepo::open(&root).expect("open repo");
+
+        // Distinct blob contents → distinct OIDs.
+        let a = write_blob(&repo, b"alpha\n").expect("blob a.txt");
+        let librs = write_blob(&repo, b"fn lib() {}\n").expect("blob lib.rs");
+        let z = write_blob(&repo, b"zeta\n").expect("blob z.txt");
+        let inner = write_blob(&repo, b"nested\n").expect("blob lib/inner.txt");
+
+        // Subtree for `lib/` (single entry → trivially canonical).
+        let lib_tree = write_tree(
+            &repo,
+            &[TreeEntry {
+                name: "inner.txt".to_owned(),
+                mode: EntryMode::Blob,
+                oid: inner,
+            }],
+        )
+        .expect("write lib/ subtree");
+
+        let mk = |name: &str, mode: EntryMode, oid: GitOid| TreeEntry {
+            name: name.to_owned(),
+            mode,
+            oid,
+        };
+        // Canonical git order is: a.txt, lib.rs, lib, z.txt — note `lib`
+        // (a tree) sorts *after* `lib.rs` because the tree name compares as
+        // if suffixed with `/` (0x2F) and `.` (0x2E) < `/`.
+        let order1 = [
+            mk("z.txt", EntryMode::Blob, z),
+            mk("lib", EntryMode::Tree, lib_tree),
+            mk("a.txt", EntryMode::Blob, a),
+            mk("lib.rs", EntryMode::Blob, librs),
+        ];
+        let order2 = [
+            mk("lib.rs", EntryMode::Blob, librs),
+            mk("a.txt", EntryMode::Blob, a),
+            mk("lib", EntryMode::Tree, lib_tree),
+            mk("z.txt", EntryMode::Blob, z),
+        ];
+
+        let oid1 = write_tree(&repo, &order1).expect("write_tree order1");
+        let oid2 = write_tree(&repo, &order2).expect("write_tree order2");
+        assert_eq!(
+            oid1, oid2,
+            "write_tree OID must be independent of caller entry order",
+        );
+
+        // Independent oracle: have real git build the same logical tree.
+        std::fs::write(root.join("a.txt"), b"alpha\n").expect("write a.txt");
+        std::fs::write(root.join("lib.rs"), b"fn lib() {}\n").expect("write lib.rs");
+        std::fs::write(root.join("z.txt"), b"zeta\n").expect("write z.txt");
+        std::fs::create_dir_all(root.join("lib")).expect("mkdir lib");
+        std::fs::write(root.join("lib/inner.txt"), b"nested\n").expect("write inner");
+        let _ = git_capture(&root, &["add", "-A"]);
+        let expected = git_capture(&root, &["write-tree"]);
+        assert_eq!(
+            oid1.to_string(),
+            expected,
+            "write_tree must produce git's canonical tree OID",
+        );
+
+        // And git must accept it with entries in canonical order.
+        let listed = git_capture(&root, &["ls-tree", "--name-only", &oid1.to_string()]);
+        assert_eq!(
+            listed.lines().collect::<Vec<_>>(),
+            ["a.txt", "lib.rs", "lib", "z.txt"],
+            "git must read the tree in canonical order",
+        );
+
         drop(dir);
     }
 }
