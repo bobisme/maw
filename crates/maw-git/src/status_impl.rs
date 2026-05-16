@@ -236,9 +236,20 @@ pub fn count_dirty_tracked(repo: &GixRepo) -> Result<usize, GitError> {
     let hash_kind = repo.repo.object_hash();
 
     let mut dirty = 0;
+    // A conflicted path occupies up to three index entries (stages 1/2/3,
+    // with no stage-0 entry). `git status --porcelain` reports such a path
+    // *once* (`UU path`), so we must count it once too — not once per stage
+    // entry. Index entries are sorted by `(path, stage)`, so all stages of a
+    // given conflicted path are contiguous; remembering the last counted
+    // conflicted path dedupes them without allocating.
+    let mut last_conflict_path: Option<Vec<u8>> = None;
     for entry in index.entries() {
         if entry.stage_raw() != 0 {
-            dirty += 1;
+            let path_bytes = entry.path(&index);
+            if last_conflict_path.as_deref() != Some(path_bytes) {
+                dirty += 1;
+                last_conflict_path = Some(path_bytes.to_vec());
+            }
             continue;
         }
 
@@ -519,5 +530,58 @@ mod tests_bn_p5z5 {
                 || p == "created/sub/"),
             "must not collapse to a directory entry, got: {untracked:#?}",
         );
+    }
+
+    /// A conflicted path occupies up to three index entries (stages 1/2/3,
+    /// no stage-0). `git status --porcelain` reports it once (`UU path`), so
+    /// `count_dirty_tracked` — which feeds the status-bar "N changed" count —
+    /// must also count it once, not once per stage entry. Before the fix it
+    /// reported a single conflicted file as 3 dirty files.
+    #[cfg(unix)]
+    #[test]
+    fn count_dirty_tracked_counts_conflicted_path_once() {
+        use std::process::Command;
+
+        let (dir, root, _oid) = init_test_repo_with_commit();
+        let repo = crate::GixRepo::open(&root).expect("open repo");
+
+        let branch =
+            crate::test_support::git_capture(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+        // Base commit introducing the soon-to-conflict file.
+        std::fs::write(root.join("conflict.txt"), "base\n").expect("write base");
+        let _ = crate::test_support::git_capture(&root, &["add", "conflict.txt"]);
+        let _ = crate::test_support::git_capture(&root, &["commit", "-m", "add conflict.txt"]);
+
+        // Divergent edit on a feature branch.
+        let _ = crate::test_support::git_capture(&root, &["checkout", "-b", "feature"]);
+        std::fs::write(root.join("conflict.txt"), "feature side\n").expect("write feature");
+        let _ = crate::test_support::git_capture(&root, &["commit", "-am", "feature edit"]);
+
+        // Conflicting edit back on the original branch.
+        let _ = crate::test_support::git_capture(&root, &["checkout", &branch]);
+        std::fs::write(root.join("conflict.txt"), "main side\n").expect("write main");
+        let _ = crate::test_support::git_capture(&root, &["commit", "-am", "main edit"]);
+
+        // Produce the conflict. `git merge` exits non-zero on conflict, so it
+        // must not go through `git_capture` (which asserts success). The index
+        // now holds stages 1/2/3 for `conflict.txt` and no stage-0 entry.
+        let merge = Command::new("git")
+            .args(["merge", "feature"])
+            .current_dir(&root)
+            .output()
+            .expect("spawn git merge");
+        assert!(
+            !merge.status.success(),
+            "expected `git merge feature` to conflict",
+        );
+
+        let n = count_dirty_tracked(&repo).expect("count_dirty_tracked");
+        assert_eq!(
+            n, 1,
+            "a single conflicted path must count once (it occupies index \
+             stages 1/2/3), not once per stage entry; got {n}",
+        );
+        drop(dir);
     }
 }
