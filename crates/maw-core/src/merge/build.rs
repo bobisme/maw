@@ -710,8 +710,15 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["alpha"]), &[], &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["alpha"]),
+            &[],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // The new commit should have the same tree as the epoch.
         let epoch_tree = git_oid(root, &format!("{}^{{tree}}", epoch.as_str()));
@@ -736,8 +743,15 @@ mod tests {
             content: b"fn main() {}".to_vec(),
         }];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["agent-1"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // File should be present in the new commit.
         let content = git_file_content(root, commit_oid.as_str(), "src/main.rs");
@@ -767,8 +781,15 @@ mod tests {
             content: b"# Updated\n".to_vec(),
         }];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["agent-1"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         let content = git_file_content(root, commit_oid.as_str(), "README.md");
         assert_eq!(content, "# Updated\n");
@@ -787,8 +808,15 @@ mod tests {
             path: PathBuf::from("README.md"),
         }];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["agent-1"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["agent-1"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // File should be absent from the new tree.
         let files = git_ls_tree_flat(root, commit_oid.as_str());
@@ -828,8 +856,15 @@ mod tests {
             },
         ];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["a", "b"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["a", "b"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // README.md modified
         let readme = git_file_content(root, commit_oid.as_str(), "README.md");
@@ -858,8 +893,15 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["beta", "alpha"]), &[], &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["beta", "alpha"]),
+            &[],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
@@ -905,8 +947,15 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws1"]),
+            &[],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // New commit's parent must be the epoch.
         let parent_out = Command::new("git")
@@ -939,10 +988,24 @@ mod tests {
             },
         ];
 
-        let oid1 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
-        let oid2 = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws-a", "ws-b"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let oid1 = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws-a", "ws-b"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
+        let oid2 = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws-a", "ws-b"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // Tree OIDs must be identical (content-addressed).
         let tree1 = git_oid(root, &format!("{}^{{tree}}", oid1.as_str()));
@@ -964,8 +1027,15 @@ mod tests {
             .expect("operation should succeed")
             .as_secs();
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws1"]), &[], &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws1"]),
+            &[],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         let after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1009,8 +1079,15 @@ mod tests {
             },
         ];
 
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         let files = git_ls_tree_flat(root, commit_oid.as_str());
         assert!(
@@ -1032,8 +1109,8 @@ mod tests {
         let (dir, epoch, repo) = setup_git_repo();
         let root = dir.path();
 
-        let commit_oid =
-            build_merge_commit(&*repo, &epoch, &[], &[], &BTreeMap::new(), None).expect("operation should succeed");
+        let commit_oid = build_merge_commit(&*repo, &epoch, &[], &[], &BTreeMap::new(), None)
+            .expect("operation should succeed");
 
         let log_out = Command::new("git")
             .args(["log", "--format=%s", "-1", commit_oid.as_str()])
@@ -1058,8 +1135,15 @@ mod tests {
         }];
 
         // Should succeed (deleting absent path is harmless)
-        let commit_oid = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, &BTreeMap::new(), None)
-            .expect("operation should succeed");
+        let commit_oid = build_merge_commit(
+            &*repo,
+            &epoch,
+            &ws_ids(&["ws"]),
+            &resolved,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("operation should succeed");
 
         // README.md should still be present
         let files = git_ls_tree_flat(root, commit_oid.as_str());
@@ -1158,22 +1242,12 @@ mod tests {
         ];
 
         let mut modes: BTreeMap<PathBuf, maw_git::EntryMode> = BTreeMap::new();
-        modes.insert(
-            PathBuf::from("tool.sh"),
-            maw_git::EntryMode::BlobExecutable,
-        );
+        modes.insert(PathBuf::from("tool.sh"), maw_git::EntryMode::BlobExecutable);
         modes.insert(PathBuf::from("alias.sh"), maw_git::EntryMode::Link);
         // regular.txt deliberately absent → must default to 100644.
 
-        let commit = build_merge_commit(
-            &*repo,
-            &epoch,
-            &ws_ids(&["ws"]),
-            &resolved,
-            &modes,
-            None,
-        )
-        .expect("operation should succeed");
+        let commit = build_merge_commit(&*repo, &epoch, &ws_ids(&["ws"]), &resolved, &modes, None)
+            .expect("operation should succeed");
 
         assert_eq!(
             git_ls_tree_mode(root, commit.as_str(), "tool.sh"),

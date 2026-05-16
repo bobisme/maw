@@ -223,13 +223,8 @@ fn collect_one<B: WorkspaceBackend>(
 
     // Added files: read content + mode, generate fresh FileId, compute blob OID.
     for path in &snapshot.added {
-        let Some((content, mode)) = read_content_and_mode(
-            ws_repo.as_ref(),
-            &ws_path,
-            path,
-            ws_id,
-            ws_has_commits,
-        )?
+        let Some((content, mode)) =
+            read_content_and_mode(ws_repo.as_ref(), &ws_path, path, ws_id, ws_has_commits)?
         else {
             // Ignore directory entries (for example untracked nested git dirs)
             // that can appear in porcelain outputs as "path/".
@@ -255,13 +250,8 @@ fn collect_one<B: WorkspaceBackend>(
     // Modified files: read current content + mode, look up existing FileId,
     // compute blob OID.
     for path in &snapshot.modified {
-        let Some((content, mode)) = read_content_and_mode(
-            ws_repo.as_ref(),
-            &ws_path,
-            path,
-            ws_id,
-            ws_has_commits,
-        )?
+        let Some((content, mode)) =
+            read_content_and_mode(ws_repo.as_ref(), &ws_path, path, ws_id, ws_has_commits)?
         else {
             // Ignore non-file paths to keep collect robust against directory-only
             // workspace entries.

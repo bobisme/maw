@@ -852,7 +852,9 @@ fn run_full_merge(
     }
     for (path, entries) in &partition.shared {
         if let Some(m) = entries.first().and_then(|e| e.mode) {
-            modes.entry(path.clone()).or_insert(maw_git::EntryMode::from(m));
+            modes
+                .entry(path.clone())
+                .or_insert(maw_git::EntryMode::from(m));
         }
     }
 
