@@ -548,6 +548,81 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     }
 }
 
+/// Refuse to destroy a workspace that a *live* in-flight merge has frozen as
+/// a source workspace (bn-cm63).
+///
+/// `maw ws destroy` deletes every ref owned by the workspace, including its
+/// oplog head (`refs/manifold/head/<ws>`). A concurrent `maw ws merge <ws>`
+/// freezes the source at PREPARE and, after a successful COMMIT, appends a
+/// `Merge` op to that workspace's oplog via `record_merge_operations`. If
+/// destroy already deleted the head ref, that append re-bootstraps a fresh
+/// oplog head — resurrecting a ref destroy intended to remove and leaving a
+/// permanently dangling blob ref with no owning workspace.
+///
+/// Resolution: serialize. If a non-terminal `.manifold/merge-state.json`
+/// lists this workspace in `sources` and its owner process is **alive**, the
+/// destroy is refused with an actionable message. An orphaned or
+/// indeterminate merge-state must NOT block destroy forever — that would
+/// regress bn-2wyh — so those cases surface the `maw ws merge --abort`
+/// recovery hint instead, consistent with prepare.rs / doctor behavior.
+fn guard_destroy_against_inflight_merge(root: &std::path::Path, name: &str) -> Result<()> {
+    use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateFile, Staleness};
+
+    let state_path = MergeStateFile::default_path(&root.join(".manifold"));
+    // No merge in progress (NotFound) or an unreadable/corrupt merge-state:
+    // nothing to serialize against. A corrupt merge-state is surfaced
+    // separately by `maw doctor`; it must not wedge destroy.
+    let Ok(state) = MergeStateFile::read(&state_path) else {
+        return Ok(());
+    };
+
+    // A terminal merge-state (Complete/Aborted) is leftover and harmless —
+    // the merge is over and will not touch this workspace's oplog again.
+    if state.phase.is_terminal() {
+        return Ok(());
+    }
+
+    // Only block if THIS workspace is one of the merge's frozen sources.
+    let is_source = state.sources.iter().any(|s| s.as_str() == name);
+    if !is_source {
+        return Ok(());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    match state.staleness(now, DEFAULT_STALE_AFTER_SECS) {
+        Staleness::Live => {
+            let pid = state
+                .owner_pid
+                .map_or_else(|| "?".to_string(), |p| p.to_string());
+            bail!(
+                "Workspace '{name}' is being merged right now (merge phase: {}, pid: {pid}). \
+                 Refusing destroy: it would orphan the workspace's oplog head ref.\n  \
+                 Wait for the merge to finish, then: maw ws destroy {name} --force\n  \
+                 (Tip: merge with --destroy to merge and clean up atomically.)",
+                state.phase
+            )
+        }
+        Staleness::Orphaned | Staleness::Indeterminate => {
+            // The merge process is gone (or unprovable). Do NOT block destroy
+            // forever — surface the recovery path. The caller can clear the
+            // stale merge-state and retry; we mirror the prepare/doctor hint
+            // rather than silently proceeding into the same race window.
+            bail!(
+                "Workspace '{name}' is listed as a source in a stale merge-state \
+                 (phase: {}, owner process not running). The interrupted merge will \
+                 not complete on its own.\n  \
+                 Clear it first: maw ws merge --abort\n  \
+                 Then: maw ws destroy {name} --force",
+                state.phase
+            )
+        }
+    }
+}
+
 #[instrument(fields(workspace = name))]
 #[expect(
     clippy::too_many_lines,
@@ -582,6 +657,16 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         println!("No action needed.");
         return Ok(());
     }
+
+    // bn-cm63: refuse to destroy a workspace that an in-flight merge has
+    // frozen as a source. Without this, destroy deletes
+    // `refs/manifold/head/<ws>` while the merge is mid-flight; the merge's
+    // post-COMMIT `record_merge_operations` then re-bootstraps that oplog
+    // head, leaking a dangling blob ref with no owning workspace. Serializing
+    // here (refuse, not corrupt) keeps the ref lifecycle coherent. An
+    // orphaned/stale merge-state must NOT block destroy forever — only a Live
+    // merge does (mirrors prepare.rs / bn-2wyh staleness handling).
+    guard_destroy_against_inflight_merge(&root, name)?;
 
     let backend = get_backend()?;
     let ws_id =

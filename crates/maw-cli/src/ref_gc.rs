@@ -66,6 +66,141 @@ pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
     Ok(count)
 }
 
+/// Workspace names that an in-flight, non-terminal, *live* merge has frozen
+/// as sources. A head ref for such a workspace must NOT be pruned: the
+/// running merge legitimately owns the oplog head and will append to it
+/// post-COMMIT. Deleting it here would re-introduce the bn-cm63 race from
+/// the GC side. Orphaned/indeterminate merge-state does NOT protect a head
+/// ref (the merge will never complete), so its dangling refs are still
+/// reclaimed — that is the whole point of self-healing GC.
+fn live_merge_source_names(root: &Path) -> std::collections::HashSet<String> {
+    use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateFile, Staleness};
+
+    let mut names = std::collections::HashSet::new();
+    let state_path = MergeStateFile::default_path(&root.join(".manifold"));
+    let Ok(state) = MergeStateFile::read(&state_path) else {
+        return names;
+    };
+    if state.phase.is_terminal() {
+        return names;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if matches!(
+        state.staleness(now, DEFAULT_STALE_AFTER_SECS),
+        Staleness::Live
+    ) {
+        for s in &state.sources {
+            names.insert(s.as_str().to_string());
+        }
+    }
+    names
+}
+
+/// Prune dangling oplog head refs: `refs/manifold/head/<name>` (and the
+/// other refs owned by that workspace) when `ws/<name>/` no longer exists
+/// and the workspace is not a source of a *live* in-flight merge.
+///
+/// Extracted so plain `maw gc` can self-heal leaked head refs (bn-cm63)
+/// without also running the recovery-ref age sweep that only `maw gc --refs`
+/// should perform.
+fn prune_dangling_head_refs(
+    repo: &maw_git::GixRepo,
+    root: &Path,
+    dry_run: bool,
+    report: &mut RefGcReport,
+) -> Result<()> {
+    let head_refs = repo
+        .list_refs(refs::HEAD_PREFIX)
+        .map_err(|e| anyhow::anyhow!("list_refs failed for head refs: {e}"))?;
+
+    let protected = live_merge_source_names(root);
+
+    for (ref_name, _oid) in &head_refs {
+        let ws_name = ref_name
+            .as_str()
+            .strip_prefix(refs::HEAD_PREFIX)
+            .unwrap_or("");
+        if ws_name.is_empty() {
+            continue;
+        }
+        let ws_dir = root.join("ws").join(ws_name);
+        if ws_dir.exists() {
+            continue;
+        }
+        if protected.contains(ws_name) {
+            // A live merge owns this oplog head right now. Skip it; it is
+            // not dangling — it will be reclaimed on a later GC once the
+            // merge (and any subsequent destroy) settles.
+            continue;
+        }
+        report.stale_head_names.push(ws_name.to_string());
+        if !dry_run {
+            // Delete every ref owned by this (gone) workspace. Iterates
+            // the single source of truth in `workspace_owned_refs` so a
+            // new ref kind is a one-line change there (bn-3kcp). The
+            // head ref we discovered via list_refs is one of the entries
+            // in that set — delete_ref is idempotent so re-deleting it
+            // is harmless.
+            for owned in refs::workspace_owned_refs(ws_name) {
+                let _ = refs::delete_ref(root, &owned);
+            }
+        }
+        report.head_refs_deleted += 1;
+    }
+    Ok(())
+}
+
+/// Prune only dangling oplog head refs (no recovery-ref sweep).
+///
+/// This is what plain `maw gc` runs so the documented cleanup path actually
+/// clears the `maw doctor` "stale head refs" warning, and so already-leaked
+/// or legacy dangling head refs self-heal (bn-cm63). `maw gc --refs` still
+/// additionally sweeps old recovery refs via [`run`].
+///
+/// # Errors
+///
+/// Returns an error if the repository cannot be opened or refs cannot be
+/// listed.
+pub fn run_head_refs_only(root: &Path, dry_run: bool) -> Result<RefGcReport> {
+    let repo =
+        maw_git::GixRepo::open(root).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
+    let mut report = RefGcReport::default();
+    prune_dangling_head_refs(&repo, root, dry_run, &mut report)?;
+    Ok(report)
+}
+
+/// CLI entry point for plain `maw gc`'s head-ref self-heal pass (bn-cm63).
+///
+/// Prints a concise summary only when something was (or would be) cleaned,
+/// so the common no-op case stays quiet and does not clutter `maw gc`
+/// output.
+#[allow(clippy::missing_errors_doc)]
+pub fn run_head_refs_cli(root: &Path, dry_run: bool) -> Result<()> {
+    let report = run_head_refs_only(root, dry_run)?;
+    if report.head_refs_deleted == 0 {
+        return Ok(());
+    }
+    if dry_run {
+        println!(
+            "Would prune {} dangling head ref(s) for non-existent workspaces:",
+            report.head_refs_deleted
+        );
+        for name in &report.stale_head_names {
+            println!("  refs/manifold/head/{name}");
+        }
+        println!("To apply: maw gc");
+    } else {
+        println!(
+            "Pruned {} dangling head ref(s) for non-existent workspaces.",
+            report.head_refs_deleted
+        );
+    }
+    Ok(())
+}
+
 /// Run ref GC: delete stale head refs and old recovery refs.
 ///
 /// - Head refs are deleted if `ws/<name>/` does not exist.
@@ -81,35 +216,7 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
     let mut report = RefGcReport::default();
 
     // --- Head refs ---
-    let head_refs = repo
-        .list_refs(refs::HEAD_PREFIX)
-        .map_err(|e| anyhow::anyhow!("list_refs failed for head refs: {e}"))?;
-
-    for (ref_name, _oid) in &head_refs {
-        let ws_name = ref_name
-            .as_str()
-            .strip_prefix(refs::HEAD_PREFIX)
-            .unwrap_or("");
-        if ws_name.is_empty() {
-            continue;
-        }
-        let ws_dir = root.join("ws").join(ws_name);
-        if !ws_dir.exists() {
-            report.stale_head_names.push(ws_name.to_string());
-            if !dry_run {
-                // Delete every ref owned by this (gone) workspace. Iterates
-                // the single source of truth in `workspace_owned_refs` so a
-                // new ref kind is a one-line change there (bn-3kcp). The
-                // head ref we discovered via list_refs is one of the entries
-                // in that set — delete_ref is idempotent so re-deleting it
-                // is harmless.
-                for owned in refs::workspace_owned_refs(ws_name) {
-                    let _ = refs::delete_ref(root, &owned);
-                }
-            }
-            report.head_refs_deleted += 1;
-        }
-    }
+    prune_dangling_head_refs(&repo, root, dry_run, &mut report)?;
 
     // --- Recovery refs ---
     let recovery_prefix = "refs/manifold/recovery/";
@@ -431,5 +538,90 @@ mod tests {
                 .expect("operation should succeed")
                 .is_some()
         );
+    }
+
+    // --- bn-cm63: plain `maw gc` head-ref self-heal + live-merge guard ---
+
+    /// Write a `.manifold/merge-state.json` owned by *this* process (so
+    /// `staleness` classifies it `Live`) listing `source` as a frozen
+    /// source at the `validate` phase.
+    fn write_live_merge_state(root: &Path, source: &str) {
+        use maw_core::merge_state::{MergePhase, MergeStateFile};
+        use maw_core::model::types::{EpochId, WorkspaceId};
+
+        let manifold = root.join(".manifold");
+        fs::create_dir_all(&manifold).expect("create .manifold");
+        let epoch = EpochId::new(&"a".repeat(40)).expect("epoch");
+        let mut state =
+            MergeStateFile::new(vec![WorkspaceId::new(source).expect("ws id")], epoch, 0);
+        state.stamp_owner(); // pid == our pid -> Liveness::Alive -> Live
+        state
+            .advance(MergePhase::Build, 1)
+            .and_then(|()| state.advance(MergePhase::Validate, 2))
+            .expect("advance to validate");
+        state
+            .write_atomic(&MergeStateFile::default_path(&manifold))
+            .expect("write merge-state");
+    }
+
+    #[test]
+    fn plain_gc_prunes_dangling_head_ref() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("oid");
+
+        refs::write_ref(root, &refs::workspace_head_ref("ghost"), &git_oid).expect("write ref");
+
+        // Plain gc path: head refs only, no recovery sweep.
+        let report = run_head_refs_only(root, false).expect("run head refs");
+        assert_eq!(report.head_refs_deleted, 1);
+        assert_eq!(report.stale_head_names, vec!["ghost"]);
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("ghost"))
+                .expect("read")
+                .is_none(),
+            "plain gc must prune the dangling head ref"
+        );
+    }
+
+    #[test]
+    fn live_merge_source_head_ref_is_protected_from_gc() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("oid");
+
+        // A head ref whose workspace dir is gone, but a LIVE merge (owned by
+        // this process) has it frozen as a source. It must NOT be pruned —
+        // pruning it would re-introduce the bn-cm63 race from the GC side.
+        refs::write_ref(root, &refs::workspace_head_ref("inflight"), &git_oid).expect("write ref");
+        write_live_merge_state(root, "inflight");
+
+        let report = run_head_refs_only(root, false).expect("run head refs");
+        assert_eq!(
+            report.head_refs_deleted, 0,
+            "a live merge's source head ref must be protected from GC"
+        );
+        assert!(
+            refs::read_ref(root, &refs::workspace_head_ref("inflight"))
+                .expect("read")
+                .is_some(),
+            "live-merge source head ref must survive gc"
+        );
+    }
+
+    #[test]
+    fn non_source_dangling_head_ref_pruned_even_with_live_merge() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let git_oid = maw_core::model::types::GitOid::new(&oid).expect("oid");
+
+        // Live merge for "inflight"; a *different* workspace "ghost" is gone
+        // and is NOT a source — it must still be pruned.
+        refs::write_ref(root, &refs::workspace_head_ref("ghost"), &git_oid).expect("write ref");
+        write_live_merge_state(root, "inflight");
+
+        let report = run_head_refs_only(root, false).expect("run head refs");
+        assert_eq!(report.head_refs_deleted, 1);
+        assert_eq!(report.stale_head_names, vec!["ghost"]);
     }
 }

@@ -618,7 +618,7 @@ fn check_stale_head_refs(root: Option<&Path>) -> DoctorCheck {
             message: format!(
                 "stale head refs: found {count} head ref(s) for non-existent workspaces"
             ),
-            fix: Some("Run: maw gc --refs".to_string()),
+            fix: Some("Run: maw gc".to_string()),
         },
         Err(_) => DoctorCheck {
             name: "stale head refs".to_string(),

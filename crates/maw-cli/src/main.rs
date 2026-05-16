@@ -216,15 +216,18 @@ enum Commands {
     /// Garbage-collect unreferenced epoch snapshots and stale refs
     ///
     /// Without flags: removes `.manifold/epochs/e-<oid>` directories that
-    /// are no longer referenced by any active workspace.
+    /// are no longer referenced by any active workspace, and prunes
+    /// dangling `refs/manifold/head/*` oplog head refs for workspaces that
+    /// no longer exist (this clears the `maw doctor` "stale head refs"
+    /// warning). Head refs owned by a live in-flight merge are preserved.
     ///
-    /// With --refs: also cleans up stale `refs/manifold/head/*` refs for
-    /// workspaces that no longer exist, and old `refs/manifold/recovery/*`
+    /// With --refs: additionally sweeps old `refs/manifold/recovery/*`
     /// refs whose commits are older than --older-than days (default: 30).
     ///
     /// Examples:
-    ///   maw gc                    # epoch GC only
-    ///   maw gc --refs             # epoch GC + stale ref cleanup
+    ///   maw gc                    # epoch GC + dangling head-ref cleanup
+    ///   maw gc --dry-run          # preview the above
+    ///   maw gc --refs             # also sweep old recovery refs
     ///   maw gc --refs --dry-run   # preview ref cleanup
     ///   maw gc --refs --older-than 7  # delete recovery refs older than 7 days
     #[command(verbatim_doc_comment)]
@@ -340,6 +343,12 @@ fn main() {
             epoch_gc::run_cli(&root, dry_run)?;
             if refs {
                 ref_gc::run_cli(&root, older_than, dry_run)?;
+            } else {
+                // bn-cm63: plain `maw gc` self-heals dangling oplog head refs
+                // (e.g. leaked by a destroy-vs-merge race) so the documented
+                // cleanup actually clears the `maw doctor` warning. The
+                // recovery-ref age sweep stays exclusive to `maw gc --refs`.
+                ref_gc::run_head_refs_cli(&root, dry_run)?;
             }
             Ok(())
         }),
