@@ -319,6 +319,47 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// Whether this workspace has unresolved rebase conflict markers in its HEAD
+/// (bn-2l00). This is the single classification predicate shared by every
+/// `ws list` render path; it is derived from `rebase_conflicts`, which is
+/// computed via `resolve::find_conflicted_files` — the *same* source of truth
+/// `ws status` and the `ws merge` gate use. Keeping all three readers behind
+/// one predicate is what guarantees they can never disagree.
+const fn is_conflicted(ws: &WorkspaceInfo) -> bool {
+    ws.rebase_conflicts > 0 && !ws.missing
+}
+
+/// Decide the trailing `(...)` annotation for a workspace in text output.
+///
+/// Pulled out of `print_list_text` so the classification is unit-testable and
+/// provably consistent with `ws status` (bn-2l00). A conflicted workspace must
+/// never be classified "ready to merge" — the merge gate hard-refuses it.
+fn text_annotation(ws: &WorkspaceInfo, check_annotation: Option<&str>) -> String {
+    if ws.missing {
+        format!(" (MISSING — fix: maw ws destroy {} --force)", ws.name)
+    } else if is_conflicted(ws) {
+        // bn-2l00: a workspace whose HEAD still carries unresolved rebase
+        // conflict markers is NOT ready to merge — `maw ws merge` hard-gates
+        // it. Surface the conflicted state here so `ws list` stays consistent
+        // with `ws status` / `ws conflicts` / the merge gate and never lures
+        // context-free agents into a guaranteed-fail `--destroy` command.
+        format!(
+            " (conflicted: {} — resolve before merge; maw ws resolve {} --list)",
+            ws.rebase_conflicts, ws.name
+        )
+    } else if ws.state.contains("stale") {
+        " (stale)".to_string()
+    } else if ws.branch.is_some() && ws.commits_ahead > 0 {
+        format!(" (branch work +{})", ws.commits_ahead)
+    } else if ws.commits_ahead > 0 {
+        format!(" (ready to merge){}", check_annotation.unwrap_or(""))
+    } else if ws.state == "quarantine" {
+        " (quarantine)".to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Print workspace list in minimal text format (agent-friendly).
 ///
 /// Output: name, absolute path, and state annotation only when actionable.
@@ -342,22 +383,7 @@ fn print_list_text(
                 format!(" [{} conflict(s)]", mc.conflict_count)
             }
         });
-        let annotation = if ws.missing {
-            format!(" (MISSING — fix: maw ws destroy {} --force)", ws.name)
-        } else if ws.state.contains("stale") {
-            " (stale)".to_string()
-        } else if ws.branch.is_some() && ws.commits_ahead > 0 {
-            format!(" (branch work +{})", ws.commits_ahead)
-        } else if ws.commits_ahead > 0 {
-            format!(
-                " (ready to merge){}",
-                check_annotation.as_deref().unwrap_or("")
-            )
-        } else if ws.state == "quarantine" {
-            " (quarantine)".to_string()
-        } else {
-            String::new()
-        };
+        let annotation = text_annotation(ws, check_annotation.as_deref());
         let desc_suffix = ws
             .description
             .as_deref()
@@ -377,15 +403,37 @@ fn print_list_text(
     print_stale_warning_text(stale, stale_persistent, stale_ephemeral);
     print_missing_warning_text(missing);
 
+    // bn-2l00: never advertise a `Merge ready: ... --destroy` line for a
+    // workspace whose HEAD still has unresolved rebase conflict markers — the
+    // merge gate hard-refuses it, so the suggestion is guaranteed to fail.
+    // Instead, point at the resolve command, consistent with the merge gate.
     let mergeable: Vec<&str> = workspaces
         .iter()
-        .filter(|ws| ws.commits_ahead > 0 && ws.branch.is_none() && !ws.missing)
+        .filter(|ws| {
+            ws.commits_ahead > 0 && ws.branch.is_none() && !ws.missing && !is_conflicted(ws)
+        })
         .map(|ws| ws.name.as_str())
         .collect();
     if !mergeable.is_empty() {
         println!();
         for name in &mergeable {
             println!("Merge ready: maw ws merge {name} --into default --destroy");
+        }
+    }
+
+    let conflicted: Vec<&WorkspaceInfo> =
+        workspaces.iter().filter(|ws| is_conflicted(ws)).collect();
+    if !conflicted.is_empty() {
+        println!();
+        for ws in &conflicted {
+            println!(
+                "Conflicted: {} has {} unresolved rebase conflict(s) — resolve before merge.",
+                ws.name, ws.rebase_conflicts
+            );
+            println!(
+                "  Fix: maw ws resolve {} --list, then --keep <side>",
+                ws.name
+            );
         }
     }
 }
@@ -409,12 +457,17 @@ fn print_list_pretty(
     for ws in workspaces {
         let is_stale = ws.state.contains("stale");
         let is_persistent = ws.mode == "persistent";
-        let has_work = ws.commits_ahead > 0 && !ws.missing;
+        let conflicted = is_conflicted(ws);
+        // bn-2l00: a conflicted workspace is NOT ready-to-merge. Don't paint it
+        // with the cyan ready glyph — the merge gate hard-refuses it.
+        let has_work = ws.commits_ahead > 0 && !ws.missing && !conflicted;
         let (glyph, name_style, reset) = if use_color {
             if ws.is_default {
                 ("\u{25cf}", "\x1b[1;32m", "\x1b[0m") // Green bold for default
-            } else if ws.missing {
-                ("\u{2718}", "\x1b[1;31m", "\x1b[0m") // Red X for missing
+            } else if ws.missing || conflicted {
+                // bn-2l00: conflicted shares the red-X treatment with missing —
+                // both are "not ready, needs action" states.
+                ("\u{2718}", "\x1b[1;31m", "\x1b[0m") // Red X for missing/conflicted
             } else if ws.state == "quarantine" {
                 ("\u{26a0}", "\x1b[1;31m", "\x1b[0m") // Red bold for quarantine
             } else if is_stale {
@@ -426,7 +479,7 @@ fn print_list_pretty(
             }
         } else if ws.is_default {
             ("\u{25cf}", "", "")
-        } else if ws.missing {
+        } else if ws.missing || conflicted {
             ("\u{2718}", "", "")
         } else if ws.state == "quarantine" {
             ("\u{26a0}", "", "")
@@ -484,6 +537,18 @@ fn print_list_pretty(
                 println!("    \x1b[31mworktree dir is gone — fix: {fix}\x1b[0m");
             } else {
                 println!("    worktree dir is gone — fix: {fix}");
+            }
+        } else if is_conflicted(ws) {
+            // bn-2l00: surface the conflict and the resolve path so this stays
+            // consistent with `ws status` / the merge gate (which hard-refuses).
+            let msg = format!(
+                "{} unresolved rebase conflict(s) — resolve before merge: maw ws resolve {} --list",
+                ws.rebase_conflicts, ws.name
+            );
+            if use_color {
+                println!("    \x1b[31m{msg}\x1b[0m");
+            } else {
+                println!("    {msg}");
             }
         }
 
@@ -594,6 +659,32 @@ fn print_list_json(
     format: OutputFormat,
 ) {
     let mut advice = vec![];
+
+    // bn-2l00: surface conflicted workspaces in structured advice too, so a
+    // machine consumer steering off `ws list` gets the same "not ready —
+    // resolve first" signal the human output gives, consistent with the merge
+    // gate. (Per-workspace `rebase_conflicts`/`state` fields already carry the
+    // raw signal; this advice mirrors the missing/stale advice pattern.)
+    let conflicted: Vec<String> = workspaces
+        .iter()
+        .filter(|ws| is_conflicted(ws))
+        .map(|ws| ws.name.clone())
+        .collect();
+    if !conflicted.is_empty() {
+        advice.push(Advice {
+            level: "warn",
+            message: format!(
+                "{} workspace(s) conflicted — unresolved rebase conflict markers in HEAD; \
+                 NOT ready to merge: {}",
+                conflicted.len(),
+                conflicted.join(", ")
+            ),
+            details: Some(AdviceDetails {
+                workspaces: conflicted,
+                fix: "maw ws resolve <name> --list, then --keep <side>".to_string(),
+            }),
+        });
+    }
 
     if !missing.is_empty() {
         advice.push(Advice {
@@ -713,5 +804,128 @@ fn print_missing_warning_text(missing: &[String]) {
     println!("  Worktree directory was removed but registry still tracks it.");
     for ws in missing {
         println!("  Fix: maw ws destroy {ws} --force");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws_info(name: &str, commits_ahead: u32, rebase_conflicts: u32) -> WorkspaceInfo {
+        WorkspaceInfo {
+            name: name.to_string(),
+            is_default: false,
+            epoch: "abc123def456".to_string(),
+            // `state` is built in `list()` exactly like `ws status` builds its
+            // own entry state (status.rs): conflicted entries use this string.
+            state: if rebase_conflicts > 0 {
+                format!("conflicted ({rebase_conflicts} conflict(s))")
+            } else {
+                "ready".to_string()
+            },
+            mode: "ephemeral".to_string(),
+            path: Some(format!("/tmp/ws/{name}")),
+            behind_epochs: None,
+            commits_ahead,
+            template: None,
+            template_defaults: None,
+            branch: None,
+            merge_check: None,
+            rebase_conflicts,
+            description: None,
+            missing: false,
+        }
+    }
+
+    /// Mirror of `ws status`'s per-workspace conflicted classification
+    /// (status.rs `WorkspaceEntry`: `rebase_conflicts > 0`). The bug (bn-2l00)
+    /// was that `ws list` disagreed with this. Keeping this mirror here makes
+    /// the disagreement a compile-pinned, asserted invariant.
+    fn status_says_conflicted(rebase_conflicts: u32) -> bool {
+        rebase_conflicts > 0
+    }
+
+    /// bn-2l00 regression: a workspace with unresolved rebase conflicts must
+    /// NEVER be classified "ready to merge" by `ws list`, and its
+    /// classification must agree with what `ws status` reports.
+    #[test]
+    fn conflicted_workspace_not_classified_ready_to_merge() {
+        // Has committed work AND unresolved rebase conflicts — exactly the
+        // bn-2l00 repro state.
+        let ws = ws_info("bob", 2, 1);
+
+        // ws list classification.
+        assert!(
+            is_conflicted(&ws),
+            "ws list must classify a workspace with rebase_conflicts>0 as conflicted"
+        );
+
+        // Parity with ws status: both readers derive from the SAME
+        // `rebase_conflicts` source of truth and must never disagree.
+        assert_eq!(
+            is_conflicted(&ws),
+            status_says_conflicted(ws.rebase_conflicts),
+            "ws list and ws status conflicted classification must match"
+        );
+
+        let annotation = text_annotation(&ws, None);
+        assert!(
+            !annotation.contains("ready to merge"),
+            "conflicted workspace must NOT be annotated 'ready to merge', got: {annotation:?}"
+        );
+        assert!(
+            annotation.contains("conflicted"),
+            "conflicted workspace annotation must surface the conflict, got: {annotation:?}"
+        );
+        assert!(
+            annotation.contains("maw ws resolve"),
+            "conflicted annotation must point at the resolve command, got: {annotation:?}"
+        );
+
+        // The `state` string `ws list` exposes (also in --format json) matches
+        // what `ws status` exposes for the same conflicted workspace.
+        assert_eq!(ws.state, "conflicted (1 conflict(s))");
+    }
+
+    /// Don't over-correct: a clean workspace with committed work must STILL be
+    /// classified ready-to-merge.
+    #[test]
+    fn clean_workspace_still_ready_to_merge() {
+        let ws = ws_info("alice", 1, 0);
+
+        assert!(!is_conflicted(&ws));
+        assert_eq!(
+            is_conflicted(&ws),
+            status_says_conflicted(ws.rebase_conflicts)
+        );
+
+        let annotation = text_annotation(&ws, None);
+        assert!(
+            annotation.contains("ready to merge"),
+            "clean workspace with work must remain ready-to-merge, got: {annotation:?}"
+        );
+        assert!(!annotation.contains("conflicted"));
+    }
+
+    /// The `Merge ready: ... --destroy` suggestion line must never be emitted
+    /// for a conflicted workspace (the bn-2l00 lure), but must still be emitted
+    /// for clean ones. We assert on the mergeable-filter predicate directly.
+    #[test]
+    fn merge_ready_suggestion_excludes_conflicted() {
+        let conflicted = ws_info("bob", 2, 1);
+        let clean = ws_info("alice", 1, 0);
+
+        let is_mergeable = |ws: &WorkspaceInfo| {
+            ws.commits_ahead > 0 && ws.branch.is_none() && !ws.missing && !is_conflicted(ws)
+        };
+
+        assert!(
+            !is_mergeable(&conflicted),
+            "conflicted workspace must be excluded from the 'Merge ready' suggestion"
+        );
+        assert!(
+            is_mergeable(&clean),
+            "clean workspace with work must still get the 'Merge ready' suggestion"
+        );
     }
 }

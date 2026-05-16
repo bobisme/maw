@@ -28,7 +28,9 @@ use maw_core::merge::plan::{
     compute_merge_id, write_plan_artifact, write_workspace_report_artifact,
 };
 use maw_core::merge::types::{ChangeKind, PatchSet as CollectedPatchSet};
-use maw_core::merge_state::{MergePhase, MergeStateFile, run_cleanup_phase};
+use maw_core::merge_state::{
+    AbortOutcome, MergePhase, MergeStateFile, abort_merge_state, run_cleanup_phase,
+};
 use maw_core::model::conflict::ConflictAtom;
 use maw_core::model::conflict::Region;
 use maw_core::model::patch::{FileId, PatchSet as ModelPatchSet, PatchValue};
@@ -4574,6 +4576,113 @@ fn abort_merge(manifold_dir: &Path, reason: &str) {
         }
         // Clean up the merge-state file
         let _ = std::fs::remove_file(&state_path);
+    }
+}
+
+/// Handle `maw ws merge --abort`.
+///
+/// Clears an orphaned/stuck `.manifold/merge-state.json` so merges can run
+/// again after a killed/OOM'd/panicked/Ctrl-C'd merge (bn-2wyh). Upholds the
+/// Prime Invariant: refuses to clear if the merge already passed COMMIT
+/// (epoch / target branch advanced to the merged commit), because clearing
+/// then could mask committed work.
+///
+/// # Errors
+/// Returns an error on I/O / deserialization failure, or (with a non-zero
+/// exit) when the abort is refused for safety.
+pub fn abort_in_progress_merge(root: &Path, fmt: OutputFormat) -> Result<()> {
+    let manifold_dir = root.join(".manifold");
+    let state_path = MergeStateFile::default_path(&manifold_dir);
+    let text_mode = fmt != OutputFormat::Json;
+
+    // Observe the current epoch and (if recorded) target branch head so the
+    // core abort logic can apply the Prime-Invariant gate without any git
+    // dependency of its own.
+    let current_epoch = maw_core::refs::read_epoch_current(root)
+        .ok()
+        .flatten()
+        .map(|o| o.as_str().to_owned());
+
+    let current_target_head = match MergeStateFile::read(&state_path) {
+        Ok(state) => state.target_branch.and_then(|branch| {
+            let branch_ref = format!("refs/heads/{branch}");
+            maw_core::refs::read_ref(root, &branch_ref)
+                .ok()
+                .flatten()
+                .map(|o| o.as_str().to_owned())
+        }),
+        Err(_) => None,
+    };
+
+    let outcome = abort_merge_state(
+        &state_path,
+        current_epoch.as_deref(),
+        current_target_head.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("merge --abort failed to read merge-state: {e}"))?;
+
+    match outcome {
+        AbortOutcome::NothingToAbort => {
+            if fmt == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "aborted": false,
+                        "reason": "no merge-state file",
+                    })
+                );
+            } else {
+                println!(
+                    "No merge in progress \u{2014} nothing to abort.\n  \
+                     Next: maw ws merge <workspaces> --into <target> --message \"...\""
+                );
+            }
+            Ok(())
+        }
+        AbortOutcome::Cleared { from } => {
+            if fmt == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "aborted": true,
+                        "phase": from.to_string(),
+                    })
+                );
+            } else {
+                println!(
+                    "Cleared orphaned merge-state (was in phase: {from}).\n  \
+                     The interrupted merge made no committed changes (pre-COMMIT), so no \
+                     work was lost.\n  \
+                     Next: re-run your merge \u{2014} maw ws merge <workspaces> --into \
+                     <target> --message \"...\""
+                );
+            }
+            Ok(())
+        }
+        AbortOutcome::RefusedPostCommit { phase, reason } => {
+            // Refuse loudly. This is the Prime-Invariant guardrail: do NOT
+            // delete state that might be masking committed work.
+            if fmt == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "aborted": false,
+                        "phase": phase.to_string(),
+                        "reason": reason,
+                    })
+                );
+            }
+            let _ = text_mode;
+            bail!(
+                "Refused to abort merge: {reason}.\n  \
+                 The merge reached phase '{phase}' and may have committed work \u{2014} \
+                 clearing merge-state now could orphan it (violates the Prime Invariant).\n  \
+                 To inspect what was committed: maw ws recover\n  \
+                 Check epoch/branch state: maw status && maw doctor\n  \
+                 If you have confirmed the refs did NOT advance, remove \
+                 .manifold/merge-state.json manually as a last resort."
+            )
+        }
     }
 }
 

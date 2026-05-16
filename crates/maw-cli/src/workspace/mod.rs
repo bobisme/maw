@@ -18,6 +18,7 @@ mod annotate;
 pub(crate) mod capture;
 mod clean;
 pub(crate) mod create;
+mod create_lock;
 mod describe;
 pub(crate) mod destroy_record;
 mod diff;
@@ -1014,14 +1015,34 @@ pub enum WorkspaceCommands {
     #[command(verbatim_doc_comment)]
     Merge {
         /// Workspace names to merge
-        #[arg(required = true)]
+        #[arg(required_unless_present = "abort")]
         workspaces: Vec<String>,
 
         /// Explicit merge target: default workspace, branch-attached workspace, or active change id.
         ///
         /// Use ws:<name> or change:<id> when a bare target is ambiguous.
-        #[arg(long)]
-        into: String,
+        #[arg(long, required_unless_present = "abort")]
+        into: Option<String>,
+
+        /// Clear an orphaned/stuck merge-state left by a killed, OOM'd,
+        /// panicked, or Ctrl-C'd `maw ws merge`.
+        ///
+        /// A crashed merge leaves `.manifold/merge-state.json` on disk and
+        /// every subsequent merge then fails with "merge already in
+        /// progress". This flag clears that state so merges can proceed
+        /// again.
+        ///
+        /// SAFE BY DESIGN: it refuses to clear if the merge already passed
+        /// COMMIT (the epoch advanced past where the merge started), so no
+        /// committed work can ever be lost (Prime Invariant).
+        ///
+        /// Takes no workspaces and no --into. Example:
+        ///   maw ws merge --abort
+        #[arg(
+            long,
+            conflicts_with_all = ["check", "plan", "dry_run", "destroy", "resolve", "resolve_all"]
+        )]
+        abort: bool,
 
         /// Destroy workspaces after successful merge (non-interactive by default)
         #[arg(long)]
@@ -1508,6 +1529,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         WorkspaceCommands::Merge {
             workspaces,
             into,
+            abort,
             destroy,
             confirm,
             message,
@@ -1525,6 +1547,18 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         } => {
             let fmt = OutputFormat::resolve(OutputFormat::with_json_flag(format, json));
             let root = repo_root()?;
+            if abort {
+                return merge::abort_in_progress_merge(&root, fmt);
+            }
+            // Past this point a merge target is required; clap guarantees
+            // `into` is Some unless --abort was passed (handled above).
+            let into = into.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing --into target.\n  \
+                     Usage: maw ws merge <workspaces> --into <target> --message \"...\"\n  \
+                     To clear a stuck merge instead: maw ws merge --abort"
+                )
+            })?;
             if check {
                 let target = match resolve_merge_target(&root, &into) {
                     Ok(target) => target,

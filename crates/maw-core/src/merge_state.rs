@@ -204,6 +204,33 @@ pub struct MergeStateFile {
     /// merges where global epoch may intentionally remain unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
+
+    /// PID of the process that owns this merge.
+    ///
+    /// Recorded during PREPARE. Used to detect orphaned merge-state: if the
+    /// recorded process is no longer alive (and the boot id matches, so the
+    /// pid has not been recycled by a reboot), the merge-state is stale and
+    /// can be safely cleared. `None` for merge-state files written by older
+    /// maw versions that did not record an owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+
+    /// Hostname of the machine that owns this merge.
+    ///
+    /// Recorded during PREPARE. A pid is only meaningful on the host that
+    /// created it; if the recorded host differs from the current host we
+    /// cannot prove the process is dead, so we conservatively keep blocking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_host: Option<String>,
+
+    /// Boot id of the machine that owns this merge (Linux only).
+    ///
+    /// Recorded during PREPARE from `/proc/sys/kernel/random/boot_id`. Pids
+    /// are recycled across reboots, so a recorded pid is only trustworthy if
+    /// the boot id still matches. If the boot id changed, the owning process
+    /// is provably gone (the machine rebooted) — the merge-state is stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_boot_id: Option<String>,
 }
 
 impl MergeStateFile {
@@ -228,7 +255,23 @@ impl MergeStateFile {
             abort_reason: None,
             commit_message: None,
             target_branch: None,
+            owner_pid: None,
+            owner_host: None,
+            owner_boot_id: None,
         }
+    }
+
+    /// Stamp this merge-state with the current process's identity.
+    ///
+    /// Records the pid, hostname, and (on Linux) the kernel boot id so a
+    /// later merge can decide whether this state is owned by a live process
+    /// or is an orphan left behind by a killed/OOM'd/panicked merge.
+    ///
+    /// Call this once during PREPARE, before the state is persisted.
+    pub fn stamp_owner(&mut self) {
+        self.owner_pid = Some(std::process::id());
+        self.owner_host = current_hostname();
+        self.owner_boot_id = current_boot_id();
     }
 
     /// Advance to the next phase, updating the timestamp.
@@ -264,6 +307,92 @@ impl MergeStateFile {
         self.abort_reason = Some(reason.into());
         self.updated_at = now;
         Ok(())
+    }
+
+    /// Classify the owning process of this merge-state.
+    ///
+    /// This is the core of orphaned-merge detection. It is deliberately
+    /// conservative: it only returns [`Liveness::Dead`] when it can *prove*
+    /// the owning process is gone. Anything it cannot prove maps to
+    /// [`Liveness::Unknown`], which callers must treat as "keep blocking".
+    ///
+    /// Decision table:
+    /// - No recorded pid (old merge-state) → `Unknown`.
+    /// - Recorded host differs from this host → `Unknown` (can't probe a
+    ///   pid on another machine).
+    /// - Recorded boot id present and differs from this machine's boot id →
+    ///   `Dead` (the machine rebooted; the pid cannot be that process).
+    /// - pid == our own pid → `Alive` (we are the owner; defensive).
+    /// - OS reports the pid as not running → `Dead`.
+    /// - OS reports the pid as running → `Alive`.
+    /// - Cannot probe (non-Linux, permission, etc.) → `Unknown`.
+    #[must_use]
+    pub fn owner_liveness(&self) -> Liveness {
+        let Some(pid) = self.owner_pid else {
+            return Liveness::Unknown;
+        };
+
+        // A pid only means something on the host that minted it.
+        if let Some(recorded_host) = self.owner_host.as_deref()
+            && let Some(this_host) = current_hostname()
+            && recorded_host != this_host
+        {
+            return Liveness::Unknown;
+        }
+
+        // A reboot recycles the entire pid space. If we recorded a boot id
+        // and it no longer matches, the owning process is provably gone.
+        if let Some(recorded_boot) = self.owner_boot_id.as_deref()
+            && let Some(this_boot) = current_boot_id()
+            && recorded_boot != this_boot
+        {
+            return Liveness::Dead;
+        }
+
+        if pid == std::process::id() {
+            return Liveness::Alive;
+        }
+
+        match process_is_alive(pid) {
+            Some(true) => Liveness::Alive,
+            Some(false) => Liveness::Dead,
+            None => Liveness::Unknown,
+        }
+    }
+
+    /// Decide whether this (non-terminal) merge-state is orphaned/stale.
+    ///
+    /// `now` is the current Unix timestamp in seconds; `stale_after_secs` is
+    /// a generous threshold used as a fallback when liveness cannot be
+    /// proven (e.g. the merge-state predates owner-pid recording).
+    ///
+    /// Returns:
+    /// - [`Staleness::Live`] — owner process is alive; a real merge is
+    ///   running. Keep blocking.
+    /// - [`Staleness::Orphaned`] — owner process is provably dead. Safe to
+    ///   recover.
+    /// - [`Staleness::Indeterminate`] — cannot prove either way. Caller
+    ///   keeps blocking but should surface the recovery command.
+    #[must_use]
+    pub fn staleness(&self, now: u64, stale_after_secs: u64) -> Staleness {
+        match self.owner_liveness() {
+            Liveness::Alive => Staleness::Live,
+            Liveness::Dead => Staleness::Orphaned,
+            Liveness::Unknown => {
+                // No proof from the pid. Fall back to age: a merge-state
+                // that has not been touched for a very long time, with no
+                // live owner we could confirm, is almost certainly an
+                // orphan. We only auto-recover on age when there is no
+                // recorded pid at all (legacy state) — if a pid was
+                // recorded but we merely cannot probe it, stay conservative.
+                let age = now.saturating_sub(self.updated_at);
+                if self.owner_pid.is_none() && age >= stale_after_secs {
+                    Staleness::Orphaned
+                } else {
+                    Staleness::Indeterminate
+                }
+            }
+        }
     }
 
     /// Serialize to pretty-printed JSON.
@@ -375,6 +504,89 @@ impl MergeStateFile {
 }
 
 // ---------------------------------------------------------------------------
+// Process-identity / staleness detection (bn-2wyh)
+// ---------------------------------------------------------------------------
+
+/// Age (seconds) after which an owner-less merge-state is treated as stale.
+///
+/// Applies only to legacy merge-state files with *no recorded owner pid*.
+/// Generous on purpose: a real merge updates `updated_at` at every phase
+/// boundary, so an hour of total silence is far longer than any healthy
+/// merge.
+pub const DEFAULT_STALE_AFTER_SECS: u64 = 3600;
+
+/// Liveness classification of a merge-state's owning process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Liveness {
+    /// The owning process is running.
+    Alive,
+    /// The owning process is provably gone (dead pid, or machine rebooted).
+    Dead,
+    /// Cannot prove either way (no pid recorded, foreign host, unprobeable).
+    Unknown,
+}
+
+/// Result of staleness analysis for a non-terminal merge-state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staleness {
+    /// A live process owns this merge — a real merge is in progress.
+    Live,
+    /// The owning process is gone — this merge-state is an orphan.
+    Orphaned,
+    /// Cannot determine; treat conservatively (keep blocking) but surface
+    /// the recovery command to the user.
+    Indeterminate,
+}
+
+/// Read the current machine hostname, if obtainable cheaply.
+///
+/// Tries `/proc/sys/kernel/hostname` (Linux) then the `HOSTNAME` env var.
+/// Returns `None` rather than failing — a missing hostname only widens the
+/// "Unknown" (conservative) case.
+#[must_use]
+pub fn current_hostname() -> Option<String> {
+    if let Ok(h) = fs::read_to_string("/proc/sys/kernel/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return Some(h.to_owned());
+        }
+    }
+    std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty())
+}
+
+/// Read the kernel boot id (Linux), if available.
+///
+/// `/proc/sys/kernel/random/boot_id` changes on every reboot, which lets us
+/// detect that a recorded pid belongs to a previous boot (and is therefore
+/// dead) even if a new process happens to reuse the same pid number.
+#[must_use]
+pub fn current_boot_id() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Determine whether a process with `pid` is currently alive.
+///
+/// Linux: checks `/proc/<pid>` existence (no `unsafe`, no extra deps —
+/// `unsafe_code` is forbidden workspace-wide so `kill(pid, 0)` is not an
+/// option). Returns:
+/// - `Some(true)`  — the pid maps to a live process,
+/// - `Some(false)` — the pid is definitively not running,
+/// - `None`        — cannot tell on this platform (no `/proc`).
+#[must_use]
+pub fn process_is_alive(pid: u32) -> Option<bool> {
+    let proc_root = Path::new("/proc");
+    // Only trust /proc-based probing when /proc is actually a procfs mount
+    // (it always is on Linux agents, which is maw's target environment).
+    if !proc_root.join("self").exists() {
+        return None;
+    }
+    Some(proc_root.join(pid.to_string()).exists())
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup + recovery helpers (bd-1lpe.6)
 // ---------------------------------------------------------------------------
 
@@ -460,6 +672,113 @@ where
     }
 
     remove_merge_state_if_exists(merge_state_path)
+}
+
+/// Outcome of an explicit `--abort` request against a merge-state file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbortOutcome {
+    /// No merge-state file existed — nothing to abort.
+    NothingToAbort,
+    /// The merge-state was cleared. `from` is the phase it was in.
+    Cleared {
+        /// The phase the aborted merge was in.
+        from: MergePhase,
+    },
+    /// Refused: the merge already passed COMMIT (epoch advanced past
+    /// `epoch_before`), so clearing could mask partially-committed work.
+    /// The caller must inspect refs / run recovery instead of blind abort.
+    RefusedPostCommit {
+        /// The phase the merge was in.
+        phase: MergePhase,
+        /// Human-readable reason.
+        reason: String,
+    },
+}
+
+/// Explicitly abort an orphaned/in-progress merge by clearing its
+/// merge-state file — but *only* when doing so cannot lose committed work.
+///
+/// This upholds the Prime Invariant. It is safe to clear merge-state iff the
+/// merge never reached COMMIT, i.e. the epoch ref still equals the
+/// `epoch_before` recorded when the merge started (and, for non-default
+/// targets, the target branch has not moved to the candidate). The caller
+/// supplies the *currently observed* epoch (and optionally the target
+/// branch head) so this function stays free of git/IO dependencies.
+///
+/// Arguments:
+/// - `merge_state_path`: path to `.manifold/merge-state.json`.
+/// - `current_epoch`: the current `refs/manifold/epoch/current` OID hex, if
+///   any (None if the epoch ref is missing).
+/// - `current_target_head`: the current head of the recorded target branch,
+///   if the merge-state recorded a `target_branch` (None otherwise).
+///
+/// # Errors
+/// Returns [`MergeStateError`] on I/O or deserialization failure.
+pub fn abort_merge_state(
+    merge_state_path: &Path,
+    current_epoch: Option<&str>,
+    current_target_head: Option<&str>,
+) -> Result<AbortOutcome, MergeStateError> {
+    let state = match MergeStateFile::read(merge_state_path) {
+        Ok(s) => s,
+        Err(MergeStateError::NotFound(_)) => return Ok(AbortOutcome::NothingToAbort),
+        Err(e) => return Err(e),
+    };
+
+    // Terminal states carry no in-progress lock; just remove the file.
+    if state.phase.is_terminal() {
+        remove_merge_state_if_exists(merge_state_path)?;
+        return Ok(AbortOutcome::Cleared { from: state.phase });
+    }
+
+    // Prime-Invariant gate: the kill must be provably pre-COMMIT.
+    //
+    // Pre-COMMIT phases (Prepare/Build/Validate) never touched a ref, so
+    // clearing is always safe. For Commit/Cleanup we must verify that the
+    // refs did NOT advance to the candidate; if they did, real work was
+    // committed and a blind abort could orphan it — refuse and point the
+    // user at recovery.
+    let post_commit = matches!(state.phase, MergePhase::Commit | MergePhase::Cleanup);
+    if post_commit && let Some(candidate) = state.epoch_candidate.as_ref().map(GitOid::as_str) {
+        let epoch_at_candidate = current_epoch == Some(candidate);
+        let branch_at_candidate = current_target_head == Some(candidate);
+        if epoch_at_candidate || branch_at_candidate {
+            return Ok(AbortOutcome::RefusedPostCommit {
+                phase: state.phase.clone(),
+                reason: format!(
+                    "merge reached {} and the {} already advanced to the merged commit; \
+                     clearing now could orphan committed work",
+                    state.phase,
+                    if epoch_at_candidate {
+                        "epoch"
+                    } else {
+                        "target branch"
+                    }
+                ),
+            });
+        }
+    }
+
+    // Epoch-drift gate: even for pre-COMMIT phases, if the epoch has moved
+    // away from epoch_before since this merge started, *something* advanced
+    // the epoch (another merge, a recovery). Refuse rather than risk
+    // clobbering that state — the user can inspect and retry.
+    if let Some(observed) = current_epoch
+        && observed != state.epoch_before.as_str()
+    {
+        return Ok(AbortOutcome::RefusedPostCommit {
+            phase: state.phase.clone(),
+            reason: format!(
+                "epoch advanced since this merge started (was {}, now {}); \
+                 refusing to clear merge-state to avoid clobbering newer state",
+                &state.epoch_before.as_str()[..state.epoch_before.as_str().len().min(12)],
+                &observed[..observed.len().min(12)]
+            ),
+        });
+    }
+
+    remove_merge_state_if_exists(merge_state_path)?;
+    Ok(AbortOutcome::Cleared { from: state.phase })
 }
 
 fn remove_merge_state_if_exists(path: &Path) -> Result<(), MergeStateError> {
@@ -1331,5 +1650,221 @@ mod tests {
         assert!(final_state.epoch_after.is_some());
         assert_eq!(final_state.started_at, 1000);
         assert_eq!(final_state.updated_at, 1005);
+    }
+
+    // -- bn-2wyh: stale / orphaned merge-state detection + abort --
+
+    /// A pid that is essentially certain not to be running. We pick a very
+    /// large value above the typical `pid_max`; on Linux `/proc/<pid>` will
+    /// not exist for it.
+    const DEAD_PID: u32 = 4_000_000_000;
+
+    #[test]
+    fn stamp_owner_records_pid() {
+        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        assert!(state.owner_pid.is_none());
+        state.stamp_owner();
+        assert_eq!(state.owner_pid, Some(std::process::id()));
+    }
+
+    #[test]
+    fn own_pid_is_alive() {
+        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        state.stamp_owner();
+        // We are obviously running, so our own pid must read as Alive and
+        // the merge-state must be classified Live (keep blocking).
+        assert_eq!(state.owner_liveness(), Liveness::Alive);
+        assert_eq!(
+            state.staleness(2000, DEFAULT_STALE_AFTER_SECS),
+            Staleness::Live
+        );
+    }
+
+    #[test]
+    fn dead_pid_is_orphaned() {
+        // Only meaningful where we can actually probe pids (Linux /proc).
+        if process_is_alive(std::process::id()) != Some(true) {
+            return;
+        }
+        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        state.stamp_owner();
+        state.owner_pid = Some(DEAD_PID);
+        assert_eq!(state.owner_liveness(), Liveness::Dead);
+        assert_eq!(
+            state.staleness(2000, DEFAULT_STALE_AFTER_SECS),
+            Staleness::Orphaned
+        );
+    }
+
+    #[test]
+    fn rebooted_machine_marks_pid_dead() {
+        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        state.stamp_owner();
+        // Force-set a recorded pid; if our own pid happens to still be
+        // alive, the boot-id mismatch must still win and report Dead.
+        state.owner_pid = Some(std::process::id());
+        state.owner_boot_id = Some("00000000-0000-0000-0000-000000000000".to_owned());
+        if current_boot_id().is_some() {
+            assert_eq!(state.owner_liveness(), Liveness::Dead);
+        }
+    }
+
+    #[test]
+    fn no_owner_pid_recent_is_indeterminate_blocks() {
+        // Legacy merge-state (no pid). Recent updated_at → cannot prove
+        // stale → Indeterminate (caller keeps blocking).
+        let state = MergeStateFile::new(test_sources(), test_epoch(), 5000);
+        assert_eq!(state.owner_liveness(), Liveness::Unknown);
+        assert_eq!(
+            state.staleness(5100, DEFAULT_STALE_AFTER_SECS),
+            Staleness::Indeterminate
+        );
+    }
+
+    #[test]
+    fn no_owner_pid_ancient_is_orphaned() {
+        // Legacy merge-state untouched for far longer than the threshold →
+        // treated as orphaned so it can be auto-recovered.
+        let state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        let now = 1000 + DEFAULT_STALE_AFTER_SECS + 1;
+        assert_eq!(
+            state.staleness(now, DEFAULT_STALE_AFTER_SECS),
+            Staleness::Orphaned
+        );
+    }
+
+    #[test]
+    fn foreign_host_is_indeterminate() {
+        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        state.stamp_owner();
+        state.owner_host = Some("definitely-not-this-host-xyzzy".to_owned());
+        // Can't probe a pid on another machine → Unknown → still blocks.
+        assert_eq!(state.owner_liveness(), Liveness::Unknown);
+    }
+
+    #[test]
+    fn abort_clears_precommit_and_preserves_epoch() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let path = MergeStateFile::default_path(dir.path());
+
+        // Build-phase orphan (pre-COMMIT), epoch unchanged.
+        let state = state_in_phase(MergePhase::Build);
+        let epoch_before = state.epoch_before.as_str().to_owned();
+        state.write_atomic(&path).expect("operation should succeed");
+
+        let outcome =
+            abort_merge_state(&path, Some(&epoch_before), None).expect("operation should succeed");
+        assert_eq!(
+            outcome,
+            AbortOutcome::Cleared {
+                from: MergePhase::Build
+            }
+        );
+        assert!(!path.exists(), "merge-state must be removed");
+        // Epoch is supplied by caller; abort never touches refs — the
+        // Prime Invariant is upheld because we only cleared a pre-COMMIT
+        // state and the epoch we observed equals epoch_before.
+    }
+
+    #[test]
+    fn abort_nothing_when_no_state() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let path = MergeStateFile::default_path(dir.path());
+        let outcome = abort_merge_state(&path, None, None).expect("operation should succeed");
+        assert_eq!(outcome, AbortOutcome::NothingToAbort);
+    }
+
+    #[test]
+    fn abort_refuses_when_epoch_advanced_past_epoch_before() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let path = MergeStateFile::default_path(dir.path());
+
+        let state = state_in_phase(MergePhase::Build);
+        state.write_atomic(&path).expect("operation should succeed");
+
+        // Observed epoch differs from epoch_before → something advanced the
+        // epoch since this merge started. Refuse to clobber it.
+        let advanced_epoch = "f".repeat(40);
+        let outcome = abort_merge_state(&path, Some(&advanced_epoch), None)
+            .expect("operation should succeed");
+        assert!(
+            matches!(outcome, AbortOutcome::RefusedPostCommit { .. }),
+            "expected refusal, got {outcome:?}"
+        );
+        assert!(path.exists(), "merge-state must be preserved on refusal");
+    }
+
+    #[test]
+    fn abort_refuses_post_commit_when_epoch_at_candidate() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let path = MergeStateFile::default_path(dir.path());
+
+        // Commit-phase with a candidate; epoch already advanced TO the
+        // candidate → the merge committed → refuse (Prime Invariant).
+        let mut state = state_in_phase(MergePhase::Commit);
+        let candidate = test_oid();
+        state.epoch_candidate = Some(candidate.clone());
+        state.write_atomic(&path).expect("operation should succeed");
+
+        let outcome = abort_merge_state(&path, Some(candidate.as_str()), None)
+            .expect("operation should succeed");
+        assert!(
+            matches!(outcome, AbortOutcome::RefusedPostCommit { .. }),
+            "expected refusal, got {outcome:?}"
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn abort_clears_terminal_state() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let path = MergeStateFile::default_path(dir.path());
+
+        let state = state_in_phase(MergePhase::Aborted);
+        state.write_atomic(&path).expect("operation should succeed");
+
+        let outcome = abort_merge_state(&path, None, None).expect("operation should succeed");
+        assert_eq!(
+            outcome,
+            AbortOutcome::Cleared {
+                from: MergePhase::Aborted
+            }
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn process_is_alive_self_true() {
+        // Linux agents (maw's target) always have /proc.
+        if Path::new("/proc/self").exists() {
+            assert_eq!(process_is_alive(std::process::id()), Some(true));
+            assert_eq!(process_is_alive(DEAD_PID), Some(false));
+        }
+    }
+
+    #[test]
+    fn merge_state_owner_fields_roundtrip_json() {
+        let mut state = MergeStateFile::new(test_sources(), test_epoch(), 1000);
+        state.stamp_owner();
+        let json = state.to_json().expect("operation should succeed");
+        let decoded = MergeStateFile::from_json(&json).expect("operation should succeed");
+        assert_eq!(decoded, state);
+        assert_eq!(decoded.owner_pid, Some(std::process::id()));
+    }
+
+    #[test]
+    fn old_merge_state_without_owner_fields_deserializes() {
+        // Backward-compat: a pre-bn-2wyh merge-state has no owner_* keys.
+        let json = r#"{
+            "phase": "build",
+            "sources": ["agent-1"],
+            "epoch_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "started_at": 1000,
+            "updated_at": 1000
+        }"#;
+        let decoded = MergeStateFile::from_json(json).expect("operation should succeed");
+        assert!(decoded.owner_pid.is_none());
+        assert!(decoded.owner_host.is_none());
+        assert_eq!(decoded.owner_liveness(), Liveness::Unknown);
     }
 }

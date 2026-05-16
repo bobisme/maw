@@ -16,8 +16,8 @@ use maw_core::refs as manifold_refs;
 use crate::changes::store::ChangesStore;
 
 use super::{
-    DEFAULT_WORKSPACE, MawConfig, ensure_repo_root, get_backend, metadata,
-    oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
+    DEFAULT_WORKSPACE, MawConfig, create_lock::WorkspaceCreateLock, ensure_repo_root, get_backend,
+    metadata, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
     templates::WorkspaceTemplate, workspace_path, workspaces_dir,
 };
 
@@ -61,10 +61,37 @@ fn create_with_output(
 ) -> Result<()> {
     let root = ensure_repo_root()?;
     let backend = get_backend()?;
+    // `workspace_path` validates the name; do this before locking so an
+    // invalid name fails fast without touching the lock directory.
     let path = workspace_path(name)?;
 
+    // Make create atomic for this workspace *name* (bn-3bbc). Without this
+    // lock, concurrent `maw ws create <same-name>` is a TOCTOU race: every
+    // caller passes the `path.exists()` check before any has finished the
+    // backend `worktree add`, so they all "succeed", clobber each other's
+    // worktree, and may leave the workspace MISSING.
+    //
+    // `acquire` blocks until the lock is free, so concurrent same-name
+    // creates serialize: exactly one caller wins and performs the real
+    // create; the losers wake up, see the workspace now exists (the
+    // re-check below), and fail fast with a clear error. The lock is held
+    // for the whole critical section (existence check + backend create +
+    // metadata write + success banner) and released by RAII `Drop` on every
+    // exit path — success, early `bail!`, or panic. The lock is per-name,
+    // so concurrent creates of *different* names never block each other.
+    let _create_lock = WorkspaceCreateLock::acquire(&root, name).with_context(|| {
+        format!("Failed to acquire create lock for workspace '{name}'\n  Check: maw doctor")
+    })?;
+
+    // Existence check is now race-safe: it runs under the exclusive
+    // per-name lock, so a losing concurrent creator observes the winner's
+    // completed workspace here and exits with an accurate error instead of
+    // a false success banner / clobbered worktree.
     if path.exists() {
-        bail!("Workspace already exists at {}", path.display());
+        bail!(
+            "workspace '{name}' already exists\n  Check: maw ws list\n  \
+             To recreate: maw ws destroy {name} && maw ws create {name}"
+        );
     }
 
     // Ensure ws directory exists

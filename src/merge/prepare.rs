@@ -36,9 +36,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use maw_git::{GitRepo as _, GixRepo};
 
-use crate::merge_state::{MergePhase, MergeStateError, MergeStateFile};
+use crate::merge_state::{
+    DEFAULT_STALE_AFTER_SECS, MergePhase, MergeStateError, MergeStateFile, Staleness,
+};
 use crate::model::types::{EpochId, GitOid, WorkspaceId};
 use crate::refs;
+
+/// Exact command an agent must run to clear an orphaned merge-state.
+///
+/// Centralized so the PREPARE error, `maw doctor`, and docs all agree.
+pub const MERGE_ABORT_RECOVERY_CMD: &str = "maw ws merge --abort";
 
 // ---------------------------------------------------------------------------
 // FrozenInputs
@@ -74,7 +81,17 @@ pub enum PrepareError {
         detail: String,
     },
     /// A merge is already in progress (merge-state file exists).
-    MergeAlreadyInProgress,
+    ///
+    /// `live` is `true` when the owning process was confirmed alive (a real
+    /// concurrent merge — keep blocking, do not auto-recover). It is `false`
+    /// when liveness could not be proven (possible orphan: still block, but
+    /// strongly steer the user toward the recovery command).
+    MergeAlreadyInProgress {
+        /// Phase the in-progress / stuck merge is in.
+        phase: MergePhase,
+        /// Whether the owning process was confirmed alive.
+        live: bool,
+    },
     /// Invalid OID from git.
     InvalidOid(String),
     /// Merge-state I/O or serialization error.
@@ -99,11 +116,27 @@ impl fmt::Display for PrepareError {
                     "PREPARE: HEAD not found for workspace {workspace}: {detail}"
                 )
             }
-            Self::MergeAlreadyInProgress => {
-                write!(
-                    f,
-                    "PREPARE: merge already in progress (merge-state file exists)"
-                )
+            Self::MergeAlreadyInProgress { phase, live } => {
+                if *live {
+                    write!(
+                        f,
+                        "PREPARE: merge already in progress (phase: {phase}, owned by a \
+                         running process)\n  \
+                         Another merge is actively running. Wait for it to finish, then retry.\n  \
+                         If you are certain no merge is running (the owner was killed), run:\n    \
+                         {MERGE_ABORT_RECOVERY_CMD}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "PREPARE: merge already in progress (phase: {phase}, merge-state file \
+                         exists)\n  \
+                         A previous merge left state behind. If no merge is running (it was \
+                         killed / OOM'd / interrupted), recover with:\n    \
+                         {MERGE_ABORT_RECOVERY_CMD}\n  \
+                         Diagnose: maw doctor"
+                    )
+                }
             }
             Self::InvalidOid(detail) => {
                 write!(f, "PREPARE: invalid OID from git: {detail}")
@@ -225,6 +258,9 @@ pub fn run_prepare_phase(
 
     let mut state = MergeStateFile::new(sources.to_vec(), epoch.clone(), now);
     state.frozen_heads = heads.clone();
+    // Record who owns this merge so a later PREPARE can tell a live merge
+    // apart from an orphan left by a kill -9 / OOM / panic (bn-2wyh).
+    state.stamp_owner();
 
     // 5. Ensure .manifold directory exists
     std::fs::create_dir_all(manifold_dir).map_err(|e| {
@@ -276,7 +312,46 @@ pub fn run_prepare_phase(
                     // Overwrite stale file
                     state.write_atomic(&state_path)?;
                 } else {
-                    return Err(PrepareError::MergeAlreadyInProgress);
+                    // Distinguish a *live* concurrent merge from an *orphan*
+                    // left behind by a killed/OOM'd/panicked process
+                    // (bn-2wyh). Pre-COMMIT phases (Prepare/Build/Validate)
+                    // touched no refs, so an orphan there is provably safe to
+                    // auto-recover. Post-COMMIT we already proved above that
+                    // the refs did NOT advance to the candidate, so an orphan
+                    // there is *also* a stuck pre-finalize state — but
+                    // auto-clearing it would still discard a merge that may
+                    // have started writing refs, so we only auto-recover
+                    // pre-COMMIT and surface the explicit recovery command
+                    // otherwise.
+                    let pre_commit = !is_post_commit;
+                    match existing.staleness(now, DEFAULT_STALE_AFTER_SECS) {
+                        Staleness::Orphaned if pre_commit => {
+                            tracing::warn!(
+                                phase = %existing.phase,
+                                owner_pid = ?existing.owner_pid,
+                                "orphaned pre-COMMIT merge-state detected (owning process \
+                                 is gone) — auto-recovering and taking over"
+                            );
+                            // Owner is provably dead and nothing was
+                            // committed: safe to take over.
+                            state.write_atomic(&state_path)?;
+                        }
+                        Staleness::Live => {
+                            return Err(PrepareError::MergeAlreadyInProgress {
+                                phase: existing.phase,
+                                live: true,
+                            });
+                        }
+                        // Orphaned-but-post-COMMIT, or Indeterminate: stay
+                        // conservative and refuse, but the error carries the
+                        // exact recovery command.
+                        Staleness::Orphaned | Staleness::Indeterminate => {
+                            return Err(PrepareError::MergeAlreadyInProgress {
+                                phase: existing.phase,
+                                live: false,
+                            });
+                        }
+                    }
                 }
             }
             _ => {
@@ -310,6 +385,7 @@ pub fn run_prepare_phase_with_epoch(
 
     let mut state = MergeStateFile::new(sources.to_vec(), epoch.clone(), now);
     state.frozen_heads = heads.clone();
+    state.stamp_owner();
 
     std::fs::create_dir_all(manifold_dir).map_err(|e| {
         PrepareError::State(MergeStateError::Io(format!(
@@ -326,7 +402,11 @@ pub fn run_prepare_phase_with_epoch(
         // File already exists — check if it's safe to overwrite
         match MergeStateFile::read(&state_path) {
             Ok(existing) if !existing.phase.is_terminal() => {
-                return Err(PrepareError::MergeAlreadyInProgress);
+                let live = existing.staleness(now, DEFAULT_STALE_AFTER_SECS) == Staleness::Live;
+                return Err(PrepareError::MergeAlreadyInProgress {
+                    phase: existing.phase,
+                    live,
+                });
             }
             _ => {
                 // Terminal or corrupt — safe to overwrite
@@ -444,7 +524,10 @@ mod tests {
         heads.insert(test_ws("new"), test_oid('e'));
         let result =
             run_prepare_phase_with_epoch(&manifold_dir, test_epoch(), &[test_ws("new")], heads);
-        assert!(matches!(result, Err(PrepareError::MergeAlreadyInProgress)));
+        assert!(matches!(
+            result,
+            Err(PrepareError::MergeAlreadyInProgress { .. })
+        ));
     }
 
     #[test]
@@ -634,8 +717,14 @@ mod tests {
         let err = PrepareError::NoSources;
         assert!(format!("{err}").contains("no source workspaces"));
 
-        let err = PrepareError::MergeAlreadyInProgress;
-        assert!(format!("{err}").contains("already in progress"));
+        let err = PrepareError::MergeAlreadyInProgress {
+            phase: MergePhase::Build,
+            live: false,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("already in progress"));
+        // bn-2wyh: the error must always print the exact recovery command.
+        assert!(msg.contains(MERGE_ABORT_RECOVERY_CMD));
 
         let err = PrepareError::EpochNotFound("not found".to_owned());
         assert!(format!("{err}").contains("epoch ref not found"));
@@ -913,8 +1002,130 @@ mod tests {
 
         let result = run_prepare_phase(root, &manifold_dir, &[ws_id], &workspace_dirs);
         assert!(
-            matches!(result, Err(PrepareError::MergeAlreadyInProgress)),
+            matches!(result, Err(PrepareError::MergeAlreadyInProgress { .. })),
             "expected MergeAlreadyInProgress, got: {result:?}"
         );
+    }
+
+    // -- bn-2wyh: orphaned (dead-pid) pre-COMMIT auto-recovery --
+
+    /// A pid extremely unlikely to exist (above typical pid_max).
+    const DEAD_PID: u32 = 4_000_000_000;
+
+    fn setup_ws(root: &Path, ws_name: &str) -> (WorkspaceId, std::path::PathBuf) {
+        let ws_path = root.join(ws_name);
+        run_git(
+            root,
+            &[
+                "worktree",
+                "add",
+                ws_path.to_str().expect("operation should succeed"),
+                "HEAD",
+            ],
+        );
+        let ws_id = WorkspaceId::new(ws_name).expect("operation should succeed");
+        (ws_id, ws_path)
+    }
+
+    #[test]
+    fn prepare_auto_recovers_orphaned_precommit_build_state() {
+        // Skip if we cannot probe pids (non-Linux); the behavior relies on
+        // /proc-based liveness detection.
+        if crate::merge_state::process_is_alive(std::process::id()) != Some(true) {
+            return;
+        }
+        let (dir, epoch_before) = setup_git_repo_with_epoch();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let (ws_id, ws_path) = setup_ws(root, "agent-x");
+
+        // Simulate a killed merge: a Build-phase merge-state owned by a
+        // dead pid, epoch unchanged (pre-COMMIT).
+        std::fs::create_dir_all(&manifold_dir).expect("operation should succeed");
+        let eb = EpochId::new(epoch_before.as_str()).expect("operation should succeed");
+        let mut orphan = MergeStateFile::new(
+            vec![WorkspaceId::new("agent-x").expect("operation should succeed")],
+            eb,
+            1000,
+        );
+        orphan
+            .advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        orphan.stamp_owner();
+        orphan.owner_pid = Some(DEAD_PID);
+        orphan
+            .write_atomic(&MergeStateFile::default_path(&manifold_dir))
+            .expect("operation should succeed");
+
+        let mut workspace_dirs = BTreeMap::new();
+        workspace_dirs.insert(ws_id.clone(), ws_path);
+
+        // PREPARE must auto-recover the orphan and succeed.
+        let result = run_prepare_phase(root, &manifold_dir, &[ws_id], &workspace_dirs);
+        assert!(
+            result.is_ok(),
+            "orphaned pre-COMMIT state should be auto-recovered, got: {result:?}"
+        );
+        // And the new merge-state must now be ours.
+        let state = MergeStateFile::read(&MergeStateFile::default_path(&manifold_dir))
+            .expect("operation should succeed");
+        assert_eq!(state.owner_pid, Some(std::process::id()));
+        assert_eq!(state.phase, MergePhase::Prepare);
+    }
+
+    #[test]
+    fn prepare_blocks_live_owner_precommit_state() {
+        let (dir, epoch_before) = setup_git_repo_with_epoch();
+        let root = dir.path();
+        let manifold_dir = root.join(".manifold");
+        let (ws_id, ws_path) = setup_ws(root, "agent-y");
+
+        // A Build-phase merge-state owned by THIS (alive) process.
+        std::fs::create_dir_all(&manifold_dir).expect("operation should succeed");
+        let eb = EpochId::new(epoch_before.as_str()).expect("operation should succeed");
+        let mut live = MergeStateFile::new(
+            vec![WorkspaceId::new("agent-y").expect("operation should succeed")],
+            eb,
+            1000,
+        );
+        live.advance(MergePhase::Build, 1001)
+            .expect("operation should succeed");
+        live.stamp_owner(); // our own pid → alive
+        live.write_atomic(&MergeStateFile::default_path(&manifold_dir))
+            .expect("operation should succeed");
+
+        let mut workspace_dirs = BTreeMap::new();
+        workspace_dirs.insert(ws_id.clone(), ws_path);
+
+        let result = run_prepare_phase(root, &manifold_dir, &[ws_id], &workspace_dirs);
+        match result {
+            Err(PrepareError::MergeAlreadyInProgress { live, .. }) => {
+                assert!(live, "owner is alive, error must report live=true");
+            }
+            other => panic!("expected a live block, got: {other:?}"),
+        }
+        // The live merge-state must be untouched.
+        let state = MergeStateFile::read(&MergeStateFile::default_path(&manifold_dir))
+            .expect("operation should succeed");
+        assert_eq!(state.phase, MergePhase::Build);
+    }
+
+    #[test]
+    fn merge_already_in_progress_error_includes_recovery_command() {
+        let err = PrepareError::MergeAlreadyInProgress {
+            phase: MergePhase::Build,
+            live: false,
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(MERGE_ABORT_RECOVERY_CMD),
+            "error must include recovery command, got: {msg}"
+        );
+
+        let err_live = PrepareError::MergeAlreadyInProgress {
+            phase: MergePhase::Validate,
+            live: true,
+        };
+        assert!(format!("{err_live}").contains(MERGE_ABORT_RECOVERY_CMD));
     }
 }

@@ -129,6 +129,7 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     checks.push(check_ghost_working_copy(root.as_deref()));
     checks.push(check_dangling_snapshots(root.as_deref()));
     checks.push(check_stale_head_refs(root.as_deref()));
+    checks.push(check_merge_state(root.as_deref()));
     checks.push(check_git_head());
 
     let all_ok = checks.iter().all(|c| c.status == "ok");
@@ -489,6 +490,107 @@ fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
             status: "ok".to_string(),
             message: "dangling snapshots: could not check (git error)".to_string(),
             fix: None,
+        },
+    }
+}
+
+/// Detect an orphaned / stuck merge-state file (bn-2wyh).
+///
+/// A killed / OOM'd / panicked / Ctrl-C'd `maw ws merge` leaves
+/// `.manifold/merge-state.json` behind, which then blocks every future
+/// merge with "merge already in progress". `maw doctor` must surface this
+/// (it previously reported "All checks passed!" while merges were wedged)
+/// and print the exact recovery command.
+fn check_merge_state(root: Option<&Path>) -> DoctorCheck {
+    use maw_core::merge_state::{
+        DEFAULT_STALE_AFTER_SECS, MergeStateError, MergeStateFile, Staleness,
+    };
+
+    let name = "merge-state".to_string();
+    let recovery_fix = "Fix: maw ws merge --abort".to_string();
+
+    let Some(root) = root else {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "merge-state: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    let state_path = MergeStateFile::default_path(&root.join(".manifold"));
+    let state = match MergeStateFile::read(&state_path) {
+        Err(MergeStateError::NotFound(_)) => {
+            return DoctorCheck {
+                name,
+                status: "ok".to_string(),
+                message: "merge-state: no merge in progress".to_string(),
+                fix: None,
+            };
+        }
+        Err(e) => {
+            // A corrupt merge-state file also wedges merges.
+            return DoctorCheck {
+                name,
+                status: "fail".to_string(),
+                message: format!("merge-state: file present but unreadable ({e})"),
+                fix: Some(recovery_fix),
+            };
+        }
+        Ok(s) => s,
+    };
+
+    if state.phase.is_terminal() {
+        // A terminal state still on disk is leftover but harmless to clear.
+        return DoctorCheck {
+            name,
+            status: "warn".to_string(),
+            message: format!(
+                "merge-state: leftover terminal state (phase: {})",
+                state.phase
+            ),
+            fix: Some(recovery_fix),
+        };
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    match state.staleness(now, DEFAULT_STALE_AFTER_SECS) {
+        Staleness::Live => DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: format!(
+                "merge-state: a merge is actively running (phase: {}, pid: {})",
+                state.phase,
+                state
+                    .owner_pid
+                    .map_or_else(|| "?".to_string(), |p| p.to_string())
+            ),
+            fix: None,
+        },
+        Staleness::Orphaned => DoctorCheck {
+            name,
+            status: "fail".to_string(),
+            message: format!(
+                "merge-state: ORPHANED merge-state from an interrupted merge \
+                 (phase: {}, owner process is gone). This blocks ALL future merges.",
+                state.phase
+            ),
+            fix: Some(recovery_fix),
+        },
+        Staleness::Indeterminate => DoctorCheck {
+            name,
+            status: "warn".to_string(),
+            message: format!(
+                "merge-state: merge-state present (phase: {}) but owner liveness \
+                 could not be confirmed. If no merge is running it is orphaned and \
+                 blocks all future merges.",
+                state.phase
+            ),
+            fix: Some(recovery_fix),
         },
     }
 }

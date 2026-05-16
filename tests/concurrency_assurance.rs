@@ -118,7 +118,7 @@ fn merge_state_blocks_concurrent_prepare_when_in_progress() {
         .expect_err("operation should fail");
 
     assert!(
-        matches!(err, PrepareError::MergeAlreadyInProgress),
+        matches!(err, PrepareError::MergeAlreadyInProgress { .. }),
         "expected MergeAlreadyInProgress, got: {err}"
     );
 }
@@ -145,7 +145,7 @@ fn merge_state_blocks_prepare_during_build_phase() {
         .expect_err("operation should fail");
 
     assert!(
-        matches!(err, PrepareError::MergeAlreadyInProgress),
+        matches!(err, PrepareError::MergeAlreadyInProgress { .. }),
         "expected MergeAlreadyInProgress during Build, got: {err}"
     );
 }
@@ -173,7 +173,7 @@ fn merge_state_blocks_prepare_during_validate_phase() {
         .expect_err("operation should fail");
 
     assert!(
-        matches!(err, PrepareError::MergeAlreadyInProgress),
+        matches!(err, PrepareError::MergeAlreadyInProgress { .. }),
         "expected MergeAlreadyInProgress during Validate, got: {err}"
     );
 }
@@ -547,7 +547,7 @@ fn full_lifecycle_exclusion_and_cas() {
     let err = run_prepare_phase_with_epoch(&manifold_dir, epoch_b, &[ws_b], heads_b)
         .expect_err("operation should fail");
     assert!(
-        matches!(err, PrepareError::MergeAlreadyInProgress),
+        matches!(err, PrepareError::MergeAlreadyInProgress { .. }),
         "agent B blocked by merge-state"
     );
 
