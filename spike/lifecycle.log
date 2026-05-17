@@ -1,0 +1,63 @@
+
+=== 1. INIT target layout (root = normal checkout, NOT bare) ===
+OK   epoch0 = 55745884ae5cccbb3ac911b2547c35b6598d13b6
+NOTE core.bare = false  (TARGET: false; root IS a real checkout)
+OK   refs/manifold/epoch/current set (manifold metadata layout UNCHANGED)
+NOTE root is the privileged merge-target checkout; files materialized on disk at root:
+       shared.txt
+       src
+
+=== 2. CREATE two agent worktrees under hidden .maw/worktrees/ ===
+OK   worktree 'agent-a' -> /tmp/sp4-layout/repo/.maw/worktrees/agent-a  (admin: .git/worktrees/agent-a)
+OK   worktree 'agent-b' -> /tmp/sp4-layout/repo/.maw/worktrees/agent-b  (admin: .git/worktrees/agent-b)
+NOTE git worktree list (admin layer is path-agnostic):
+       /tmp/sp4-layout/repo                        5574588 [main]
+       /tmp/sp4-layout/repo/.maw/worktrees/agent-a 5574588 (detached HEAD)
+       /tmp/sp4-layout/repo/.maw/worktrees/agent-b 5574588 (detached HEAD)
+
+=== 3. COMMIT work in each agent worktree (disjoint + overlapping) ===
+OK   agent-a HEAD = f6e0f9bb3f96dbacc35acf246d5a25e3d7960ab7
+OK   agent-b HEAD = 6308cffc93b7c2e89df82221fa6f9d08777d7ce3
+
+=== 4. MERGE: build merged tree (engine merge algorithm is path-layout agnostic) ===
+OK   merged tree  = bf88c238392e704e916ff13256d28e4b292caf24
+OK   merge commit = d4375b06ef5239bfbfd1a04f53247aa8a4c890f2
+OK   branch main + epoch advanced to merge commit
+
+=== 5. PRIVILEGED-TARGET update: sync ROOT checkout to new epoch ===
+NOTE target worktree HEAD file resolved as: /tmp/sp4-layout/repo/.git/HEAD  (root checkout)
+OK   ROOT checkout now reflects merge: src/a.rs, src/b.rs present; shared.txt=agent-a
+NOTE root HEAD now: d4375b06ef5239bfbfd1a04f53247aa8a4c890f2 on main
+
+=== 6. DESTROY agent worktrees (with recovery snapshot, like post-merge) ===
+OK   destroyed 'agent-a' (recovery ref refs/manifold/recovery/agent-a/snapshot -> f6e0f9bb3f96dbacc35acf246d5a25e3d7960ab7)
+OK   destroyed 'agent-b' (recovery ref refs/manifold/recovery/agent-b/snapshot -> 6308cffc93b7c2e89df82221fa6f9d08777d7ce3)
+
+=== 7. RECOVER: prove no work lost (Prime Invariant) ===
+OK   recovery[agent-a] = f6e0f9bb3f96dbacc35acf246d5a25e3d7960ab7  contents:
+       shared.txt
+       src/a.rs
+       src/main.rs
+OK   recovery[agent-b] = 6308cffc93b7c2e89df82221fa6f9d08777d7ce3  contents:
+       shared.txt
+       src/b.rs
+       src/main.rs
+OK   recovered agent-a into .maw/worktrees/agent-a-restored (src/a.rs present)
+
+=== 8. FINAL STATE ===
+NOTE git worktree list:
+       /tmp/sp4-layout/repo                                 d4375b0 [main]
+       /tmp/sp4-layout/repo/.maw/worktrees/agent-a-restored f6e0f9b (detached HEAD)
+NOTE root WC top-level (hidden .maw not a tracked source dir):
+       .
+       ..
+       .git
+       .manifold
+       .maw
+       shared.txt
+       .sp4-merged
+       .sp4-mergetmp
+       src
+NOTE manifold refs:
+
+ALL LIFECYCLE STAGES PASSED ON TARGET LAYOUT
