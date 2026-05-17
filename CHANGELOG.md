@@ -2,6 +2,31 @@
 
 All notable changes to maw.
 
+## v0.61.0 — gix migration: maw no longer shells out to `git` (2026-05-17)
+
+Minor release completing the migration off the `git` CLI. maw's git access now goes through the `gix` library via a single `GitRepo` trait (`GixRepo` implementation), with the codebase split into focused crates (`maw-git`, `maw-core`, `maw-cli`, `maw-tui`, `maw-assurance`, `maw-lfs`). No public CLI surface changed; this is an internal architecture release plus the correctness fixes the migration and a fresh-eyes/chaos pass surfaced.
+
+Why it matters: subprocess `git` was the largest source of environment-coupling and parse-fragility in maw's hot paths (working-copy, oplog, recover, backend, resolve, merge engine, init). Driving git through a typed library removes a class of "works on my machine" failures and makes the engine deterministically testable — the substrate the v1.0 DST harness builds on.
+
+Highlights:
+
+- **Full gix migration.** Working-copy (bn-5k0g), recover tree-walk (bn-2j9f), oplog blob reads (bn-3005), maw-core backend (bn-p5z5), resolve/changes (bn-15wt), diagnostic utilities (bn-175a), v2 init (bn-14gc), and the merge engine (bn-3lcl) no longer invoke `git`. Push/fetch are the only remaining subprocess carveouts and are now explicitly bounded (bn-28ky); the carveout inventory is tracked (bn-3471).
+- **No silent tree corruption from unsorted entries (bn-phv1).** Raw `gix::objs::Tree` construction only `debug_assert`s sorted entries — in release builds an unsorted tree was written silently. `write_tree` now canonicalizes entry order. (See the gix write-tree pitfall.)
+- **File modes preserved through the merge engine (bn-1tl6).** Executable bits and symlink modes survived a round-trip through the old CLI path but were dropped by the first gix merge implementation; modes are now carried end-to-end.
+- **Staged-only changes no longer dropped (bn-pfh7).** Prime-Invariant paths must diff HEAD→worktree, not index→worktree; `status_head_to_worktree` now does, so staged-but-unmodified content is no longer invisible to snapshot/merge.
+- **Destroy racing an in-flight merge no longer leaks a dangling head ref (bn-cm63).** Found by maw's own chaos harness. Not a work-loss bug — a coherence bug `maw doctor` caught — but the class is exactly what the v1.0 trust work targets, so it's called out here rather than buried. `maw ws destroy` now refuses while the workspace is a live merge source; plain `maw gc` self-heals pre-existing dangling `refs/manifold/head/*`.
+- **Conflicted-path dirty count fixed (bn-7kg3).** `count_dirty_tracked` counted a conflicted path once per index stage (1/2/3), tripling the dirty count for any conflicted file; it now counts the path once.
+- Additional fresh-eyes correctness fixes from the migration: cross-bucket dedup / quarantine index sync / symlink raw bytes, `ws list` conflicted-state reporting (bn-2l00), concurrent-create locking (bn-3bbc), crashed-merge recovery (bn-2wyh), and bn-uyk3 / bn-35mr / bn-oas3.
+- Shared `maw-git` test fixtures extracted for cross-crate reuse (bn-5rdz).
+
+### Bug fix: destroy racing an in-flight merge leaks a dangling head ref (bn-cm63)
+
+A `maw ws destroy <ws>` racing a merge that had `<ws>` as a source could resurrect the workspace's `refs/manifold/head/<ws>` ref after the worktree was gone: `record_merge_operations` → `ensure_workspace_oplog_head` re-bootstrapped a Create op when `read_head()` returned `None`. The standalone `destroy()` path now guards against destroying a workspace that is a source of a non-terminal merge — bailing with a wait hint (live owner) or a `maw ws merge --abort` hint (orphaned/indeterminate). `merge --destroy` is unaffected (it goes through the backend destroy, not the standalone path). Plain `maw gc` (not just `maw gc --refs`) now prunes dangling `refs/manifold/head/*` for non-existent workspaces, so existing leaks self-heal once a current binary is installed. Regression test in `crates/maw-cli/tests/destroy_vs_merge_head_ref.rs`.
+
+### Bug fix: `count_dirty_tracked` triple-counts conflicted paths (bn-7kg3)
+
+A conflicted path occupies three index entries (stages 1/2/3). `count_dirty_tracked` added one to the dirty count per non-zero-stage entry, so every conflicted file counted three times, inflating dirty/ahead reporting in `ws status`/`ws list`. The counter now dedupes consecutive conflict entries by path, counting each conflicted path once. Regression test (`count_dirty_tracked_counts_conflicted_path_once`) in `crates/maw-git/src/status_impl.rs`.
+
 ## v0.60.9 — Branch-attached-target deletion drop fix (2026-05-11)
 
 Patch release for a silent regression in `maw ws merge` against branch-attached merge targets, plus a quality-of-life output cleanup.
