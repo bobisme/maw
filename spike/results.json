@@ -1,0 +1,187 @@
+{
+  "results": [
+    {
+      "step": 1,
+      "label": "init/baseline",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 4.681641992647201,
+      "b_ms": 0.0592700089327991,
+      "witnesses": 1,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 2,
+      "label": "create alice",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 5.319682008121163,
+      "b_ms": 0.04437996540218592,
+      "witnesses": 1,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 3,
+      "label": "alice commit f1",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 5.538591998629272,
+      "b_ms": 0.060260004829615355,
+      "witnesses": 2,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 4,
+      "label": "create bob",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 6.321111985016614,
+      "b_ms": 0.07996999192982912,
+      "witnesses": 2,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 5,
+      "label": "bob commit f1",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 8.521482988726348,
+      "b_ms": 0.04931999137625098,
+      "witnesses": 3,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 6,
+      "label": "alice commit f2",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 6.69889198616147,
+      "b_ms": 0.0569300027564168,
+      "witnesses": 4,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 7,
+      "label": "merge alice->default",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 7.175042002927512,
+      "b_ms": 0.060960010159760714,
+      "witnesses": 6,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 8,
+      "label": "destroy alice --force",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 5.472240969538689,
+      "b_ms": 1.6905110096558928,
+      "witnesses": 6,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 9,
+      "label": "create carol",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 6.67920196428895,
+      "b_ms": 1.6623609699308872,
+      "witnesses": 6,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 10,
+      "label": "carol commit f1",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 7.475942955352366,
+      "b_ms": 1.8044700263999403,
+      "witnesses": 7,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 11,
+      "label": "destroy carol --force",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 5.827651999425143,
+      "b_ms": 3.2266610069200397,
+      "witnesses": 7,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 12,
+      "label": "merge bob->default",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 4.051361989695579,
+      "b_ms": 5.189250980038196,
+      "witnesses": 8,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 13,
+      "label": "PLANT work-loss (dave)",
+      "a_pass": false,
+      "b_pass": true,
+      "a_ms": 4.261341993696988,
+      "b_ms": 5.5364909931086,
+      "witnesses": 9,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 14,
+      "label": "heal work-loss (pin recovery)",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 4.1649710037745535,
+      "b_ms": 7.1561019867658615,
+      "witnesses": 9,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 15,
+      "label": "PLANT bn-cm63 (ghost head ref)",
+      "a_pass": true,
+      "b_pass": false,
+      "a_ms": 3.9677920285612345,
+      "b_ms": 8.950043004006147,
+      "witnesses": 9,
+      "status": "OK",
+      "notes": []
+    },
+    {
+      "step": 16,
+      "label": "heal bn-cm63 (maw gc)",
+      "a_pass": true,
+      "b_pass": true,
+      "a_ms": 3.8358609890565276,
+      "b_ms": 7.557113014627248,
+      "witnesses": 9,
+      "status": "OK",
+      "notes": []
+    }
+  ],
+  "avg_a_ms": 5.624550678476226,
+  "avg_b_ms": 2.6990058104274794,
+  "max_a_ms": 8.521482988726348,
+  "max_b_ms": 8.950043004006147,
+  "witnesses": 9,
+  "doctor_flags_cm63": true,
+  "doctor_clean_after_gc": true
+}
