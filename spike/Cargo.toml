@@ -1,0 +1,42 @@
+# Standalone manifest — keep the spike out of the parent cargo workspace so
+# it can opt into the parent's `failpoints` feature without perturbing it.
+[workspace]
+
+[package]
+name = "dst-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# SP1 (bn-imw8) execution-model spike. NOT production code.
+#
+# Two binaries demonstrate the two candidate DST execution models against a
+# real on-disk git repo, both seeded for bit-exact replay:
+#
+#   inproc      — links `maw` (maw-workspaces) + maw-core, drives the COMMIT
+#                 FSM directly, injects faults via failpoints::set().
+#   subprocess  — spawns the installed `maw` binary, injects faults via a
+#                 PROPOSED env bridge (MAW_FP="NAME=action;...") plus a real
+#                 setsid + poll-merge-state + SIGKILL crash (the bn-cm63
+#                 chaos pattern), then runs `maw ws merge --abort`/retry.
+#
+# The inproc binary requires the parent crate's `failpoints` feature, so it
+# depends on `maw` with that feature on. Build/run from this manifest only.
+
+[[bin]]
+name = "inproc"
+path = "src/inproc.rs"
+
+[[bin]]
+name = "subprocess"
+path = "src/subprocess.rs"
+
+[dependencies]
+maw = { path = "..", package = "maw-workspaces", features = ["failpoints", "assurance"] }
+maw-core = { path = "../crates/maw-core", features = ["failpoints"] }
+maw-assurance = { path = "../crates/maw-assurance" }
+rand = "0.9"
+serde_json = "1"
+
+[features]
+default = []

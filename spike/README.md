@@ -1,29 +1,38 @@
-# SP3 spike harness scaffold (bn-2ixm)
+# SP1 / bn-imw8 — DST execution-model spike
 
-Minimal, reproducible 2-task / 3-agent agent-ergonomics harness used to
-prove the SG2 benchmark is **feasible** and **fair** before building it.
+Throwaway prototype. **Not production code.** Standalone cargo manifest
+(`[workspace]` in its own `Cargo.toml`) so it can opt into the parent's
+`failpoints` feature without perturbing the parent workspace.
 
-This is a *spike* scaffold, not the production harness. It exists to:
+See the decision in [`../notes/adr-dst-execution-model.md`](../notes/adr-dst-execution-model.md).
 
-1. Define the canonical scenario (2 tasks, 3 agents, deterministic seed
-   repo) so every arm sees an identical workload.
-2. Define the three arms (maw / git-worktrees+convention / jj-workspaces).
-3. Define the metric extraction contract (what we read out of each run).
-4. Carry the measured per-run cost + variance numbers (see
-   `../notes/agent-benchmark-feasibility.md`).
+## Prerequisite
 
-## Layout
+This spike applies a one-line fix to `../src/merge/commit.rs` (`fp_commit`:
+`const fn` → `fn`) so the parent crate compiles with `--features
+failpoints`. Tracking bone: bn-1cww. Without it, the in-proc prototype (and
+any DST harness touching COMMIT failpoints) cannot build.
 
-- `scenario/` — the deterministic seed repo + task prompts (arm-agnostic).
-- `arms/` — one driver script per arm. Each takes a fresh seed-repo copy,
-  runs the 3 agents, and emits `metrics.json`.
-- `drive_agent.sh` — the fresh-context agent driver wrapper (Claude Code
-  CLI, `--print` non-interactive, JSON output for cost/turn extraction).
-- `metrics.md` — the metric contract (what each field means, how derived).
+## Run
 
-## Why not run the full benchmark here
+```sh
+# In-process model: bit-exact, fast, links maw + maw-core, faults via
+# failpoints::set(). Drives the real COMMIT FSM + real recovery, checks G3.
+cargo run --bin inproc -- <seed>          # e.g. 1 2 3 7 42 99 → all PASS
 
-Running 3 fresh-context coding agents x 3 arms x N>=10 is real money and
-hours. The spike's job is to **size** that, not pay it. We run the driver
-*once* end-to-end on the cheapest arm to get a real per-run cost+turn
-anchor, then extrapolate N from observed metric variance. See the memo.
+# Subprocess / faithful model: real `maw`, real SIGKILL (bn-cm63 pattern),
+# real recovery, Prime-Invariant oracle. Seeds hitting `validate` PASS;
+# `build`-phase seeds show the sleep-window blind spot (ADR Finding A).
+cargo run --bin subprocess -- <seed>      # e.g. 3, 8 → PASS
+```
+
+Same seed ⇒ same fault selection. Bit-exact OID replay requires the pinned
+`GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` (already set in `inproc.rs`) — this is
+a determinism-contract requirement carried into bn-kwm7.
+
+## Files
+
+- `src/inproc.rs` — in-process driver (the load-bearing reproducible run).
+- `src/subprocess.rs` — faithful driver; demonstrates the bn-cm63 chaos
+  pattern and the two faithful-only findings (sleep-window blind spot;
+  zombie-masked owner liveness).
