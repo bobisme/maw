@@ -53,6 +53,13 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", 
 # bn-2upt: expose the upstream ast-merge feature so the post-rebase
 # sanity check can call into maw's tree-sitter integration.
 ast-merge = ["maw/ast-merge"]
+# bn-263u: build the *shipped* binary with the failpoint env bridge so the
+# faithful DST tier can crash it deterministically via `MAW_FP`. Propagated
+# to both `maw` (the lib that owns the `fp!()` call sites) and `maw-core`
+# (which owns the registry + `MAW_FP` parser). Off by default => the release
+# binary stays zero-overhead. Build the faithful binary with:
+#   cargo build -p maw-cli --features failpoints
+failpoints = ["maw/failpoints", "maw-core/failpoints"]
 
 [lints]
 workspace = true

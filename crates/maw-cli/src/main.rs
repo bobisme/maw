@@ -307,6 +307,12 @@ fn emit_migration_notice_if_needed() {
 
 fn main() {
     let _telemetry = telemetry::init();
+    // bn-263u: seed the failpoint registry from `MAW_FP` so the *shipped*
+    // binary honours faults the faithful DST tier injects. Compiled away in
+    // the default build (no-op `init_from_env`); only the
+    // `--features failpoints` binary reads the env var. Zero-overhead release
+    // contract preserved.
+    maw_core::failpoints::init_from_env();
     let cli = Cli::parse();
     emit_migration_notice_if_needed();
 

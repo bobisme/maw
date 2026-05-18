@@ -12,6 +12,8 @@
 //! - [`oracle::check_g6_searchability`] — G6: searchable recovery
 //! - [`oracle::check_all`] — run all six checks
 //! - [`model`] — Stateright model-checking definitions
+//! - [`fault`] — DST fault-injection / real-SIGKILL / recovery driver
+//!   (bn-263u; behind the `fault-injection` feature)
 //!
 //! # Usage
 //!
@@ -24,6 +26,8 @@
 //! check_all(&pre, &post)?;
 //! ```
 
+#[cfg(feature = "fault-injection")]
+pub mod fault;
 #[cfg(feature = "stateright")]
 pub mod model;
 pub mod oracle;

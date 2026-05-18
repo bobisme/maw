@@ -12,6 +12,10 @@ categories = ["development-tools"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 stateright = { version = "0.30", optional = true }
+# bn-263u: only pulled in by the `fault-injection` feature. maw-core gives
+# the failpoint registry + MAW_FP parser; rand gives seeded plan selection.
+maw-core = { path = "../maw-core", version = "0.61.0", optional = true }
+rand = { version = "0.9", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -20,6 +24,10 @@ tempfile = "3"
 default = []
 kani-slow = []
 stateright = ["dep:stateright"]
+# bn-263u: DST fault-injection / real-SIGKILL / recovery driver. Off by
+# default so the base maw-assurance build (and the default maw release) stay
+# clean; activating it turns on maw-core's `failpoints` registry control.
+fault-injection = ["dep:maw-core", "dep:rand", "maw-core/failpoints"]
 
 [lints]
 workspace = true
