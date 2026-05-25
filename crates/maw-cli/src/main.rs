@@ -79,6 +79,24 @@ enum Commands {
     #[command(hide = true, name = "ls")]
     Ls,
 
+    /// Print the absolute path of a workspace (recipe for `cd`)
+    ///
+    /// `cd` itself can't persist between tool calls in a sandboxed agent
+    /// shell, so this command instead prints the absolute on-disk path of
+    /// the given workspace. Use it from a human shell with command
+    /// substitution:
+    ///
+    ///   cd "$(maw cd alice)"
+    ///
+    /// In agent loops, prefer `maw exec <name> -- <cmd>` (the path-agnostic
+    /// interface that survives the absolute-path doubling introduced by
+    /// `.maw/workspaces/<name>/` in the consolidated layout — SP5 §6 risk #2).
+    #[command(name = "cd", verbatim_doc_comment)]
+    Cd {
+        /// Workspace name (use "default" for the privileged target).
+        name: String,
+    },
+
     /// Manage AGENTS.md instructions
     #[command(subcommand)]
     Agents(agents::AgentsCommands),
@@ -93,9 +111,20 @@ enum Commands {
 
     /// Initialize maw in the current repository
     ///
-    /// Ensures .manifold/ directory structure is initialized.
+    /// Greenfield init defaults to the consolidated `.maw/` layout (root is
+    /// a normal checkout, `.maw/workspaces/<name>/` for agents). Pass
+    /// `--legacy-ws` (or set `MAW_LAYOUT=v2`) to use the legacy v2 layout
+    /// (bare root + `ws/default/` + `ws/<name>/`). Brownfield init on an
+    /// existing repo preserves whichever layout is already on disk — use
+    /// `maw migrate` (T3.3) to move a v2 repo to the consolidated layout.
+    ///
     /// Safe to run multiple times.
-    Init,
+    Init {
+        /// Use the legacy v2 `ws/` layout instead of the consolidated `.maw/`
+        /// layout (greenfield init only).
+        #[arg(long = "legacy-ws", alias = "v2")]
+        legacy_ws: bool,
+    },
 
     /// Check system requirements and configuration
     ///
@@ -387,6 +416,9 @@ fn main() {
     emit_migration_notice_if_needed();
 
     let result = match cli.command {
+        Commands::Cd { name } => workspace::resolve_workspace_path_for_cd(&name).map(|path| {
+            println!("{}", path.display());
+        }),
         Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
         Commands::Ls => workspace::run(workspace::WorkspaceCommands::List {
             verbose: false,
@@ -396,7 +428,9 @@ fn main() {
         }),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Changes(ref cmd) => changes::run(cmd),
-        Commands::Init => init::run(),
+        Commands::Init { legacy_ws } => init::run_with(&init::InitRunOptions {
+            legacy_ws_layout: legacy_ws,
+        }),
         Commands::Upgrade => upgrade::run(),
         Commands::Doctor { format, json, repair } => doctor::run_with_repair(
             format::OutputFormat::with_json_flag(format, json),

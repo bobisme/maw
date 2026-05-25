@@ -14,7 +14,8 @@ pub(super) fn is_default_workspace(name: &str) -> bool {
 }
 
 pub(super) fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
-    let ws_root = root.join("ws");
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let ws_root = flavor.workspaces_dir(root);
     let Ok(relative) = cwd.strip_prefix(&ws_root) else {
         return DEFAULT_WORKSPACE.to_string();
     };
@@ -111,7 +112,8 @@ fn sync_worktree_to_epoch_inner(
     epoch_oid: &str,
     announce: bool,
 ) -> Result<()> {
-    let ws_path = root.join("ws").join(ws_name);
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let ws_path = flavor.workspace_path(root, ws_name);
     if !ws_path.exists() {
         bail!("Workspace directory does not exist: {}", ws_path.display());
     }

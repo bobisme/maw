@@ -78,7 +78,10 @@ impl WorkspaceCreateLock {
     /// lockfile cannot be opened, or the kernel reports an unexpected
     /// failure while taking the lock.
     pub(super) fn acquire(root: &Path, ws_name: &str) -> io::Result<Self> {
-        let lock_dir = root.join(".manifold").join("locks").join("create");
+        let lock_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .manifold_dir(root)
+            .join("locks")
+            .join("create");
         std::fs::create_dir_all(&lock_dir)?;
         let path = lock_dir.join(format!("{ws_name}.lock"));
 

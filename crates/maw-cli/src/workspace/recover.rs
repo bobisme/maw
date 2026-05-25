@@ -1398,7 +1398,8 @@ pub enum DanglingReason {
 /// - The snapshot is the only recovery point for that workspace
 /// - There's an active merge in progress referencing it
 pub fn find_dangling_snapshots(root: &Path) -> Result<Vec<DanglingSnapshot>> {
-    let default_ws = root.join("ws").join("default");
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let default_ws = flavor.default_target_path(root, "default");
     let git_cwd = if default_ws.exists() {
         default_ws
     } else {
@@ -1624,9 +1625,11 @@ struct GcEnvelope {
     advice: Vec<String>,
 }
 
-/// List active workspace names by scanning the `ws/` directory.
+/// List active workspace names by scanning the workspaces directory
+/// (layout-aware: `ws/` in v2, `.maw/workspaces/` in consolidated).
 fn list_active_workspace_names(root: &Path) -> HashSet<String> {
-    let ws_dir = root.join("ws");
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let ws_dir = flavor.workspaces_dir(root);
     let mut names = HashSet::new();
     if let Ok(entries) = std::fs::read_dir(&ws_dir) {
         for entry in entries.flatten() {
@@ -1641,7 +1644,9 @@ fn list_active_workspace_names(root: &Path) -> HashSet<String> {
 
 /// Get workspace names involved in an active merge (if any).
 fn active_merge_workspaces(root: &Path) -> HashSet<String> {
-    let state_path = root.join(".manifold").join("merge-state.json");
+    let state_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
+        .join("merge-state.json");
     let mut names = HashSet::new();
     if let Ok(state) = MergeStateFile::read(&state_path) {
         for ws_id in &state.sources {

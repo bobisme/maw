@@ -272,7 +272,9 @@ fn repo_root_for_workspace(workspace_path: &Path) -> Result<PathBuf, DiffError> 
 
 fn load_file_id_map(workspace_path: &Path) -> Result<FileIdMap, DiffError> {
     let repo_root = repo_root_for_workspace(workspace_path)?;
-    let fileids_path = repo_root.join(".manifold").join("fileids");
+    let fileids_path = crate::model::layout::LayoutFlavor::detect_with_env(&repo_root)
+        .manifold_dir(&repo_root)
+        .join("fileids");
     FileIdMap::load(&fileids_path).map_err(|e| DiffError::FileIdMap(e.to_string()))
 }
 

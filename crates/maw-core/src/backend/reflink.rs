@@ -156,17 +156,18 @@ impl RefLinkBackend {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// `ws/` directory under the repo root.
+    /// Workspaces directory under the repo root (layout-aware).
     fn workspaces_dir(&self) -> PathBuf {
-        self.root.join("ws")
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(&self.root);
+        flavor.workspaces_dir(&self.root)
     }
 
     /// Path to the epoch snapshot directory for a given epoch.
     ///
     /// e.g. `/repo/.manifold/epochs/e-abc123.../`
     fn epoch_snapshot_path(&self, epoch: &EpochId) -> PathBuf {
-        self.root
-            .join(".manifold")
+        crate::model::layout::LayoutFlavor::detect_with_env(&self.root)
+            .manifold_dir(&self.root)
             .join("epochs")
             .join(format!("e-{}", epoch.as_str()))
     }

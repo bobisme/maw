@@ -96,7 +96,9 @@ pub struct RebaseConflicts {
 
 /// Path to the rebase conflicts JSON file for a workspace.
 fn rebase_conflicts_path(root: &Path, ws_name: &str) -> std::path::PathBuf {
-    root.join(".manifold")
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    flavor
+        .manifold_dir(root)
         .join("artifacts")
         .join("ws")
         .join(ws_name)
@@ -280,7 +282,8 @@ pub(super) fn rebase_workspace_run(
                     "Another rebase is in progress for workspace '{ws_name}'. \
                      Wait for it to finish and retry. \
                      (Lock file: {})",
-                    root.join(".manifold")
+                    maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+                        .manifold_dir(root)
                         .join("locks")
                         .join("rebase")
                         .join(format!("{ws_name}.lock"))
@@ -481,8 +484,10 @@ pub(super) fn rebase_workspace_run(
     // there) we use defaults — i.e. strict ON, ratio 1.5x. Failing
     // closed: a config we can't parse is not a license to skip the
     // check.
-    let manifold_config =
-        ManifoldConfig::load(&root.join(".manifold").join("config.toml")).unwrap_or_default();
+    let manifold_config = ManifoldConfig::load(
+        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).bootstrap_config_path(root),
+    )
+    .unwrap_or_default();
     let sanity_cfg = PostRebaseSanityConfig::from_merge(&manifold_config.merge);
     let mut sanity_flagged_steps = 0usize;
     let mut sanity_flagged_paths_total: Vec<PathBuf> = Vec::new();

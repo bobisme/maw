@@ -160,7 +160,9 @@ impl ChangesStore {
 
     #[must_use]
     pub fn changes_root(&self) -> PathBuf {
-        self.repo_root.join(".manifold").join("changes")
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&self.repo_root)
+            .manifold_dir(&self.repo_root)
+            .join("changes")
     }
 
     #[must_use]

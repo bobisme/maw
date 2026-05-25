@@ -10,11 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::model::types::GitOid;
 use crate::refs::{self, RefError};
 
-/// Commit-phase state persistence path relative to the repo root.
+/// Commit-phase state persistence filename inside the manifold dir.
 ///
-/// This is intentionally distinct from `.manifold/merge-state.json` used by
-/// the main merge state machine (`merge_state.rs`).
-const MERGE_STATE_REL_PATH: &str = ".manifold/commit-state.json";
+/// Intentionally distinct from `merge-state.json` used by the main merge
+/// state machine (`merge_state.rs`). Joined with the layout-aware manifold
+/// dir at use sites (v2 → `<root>/.manifold/`, consolidated →
+/// `<root>/.maw/manifold/`).
+const COMMIT_STATE_FILE: &str = "commit-state.json";
 
 /// Result of running the COMMIT phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +252,9 @@ pub fn read_merge_state(root: &Path) -> Result<CommitStateFile, CommitError> {
 }
 
 fn merge_state_path(root: &Path) -> PathBuf {
-    root.join(MERGE_STATE_REL_PATH)
+    crate::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
+        .join(COMMIT_STATE_FILE)
 }
 
 fn write_merge_state(root: &Path, state: &CommitStateFile) -> Result<(), CommitError> {

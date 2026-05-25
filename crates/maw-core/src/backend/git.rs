@@ -141,8 +141,12 @@ impl GitWorktreeBackend {
     }
 
     /// Get the directory where workspaces are stored.
+    ///
+    /// Layout-aware: v2 → `<root>/ws/`, consolidated → `<root>/.maw/workspaces/`
+    /// (T3.2 / bn-2sw3).
     fn workspaces_dir(&self) -> PathBuf {
-        self.root.join("ws")
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(&self.root);
+        flavor.workspaces_dir(&self.root)
     }
 
     /// Run a git command in a specific directory and return stdout.
@@ -221,7 +225,8 @@ impl GitWorktreeBackend {
     ///
     /// Missing config or parse/load failures fall back to enabled.
     fn git_compat_refs_enabled(&self) -> bool {
-        let config_path = self.root.join(".manifold").join("config.toml");
+        let config_path = crate::model::layout::LayoutFlavor::detect_with_env(&self.root)
+            .bootstrap_config_path(&self.root);
         ManifoldConfig::load(&config_path).map_or(true, |cfg| cfg.workspace.git_compat_refs)
     }
 

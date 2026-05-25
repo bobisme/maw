@@ -55,7 +55,8 @@ pub const EPOCH_LABEL: &str = "epoch";
 
 /// Directory holding sidecars for `ws_name` under `root`.
 fn sidecar_dir(root: &Path, ws_name: &str) -> PathBuf {
-    root.join(".manifold")
+    maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
         .join("artifacts")
         .join("ws")
         .join(ws_name)

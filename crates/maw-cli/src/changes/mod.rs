@@ -401,7 +401,8 @@ fn create_change(args: &CreateArgs) -> Result<()> {
         );
     }
 
-    let workspace_path = root.join("ws").join(&primary_workspace);
+    let workspace_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+        .workspace_path(&root, &primary_workspace);
     let advice = create_change_advice(&primary_workspace, &change_id);
     let envelope = CreateEnvelope {
         change_id,
@@ -595,7 +596,8 @@ fn resolve_create_source(root: &Path, source_spec: &str) -> Result<ResolvedSourc
         .map_err(|e| anyhow::anyhow!("Failed to read workspace source ref: {e}"))?
         .is_some()
     {
-        let ws_path = root.join("ws").join(source_spec);
+        let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .workspace_path(root, source_spec);
         let repo = maw_git::GixRepo::open(&ws_path)
             .map_err(|e| anyhow::anyhow!("Failed to open workspace '{source_spec}': {e}"))?;
         let head_oid = repo.rev_parse("HEAD").map_err(|e| {
@@ -833,11 +835,12 @@ fn ensure_linked_workspaces_resolved(
     record: &store::ChangeRecord,
     force: bool,
 ) -> Result<()> {
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
     let existing: Vec<String> = record
         .workspaces
         .linked
         .iter()
-        .filter(|workspace| root.join("ws").join(workspace).exists())
+        .filter(|workspace| flavor.workspace_path(root, workspace).exists())
         .cloned()
         .collect();
 
@@ -1289,7 +1292,9 @@ fn sync_change(args: &SyncArgs) -> Result<()> {
     let old_head = git_rev_parse(&root, &branch_ref)?;
     let published_on_origin = has_ref(&root, &format!("refs/remotes/origin/{change_branch}"))?;
 
-    let tmp_parent = root.join(".manifold").join("tmp");
+    let tmp_parent = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+        .manifold_dir(&root)
+        .join("tmp");
     fs::create_dir_all(&tmp_parent)
         .with_context(|| format!("Failed to create temp dir: {}", tmp_parent.display()))?;
     let temp_worktree = Builder::new()

@@ -799,12 +799,28 @@ fn sidecar_dir_for(ws_path: &Path) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    let repo_root = ws_path
+    // Layout-aware repo-root walk: v2 is `<root>/ws/<n>/` (two up);
+    // consolidated is `<root>/.maw/workspaces/<n>/` (three up). Try both
+    // and pick the one whose detected layout matches.
+    let two_up = ws_path
         .parent()
         .and_then(Path::parent)
-        .map_or_else(|| ws_path.to_path_buf(), Path::to_path_buf);
-    repo_root
-        .join(".manifold")
+        .map(Path::to_path_buf);
+    let three_up = two_up
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let repo_root = three_up
+        .as_ref()
+        .filter(|r| {
+            crate::model::layout::LayoutFlavor::detect_with_env(r)
+                == crate::model::layout::LayoutFlavor::ConsolidatedMawDir
+        })
+        .cloned()
+        .or(two_up)
+        .unwrap_or_else(|| ws_path.to_path_buf());
+    crate::model::layout::LayoutFlavor::detect_with_env(&repo_root)
+        .manifold_dir(&repo_root)
         .join("artifacts")
         .join("ws")
         .join(ws_name)

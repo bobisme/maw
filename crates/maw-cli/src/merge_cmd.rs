@@ -171,7 +171,7 @@ pub fn run(cmd: &MergeCommands) -> Result<()> {
 /// Re-validate and commit a quarantine workspace.
 fn promote(merge_id: &str) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
 
     // Read state before promoting (for informational output)
     let state =
@@ -288,7 +288,7 @@ fn print_promote_success(merge_id: &str, new_epoch_short: &str, branch: &str) {
 /// Discard a quarantine workspace.
 fn abandon(merge_id: &str) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
 
     let ws_path = quarantine_workspace_path(&root, merge_id);
 
@@ -336,7 +336,7 @@ fn abandon(merge_id: &str) -> Result<()> {
 /// List all active quarantine workspaces.
 fn list() -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let maw_config = MawConfig::load(&root)?;
     let _backend = get_backend()?;
 

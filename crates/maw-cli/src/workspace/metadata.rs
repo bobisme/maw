@@ -105,8 +105,8 @@ pub fn delete(repo_root: &Path, name: &str) -> Result<()> {
 
 /// Canonical path for the metadata file of a workspace.
 pub fn metadata_path(repo_root: &Path, name: &str) -> PathBuf {
-    repo_root
-        .join(".manifold")
+    maw_core::model::layout::LayoutFlavor::detect_with_env(repo_root)
+        .manifold_dir(repo_root)
         .join("workspaces")
         .join(format!("{name}.toml"))
 }

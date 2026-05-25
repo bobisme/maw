@@ -58,7 +58,8 @@ pub fn count_stale_head_refs(root: &Path) -> Result<usize> {
         if ws_name.is_empty() {
             continue;
         }
-        let ws_dir = root.join("ws").join(ws_name);
+        let ws_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .workspace_path(root, ws_name);
         if !ws_dir.exists() {
             count += 1;
         }
@@ -77,7 +78,9 @@ fn live_merge_source_names(root: &Path) -> std::collections::HashSet<String> {
     use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateFile, Staleness};
 
     let mut names = std::collections::HashSet::new();
-    let state_path = MergeStateFile::default_path(&root.join(".manifold"));
+    let state_path = MergeStateFile::default_path(
+        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
+    );
     let Ok(state) = MergeStateFile::read(&state_path) else {
         return names;
     };
@@ -126,7 +129,8 @@ fn prune_dangling_head_refs(
         if ws_name.is_empty() {
             continue;
         }
-        let ws_dir = root.join("ws").join(ws_name);
+        let ws_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .workspace_path(root, ws_name);
         if ws_dir.exists() {
             continue;
         }

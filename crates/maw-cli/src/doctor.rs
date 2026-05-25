@@ -330,18 +330,30 @@ fn check_manifold_initialized(root: Option<&Path>) -> DoctorCheck {
         };
     };
 
-    if root.join(".manifold").exists() {
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let manifold = flavor.manifold_dir(root);
+    if manifold.exists() {
+        let label = match flavor {
+            maw_core::model::layout::LayoutFlavor::ConsolidatedMawDir => ".maw/manifold/",
+            maw_core::model::layout::LayoutFlavor::V2WsRoot => ".manifold/",
+        };
         DoctorCheck {
             name: "manifold metadata".to_string(),
             status: "ok".to_string(),
-            message: "manifold metadata: .manifold/ exists".to_string(),
+            message: format!("manifold metadata: {label} exists"),
             fix: None,
         }
     } else {
         DoctorCheck {
             name: "manifold metadata".to_string(),
             status: "fail".to_string(),
-            message: "manifold metadata: .manifold/ is missing".to_string(),
+            message: format!(
+                "manifold metadata: {} is missing",
+                manifold
+                    .strip_prefix(root)
+                    .unwrap_or(&manifold)
+                    .display()
+            ),
             fix: Some("Run: maw init".to_string()),
         }
     }
@@ -357,7 +369,27 @@ fn check_default_workspace(root: Option<&Path>) -> DoctorCheck {
         };
     };
 
-    let default_ws = root.join("ws").join("default");
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let default_ws = flavor.default_target_path(root, "default");
+
+    // Consolidated layout: the root itself IS the default workspace; it
+    // always exists (we're checking via the repo root), no worktree
+    // registration is needed because the root is the primary worktree.
+    if matches!(
+        flavor,
+        maw_core::model::layout::LayoutFlavor::ConsolidatedMawDir
+    ) {
+        return DoctorCheck {
+            name: "default workspace".to_string(),
+            status: "ok".to_string(),
+            message: format!(
+                "default workspace: consolidated layout — root checkout at {}",
+                default_ws.display()
+            ),
+            fix: None,
+        };
+    }
+
     if !default_ws.exists() {
         return DoctorCheck {
             name: "default workspace".to_string(),
@@ -471,6 +503,21 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
         };
     };
 
+    // Consolidated layout: the root is intentionally a live checkout, so
+    // "stray" project files are expected. Skip the bare-root strict check.
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    if matches!(
+        flavor,
+        maw_core::model::layout::LayoutFlavor::ConsolidatedMawDir
+    ) {
+        return DoctorCheck {
+            name: "repo root".to_string(),
+            status: "ok".to_string(),
+            message: "repo root: consolidated layout (live checkout at root)".to_string(),
+            fix: None,
+        };
+    }
+
     let stray = stray_root_entries(root);
     if stray.is_empty() {
         DoctorCheck {
@@ -493,7 +540,7 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
     }
 }
 
-const BARE_ROOT_ALLOWED: &[&str] = &[".git", ".manifold", "repo.git", "ws"];
+const BARE_ROOT_ALLOWED: &[&str] = &[".git", ".manifold", ".maw", "repo.git", "ws"];
 
 fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
     let Some(root) = root else {
@@ -682,7 +729,9 @@ fn check_merge_state(root: Option<&Path>) -> DoctorCheck {
         };
     };
 
-    let state_path = MergeStateFile::default_path(&root.join(".manifold"));
+    let state_path = MergeStateFile::default_path(
+        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
+    );
     let state = match MergeStateFile::read(&state_path) {
         Err(MergeStateError::NotFound(_)) => {
             return DoctorCheck {
@@ -984,7 +1033,8 @@ fn check_lfs(root: Option<&Path>) -> DoctorCheck {
 
 #[cfg(feature = "lfs")]
 fn check_lfs_in(root: &Path) -> DoctorCheck {
-    let ws_root = root.join("ws");
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let ws_root = flavor.workspaces_dir(root);
     if !has_any_gitattributes(&ws_root) {
         return DoctorCheck {
             name: "lfs".to_string(),

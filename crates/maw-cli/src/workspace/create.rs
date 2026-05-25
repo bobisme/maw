@@ -107,7 +107,14 @@ fn create_with_output(
     let template_profile = template.map(WorkspaceTemplate::profile);
 
     if emit_output {
-        println!("Creating workspace '{name}' at ws/{name} ...");
+        // Path display is layout-aware: v2 → ws/<name>, consolidated →
+        // .maw/workspaces/<name>. SP5 §6 risk #1 (hidden-dir invisibility):
+        // always name the full path so agents can navigate without guessing.
+        let display_path = path.strip_prefix(&root).map_or_else(
+            |_| path.display().to_string(),
+            |p| p.display().to_string(),
+        );
+        println!("Creating workspace '{name}' at {display_path} ...");
     }
     if persistent && emit_output {
         println!(
@@ -300,7 +307,8 @@ fn resolve_from_source(root: &std::path::Path, from: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Failed to read workspace source ref: {e}"))?
         .is_some()
     {
-        let ws_path = root.join("ws").join(from);
+        let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .workspace_path(root, from);
         let repo = maw_git::GixRepo::open(&ws_path)
             .map_err(|e| anyhow::anyhow!("Failed to open workspace '{from}': {e}"))?;
         let head_oid = repo
@@ -568,7 +576,9 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
 fn guard_destroy_against_inflight_merge(root: &std::path::Path, name: &str) -> Result<()> {
     use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateFile, Staleness};
 
-    let state_path = MergeStateFile::default_path(&root.join(".manifold"));
+    let state_path = MergeStateFile::default_path(
+        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
+    );
     // No merge in progress (NotFound) or an unreadable/corrupt merge-state:
     // nothing to serialize against. A corrupt merge-state is surfaced
     // separately by `maw doctor`; it must not wedge destroy.
@@ -894,7 +904,9 @@ pub fn attach(name: &str, revision: Option<&str>) -> Result<()> {
     );
 
     // Move existing contents to a temp location
-    let temp_backup = root.join("ws").join(format!(".{name}-attach-backup"));
+    let temp_backup = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+        .workspaces_dir(&root)
+        .join(format!(".{name}-attach-backup"));
     backup_workspace_contents(&path, &temp_backup)?;
 
     // Create the worktree via backend

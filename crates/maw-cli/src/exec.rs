@@ -60,7 +60,15 @@ pub fn run(args: &ExecArgs) -> Result<()> {
         );
     }
 
-    let path = workspace::workspace_path(&args.workspace)?;
+    // Resolve the workspace path. The sentinel "default" name refers to the
+    // privileged target — in the v2 layout that's `ws/default/`; in the
+    // consolidated layout that's the repo root itself (T3.2 / bn-2sw3).
+    let path = workspace::resolve_workspace_path_for_cd(&args.workspace).or_else(|_| {
+        // Fall back to the strict workspace_path lookup so the original
+        // error message ("Workspace … does not exist") still surfaces for
+        // genuinely missing workspaces.
+        workspace::workspace_path(&args.workspace)
+    })?;
     if !path.exists() {
         bail!(
             "Workspace '{}' does not exist at {}\n  \

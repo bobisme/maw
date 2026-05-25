@@ -122,7 +122,7 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     }
 
     let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ws_path = root.join("ws").join(&workspace_name);
+    let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, &workspace_name);
 
     if !ws_status.is_stale {
         println!("Workspace '{workspace_name}' is up to date.");
@@ -267,7 +267,7 @@ fn sync_all(no_rebase: bool) -> Result<()> {
         // reset). If git fails (None), treat as "has work" to prevent data
         // loss. Compare against the workspace's base epoch (not current
         // epoch) — see committed_ahead_of_epoch docs.
-        let ws_path = root.join("ws").join(name);
+        let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
         let ws_status = backend.status(&ws.id).map_err(|e| anyhow::anyhow!("{e}"))?;
         let ahead_count = match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
             None => {
@@ -419,7 +419,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     // stale AND has diverged commits. Syncing would wipe those commits.
     // The lead agent must merge this workspace first.
     // NOTE: Compare against base epoch, not current — see bn-18dj.
-    let ws_path = root.join("ws").join(name);
+    let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
     match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
         None => {
             eprintln!(
@@ -470,7 +470,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
 
     // Safety: don't auto-sync over uncommitted changes — warn and let the
     // command run against the stale workspace instead of blocking it entirely.
-    let ws_path = root.join("ws").join(name);
+    let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
     let is_dirty = workspace_has_uncommitted_changes(&ws_path).unwrap_or(false);
     if is_dirty {
         eprintln!(

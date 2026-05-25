@@ -186,9 +186,10 @@ impl OverlayBackend {
 
     // --- directory helpers --------------------------------------------------
 
-    /// `ws/` directory (workspace mount points live here).
+    /// Directory where workspace mount points live (layout-aware).
     fn workspaces_dir(&self) -> PathBuf {
-        self.root.join("ws")
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(&self.root);
+        flavor.workspaces_dir(&self.root)
     }
 
     /// `ws/<name>/` — overlay mount point (the workspace working copy).
@@ -196,36 +197,37 @@ impl OverlayBackend {
         self.workspaces_dir().join(name.as_str())
     }
 
-    /// `.manifold/epochs/e-{hash}/` — immutable epoch snapshot (lowerdir).
+    /// Layout-aware manifold dir resolver.
+    fn manifold_root(&self) -> PathBuf {
+        crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root)
+    }
+
+    /// `.../epochs/e-{hash}/` — immutable epoch snapshot (lowerdir).
     fn epoch_snapshot_dir(&self, epoch: &EpochId) -> PathBuf {
-        self.root
-            .join(".manifold")
+        self.manifold_root()
             .join("epochs")
             .join(format!("e-{}", epoch.as_str()))
     }
 
-    /// `.manifold/cow/<name>/upper/` — per-workspace writable layer.
+    /// `.../cow/<name>/upper/` — per-workspace writable layer.
     fn upper_dir(&self, name: &WorkspaceId) -> PathBuf {
-        self.root
-            .join(".manifold")
+        self.manifold_root()
             .join("cow")
             .join(name.as_str())
             .join("upper")
     }
 
-    /// `.manifold/cow/<name>/work/` — overlayfs bookkeeping dir.
+    /// `.../cow/<name>/work/` — overlayfs bookkeeping dir.
     fn work_dir(&self, name: &WorkspaceId) -> PathBuf {
-        self.root
-            .join(".manifold")
+        self.manifold_root()
             .join("cow")
             .join(name.as_str())
             .join("work")
     }
 
-    /// `.manifold/cow/<name>/epoch` — records which epoch this workspace uses.
+    /// `.../cow/<name>/epoch` — records which epoch this workspace uses.
     fn workspace_epoch_file(&self, name: &WorkspaceId) -> PathBuf {
-        self.root
-            .join(".manifold")
+        self.manifold_root()
             .join("cow")
             .join(name.as_str())
             .join("epoch")
@@ -333,7 +335,7 @@ impl OverlayBackend {
             let _ = fs::remove_dir_all(&mount_point);
         }
 
-        let cow_dir = self.root.join(".manifold").join("cow").join(name.as_str());
+        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root).join("cow").join(name.as_str());
         if cow_dir.exists() {
             let _ = fs::remove_dir_all(&cow_dir);
         }
@@ -599,7 +601,7 @@ impl WorkspaceBackend for OverlayBackend {
         }
 
         // Remove CoW directories (upper + work).
-        let cow_dir = self.root.join(".manifold").join("cow").join(name.as_str());
+        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root).join("cow").join(name.as_str());
         if cow_dir.exists() {
             fs::remove_dir_all(&cow_dir)?;
         }
@@ -616,7 +618,7 @@ impl WorkspaceBackend for OverlayBackend {
     }
 
     fn list(&self) -> Result<Vec<WorkspaceInfo>, Self::Error> {
-        let cow_dir = self.root.join(".manifold").join("cow");
+        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root).join("cow");
         if !cow_dir.exists() {
             return Ok(vec![]);
         }

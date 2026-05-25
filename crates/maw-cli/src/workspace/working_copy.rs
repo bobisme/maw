@@ -176,7 +176,8 @@ pub struct RewriteRecord {
 /// Root directory for rewrite artifacts for a given workspace.
 #[allow(dead_code)]
 fn rewrite_dir(root: &Path, workspace: &str) -> PathBuf {
-    root.join(".manifold")
+    maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
         .join("artifacts")
         .join("rewrite")
         .join(workspace)
@@ -285,7 +286,10 @@ pub fn read_rewrite_record(path: &Path) -> Result<RewriteRecord> {
 /// List all workspace names that have rewrite records.
 #[allow(dead_code)]
 pub fn list_rewritten_workspaces(root: &Path) -> Result<Vec<String>> {
-    let rewrite_root = root.join(".manifold").join("artifacts").join("rewrite");
+    let rewrite_root = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
+        .join("artifacts")
+        .join("rewrite");
     if !rewrite_root.exists() {
         return Ok(vec![]);
     }
@@ -700,13 +704,34 @@ pub fn replay_snapshot_with_merge_protection(
     // Load the manifold config once so the bn-2upt sanity check below can
     // honor `merge.strict_post_rebase_check` and `merge.post_rebase_size_ratio_max`.
     // Resolve the repo root from `ws_path`: ws/<name>/ → repo_root.
-    let sanity_cfg = ws_path
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map_or_else(maw_core::config::ManifoldConfig::default, |root| {
-            maw_core::config::ManifoldConfig::load(&root.join(".manifold").join("config.toml"))
-                .unwrap_or_default()
-        });
+    let sanity_cfg = {
+        // Layout-aware repo-root resolution. From `<root>/ws/<n>/` we go
+        // up two levels (parent().parent() → root); from
+        // `<root>/.maw/workspaces/<n>/` we go up three. Try both shapes
+        // and load whichever config exists; missing → defaults.
+        let two_up = ws_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf);
+        let three_up = two_up
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf);
+
+        let mut cfg = maw_core::config::ManifoldConfig::default();
+        for candidate_root in [two_up, three_up].into_iter().flatten() {
+            let manifold = maw_core::model::layout::LayoutFlavor::detect_with_env(&candidate_root)
+                .manifold_dir(&candidate_root);
+            let cfg_path = manifold.join("config.toml");
+            if cfg_path.exists()
+                && let Ok(loaded) = maw_core::config::ManifoldConfig::load(&cfg_path)
+            {
+                cfg = loaded;
+                break;
+            }
+        }
+        cfg
+    };
 
     // Step 3: Save the merge versions of overlapping files BEFORE stash apply.
     // After checkout, these files contain the correct merge result.

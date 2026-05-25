@@ -47,7 +47,9 @@ impl Default for PlatformCapabilities {
 /// Resolve path for platform capability cache.
 #[must_use]
 pub fn cache_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".manifold").join("platform-capabilities")
+    crate::model::layout::LayoutFlavor::detect_with_env(repo_root)
+        .manifold_dir(repo_root)
+        .join("platform-capabilities")
 }
 
 /// Load cached capabilities if present and valid.
@@ -167,7 +169,8 @@ pub const fn auto_select_backend(
     BackendKind::GitWorktree
 }
 
-/// Count tracked + untracked repo files (best-effort), excluding `.git` and `ws`.
+/// Count tracked + untracked repo files (best-effort), excluding internal
+/// admin directories (`.git`, `ws`, `.maw`, `.manifold`, `repo.git`).
 #[must_use]
 pub fn estimate_repo_file_count(repo_root: &Path) -> Option<usize> {
     fn walk(path: &Path, count: &mut usize) -> std::io::Result<()> {
@@ -175,7 +178,12 @@ pub fn estimate_repo_file_count(repo_root: &Path) -> Option<usize> {
             let entry = entry?;
             let p = entry.path();
             let name = entry.file_name();
-            if name == OsStr::new(".git") || name == OsStr::new("ws") {
+            if name == OsStr::new(".git")
+                || name == OsStr::new("ws")
+                || name == OsStr::new(".maw")
+                || name == OsStr::new(".manifold")
+                || name == OsStr::new("repo.git")
+            {
                 continue;
             }
             if p.is_dir() {

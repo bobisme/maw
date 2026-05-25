@@ -436,11 +436,14 @@ fn repo_root_from_worktree(ws_path: &Path) -> Result<std::path::PathBuf> {
     // Without this check, a non-standard layout silently returns a wrong
     // path and recovery refs get pinned under an unrelated repo's
     // namespace (bn-2bow).
+    // Layout-aware: accept either v2 markers (ws/ or .manifold/) or
+    // consolidated markers (.maw/manifold/).
     let has_ws_dir = root.join("ws").is_dir();
     let has_manifold_dir = root.join(".manifold").is_dir();
-    if !has_ws_dir && !has_manifold_dir {
+    let has_consolidated = root.join(".maw").join("manifold").is_dir();
+    if !has_ws_dir && !has_manifold_dir && !has_consolidated {
         bail!(
-            "derived repo root {} does not contain `ws/` or `.manifold/` — \
+            "derived repo root {} does not contain `ws/`, `.manifold/`, or `.maw/manifold/` — \
              refusing to pin recovery ref under an unrecognized layout",
             root.display()
         );
@@ -613,7 +616,9 @@ mod tests {
         );
         let err = format!("{}", result.expect_err("operation should fail"));
         assert!(
-            err.contains("does not contain `ws/` or `.manifold/`"),
+            err.contains("does not contain `ws/`")
+                && err.contains(".manifold/")
+                && err.contains(".maw/manifold/"),
             "unexpected error message: {err}"
         );
     }

@@ -106,7 +106,8 @@ pub fn run(
     format: OutputFormat,
 ) -> Result<()> {
     let root = repo_root()?;
-    let ws_path = root.join("ws").join(workspace);
+    let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+        .workspace_path(&root, workspace);
     if !ws_path.exists() {
         bail!(
             "Workspace '{}' not found at {}\n  To fix: check workspace name with `maw ws list`",

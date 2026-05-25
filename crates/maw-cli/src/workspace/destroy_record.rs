@@ -66,8 +66,8 @@ pub fn write_destroy_record(
     let destroyed_at = super::now_timestamp_iso8601_precise();
     let filename_ts = destroyed_at.replace(':', "-");
 
-    let destroy_dir = root
-        .join(".manifold")
+    let destroy_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
         .join("artifacts")
         .join("ws")
         .join(workspace_name)
@@ -159,7 +159,8 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Path to the destroy artifacts directory for a workspace.
 pub fn destroy_dir(root: &Path, workspace_name: &str) -> PathBuf {
-    root.join(".manifold")
+    maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
         .join("artifacts")
         .join("ws")
         .join(workspace_name)
@@ -214,7 +215,10 @@ pub fn list_record_files(root: &Path, workspace_name: &str) -> Result<Vec<String
 /// discovery resilient to partial writes where the record was persisted but
 /// `latest.json` was not (e.g. crash between the two writes).
 pub fn list_destroyed_workspaces(root: &Path) -> Result<Vec<String>> {
-    let ws_dir = root.join(".manifold").join("artifacts").join("ws");
+    let ws_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
+        .join("artifacts")
+        .join("ws");
     if !ws_dir.exists() {
         return Ok(vec![]);
     }

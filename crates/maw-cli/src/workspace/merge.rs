@@ -1582,7 +1582,7 @@ fn check_merge_result_for_target(
     }
 
     // Try a BUILD phase to detect conflicts (don't COMMIT)
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let temp_check_dir = tempfile::Builder::new()
         .prefix("check-tmp-")
         .tempdir_in(&manifold_dir)
@@ -1781,7 +1781,7 @@ pub fn plan_merge(
         );
     }
 
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let sources = parse_workspace_ids(workspaces)?;
@@ -2197,7 +2197,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     }
 
     // Run PREPARE + BUILD in a temp dir to detect conflicts without committing
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let temp_check_dir = tempfile::Builder::new()
         .prefix("conflicts-tmp-")
         .tempdir_in(&manifold_dir)
@@ -2289,8 +2289,9 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     // resolving. The merge engine treats marker text as ordinary content,
     // so it wouldn't flag these. Scan each workspace's worktree explicitly.
     let mut workspaces_with_markers: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+    let conflict_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
     for ws_name in workspaces {
-        let ws_path = root.join("ws").join(ws_name);
+        let ws_path = conflict_flavor.workspace_path(&root, ws_name);
         let marker_files = super::resolve::find_conflicted_files(&ws_path).unwrap_or_default();
         if !marker_files.is_empty() {
             workspaces_with_markers.push((ws_name.clone(), marker_files));
@@ -2942,7 +2943,8 @@ fn reconcile_epoch_with_branch(
             // self-block. What matters for safety is whether the target's
             // *uncommitted* edits would be clobbered by the FF-range checkout
             // in `sync_target_worktree_to_epoch`. Check only those.
-            let target_path = root.join("ws").join(target_workspace_name);
+            let target_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+                .default_target_path(root, target_workspace_name);
             let dirty = dirty_paths_in_workspace(&target_path);
             if !dirty.is_empty() {
                 ws_touched.push(super::ff_absorb::WorkspaceTouchedPaths {
@@ -2994,7 +2996,8 @@ fn reconcile_epoch_with_branch(
                         "failed to advance workspace epoch ref after FF absorb"
                     );
                 }
-                let ws_path = root.join("ws").join(&ws.name);
+                let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+                    .workspace_path(root, &ws.name);
                 sync_ff_paths_in_worktree(&ws_path, &ws.name, branch_oid, &ff_paths);
             }
 
@@ -3021,7 +3024,8 @@ fn reconcile_epoch_with_branch(
             // for this is guaranteed by the predicate: the target's dirty
             // paths (if any) were already proven disjoint from the FF range.
             sync_target_worktree_to_epoch(
-                &root.join("ws").join(target_workspace_name),
+                &maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+                    .default_target_path(root, target_workspace_name),
                 target_workspace_name,
                 branch_oid,
             );
@@ -3588,8 +3592,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // "diverged" error, augmented with the affected workspace list when the
     // FF was a candidate but blocked.
     if target_updates_epoch && let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(&root) {
-        let manifold_config =
-            ManifoldConfig::load(&root.join(".manifold").join("config.toml")).unwrap_or_default();
+        let manifold_config = ManifoldConfig::load(
+            &maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+                .bootstrap_config_path(&root),
+        )
+        .unwrap_or_default();
         reconcile_epoch_with_branch(
             &root,
             branch,
@@ -3654,10 +3661,15 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         false,
     );
 
-    // Set up paths
-    let manifold_dir = root.join(".manifold");
-    let default_ws_path = root.join("ws").join(default_ws);
-    let target_base_epoch_before = if default_ws_path.exists() {
+    // Set up paths (layout-aware: v2 → `<root>/ws/default`, consolidated → root).
+    let layout_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
+    let manifold_dir = layout_flavor.manifold_dir(&root);
+    let default_ws_path = layout_flavor.default_target_path(&root, default_ws);
+    // In the consolidated layout the privileged target IS the root checkout —
+    // there's no `.maw/workspaces/default/` for the backend to inspect, so
+    // skip the per-workspace base-epoch probe. The merge engine derives the
+    // pre-merge epoch from the current epoch ref directly.
+    let target_base_epoch_before = if default_ws_path.exists() && !default_ws_path.eq(&root) {
         let target_ws_id = WorkspaceId::new(default_ws)
             .map_err(|e| anyhow::anyhow!("invalid target workspace '{default_ws}': {e}"))?;
         Some(
@@ -4342,7 +4354,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // result line.
     // -----------------------------------------------------------------------
     if target_updates_epoch {
-        let manifold_config_path = root.join(".manifold").join("config.toml");
+        let manifold_config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+            .bootstrap_config_path(&root);
         let manifold_cfg =
             maw_core::config::ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
         let auto_rebase_enabled =
@@ -4469,11 +4482,13 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // Also clean up commit-phase sidecar state files if present.
     // `commit-state.json` is current; `merge-state` is a legacy fallback.
-    let commit_state_path = root.join(".manifold").join("commit-state.json");
+    let abort_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
+    let abort_manifold = abort_flavor.manifold_dir(&root);
+    let commit_state_path = abort_manifold.join("commit-state.json");
     if commit_state_path.exists() {
         let _ = std::fs::remove_file(&commit_state_path);
     }
-    let legacy_commit_state_path = root.join(".manifold").join("merge-state");
+    let legacy_commit_state_path = abort_manifold.join("merge-state");
     if legacy_commit_state_path.exists() {
         let _ = std::fs::remove_file(&legacy_commit_state_path);
     }
@@ -4874,7 +4889,8 @@ fn abort_merge(manifold_dir: &Path, reason: &str) {
 /// Returns an error on I/O / deserialization failure, or (with a non-zero
 /// exit) when the abort is refused for safety.
 pub fn abort_in_progress_merge(root: &Path, fmt: OutputFormat) -> Result<()> {
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root);
     let state_path = MergeStateFile::default_path(&manifold_dir);
     let text_mode = fmt != OutputFormat::Json;
 
@@ -5582,6 +5598,12 @@ fn handle_post_merge_destroy(
     if text_mode {
         println!("  Cleaning up workspaces...");
     }
+    // Belt-and-braces (C4 from sg3-layout-design §2.2): in addition to the
+    // by-name guard above, canonicalize the resolved workspace path and
+    // refuse to destroy if it canonicalizes to the privileged root. This
+    // defends against a future caller passing the root path as a "source"
+    // in the consolidated layout (where root IS the merge target).
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     for ws_name in &ws_to_destroy {
         if ws_name == default_ws {
             if text_mode {
@@ -5596,6 +5618,18 @@ fn handle_post_merge_destroy(
 
         // --- Step 1: Get workspace metadata (path + base epoch) ---
         let ws_path = backend.workspace_path(&ws_id);
+
+        // C4 path-based guard: never destroy the repo root, regardless of name.
+        let canonical_ws =
+            std::fs::canonicalize(&ws_path).unwrap_or_else(|_| ws_path.clone());
+        if canonical_ws == canonical_root {
+            if text_mode {
+                println!(
+                    "    Skipping '{ws_name}': resolves to repo root (privileged target)"
+                );
+            }
+            continue;
+        }
         let base_epoch = match backend.status(&ws_id) {
             Ok(status) => status.base_epoch.to_epoch_id(),
             Err(e) => {

@@ -54,7 +54,10 @@ impl WorkspaceRebaseLock {
     /// * `Err(...)` — unexpected I/O error (cannot create the lock dir,
     ///   cannot open the lockfile, etc.).
     pub(super) fn try_acquire(root: &Path, ws_name: &str) -> io::Result<Option<Self>> {
-        let lock_dir = root.join(".manifold").join("locks").join("rebase");
+        let lock_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .manifold_dir(root)
+            .join("locks")
+            .join("rebase");
         std::fs::create_dir_all(&lock_dir)?;
         let path = lock_dir.join(format!("{ws_name}.lock"));
 

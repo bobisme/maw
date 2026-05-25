@@ -11,6 +11,7 @@ use crate::format::OutputFormat;
 use maw_core::backend::platform;
 use maw_core::backend::{AnyBackend, WorkspaceBackend};
 use maw_core::config::{BackendKind, ManifoldConfig};
+use maw_core::model::layout::{LayoutFlavor, MAW_DIR, V2_WORKSPACES_DIR};
 use maw_core::model::types::WorkspaceId;
 
 mod advance;
@@ -125,21 +126,16 @@ impl MawConfig {
     ///
     /// Returns an error if the config file cannot be read or parsed.
     pub fn load(repo_root: &Path) -> Result<Self> {
-        let root_config = repo_root.join(".maw.toml");
-        let ws_config = repo_root.join("ws").join("default").join(".maw.toml");
-
-        let config_path = if root_config.exists() {
-            root_config
-        } else if ws_config.exists() {
-            ws_config
-        } else {
-            return Ok(Self::default());
-        };
-
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {}", config_path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("Failed to parse {}", config_path.display()))
+        let flavor = LayoutFlavor::detect_with_env(repo_root);
+        for candidate in flavor.maw_toml_search_paths(repo_root, DEFAULT_WORKSPACE) {
+            if candidate.exists() {
+                let content = std::fs::read_to_string(&candidate)
+                    .with_context(|| format!("Failed to read {}", candidate.display()))?;
+                return toml::from_str(&content)
+                    .with_context(|| format!("Failed to parse {}", candidate.display()));
+            }
+        }
+        Ok(Self::default())
     }
 
     /// The configured branch name (default: "main").
@@ -189,7 +185,8 @@ fn resolve_merge_target(root: &Path, into: &str) -> Result<MergeTarget> {
     let change_record = store.read_active_record(into)?;
 
     validate_workspace_name(into)?;
-    let target_path = root.join("ws").join(into);
+    let flavor = LayoutFlavor::detect_with_env(root);
+    let target_path = flavor.workspace_path(root, into);
     let workspace_exists = target_path.exists();
 
     match (change_record, workspace_exists) {
@@ -249,7 +246,8 @@ fn resolve_merge_target_workspace(root: &Path, workspace: &str) -> Result<MergeT
     }
 
     validate_workspace_name(workspace)?;
-    let target_path = root.join("ws").join(workspace);
+    let flavor = LayoutFlavor::detect_with_env(root);
+    let target_path = flavor.workspace_path(root, workspace);
     if !target_path.exists() {
         bail!("Workspace '{workspace}' does not exist.\n  Check available workspaces: maw ws list");
     }
@@ -1758,10 +1756,15 @@ pub fn repo_root() -> Result<PathBuf> {
     }
 
     // Fallback: ancestor walk for Manifold markers. Used when git is not
-    // available or not in a git repo at all.
+    // available or not in a git repo at all. Tolerates both layouts:
+    // - V2:           .manifold/ + (ws/ or .git)
+    // - Consolidated: .maw/manifold/ + .git
     let cwd = std::env::current_dir().context("Could not determine current directory")?;
     if let Some(root) = cwd.ancestors().find(|dir| {
-        dir.join(".manifold").is_dir() && (dir.join("ws").is_dir() || dir.join(".git").exists())
+        let consolidated_marker = dir.join(MAW_DIR).join("manifold").is_dir();
+        let v2_marker = dir.join(".manifold").is_dir()
+            && (dir.join(V2_WORKSPACES_DIR).is_dir() || dir.join(".git").exists());
+        consolidated_marker || v2_marker
     }) {
         return Ok(root.to_path_buf());
     }
@@ -1775,20 +1778,69 @@ pub fn repo_root() -> Result<PathBuf> {
 
 /// Return the best directory for running git commands.
 ///
-/// In v2 bare repo model, the repo root has no workspace. This returns
-/// `ws/default/` when it exists, falling back to the repo root.
+/// In the v2 bare-repo model, the repo root has no working tree, so this
+/// returns `ws/default/` when it exists, falling back to the repo root.
+/// In the consolidated `.maw/` layout, the root IS the live checkout / the
+/// privileged target, so this returns the root directly.
 ///
 /// # Errors
 ///
 /// Returns an error if the repository root cannot be discovered.
 pub fn git_cwd() -> Result<PathBuf> {
     let root = repo_root()?;
-    let default_ws = root.join("ws").join("default");
-    if default_ws.exists() {
-        Ok(default_ws)
-    } else {
-        Ok(root)
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    match flavor {
+        LayoutFlavor::ConsolidatedMawDir => Ok(root),
+        LayoutFlavor::V2WsRoot => {
+            let default_ws = flavor.default_target_path(&root, DEFAULT_WORKSPACE);
+            if default_ws.exists() {
+                Ok(default_ws)
+            } else {
+                Ok(root)
+            }
+        }
     }
+}
+
+/// Detect the layout flavor for the current repo.
+///
+/// Convenience wrapper that combines [`repo_root`] + [`LayoutFlavor::detect_with_env`].
+///
+/// # Errors
+///
+/// Returns an error if the repository root cannot be discovered.
+pub fn detect_layout() -> Result<LayoutFlavor> {
+    let root = repo_root()?;
+    Ok(LayoutFlavor::detect_with_env(&root))
+}
+
+/// Resolve the absolute on-disk path for a `maw cd <name>` recipe.
+///
+/// The sentinel `default` resolves to the privileged target (repo root in
+/// the consolidated layout, `ws/default/` in v2). Any other name resolves
+/// to the corresponding workspace directory.
+///
+/// # Errors
+///
+/// Returns an error if the name is invalid or the workspace does not exist.
+pub fn resolve_workspace_path_for_cd(name: &str) -> Result<PathBuf> {
+    let root = repo_root()?;
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    let config = MawConfig::load(&root).unwrap_or_default();
+    let default = config.default_workspace().to_owned();
+    let path = if name == default || name == DEFAULT_WORKSPACE {
+        flavor.default_target_path(&root, &default)
+    } else {
+        validate_workspace_name(name)?;
+        flavor.workspace_path(&root, name)
+    };
+    if !path.exists() {
+        bail!(
+            "Workspace path does not exist: {}\n  Check available workspaces: maw ws list",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 /// Resolve the workspace backend from `.manifold/config.toml` and platform capabilities.
@@ -1802,8 +1854,10 @@ pub fn git_cwd() -> Result<PathBuf> {
 pub fn get_backend() -> Result<AnyBackend> {
     let root = repo_root()?;
 
-    // Load `.manifold/config.toml` (missing file → all defaults).
-    let manifold_config_path = root.join(".manifold").join("config.toml");
+    // Load the bootstrap manifold config (missing file → all defaults).
+    // Layout-aware so the consolidated `.maw/config.toml` is picked up too.
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    let manifold_config_path = flavor.bootstrap_config_path(&root);
     let manifold_config = ManifoldConfig::load(&manifold_config_path).unwrap_or_default();
     let configured_kind = manifold_config.workspace.backend;
 
@@ -1851,8 +1905,14 @@ fn ensure_repo_root() -> Result<PathBuf> {
     Ok(root)
 }
 
+/// Directory where individual workspace worktrees live.
+///
+/// Dispatched on layout flavor (v2 → `<root>/ws/`, consolidated →
+/// `<root>/.maw/workspaces/`).
 fn workspaces_dir() -> Result<PathBuf> {
-    Ok(repo_root()?.join("ws"))
+    let root = repo_root()?;
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    Ok(flavor.workspaces_dir(&root))
 }
 
 /// # Errors

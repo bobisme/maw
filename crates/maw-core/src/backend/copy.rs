@@ -141,7 +141,8 @@ impl CopyBackend {
     // -----------------------------------------------------------------------
 
     fn workspaces_dir(&self) -> PathBuf {
-        self.root.join("ws")
+        let flavor = crate::model::layout::LayoutFlavor::detect_with_env(&self.root);
+        flavor.workspaces_dir(&self.root)
     }
 
     fn read_epoch_file(ws_path: &Path, name: &str) -> Result<EpochId, CopyBackendError> {

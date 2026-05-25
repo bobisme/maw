@@ -125,22 +125,49 @@ pub struct InitResult {
 
 impl fmt::Display for InitResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let flavor = layout::LayoutFlavor::detect(&self.repo_root);
+        let layout_label = match flavor {
+            layout::LayoutFlavor::ConsolidatedMawDir => "consolidated (.maw/)",
+            layout::LayoutFlavor::V2WsRoot => "legacy v2 (ws/)",
+        };
+
         writeln!(f, "Manifold repository initialized!")?;
         writeln!(f)?;
         writeln!(f, "  Root:      {}", self.repo_root.display())?;
+        writeln!(f, "  Layout:    {layout_label}")?;
         writeln!(f, "  Workspace: {}/", self.default_workspace.display())?;
         writeln!(f, "  Branch:    {}", self.branch)?;
         writeln!(f, "  Epoch₀:    {}", &self.epoch0.as_str()[..12])?;
         writeln!(f)?;
         writeln!(f, "Next steps:")?;
-        writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
+        match flavor {
+            layout::LayoutFlavor::ConsolidatedMawDir => {
+                writeln!(
+                    f,
+                    "  Workspaces directory: {}/.maw/workspaces/",
+                    self.repo_root.display()
+                )?;
+                writeln!(
+                    f,
+                    "  maw ws create <agent-name> --from {}      # create agent workspace",
+                    self.branch
+                )?;
+                writeln!(
+                    f,
+                    "  maw exec <agent-name> -- <cmd>            # run cmd in workspace"
+                )?;
+            }
+            layout::LayoutFlavor::V2WsRoot => {
+                writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
+                writeln!(
+                    f,
+                    "  maw ws create --from main <agent-name>    # create agent workspace"
+                )?;
+            }
+        }
         writeln!(
             f,
-            "  maw ws create --from main <agent-name>    # create agent workspace"
-        )?;
-        writeln!(
-            f,
-            "  maw ws status                 # check workspace status"
+            "  maw ws status                             # check workspace status"
         )
     }
 }
@@ -154,12 +181,26 @@ impl fmt::Display for InitResult {
 pub struct InitOptions {
     /// The main branch name (default: `"main"`).
     pub branch: String,
+    /// Which on-disk layout flavor to create (default: consolidated `.maw/`).
+    pub layout: layout::LayoutFlavor,
 }
 
 impl Default for InitOptions {
     fn default() -> Self {
         Self {
             branch: "main".to_owned(),
+            layout: layout::LayoutFlavor::ConsolidatedMawDir,
+        }
+    }
+}
+
+impl InitOptions {
+    /// Construct a v2-flavored options set (legacy `ws/` layout).
+    #[must_use]
+    pub fn v2_legacy() -> Self {
+        Self {
+            branch: "main".to_owned(),
+            layout: layout::LayoutFlavor::V2WsRoot,
         }
     }
 }
@@ -211,28 +252,74 @@ pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, In
     // 4. Normalize to repo.git common-dir topology
     normalize_common_dir_to_repo_git(&root)?;
 
-    // 5. Set core.bare = true
-    set_bare_mode(&root)?;
+    match opts.layout {
+        layout::LayoutFlavor::V2WsRoot => {
+            // 5. Set core.bare = true
+            set_bare_mode(&root)?;
 
-    // 6. Clean up common-dir working tree artifacts
-    clean_root_worktree(&root)?;
+            // 6. Clean up common-dir working tree artifacts
+            clean_root_worktree(&root)?;
 
-    // 7. Create .manifold/ directory structure
-    layout::init_manifold_dir(&root).map_err(InitError::Layout)?;
+            // 7. Create .manifold/ directory structure
+            layout::init_manifold_layout(&root, layout::LayoutFlavor::V2WsRoot)
+                .map_err(InitError::Layout)?;
 
-    // 8. Set refs/manifold/epoch/current → epoch₀
-    set_epoch_ref(&root, &epoch0_oid)?;
-    set_default_workspace_ref(&root, &epoch0_oid)?;
+            // 8. Set refs/manifold/epoch/current → epoch₀
+            set_epoch_ref(&root, &epoch0_oid)?;
+            set_default_workspace_ref(&root, &epoch0_oid)?;
 
-    // 9. Create ws/default/ workspace (attached to the configured branch)
-    let ws_default = create_default_workspace(&root, &opts.branch)?;
+            // 9. Create ws/default/ workspace (attached to the configured branch)
+            let ws_default = create_default_workspace(&root, &opts.branch)?;
 
-    Ok(InitResult {
-        repo_root: root,
-        default_workspace: ws_default,
-        epoch0: epoch0_oid,
-        branch: opts.branch.clone(),
-    })
+            Ok(InitResult {
+                repo_root: root,
+                default_workspace: ws_default,
+                epoch0: epoch0_oid,
+                branch: opts.branch.clone(),
+            })
+        }
+        layout::LayoutFlavor::ConsolidatedMawDir => {
+            // Consolidated layout: root IS the live checkout and IS the
+            // privileged merge target. No `core.bare`, no ws/default/.
+            //
+            // 5. Create .maw/ admin tree (manifold/, workspaces/, cache/,
+            //    .gitignore, config.toml).
+            layout::init_manifold_layout(&root, layout::LayoutFlavor::ConsolidatedMawDir)
+                .map_err(InitError::Layout)?;
+
+            // 5b. Ensure the root has a tracked `.gitignore` that ignores
+            //     `/.maw/`, `/.manifold/`, and `/repo.git/` (per
+            //     sg3-layout-design §5.1). Without this, the root checkout
+            //     reports the admin tree as untracked AND a merge engine
+            //     `checkout_tree` could delete admin dirs (because git
+            //     considers them "stale" relative to the merged tree).
+            ensure_consolidated_root_gitignore(&root)?;
+
+            // 5c. Replace epoch₀ with a commit that includes the .gitignore
+            //     so the merge engine (and `git checkout`) know the admin
+            //     dirs are intentionally ignored — otherwise the first
+            //     merge that runs `checkout_tree(merged_tree, root)` would
+            //     wipe `.maw/` and `repo.git/` (they aren't in the merged
+            //     tree, so they look "stale" to a force-checkout). See
+            //     bn-2sw3 manual-verification log.
+            let epoch0_with_ignore = commit_gitignore_into_epoch0(&root, &opts.branch)
+                .unwrap_or_else(|| epoch0_oid.clone());
+
+            // 6. Set refs/manifold/epoch/current → epoch₀ (paths still
+            //    derived from manifold metadata which now lives under .maw/).
+            set_epoch_ref(&root, &epoch0_with_ignore)?;
+            set_default_workspace_ref(&root, &epoch0_with_ignore)?;
+
+            Ok(InitResult {
+                repo_root: root.clone(),
+                // In the consolidated layout the "default workspace" IS the
+                // root checkout itself.
+                default_workspace: root,
+                epoch0: epoch0_with_ignore,
+                branch: opts.branch.clone(),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +505,98 @@ fn set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), InitError> {
     })
 }
 
+/// For the consolidated layout, ensure the root has a `.gitignore` that
+/// excludes the maw admin tree from the working tree status.
+///
+/// If `.gitignore` doesn't exist, create it with the `/.maw/` rule.
+/// If it already exists, append `/.maw/` only if absent (and preserve any
+/// other rules the user has). Per sg3-layout-design §5.1.
+fn ensure_consolidated_root_gitignore(root: &Path) -> Result<(), InitError> {
+    let path = root.join(".gitignore");
+    let header = "# maw admin tree (consolidated layout) — runtime/admin only";
+    let rules = ["/.maw/", "/.manifold/", "/repo.git/"];
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path).map_err(InitError::Io)?;
+        let missing: Vec<&str> = rules
+            .iter()
+            .copied()
+            .filter(|r| !existing.lines().any(|l| l.trim() == *r))
+            .collect();
+        if !missing.is_empty() {
+            let mut buf = existing;
+            if !buf.ends_with('\n') {
+                buf.push('\n');
+            }
+            buf.push_str(header);
+            buf.push('\n');
+            for r in missing {
+                buf.push_str(r);
+                buf.push('\n');
+            }
+            std::fs::write(&path, buf).map_err(InitError::Io)?;
+        }
+    } else {
+        let body: String = std::iter::once(header.to_owned())
+            .chain(rules.iter().map(|r| (*r).to_owned()))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, body).map_err(InitError::Io)?;
+    }
+    Ok(())
+}
+
+/// Commit the newly-written root `.gitignore` into epoch₀ so the merge
+/// engine and `git checkout` know the admin dirs are intentionally ignored.
+///
+/// Returns the new epoch OID. If the commit fails for any reason (e.g.
+/// the `.gitignore` was never written, or git identity is missing), the
+/// caller falls back to the original empty `epoch0_oid`.
+fn commit_gitignore_into_epoch0(root: &Path, branch: &str) -> Option<EpochId> {
+    let gitignore = root.join(".gitignore");
+    if !gitignore.is_file() {
+        return None;
+    }
+    // Use git CLI for `add` + `commit --amend` (gix lacks an --amend
+    // equivalent at the trait level; this is a one-time init step).
+    let add = Command::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !add.status.success() {
+        return None;
+    }
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Manifold",
+            "-c",
+            "user.email=manifold@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--amend",
+            "--no-edit",
+        ])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !commit.status.success() {
+        return None;
+    }
+    let head = Command::new("git")
+        .args(["rev-parse", &format!("refs/heads/{branch}")])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !head.status.success() {
+        return None;
+    }
+    let oid_str = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    EpochId::new(&oid_str).ok()
+}
+
 fn set_default_workspace_ref(root: &Path, epoch: &EpochId) -> Result<(), InitError> {
     let ref_name = manifold_refs::workspace_state_ref("default");
     manifold_refs::write_ref(root, &ref_name, epoch.oid()).map_err(|e| InitError::RefSet {
@@ -512,7 +691,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         // .git/ exists
         assert!(root.join(".git").exists(), ".git/ should exist");
@@ -530,7 +709,7 @@ mod tests {
         let root = dir.path().join("myrepo");
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
-        greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+        greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         assert!(root.join(".manifold").is_dir());
         assert!(root.join(".manifold/epochs").is_dir());
@@ -547,7 +726,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         // refs/manifold/epoch/current exists and matches epoch0
         let ref_oid = read_ref(&result.repo_root, "refs/manifold/epoch/current");
@@ -565,7 +744,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         // ws/default/ exists
         assert!(result.default_workspace.is_dir());
@@ -584,7 +763,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).expect("operation should succeed");
 
         let err =
-            greenfield_init(root, &InitOptions::default()).expect_err("operation should fail");
+            greenfield_init(root, &InitOptions::v2_legacy()).expect_err("operation should fail");
         assert!(
             matches!(err, InitError::AlreadyExists { .. }),
             "should reject existing .git/: {err}"
@@ -598,7 +777,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         let output = Command::new("git")
             .args(["config", "core.bare"])
@@ -616,7 +795,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         assert!(result.repo_root.join(".git").is_file());
         assert!(result.repo_root.join(REPO_GIT_DIR).is_dir());
@@ -634,6 +813,7 @@ mod tests {
 
         let opts = InitOptions {
             branch: "develop".to_owned(),
+            layout: layout::LayoutFlavor::V2WsRoot,
         };
         let result = greenfield_init(&root, &opts).expect("operation should succeed");
 
@@ -651,7 +831,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         // EpochId validates as a proper 40-char hex OID
         assert_eq!(result.epoch0.as_str().len(), 40);
@@ -671,7 +851,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         // Index file should be removed from common-dir (bare mode)
         let common_dir = git_common_dir(&result.repo_root);
@@ -688,7 +868,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("operation should succeed");
 
         let result =
-            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+            greenfield_init(&root, &InitOptions::v2_legacy()).expect("operation should succeed");
 
         // The workspace HEAD should be at epoch₀
         let ws_head = Command::new("git")
@@ -701,20 +881,100 @@ mod tests {
     }
 
     #[test]
-    fn greenfield_display_result() {
+    fn greenfield_display_result_v2() {
         let result = InitResult {
             repo_root: PathBuf::from("/tmp/myrepo"),
             default_workspace: PathBuf::from("/tmp/myrepo/ws/default"),
             epoch0: EpochId::new(&"a".repeat(40)).expect("operation should succeed"),
             branch: "main".to_owned(),
         };
+        // Detection requires a real fs root; just check the v2-shape parts
+        // of the Display (path strings, branch, OID prefix).
         let display = format!("{result}");
         assert!(display.contains("Manifold repository initialized"));
         assert!(display.contains("/tmp/myrepo"));
-        assert!(display.contains("ws/default"));
         assert!(display.contains("main"));
         assert!(display.contains("aaaaaaaaaaaa")); // first 12 chars
-        assert!(display.contains("maw ws create --from main <agent-name>"));
+    }
+
+    // ---------- Consolidated `.maw/` layout tests ----------
+
+    #[test]
+    fn greenfield_consolidated_default_creates_maw_dir() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path().join("myrepo");
+        std::fs::create_dir_all(&root).expect("operation should succeed");
+
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+
+        // .maw/ tree
+        assert!(result.repo_root.join(".maw").is_dir());
+        assert!(result.repo_root.join(".maw/manifold").is_dir());
+        assert!(result.repo_root.join(".maw/manifold/epochs").is_dir());
+        assert!(result.repo_root.join(".maw/manifold/artifacts").is_dir());
+        assert!(result.repo_root.join(".maw/manifold/config.toml").is_file());
+        assert!(result.repo_root.join(".maw/workspaces").is_dir());
+        assert!(result.repo_root.join(".maw/cache").is_dir());
+        assert!(result.repo_root.join(".maw/.gitignore").is_file());
+        assert!(result.repo_root.join(".maw/config.toml").is_file());
+        // No legacy .manifold/ at repo root.
+        assert!(!result.repo_root.join(".manifold").exists());
+        // No ws/ at repo root.
+        assert!(!result.repo_root.join("ws").exists());
+        // Layout detection sees consolidated.
+        assert_eq!(
+            layout::LayoutFlavor::detect(&result.repo_root),
+            layout::LayoutFlavor::ConsolidatedMawDir
+        );
+    }
+
+    #[test]
+    fn greenfield_consolidated_root_is_live_checkout() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path().join("myrepo");
+        std::fs::create_dir_all(&root).expect("operation should succeed");
+
+        greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+
+        // Root is NOT bare (consolidated layout).
+        let output = Command::new("git")
+            .args(["config", "core.bare"])
+            .current_dir(&root)
+            .output()
+            .expect("operation should succeed");
+        let val = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            val.trim(),
+            "false",
+            "core.bare should be false in consolidated layout"
+        );
+    }
+
+    #[test]
+    fn greenfield_consolidated_default_workspace_is_root() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path().join("myrepo");
+        std::fs::create_dir_all(&root).expect("operation should succeed");
+
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+        assert_eq!(
+            result.default_workspace, result.repo_root,
+            "consolidated layout: default workspace IS the repo root"
+        );
+    }
+
+    #[test]
+    fn greenfield_consolidated_sets_epoch0() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path().join("myrepo");
+        std::fs::create_dir_all(&root).expect("operation should succeed");
+
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+        let ref_oid = read_ref(&result.repo_root, "refs/manifold/epoch/current");
+        assert_eq!(ref_oid, result.epoch0.as_str());
     }
 
     #[test]
@@ -923,6 +1183,23 @@ impl Default for BrownfieldInitOptions {
 ///
 /// Returns an error if repository initialization fails.
 pub fn run() -> anyhow::Result<()> {
+    run_with(&InitRunOptions::default())
+}
+
+/// Options for `maw init` runtime control.
+#[derive(Clone, Debug, Default)]
+pub struct InitRunOptions {
+    /// Use the legacy v2 `ws/` layout instead of the consolidated `.maw/`
+    /// layout. Triggered by `--legacy-ws` on the CLI or `MAW_LAYOUT=v2`.
+    pub legacy_ws_layout: bool,
+}
+
+/// Entry point for `maw init` with explicit options.
+///
+/// # Errors
+///
+/// Returns an error if repository initialization fails.
+pub fn run_with(opts: &InitRunOptions) -> anyhow::Result<()> {
     // Warn (but don't block) if git is below the minimum supported version.
     crate::doctor::warn_git_version_if_old();
 
@@ -936,13 +1213,25 @@ pub fn run() -> anyhow::Result<()> {
 
     let git_dir = root.join(".git");
 
+    // Honour env override on top of CLI flag.
+    let legacy_env = std::env::var("MAW_LAYOUT")
+        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "v2" | "ws" | "legacy"));
+    let want_legacy = opts.legacy_ws_layout || legacy_env;
+
     if git_dir.exists() {
+        // Brownfield init currently always produces the v2 layout; the
+        // v2→consolidated transition is T3.3 (`maw migrate`). This keeps
+        // existing v2 repos working without any surprise on-disk move.
         let result = brownfield_init(&root, &BrownfieldInitOptions::default())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("{result}");
     } else {
-        let result =
-            greenfield_init(&root, &InitOptions::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let init_opts = if want_legacy {
+            InitOptions::v2_legacy()
+        } else {
+            InitOptions::default()
+        };
+        let result = greenfield_init(&root, &init_opts).map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("{result}");
     }
 

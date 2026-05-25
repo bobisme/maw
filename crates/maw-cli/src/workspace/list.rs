@@ -217,7 +217,9 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             let rebase_conflicts = if missing {
                 0
             } else {
-                let ws_path = root.join("ws").join(ws.id.as_str());
+                let flavor =
+                    maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
+                let ws_path = flavor.workspace_path(&root, ws.id.as_str());
                 super::resolve::find_conflicted_files(&ws_path)
                     .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
             };
