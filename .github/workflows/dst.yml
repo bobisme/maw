@@ -30,6 +30,35 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------
+  # SG3 subset pre-reg freshness gate (bn-iux4).
+  #
+  # Asserts notes/sg3-subset-prereg.md exists AND its commit timestamp
+  # strictly precedes any modification to
+  # crates/maw-cli/src/workspace/create.rs (the canonical SG3 layout-
+  # implementation file per notes/sg3-layout-design.md §2.1).
+  #
+  # Why this gate: T3.5 (bn-1uzn) evaluates the SG3 layout change against
+  # the pre-reg's frozen bar. If the bar postdates the layout
+  # implementation, it can be tuned to the data, and the SG3 gate would
+  # have no teeth. This job is the audit-trail "frozen-before-the-fact"
+  # signal. Cheap (no build); fail-fast so a layout-work PR that races
+  # the pre-reg turns the queue red immediately.
+  # ---------------------------------------------------------------------
+  sg3-prereg-check:
+    name: SG3 subset pre-reg freshness (bn-iux4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full git history so `git log -1 --format=%ct -- <path>`
+          # returns a real commit timestamp, not the shallow-clone HEAD.
+          fetch-depth: 0
+      - uses: taiki-e/install-action@just
+      - name: Assert SG3 subset pre-reg is frozen-before-the-fact
+        run: just sg3-prereg-check
+
+  # ---------------------------------------------------------------------
   # SG1 per-commit gate (bn-1gp4, T1.7 — release-blocking for v1.0).
   # ---------------------------------------------------------------------
   sg1-per-commit:

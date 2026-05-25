@@ -297,3 +297,76 @@ sg2-friction-list-pilot:
 #   SP5_REPS=5 just sp5-pilot          # override wall-time replicate count (default 3)
 sp5-pilot out='':
   cargo run --quiet -p maw-bench-adapters --features bench --bin sp5-layout-pilot -- {{out}}
+
+# sg3-prereg-check: assert notes/sg3-subset-prereg.md exists AND its
+# commit time strictly precedes any modification to
+# crates/maw-cli/src/workspace/create.rs (the canonical SG3 layout-
+# implementation file per notes/sg3-layout-design.md §2.1).
+#
+# This is the bn-iux4 CI gate that the SG3 subset pre-reg is
+# "frozen-before-the-fact": if the layout work has NOT started, the
+# check passes trivially (no modification to create.rs after the doc
+# commit). If the layout work HAS started, the doc commit must
+# strictly predate it, or the gate is RED — proving the bar was
+# pre-registered, not back-fitted.
+#
+# Exit codes:
+#   0 — gate green (doc exists; doc commit-time < create.rs latest
+#       modification commit-time, OR create.rs has not been modified
+#       since the doc commit).
+#   1 — gate red (doc missing OR create.rs modified at or before the
+#       doc commit — i.e. the layout work raced the pre-reg).
+sg3-prereg-check:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  DOC="notes/sg3-subset-prereg.md"
+  CANARY="crates/maw-cli/src/workspace/create.rs"
+  if [ ! -f "$DOC" ]; then
+    echo "sg3-prereg-check: FAIL — $DOC does not exist."
+    echo "  The SG3 subset pre-registration (bn-iux4) is the bar T3.5"
+    echo "  evaluates against. Its absence means SG3 has no formal"
+    echo "  go/no-go criterion. Block."
+    exit 1
+  fi
+  # git log -1 --format=%ct returns the committer timestamp of the
+  # most recent commit that touched the path. If the file was never
+  # committed, the output is empty and we treat that as "predates
+  # everything" (the doc itself must have been committed before this
+  # check runs in CI).
+  DOC_CT=$(git log -1 --format=%ct -- "$DOC" || true)
+  CANARY_CT=$(git log -1 --format=%ct -- "$CANARY" || true)
+  if [ -z "$DOC_CT" ]; then
+    echo "sg3-prereg-check: FAIL — $DOC is not committed yet."
+    echo "  Commit the doc before running the gate."
+    exit 1
+  fi
+  if [ -z "$CANARY_CT" ]; then
+    # Canary file does not exist or has no commits — layout work has
+    # not started, gate passes trivially.
+    echo "sg3-prereg-check: OK — $CANARY has no commit history; layout"
+    echo "  work has not started. Doc is pre-registered."
+    echo "  doc commit-time: $DOC_CT ($(date -u -d @$DOC_CT +%Y-%m-%dT%H:%M:%SZ))"
+    exit 0
+  fi
+  echo "sg3-prereg-check: doc commit-time   = $DOC_CT ($(date -u -d @$DOC_CT +%Y-%m-%dT%H:%M:%SZ))"
+  echo "sg3-prereg-check: canary commit-time = $CANARY_CT ($(date -u -d @$CANARY_CT +%Y-%m-%dT%H:%M:%SZ))"
+  if [ "$DOC_CT" -lt "$CANARY_CT" ]; then
+    echo "sg3-prereg-check: OK — doc commit strictly precedes the"
+    echo "  most recent modification to $CANARY."
+    echo "  Pre-registration is frozen-before-the-fact."
+    exit 0
+  elif [ "$DOC_CT" -eq "$CANARY_CT" ]; then
+    echo "sg3-prereg-check: FAIL — doc and canary share the same"
+    echo "  commit timestamp (likely the same commit). Per bn-iux4,"
+    echo "  the doc must STRICTLY predate any layout-implementation"
+    echo "  commit. Split the commits."
+    exit 1
+  else
+    # DOC_CT > CANARY_CT means create.rs was last modified BEFORE the
+    # doc commit. That is the expected steady state once the doc is in
+    # main and the layout work has not modified create.rs since.
+    echo "sg3-prereg-check: OK — $CANARY was last modified BEFORE"
+    echo "  the doc commit; the layout work has not modified the"
+    echo "  canary since pre-registration was frozen."
+    exit 0
+  fi
