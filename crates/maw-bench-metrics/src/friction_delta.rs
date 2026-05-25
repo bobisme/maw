@@ -579,10 +579,7 @@ fn render_md_rows(out: &mut String, report: &DeltaReport) {
         out,
         "| Bone | Cluster | Baseline cost | After cost | Δ % | Target | Verdict |"
     );
-    let _ = writeln!(
-        out,
-        "|---|---|---:|---:|---:|---|---|"
-    );
+    let _ = writeln!(out, "|---|---|---:|---:|---:|---|---|");
     for row in &report.rows {
         let bone = if row.fix_task_bone.is_empty() {
             "_(no backlog wiring)_".to_string()
@@ -638,10 +635,7 @@ fn render_md_unattributed(out: &mut String, report: &DeltaReport) {
     );
     match report.unattributed.growth_pct() {
         None => {
-            let _ = writeln!(
-                out,
-                "- Growth: _undefined (baseline = 0)_",
-            );
+            let _ = writeln!(out, "- Growth: _undefined (baseline = 0)_",);
         }
         Some(g) => {
             let blocker = if report.unattributed.blocks_sg4() {
@@ -663,7 +657,10 @@ fn render_md_triggers(out: &mut String, report: &DeltaReport) {
     let _ = writeln!(out, "## Iteration triggers (re-open T4.2 children)");
     out.push('\n');
     if report.iteration_triggers.is_empty() {
-        let _ = writeln!(out, "_No triggers — every cluster met target and no regressions surfaced._");
+        let _ = writeln!(
+            out,
+            "_No triggers — every cluster met target and no regressions surfaced._"
+        );
         out.push('\n');
         return;
     }
@@ -711,7 +708,10 @@ fn render_md_triggers(out: &mut String, report: &DeltaReport) {
 }
 
 fn render_md_renegotiation_template(out: &mut String, report: &DeltaReport) {
-    let _ = writeln!(out, "## Renegotiated targets (template; populate only when a target is sound but missed)");
+    let _ = writeln!(
+        out,
+        "## Renegotiated targets (template; populate only when a target is sound but missed)"
+    );
     out.push('\n');
     if report.is_pilot {
         let _ = writeln!(
@@ -726,7 +726,10 @@ fn render_md_renegotiation_template(out: &mut String, report: &DeltaReport) {
     );
     let _ = writeln!(out, "Required fields per renegotiation entry:");
     out.push('\n');
-    let _ = writeln!(out, "- **Cluster + fix-task bone:** e.g. `ws_destroy_refused` / `bn-c6l3`.");
+    let _ = writeln!(
+        out,
+        "- **Cluster + fix-task bone:** e.g. `ws_destroy_refused` / `bn-c6l3`."
+    );
     let _ = writeln!(out, "- **Original target:** e.g. `reaches 0`.");
     let _ = writeln!(out, "- **Measured delta:** e.g. `40% reduction (1 → 0.6)`.");
     let _ = writeln!(
@@ -752,9 +755,7 @@ fn round2(v: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::attribution::DiagnosticBundle;
-    use crate::friction_list::{
-        friction_list_from_bundles, FrictionSource, SweepRunRef,
-    };
+    use crate::friction_list::{FrictionSource, SweepRunRef, friction_list_from_bundles};
 
     fn sweep_run(n: u32) -> SweepRunRef {
         SweepRunRef {
@@ -764,7 +765,11 @@ mod tests {
         }
     }
 
-    fn bundle(run_id: &str, attrs: &[(MawVerbAttribution, u32)], unattributed: u32) -> DiagnosticBundle {
+    fn bundle(
+        run_id: &str,
+        attrs: &[(MawVerbAttribution, u32)],
+        unattributed: u32,
+    ) -> DiagnosticBundle {
         let mut counts: BTreeMap<MawVerbAttribution, u32> = BTreeMap::new();
         for (a, n) in attrs {
             counts.insert(*a, *n);
@@ -788,7 +793,9 @@ mod tests {
 
     #[test]
     fn evaluate_target_met_on_50_pct_reduction() {
-        let target = ClusterTarget::ReducePct { min_reduction_pct: 50.0 };
+        let target = ClusterTarget::ReducePct {
+            min_reduction_pct: 50.0,
+        };
         let (v, flag, delta) = evaluate_row(10, 5, target);
         assert_eq!(v, RebenchVerdict::TargetMet);
         assert!(flag.is_none());
@@ -797,7 +804,9 @@ mod tests {
 
     #[test]
     fn evaluate_target_missed_just_below_threshold() {
-        let target = ClusterTarget::ReducePct { min_reduction_pct: 50.0 };
+        let target = ClusterTarget::ReducePct {
+            min_reduction_pct: 50.0,
+        };
         // baseline=10, after=6 → 40% reduction → MISSED.
         let (v, flag, delta) = evaluate_row(10, 6, target);
         assert_eq!(v, RebenchVerdict::TargetMissed);
@@ -807,7 +816,9 @@ mod tests {
 
     #[test]
     fn evaluate_regressed_when_cost_rose() {
-        let target = ClusterTarget::ReducePct { min_reduction_pct: 50.0 };
+        let target = ClusterTarget::ReducePct {
+            min_reduction_pct: 50.0,
+        };
         // baseline=2, after=3 → cost rose.
         let (v, flag, delta) = evaluate_row(2, 3, target);
         assert_eq!(v, RebenchVerdict::Regressed);
@@ -849,37 +860,33 @@ mod tests {
     #[test]
     fn diff_pilot_targets_all_met() {
         // Baseline matches T2.8 pilot synthetic ranking.
-        let baseline = make_list(&[
-            bundle(
-                "b-r01",
-                &[
-                    (MawVerbAttribution::WsMergeStructuredConflict, 9),
-                    (MawVerbAttribution::WsSyncStaleWorkspace, 3),
-                    (MawVerbAttribution::EpochSyncRequired, 3),
-                    (MawVerbAttribution::VocabularyScarcity, 3),
-                    (MawVerbAttribution::WsRecoverInvoked, 2),
-                    (MawVerbAttribution::WsDestroyRefused, 1),
-                    (MawVerbAttribution::ReadFromStaleWorkspace, 1),
-                ],
-                5,
-            ),
-        ]);
+        let baseline = make_list(&[bundle(
+            "b-r01",
+            &[
+                (MawVerbAttribution::WsMergeStructuredConflict, 9),
+                (MawVerbAttribution::WsSyncStaleWorkspace, 3),
+                (MawVerbAttribution::EpochSyncRequired, 3),
+                (MawVerbAttribution::VocabularyScarcity, 3),
+                (MawVerbAttribution::WsRecoverInvoked, 2),
+                (MawVerbAttribution::WsDestroyRefused, 1),
+                (MawVerbAttribution::ReadFromStaleWorkspace, 1),
+            ],
+            5,
+        )]);
         // After: every cluster reduced by 50% or to 0.
-        let after = make_list(&[
-            bundle(
-                "a-r01",
-                &[
-                    (MawVerbAttribution::WsMergeStructuredConflict, 4),
-                    (MawVerbAttribution::WsSyncStaleWorkspace, 1),
-                    (MawVerbAttribution::EpochSyncRequired, 1),
-                    (MawVerbAttribution::VocabularyScarcity, 1),
-                    (MawVerbAttribution::WsRecoverInvoked, 1),
-                    // ws_destroy_refused: 1 → 0 (ReachZero).
-                    // read_from_stale_workspace: 1 → 0 (ReachZero).
-                ],
-                4,
-            ),
-        ]);
+        let after = make_list(&[bundle(
+            "a-r01",
+            &[
+                (MawVerbAttribution::WsMergeStructuredConflict, 4),
+                (MawVerbAttribution::WsSyncStaleWorkspace, 1),
+                (MawVerbAttribution::EpochSyncRequired, 1),
+                (MawVerbAttribution::VocabularyScarcity, 1),
+                (MawVerbAttribution::WsRecoverInvoked, 1),
+                // ws_destroy_refused: 1 → 0 (ReachZero).
+                // read_from_stale_workspace: 1 → 0 (ReachZero).
+            ],
+            4,
+        )]);
         let report = diff_friction_lists(
             &baseline,
             &after,
@@ -901,7 +908,11 @@ mod tests {
             );
         }
         // No triggers fired.
-        assert!(report.iteration_triggers.is_empty(), "{:#?}", report.iteration_triggers);
+        assert!(
+            report.iteration_triggers.is_empty(),
+            "{:#?}",
+            report.iteration_triggers
+        );
         // Unattributed went down 5 → 4: growth = -20%. Does NOT block SG4.
         assert!(!report.unattributed.blocks_sg4());
     }
@@ -945,7 +956,11 @@ mod tests {
                 found = true;
             }
         }
-        assert!(found, "expected a TargetMissed trigger for bn-yyx; got {:#?}", report.iteration_triggers);
+        assert!(
+            found,
+            "expected a TargetMissed trigger for bn-yyx; got {:#?}",
+            report.iteration_triggers
+        );
     }
 
     #[test]
@@ -1007,7 +1022,11 @@ mod tests {
         // with NewClusterInAfter flag.
         let baseline = make_list(&[bundle("b", &[], 0)]);
         let after_zero = make_list(&[bundle("a0", &[], 0)]);
-        let after_one = make_list(&[bundle("a1", &[(MawVerbAttribution::VocabularyScarcity, 1)], 0)]);
+        let after_one = make_list(&[bundle(
+            "a1",
+            &[(MawVerbAttribution::VocabularyScarcity, 1)],
+            0,
+        )]);
         let r_zero = diff_friction_lists(
             &baseline,
             &after_zero,

@@ -75,9 +75,7 @@ fn dry_run_on_dirty_workspace_predicts_refuse_and_recommends_merge_destroy() {
     assert_eq!(preview["would_proceed"], false);
     assert_eq!(preview["would_capture_snapshot"], false);
     assert!(
-        preview["touched_count"]
-            .as_u64()
-            .is_some_and(|n| n >= 1),
+        preview["touched_count"].as_u64().is_some_and(|n| n >= 1),
         "dirty workspace should have touched_count >= 1, got {:?}",
         preview["touched_count"]
     );
@@ -107,7 +105,13 @@ fn dry_run_force_on_dirty_workspace_flags_would_need_recovery() {
     repo.add_file("carol", "draft.md", "wip\n");
 
     let out = repo.maw_ok(&[
-        "ws", "destroy", "carol", "--dry-run", "--force", "--format", "json",
+        "ws",
+        "destroy",
+        "carol",
+        "--dry-run",
+        "--force",
+        "--format",
+        "json",
     ]);
     let preview: serde_json::Value = serde_json::from_str(&out).expect("dry-run JSON");
 

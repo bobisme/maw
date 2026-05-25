@@ -45,7 +45,7 @@ use anyhow::{Context, Result, bail};
 
 use maw_core::merge_state::MergeStateFile;
 use maw_core::model::layout::{
-    self, LayoutFlavor, MAW_DIR, MAW_MANIFOLD_SUBDIR, MAW_WORKSPACES_SUBDIR, MANIFOLD_DIR,
+    self, LayoutFlavor, MANIFOLD_DIR, MAW_DIR, MAW_MANIFOLD_SUBDIR, MAW_WORKSPACES_SUBDIR,
     V2_WORKSPACES_DIR,
 };
 use maw_git::GitRepo as _;
@@ -149,9 +149,7 @@ fn phase_a(root: &Path, journal: &mut Journal) -> Result<()> {
 
     // Step 1: detect layout.
     let flavor = LayoutFlavor::detect_with_env(root);
-    if flavor == LayoutFlavor::ConsolidatedMawDir
-        && journal.phase == JournalPhase::Start
-    {
+    if flavor == LayoutFlavor::ConsolidatedMawDir && journal.phase == JournalPhase::Start {
         // Already on the new layout and no in-flight migration. Treat
         // as success (caller already short-circuited the common case;
         // this branch covers the env-override path).
@@ -288,14 +286,12 @@ fn phase_b(root: &Path, journal: &mut Journal) -> Result<()> {
         // committed-ahead content (Prime Invariant pessimistic default).
         let zero_oid = "0".repeat(40);
         let base_epoch = entry.head_oid.as_deref().unwrap_or(zero_oid.as_str());
-        let base = maw_core::model::types::GitOid::new(base_epoch)
-            .with_context(|| format!("invalid base epoch OID `{base_epoch}` for `{}`", entry.name))?;
+        let base = maw_core::model::types::GitOid::new(base_epoch).with_context(|| {
+            format!("invalid base epoch OID `{base_epoch}` for `{}`", entry.name)
+        })?;
 
-        match crate::workspace::capture::capture_before_destroy(
-            &entry.old_path,
-            &entry.name,
-            &base,
-        ) {
+        match crate::workspace::capture::capture_before_destroy(&entry.old_path, &entry.name, &base)
+        {
             Ok(Some(captured)) => {
                 tracing::info!(
                     workspace = %entry.name,
@@ -538,9 +534,7 @@ fn phase_d(root: &Path, journal: &mut Journal) -> Result<()> {
     if let Some(default_entry) = journal.worktrees.iter().find(|e| e.name == "default")
         && let Some(ref recovery) = default_entry.recovery_ref
     {
-        println!(
-            "[INFO] ws/default had uncommitted edits, pinned at: {recovery}"
-        );
+        println!("[INFO] ws/default had uncommitted edits, pinned at: {recovery}");
         println!("       Recover with: maw ws recover default --to default-prev");
     }
 
@@ -553,7 +547,12 @@ fn phase_d(root: &Path, journal: &mut Journal) -> Result<()> {
         // matches. Fall back to a manual rmdir on failure.
         let remove = Command::new("git")
             .current_dir(root)
-            .args(["worktree", "remove", "--force", default_old.to_string_lossy().as_ref()])
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                default_old.to_string_lossy().as_ref(),
+            ])
             .output();
         match remove {
             Ok(out) if out.status.success() => {
@@ -708,8 +707,7 @@ fn verify_no_work_lost(root: &Path, journal: &Journal) -> Result<()> {
     let repo = maw_git::GixRepo::open(root)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
     let post = list_all_manifold_refs(&repo)?;
-    let post_names: std::collections::HashSet<&String> =
-        post.iter().map(|(n, _)| n).collect();
+    let post_names: std::collections::HashSet<&String> = post.iter().map(|(n, _)| n).collect();
 
     let mut missing: Vec<&String> = journal
         .pre_migration_refs
@@ -740,8 +738,12 @@ fn verify_no_work_lost(root: &Path, journal: &Journal) -> Result<()> {
             );
         }
         if let Some(ref recorded) = entry.head_oid {
-            let ws_repo = maw_git::GixRepo::open(&entry.new_path)
-                .map_err(|e| anyhow::anyhow!("post-migration: cannot open {}: {e}", entry.new_path.display()))?;
+            let ws_repo = maw_git::GixRepo::open(&entry.new_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "post-migration: cannot open {}: {e}",
+                    entry.new_path.display()
+                )
+            })?;
             let head = ws_repo
                 .rev_parse_opt("HEAD")
                 .ok()
@@ -805,9 +807,8 @@ fn copy_dir_merge(src: &Path, dst: &Path) -> Result<()> {
         if path.is_dir() {
             copy_dir_merge(&path, &target)?;
         } else if !target.exists() {
-            fs::copy(&path, &target).with_context(|| {
-                format!("copy {} -> {}", path.display(), target.display())
-            })?;
+            fs::copy(&path, &target)
+                .with_context(|| format!("copy {} -> {}", path.display(), target.display()))?;
         }
     }
     Ok(())
@@ -828,8 +829,7 @@ fn update_root_gitignore_working_copy(root: &Path) -> Result<()> {
             content.push_str("\n# maw runtime/admin state — never tracked\n");
         }
         content.push_str("/.maw/\n");
-        fs::write(&path, content)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
     }
 
     // Remove a stale `ws/` line (legacy v2 ignore) if present and no
@@ -857,11 +857,7 @@ fn update_root_gitignore_working_copy(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_dry_run_plan(
-    root: &Path,
-    flavor: LayoutFlavor,
-    journal: Option<&Journal>,
-) -> Result<()> {
+fn print_dry_run_plan(root: &Path, flavor: LayoutFlavor, journal: Option<&Journal>) -> Result<()> {
     println!("Dry run: maw migrate at {}", root.display());
     println!("  Detected layout: {flavor:?}");
     if let Some(j) = journal {
@@ -871,9 +867,7 @@ fn print_dry_run_plan(
     println!("  Plan:");
     println!("    A. Preflight: refuse if merge in flight; snapshot refs.");
     println!("    B. Preserve : pin recovery refs for every workspace.");
-    println!(
-        "    C. Relocate : ws/<name>/ → .maw/worktrees/<name>/ (admin gitdir rewrite)."
-    );
+    println!("    C. Relocate : ws/<name>/ → .maw/worktrees/<name>/ (admin gitdir rewrite).");
     println!("    D. Un-bare  : core.bare=false; attach HEAD; checkout branch at root.");
     println!("    E. Finalize : update .gitignore; rmdir ws/; verify Prime Invariant.");
     Ok(())

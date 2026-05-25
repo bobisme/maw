@@ -218,7 +218,9 @@ impl NoopSubstrate {
     /// tempdir; `teardown` drops it.
     #[must_use]
     pub const fn new() -> Self {
-        Self { keep_alive: Vec::new() }
+        Self {
+            keep_alive: Vec::new(),
+        }
     }
 
     /// Stable placeholder convention text. The harness's determinism

@@ -53,8 +53,7 @@ impl MawAdapter {
     ///
     /// Returns [`SubstrateError`] if `maw` is missing or `maw init` fails.
     pub fn new() -> Result<Self> {
-        let tmp =
-            tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
+        let tmp = tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
         Self::new_in(tmp.path().to_path_buf(), Some(tmp))
     }
 
@@ -180,12 +179,7 @@ impl Substrate for MawAdapter {
         })
     }
 
-    fn merge(
-        &mut self,
-        srcs: &[WsId],
-        target: &str,
-        destroy_sources: bool,
-    ) -> Result<StepOutcome> {
+    fn merge(&mut self, srcs: &[WsId], target: &str, destroy_sources: bool) -> Result<StepOutcome> {
         let mut args: Vec<String> = vec!["ws".into(), "merge".into()];
         for s in srcs {
             args.push(s.0.clone());
@@ -200,7 +194,10 @@ impl Substrate for MawAdapter {
         args.push("--message".into());
         args.push(format!(
             "merge: {}",
-            srcs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join(", ")
+            srcs.iter()
+                .map(|s| s.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let result = proc_util::run(&self.maw_bin, &arg_refs, &self.root);
@@ -235,9 +232,7 @@ impl Substrate for MawAdapter {
                 notes: "maw ws sync".into(),
                 ..StepOutcome::default()
             }),
-            Err(SubstrateError::SubprocessFailed { stderr, .. })
-                if stderr.contains("conflict") =>
-            {
+            Err(SubstrateError::SubprocessFailed { stderr, .. }) if stderr.contains("conflict") => {
                 Ok(StepOutcome {
                     ok: true,
                     conflicted: true,
@@ -351,15 +346,14 @@ mod tests {
         s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n")
             .expect("edit");
         s.commit(&ws, "feat: alpha").expect("commit");
-        let merge = s
-            .merge(&[ws.clone()], "default", true)
-            .expect("merge");
+        let merge = s.merge(&[ws.clone()], "default", true).expect("merge");
         assert!(merge.ok);
         assert!(merge.advanced_integration);
         let snap = s.state_snapshot().expect("snapshot");
-        assert!(snap
-            .integrated_files
-            .get("src/lib.rs")
-            .map_or(false, |c| c.contains("alpha")));
+        assert!(
+            snap.integrated_files
+                .get("src/lib.rs")
+                .map_or(false, |c| c.contains("alpha"))
+        );
     }
 }

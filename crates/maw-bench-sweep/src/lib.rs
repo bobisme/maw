@@ -86,16 +86,16 @@ pub mod render;
 pub mod sg3_decision;
 
 pub use aggregate::{
-    aggregate_artifacts, load_runs, AggregateError, AggregateExtras, CellAggregate, CellKey,
-    SweepSummary, WilsonCi,
+    AggregateError, AggregateExtras, CellAggregate, CellKey, SweepSummary, WilsonCi,
+    aggregate_artifacts, load_runs,
 };
-pub use crossover::{find_crossover, CrossoverPoint, CrossoverRegime, MetricName};
+pub use crossover::{CrossoverPoint, CrossoverRegime, MetricName, find_crossover};
 pub use driver::{SweepDriver, SweepDriverError, SweepPlan};
 pub use grid::{
-    pilot_grid, spectrum_grid, ConditionPoint, SweepCell, SweepGrid, TClass, ARMS_PUBLICATION,
+    ARMS_PUBLICATION, ConditionPoint, SweepCell, SweepGrid, TClass, pilot_grid, spectrum_grid,
 };
-pub use render::{render_crossover_doc, render_spectrum_table, SpectrumReportOptions};
+pub use render::{SpectrumReportOptions, render_crossover_doc, render_spectrum_table};
 pub use sg3_decision::{
-    decide_go_no_go, Decision, EvaluatedRule, Evidence, PairedCiSignal, PairedCiSignals,
-    PrereggedBars, RuleStatus, ARM_NEW, ARM_OLD, SUBSET_CELLS,
+    ARM_NEW, ARM_OLD, Decision, EvaluatedRule, Evidence, PairedCiSignal, PairedCiSignals,
+    PrereggedBars, RuleStatus, SUBSET_CELLS, decide_go_no_go,
 };

@@ -50,8 +50,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use maw_bench::run::BenchRun;
 use maw_bench_metrics::{
+    DiagnosticBundle, FrictionList, FrictionSource, MawVerbAttribution, SweepRunRef,
     diff_friction_lists, extract_metrics, friction_list_from_bundles, render_delta_report_md,
-    sg4_backlog, DiagnosticBundle, FrictionList, FrictionSource, MawVerbAttribution, SweepRunRef,
+    sg4_backlog,
 };
 
 fn usage() -> &'static str {
@@ -127,7 +128,10 @@ fn main() -> ExitCode {
         (pilot_baseline(), "synthetic://pilot-baseline".to_string())
     } else {
         let Some(p) = args.baseline.as_ref() else {
-            eprintln!("--baseline is required when --pilot is not set\n{}", usage());
+            eprintln!(
+                "--baseline is required when --pilot is not set\n{}",
+                usage()
+            );
             return ExitCode::from(2);
         };
         match load_friction_list(p) {
@@ -230,7 +234,10 @@ fn load_friction_list(path: &Path) -> Result<FrictionList, std::io::Error> {
     if meta.is_file() {
         let s = fs::read_to_string(path)?;
         return FrictionList::from_json(&s).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("parse FrictionList: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("parse FrictionList: {e}"),
+            )
         });
     }
     if meta.is_dir() {
@@ -374,7 +381,9 @@ fn planted_bundle(
 }
 
 fn current_utc_string() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs();
     let (year, month, day, hour, minute, second) = utc_breakdown(secs);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")

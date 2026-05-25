@@ -65,8 +65,7 @@ impl WorktreesConventionAdapter {
     /// Returns [`SubstrateError`] if `git` is missing or any step of
     /// repo/worktree creation fails.
     pub fn new() -> Result<Self> {
-        let tmp =
-            tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
+        let tmp = tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
         Self::new_in(tmp.path().to_path_buf(), Some(tmp))
     }
 
@@ -92,11 +91,7 @@ impl WorktreesConventionAdapter {
         //    Clone first so we have a working tree to seed an initial commit.
         proc_util::run("git", &["clone", "repo.git", "main"], &root)?;
         // Pin identity inside the integration worktree.
-        proc_util::run(
-            "git",
-            &["config", "user.name", "bench"],
-            &integration_dir,
-        )?;
+        proc_util::run("git", &["config", "user.name", "bench"], &integration_dir)?;
         proc_util::run(
             "git",
             &["config", "user.email", "bench@localhost"],
@@ -106,11 +101,7 @@ impl WorktreesConventionAdapter {
         fs::write(integration_dir.join("README.md"), "bench repo\n")
             .map_err(|e| SubstrateError::Io(e.to_string()))?;
         proc_util::run("git", &["add", "README.md"], &integration_dir)?;
-        proc_util::run(
-            "git",
-            &["commit", "-m", "init"],
-            &integration_dir,
-        )?;
+        proc_util::run("git", &["commit", "-m", "init"], &integration_dir)?;
         // 4. Push to the bare repo and force its HEAD to main so `worktree
         //    add` from the bare repo finds the right default branch.
         //    `git push` from the clone sets up `main` on the bare repo.
@@ -177,14 +168,7 @@ impl Substrate for WorktreesConventionAdapter {
         let dir_str = dir.to_string_lossy().into_owned();
         proc_util::run(
             "git",
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &ws.0,
-                &dir_str,
-                base_ref,
-            ],
+            &["worktree", "add", "-b", &ws.0, &dir_str, base_ref],
             &self.integration_dir,
         )?;
         // Pin per-worktree identity (the bare repo gitconfig isn't inherited
@@ -244,12 +228,7 @@ impl Substrate for WorktreesConventionAdapter {
         })
     }
 
-    fn merge(
-        &mut self,
-        srcs: &[WsId],
-        target: &str,
-        destroy_sources: bool,
-    ) -> Result<StepOutcome> {
+    fn merge(&mut self, srcs: &[WsId], target: &str, destroy_sources: bool) -> Result<StepOutcome> {
         // Convention: the integration worktree is always "main" (or the
         // single integration label the convention pins). Other targets are
         // not supported by this thin convention — accept "default" or "main"
@@ -263,9 +242,14 @@ impl Substrate for WorktreesConventionAdapter {
         proc_util::run("git", &["checkout", "main"], &self.integration_dir)?;
         // Build the merge args: `git merge --no-ff -m "..." <branches...>`.
         // This is an octopus merge; git refuses if any branch conflicts.
-        let msg = format!("merge: {}", srcs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join(", "));
-        let mut args: Vec<String> =
-            vec!["merge".into(), "--no-ff".into(), "-m".into(), msg];
+        let msg = format!(
+            "merge: {}",
+            srcs.iter()
+                .map(|s| s.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut args: Vec<String> = vec!["merge".into(), "--no-ff".into(), "-m".into(), msg];
         for s in srcs {
             args.push(s.0.clone());
         }
@@ -293,11 +277,7 @@ impl Substrate for WorktreesConventionAdapter {
                 // Abort the merge so the integration branch isn't left in a
                 // half-merged state — this matches what an attentive git user
                 // does manually; the convention documents this step.
-                let _ = proc_util::run_lenient(
-                    "git",
-                    &["merge", "--abort"],
-                    &self.integration_dir,
-                );
+                let _ = proc_util::run_lenient("git", &["merge", "--abort"], &self.integration_dir);
                 Ok(StepOutcome {
                     ok: true,
                     conflicted: true,
@@ -346,8 +326,11 @@ impl Substrate for WorktreesConventionAdapter {
             ..StateSnapshot::default()
         };
         // List worktrees: `git worktree list --porcelain`.
-        let porcelain =
-            proc_util::run("git", &["worktree", "list", "--porcelain"], &self.integration_dir)?;
+        let porcelain = proc_util::run(
+            "git",
+            &["worktree", "list", "--porcelain"],
+            &self.integration_dir,
+        )?;
         for block in porcelain.split("\n\n") {
             let mut path_opt: Option<&str> = None;
             let mut branch_opt: Option<&str> = None;
@@ -386,7 +369,11 @@ impl Substrate for WorktreesConventionAdapter {
             snap.destroyed_workspaces.sort();
         }
         // Integrated files: walk the integration worktree (skipping .git).
-        collect_files(&self.integration_dir, &self.integration_dir, &mut snap.integrated_files)?;
+        collect_files(
+            &self.integration_dir,
+            &self.integration_dir,
+            &mut snap.integrated_files,
+        )?;
         Ok(snap)
     }
 
@@ -416,8 +403,8 @@ impl WorktreesConventionAdapter {
         // convention only requires *naming* the destroyed workspace; this
         // is the agent-readable surface.
         let archive = self.destroyed_dir().join(&ws.0);
-        let tip = proc_util::run("git", &["rev-parse", &ws.0], &self.integration_dir)
-            .unwrap_or_default();
+        let tip =
+            proc_util::run("git", &["rev-parse", &ws.0], &self.integration_dir).unwrap_or_default();
         fs::write(&archive, tip).map_err(|e| SubstrateError::Io(e.to_string()))?;
         // Delete branch.
         let _ = proc_util::run_lenient("git", &["branch", "-D", &ws.0], &self.integration_dir);
@@ -437,10 +424,8 @@ pub(crate) fn collect_files(
     base: &std::path::Path,
     out: &mut BTreeMap<String, String>,
 ) -> Result<()> {
-    for entry in
-        fs::read_dir(root).map_err(|e| {
-            SubstrateError::Io(format!("read_dir {}: {e}", root.display()))
-        })?
+    for entry in fs::read_dir(root)
+        .map_err(|e| SubstrateError::Io(format!("read_dir {}: {e}", root.display())))?
     {
         let entry = entry.map_err(|e| SubstrateError::Io(e.to_string()))?;
         let path = entry.path();
@@ -460,8 +445,7 @@ pub(crate) fn collect_files(
                 .map_err(|e| SubstrateError::Io(e.to_string()))?
                 .to_string_lossy()
                 .to_string();
-            let content =
-                fs::read_to_string(&path).unwrap_or_else(|_| String::from("<binary>"));
+            let content = fs::read_to_string(&path).unwrap_or_else(|_| String::from("<binary>"));
             out.insert(rel, content);
         }
     }
@@ -481,7 +465,8 @@ mod tests {
         let mut s = new_adapter();
         let ws = WsId::slot(0);
         s.create_workspace(&ws, &BaseRef::Main).unwrap();
-        s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n").unwrap();
+        s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n")
+            .unwrap();
         s.commit(&ws, "feat: alpha").unwrap();
         let merge = s.merge(&[ws.clone()], "main", true).unwrap();
         assert!(merge.ok);
@@ -491,10 +476,11 @@ mod tests {
         assert!(snap.live_workspaces.is_empty());
         assert!(snap.destroyed_workspaces.contains(&ws.0));
         // Integration head has the merged file.
-        assert!(snap
-            .integrated_files
-            .get("src/lib.rs")
-            .map_or(false, |c| c.contains("alpha")));
+        assert!(
+            snap.integrated_files
+                .get("src/lib.rs")
+                .map_or(false, |c| c.contains("alpha"))
+        );
     }
 
     #[test]

@@ -745,7 +745,7 @@ pub fn check_all(pre: &AssuranceState, post: &AssuranceState) -> Result<(), Assu
 
 #[cfg(test)]
 #[allow(deprecated)] // G1 tests intentionally pin the proven-wrong semantics
-                     // for backward-compatibility; the SG1 gate uses Oracle A.
+// for backward-compatibility; the SG1 gate uses Oracle A.
 mod tests {
     use super::*;
 

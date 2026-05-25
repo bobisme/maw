@@ -184,8 +184,7 @@ pub fn shrink(
 
     // -------- Verify final and produce a replay command ---------------------
     let minimal_verdict = drive_once(&current, planted);
-    let minimized_replay_command =
-        replay_command_for(&current, planted);
+    let minimized_replay_command = replay_command_for(&current, planted);
     ShrinkReport {
         minimal: current,
         original_verdict,
@@ -207,11 +206,7 @@ fn drive_once(plan: &ScenarioPlan, planted: &[PlantedDefect]) -> StepVerdict {
     driver.drive_fast(plan).verdict
 }
 
-fn try_reproduces(
-    plan: &ScenarioPlan,
-    planted: &[PlantedDefect],
-    target: &StepVerdict,
-) -> bool {
+fn try_reproduces(plan: &ScenarioPlan, planted: &[PlantedDefect], target: &StepVerdict) -> bool {
     drive_once(plan, planted).same_class(target)
 }
 
@@ -330,10 +325,7 @@ pub struct ShrinkerCorpusEntry {
 impl ShrinkerCorpusEntry {
     /// Build a corpus entry from a shrink report.
     #[must_use]
-    pub fn from_report(
-        report: &ShrinkReport,
-        planted: &[crate::in_proc::PlantedDefect],
-    ) -> Self {
+    pub fn from_report(report: &ShrinkReport, planted: &[crate::in_proc::PlantedDefect]) -> Self {
         let (kind, entity) = match &report.minimal_verdict {
             StepVerdict::OracleA(a) => (a.kind, a.oid.clone()),
             StepVerdict::OracleB(b) => (b.kind, b.entity.clone()),

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use maw_bench::run::{BenchRun, OracleBSummary, RunVerdict, StepOutcome, ToolCall, Turn};
 
-use crate::attribution::{attribute_tool_call, MawVerbAttribution};
+use crate::attribution::{MawVerbAttribution, attribute_tool_call};
 use crate::record::{MetricRecord, MetricValue};
 
 #[cfg(test)]
@@ -277,9 +277,11 @@ fn turn_is_literal_retry(turn: &Turn, prev: Option<&Turn>) -> bool {
         if call.name != "Bash" {
             continue;
         }
-        if prev.tool_calls.iter().any(|p| {
-            p.name == "Bash" && p.args_json == call.args_json
-        }) {
+        if prev
+            .tool_calls
+            .iter()
+            .any(|p| p.name == "Bash" && p.args_json == call.args_json)
+        {
             return true;
         }
     }
@@ -450,7 +452,14 @@ mod tests {
 
     #[test]
     fn cost_unavailable_when_none() {
-        let run = synth_run("maw", RunVerdict::Success, OracleBSummary::Green, 3, 9, None);
+        let run = synth_run(
+            "maw",
+            RunVerdict::Success,
+            OracleBSummary::Green,
+            3,
+            9,
+            None,
+        );
         let m = extract_metrics(&run);
         assert_eq!(m.cost_usd, MetricValue::Unavailable);
     }
@@ -577,10 +586,8 @@ mod tests {
     fn attribution_driven_matches_per_verb_sum() {
         // Turn 1: merge that conflicts. Turn 2: retry merge after the
         // conflict — should attribute as WsMergeStructuredConflict.
-        let merge_attempt = bash_with_outcome(
-            r#"{"cmd":"maw ws merge a --into default"}"#,
-            conflicted(),
-        );
+        let merge_attempt =
+            bash_with_outcome(r#"{"cmd":"maw ws merge a --into default"}"#, conflicted());
         let retry = bash(r#"{"cmd":"maw ws merge a --into default"}"#);
         let turns = vec![
             turn_with_calls(1, vec![merge_attempt]),
@@ -600,13 +607,17 @@ mod tests {
     #[test]
     fn maw_arm_record_carries_per_verb_axis() {
         let conflict_then_retry = [
-            bash_with_outcome(
-                r#"{"cmd":"maw ws merge a --into default"}"#,
-                conflicted(),
-            ),
+            bash_with_outcome(r#"{"cmd":"maw ws merge a --into default"}"#, conflicted()),
             bash(r#"{"cmd":"maw ws merge a --into default"}"#),
         ];
-        let mut run = synth_run("maw", RunVerdict::Success, OracleBSummary::Green, 0, 2, None);
+        let mut run = synth_run(
+            "maw",
+            RunVerdict::Success,
+            OracleBSummary::Green,
+            0,
+            2,
+            None,
+        );
         run.transcript.turns = vec![
             turn_with_calls(1, vec![conflict_then_retry[0].clone()]),
             turn_with_calls(2, vec![conflict_then_retry[1].clone()]),
@@ -621,7 +632,11 @@ mod tests {
             Some(&1)
         );
         // work_redone_turns matches the diagnostic-axis sum (no drift).
-        let sum: u64 = m.per_verb_wasted_turns.values().map(|n| u64::from(*n)).sum();
+        let sum: u64 = m
+            .per_verb_wasted_turns
+            .values()
+            .map(|n| u64::from(*n))
+            .sum();
         assert_eq!(m.work_redone_turns, MetricValue::count(sum));
     }
 
@@ -648,8 +663,7 @@ mod tests {
     fn destroy_refused_attribution_end_to_end() {
         // Agent issues `maw ws destroy x` -> refused. Then retries
         // with --force. The retry attributes to WsDestroyRefused.
-        let attempt =
-            bash_with_outcome(r#"{"cmd":"maw ws destroy alice"}"#, refused());
+        let attempt = bash_with_outcome(r#"{"cmd":"maw ws destroy alice"}"#, refused());
         let retry = bash(r#"{"cmd":"maw ws destroy alice --force"}"#);
         let turns = vec![
             turn_with_calls(1, vec![attempt]),

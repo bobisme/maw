@@ -1,14 +1,3 @@
-// TODO(bn-c6l3 follow-up): wire-up deferred. This module ships as a building
-// block but is NOT invoked from `create.rs` yet because a merge conflict with
-// bn-29fi (destroy-prevention cues) on the refusal-text path required choosing
-// one side; `--keep epoch` preserved bn-29fi's cues. A follow-up bone should
-// integrate both: take the structured DestroyRefusal from this module AND
-// preserve bn-29fi's `--dry-run` / `merge --destroy` recommendation lines.
-// The 3 integration tests in tests/destroy_gate.rs are `#[ignore]`d pending
-// that wire-up; the 11 unit tests in this module's own `mod tests` are green.
-
-#![allow(dead_code)] // wire-up deferred — see TODO above
-
 //! Self-describing refusal payload for `maw ws destroy` (SG4 / bn-c6l3).
 //!
 //! Targets the `ws_destroy_refused`
@@ -91,6 +80,22 @@ pub struct DestroyRefusal {
     /// the workspace before choosing the safe-vs-force path. Surfaced
     /// as a third "if you want to look first" line.
     pub inspect_command: String,
+    /// bn-29fi destroy-prevention cue: structured `--dry-run` preview
+    /// command. Agents that aren't yet sure which path to take can
+    /// invoke this to get a parseable plan before issuing any
+    /// destructive verb. Carried as a first-class field (rather than
+    /// inlined free-text) so JSON consumers can branch on it.
+    pub dry_run_hint: String,
+    /// bn-29fi destroy-prevention cue: alternative one-shot that
+    /// merges-then-destroys. Same shape as `recommended_action` for
+    /// committed work, but expressed as the explicit "merge --destroy
+    /// preferred over --force" alternative so the agent sees both
+    /// safe verbs side by side. For dirty workspaces this is the
+    /// `commit-then-merge --destroy` chain; for committed workspaces
+    /// it duplicates `recommended_action` (intentional — the JSON
+    /// consumer reads `recommended_action`, the text renderer skips
+    /// the duplicate line).
+    pub merge_destroy_alternative: String,
 }
 
 /// Named kinds of recommended action, so machine consumers don't
@@ -182,6 +187,18 @@ impl DestroyRefusal {
             ),
         };
 
+        // bn-29fi cue: structured --dry-run preview is the agent's
+        // "look before you leap" surface — predict the destroy without
+        // running it. Same command shape regardless of lifecycle state.
+        let dry_run_hint = format!("maw ws destroy {workspace} --dry-run --format json");
+
+        // bn-29fi cue: the merge-then-destroy one-shot. For committed
+        // work this IS the recommended_action; for dirty work it is
+        // the second leg (after the commit step). Carried separately
+        // so JSON consumers see both paths without parsing the chain.
+        let merge_destroy_alternative =
+            format!("maw ws merge {workspace} --into default --destroy");
+
         Self {
             workspace: workspace.to_string(),
             lifecycle_state,
@@ -197,6 +214,8 @@ impl DestroyRefusal {
                  maw ws recover {workspace}"
             ),
             inspect_command: format!("maw ws touched {workspace} --format json"),
+            dry_run_hint,
+            merge_destroy_alternative,
         }
     }
 
@@ -204,6 +223,24 @@ impl DestroyRefusal {
     /// two spaces to match the existing `bail!` output convention in
     /// `workspace/create.rs` so agents that already pattern-match the
     /// old layout still parse cleanly.
+    ///
+    /// Layout (top-down, in priority of what the agent should try first):
+    /// 1. Lead — names the workspace + state slug + refusal.
+    /// 2. `Recommended:` — the SAFE single-command path.
+    /// 3. `Preview options:` — bn-29fi `--dry-run` hint (look before
+    ///    you leap).
+    /// 4. `Or force-destroy:` — `--force` escape hatch with the
+    ///    Prime-Invariant reassurance inlined.
+    /// 5. `Inspect first:` — the read-only "what's actually in the
+    ///    workspace" command.
+    ///
+    /// For dirty (uncommitted) workspaces, the `Recommended:` line is
+    /// a chained `git add && git commit && maw ws merge --destroy`; in
+    /// that case `Preview options:` carries the bn-29fi cue and the
+    /// `merge --destroy` one-shot is *embedded inside* `Recommended:`
+    /// — so we don't duplicate it on its own line. For committed
+    /// workspaces `Recommended:` is already the `merge --destroy`
+    /// one-shot, so the bn-29fi alternative line is omitted.
     #[must_use]
     pub fn render_text(&self) -> String {
         let Self {
@@ -213,17 +250,15 @@ impl DestroyRefusal {
             force_command,
             force_safety_note,
             inspect_command,
+            dry_run_hint,
             ..
         } = self;
         let state_slug = self.lifecycle_state.slug();
-        // Lead line names the state from the safe-cleanup vocabulary.
-        // Sub-lines are ordered: SAFE first, FORCE second, INSPECT
-        // third — the agent's "first attempt is the right one" only
-        // if the safe path is the most prominent.
         format!(
             "Workspace '{workspace}' has {touched_count} unmerged change(s) \
              (state: {state_slug}). Refusing destroy to avoid data loss.\n  \
              Recommended: {recommended_action}\n  \
+             Preview options: {dry_run_hint}   (bn-29fi)\n  \
              Or force-destroy: {force_command}\n    \
              ({force_safety_note})\n  \
              Inspect first: {inspect_command}"
@@ -251,7 +286,10 @@ mod tests {
     fn committed_unintegrated_leads_with_merge_and_destroy() {
         let r = DestroyRefusal::new("alice", 3, 2, 0);
         assert_eq!(r.lifecycle_state, LifecycleState::CommittedUnintegrated);
-        assert_eq!(r.recommended_action_kind, RecommendedAction::MergeAndDestroy);
+        assert_eq!(
+            r.recommended_action_kind,
+            RecommendedAction::MergeAndDestroy
+        );
         assert!(r.recommended_action.starts_with("maw ws merge alice"));
         assert!(r.recommended_action.contains("--into default"));
         assert!(r.recommended_action.contains("--destroy"));
@@ -261,7 +299,10 @@ mod tests {
     fn dirty_uncommitted_leads_with_commit_then_merge() {
         let r = DestroyRefusal::new("bob", 2, 0, 2);
         assert_eq!(r.lifecycle_state, LifecycleState::DirtyUncommitted);
-        assert_eq!(r.recommended_action_kind, RecommendedAction::CommitThenMerge);
+        assert_eq!(
+            r.recommended_action_kind,
+            RecommendedAction::CommitThenMerge
+        );
         assert!(r.recommended_action.contains("git add -A"));
         assert!(r.recommended_action.contains("git commit"));
         assert!(r.recommended_action.contains("maw ws merge bob"));
@@ -274,7 +315,10 @@ mod tests {
         // because committed work is the more dangerous thing to lose.
         let r = DestroyRefusal::new("carol", 5, 1, 3);
         assert_eq!(r.lifecycle_state, LifecycleState::CommittedUnintegrated);
-        assert_eq!(r.recommended_action_kind, RecommendedAction::MergeAndDestroy);
+        assert_eq!(
+            r.recommended_action_kind,
+            RecommendedAction::MergeAndDestroy
+        );
     }
 
     #[test]
@@ -307,7 +351,9 @@ mod tests {
     fn render_text_lists_safe_path_before_force_path() {
         let r = DestroyRefusal::new("frank", 1, 1, 0);
         let text = r.render_text();
-        let safe_pos = text.find("Recommended:").expect("Recommended: line present");
+        let safe_pos = text
+            .find("Recommended:")
+            .expect("Recommended: line present");
         let force_pos = text
             .find("Or force-destroy:")
             .expect("force-destroy line present");
@@ -380,10 +426,7 @@ mod tests {
         let r = DestroyRefusal::new("jane", 1, 0, 1);
         let json = r.render_json().expect("json renders");
         let v: serde_json::Value = serde_json::from_str(&json).expect("parses");
-        assert_eq!(
-            v["lifecycle_state"].as_str(),
-            Some("dirty-uncommitted")
-        );
+        assert_eq!(v["lifecycle_state"].as_str(), Some("dirty-uncommitted"));
         assert_eq!(
             v["recommended_action_kind"].as_str(),
             Some("commit-then-merge")

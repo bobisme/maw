@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use maw_bench::run::BenchRun;
-use maw_bench_metrics::{extract_metrics, render_dominance_table, ReportOptions};
+use maw_bench_metrics::{ReportOptions, extract_metrics, render_dominance_table};
 
 fn usage() -> &'static str {
     "usage: sg2-report <artifact-dir> [--median]\n\

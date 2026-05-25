@@ -199,7 +199,9 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
 /// reason" message). Returns `None` for the in-sync / epoch-unset cases
 /// to avoid noise.
 fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
-    use crate::workspace::epoch_drift::{AutoAdvanceOutcome, AutoAdvanceSkip, auto_advance_if_safe};
+    use crate::workspace::epoch_drift::{
+        AutoAdvanceOutcome, AutoAdvanceSkip, auto_advance_if_safe,
+    };
 
     let root = root?;
     let config = crate::workspace::MawConfig::load(root).ok()?;
@@ -208,7 +210,10 @@ fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
     let backend = maw_core::backend::git::GitWorktreeBackend::new(root.to_path_buf());
 
     match auto_advance_if_safe(root, branch, default_ws, &backend) {
-        Ok(AutoAdvanceOutcome::Advanced { report, new_epoch_short }) => Some(DoctorCheck {
+        Ok(AutoAdvanceOutcome::Advanced {
+            report,
+            new_epoch_short,
+        }) => Some(DoctorCheck {
             name: "epoch repair".to_string(),
             status: "ok".to_string(),
             message: format!(
@@ -217,8 +222,12 @@ fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
             ),
             fix: None,
         }),
-        Ok(AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::InSync | AutoAdvanceSkip::EpochUnset }) => None,
-        Ok(AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::FfBlocked(report) }) => Some(DoctorCheck {
+        Ok(AutoAdvanceOutcome::NoOp {
+            reason: AutoAdvanceSkip::InSync | AutoAdvanceSkip::EpochUnset,
+        }) => None,
+        Ok(AutoAdvanceOutcome::NoOp {
+            reason: AutoAdvanceSkip::FfBlocked(report),
+        }) => Some(DoctorCheck {
             name: "epoch repair".to_string(),
             status: "warn".to_string(),
             message: format!(
@@ -229,10 +238,15 @@ fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
             ),
             fix: Some(format!(
                 "Resolve first: maw ws merge {} --into default --check",
-                report.blocking_workspaces.first().map_or("<ws>", String::as_str),
+                report
+                    .blocking_workspaces
+                    .first()
+                    .map_or("<ws>", String::as_str),
             )),
         }),
-        Ok(AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::Diverged(report) }) => Some(DoctorCheck {
+        Ok(AutoAdvanceOutcome::NoOp {
+            reason: AutoAdvanceSkip::Diverged(report),
+        }) => Some(DoctorCheck {
             name: "epoch repair".to_string(),
             status: "fail".to_string(),
             message: format!(
@@ -349,10 +363,7 @@ fn check_manifold_initialized(root: Option<&Path>) -> DoctorCheck {
             status: "fail".to_string(),
             message: format!(
                 "manifold metadata: {} is missing",
-                manifold
-                    .strip_prefix(root)
-                    .unwrap_or(&manifold)
-                    .display()
+                manifold.strip_prefix(root).unwrap_or(&manifold).display()
             ),
             fix: Some("Run: maw init".to_string()),
         }
@@ -913,7 +924,10 @@ fn check_epoch_drift(root: Option<&Path>) -> DoctorCheck {
         EpochDriftKind::InSync => DoctorCheck {
             name,
             status: "ok".to_string(),
-            message: format!("epoch drift: in sync ({} == '{branch}')", report.epoch_short),
+            message: format!(
+                "epoch drift: in sync ({} == '{branch}')",
+                report.epoch_short
+            ),
             fix: None,
         },
         EpochDriftKind::FfAbsorbable => DoctorCheck {
@@ -940,7 +954,10 @@ fn check_epoch_drift(root: Option<&Path>) -> DoctorCheck {
             ),
             fix: Some(format!(
                 "Fix: maw ws merge {} --into default --check  (resolve, then retry)",
-                report.blocking_workspaces.first().map_or("<ws>", String::as_str),
+                report
+                    .blocking_workspaces
+                    .first()
+                    .map_or("<ws>", String::as_str),
             )),
         },
         EpochDriftKind::Diverged => DoctorCheck {
@@ -951,9 +968,11 @@ fn check_epoch_drift(root: Option<&Path>) -> DoctorCheck {
                  Manual recovery required — auto-advance is unsafe.",
                 report.epoch_short, report.branch_short,
             ),
-            fix: Some("Fix: investigate with `git log --oneline --all`; \
+            fix: Some(
+                "Fix: investigate with `git log --oneline --all`; \
                        reset branch or epoch ref deliberately."
-                .to_string()),
+                    .to_string(),
+            ),
         },
     }
 }

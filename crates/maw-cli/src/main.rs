@@ -469,14 +469,14 @@ fn main() {
             legacy_ws_layout: legacy_ws,
         }),
         Commands::Upgrade => upgrade::run(),
-        Commands::Migrate { resume, dry_run } => migrate::run(&migrate::MigrateOptions {
-            resume,
-            dry_run,
-        }),
-        Commands::Doctor { format, json, repair } => doctor::run_with_repair(
-            format::OutputFormat::with_json_flag(format, json),
+        Commands::Migrate { resume, dry_run } => {
+            migrate::run(&migrate::MigrateOptions { resume, dry_run })
+        }
+        Commands::Doctor {
+            format,
+            json,
             repair,
-        ),
+        } => doctor::run_with_repair(format::OutputFormat::with_json_flag(format, json), repair),
         #[cfg(feature = "tui")]
         Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),

@@ -141,7 +141,9 @@ pub fn auto_rebase_siblings<B: WorkspaceBackend>(
     // and-suspenders defense against a renamed source.
     let mut in_progress: HashSet<String> = merge_sources.iter().cloned().collect();
     {
-        let merge_state_path = MergeStateFile::default_path(&maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root));
+        let merge_state_path = MergeStateFile::default_path(
+            &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
+        );
         if let Ok(state) = MergeStateFile::read(&merge_state_path) {
             for ws_id in &state.sources {
                 in_progress.insert(ws_id.as_str().to_string());
@@ -243,7 +245,9 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
     // have started since we read the snapshot above; the per-workspace lock
     // does not exclude the merge-state writer, so re-read here.
     {
-        let merge_state_path = MergeStateFile::default_path(&maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root));
+        let merge_state_path = MergeStateFile::default_path(
+            &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
+        );
         if let Ok(state) = MergeStateFile::read(&merge_state_path)
             && state.sources.iter().any(|src| src.as_str() == name)
         {

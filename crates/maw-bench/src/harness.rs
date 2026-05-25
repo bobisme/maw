@@ -41,10 +41,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use maw_scenario::ScenarioPlan;
 
 use crate::agent::{AgentBackend, AgentConfig, AgentError};
-use crate::prompt::{prompt_sha256_hex, render_prompt, PromptInputs};
-use crate::run::{
-    BenchRun, OracleBSummary, RunManifest, RunVerdict, Transcript,
-};
+use crate::prompt::{PromptInputs, prompt_sha256_hex, render_prompt};
+use crate::run::{BenchRun, OracleBSummary, RunManifest, RunVerdict, Transcript};
 use crate::substrate::{Substrate, SubstrateConfig, SubstrateError, SubstrateLabel};
 
 /// Per-run configuration controlling the harness's behaviour.
@@ -157,7 +155,10 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
             base_git_time: maw_scenario::GIT_TIME_BASE_FOR_DRIVER,
             debug_dir: None,
         };
-        let handle = self.substrate.setup(&scfg).map_err(HarnessError::SubstrateSetup)?;
+        let handle = self
+            .substrate
+            .setup(&scfg)
+            .map_err(HarnessError::SubstrateSetup)?;
 
         // -- 2. Prompt rendering (deterministic given seed + crib). --
         let prompt = render_prompt(&PromptInputs {
@@ -171,11 +172,11 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
         let start_ms = config.pinned_start_ms.unwrap_or_else(unix_ms_now);
 
         // -- 4. Agent run. --
-        let agent_result = self
-            .agent
-            .run(&prompt, &self.agent_config, &handle);
+        let agent_result = self.agent.run(&prompt, &self.agent_config, &handle);
 
-        let end_ms = config.pinned_end_ms.unwrap_or_else(|| unix_ms_now().max(start_ms));
+        let end_ms = config
+            .pinned_end_ms
+            .unwrap_or_else(|| unix_ms_now().max(start_ms));
 
         // -- 5. Build transcript / per-run counters. --
         let (turns_field, total_turns, total_tool_calls, agent_done, agent_cost, agent_stop) =
@@ -270,7 +271,6 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
 
         Ok(run)
     }
-
 }
 
 /// Run Oracle B if the caller enabled it. Pure free function so we don't
@@ -315,11 +315,7 @@ fn unix_ms_now() -> u64 {
 
 /// Decide the harness-side verdict. Pure function — easier to unit-test
 /// than the orchestrator.
-fn classify_verdict(
-    agent_done: bool,
-    oracle_b: &OracleBSummary,
-    agent_stop: &str,
-) -> RunVerdict {
+fn classify_verdict(agent_done: bool, oracle_b: &OracleBSummary, agent_stop: &str) -> RunVerdict {
     if !agent_done {
         return RunVerdict::AgentFailed {
             reason: if agent_stop.is_empty() {
@@ -392,9 +388,24 @@ fn derive_run_id(
     cfg: &BenchConfig,
     start_ms: u64,
 ) -> String {
-    let cond = if cfg.condition_id.is_empty() { "C-" } else { cfg.condition_id.as_str() };
-    let tc = if cfg.t_class.is_empty() { "T-" } else { cfg.t_class.as_str() };
-    format!("{}-{}-seed{}-{}-{}", arm.as_str(), cond, plan.seed, tc, start_ms)
+    let cond = if cfg.condition_id.is_empty() {
+        "C-"
+    } else {
+        cfg.condition_id.as_str()
+    };
+    let tc = if cfg.t_class.is_empty() {
+        "T-"
+    } else {
+        cfg.t_class.as_str()
+    };
+    format!(
+        "{}-{}-seed{}-{}-{}",
+        arm.as_str(),
+        cond,
+        plan.seed,
+        tc,
+        start_ms
+    )
 }
 
 /// Enumerate every file under the workspace root, recursively. Returns
@@ -408,17 +419,15 @@ fn enumerate_workspace_files(root: &std::path::Path) -> Vec<String> {
     out
 }
 
-fn enumerate_inner(
-    base: &std::path::Path,
-    cur: &std::path::Path,
-    out: &mut Vec<String>,
-) {
+fn enumerate_inner(base: &std::path::Path, cur: &std::path::Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(cur) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(rel) = path.strip_prefix(base) else { continue };
+        let Ok(rel) = path.strip_prefix(base) else {
+            continue;
+        };
         let s = rel.to_string_lossy().to_string();
         // Skip the .git internals (huge churn, not interesting per-run).
         if s.starts_with(".git") {
@@ -619,7 +628,9 @@ mod tests {
         // agent_done=true + Oracle B red ⇒ SubstrateIncoherent.
         let v = classify_verdict(
             true,
-            &OracleBSummary::Red { violations: vec!["x".into()] },
+            &OracleBSummary::Red {
+                violations: vec!["x".into()],
+            },
             "",
         );
         assert!(matches!(v, RunVerdict::SubstrateIncoherent));
@@ -629,7 +640,9 @@ mod tests {
         // agent_done=true + Oracle B N/A ⇒ Success.
         let v = classify_verdict(
             true,
-            &OracleBSummary::NotApplicable { reason: "noop".into() },
+            &OracleBSummary::NotApplicable {
+                reason: "noop".into(),
+            },
             "",
         );
         assert!(matches!(v, RunVerdict::Success));
@@ -741,13 +754,8 @@ mod tests {
                 })
             }
 
-            fn teardown(
-                &mut self,
-                handle: SubstrateHandle,
-            ) -> Result<(), SubstrateError> {
-                if let Some(pos) =
-                    self.keep.iter().position(|d| d.path() == handle.repo_root)
-                {
+            fn teardown(&mut self, handle: SubstrateHandle) -> Result<(), SubstrateError> {
+                if let Some(pos) = self.keep.iter().position(|d| d.path() == handle.repo_root) {
                     let _ = self.keep.remove(pos);
                 }
                 Ok(())
@@ -774,10 +782,7 @@ mod tests {
         }
 
         fn git_capture(root: &std::path::Path, args: &[&str]) -> std::io::Result<String> {
-            let o = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()?;
+            let o = Command::new("git").current_dir(root).args(args).output()?;
             if !o.status.success() {
                 return Err(std::io::Error::other(format!(
                     "git {args:?} -> {} stderr={}",

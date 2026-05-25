@@ -71,11 +71,13 @@ pub mod substrate;
 #[cfg(feature = "claude-backend")]
 pub mod claude;
 
-pub use agent::{AgentBackend, AgentConfig, AgentReply, AgentTurn, MockAgent, MockScript, MockTurnScript};
+pub use agent::{
+    AgentBackend, AgentConfig, AgentReply, AgentTurn, MockAgent, MockScript, MockTurnScript,
+};
 pub use harness::{BenchConfig, BenchHarness, HarnessError};
-pub use prompt::{render_prompt, PromptInputs};
+pub use prompt::{PromptInputs, render_prompt};
 pub use run::{
-    BenchRun, OpClass, OracleBSummary, RunVerdict, StepOutcome,
-    Substrate as SubstrateLabel, ToolCall, Transcript, Turn,
+    BenchRun, OpClass, OracleBSummary, RunVerdict, StepOutcome, Substrate as SubstrateLabel,
+    ToolCall, Transcript, Turn,
 };
 pub use substrate::{NoopSubstrate, Substrate, SubstrateError, SubstrateHandle};

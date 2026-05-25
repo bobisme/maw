@@ -217,8 +217,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             let rebase_conflicts = if missing {
                 0
             } else {
-                let flavor =
-                    maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
+                let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
                 let ws_path = flavor.workspace_path(&root, ws.id.as_str());
                 super::resolve::find_conflicted_files(&ws_path)
                     .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
@@ -252,7 +251,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                     commits_ahead: ws.commits_ahead,
                     has_uncommitted,
                     was_integrated: false,
-            has_pinned_snapshot: false,
+                    has_pinned_snapshot: false,
                 };
                 let state = LifecycleState::classify(signals);
                 let fix = state.fix_command(ws.id.as_str(), ws_mode.is_persistent());

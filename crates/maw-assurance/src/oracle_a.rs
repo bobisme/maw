@@ -308,13 +308,11 @@ impl OracleA {
                 None => ls_tree_blobs(&self.repo_root, tip)?,
             };
             for blob in blobs {
-                self.witnesses
-                    .entry(blob)
-                    .or_insert_with(|| WitnessOrigin {
-                        ws: ws_name.clone(),
-                        step: step_index,
-                        tip: tip.clone(),
-                    });
+                self.witnesses.entry(blob).or_insert_with(|| WitnessOrigin {
+                    ws: ws_name.clone(),
+                    step: step_index,
+                    tip: tip.clone(),
+                });
             }
         }
         Ok(())
@@ -504,7 +502,10 @@ fn rev_list_objects(
     }
     let output = cmd.output().map_err(|e| AssuranceViolation::GitError {
         check: "oracle_a::rev_list_objects".to_owned(),
-        command: format!("git rev-list --objects --no-object-names <{} roots>", roots.len()),
+        command: format!(
+            "git rev-list --objects --no-object-names <{} roots>",
+            roots.len()
+        ),
         stderr: e.to_string(),
     })?;
     if !output.status.success() {
@@ -514,7 +515,10 @@ fn rev_list_objects(
         // visible.
         return Err(AssuranceViolation::GitError {
             check: "oracle_a::rev_list_objects".to_owned(),
-            command: format!("git rev-list --objects --no-object-names <{} roots>", roots.len()),
+            command: format!(
+                "git rev-list --objects --no-object-names <{} roots>",
+                roots.len()
+            ),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
@@ -531,11 +535,7 @@ fn rev_list_objects(
 /// `dstoid=0`).
 ///
 /// TODO(gix): assurance carveout — see [`rev_list_objects`].
-fn diff_blobs(
-    repo_root: &Path,
-    base: &str,
-    tip: &str,
-) -> Result<Vec<String>, AssuranceViolation> {
+fn diff_blobs(repo_root: &Path, base: &str, tip: &str) -> Result<Vec<String>, AssuranceViolation> {
     if base == tip {
         return Ok(Vec::new());
     }
@@ -543,7 +543,15 @@ fn diff_blobs(
     // need full 40-hex blob OIDs to match against `git rev-list --objects`
     // (which always prints full OIDs).
     let output = Command::new("git")
-        .args(["diff", "--raw", "--no-renames", "--no-abbrev", "-z", base, tip])
+        .args([
+            "diff",
+            "--raw",
+            "--no-renames",
+            "--no-abbrev",
+            "-z",
+            base,
+            tip,
+        ])
         .current_dir(repo_root)
         .output()
         .map_err(|e| AssuranceViolation::GitError {
@@ -709,25 +717,16 @@ mod tests {
         git(root, &["config", "commit.gpgsign", "false"]);
         fs::write(root.join("README.md"), "x").unwrap();
         git(root, &["add", "README.md"]);
-        git(
-            root,
-            &["commit", "-q", "--no-gpg-sign", "-m", "init"],
-        );
+        git(root, &["commit", "-q", "--no-gpg-sign", "-m", "init"]);
         // initial epoch ref
         let head = git_capture(root, &["rev-parse", "HEAD"]);
-        git(
-            root,
-            &["update-ref", "refs/manifold/epoch/current", &head],
-        );
+        git(root, &["update-ref", "refs/manifold/epoch/current", &head]);
         dir
     }
 
     /// Build an AssuranceState by reading the repo + the given ws-dir map
     /// `(ws_name, head_oid, dirty, exists)`.
-    fn make_state(
-        root: &Path,
-        workspaces: &[(&str, &str, bool, bool)],
-    ) -> AssuranceState {
+    fn make_state(root: &Path, workspaces: &[(&str, &str, bool, bool)]) -> AssuranceState {
         // Re-read refs via capture_state (uses git for-each-ref).
         let mut state = capture_state(root).expect("capture");
         state.workspaces.clear();
@@ -789,7 +788,11 @@ mod tests {
         // the ws branch at the current HEAD (refs/heads/main).
         let parent = {
             let out = Command::new("git")
-                .args(["rev-parse", "--verify", &format!("{ws_branch_ref}^{{commit}}")])
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    &format!("{ws_branch_ref}^{{commit}}"),
+                ])
                 .current_dir(root)
                 .output()
                 .expect("git rev-parse");
@@ -832,10 +835,7 @@ mod tests {
         let head = git_capture(root, &["rev-parse", "HEAD"]);
 
         // Alice authors a blob and gets a recovery ref (post-destroy).
-        git(
-            root,
-            &["update-ref", "refs/manifold/epoch/ws/alice", &head],
-        );
+        git(root, &["update-ref", "refs/manifold/epoch/ws/alice", &head]);
         let alice_blob = commit_file(root, "refs/manifold/ws/alice", "a.txt", "alice-content");
         let alice_tip = git_capture(root, &["rev-parse", "refs/manifold/ws/alice"]);
         // Pin a recovery ref pointing at the workspace tip (mimics
@@ -882,10 +882,7 @@ mod tests {
         // already dropped alice's epoch ref to mimic post-destroy state,
         // so harvest_witnesses will use the ls-tree fallback (no base
         // epoch) and still collect alice's authored blob.
-        let state0 = make_state(
-            root,
-            &[("alice", &alice_tip, false, true)],
-        );
+        let state0 = make_state(root, &[("alice", &alice_tip, false, true)]);
         let r0 = oracle
             .check_step(&state0, 0)
             .expect("step 0 should not error");
@@ -923,11 +920,13 @@ mod tests {
         let root = dir.path();
         let head = git_capture(root, &["rev-parse", "HEAD"]);
 
-        git(
+        git(root, &["update-ref", "refs/manifold/epoch/ws/dave", &head]);
+        let dave_blob = commit_file(
             root,
-            &["update-ref", "refs/manifold/epoch/ws/dave", &head],
+            "refs/manifold/ws/dave",
+            "d.txt",
+            "dave-unique-content",
         );
-        let dave_blob = commit_file(root, "refs/manifold/ws/dave", "d.txt", "dave-unique-content");
         let dave_tip = git_capture(root, &["rev-parse", "refs/manifold/ws/dave"]);
 
         let mut oracle = OracleA::new(root);
@@ -998,10 +997,7 @@ mod tests {
         // Step 0: both workspaces exist; both blobs witnessed.
         let state0 = make_state(
             root,
-            &[
-                ("wsA", &tip_a, false, true),
-                ("wsB", &tip_b, false, true),
-            ],
+            &[("wsA", &tip_a, false, true), ("wsB", &tip_b, false, true)],
         );
         let r0 = oracle.check_step(&state0, 0).unwrap();
         assert!(r0.violation.is_none());
@@ -1017,10 +1013,7 @@ mod tests {
         // Build a merged-main commit whose tree contains only beta.
         let merged_commit = {
             // Compute beta's tree: a single file `shared.txt` → beta-blob.
-            let beta_blob = git_capture(
-                root,
-                &["rev-parse", &format!("{tip_b}:shared.txt")],
-            );
+            let beta_blob = git_capture(root, &["rev-parse", &format!("{tip_b}:shared.txt")]);
             let merged_tree = {
                 let mut c = Command::new("git");
                 c.args(["mktree"])
@@ -1059,10 +1052,7 @@ mod tests {
         git(root, &["update-ref", "-d", "refs/manifold/ws/wsA"]);
         git(root, &["update-ref", "-d", "refs/manifold/epoch/ws/wsA"]);
         // (deliberately NO refs/manifold/recovery/wsA/*)
-        let state1 = make_state(
-            root,
-            &[("wsB", &tip_b, false, true)],
-        );
+        let state1 = make_state(root, &[("wsB", &tip_b, false, true)]);
         let r1 = oracle.check_step(&state1, 1).unwrap();
         let v = r1
             .violation
@@ -1110,10 +1100,7 @@ mod tests {
             // current tip.
             if i.is_multiple_of(20) {
                 git(root, &["update-ref", "refs/heads/main", &tip]);
-                git(
-                    root,
-                    &["update-ref", "refs/manifold/epoch/current", &tip],
-                );
+                git(root, &["update-ref", "refs/manifold/epoch/current", &tip]);
             }
 
             let state = make_state(root, &[("ws1", &tip, false, true)]);
@@ -1302,9 +1289,7 @@ mod tests {
         git(root, &["update-ref", "refs/manifold/head/x", &blob]);
         let state = capture_state(root).unwrap();
         // Sanity: capture_state DID see the head ref.
-        assert!(state
-            .durable_refs
-            .contains_key("refs/manifold/head/x"));
+        assert!(state.durable_refs.contains_key("refs/manifold/head/x"));
         // But compute_frontier must NOT include it.
         let f = compute_frontier(&state);
         assert!(

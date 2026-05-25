@@ -62,9 +62,9 @@ use std::path::PathBuf;
 
 use maw_assurance::in_proc::{InProcDriver, PlantedDefect, StepVerdict};
 use maw_assurance::scenario::{
-    generate_plan, ConditionProfile, Op, ScenarioPlan, CANONICAL_BN_CM63_SEED,
+    CANONICAL_BN_CM63_SEED, ConditionProfile, Op, ScenarioPlan, generate_plan,
 };
-use maw_assurance::shrinker::{shrink, ShrinkerCorpusEntry};
+use maw_assurance::shrinker::{ShrinkerCorpusEntry, shrink};
 
 /// Path to `tests/corpus/dst/` resolved from the maw-assurance manifest dir.
 /// Mirrors the resolver in `sg1_dst.rs::corpus_dir`.
@@ -124,9 +124,7 @@ fn write_corpus_entry(name: &str, entry: &ShrinkerCorpusEntry) {
 #[ignore = "Emits tests/corpus/dst/bn-cm63-destroy-vs-inflight-merge.json — run on demand."]
 fn emit_bn_cm63_corpus_entry() {
     let plan = generate_plan(CANONICAL_BN_CM63_SEED, &ConditionProfile::default(), 32);
-    let planted = vec![PlantedDefect::DanglingHeadRef {
-        ws: "ws-0".into(),
-    }];
+    let planted = vec![PlantedDefect::DanglingHeadRef { ws: "ws-0".into() }];
     let verdict = drive_once(&plan, &planted);
     assert!(
         matches!(verdict, StepVerdict::OracleB(_)),
@@ -185,8 +183,7 @@ fn find_lost_commits_seed() -> (u64, ScenarioPlan, String) {
 /// Does `plan` contain an `Op::Merge` with `>=2` sources where at least two
 /// of those sources previously edited a `shared/*` path?
 fn plan_has_overlap_merge(plan: &ScenarioPlan) -> bool {
-    let mut shared_editors: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut shared_editors: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for step in &plan.steps {
         match &step.op {
             Op::EditFiles { ws, files } => {
@@ -221,8 +218,7 @@ fn plan_has_overlap_merge(plan: &ScenarioPlan) -> bool {
 fn pick_committed_surviving_ws(plan: &ScenarioPlan) -> Option<String> {
     let mut committed_at: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
-    let mut destroyed: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut destroyed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (i, step) in plan.steps.iter().enumerate() {
         match &step.op {
             Op::Commit { ws, .. } => {
@@ -274,9 +270,7 @@ fn pick_committed_surviving_ws(plan: &ScenarioPlan) -> Option<String> {
 #[ignore = "Emits tests/corpus/dst/lost-commits-2026-02-05.json — run on demand."]
 fn emit_lost_commits_corpus_entry() {
     let (seed, plan, target_ws) = find_lost_commits_seed();
-    eprintln!(
-        "[corpus] lost-commits seed pinned at {seed}, plant target ws={target_ws}"
-    );
+    eprintln!("[corpus] lost-commits seed pinned at {seed}, plant target ws={target_ws}");
     let planted = vec![PlantedDefect::WorkLoss {
         ws: target_ws.clone(),
     }];

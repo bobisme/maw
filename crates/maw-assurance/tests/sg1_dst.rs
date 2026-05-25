@@ -76,10 +76,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use maw_assurance::in_proc::{InProcDriver, PlantedDefect, StepVerdict};
 use maw_assurance::scenario::{
-    generate_plan, ConditionProfile, DefaultScenarioGenerator, ScenarioGenerator,
-    CANONICAL_BN_CM63_SEED,
+    CANONICAL_BN_CM63_SEED, ConditionProfile, DefaultScenarioGenerator, ScenarioGenerator,
+    generate_plan,
 };
-use maw_assurance::shrinker::{shrink, ShrinkReport, ShrinkerCorpusEntry};
+use maw_assurance::shrinker::{ShrinkReport, ShrinkerCorpusEntry, shrink};
 
 // ---------------------------------------------------------------------------
 // Tunables (overridable via env vars in CI)

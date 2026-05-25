@@ -77,9 +77,7 @@ use std::time::Instant;
 
 use maw_bench_adapters::consolidated_layout_adapter::ConsolidatedLayoutAdapter;
 use maw_bench_adapters::ws_layout_adapter::WsLayoutAdapter;
-use maw_bench_adapters::{
-    NoopAgent, ScriptedOp, StateSnapshot, StepOutcome, Substrate,
-};
+use maw_bench_adapters::{NoopAgent, ScriptedOp, StateSnapshot, StepOutcome, Substrate};
 use maw_scenario::{BaseRef, WsId};
 
 fn usage() -> &'static str {
@@ -123,8 +121,14 @@ fn pilot_script() -> Vec<ScriptedOp> {
     let b = WsId::slot(1);
     vec![
         // --- TASK 1: two independent agents, no overlap (light) ---
-        ScriptedOp::Create { ws: a.clone(), base: BaseRef::Main },
-        ScriptedOp::Create { ws: b.clone(), base: BaseRef::Main },
+        ScriptedOp::Create {
+            ws: a.clone(),
+            base: BaseRef::Main,
+        },
+        ScriptedOp::Create {
+            ws: b.clone(),
+            base: BaseRef::Main,
+        },
         ScriptedOp::Edit {
             ws: a.clone(),
             path: "src/lib_a.rs".to_string(),
@@ -135,21 +139,33 @@ fn pilot_script() -> Vec<ScriptedOp> {
             path: "src/lib_b.rs".to_string(),
             content: "pub fn beta() {}\n".to_string(),
         },
-        ScriptedOp::Commit { ws: a.clone(), msg: "feat: alpha".to_string() },
-        ScriptedOp::Commit { ws: b.clone(), msg: "feat: beta".to_string() },
+        ScriptedOp::Commit {
+            ws: a.clone(),
+            msg: "feat: alpha".to_string(),
+        },
+        ScriptedOp::Commit {
+            ws: b.clone(),
+            msg: "feat: beta".to_string(),
+        },
         ScriptedOp::Merge {
             srcs: vec![a.clone(), b.clone()],
             target: "default".to_string(),
             destroy: true,
         },
         // --- TASK 2: two agents touching same file (overlap-aware merge) ---
-        ScriptedOp::Create { ws: a.clone(), base: BaseRef::Main },
+        ScriptedOp::Create {
+            ws: a.clone(),
+            base: BaseRef::Main,
+        },
         ScriptedOp::Edit {
             ws: a.clone(),
             path: "src/lib_a.rs".to_string(),
             content: "pub fn alpha() {}\npub fn alpha_v2() {}\n".to_string(),
         },
-        ScriptedOp::Commit { ws: a.clone(), msg: "feat: alpha_v2".to_string() },
+        ScriptedOp::Commit {
+            ws: a.clone(),
+            msg: "feat: alpha_v2".to_string(),
+        },
         ScriptedOp::Merge {
             srcs: vec![a.clone()],
             target: "default".to_string(),
@@ -174,7 +190,8 @@ where
     // by end-of-script. To measure path shape, we re-create one extant
     // workspace for the structural sample.
     let probe = WsId::slot(2);
-    subs.create_workspace(&probe, &BaseRef::Main).expect("probe create");
+    subs.create_workspace(&probe, &BaseRef::Main)
+        .expect("probe create");
     let probe_dir = synthesize_ws_path(&subs, arm, &probe);
     let depth = probe_dir
         .strip_prefix(subs.root())
@@ -346,10 +363,7 @@ fn render_table(ws: &PilotResult, cons: &PilotResult) -> String {
     s
 }
 
-fn render_repeat_block(
-    ws_times: &[u128],
-    cons_times: &[u128],
-) -> String {
+fn render_repeat_block(ws_times: &[u128], cons_times: &[u128]) -> String {
     let (ws_min, ws_max) = min_max(ws_times);
     let (cs_min, cs_max) = min_max(cons_times);
     let ws_med = median(ws_times.to_vec());

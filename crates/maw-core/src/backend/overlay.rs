@@ -335,7 +335,10 @@ impl OverlayBackend {
             let _ = fs::remove_dir_all(&mount_point);
         }
 
-        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root).join("cow").join(name.as_str());
+        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root)
+            .manifold_dir(&self.root)
+            .join("cow")
+            .join(name.as_str());
         if cow_dir.exists() {
             let _ = fs::remove_dir_all(&cow_dir);
         }
@@ -601,7 +604,10 @@ impl WorkspaceBackend for OverlayBackend {
         }
 
         // Remove CoW directories (upper + work).
-        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root).join("cow").join(name.as_str());
+        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root)
+            .manifold_dir(&self.root)
+            .join("cow")
+            .join(name.as_str());
         if cow_dir.exists() {
             fs::remove_dir_all(&cow_dir)?;
         }
@@ -618,7 +624,9 @@ impl WorkspaceBackend for OverlayBackend {
     }
 
     fn list(&self) -> Result<Vec<WorkspaceInfo>, Self::Error> {
-        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root).manifold_dir(&self.root).join("cow");
+        let cow_dir = crate::model::layout::LayoutFlavor::detect_with_env(&self.root)
+            .manifold_dir(&self.root)
+            .join("cow");
         if !cow_dir.exists() {
             return Ok(vec![]);
         }

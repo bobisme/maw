@@ -335,7 +335,7 @@ fn eval_r1(
                 "irrecoverable_lost_work",
                 old.is_some(),
                 new.is_some(),
-            )
+            );
         }
     };
     let status = if new_k == 0 {
@@ -429,7 +429,7 @@ fn eval_r3(
                 "wedge_incident",
                 old.is_some(),
                 new.is_some(),
-            )
+            );
         }
     };
     let delta = new_rate - old_rate;
@@ -524,7 +524,7 @@ fn eval_r5(
                 "tool_calls_total",
                 old.is_some(),
                 new.is_some(),
-            )
+            );
         }
     };
     let ci_signal = paired
@@ -748,7 +748,7 @@ fn missing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregate::{aggregate_metric_records, WilsonCi};
+    use crate::aggregate::{WilsonCi, aggregate_metric_records};
     use maw_bench_metrics::{MetricRecord, MetricValue};
     use std::collections::BTreeMap;
 

@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use maw_bench::run::BenchRun;
-use maw_bench_metrics::{extract_metrics, MetricRecord, MetricValue};
+use maw_bench_metrics::{MetricRecord, MetricValue, extract_metrics};
 
 /// Schema versions this aggregator knows about. v1 is the T2.4
 /// shipping schema; v2 is the T2.5 extension (forward-compat).

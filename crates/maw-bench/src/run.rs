@@ -448,7 +448,10 @@ mod tests {
             serde_json::from_value(v1_json).expect("v1 JSON deserializes into v2 struct");
         assert_eq!(run.schema_version, 1, "schema field carries v1 verbatim");
         let tc = &run.transcript.turns[0].tool_calls[0];
-        assert!(tc.attributed_op.is_none(), "missing v1 field defaults to None");
+        assert!(
+            tc.attributed_op.is_none(),
+            "missing v1 field defaults to None"
+        );
         assert!(
             tc.attributed_outcome.is_none(),
             "missing v1 field defaults to None"
@@ -533,9 +536,11 @@ mod tests {
     #[test]
     fn run_verdict_serializes_to_tagged_json() {
         let v = RunVerdict::Success;
-        assert!(serde_json::to_string(&v)
-            .expect("ser ok")
-            .contains("\"outcome\":\"success\""));
+        assert!(
+            serde_json::to_string(&v)
+                .expect("ser ok")
+                .contains("\"outcome\":\"success\"")
+        );
         let v = RunVerdict::AgentFailed {
             reason: "max_turns".to_string(),
         };

@@ -121,7 +121,10 @@ fn migrate_greenfield_v2_to_consolidated() {
 
     // Journal is removed on success.
     assert!(
-        !repo.root().join(".maw/manifold/migration/journal.json").exists(),
+        !repo
+            .root()
+            .join(".maw/manifold/migration/journal.json")
+            .exists(),
         "journal should be removed on successful Phase E"
     );
 }
@@ -292,8 +295,7 @@ fn migrate_then_doctor_is_clean() {
     // root stub fails like AGENTS.md absence are allowed).
     // Conservative assertion: the migration-related checks must say OK.
     assert!(
-        stdout.contains("[OK] default workspace")
-            || stdout.contains("consolidated layout"),
+        stdout.contains("[OK] default workspace") || stdout.contains("consolidated layout"),
         "default workspace check missing in doctor output:\n{stdout}\nstderr:\n{stderr}"
     );
 }
@@ -317,7 +319,9 @@ mod oracle_tests {
         // that legitimately lives under .maw/workspaces/ now.
         for v in &violations {
             match v {
-                maw_assurance::oracle_b::OracleBViolation::DanglingHeadRef { workspace, .. }
+                maw_assurance::oracle_b::OracleBViolation::DanglingHeadRef {
+                    workspace, ..
+                }
                 | maw_assurance::oracle_b::OracleBViolation::DanglingOwnedRef {
                     workspace, ..
                 } => {
@@ -387,10 +391,7 @@ fn migrate_dry_run_does_not_mutate() {
     assert!(stdout.contains("Dry run") || stdout.contains("Plan:"));
 
     let post_refs = list_manifold_refs(&repo);
-    assert_eq!(
-        pre_refs, post_refs,
-        "dry-run must not modify any refs"
-    );
+    assert_eq!(pre_refs, post_refs, "dry-run must not modify any refs");
     assert_eq!(repo.root().join(".manifold").is_dir(), pre_layout);
     assert_eq!(repo.root().join("ws").join("default").is_dir(), pre_default);
     assert!(

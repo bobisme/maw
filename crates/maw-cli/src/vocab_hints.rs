@@ -148,7 +148,10 @@ pub fn classify_rejected_verb(args: &[&str]) -> Option<VerbHint> {
 /// Top-level `maw merge` has real subcommands (`list`, `promote`,
 /// `abandon`). Don't hijack those with a "did you mean ws merge" hint.
 fn is_quarantine_subverb(token: &str) -> bool {
-    matches!(token, "list" | "promote" | "abandon" | "help" | "--help" | "-h")
+    matches!(
+        token,
+        "list" | "promote" | "abandon" | "help" | "--help" | "-h"
+    )
 }
 
 /// Tail-line appended to every rejected-verb error so even unknown

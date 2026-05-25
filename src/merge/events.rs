@@ -392,7 +392,9 @@ mod tests {
         let evs = read_events(dir.path()).expect("read");
         match &evs[0].kind {
             MergeEventKind::ConflictDetected {
-                conflict_ids, paths, ..
+                conflict_ids,
+                paths,
+                ..
             } => {
                 assert_eq!(conflict_ids.len(), paths.len());
                 assert_eq!(conflict_ids[0], "cf-aaaa");

@@ -248,9 +248,19 @@ pub fn render_crossover_doc(summary: &SweepSummary, opts: &SpectrumReportOptions
         out,
         "**Binding format reminders (this scaffolding preserves them verbatim):**"
     );
-    let _ = writeln!(out, "- Correctness axis is reported SEPARATELY from efficiency. Axes are not combined; there is no cross-axis aggregation.");
-    let _ = writeln!(out, "- Zero-event proportion cells publish their Wilson 95% upper bound, NOT a bare zero (§6.1).");
-    let _ = writeln!(out, "- The overkill regime (where {} loses on an efficiency metric) is shipped, never clipped (§2).", opts.ref_arm);
+    let _ = writeln!(
+        out,
+        "- Correctness axis is reported SEPARATELY from efficiency. Axes are not combined; there is no cross-axis aggregation."
+    );
+    let _ = writeln!(
+        out,
+        "- Zero-event proportion cells publish their Wilson 95% upper bound, NOT a bare zero (§6.1)."
+    );
+    let _ = writeln!(
+        out,
+        "- The overkill regime (where {} loses on an efficiency metric) is shipped, never clipped (§2).",
+        opts.ref_arm
+    );
     out.push('\n');
 
     // Bucket crossover points by regime per metric, keeping the
@@ -294,8 +304,16 @@ pub fn render_crossover_doc(summary: &SweepSummary, opts: &SpectrumReportOptions
         out,
         "**Narrative scaffold (fill from real-run artifacts):**"
     );
-    let _ = writeln!(out, "- _On low-coordination conditions ({{C0, C1}}), {} uses more tool calls / turns than the comparison arm. Margin: {{ratio range from the table above}}. This is expected and pre-registered._", opts.ref_arm);
-    let _ = writeln!(out, "- _Recommendation (for the publication): \"Do not use {} below the {{C?}} condition class.\"_", opts.ref_arm);
+    let _ = writeln!(
+        out,
+        "- _On low-coordination conditions ({{C0, C1}}), {} uses more tool calls / turns than the comparison arm. Margin: {{ratio range from the table above}}. This is expected and pre-registered._",
+        opts.ref_arm
+    );
+    let _ = writeln!(
+        out,
+        "- _Recommendation (for the publication): \"Do not use {} below the {{C?}} condition class.\"_",
+        opts.ref_arm
+    );
     out.push('\n');
 
     let _ = writeln!(out, "## HOSTILE_REGIME");
@@ -334,8 +352,15 @@ pub fn render_crossover_doc(summary: &SweepSummary, opts: &SpectrumReportOptions
     write_crossover_table(&mut out, &safety_superior);
     out.push('\n');
     let _ = writeln!(out, "**Narrative scaffold:**");
-    let _ = writeln!(out, "- _On C3/C4, the comparison arm experiences {{wedge / lost-work / agent-abandon}} events at rate {{Wilson CI}}; {} stays at 0 with Wilson 95% UB ≤ {{table}}._", opts.ref_arm);
-    let _ = writeln!(out, "- _The crossover from OVERKILL to HOSTILE occurs in {{C1..C3}} band; the band's width is reported per pre-reg §4.3 (never collapsed to a point if MIXED)._");
+    let _ = writeln!(
+        out,
+        "- _On C3/C4, the comparison arm experiences {{wedge / lost-work / agent-abandon}} events at rate {{Wilson CI}}; {} stays at 0 with Wilson 95% UB ≤ {{table}}._",
+        opts.ref_arm
+    );
+    let _ = writeln!(
+        out,
+        "- _The crossover from OVERKILL to HOSTILE occurs in {{C1..C3}} band; the band's width is reported per pre-reg §4.3 (never collapsed to a point if MIXED)._"
+    );
     out.push('\n');
 
     let _ = writeln!(out, "## TIE_REGIME");

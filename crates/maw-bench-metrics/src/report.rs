@@ -125,12 +125,7 @@ pub fn render_dominance_table(records: &[MetricRecord], opts: &ReportOptions) ->
     out
 }
 
-fn render_arm_block(
-    out: &mut String,
-    arm: &str,
-    runs: &[&MetricRecord],
-    opts: &ReportOptions,
-) {
+fn render_arm_block(out: &mut String, arm: &str, runs: &[&MetricRecord], opts: &ReportOptions) {
     let _ = writeln!(out, "ARM: {arm}   (N={})", runs.len());
 
     // Compute column widths. Metric name column = max(name_len).
@@ -437,9 +432,7 @@ mod tests {
         // Diagnostic header present.
         assert!(out.contains("diagnostic: per-verb attribution"));
         // Cluster rows present in stable order.
-        let merge_idx = out
-            .find("ws_merge_structured_conflict")
-            .expect("merge row");
+        let merge_idx = out.find("ws_merge_structured_conflict").expect("merge row");
         let recover_idx = out.find("ws_recover_invoked").expect("recover row");
         assert!(merge_idx < recover_idx, "stable variant ordering");
         // Counts present.

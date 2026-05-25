@@ -15,7 +15,7 @@
 use maw_bench_metrics::{MetricRecord, MetricValue};
 use maw_bench_sweep::aggregate::aggregate_metric_records;
 use maw_bench_sweep::crossover::{
-    find_crossover, CrossoverRegime, MetricName, MATERIALITY_RATE_GAP,
+    CrossoverRegime, MATERIALITY_RATE_GAP, MetricName, find_crossover,
 };
 
 fn rec(arm: &str, cond: &str, t: &str, lost: u64, turns: u64, calls: u64) -> MetricRecord {
@@ -83,8 +83,7 @@ fn band_of_mixed_verdicts_is_reported_per_cell_not_collapsed() {
     }
     let s = aggregate_metric_records(&records);
     let cps = find_crossover(&s, MetricName::ToolCallsTotal, "maw");
-    let conds: std::collections::BTreeSet<_> =
-        cps.iter().map(|c| c.condition_id.clone()).collect();
+    let conds: std::collections::BTreeSet<_> = cps.iter().map(|c| c.condition_id.clone()).collect();
     assert!(conds.contains("C1"));
     assert!(conds.contains("C2"));
     // Different regimes — verifies the band is "wide" not collapsed.
@@ -99,14 +98,7 @@ fn rate_dominance_threshold_matches_pre_reg_010_gap() {
     let mut records = Vec::new();
     for i in 0..10 {
         records.push(rec("maw", "C4", "T0", 0, 5, 30));
-        records.push(rec(
-            "jj-workspaces",
-            "C4",
-            "T0",
-            u64::from(i >= 8),
-            5,
-            30,
-        ));
+        records.push(rec("jj-workspaces", "C4", "T0", u64::from(i >= 8), 5, 30));
     }
     let s = aggregate_metric_records(&records);
     let cps = find_crossover(&s, MetricName::WorkLostRate, "maw");

@@ -80,7 +80,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use maw_core::merge_state::{MergeStateFile, Staleness, DEFAULT_STALE_AFTER_SECS};
+use maw_core::merge_state::{DEFAULT_STALE_AFTER_SECS, MergeStateFile, Staleness};
 use maw_core::model::layout::LayoutFlavor;
 use maw_core::refs;
 

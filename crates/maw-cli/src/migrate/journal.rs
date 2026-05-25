@@ -147,15 +147,13 @@ impl Journal {
     /// Returns an error if the file system mutations fail.
     pub fn write_atomic(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(self)
-            .context("serialize journal to JSON")?;
+        let json = serde_json::to_string_pretty(self).context("serialize journal to JSON")?;
         {
-            let mut f = fs::File::create(&tmp)
-                .with_context(|| format!("create {}", tmp.display()))?;
+            let mut f =
+                fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
             f.write_all(json.as_bytes())
                 .with_context(|| format!("write {}", tmp.display()))?;
             f.sync_all().ok();
@@ -174,8 +172,7 @@ impl Journal {
         if !path.exists() {
             return Ok(None);
         }
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let parsed: Self = serde_json::from_str(&raw)
             .with_context(|| format!("parse {} as Journal", path.display()))?;
         if parsed.schema_version != SCHEMA_VERSION {
@@ -192,7 +189,9 @@ impl Journal {
 /// Pre-flip journal path (`.manifold/migration/journal.json`).
 #[must_use]
 pub fn path_v2(root: &Path) -> PathBuf {
-    root.join(".manifold").join("migration").join("journal.json")
+    root.join(".manifold")
+        .join("migration")
+        .join("journal.json")
 }
 
 /// Post-flip journal path (`.maw/manifold/migration/journal.json`).
@@ -252,7 +251,9 @@ mod tests {
         j.phase = JournalPhase::PreflightDone;
 
         j.write_atomic(&path).expect("write");
-        let read = Journal::read(&path).expect("read result").expect("journal present");
+        let read = Journal::read(&path)
+            .expect("read result")
+            .expect("journal present");
         assert_eq!(read.schema_version, SCHEMA_VERSION);
         assert_eq!(read.phase, JournalPhase::PreflightDone);
         assert_eq!(read.worktrees.len(), 1);
@@ -263,9 +264,7 @@ mod tests {
     #[test]
     fn journal_phase_ordering_is_monotonic() {
         assert!(JournalPhase::Start as u8 == 0);
-        assert!(
-            (JournalPhase::PreflightDone as u8) < (JournalPhase::PreserveDone as u8)
-        );
+        assert!((JournalPhase::PreflightDone as u8) < (JournalPhase::PreserveDone as u8));
         assert!((JournalPhase::PreserveDone as u8) < (JournalPhase::RelocateDone as u8));
         assert!((JournalPhase::RelocateDone as u8) < (JournalPhase::UnBareDone as u8));
         assert!((JournalPhase::UnBareDone as u8) < (JournalPhase::FinalizeDone as u8));

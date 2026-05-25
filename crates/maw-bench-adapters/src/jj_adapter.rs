@@ -43,8 +43,7 @@ impl JjAdapter {
     /// Returns [`SubstrateError`] if `jj` is missing or any setup step
     /// fails.
     pub fn new() -> Result<Self> {
-        let tmp =
-            tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
+        let tmp = tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
         Self::new_in(tmp.path().to_path_buf(), Some(tmp))
     }
 
@@ -58,10 +57,7 @@ impl JjAdapter {
         fs::create_dir_all(&repo_dir).map_err(|e| SubstrateError::Io(e.to_string()))?;
 
         // Stable jj user identity. jj reads $JJ_USER / $JJ_EMAIL.
-        let env: &[(&str, &str)] = &[
-            ("JJ_USER", "bench"),
-            ("JJ_EMAIL", "bench@localhost"),
-        ];
+        let env: &[(&str, &str)] = &[("JJ_USER", "bench"), ("JJ_EMAIL", "bench@localhost")];
 
         // Colocated init so `git log` works on the same object store.
         proc_util::run_envs("jj", &["git", "init", "--colocate"], &repo_dir, env)?;
@@ -182,12 +178,7 @@ impl Substrate for JjAdapter {
         })
     }
 
-    fn merge(
-        &mut self,
-        srcs: &[WsId],
-        target: &str,
-        destroy_sources: bool,
-    ) -> Result<StepOutcome> {
+    fn merge(&mut self, srcs: &[WsId], target: &str, destroy_sources: bool) -> Result<StepOutcome> {
         if !(target == "main" || target == "default") {
             return Err(SubstrateError::Refused(format!(
                 "jj adapter integration target must be 'main'/'default', got {target}"
@@ -204,7 +195,10 @@ impl Substrate for JjAdapter {
         }
         let msg = format!(
             "merge: {}",
-            srcs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join(", ")
+            srcs.iter()
+                .map(|s| s.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         // `jj new <revset> -m "..."` in the integration workspace.
         let result = proc_util::run_envs(
@@ -226,12 +220,8 @@ impl Substrate for JjAdapter {
                 );
                 // Force-update the colocated git HEAD (main) so `git log` /
                 // file walking on the integration dir sees the merge.
-                let _ = proc_util::run_envs(
-                    "jj",
-                    &["git", "export"],
-                    &self.integration_dir,
-                    &env_refs,
-                );
+                let _ =
+                    proc_util::run_envs("jj", &["git", "export"], &self.integration_dir, &env_refs);
                 let mut outcome = StepOutcome {
                     ok: true,
                     advanced_integration: true,
@@ -272,12 +262,8 @@ impl Substrate for JjAdapter {
         // operation` errors — that is the SP3-observed wedge and the
         // benchmark needs to see it.
         let _ = proc_util::run_envs("jj", &["workspace", "update-stale"], &dir, &env_refs);
-        let result = proc_util::run_envs(
-            "jj",
-            &["rebase", "-s", "@", "-d", "main"],
-            &dir,
-            &env_refs,
-        );
+        let result =
+            proc_util::run_envs("jj", &["rebase", "-s", "@", "-d", "main"], &dir, &env_refs);
         match result {
             Ok(_) => Ok(StepOutcome {
                 ok: true,
@@ -432,15 +418,14 @@ mod tests {
         s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n")
             .expect("edit");
         s.commit(&ws, "feat: alpha").expect("commit");
-        let merge = s
-            .merge(&[ws.clone()], "main", true)
-            .expect("merge");
+        let merge = s.merge(&[ws.clone()], "main", true).expect("merge");
         assert!(merge.ok);
         assert!(merge.advanced_integration);
         let snap = s.state_snapshot().expect("snapshot");
-        assert!(snap
-            .integrated_files
-            .get("src/lib.rs")
-            .map_or(false, |c| c.contains("alpha")));
+        assert!(
+            snap.integrated_files
+                .get("src/lib.rs")
+                .map_or(false, |c| c.contains("alpha"))
+        );
     }
 }

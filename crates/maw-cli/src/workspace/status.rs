@@ -186,13 +186,11 @@ pub fn status(format: OutputFormat) -> Result<()> {
     // signal, not a hard gate; status() should never error out because of
     // it. Likewise for any classify_drift error: surface as "no drift
     // report" rather than crashing.
-    let epoch_drift = super::MawConfig::load(&root)
-        .ok()
-        .and_then(|cfg| {
-            super::epoch_drift::classify_drift(&root, cfg.branch(), &backend)
-                .ok()
-                .flatten()
-        });
+    let epoch_drift = super::MawConfig::load(&root).ok().and_then(|cfg| {
+        super::epoch_drift::classify_drift(&root, cfg.branch(), &backend)
+            .ok()
+            .flatten()
+    });
 
     // Build workspace entries
     let workspace_entries: Vec<WorkspaceEntry> = all_workspaces
@@ -233,7 +231,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                     commits_ahead: ws.commits_ahead,
                     has_uncommitted,
                     was_integrated: false,
-            has_pinned_snapshot: false,
+                    has_pinned_snapshot: false,
                 };
                 let state = LifecycleState::classify(signals);
                 let behind = match ws.state {
@@ -255,12 +253,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 // `lifecycle_state`. Cluster `read_from_stale_workspace`
                 // fires when an agent misreads this surface; the
                 // prefixed slug closes the inference gap.
-                state: build_entry_state(
-                    is_default,
-                    rebase_conflicts,
-                    lifecycle_state,
-                    &ws.state,
-                ),
+                state: build_entry_state(is_default, rebase_conflicts, lifecycle_state, &ws.state),
                 mode: format!("{ws_mode}"),
                 rebase_conflicts,
                 lifecycle_state,
@@ -716,8 +709,8 @@ fn compute_global_view_summary(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::epoch_drift::{EpochDriftKind, EpochDriftReport};
+    use super::*;
 
     fn mk_report(kind: EpochDriftKind, blocking: &[&str]) -> EpochDriftReport {
         EpochDriftReport {
@@ -806,10 +799,7 @@ mod tests {
             changes: None,
             global_view: None,
             workspaces: Vec::new(),
-            epoch_drift: Some(mk_report(
-                EpochDriftKind::FfBlocked,
-                &["alice", "carol"],
-            )),
+            epoch_drift: Some(mk_report(EpochDriftKind::FfBlocked, &["alice", "carol"])),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(

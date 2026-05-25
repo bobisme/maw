@@ -71,8 +71,7 @@ pub struct ConsolidatedLayoutAdapter {
 impl ConsolidatedLayoutAdapter {
     /// Build a fresh substrate under a private tempdir.
     pub fn new() -> Result<Self> {
-        let tmp =
-            tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
+        let tmp = tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
         Self::new_in(tmp.path().to_path_buf(), Some(tmp))
     }
 
@@ -127,8 +126,11 @@ impl ConsolidatedLayoutAdapter {
         // to git. config.toml IS tracked via .maw/.gitignore's bang-rule above.
         fs::write(root.join("README.md"), "bench repo\n")
             .map_err(|e| SubstrateError::Io(e.to_string()))?;
-        fs::write(root.join(".gitignore"), "/.maw/\n!/.maw/.gitignore\n!/.maw/config.toml\n")
-            .map_err(|e| SubstrateError::Io(e.to_string()))?;
+        fs::write(
+            root.join(".gitignore"),
+            "/.maw/\n!/.maw/.gitignore\n!/.maw/config.toml\n",
+        )
+        .map_err(|e| SubstrateError::Io(e.to_string()))?;
         proc_util::run("git", &["add", "-A"], &root)?;
         proc_util::run("git", &["commit", "-m", "init"], &root)?;
 
@@ -232,12 +234,7 @@ impl Substrate for ConsolidatedLayoutAdapter {
         })
     }
 
-    fn merge(
-        &mut self,
-        srcs: &[WsId],
-        target: &str,
-        destroy_sources: bool,
-    ) -> Result<StepOutcome> {
+    fn merge(&mut self, srcs: &[WsId], target: &str, destroy_sources: bool) -> Result<StepOutcome> {
         // Consolidated: the root IS the integration target (no ws/default).
         if !(target == "default" || target == "main") {
             return Err(SubstrateError::Refused(format!(
@@ -247,7 +244,10 @@ impl Substrate for ConsolidatedLayoutAdapter {
         proc_util::run("git", &["checkout", "main"], &self.root)?;
         let msg = format!(
             "merge: {}",
-            srcs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join(", ")
+            srcs.iter()
+                .map(|s| s.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let mut args: Vec<String> = vec!["merge".into(), "--no-ff".into(), "-m".into(), msg];
         for s in srcs {
@@ -260,10 +260,7 @@ impl Substrate for ConsolidatedLayoutAdapter {
                 let mut outcome = StepOutcome {
                     ok: true,
                     advanced_integration: true,
-                    notes: format!(
-                        "consolidated merged {} sources into <root>",
-                        srcs.len()
-                    ),
+                    notes: format!("consolidated merged {} sources into <root>", srcs.len()),
                     ..StepOutcome::default()
                 };
                 if destroy_sources {
@@ -322,8 +319,7 @@ impl Substrate for ConsolidatedLayoutAdapter {
             integration_head: Some("default".to_string()),
             ..StateSnapshot::default()
         };
-        let porcelain =
-            proc_util::run("git", &["worktree", "list", "--porcelain"], &self.root)?;
+        let porcelain = proc_util::run("git", &["worktree", "list", "--porcelain"], &self.root)?;
         for block in porcelain.split("\n\n") {
             let mut branch_opt: Option<&str> = None;
             for line in block.lines() {
@@ -335,14 +331,10 @@ impl Substrate for ConsolidatedLayoutAdapter {
                 if b == "main" {
                     continue;
                 }
-                let msg = proc_util::run(
-                    "git",
-                    &["log", "-1", "--format=%s", b],
-                    &self.root,
-                )
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+                let msg = proc_util::run("git", &["log", "-1", "--format=%s", b], &self.root)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
                 snap.live_workspaces.insert(b.to_string(), msg);
             }
         }
@@ -408,8 +400,7 @@ fn collect_files_skip_maw(
                 .map_err(|e| SubstrateError::Io(e.to_string()))?
                 .to_string_lossy()
                 .to_string();
-            let content =
-                fs::read_to_string(&path).unwrap_or_else(|_| String::from("<binary>"));
+            let content = fs::read_to_string(&path).unwrap_or_else(|_| String::from("<binary>"));
             out.insert(rel, content);
         }
     }
@@ -426,24 +417,30 @@ mod tests {
         let ws = WsId::slot(0);
         s.create_workspace(&ws, &BaseRef::Main).expect("create");
         let dir = s.ws_dir(&ws);
-        assert!(dir.exists(), ".maw/workspaces dir must exist at {}", dir.display());
+        assert!(
+            dir.exists(),
+            ".maw/workspaces dir must exist at {}",
+            dir.display()
+        );
         // Depth = 3 from root: .maw / workspaces / <ws>
         assert_eq!(
             super::super::ws_layout_adapter::ws_path_depth_components(&dir, s.root()),
             3,
             "expected depth=3 for .maw/workspaces/<name>"
         );
-        s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n").expect("edit");
+        s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n")
+            .expect("edit");
         s.commit(&ws, "feat: alpha").expect("commit");
         let m = s.merge(&[ws.clone()], "default", true).expect("merge");
         assert!(m.ok);
         assert!(m.advanced_integration);
         let snap = s.state_snapshot().expect("snapshot");
         assert!(snap.live_workspaces.is_empty());
-        assert!(snap
-            .integrated_files
-            .get("src/lib.rs")
-            .map_or(false, |c| c.contains("alpha")));
+        assert!(
+            snap.integrated_files
+                .get("src/lib.rs")
+                .map_or(false, |c| c.contains("alpha"))
+        );
         // .maw/ is NOT in the integrated file view (it's runtime admin).
         assert!(
             !snap.integrated_files.keys().any(|k| k.starts_with(".maw")),

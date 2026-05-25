@@ -36,6 +36,16 @@
 
 #[cfg(feature = "fault-injection")]
 pub mod fault;
+/// **In-process model driver** for SG1 DST (bn-32k3 / T1.6).
+///
+/// The workhorse tier of the SG1 architecture (§1) — applies a
+/// [`scenario::ScenarioPlan`] step-by-step to a real git temp repo,
+/// runs Oracle A + Oracle B after every step, and returns the first
+/// violating verdict. Bit-exact across replays because every git write
+/// is pinned to `PlannedStep::git_time`. The substrate the T1.6
+/// determinism guarantee tests and the T1.6 shrinker run against.
+#[cfg(feature = "oracles")]
+pub mod in_proc;
 #[cfg(feature = "stateright")]
 pub mod model;
 pub mod oracle;
@@ -49,28 +59,6 @@ pub mod oracle;
 /// for the harness integration point.
 #[cfg(feature = "oracles")]
 pub mod oracle_a;
-/// **In-process model driver** for SG1 DST (bn-32k3 / T1.6).
-///
-/// The workhorse tier of the SG1 architecture (§1) — applies a
-/// [`scenario::ScenarioPlan`] step-by-step to a real git temp repo,
-/// runs Oracle A + Oracle B after every step, and returns the first
-/// violating verdict. Bit-exact across replays because every git write
-/// is pinned to `PlannedStep::git_time`. The substrate the T1.6
-/// determinism guarantee tests and the T1.6 shrinker run against.
-#[cfg(feature = "oracles")]
-pub mod in_proc;
-/// **Failing-seed shrinker** for SG1 DST (bn-32k3 / T1.6).
-///
-/// Reduces a failing [`scenario::ScenarioPlan`] to a minimal repro via
-/// delta-debugging over `plan.steps`, replaying through
-/// [`in_proc::InProcDriver`]. A reduction is kept iff the SAME oracle
-/// trips with the SAME violation class on replay
-/// ([`in_proc::StepVerdict::same_class`]); never drifts onto an
-/// unrelated bug.
-#[cfg(feature = "oracles")]
-pub mod shrinker;
-#[cfg(all(test, feature = "oracles"))]
-mod shrinker_tests;
 /// **Oracle B** — state coherence (B1–B4) for SG1 (bn-3ji6 / T1.4).
 ///
 /// Pure predicate over `(refs, ws-dirs, merge-state.json)`. Catches the
@@ -83,6 +71,18 @@ mod shrinker_tests;
 pub mod oracle_b;
 #[cfg(feature = "scenario")]
 pub mod scenario;
+/// **Failing-seed shrinker** for SG1 DST (bn-32k3 / T1.6).
+///
+/// Reduces a failing [`scenario::ScenarioPlan`] to a minimal repro via
+/// delta-debugging over `plan.steps`, replaying through
+/// [`in_proc::InProcDriver`]. A reduction is kept iff the SAME oracle
+/// trips with the SAME violation class on replay
+/// ([`in_proc::StepVerdict::same_class`]); never drifts onto an
+/// unrelated bug.
+#[cfg(feature = "oracles")]
+pub mod shrinker;
+#[cfg(all(test, feature = "oracles"))]
+mod shrinker_tests;
 pub mod trace;
 
 // Re-export key types for convenience.

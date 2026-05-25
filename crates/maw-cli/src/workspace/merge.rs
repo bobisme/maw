@@ -12,12 +12,12 @@ use crate::changes::store::ChangesStore;
 use crate::format::OutputFormat;
 use maw::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use maw::merge::collect::collect_snapshots;
-use maw::merge::events::{self as merge_events, MergeEventKind};
-use maw::merge::last_conflict::{self as merge_last_conflict, LastConflict, LastConflictEntry};
 use maw::merge::commit::{
     CommitRecovery, CommitResult, recover_partial_commit_with_branch_base,
     run_commit_phase_with_branch_base,
 };
+use maw::merge::events::{self as merge_events, MergeEventKind};
+use maw::merge::last_conflict::{self as merge_last_conflict, LastConflict, LastConflictEntry};
 use maw::merge::prepare::run_prepare_phase;
 use maw::merge::quarantine::create_quarantine_workspace;
 use maw::merge::resolve::{ConflictReason, ConflictRecord};
@@ -1020,12 +1020,7 @@ fn persist_merge_conflict_surface(
 }
 
 /// bn-yyx: best-effort emit of an `IntegrationStarted` event.
-fn emit_integration_started(
-    manifold_dir: &Path,
-    sources: &[String],
-    into: &str,
-    check_only: bool,
-) {
+fn emit_integration_started(manifold_dir: &Path, sources: &[String], into: &str, check_only: bool) {
     if let Err(e) = merge_events::append_event(
         manifold_dir,
         MergeEventKind::IntegrationStarted {
@@ -1063,12 +1058,7 @@ fn emit_integration_completed(
 }
 
 /// bn-yyx: best-effort emit of an `IntegrationAborted` event.
-fn emit_integration_aborted(
-    manifold_dir: &Path,
-    sources: &[String],
-    into: &str,
-    reason: &str,
-) {
+fn emit_integration_aborted(manifold_dir: &Path, sources: &[String], into: &str, reason: &str) {
     if let Err(e) = merge_events::append_event(
         manifold_dir,
         MergeEventKind::IntegrationAborted {
@@ -1349,12 +1339,7 @@ pub fn check_merge(
     // bound `maw merge events --since` to the latest attempt.
     if let Ok(root) = repo_root() {
         let into_display = target_change_id.unwrap_or(target_workspace).to_string();
-        emit_integration_started(
-            &root.join(".manifold"),
-            workspaces,
-            &into_display,
-            true,
-        );
+        emit_integration_started(&root.join(".manifold"), workspaces, &into_display, true);
     }
 
     let result = match check_merge_result_for_target(
@@ -1374,7 +1359,10 @@ pub fn check_merge(
 
     // bn-yyx: if the check surfaced conflicts, persist them so the agent can
     // recall via `maw merge last-conflict` instead of re-running the check.
-    if !result.ready && !result.conflicts.is_empty() && !result.stale && let Ok(root) = repo_root()
+    if !result.ready
+        && !result.conflicts.is_empty()
+        && !result.stale
+        && let Ok(root) = repo_root()
     {
         let manifold_dir = root.join(".manifold");
         let into_display = target_change_id.unwrap_or(target_workspace).to_string();
@@ -1582,7 +1570,8 @@ fn check_merge_result_for_target(
     }
 
     // Try a BUILD phase to detect conflicts (don't COMMIT)
-    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let temp_check_dir = tempfile::Builder::new()
         .prefix("check-tmp-")
         .tempdir_in(&manifold_dir)
@@ -1781,7 +1770,8 @@ pub fn plan_merge(
         );
     }
 
-    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let manifold_config = ManifoldConfig::load(&manifold_dir.join("config.toml"))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let sources = parse_workspace_ids(workspaces)?;
@@ -2197,7 +2187,8 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     }
 
     // Run PREPARE + BUILD in a temp dir to detect conflicts without committing
-    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let temp_check_dir = tempfile::Builder::new()
         .prefix("conflicts-tmp-")
         .tempdir_in(&manifold_dir)
@@ -3654,12 +3645,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
 
     // bn-yyx: record the integration start so the event log carries an
     // anchoring entry the agent can use to bound `maw merge events --since`.
-    emit_integration_started(
-        &root.join(".manifold"),
-        &ws_to_merge,
-        into_target,
-        false,
-    );
+    emit_integration_started(&root.join(".manifold"), &ws_to_merge, into_target, false);
 
     // Set up paths (layout-aware: v2 → `<root>/ws/default`, consolidated → root).
     let layout_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
@@ -5620,13 +5606,10 @@ fn handle_post_merge_destroy(
         let ws_path = backend.workspace_path(&ws_id);
 
         // C4 path-based guard: never destroy the repo root, regardless of name.
-        let canonical_ws =
-            std::fs::canonicalize(&ws_path).unwrap_or_else(|_| ws_path.clone());
+        let canonical_ws = std::fs::canonicalize(&ws_path).unwrap_or_else(|_| ws_path.clone());
         if canonical_ws == canonical_root {
             if text_mode {
-                println!(
-                    "    Skipping '{ws_name}': resolves to repo root (privileged target)"
-                );
+                println!("    Skipping '{ws_name}': resolves to repo root (privileged target)");
             }
             continue;
         }

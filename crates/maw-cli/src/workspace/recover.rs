@@ -1256,7 +1256,7 @@ pub fn restore_ref_to(recovery_ref: &str, new_name: &str) -> Result<()> {
 
     if let Err(e) = populate_from_snapshot(&new_path, &oid) {
         eprintln!("Populate failed, rolling back workspace '{new_name}': {e:#}");
-        if let Err(cleanup_err) = super::create::destroy(new_name, false, true) {
+        if let Err(cleanup_err) = super::create::destroy(new_name, false, true, None) {
             eprintln!(
                 "WARNING: rollback destroy also failed: {cleanup_err:#}\n  \
                  Manual cleanup may be needed: maw ws destroy {new_name} --force"
@@ -1313,7 +1313,7 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     let new_ws_path = workspace_path(new_name)?;
     if let Err(e) = populate_from_snapshot(&new_ws_path, &oid) {
         eprintln!("Populate failed, rolling back workspace '{new_name}': {e:#}");
-        if let Err(cleanup_err) = super::create::destroy(new_name, false, true) {
+        if let Err(cleanup_err) = super::create::destroy(new_name, false, true, None) {
             eprintln!(
                 "WARNING: rollback destroy also failed: {cleanup_err:#}\n  \
                  Manual cleanup may be needed: maw ws destroy {new_name} --force"

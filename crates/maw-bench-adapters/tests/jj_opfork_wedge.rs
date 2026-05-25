@@ -143,6 +143,10 @@ fn jj_opfork_wedge_is_reproducible() {
     eprintln!(
         "[wedge fingerprint, {} occurrences] {}",
         fingerprints.len(),
-        fingerprints[0].lines().take(4).collect::<Vec<_>>().join(" | ")
+        fingerprints[0]
+            .lines()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" | ")
     );
 }

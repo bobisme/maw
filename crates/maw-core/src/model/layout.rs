@@ -297,7 +297,10 @@ fn init_maw_gitignore_if_missing(path: &Path) -> io::Result<()> {
         return Ok(());
     }
     let mut file = fs::File::create(path)?;
-    writeln!(file, "# maw consolidated layout — runtime state under .maw/")?;
+    writeln!(
+        file,
+        "# maw consolidated layout — runtime state under .maw/"
+    )?;
     writeln!(file, "# is never tracked; only this .gitignore and")?;
     writeln!(file, "# config.toml are.")?;
     writeln!(file, "*")?;
@@ -348,10 +351,7 @@ mod tests {
         let dir = tempdir().expect("operation should succeed");
         let root = dir.path();
         fs::create_dir_all(root.join(".maw").join("manifold")).expect("operation should succeed");
-        assert_eq!(
-            LayoutFlavor::detect(root),
-            LayoutFlavor::ConsolidatedMawDir
-        );
+        assert_eq!(LayoutFlavor::detect(root), LayoutFlavor::ConsolidatedMawDir);
     }
 
     #[test]
@@ -362,10 +362,7 @@ mod tests {
         fs::create_dir_all(root.join(".maw").join("manifold")).expect("operation should succeed");
         // The consolidated layout takes precedence (a fully-migrated repo
         // may still have a residual .manifold/ artifact briefly).
-        assert_eq!(
-            LayoutFlavor::detect(root),
-            LayoutFlavor::ConsolidatedMawDir
-        );
+        assert_eq!(LayoutFlavor::detect(root), LayoutFlavor::ConsolidatedMawDir);
     }
 
     #[test]
@@ -439,10 +436,7 @@ mod tests {
         assert!(root.join(".maw/config.toml").is_file());
 
         // Detection now sees consolidated.
-        assert_eq!(
-            LayoutFlavor::detect(root),
-            LayoutFlavor::ConsolidatedMawDir
-        );
+        assert_eq!(LayoutFlavor::detect(root), LayoutFlavor::ConsolidatedMawDir);
 
         // .gitignore content has the right ignore policy.
         let gitignore =
@@ -494,10 +488,7 @@ mod tests {
             .expect("operation should succeed");
         init_manifold_layout(root, LayoutFlavor::ConsolidatedMawDir)
             .expect("operation should succeed");
-        assert_eq!(
-            LayoutFlavor::detect(root),
-            LayoutFlavor::ConsolidatedMawDir
-        );
+        assert_eq!(LayoutFlavor::detect(root), LayoutFlavor::ConsolidatedMawDir);
     }
 
     // Env-override behaviour is exercised through `detect_with_env`; we

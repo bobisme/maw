@@ -167,9 +167,7 @@ impl LifecycleState {
             Self::CommittedUnintegrated => {
                 Some(format!("maw ws merge {ws_name} --into default --check"))
             }
-            Self::DirtyUncommitted => {
-                Some(format!("maw exec {ws_name} -- git status"))
-            }
+            Self::DirtyUncommitted => Some(format!("maw exec {ws_name} -- git status")),
             Self::Clean | Self::Integrated => None,
         }
     }
@@ -311,7 +309,10 @@ mod tests {
     fn dirty_beats_clean() {
         let mut s = signals();
         s.has_uncommitted = true;
-        assert_eq!(LifecycleState::classify(s), LifecycleState::DirtyUncommitted);
+        assert_eq!(
+            LifecycleState::classify(s),
+            LifecycleState::DirtyUncommitted
+        );
     }
 
     #[test]

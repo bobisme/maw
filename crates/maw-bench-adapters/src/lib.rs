@@ -219,11 +219,7 @@ pub trait Substrate {
     fn root(&self) -> &PathBuf;
 
     /// Create a new workspace identified by `ws`, branching from `base`.
-    fn create_workspace(
-        &mut self,
-        ws: &WsId,
-        base: &maw_scenario::BaseRef,
-    ) -> Result<StepOutcome>;
+    fn create_workspace(&mut self, ws: &WsId, base: &maw_scenario::BaseRef) -> Result<StepOutcome>;
 
     /// Write/overwrite `path` inside `ws` with `content` (text). Adapters
     /// may collapse multiple edits to the same `(ws, path)` between commits.
@@ -236,12 +232,7 @@ pub trait Substrate {
     /// `"default"` for maw, the merge-target branch for worktrees, the
     /// integration commit for jj). If `destroy_sources`, drop sources on
     /// success (sources NOT dropped if the merge conflicts — Prime Invariant).
-    fn merge(
-        &mut self,
-        srcs: &[WsId],
-        target: &str,
-        destroy_sources: bool,
-    ) -> Result<StepOutcome>;
+    fn merge(&mut self, srcs: &[WsId], target: &str, destroy_sources: bool) -> Result<StepOutcome>;
 
     /// Sync `ws` to the current integration head (`maw ws sync`,
     /// `git rebase`, `jj workspace update-stale` + `jj rebase` depending
@@ -333,10 +324,7 @@ impl NoopAgent {
     ///
     /// Propagates substrate errors verbatim. The equivalence test treats
     /// any error as a parity divergence to be investigated.
-    pub fn drive<S: Substrate>(
-        subs: &mut S,
-        script: &[ScriptedOp],
-    ) -> Result<Vec<StepOutcome>> {
+    pub fn drive<S: Substrate>(subs: &mut S, script: &[ScriptedOp]) -> Result<Vec<StepOutcome>> {
         let mut out = Vec::with_capacity(script.len());
         for op in script {
             let step = match op {

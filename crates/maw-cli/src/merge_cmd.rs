@@ -171,7 +171,8 @@ pub fn run(cmd: &MergeCommands) -> Result<()> {
 /// Re-validate and commit a quarantine workspace.
 fn promote(merge_id: &str) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
 
     // Read state before promoting (for informational output)
     let state =
@@ -288,7 +289,8 @@ fn print_promote_success(merge_id: &str, new_epoch_short: &str, branch: &str) {
 /// Discard a quarantine workspace.
 fn abandon(merge_id: &str) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
 
     let ws_path = quarantine_workspace_path(&root, merge_id);
 
@@ -336,7 +338,8 @@ fn abandon(merge_id: &str) -> Result<()> {
 /// List all active quarantine workspaces.
 fn list() -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let maw_config = MawConfig::load(&root)?;
     let _backend = get_backend()?;
 
@@ -402,8 +405,7 @@ fn events_cmd(
 ) -> Result<()> {
     let root = repo_root()?;
     let manifold_dir = root.join(".manifold");
-    let all = merge_events::read_events(&manifold_dir)
-        .context("read merge event log")?;
+    let all = merge_events::read_events(&manifold_dir).context("read merge event log")?;
 
     let cutoff = if since_last_attempt {
         // Find the timestamp of the most recent IntegrationStarted.
@@ -473,7 +475,11 @@ fn print_event_line(ev: &MergeEvent) {
             merge_commit,
         } => {
             let short = merge_commit.get(..12).unwrap_or(merge_commit.as_str());
-            format!("sources=[{}] into={} commit={short}", sources.join(","), into)
+            format!(
+                "sources=[{}] into={} commit={short}",
+                sources.join(","),
+                into
+            )
         }
         MergeEventKind::IntegrationAborted {
             sources,
@@ -524,16 +530,10 @@ fn last_conflict_cmd(format: Option<OutputFormat>) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "Last conflict (recorded {} ms UTC):",
-        snapshot.ts_unix_ms
-    );
+    println!("Last conflict (recorded {} ms UTC):", snapshot.ts_unix_ms);
     println!("  Sources: {}", snapshot.sources.join(", "));
     println!("  Into:    {}", snapshot.into);
-    println!(
-        "  {} conflict(s):",
-        snapshot.conflicts.len()
-    );
+    println!("  {} conflict(s):", snapshot.conflicts.len());
     for c in &snapshot.conflicts {
         println!(
             "    {id:<14}  {path:<48}  [{sides}]",
@@ -624,8 +624,8 @@ fn resume_cmd(resolve: &[String], resolve_all: Option<&str>, dry_run: bool) -> R
     // boundary — keeps merge_cmd.rs from importing the workspace::merge
     // private surface, and preserves the existing tracing / failpoints wiring
     // of `maw ws merge`.
-    let current_exe = std::env::current_exe()
-        .context("locate current maw executable for resume re-exec")?;
+    let current_exe =
+        std::env::current_exe().context("locate current maw executable for resume re-exec")?;
     let status = std::process::Command::new(current_exe)
         .args(&argv)
         .current_dir(&root)

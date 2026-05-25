@@ -10,7 +10,7 @@
 
 use maw_bench_metrics::{MetricRecord, MetricValue};
 use maw_bench_sweep::aggregate::{aggregate_metric_records, wilson_ci, wilson_score_upper};
-use maw_bench_sweep::{render_spectrum_table, SpectrumReportOptions};
+use maw_bench_sweep::{SpectrumReportOptions, render_spectrum_table};
 
 fn rec(arm: &str, cond: &str, t: &str, lost: u64) -> MetricRecord {
     MetricRecord {

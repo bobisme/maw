@@ -270,7 +270,10 @@ impl MockAgent {
     /// New `MockAgent` using the real wall clock for turn timestamps.
     #[must_use]
     pub const fn new(script: MockScript) -> Self {
-        Self { script, pinned_clock: None }
+        Self {
+            script,
+            pinned_clock: None,
+        }
     }
 
     /// New `MockAgent` with deterministic timestamps. Required for the
@@ -383,9 +386,18 @@ mod tests {
     fn mock_agent_truncates_at_max_turns() {
         let script = MockScript {
             turns: vec![
-                MockTurnScript { reply_text: "t1".to_string(), tool_calls: vec![] },
-                MockTurnScript { reply_text: "t2".to_string(), tool_calls: vec![] },
-                MockTurnScript { reply_text: "t3".to_string(), tool_calls: vec![] },
+                MockTurnScript {
+                    reply_text: "t1".to_string(),
+                    tool_calls: vec![],
+                },
+                MockTurnScript {
+                    reply_text: "t2".to_string(),
+                    tool_calls: vec![],
+                },
+                MockTurnScript {
+                    reply_text: "t3".to_string(),
+                    tool_calls: vec![],
+                },
             ],
             done: true,
             stop_reason: String::new(),

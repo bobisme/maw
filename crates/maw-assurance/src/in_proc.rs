@@ -109,7 +109,9 @@ use tempfile::TempDir;
 use crate::oracle::{AssuranceViolation, WorkspaceStatus, capture_state};
 use crate::oracle_a::{OracleA, StepReport};
 use crate::oracle_b::{self, OracleBViolation};
-use crate::scenario::{BaseRef, FaultSpec, FileEdit, Op, PlannedStep, ScenarioPlan, Seeded, Target, WsId};
+use crate::scenario::{
+    BaseRef, FaultSpec, FileEdit, Op, PlannedStep, ScenarioPlan, Seeded, Target, WsId,
+};
 
 // ---------------------------------------------------------------------------
 // Violation verdict — what the driver reports per step
@@ -450,16 +452,24 @@ impl InProcDriver {
             Op::WsCreate { ws, from } => self.do_ws_create(&root, ws, from, &env),
             Op::EditFiles { ws, files } => self.do_edit_files(&root, ws, files),
             Op::Commit { ws, msg } => self.do_commit(&root, ws, msg, &env),
-            Op::Merge { srcs, into, destroy } => {
-                self.do_merge(&root, srcs, into, *destroy, &step.fault, &env)
-            }
+            Op::Merge {
+                srcs,
+                into,
+                destroy,
+            } => self.do_merge(&root, srcs, into, *destroy, &step.fault, &env),
             Op::Sync { ws } => self.do_sync(&root, ws),
             Op::Destroy { ws, force: _ } => self.do_destroy(&root, ws, &env),
             Op::Recover { ws, to } => self.do_recover(&root, ws, to, &env),
         }
     }
 
-    fn do_ws_create(&self, root: &Path, ws: &WsId, _from: &BaseRef, env: &[(String, String)]) -> std::io::Result<()> {
+    fn do_ws_create(
+        &self,
+        root: &Path,
+        ws: &WsId,
+        _from: &BaseRef,
+        env: &[(String, String)],
+    ) -> std::io::Result<()> {
         let ws_dir = root.join("ws").join(&ws.0);
         std::fs::create_dir_all(&ws_dir)?;
         // Plant a minimal sentinel so the worktree isn't empty; not
@@ -477,7 +487,10 @@ impl InProcDriver {
             root,
             format!(r#"{{"workspace_id":"{}","epoch":"{}"}}"#, ws.0, head).as_bytes(),
         );
-        run_git(root, &["update-ref", &refs_workspace_head(&ws.0), &oplog_blob])?;
+        run_git(
+            root,
+            &["update-ref", &refs_workspace_head(&ws.0), &oplog_blob],
+        )?;
         let _ = env; // env not needed; no commit produced here
         Ok(())
     }
@@ -497,7 +510,13 @@ impl InProcDriver {
         Ok(())
     }
 
-    fn do_commit(&self, root: &Path, ws: &WsId, msg: &Seeded, env: &[(String, String)]) -> std::io::Result<()> {
+    fn do_commit(
+        &self,
+        root: &Path,
+        ws: &WsId,
+        msg: &Seeded,
+        env: &[(String, String)],
+    ) -> std::io::Result<()> {
         // Manually build a commit at refs/manifold/ws/<ws> with the
         // workspace's edited file content (a single file per commit is
         // sufficient — we just need a real, hash-stable blob for Oracle
@@ -558,17 +577,14 @@ impl InProcDriver {
         let tree = git_pipe(root, &["mktree"], mktree_input.as_bytes());
         // Parent: current ws tip if any, else main.
         let ws_ref = refs_workspace_state(&ws.0);
-        let parent = git_capture_or(root, &["rev-parse", "--verify", &format!("{ws_ref}^{{commit}}")], &self.root_oid);
+        let parent = git_capture_or(
+            root,
+            &["rev-parse", "--verify", &format!("{ws_ref}^{{commit}}")],
+            &self.root_oid,
+        );
         let commit = git_pipe_env(
             root,
-            &[
-                "commit-tree",
-                &tree,
-                "-p",
-                &parent,
-                "-m",
-                &msg.0,
-            ],
+            &["commit-tree", &tree, "-p", &parent, "-m", &msg.0],
             &[],
             env,
         );
@@ -648,12 +664,21 @@ impl InProcDriver {
         let _ = env;
         let ws_dir = root.join("ws").join(&ws.0);
         // Pin a recovery ref BEFORE tearing refs down (well-behaved destroy).
-        if let Some(tip) = git_capture_opt(root, &["rev-parse", "--verify", &refs_workspace_state(&ws.0)]) {
+        if let Some(tip) = git_capture_opt(
+            root,
+            &["rev-parse", "--verify", &refs_workspace_state(&ws.0)],
+        ) {
             run_git(
                 root,
                 &[
                     "update-ref",
-                    &format!("refs/manifold/recovery/{}/dst-{}", ws.0, env.iter().find(|(k, _)| k == "GIT_AUTHOR_DATE").map_or("0", |(_, v)| v.as_str())),
+                    &format!(
+                        "refs/manifold/recovery/{}/dst-{}",
+                        ws.0,
+                        env.iter()
+                            .find(|(k, _)| k == "GIT_AUTHOR_DATE")
+                            .map_or("0", |(_, v)| v.as_str())
+                    ),
                     &tip,
                 ],
             )?;
@@ -669,7 +694,13 @@ impl InProcDriver {
         Ok(())
     }
 
-    fn do_recover(&self, root: &Path, ws: &WsId, to: &WsId, env: &[(String, String)]) -> std::io::Result<()> {
+    fn do_recover(
+        &self,
+        root: &Path,
+        ws: &WsId,
+        to: &WsId,
+        env: &[(String, String)],
+    ) -> std::io::Result<()> {
         let _ = env;
         // Pick the first recovery ref for `ws` (deterministic ordering
         // via for-each-ref's lexicographic output) and materialize a new
@@ -791,8 +822,7 @@ impl InProcDriver {
         }
         match self.oracle_a.check_step(&state, step_index) {
             Ok(StepReport {
-                violation: Some(v),
-                ..
+                violation: Some(v), ..
             }) => {
                 return StepVerdict::OracleA(OracleAClass::from_violation(&v));
             }

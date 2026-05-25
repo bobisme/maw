@@ -83,9 +83,8 @@ fn substrate_neutral_snapshot_is_equal_across_adapters() {
         eprintln!("skipping: git missing on PATH");
         return;
     }
-    let maw_present = binary_present(
-        &std::env::var("MAW_BENCH_BIN").unwrap_or_else(|_| "maw".into()),
-    );
+    let maw_present =
+        binary_present(&std::env::var("MAW_BENCH_BIN").unwrap_or_else(|_| "maw".into()));
     let jj_present = binary_present("jj");
 
     let script = script_basic();

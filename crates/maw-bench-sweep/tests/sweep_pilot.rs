@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use maw_bench::{MockAgent, MockScript, NoopSubstrate};
 use maw_bench_sweep::{
-    aggregate_artifacts, pilot_grid, render_crossover_doc, render_spectrum_table,
-    SpectrumReportOptions, SweepDriver,
+    SpectrumReportOptions, SweepDriver, aggregate_artifacts, pilot_grid, render_crossover_doc,
+    render_spectrum_table,
 };
 
 #[test]
@@ -64,7 +64,10 @@ fn pilot_end_to_end_loads_cleanly_and_renders_with_overkill_section() {
     );
     // The C0 cell — pre-reg's overkill-region anchor — is included
     // in the spectrum table, not clipped.
-    assert!(table.contains("CELL: C0"), "C0 cell missing from spectrum table:\n{table}");
+    assert!(
+        table.contains("CELL: C0"),
+        "C0 cell missing from spectrum table:\n{table}"
+    );
 }
 
 #[test]

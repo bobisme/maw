@@ -1942,7 +1942,7 @@ exit 1
             })
             .expect("create change");
 
-            crate::workspace::create::destroy("close-ws", false, false)
+            crate::workspace::create::destroy("close-ws", false, false, None)
                 .expect("destroy linked workspace before close");
 
             let store = store::ChangesStore::open(root);

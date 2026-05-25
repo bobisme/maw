@@ -258,15 +258,22 @@ pub fn friction_list_from_bundles(
     let mut total_unattributed: u32 = 0;
 
     for bundle in bundles {
-        total_unattributed = total_unattributed.saturating_add(bundle.total_unattributed_wasted_turns);
+        total_unattributed =
+            total_unattributed.saturating_add(bundle.total_unattributed_wasted_turns);
         for row in &bundle.per_verb_clusters {
             if row.count == 0 {
                 continue;
             }
-            *totals.entry(row.attribution).or_insert(0) =
-                totals.get(&row.attribution).copied().unwrap_or(0).saturating_add(row.count);
-            *occurrences.entry(row.attribution).or_insert(0) =
-                occurrences.get(&row.attribution).copied().unwrap_or(0).saturating_add(1);
+            *totals.entry(row.attribution).or_insert(0) = totals
+                .get(&row.attribution)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(row.count);
+            *occurrences.entry(row.attribution).or_insert(0) = occurrences
+                .get(&row.attribution)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
             // Evidence: this bundle's own run_id, plus whatever
             // run-ids the row already carries (from a multi-run
             // bundle).
@@ -498,11 +505,9 @@ fn render_md_one_cluster(out: &mut String, cluster: &FrictionCluster) {
     } else {
         let _ = writeln!(out, "- Excerpts:");
         for ex in &cluster.example_transcript_excerpts {
-            let outcome = ex
-                .subsequent_outcome
-                .map_or_else(String::new, |o| {
-                    format!(" (ok={}, conflicted={})", o.ok, o.conflicted)
-                });
+            let outcome = ex.subsequent_outcome.map_or_else(String::new, |o| {
+                format!(" (ok={}, conflicted={})", o.ok, o.conflicted)
+            });
             let _ = writeln!(
                 out,
                 "  - `{}` turn {}: `{}` — `{}`{outcome}",
@@ -605,7 +610,11 @@ mod tests {
         }
     }
 
-    fn bundle(run_id: &str, attrs: &[(MawVerbAttribution, u32)], unattributed: u32) -> DiagnosticBundle {
+    fn bundle(
+        run_id: &str,
+        attrs: &[(MawVerbAttribution, u32)],
+        unattributed: u32,
+    ) -> DiagnosticBundle {
         let mut counts: BTreeMap<MawVerbAttribution, u32> = BTreeMap::new();
         for (a, n) in attrs {
             counts.insert(*a, *n);
@@ -733,7 +742,11 @@ mod tests {
     #[test]
     fn json_round_trip_is_stable() {
         let bundles = vec![
-            bundle("r-001", &[(MawVerbAttribution::WsMergeStructuredConflict, 4)], 1),
+            bundle(
+                "r-001",
+                &[(MawVerbAttribution::WsMergeStructuredConflict, 4)],
+                1,
+            ),
             bundle("r-002", &[(MawVerbAttribution::WsRecoverInvoked, 2)], 0),
         ];
         let list = friction_list_from_bundles(
@@ -752,7 +765,11 @@ mod tests {
 
     #[test]
     fn friction_list_schema_is_pinned() {
-        let bundles = vec![bundle("r-pin", &[(MawVerbAttribution::WsMergeStructuredConflict, 1)], 0)];
+        let bundles = vec![bundle(
+            "r-pin",
+            &[(MawVerbAttribution::WsMergeStructuredConflict, 1)],
+            0,
+        )];
         let list = friction_list_from_bundles(
             &bundles,
             sweep_run(1),
@@ -908,7 +925,11 @@ mod tests {
     fn accepts_mixed_arms() {
         // Non-maw bundle is empty by construction.
         let jj = DiagnosticBundle::empty_for("jj-workspaces", "r-jj");
-        let maw = bundle("r-maw", &[(MawVerbAttribution::WsMergeStructuredConflict, 4)], 2);
+        let maw = bundle(
+            "r-maw",
+            &[(MawVerbAttribution::WsMergeStructuredConflict, 4)],
+            2,
+        );
         let list = friction_list_from_bundles(
             &[jj, maw],
             sweep_run(2),

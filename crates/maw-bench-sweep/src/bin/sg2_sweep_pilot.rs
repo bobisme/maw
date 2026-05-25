@@ -32,8 +32,8 @@ use std::time::Instant;
 
 use maw_bench::{MockAgent, MockScript, NoopSubstrate};
 use maw_bench_sweep::{
-    aggregate_artifacts, pilot_grid, render_crossover_doc, render_spectrum_table,
-    SpectrumReportOptions, SweepDriver,
+    SpectrumReportOptions, SweepDriver, aggregate_artifacts, pilot_grid, render_crossover_doc,
+    render_spectrum_table,
 };
 
 fn usage() -> &'static str {

@@ -938,8 +938,7 @@ fn choose_fault(rng: &mut StdRng, profile: &ConditionProfile, op: &Op) -> FaultS
     if !rng.random_bool(profile.mid_op_kill_prob) {
         return FaultSpec::None;
     }
-    let (phase, sites) =
-        CRASHABLE_BY_PHASE[rng.random_range(0..CRASHABLE_BY_PHASE.len())];
+    let (phase, sites) = CRASHABLE_BY_PHASE[rng.random_range(0..CRASHABLE_BY_PHASE.len())];
     let name = sites[rng.random_range(0..sites.len())];
     FaultSpec::Failpoint {
         name: name.to_string(),
@@ -1265,10 +1264,9 @@ mod tests {
                 assert!(!files.is_empty(), "EditFiles with zero files");
             }
             Op::Commit { ws, .. } => {
-                let st = model
-                    .workspaces
-                    .get(ws)
-                    .unwrap_or_else(|| panic!("seed {seed} step {index}: Commit on nonexistent {ws:?}"));
+                let st = model.workspaces.get(ws).unwrap_or_else(|| {
+                    panic!("seed {seed} step {index}: Commit on nonexistent {ws:?}")
+                });
                 assert!(
                     st.has_uncommitted,
                     "seed {seed} step {index}: Commit on clean {ws:?}",
@@ -1277,10 +1275,9 @@ mod tests {
             Op::Merge { srcs, .. } => {
                 assert!(!srcs.is_empty(), "Merge with zero sources");
                 for s in srcs {
-                    let st = model
-                        .workspaces
-                        .get(s)
-                        .unwrap_or_else(|| panic!("seed {seed} step {index}: Merge source nonexistent {s:?}"));
+                    let st = model.workspaces.get(s).unwrap_or_else(|| {
+                        panic!("seed {seed} step {index}: Merge source nonexistent {s:?}")
+                    });
                     assert!(
                         st.has_commit,
                         "seed {seed} step {index}: Merge source {s:?} has no commit",
@@ -1288,20 +1285,18 @@ mod tests {
                 }
             }
             Op::Sync { ws } => {
-                let st = model
-                    .workspaces
-                    .get(ws)
-                    .unwrap_or_else(|| panic!("seed {seed} step {index}: Sync on nonexistent {ws:?}"));
+                let st = model.workspaces.get(ws).unwrap_or_else(|| {
+                    panic!("seed {seed} step {index}: Sync on nonexistent {ws:?}")
+                });
                 assert!(
                     !st.has_uncommitted,
                     "seed {seed} step {index}: Sync on dirty {ws:?}",
                 );
             }
             Op::Destroy { ws, force } => {
-                let st = model
-                    .workspaces
-                    .get(ws)
-                    .unwrap_or_else(|| panic!("seed {seed} step {index}: Destroy of nonexistent {ws:?}"));
+                let st = model.workspaces.get(ws).unwrap_or_else(|| {
+                    panic!("seed {seed} step {index}: Destroy of nonexistent {ws:?}")
+                });
                 if st.has_uncommitted {
                     assert!(*force, "Destroy of dirty {ws:?} without --force");
                 }

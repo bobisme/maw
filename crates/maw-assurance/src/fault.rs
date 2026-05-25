@@ -229,7 +229,10 @@ pub enum SubprocOutcome {
     /// bounded recovery retry eventually succeeded. `recovery_attempts` is how
     /// many `maw ws merge` retries it took (SP1: the first is racy; >1 is
     /// expected and not a failure).
-    Recovered { killed_phase: String, recovery_attempts: u32 },
+    Recovered {
+        killed_phase: String,
+        recovery_attempts: u32,
+    },
     /// The target phase was never observed within the deadline (a timing miss,
     /// e.g. SP1 Finding A's sub-20 ms BUILD without the env bridge). This is
     /// **not** a maw fault — the caller should replay or widen.
@@ -505,10 +508,7 @@ mod tests {
             assert_eq!(parsed[0].0, p.failpoint);
             match (p.kind, &parsed[0].1) {
                 (CrashKind::Panic, FailpointAction::Panic(_))
-                | (
-                    CrashKind::Unwind | CrashKind::SigKill,
-                    FailpointAction::Error(_),
-                ) => {}
+                | (CrashKind::Unwind | CrashKind::SigKill, FailpointAction::Error(_)) => {}
                 (k, a) => panic!("seed {seed}: kind {k:?} -> wrong action {a:?}"),
             }
         }

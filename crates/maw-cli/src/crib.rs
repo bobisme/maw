@@ -365,7 +365,11 @@ pub fn render_markdown(proto: &CribProtocol) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    let _ = writeln!(out, "# maw crib — {} (maw {})", proto.agent, proto.maw_version);
+    let _ = writeln!(
+        out,
+        "# maw crib — {} (maw {})",
+        proto.agent, proto.maw_version
+    );
     out.push('\n');
     let _ = writeln!(out, "_Schema v{}._\n", proto.schema_version);
 
@@ -410,9 +414,18 @@ Map them to the correct verb up front."
     let _ = writeln!(out, "## Discoverability");
     out.push('\n');
     let _ = writeln!(out, "- `maw --help` — top-level command list.");
-    let _ = writeln!(out, "- `maw <command> --help` — per-command help (always works).");
-    let _ = writeln!(out, "- `maw crib <agent> --format json` — this same content as JSON.");
-    let _ = writeln!(out, "- `maw crib --overkill-line` — just the one-line guidance.");
+    let _ = writeln!(
+        out,
+        "- `maw <command> --help` — per-command help (always works)."
+    );
+    let _ = writeln!(
+        out,
+        "- `maw crib <agent> --format json` — this same content as JSON."
+    );
+    let _ = writeln!(
+        out,
+        "- `maw crib --overkill-line` — just the one-line guidance."
+    );
     out.push('\n');
 
     out
@@ -521,9 +534,7 @@ mod tests {
             assert!(!p.right.is_empty());
             assert!(!p.note.is_empty());
             assert!(
-                p.right.starts_with("maw ")
-                    || p.right.contains("git ")
-                    || p.right.contains("bn "),
+                p.right.starts_with("maw ") || p.right.contains("git ") || p.right.contains("bn "),
                 "right-hand side should be a real shell command: {:?}",
                 p.right,
             );
@@ -543,7 +554,9 @@ mod tests {
             "must catch the `ws new` synonym (agents reach for git's worktree add)",
         );
         assert!(
-            wrongs.iter().any(|w| w.contains("delete") || w.contains("rm")),
+            wrongs
+                .iter()
+                .any(|w| w.contains("delete") || w.contains("rm")),
             "must catch the `delete`/`rm` synonym for destroy",
         );
         assert!(
@@ -631,6 +644,9 @@ mod tests {
             overkill_line: true,
         };
         assert!(!OVERKILL_LINE.is_empty());
-        assert!(OVERKILL_LINE.len() < 400, "overkill line stays one screen-line of context");
+        assert!(
+            OVERKILL_LINE.len() < 400,
+            "overkill line stays one screen-line of context"
+        );
     }
 }

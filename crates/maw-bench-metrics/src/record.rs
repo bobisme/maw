@@ -243,11 +243,7 @@ impl MetricRecord {
             ),
             ("tool_calls_total", self.tool_calls_total, Axis::Efficiency),
             ("turns_to_done", self.turns_to_done, Axis::Efficiency),
-            (
-                "wall_duration_ms",
-                self.wall_duration_ms,
-                Axis::Efficiency,
-            ),
+            ("wall_duration_ms", self.wall_duration_ms, Axis::Efficiency),
             ("cost_usd", self.cost_usd, Axis::Efficiency),
             (
                 "work_redone_turns",

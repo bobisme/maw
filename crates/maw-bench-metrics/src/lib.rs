@@ -117,22 +117,20 @@ pub mod friction_list;
 pub mod record;
 pub mod report;
 
-pub use attribution::{
-    attribute_tool_call, DiagnosticBundle, MawVerbAttribution, PerVerbCluster,
-};
+pub use attribution::{DiagnosticBundle, MawVerbAttribution, PerVerbCluster, attribute_tool_call};
 pub use extract::{
     count_attribution_driven_redone_turns, count_work_redone_turns, extract_metrics,
     per_verb_attribution,
 };
 pub use friction_delta::{
-    cluster_cost_map, diff_friction_lists, evaluate_row, render_delta_report_md, sg4_backlog,
-    BacklogEntry, ClusterTarget, DeltaReport, DeltaReportRow, IterationTrigger, RebenchVerdict,
-    RegressionFlag, UnattributedDelta, DELTA_REPORT_SCHEMA_VERSION,
+    BacklogEntry, ClusterTarget, DELTA_REPORT_SCHEMA_VERSION, DeltaReport, DeltaReportRow,
+    IterationTrigger, RebenchVerdict, RegressionFlag, UnattributedDelta, cluster_cost_map,
+    diff_friction_lists, evaluate_row, render_delta_report_md, sg4_backlog,
 };
 pub use friction_list::{
-    friction_list_from_bundles, recommended_fix_class, render_friction_list_md, ExcerptOutcome,
+    EVIDENCE_RUN_ID_CAP, EXAMPLE_EXCERPT_CAP, ExcerptOutcome, FRICTION_LIST_SCHEMA_VERSION,
     FrictionCluster, FrictionList, FrictionSource, SweepRunRef, TranscriptExcerpt,
-    EVIDENCE_RUN_ID_CAP, EXAMPLE_EXCERPT_CAP, FRICTION_LIST_SCHEMA_VERSION,
+    friction_list_from_bundles, recommended_fix_class, render_friction_list_md,
 };
 pub use record::{Axis, MetricRecord, MetricValue, MetricsSchemaError};
-pub use report::{render_dominance_table, ReportOptions};
+pub use report::{ReportOptions, render_dominance_table};

@@ -99,9 +99,7 @@ fn ws_status_json_marks_committed_unintegrated_with_merge_check_fix() {
     manifold_common::git_ok(&ws_path, &["commit", "-m", "feat: bn-242l alice commit"]);
 
     let json = ws_status_json(&repo);
-    let workspaces = json["workspaces"]
-        .as_array()
-        .expect("workspaces array");
+    let workspaces = json["workspaces"].as_array().expect("workspaces array");
     let alice = workspaces
         .iter()
         .find(|w| w["name"].as_str() == Some("alice"))
@@ -196,9 +194,7 @@ fn ws_list_json_carries_lifecycle_state_for_stale_workspace() {
     repo.advance_epoch("chore: bn-242l advance for ws list stale test");
 
     let json = ws_list_json(&repo);
-    let workspaces = json["workspaces"]
-        .as_array()
-        .expect("workspaces array");
+    let workspaces = json["workspaces"].as_array().expect("workspaces array");
     let alice = workspaces
         .iter()
         .find(|w| w["name"].as_str() == Some("alice"))
@@ -305,7 +301,10 @@ fn ws_diff_json_carries_lifecycle_state_for_stale_workspace() {
     repo.add_file("alice", "feature.txt", "alice feature\n");
     let ws_path = repo.workspace_path("alice");
     manifold_common::git_ok(&ws_path, &["add", "-A"]);
-    manifold_common::git_ok(&ws_path, &["commit", "-m", "feat: bn-242l alice diff target"]);
+    manifold_common::git_ok(
+        &ws_path,
+        &["commit", "-m", "feat: bn-242l alice diff target"],
+    );
 
     // Advance the epoch so alice is now stale.
     repo.add_file("default", "advance.txt", "advance\n");
@@ -394,7 +393,10 @@ fn ws_list_text_includes_named_lifecycle_slug() {
     repo.add_file("alice", "feature.txt", "alice feature\n");
     let ws_path = repo.workspace_path("alice");
     manifold_common::git_ok(&ws_path, &["add", "-A"]);
-    manifold_common::git_ok(&ws_path, &["commit", "-m", "feat: bn-242l alice for list text"]);
+    manifold_common::git_ok(
+        &ws_path,
+        &["commit", "-m", "feat: bn-242l alice for list text"],
+    );
 
     let out = repo.maw_ok(&["ws", "list"]);
     assert!(
@@ -425,8 +427,16 @@ fn ws_status_json_preserves_legacy_envelope_shape() {
     assert!(json.get("has_changes").is_some());
 
     let workspaces = json["workspaces"].as_array().expect("workspaces array");
-    assert!(workspaces.iter().any(|w| w["name"].as_str() == Some("default")));
-    assert!(workspaces.iter().any(|w| w["name"].as_str() == Some("alice")));
+    assert!(
+        workspaces
+            .iter()
+            .any(|w| w["name"].as_str() == Some("default"))
+    );
+    assert!(
+        workspaces
+            .iter()
+            .any(|w| w["name"].as_str() == Some("alice"))
+    );
 }
 
 /// SG4 / bn-242l — same backward-compat guarantee for `ws list`. The

@@ -14,7 +14,9 @@ use maw_core::oplog::types::{OpPayload, Operation};
 use maw_core::refs as manifold_refs;
 
 use crate::changes::store::ChangesStore;
+use crate::format::OutputFormat;
 
+use super::destroy_guidance::DestroyRefusal;
 use super::{
     DEFAULT_WORKSPACE, MawConfig, create_lock::WorkspaceCreateLock, ensure_repo_root, get_backend,
     metadata, oplog_runtime::append_operation_with_runtime_checkpoint, repo_root,
@@ -110,10 +112,9 @@ fn create_with_output(
         // Path display is layout-aware: v2 → ws/<name>, consolidated →
         // .maw/workspaces/<name>. SP5 §6 risk #1 (hidden-dir invisibility):
         // always name the full path so agents can navigate without guessing.
-        let display_path = path.strip_prefix(&root).map_or_else(
-            |_| path.display().to_string(),
-            |p| p.display().to_string(),
-        );
+        let display_path = path
+            .strip_prefix(&root)
+            .map_or_else(|_| path.display().to_string(), |p| p.display().to_string());
         println!("Creating workspace '{name}' at {display_path} ...");
     }
     if persistent && emit_output {
@@ -307,8 +308,8 @@ fn resolve_from_source(root: &std::path::Path, from: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Failed to read workspace source ref: {e}"))?
         .is_some()
     {
-        let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
-            .workspace_path(root, from);
+        let ws_path =
+            maw_core::model::layout::LayoutFlavor::detect_with_env(root).workspace_path(root, from);
         let repo = maw_git::GixRepo::open(&ws_path)
             .map_err(|e| anyhow::anyhow!("Failed to open workspace '{from}': {e}"))?;
         let head_oid = repo
@@ -556,6 +557,27 @@ fn resolve_epoch(root: &std::path::Path, revision: Option<&str>) -> Result<Epoch
     }
 }
 
+/// Count commits on the workspace HEAD ahead of `base_epoch_oid`.
+///
+/// Used by the structured `DestroyRefusal` (bn-c6l3 / bn-voy5) to
+/// classify the workspace lifecycle state without requiring callers
+/// to round-trip through `backend.list()` (which would materialize
+/// every workspace's metadata just to read one field). Returns `None`
+/// if the workspace repo can't be opened, HEAD doesn't resolve, or
+/// the ancestry walk fails — the caller treats `None` as "0 commits
+/// ahead" (conservative: classifies as `DirtyUncommitted`, which still
+/// refuses and still surfaces the safer commit-then-merge path).
+fn workspace_commits_ahead(ws_path: &std::path::Path, base_epoch_oid: &str) -> Option<u32> {
+    use maw_git::GitRepo as _;
+    let repo = maw_git::GixRepo::open(ws_path).ok()?;
+    let head_oid = repo.rev_parse("HEAD").ok()?;
+    let base_oid: maw_git::GitOid = base_epoch_oid.parse().ok()?;
+    if head_oid == base_oid {
+        return Some(0);
+    }
+    repo.count_commits_between(base_oid, head_oid).ok()
+}
+
 /// Refuse to destroy a workspace that a *live* in-flight merge has frozen as
 /// a source workspace (bn-cm63).
 ///
@@ -638,7 +660,7 @@ fn guard_destroy_against_inflight_merge(root: &std::path::Path, name: &str) -> R
     clippy::too_many_lines,
     reason = "destroy command keeps safety checks and cleanup in one flow"
 )]
-pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
+pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputFormat>) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
         bail!("Cannot destroy the default workspace");
     }
@@ -694,13 +716,40 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     maw::fp!("FP_DESTROY_AFTER_STATUS")?;
 
     if touched_count > 0 && !force {
-        bail!(
-            "Workspace '{name}' has {touched_count} unmerged change(s). Refusing destroy to avoid data loss.\n  \
-             Preview options:  maw ws destroy {name} --dry-run --format json   (bn-29fi)\n  \
-             Review changes:   maw ws touched {name} --format json\n  \
-             Merge + destroy:  maw ws merge {name} --into default --destroy   (preferred)\n  \
-             Destroy anyway:   maw ws destroy {name} --force"
-        );
+        // bn-voy5: build a structured DestroyRefusal (bn-c6l3 scaffold)
+        // that carries lifecycle_state + recommended_action + bn-29fi
+        // destroy-prevention cues in a single payload. Render to the
+        // caller-requested format (text default, JSON via --format).
+        //
+        // commits_ahead is computed by opening the workspace repo and
+        // counting commits between base_epoch and HEAD; non-fatal —
+        // a failure here defaults to 0, which conservatively classifies
+        // the workspace as DirtyUncommitted (still refuses, still
+        // surfaces the safer "commit then merge" path).
+        let commits_ahead = workspace_commits_ahead(&path, base_epoch.as_str()).unwrap_or(0);
+        let refusal = DestroyRefusal::new(name, touched_count, commits_ahead, status.dirty_count());
+        let fmt = OutputFormat::resolve(format);
+        match fmt {
+            OutputFormat::Json => {
+                // Emit the JSON payload to stderr (matches the refusal
+                // surface — `bail!` also lands on stderr via anyhow),
+                // then bail with a short message. The integration test
+                // (bn_c6l3_refusal_emits_machine_readable_json_under_format_flag)
+                // parses the first `{...}` block out of stderr, so the
+                // JSON must be valid + appear before the bail line.
+                let json = refusal
+                    .render_json()
+                    .context("failed to serialize destroy refusal as JSON")?;
+                eprintln!("{json}");
+                bail!(
+                    "Refusing destroy: '{name}' has {touched_count} unmerged change(s) \
+                     (see JSON payload above for lifecycle_state + recommended_action)."
+                );
+            }
+            OutputFormat::Text | OutputFormat::Pretty => {
+                bail!("{}", refusal.render_text());
+            }
+        }
     }
 
     if confirm {

@@ -12,7 +12,7 @@
 
 use maw_bench_metrics::{MetricRecord, MetricValue};
 use maw_bench_sweep::aggregate::aggregate_metric_records;
-use maw_bench_sweep::{render_crossover_doc, render_spectrum_table, SpectrumReportOptions};
+use maw_bench_sweep::{SpectrumReportOptions, render_crossover_doc, render_spectrum_table};
 
 fn rec(arm: &str, cond: &str, t: &str, lost: u64, turns: u64, calls: u64) -> MetricRecord {
     MetricRecord {
@@ -107,7 +107,9 @@ fn axes_remain_separated_in_spectrum_renderer() {
     let mut search = out.as_str();
     while let Some(corr_idx) = search.find("correctness") {
         let after_corr = &search[corr_idx..];
-        let eff_idx = after_corr.find("efficiency").expect("efficiency after correctness");
+        let eff_idx = after_corr
+            .find("efficiency")
+            .expect("efficiency after correctness");
         assert!(eff_idx > 0);
         search = &after_corr[eff_idx + 1..];
     }

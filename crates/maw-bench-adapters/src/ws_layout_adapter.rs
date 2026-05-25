@@ -59,8 +59,7 @@ pub struct WsLayoutAdapter {
 impl WsLayoutAdapter {
     /// Build a fresh substrate under a private tempdir.
     pub fn new() -> Result<Self> {
-        let tmp =
-            tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
+        let tmp = tempfile::tempdir().map_err(|e| SubstrateError::Io(format!("tempdir: {e}")))?;
         Self::new_in(tmp.path().to_path_buf(), Some(tmp))
     }
 
@@ -76,18 +75,17 @@ impl WsLayoutAdapter {
         // .manifold/ placeholder file so the dir is non-empty (matches maw
         // populating .manifold/ during init). Empty file — content irrelevant
         // for the SP5 structural read.
-        fs::write(manifold_dir.join("PLACEHOLDER"), "maw metadata placeholder\n")
-            .map_err(|e| SubstrateError::Io(e.to_string()))?;
+        fs::write(
+            manifold_dir.join("PLACEHOLDER"),
+            "maw metadata placeholder\n",
+        )
+        .map_err(|e| SubstrateError::Io(e.to_string()))?;
 
         // 1. Bare repo as the canonical object store.
         proc_util::run("git", &["init", "--bare", "repo.git"], &root)?;
         // 2. Clone into ws/default as the integration worktree (== maw's
         //    "privileged target").
-        proc_util::run(
-            "git",
-            &["clone", "repo.git", "ws/default"],
-            &root,
-        )?;
+        proc_util::run("git", &["clone", "repo.git", "ws/default"], &root)?;
         // 3. Pin identity and seed.
         proc_util::run("git", &["config", "user.name", "bench"], &integration_dir)?;
         proc_util::run(
@@ -110,7 +108,11 @@ impl WsLayoutAdapter {
             &["push", "-u", "origin", "HEAD:refs/heads/main"],
             &integration_dir,
         )?;
-        proc_util::run("git", &["symbolic-ref", "HEAD", "refs/heads/main"], &bare_dir)?;
+        proc_util::run(
+            "git",
+            &["symbolic-ref", "HEAD", "refs/heads/main"],
+            &bare_dir,
+        )?;
 
         Ok(Self {
             root,
@@ -200,12 +202,7 @@ impl Substrate for WsLayoutAdapter {
         })
     }
 
-    fn merge(
-        &mut self,
-        srcs: &[WsId],
-        target: &str,
-        destroy_sources: bool,
-    ) -> Result<StepOutcome> {
+    fn merge(&mut self, srcs: &[WsId], target: &str, destroy_sources: bool) -> Result<StepOutcome> {
         // Engine: octopus merge into ws/default (the privileged target).
         // Layout-equivalent to maw ws merge under v2; here we measure
         // engine-equivalent semantics so the only delta vs the consolidated
@@ -218,7 +215,10 @@ impl Substrate for WsLayoutAdapter {
         proc_util::run("git", &["checkout", "main"], &self.integration_dir)?;
         let msg = format!(
             "merge: {}",
-            srcs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join(", ")
+            srcs.iter()
+                .map(|s| s.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let mut args: Vec<String> = vec!["merge".into(), "--no-ff".into(), "-m".into(), msg];
         for s in srcs {
@@ -245,11 +245,7 @@ impl Substrate for WsLayoutAdapter {
             Err(SubstrateError::SubprocessFailed { stderr, .. })
                 if stderr.contains("CONFLICT") || stderr.contains("Automatic merge failed") =>
             {
-                let _ = proc_util::run_lenient(
-                    "git",
-                    &["merge", "--abort"],
-                    &self.integration_dir,
-                );
+                let _ = proc_util::run_lenient("git", &["merge", "--abort"], &self.integration_dir);
                 Ok(StepOutcome {
                     ok: true,
                     conflicted: true,
@@ -379,16 +375,18 @@ mod tests {
         let dir = s.ws_dir(&ws);
         assert!(dir.exists(), "ws dir must exist at {}", dir.display());
         assert_eq!(ws_path_depth_components(&dir, s.root()), 2);
-        s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n").expect("edit");
+        s.edit_file(&ws, "src/lib.rs", "pub fn alpha() {}\n")
+            .expect("edit");
         s.commit(&ws, "feat: alpha").expect("commit");
         let m = s.merge(&[ws.clone()], "default", true).expect("merge");
         assert!(m.ok);
         assert!(m.advanced_integration);
         let snap = s.state_snapshot().expect("snapshot");
         assert!(snap.live_workspaces.is_empty());
-        assert!(snap
-            .integrated_files
-            .get("src/lib.rs")
-            .map_or(false, |c| c.contains("alpha")));
+        assert!(
+            snap.integrated_files
+                .get("src/lib.rs")
+                .map_or(false, |c| c.contains("alpha"))
+        );
     }
 }

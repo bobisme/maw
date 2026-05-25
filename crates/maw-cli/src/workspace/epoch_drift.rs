@@ -197,8 +197,7 @@ where
         .parse()
         .map_err(|e| anyhow!("invalid branch OID '{}': {e}", branch_oid.as_str()))?;
 
-    let epoch_is_ancestor =
-        super::ff_absorb::is_strict_ancestor(&repo, &epoch_git, &branch_git)?;
+    let epoch_is_ancestor = super::ff_absorb::is_strict_ancestor(&repo, &epoch_git, &branch_git)?;
     if !epoch_is_ancestor {
         return Ok(Some(EpochDriftReport {
             kind: EpochDriftKind::Diverged,
@@ -634,12 +633,10 @@ mod integration_tests {
         assert_eq!(after.as_str(), new_tip, "epoch ref should equal branch tip");
         // Default workspace baseline must follow (avoids the bn-3r8s
         // double-application class).
-        let default_ws_ref = manifold_refs::read_ref(
-            &root,
-            &manifold_refs::workspace_epoch_ref("default"),
-        )
-        .expect("read")
-        .expect("set");
+        let default_ws_ref =
+            manifold_refs::read_ref(&root, &manifold_refs::workspace_epoch_ref("default"))
+                .expect("read")
+                .expect("set");
         assert_eq!(
             default_ws_ref.as_str(),
             new_tip,
@@ -662,7 +659,12 @@ mod integration_tests {
         let outcome = auto_advance_if_safe(&root, "main", "default", &backend)
             .expect("auto-advance call should succeed");
         assert!(
-            matches!(outcome, AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::InSync }),
+            matches!(
+                outcome,
+                AutoAdvanceOutcome::NoOp {
+                    reason: AutoAdvanceSkip::InSync
+                }
+            ),
             "expected NoOp::InSync, got {outcome:?}"
         );
         // Refs unchanged.
@@ -691,7 +693,12 @@ mod integration_tests {
         let outcome = auto_advance_if_safe(&root, "main", "default", &backend)
             .expect("auto-advance call should succeed");
         assert!(
-            matches!(outcome, AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::Diverged(_) }),
+            matches!(
+                outcome,
+                AutoAdvanceOutcome::NoOp {
+                    reason: AutoAdvanceSkip::Diverged(_)
+                }
+            ),
             "expected NoOp::Diverged, got {outcome:?}"
         );
         // Epoch ref must NOT have moved.

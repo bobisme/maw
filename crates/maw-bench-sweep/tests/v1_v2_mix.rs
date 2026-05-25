@@ -128,7 +128,10 @@ fn unknown_schema_version_surfaces_as_error() {
     let err = aggregate_artifacts(tmp.path()).expect_err("must error");
     let msg = format!("{err}");
     assert!(msg.contains("99"), "expected schema 99 in error: {msg}");
-    assert!(msg.contains("unsupported"), "expected 'unsupported' in error: {msg}");
+    assert!(
+        msg.contains("unsupported"),
+        "expected 'unsupported' in error: {msg}"
+    );
 }
 
 fn write_json(dir: &Path, name: &str, body: &str) {

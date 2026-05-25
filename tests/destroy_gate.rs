@@ -511,7 +511,6 @@ fn it_g4_001_post_merge_destroy_captures_extra_dirty_state() {
 /// hatch. The legacy text led with `--force`, which encouraged the
 /// agent to choose the data-loss-shaped action.
 #[test]
-#[ignore = "wire-up deferred: see destroy_guidance.rs TODO (bn-c6l3 conflicted with bn-29fi refusal-text additions; follow-up bone needed)"]
 fn bn_c6l3_refusal_for_dirty_workspace_leads_with_commit_then_merge() {
     let repo = TestRepo::new();
 
@@ -543,9 +542,7 @@ fn bn_c6l3_refusal_for_dirty_workspace_leads_with_commit_then_merge() {
     );
 
     // SAFE path appears before FORCE path.
-    let safe_idx = stderr
-        .find("Recommended:")
-        .expect("Recommended: present");
+    let safe_idx = stderr.find("Recommended:").expect("Recommended: present");
     let force_idx = stderr
         .find("Or force-destroy:")
         .expect("force-destroy line present");
@@ -583,7 +580,6 @@ fn bn_c6l3_refusal_for_dirty_workspace_leads_with_commit_then_merge() {
 /// single-command safe path (instead of telling the agent to inspect
 /// first and decide between two further options).
 #[test]
-#[ignore = "wire-up deferred: see destroy_guidance.rs TODO (bn-c6l3 conflicted with bn-29fi refusal-text additions; follow-up bone needed)"]
 fn bn_c6l3_refusal_for_committed_work_recommends_merge_and_destroy() {
     let repo = TestRepo::new();
 
@@ -628,7 +624,6 @@ fn bn_c6l3_refusal_for_committed_work_recommends_merge_and_destroy() {
 /// bail message. Machine consumers can branch on `lifecycle_state`
 /// and `recommended_action_kind` slugs without regex over the text.
 #[test]
-#[ignore = "wire-up deferred: see destroy_guidance.rs TODO (bn-c6l3 conflicted with bn-29fi refusal-text additions; follow-up bone needed)"]
 fn bn_c6l3_refusal_emits_machine_readable_json_under_format_flag() {
     let repo = TestRepo::new();
 
@@ -670,9 +665,8 @@ fn bn_c6l3_refusal_emits_machine_readable_json_under_format_flag() {
     }
     assert!(end > 0, "could not find matching brace in:\n{json_slice}");
     let json_text = &json_slice[..end];
-    let v: serde_json::Value = serde_json::from_str(json_text).unwrap_or_else(|e| {
-        panic!("destroy refusal JSON must parse (err={e}); got:\n{json_text}")
-    });
+    let v: serde_json::Value = serde_json::from_str(json_text)
+        .unwrap_or_else(|e| panic!("destroy refusal JSON must parse (err={e}); got:\n{json_text}"));
 
     assert_eq!(v["workspace"].as_str(), Some("json-ws"));
     assert_eq!(

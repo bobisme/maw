@@ -268,7 +268,7 @@ fn persist_run_json(run: &BenchRun, dir: &Path, run_id: &str) -> Result<(), Swee
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{pilot_grid, ConditionPoint, TClass};
+    use crate::grid::{ConditionPoint, TClass, pilot_grid};
     use maw_bench::{MockAgent, MockScript, NoopSubstrate};
 
     fn finished_script() -> MockScript {

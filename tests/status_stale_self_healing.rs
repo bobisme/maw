@@ -209,9 +209,7 @@ fn status_json_persistent_stale_uses_advance() {
     let stale = json["stale_workspaces"]
         .as_array()
         .expect("stale_workspaces array");
-    let longliv = stale
-        .iter()
-        .find(|w| w["name"].as_str() == Some("longliv"));
+    let longliv = stale.iter().find(|w| w["name"].as_str() == Some("longliv"));
 
     // Persistent workspaces don't auto-go-stale on epoch advance in
     // every backend wiring; if it does show up, the fix MUST be

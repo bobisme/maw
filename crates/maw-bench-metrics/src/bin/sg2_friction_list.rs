@@ -40,8 +40,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use maw_bench::run::BenchRun;
 use maw_bench_metrics::{
-    extract_metrics, friction_list_from_bundles, render_friction_list_md, DiagnosticBundle,
-    FrictionSource, MawVerbAttribution, SweepRunRef,
+    DiagnosticBundle, FrictionSource, MawVerbAttribution, SweepRunRef, extract_metrics,
+    friction_list_from_bundles, render_friction_list_md,
 };
 
 fn usage() -> &'static str {
@@ -130,13 +130,7 @@ fn main() -> ExitCode {
                 // enrich…)" framing. Real values land when the
                 // harness writes a v2 BenchRun with explicit
                 // unattributed-marker counts.
-                DiagnosticBundle::from_counts(
-                    &run.manifest.arm,
-                    &run.run_id,
-                    &counts,
-                    &evidence,
-                    0,
-                )
+                DiagnosticBundle::from_counts(&run.manifest.arm, &run.run_id, &counts, &evidence, 0)
             })
             .collect()
     };
@@ -236,7 +230,9 @@ fn visit(dir: &Path, out: &mut Vec<BenchRun>) -> Result<(), std::io::Error> {
 fn current_utc_string() -> String {
     // Minimalist ISO-8601 UTC. Avoids pulling chrono as a dep just
     // for this. Seconds-precision is enough for the audit field.
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs();
     let (year, month, day, hour, minute, second) = utc_breakdown(secs);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}-{second:02}Z")
@@ -301,23 +297,21 @@ const fn is_leap(y: i64) -> bool {
 fn synthetic_demo_bundles() -> Vec<DiagnosticBundle> {
     use MawVerbAttribution as A;
     let mut out = Vec::new();
-    let push = |out: &mut Vec<DiagnosticBundle>,
-                run_id: &str,
-                attrs: &[(A, u32)],
-                unattributed: u32| {
-        let mut counts: BTreeMap<A, u32> = BTreeMap::new();
-        for (a, n) in attrs {
-            counts.insert(*a, *n);
-        }
-        let evidence: BTreeMap<A, Vec<String>> = BTreeMap::new();
-        out.push(DiagnosticBundle::from_counts(
-            "maw",
-            run_id,
-            &counts,
-            &evidence,
-            unattributed,
-        ));
-    };
+    let push =
+        |out: &mut Vec<DiagnosticBundle>, run_id: &str, attrs: &[(A, u32)], unattributed: u32| {
+            let mut counts: BTreeMap<A, u32> = BTreeMap::new();
+            for (a, n) in attrs {
+                counts.insert(*a, *n);
+            }
+            let evidence: BTreeMap<A, Vec<String>> = BTreeMap::new();
+            out.push(DiagnosticBundle::from_counts(
+                "maw",
+                run_id,
+                &counts,
+                &evidence,
+                unattributed,
+            ));
+        };
     push(
         &mut out,
         "synthetic-maw-r01",
@@ -331,10 +325,7 @@ fn synthetic_demo_bundles() -> Vec<DiagnosticBundle> {
     push(
         &mut out,
         "synthetic-maw-r02",
-        &[
-            (A::WsMergeStructuredConflict, 2),
-            (A::EpochSyncRequired, 1),
-        ],
+        &[(A::WsMergeStructuredConflict, 2), (A::EpochSyncRequired, 1)],
         1,
     );
     push(
@@ -350,22 +341,21 @@ fn synthetic_demo_bundles() -> Vec<DiagnosticBundle> {
     push(
         &mut out,
         "synthetic-maw-r04",
-        &[
-            (A::WsSyncStaleWorkspace, 2),
-            (A::ReadFromStaleWorkspace, 1),
-        ],
+        &[(A::WsSyncStaleWorkspace, 2), (A::ReadFromStaleWorkspace, 1)],
         1,
     );
     push(
         &mut out,
         "synthetic-maw-r05",
-        &[
-            (A::WsDestroyRefused, 1),
-            (A::WsRecoverInvoked, 1),
-        ],
+        &[(A::WsDestroyRefused, 1), (A::WsRecoverInvoked, 1)],
         0,
     );
-    push(&mut out, "synthetic-maw-r06", &[(A::EpochSyncRequired, 2)], 1);
+    push(
+        &mut out,
+        "synthetic-maw-r06",
+        &[(A::EpochSyncRequired, 2)],
+        1,
+    );
     out
 }
 

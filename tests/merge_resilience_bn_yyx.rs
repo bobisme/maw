@@ -143,7 +143,10 @@ fn conflict_appends_events_to_event_log() {
     );
 
     let bytes = fs::read(&log_path).expect("read log");
-    let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&[u8]> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .collect();
     let events: Vec<Value> = lines
         .iter()
         .map(|l| serde_json::from_slice(l).expect("parse event"))
@@ -177,7 +180,9 @@ fn conflict_appends_events_to_event_log() {
     let paths = cd["kind"]["paths"].as_array().expect("paths");
     assert_eq!(ids.len(), paths.len(), "ids and paths must be parallel");
     assert!(
-        paths.iter().any(|p| p.as_str().unwrap_or("").contains("shared.txt")),
+        paths
+            .iter()
+            .any(|p| p.as_str().unwrap_or("").contains("shared.txt")),
         "conflict_detected.paths should include shared.txt; got {paths:?}"
     );
 }
@@ -273,7 +278,10 @@ fn events_cli_since_last_attempt_bounds_to_latest_start() {
         "--format",
         "json",
     ]);
-    assert!(out.status.success(), "events --since-last-attempt should succeed");
+    assert!(
+        out.status.success(),
+        "events --since-last-attempt should succeed"
+    );
     let stdout = String::from_utf8(out.stdout).expect("utf8");
     let parsed: Value = serde_json::from_str(&stdout).expect("parse json");
     let arr = parsed.as_array().expect("array");
@@ -297,12 +305,7 @@ fn resume_dry_run_derives_command_without_running_merge() {
     // that the recall surface is sufficient without re-running the merge.
     let repo = setup_repo_with_pending_structured_conflict();
 
-    let out = repo.maw_raw_exact(&[
-        "merge",
-        "resume",
-        "--resolve-all=alice",
-        "--dry-run",
-    ]);
+    let out = repo.maw_raw_exact(&["merge", "resume", "--resolve-all=alice", "--dry-run"]);
     assert!(
         out.status.success(),
         "resume --dry-run should succeed\nstdout: {}\nstderr: {}",
@@ -382,7 +385,10 @@ fn successful_merge_clears_last_conflict_and_records_completion_event() {
     let log_path = repo.root().join(".manifold/events/merge.jsonl");
     assert!(log_path.exists());
     let bytes = fs::read(&log_path).expect("read log");
-    let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&[u8]> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .collect();
     let kinds: Vec<String> = lines
         .iter()
         .map(|l| serde_json::from_slice::<Value>(l).expect("parse"))

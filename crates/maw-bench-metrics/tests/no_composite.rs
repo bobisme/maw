@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use maw_bench_metrics::{render_dominance_table, MetricRecord, MetricValue, ReportOptions};
+use maw_bench_metrics::{MetricRecord, MetricValue, ReportOptions, render_dominance_table};
 
 fn rec(arm: &str, run_id: &str, lost: u64, turns: u64, calls: u64) -> MetricRecord {
     MetricRecord {

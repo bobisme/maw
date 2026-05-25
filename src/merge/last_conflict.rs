@@ -117,8 +117,7 @@ pub fn read(manifold_dir: &Path) -> std::io::Result<Option<LastConflict>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let snapshot: LastConflict =
-        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    let snapshot: LastConflict = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
     Ok(Some(snapshot))
 }
 
@@ -169,7 +168,9 @@ pub fn build_recovery_commands(
     // last-conflict as source-of-truth. Intentionally NOT `maw ws merge` so
     // attribution heuristics don't double-count this as a retry of the
     // failing class.
-    out.push(format!("maw merge resume --resolve-all={default_resolve_ws}"));
+    out.push(format!(
+        "maw merge resume --resolve-all={default_resolve_ws}"
+    ));
     out
 }
 
@@ -255,12 +256,8 @@ mod tests {
         // Load-bearing for the friction-cluster fix: the recovery surface
         // must point at `maw merge resume` (not `maw ws merge`) so the
         // agent's next call lands on a non-friction verb.
-        let cmds = build_recovery_commands(
-            &["alice".into()],
-            "default",
-            &["cf-abcd".into()],
-            "alice",
-        );
+        let cmds =
+            build_recovery_commands(&["alice".into()], "default", &["cf-abcd".into()], "alice");
         assert!(
             cmds.iter().any(|c| c.starts_with("maw merge resume")),
             "missing `maw merge resume` recovery cue in: {cmds:#?}"
@@ -268,8 +265,7 @@ mod tests {
         // And the individual --resolve form is present too, for agents that
         // prefer the explicit per-conflict path.
         assert!(
-            cmds.iter()
-                .any(|c| c.contains("--resolve cf-abcd=alice")),
+            cmds.iter().any(|c| c.contains("--resolve cf-abcd=alice")),
             "missing per-conflict --resolve cue in: {cmds:#?}"
         );
     }

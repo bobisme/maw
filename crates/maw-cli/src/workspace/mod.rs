@@ -21,6 +21,7 @@ mod clean;
 pub(crate) mod create;
 mod create_lock;
 mod describe;
+pub(crate) mod destroy_guidance;
 pub(crate) mod destroy_preview;
 pub(crate) mod destroy_record;
 mod diff;
@@ -445,8 +446,11 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Output format for `--dry-run` (text|json|pretty). Ignored
-        /// when `--dry-run` is not set.
+        /// Output format (text|json|pretty). Consumed by both
+        /// `--dry-run` (preview payload) and by the refusal renderer
+        /// when destroy refuses (bn-c6l3 / bn-voy5 — structured
+        /// `DestroyRefusal` JSON when `json` is selected). For a clean
+        /// workspace destroy that succeeds, the format is unused.
         #[arg(long)]
         format: Option<OutputFormat>,
     },
@@ -1326,7 +1330,10 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             if dry_run {
                 destroy_preview::preview(&name, force, format)
             } else {
-                create::destroy(&name, confirm, force)
+                // bn-voy5: `--format` is now also consumed by the
+                // refusal renderer (DestroyRefusal text/JSON via
+                // bn-c6l3 scaffold), not only by `--dry-run`.
+                create::destroy(&name, confirm, force, format)
             }
         }
         WorkspaceCommands::Restore { name } => restore::restore(&name),

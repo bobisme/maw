@@ -28,8 +28,8 @@ use std::time::Instant;
 use crate::in_proc::{InProcDriver, PlantedDefect, StepVerdict};
 use crate::oracle_b;
 use crate::scenario::{
-    CANONICAL_BN_CM63_SEED, ConditionProfile, DefaultScenarioGenerator,
-    ScenarioGenerator, generate_plan,
+    CANONICAL_BN_CM63_SEED, ConditionProfile, DefaultScenarioGenerator, ScenarioGenerator,
+    generate_plan,
 };
 use crate::shrinker::{ShrinkerCorpusEntry, TARGET_MIN_STEPS, shrink};
 
@@ -118,10 +118,7 @@ fn planted_oracle_b_fixture() -> (crate::scenario::ScenarioPlan, Vec<PlantedDefe
 }
 
 /// Drive a plan + planted defects once and return the first-violating verdict.
-fn drive_once(
-    plan: &crate::scenario::ScenarioPlan,
-    planted: &[PlantedDefect],
-) -> StepVerdict {
+fn drive_once(plan: &crate::scenario::ScenarioPlan, planted: &[PlantedDefect]) -> StepVerdict {
     let mut driver = InProcDriver::new()
         .expect("driver init")
         .with_planted(planted.to_vec());
@@ -311,9 +308,7 @@ fn shrinker_reduces_oracle_a_plan_to_under_10_steps_and_is_sound() {
             tail_pos + i,
             PlannedStep {
                 index: tail_pos + i,
-                op: Op::Sync {
-                    ws: WsId::slot(7),
-                },
+                op: Op::Sync { ws: WsId::slot(7) },
                 fault: FaultSpec::None,
                 git_time: t,
             },
@@ -459,14 +454,10 @@ fn driver_clean_plan_no_violation_under_zero_fault_profile() {
 fn oracle_b_check_wired_into_driver() {
     let mut driver = InProcDriver::new()
         .expect("driver init")
-        .with_planted(vec![PlantedDefect::DanglingHeadRef {
-            ws: "ghost".into(),
-        }]);
+        .with_planted(vec![PlantedDefect::DanglingHeadRef { ws: "ghost".into() }]);
     // A minimal one-step plan whose op is a no-op WsCreate so the
     // planted defect fires after step 0.
-    use crate::scenario::{
-        BaseRef, FaultSpec, Op, PlannedStep, ScenarioPlan, WsId,
-    };
+    use crate::scenario::{BaseRef, FaultSpec, Op, PlannedStep, ScenarioPlan, WsId};
     let plan = ScenarioPlan {
         seed: 0,
         profile: ConditionProfile::default(),
