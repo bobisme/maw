@@ -68,12 +68,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Manage agent workspaces
-    #[command(subcommand)]
+    ///
+    /// Aliases: `ws` (the short canonical short-form used in agent loops
+    /// and docs), `worktree`, `wt` (git-fluent aliases — `maw worktree
+    /// create alice` and `maw wt create alice` both route to the same
+    /// code as `maw ws create alice`; per the 2026-05-25 terminology
+    /// decision, workspaces stays canonical in commands, docs, and on-
+    /// disk paths, and the worktree/wt aliases give agents who reach
+    /// for the git-fluent name from muscle memory a working command
+    /// instead of an unrecognized-subcommand error; the alias also
+    /// serves as a future-switch escape hatch).
+    #[command(subcommand, visible_aliases = ["ws", "worktree", "wt"])]
     Workspace(workspace::WorkspaceCommands),
-
-    /// Alias for 'workspace' (shorter to type)
-    #[command(subcommand, name = "ws")]
-    Ws(workspace::WorkspaceCommands),
 
     /// Alias for 'maw ws list'
     #[command(hide = true, name = "ls")]
@@ -419,7 +425,7 @@ fn main() {
         Commands::Cd { name } => workspace::resolve_workspace_path_for_cd(&name).map(|path| {
             println!("{}", path.display());
         }),
-        Commands::Workspace(cmd) | Commands::Ws(cmd) => workspace::run(cmd),
+        Commands::Workspace(cmd) => workspace::run(cmd),
         Commands::Ls => workspace::run(workspace::WorkspaceCommands::List {
             verbose: false,
             check: false,
@@ -491,7 +497,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{Cli, should_emit_migration_notice};
+    use super::{Cli, Commands, should_emit_migration_notice};
 
     #[test]
     fn emits_notice_for_jj_only_repo() {
@@ -573,12 +579,18 @@ mod tests {
 
     #[test]
     fn ws_merge_help_describes_supported_into_targets() {
+        // T3.4 / bn-1jqo: the canonical subcommand registered with clap is
+        // `workspace` (with `ws`, `worktree`, `wt` as visible aliases). The
+        // help-walker keys on `get_name()`, which returns the canonical
+        // name, so the help path is `maw workspace merge` — `maw ws merge`,
+        // `maw worktree merge` and `maw wt merge` all dispatch to the
+        // same registered command and share this help text.
         let mut help_texts = Vec::new();
         collect_help_texts(Cli::command(), "maw".to_string(), &mut help_texts);
         let help = help_texts
             .iter()
-            .find_map(|(path, help)| (path == "maw ws merge").then_some(help))
-            .expect("maw ws merge help should be present");
+            .find_map(|(path, help)| (path == "maw workspace merge").then_some(help))
+            .expect("maw workspace merge help should be present");
 
         assert!(
             help.contains(
@@ -711,5 +723,118 @@ mod tests {
         let tail = maw_cli::vocab_hints::UNIVERSAL_DISCOVERY_TAIL;
         assert!(tail.contains("maw --help"));
         assert!(tail.contains("maw crib"));
+    }
+
+    // -----------------------------------------------------------------
+    // T3.4 / bn-1jqo — workspace-group alias surface.
+    //
+    // The 2026-05-25 terminology decision keeps `workspaces` canonical
+    // in commands, docs, and on-disk paths AND exposes git-fluent
+    // aliases (`worktree`, `wt`) so agents who reach for the git verb
+    // from muscle memory get a working command instead of an
+    // `unrecognized subcommand` error. The aliases are clap-native
+    // (one `visible_aliases` annotation on the `Workspace` variant) —
+    // they route to the SAME dispatch arm and therefore the SAME code
+    // path as `maw ws`. These tests pin that contract so a future
+    // refactor cannot silently strip the aliases or fork the dispatch.
+    // -----------------------------------------------------------------
+
+    /// All four entry forms (`workspace`, `ws`, `worktree`, `wt`)
+    /// must parse a `create <name>` invocation. Equivalence at the
+    /// parse-tree level is the strongest "they route to the same code"
+    /// guarantee a static test can offer — Cli is one enum, all four
+    /// resolve to `Commands::Workspace(WorkspaceCommands::Create { … })`
+    /// with identical inner fields.
+    #[test]
+    fn workspace_group_aliases_all_route_to_same_create() {
+        use maw_cli::workspace::WorkspaceCommands;
+
+        fn parse_create(name: &str) -> Cli {
+            Cli::try_parse_from(["maw", name, "create", "alice", "--from", "main"])
+                .unwrap_or_else(|e| panic!("`maw {name} create alice --from main` must parse: {e}"))
+        }
+
+        let canonical = parse_create("workspace");
+        let ws = parse_create("ws");
+        let worktree = parse_create("worktree");
+        let wt = parse_create("wt");
+
+        for parsed in [&canonical, &ws, &worktree, &wt] {
+            let Commands::Workspace(WorkspaceCommands::Create { name, .. }) = &parsed.command
+            else {
+                panic!("alias must route to Commands::Workspace(Create), got something else");
+            };
+            assert_eq!(
+                name.as_deref(),
+                Some("alice"),
+                "alias must preserve positional name"
+            );
+        }
+    }
+
+    /// Each alias must parse `list` identically too — a single subcommand
+    /// is not enough to prove the group-level alias works. This is the
+    /// belt-and-braces test that proves the aliases sit at the group
+    /// boundary (between `maw` and the subcommand), not on individual
+    /// leaf subcommands.
+    #[test]
+    fn workspace_group_aliases_all_route_to_same_list() {
+        for name in ["workspace", "ws", "worktree", "wt"] {
+            let parsed = Cli::try_parse_from(["maw", name, "list"])
+                .unwrap_or_else(|e| panic!("`maw {name} list` must parse: {e}"));
+            assert!(
+                matches!(
+                    parsed.command,
+                    Commands::Workspace(maw_cli::workspace::WorkspaceCommands::List { .. })
+                ),
+                "`maw {name} list` must route to Commands::Workspace(List)"
+            );
+        }
+    }
+
+    /// The `workspace` subcommand's long-help must advertise all three
+    /// aliases (`ws`, `worktree`, `wt`) so agents discover them via
+    /// `maw --help` / `maw workspace --help` without needing to read
+    /// AGENTS.md first. The `[aliases: …]` block is generated by clap
+    /// when `visible_aliases` is set; this test guards against a
+    /// regression that changes them to hidden `aliases = …`.
+    #[test]
+    fn workspace_group_aliases_advertised_in_top_level_help() {
+        let mut help_texts = Vec::new();
+        collect_help_texts(Cli::command(), "maw".to_string(), &mut help_texts);
+
+        let top_help = help_texts
+            .iter()
+            .find_map(|(path, help)| (path == "maw").then_some(help))
+            .expect("top-level maw help should be present");
+
+        for alias in ["ws", "worktree", "wt"] {
+            assert!(
+                top_help.contains(alias),
+                "`maw --help` must advertise visible alias `{alias}` for the workspace group:\n{top_help}"
+            );
+        }
+    }
+
+    /// Clap stores the aliases on the registered subcommand object as
+    /// "visible" aliases. Reading them back from `Cli::command()` is
+    /// the static guarantee that the annotation has not been demoted
+    /// to a hidden `alias` (which would still parse but vanish from
+    /// `--help`, defeating the discoverability half of the contract).
+    #[test]
+    fn workspace_subcommand_carries_visible_aliases() {
+        let cmd = Cli::command();
+        let workspace_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "workspace")
+            .expect("`workspace` subcommand must be registered");
+
+        let visible_aliases: Vec<&str> = workspace_sub.get_visible_aliases().collect();
+        for expected in ["ws", "worktree", "wt"] {
+            assert!(
+                visible_aliases.contains(&expected),
+                "workspace subcommand must carry visible alias `{expected}` (got {visible_aliases:?})"
+            );
+        }
     }
 }
