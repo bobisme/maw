@@ -139,6 +139,23 @@ sg1-nightly:
   cargo test -p maw-assurance --features oracles --test sg1_dst \
     sg1_nightly_soak -- --ignored --nocapture
 
+# sg1-soak-pilot: small-N validation of the soak harness end-to-end
+# (T1.9 / bn-6308). Uses the SAME `sg1_nightly_soak` test as the
+# full nightly + the published soak campaign, only with `SG1_NIGHTLY_SEEDS`
+# turned down to a few-minute local-run budget. The canonical bn-cm63
+# seed is exercised on every run (the harness pushes it onto `seeds`
+# regardless of N). Use this to verify a green pilot before kicking off
+# the multi-day published soak.
+#
+# Default: 2k seeds × 32 steps ≈ 64k op-steps ≈ few minutes wall in
+# release. Override SG1_NIGHTLY_SEEDS / SG1_NIGHTLY_STEPS to retune.
+# See notes/sg1-soak-campaign.md for the campaign target + cadence.
+sg1-soak-pilot:
+  SG1_NIGHTLY_SEEDS=${SG1_NIGHTLY_SEEDS:-2000} \
+  SG1_NIGHTLY_STEPS=${SG1_NIGHTLY_STEPS:-32} \
+  cargo test --release -p maw-assurance --features oracles --test sg1_dst \
+    sg1_nightly_soak -- --ignored --nocapture
+
 # sg1-nightly-faithful: curated faithful (subprocess+SIGKILL) tier —
 # replays the bn-cm63 + 2026-02-05 chaos patterns through the real
 # `maw` binary built with `--features failpoints`. Today this delegates
