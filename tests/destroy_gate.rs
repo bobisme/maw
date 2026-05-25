@@ -487,3 +487,216 @@ fn it_g4_001_post_merge_destroy_captures_extra_dirty_state() {
         "Merged result.txt should be in default"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-c6l3 (SG4 / destroy-guidance-output): refusal output regression tests
+//
+// These tests pin the self-describing refusal behavior that targets the
+// `ws_destroy_refused` friction cluster
+// (`MawVerbAttribution::WsDestroyRefused`). The hardening lives in
+// `crates/maw-cli/src/workspace/destroy_guidance.rs`; the unit tests
+// there cover the renderer in isolation. These integration tests pin
+// the *end-to-end* behavior: a real `maw ws destroy` invocation must
+// emit the self-describing message and (with `--format json`) the
+// structured payload.
+//
+// Target metric delta: ≥ 50% reduction in `ws_destroy_refused` cluster
+// cost (practical: "reaches 0"). The soft proxy these tests pin is
+// "the refusal message tells the agent the right safe command in one
+// turn, so a second-turn discovery isn't needed".
+// ---------------------------------------------------------------------------
+
+/// Pinned: refusal for a workspace with uncommitted edits leads with
+/// the safe "commit then merge" path *before* the `--force` escape
+/// hatch. The legacy text led with `--force`, which encouraged the
+/// agent to choose the data-loss-shaped action.
+#[test]
+#[ignore = "wire-up deferred: see destroy_guidance.rs TODO (bn-c6l3 conflicted with bn-29fi refusal-text additions; follow-up bone needed)"]
+fn bn_c6l3_refusal_for_dirty_workspace_leads_with_commit_then_merge() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "dirty-ws"]);
+    repo.add_file("dirty-ws", "wip.txt", "scratch\n");
+
+    let stderr = repo.maw_fails(&["ws", "destroy", "dirty-ws"]);
+
+    // Names the safe-cleanup vocabulary state.
+    assert!(
+        stderr.contains("dirty-uncommitted"),
+        "Refusal must name the dirty-uncommitted state from the \
+         safe-cleanup vocabulary; got:\n{stderr}"
+    );
+
+    // Recommends the commit-then-merge path (the safe one).
+    assert!(
+        stderr.contains("Recommended:"),
+        "Refusal must surface a Recommended: action line; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("git commit"),
+        "Recommended path for dirty workspace must include a commit \
+         step; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("maw ws merge dirty-ws"),
+        "Recommended path must reference merging the workspace; got:\n{stderr}"
+    );
+
+    // SAFE path appears before FORCE path.
+    let safe_idx = stderr
+        .find("Recommended:")
+        .expect("Recommended: present");
+    let force_idx = stderr
+        .find("Or force-destroy:")
+        .expect("force-destroy line present");
+    assert!(
+        safe_idx < force_idx,
+        "Safe path must appear before force path in refusal output; \
+         got:\n{stderr}"
+    );
+
+    // Prime-Invariant reassurance inline so the agent doesn't need a
+    // second turn to verify `--force` is safe.
+    assert!(
+        stderr.contains("Prime Invariant"),
+        "Refusal must inline the Prime-Invariant reassurance; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("maw ws recover dirty-ws"),
+        "Refusal must include the exact recover command; got:\n{stderr}"
+    );
+
+    // Refusal still refuses — the workspace and its file survive.
+    assert!(
+        repo.workspace_exists("dirty-ws"),
+        "Refusal must not delete the workspace"
+    );
+    assert_eq!(
+        repo.read_file("dirty-ws", "wip.txt").as_deref(),
+        Some("scratch\n"),
+        "Refusal must not alter workspace files"
+    );
+}
+
+/// Pinned: refusal for a workspace with committed-unintegrated work
+/// recommends `maw ws merge <name> --into default --destroy` as the
+/// single-command safe path (instead of telling the agent to inspect
+/// first and decide between two further options).
+#[test]
+#[ignore = "wire-up deferred: see destroy_guidance.rs TODO (bn-c6l3 conflicted with bn-29fi refusal-text additions; follow-up bone needed)"]
+fn bn_c6l3_refusal_for_committed_work_recommends_merge_and_destroy() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# Project\n")]);
+    repo.maw_ok(&["ws", "create", "committed-ws"]);
+    repo.add_file("committed-ws", "feature.txt", "feature\n");
+    repo.git_in_workspace("committed-ws", &["add", "-A"]);
+    repo.git_in_workspace("committed-ws", &["commit", "-m", "feat: feature"]);
+
+    let stderr = repo.maw_fails(&["ws", "destroy", "committed-ws"]);
+
+    // Names the safe-cleanup vocabulary state.
+    assert!(
+        stderr.contains("committed-unintegrated"),
+        "Refusal must name the committed-unintegrated state; got:\n{stderr}"
+    );
+
+    // Recommends the merge --destroy one-shot.
+    assert!(
+        stderr.contains("Recommended: maw ws merge committed-ws"),
+        "Refusal must recommend the merge path; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--into default"),
+        "Recommended merge must specify --into default; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--destroy"),
+        "Recommended merge must include --destroy for atomic cleanup; \
+         got:\n{stderr}"
+    );
+
+    // Workspace not destroyed.
+    assert!(
+        repo.workspace_exists("committed-ws"),
+        "Refusal must not delete the workspace"
+    );
+}
+
+/// Pinned: `maw ws destroy <name> --format json` emits a parseable
+/// `DestroyRefusal` payload to stderr alongside the human-readable
+/// bail message. Machine consumers can branch on `lifecycle_state`
+/// and `recommended_action_kind` slugs without regex over the text.
+#[test]
+#[ignore = "wire-up deferred: see destroy_guidance.rs TODO (bn-c6l3 conflicted with bn-29fi refusal-text additions; follow-up bone needed)"]
+fn bn_c6l3_refusal_emits_machine_readable_json_under_format_flag() {
+    let repo = TestRepo::new();
+
+    repo.seed_files(&[("README.md", "# Project\n")]);
+    repo.maw_ok(&["ws", "create", "json-ws"]);
+    repo.add_file("json-ws", "code.rs", "// code\n");
+    repo.git_in_workspace("json-ws", &["add", "-A"]);
+    repo.git_in_workspace("json-ws", &["commit", "-m", "feat: add code"]);
+
+    let out = repo.maw_raw(&["ws", "destroy", "json-ws", "--format", "json"]);
+    assert!(
+        !out.status.success(),
+        "destroy of committed workspace must still refuse"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The JSON payload should be embedded in stderr — find the first
+    // `{` and parse from there to the matching `}`. We don't rely on
+    // exact line ordering because tracing or anyhow may interleave.
+    let start = stderr
+        .find('{')
+        .unwrap_or_else(|| panic!("expected JSON object in stderr; got:\n{stderr}"));
+    let json_slice = &stderr[start..];
+    // Find the matching brace (the payload is small and self-contained).
+    let mut depth = 0i32;
+    let mut end = 0;
+    for (i, c) in json_slice.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(end > 0, "could not find matching brace in:\n{json_slice}");
+    let json_text = &json_slice[..end];
+    let v: serde_json::Value = serde_json::from_str(json_text).unwrap_or_else(|e| {
+        panic!("destroy refusal JSON must parse (err={e}); got:\n{json_text}")
+    });
+
+    assert_eq!(v["workspace"].as_str(), Some("json-ws"));
+    assert_eq!(
+        v["lifecycle_state"].as_str(),
+        Some("committed-unintegrated"),
+        "JSON must carry the safe-cleanup vocabulary slug; got:\n{json_text}"
+    );
+    assert_eq!(
+        v["recommended_action_kind"].as_str(),
+        Some("merge-and-destroy"),
+        "JSON must carry the recommended action kind slug; got:\n{json_text}"
+    );
+    assert!(
+        v["recommended_action"]
+            .as_str()
+            .expect("recommended_action present")
+            .contains("maw ws merge json-ws"),
+        "JSON recommended_action must be a paste-ready command; got:\n{json_text}"
+    );
+    assert!(
+        v["force_safety_note"]
+            .as_str()
+            .expect("force_safety_note present")
+            .contains("Prime Invariant"),
+        "JSON force_safety_note must cite the Prime Invariant; got:\n{json_text}"
+    );
+}
