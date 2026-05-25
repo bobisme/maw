@@ -1,5 +1,26 @@
 name: Deterministic Simulation
 
+# Per-commit DST gate. Two jobs:
+#
+# 1. `sg1-per-commit` — the SG1 release-gate (bn-1gp4, T1.7). Runs the
+#    `maw_assurance::{scenario, in_proc, shrinker}` substrate end-to-end
+#    via `just sg1-per-commit` (corpus + bounded random budget). Hard
+#    wall-clock cap 8 min. ANY oracle violation = red CI = release-
+#    blocking for v1.0 per `notes/sg1-dst-architecture.md` §7. Also runs
+#    a `dst-per-commit-smoke` step that PLANTS a violation and asserts
+#    the gate turns red — without this self-test a silently-broken gate
+#    could mask regressions.
+#
+# 2. `legacy-sim` — the pre-SG1 simulation harness families
+#    (`tests/workflow_dst.rs` + `tests/action_workflow_dst.rs`) kept on
+#    main per T1.6's note that the new SG1 harness is additive, not a
+#    replacement. They use ad-hoc prefix-minimisation and predate the
+#    `ScenarioPlan` substrate; T1.8 will migrate their corpus seeds.
+#
+# Nightly soak + faithful-binary build live in sibling workflows:
+#   - `.github/workflows/dst-soak.yml`     (cron)
+#   - `.github/workflows/dst-faithful.yml` (PR + push to main + cron)
+
 on:
   pull_request:
   push:
@@ -8,7 +29,72 @@ on:
   workflow_dispatch:
 
 jobs:
-  dst:
+  # ---------------------------------------------------------------------
+  # SG1 per-commit gate (bn-1gp4, T1.7 — release-blocking for v1.0).
+  # ---------------------------------------------------------------------
+  sg1-per-commit:
+    name: SG1 per-commit (in-proc, <= 8 min)
+    runs-on: ubuntu-latest
+    # Hard wall-clock cap. The harness itself enforces SG1_PER_COMMIT_WALL_CAP_SECS,
+    # but `timeout-minutes` is the belt-and-braces backstop so a runaway never
+    # blocks the queue forever.
+    timeout-minutes: 12
+    env:
+      DST_ARTIFACT_DIR: /tmp/maw-dst-artifacts
+      # Per-commit tuning. Sized for ~3 s of pure driver time (~42 ms/seed),
+      # leaving ample headroom under the 8-minute wall cap for shrink runs
+      # on the (rare) failing seed.
+      SG1_PER_COMMIT_SEEDS: "64"
+      SG1_PER_COMMIT_STEPS: "32"
+      SG1_PER_COMMIT_WALL_CAP_SECS: "480"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+
+      - name: SG1 per-commit (corpus + bounded random budget)
+        run: just sg1-per-commit
+
+      # Planted-violation self-test. If THIS step ever exits 0 (i.e. the
+      # planted Oracle A WorkLoss did not trip the gate), the gate is
+      # broken — fail the job so the regression is visible.
+      - name: SG1 gate self-test (planted violation MUST turn red)
+        run: just sg1-per-commit-smoke
+
+      - name: Upload SG1 artifacts (on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maw-dst-artifacts
+          path: ${{ env.DST_ARTIFACT_DIR }}
+          if-no-files-found: warn
+
+      - name: Publish SG1 replay summary
+        if: always()
+        run: |
+          {
+            echo "## SG1 DST per-commit gate"
+            echo
+            echo "- Acceptance gate: ANY oracle violation = red CI = release-blocking for v1.0"
+            echo "  (see notes/sg1-dst-architecture.md §7)"
+            echo "- Budget: \`SG1_PER_COMMIT_SEEDS=$SG1_PER_COMMIT_SEEDS\` x \`SG1_PER_COMMIT_STEPS=$SG1_PER_COMMIT_STEPS\` steps"
+            echo "- Wall cap: \`SG1_PER_COMMIT_WALL_CAP_SECS=$SG1_PER_COMMIT_WALL_CAP_SECS\`"
+            echo "- Artifact: \`maw-dst-artifacts\` (under \`sg1-dst-per-commit/\` and \`sg1-dst-corpus/\`)"
+            echo "- Replay one seed:"
+            echo "      SG1_SEED=<seed> just sg1-per-commit"
+            echo "- Inspect a failure bundle:"
+            echo "      jq . /tmp/maw-dst-artifacts/sg1-dst-per-commit/seed-*/bundle.json"
+            echo
+            echo "Planted-violation self-test ran; if it succeeded, the gate is verified to RED on a known defect."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Legacy simulation (pre-SG1 harness families). Kept for compatibility
+  # until T1.8 migrates the seeds to `ScenarioPlan` form.
+  # ---------------------------------------------------------------------
+  legacy-sim:
+    name: Legacy DST sweep (workflow + action harnesses)
     runs-on: ubuntu-latest
     env:
       DST_ARTIFACT_DIR: /tmp/maw-dst-artifacts
@@ -36,7 +122,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: maw-dst-artifacts
+          name: maw-dst-artifacts-legacy
           path: ${{ env.DST_ARTIFACT_DIR }}
           if-no-files-found: warn
 
@@ -44,9 +130,9 @@ jobs:
         if: always()
         run: |
           {
-            echo "## Deterministic Simulation"
+            echo "## Deterministic Simulation (legacy)"
             echo
-            echo "- Artifact: \\`maw-dst-artifacts\\`"
+            echo "- Artifact: \\`maw-dst-artifacts-legacy\\`"
             echo "- Run sweeps: \\`just sim-run-print all 12 14\\`"
             echo "- Workflow replay: \\`just sim-replay-workflow <seed>\\`"
             echo "- Action replay: \\`just sim-replay-action <seed> <prefix>\\`"

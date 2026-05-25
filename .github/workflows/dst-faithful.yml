@@ -1,0 +1,46 @@
+name: SG1 Faithful-Binary Build + Clippy
+
+# Faithful-tier build + clippy gate (bn-1gp4, T1.7).
+#
+# Per `notes/sg1-dst-architecture.md` §7: "Faithful tier needs a
+# dedicated build with `--features failpoints` ... a separate CI
+# job/build; the default release build stays clean and zero-overhead
+# (`fp!()` compiles to nothing without the feature)."
+#
+# Per the bn-2ors fix on main, BOTH lints must stay -D warnings clean:
+#   - default build:   `cargo clippy --workspace --all-targets -- -D warnings`
+#   - failpoints build: `cargo clippy -p maw-cli --features failpoints --all-targets -- -D warnings`
+#
+# This workflow runs the second one (the first is already covered by the
+# main CI / `just clippy` gate). It also builds the failpoints release
+# binary so a green run guarantees the faithful tier is deployable.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  failpoints-clippy:
+    name: Faithful-binary clippy (--features failpoints)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+
+      # Runs BOTH clippy invocations per bn-2ors (default + failpoints).
+      - name: Clippy (default + failpoints)
+        run: just sg1-faithful-clippy
+
+      # Build the failpoints release binary so the faithful tier is
+      # deployable (the nightly soak's faithful-binary step expects this
+      # binary to compile cleanly).
+      - name: Build failpoints release binary
+        run: just sg1-faithful-build

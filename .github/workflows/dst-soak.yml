@@ -1,0 +1,85 @@
+name: SG1 DST Nightly Soak
+
+# SG1 nightly soak (bn-1gp4, T1.7; soak campaign tracked in bn-6308 T1.9).
+#
+# Runs the SG1 substrate at long-soak volume (default 100k seeds + the
+# canonical bn-cm63 seed), in-proc tier only. Failing seeds auto-shrink
+# via `maw_assurance::shrinker::shrink` and a minimal bundle.json lands
+# under `DST_ARTIFACT_DIR/sg1-dst-nightly/` for the existing
+# `maw-dst-artifacts` upload to pick up.
+#
+# After the in-proc nightly, a curated faithful (subprocess + real
+# SIGKILL) tier replays the bn-cm63 chaos pattern and the 2026-02-05
+# lost-commits scenario through the real `maw` binary. Today this maps
+# to `tests/crash_recovery.rs` + `tests/destroy_vs_merge_head_ref.rs`;
+# T1.5's MAW_FP env bridge will widen the faithful seed set.
+#
+# Cron: 02:00 UTC daily. Manual dispatch supported.
+
+on:
+  schedule:
+    # Daily at 02:00 UTC. Adjust if it collides with other long-running CI.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Override SG1_NIGHTLY_SEEDS (default 100000)"
+        required: false
+        default: "100000"
+      steps:
+        description: "Override SG1_NIGHTLY_STEPS (default 64)"
+        required: false
+        default: "64"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # SG1 in-proc soak — the volume tier.
+  # ---------------------------------------------------------------------
+  sg1-nightly-soak:
+    name: SG1 nightly in-proc soak
+    runs-on: ubuntu-latest
+    # Soak is allowed to run long. 100k seeds * ~42 ms = ~70 min wall.
+    timeout-minutes: 180
+    env:
+      DST_ARTIFACT_DIR: /tmp/maw-dst-artifacts
+      SG1_NIGHTLY_SEEDS: ${{ github.event.inputs.seeds || '100000' }}
+      SG1_NIGHTLY_STEPS: ${{ github.event.inputs.steps || '64' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+
+      - name: SG1 in-proc nightly soak
+        run: just sg1-nightly
+
+      - name: SG1 curated faithful tier (real subprocess + SIGKILL)
+        if: always()
+        run: just sg1-nightly-faithful
+
+      - name: Upload SG1 nightly artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maw-dst-artifacts-nightly
+          path: ${{ env.DST_ARTIFACT_DIR }}
+          if-no-files-found: warn
+
+      - name: Publish SG1 nightly summary
+        if: always()
+        run: |
+          {
+            echo "## SG1 DST nightly soak"
+            echo
+            echo "- Acceptance gate: ANY oracle violation = red CI = release-blocking for v1.0"
+            echo "  (notes/sg1-dst-architecture.md §7; soak evidence accrues into bn-6308 T1.9)"
+            echo "- In-proc tier budget: \`SG1_NIGHTLY_SEEDS=$SG1_NIGHTLY_SEEDS\` x \`SG1_NIGHTLY_STEPS=$SG1_NIGHTLY_STEPS\` steps"
+            echo "- Includes the canonical bn-cm63 seed (\`CANONICAL_BN_CM63_SEED=1\`) every run"
+            echo "- Faithful tier: \`just sg1-nightly-faithful\` (real subprocess + SIGKILL chaos)"
+            echo "- Artifact: \`maw-dst-artifacts-nightly\` (failures under \`sg1-dst-nightly/seed-*/bundle.json\`)"
+            echo "- Replay a failing seed:"
+            echo "      SG1_SEED=<seed> just sg1-per-commit"
+            echo "- Promote a minimized seed to the permanent regression corpus (T1.8 / bn-3ryq):"
+            echo "      jq .corpus_entry /tmp/maw-dst-artifacts/sg1-dst-nightly/seed-<seed>-*/bundle.json \\"
+            echo "        > tests/corpus/dst/<short-name>.json"
+          } >> "$GITHUB_STEP_SUMMARY"
