@@ -81,7 +81,34 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use maw_core::merge_state::{MergeStateFile, Staleness, DEFAULT_STALE_AFTER_SECS};
+use maw_core::model::layout::LayoutFlavor;
 use maw_core::refs;
+
+/// Layout-aware "does workspace `<name>` exist on disk?" predicate.
+///
+/// Pre-T3.2 this was `repo_root.join("ws").join(name).exists()` everywhere
+/// in oracle_b. T3.3 (bn-3kkl) migrates to the consolidated layout where
+/// workspaces live under `.maw/workspaces/<name>/`; the privileged
+/// "default" workspace IS the repo root itself. This helper centralizes
+/// that lookup so the migrated repo passes the oracle without re-writing
+/// every call site to pass a `LayoutFlavor`.
+fn ws_dir_exists(repo_root: &Path, name: &str) -> bool {
+    let flavor = LayoutFlavor::detect(repo_root);
+    if matches!(flavor, LayoutFlavor::ConsolidatedMawDir) && name == "default" {
+        // The root checkout IS the default workspace under the
+        // consolidated layout; always treat it as present.
+        return repo_root.is_dir();
+    }
+    flavor.workspace_path(repo_root, name).is_dir()
+}
+
+/// Layout-aware path to the `.manifold/` directory used for the merge-state
+/// file lookup. Mirrors the rule applied throughout the rest of the
+/// codebase (T3.2 / bn-2sw3): v2 → `<root>/.manifold/`, consolidated →
+/// `<root>/.maw/manifold/`.
+fn manifold_dir_path(repo_root: &Path) -> std::path::PathBuf {
+    LayoutFlavor::detect(repo_root).manifold_dir(repo_root)
+}
 
 // ---------------------------------------------------------------------------
 // Violation type
@@ -281,7 +308,7 @@ pub fn check(repo_root: &Path) -> Vec<OracleBViolation> {
             if ws.is_empty() {
                 return None;
             }
-            if repo_root.join("ws").join(ws).exists() {
+            if ws_dir_exists(repo_root, ws) {
                 return None;
             }
             if live_sources.contains(ws) {
@@ -336,7 +363,7 @@ pub fn check(repo_root: &Path) -> Vec<OracleBViolation> {
         if name.starts_with(head_prefix) {
             continue;
         }
-        if repo_root.join("ws").join(ws_name).exists() {
+        if ws_dir_exists(repo_root, ws_name) {
             continue;
         }
         if live_sources.contains(ws_name) {
@@ -442,7 +469,7 @@ fn list_all_refs(repo_root: &Path) -> Result<Vec<(String, String)>, OracleBViola
 }
 
 fn check_b3_merge_state(repo_root: &Path, all_refs: &[(String, String)]) -> Vec<OracleBViolation> {
-    let state_path = MergeStateFile::default_path(&repo_root.join(".manifold"));
+    let state_path = MergeStateFile::default_path(&manifold_dir_path(repo_root));
     let Ok(state) = MergeStateFile::read(&state_path) else {
         return Vec::new(); // No merge-state file — nothing to check.
     };
@@ -465,7 +492,7 @@ fn check_b3_merge_state(repo_root: &Path, all_refs: &[(String, String)]) -> Vec<
     // Iterate sources in their canonical (deterministic) order.
     for src in &state.sources {
         let src_name = src.as_str();
-        let ws_present = repo_root.join("ws").join(src_name).exists();
+        let ws_present = ws_dir_exists(repo_root, src_name);
         let pinned_in_recovery = recovery_ws_names.contains(src_name);
         if !ws_present && !pinned_in_recovery {
             violations.push(OracleBViolation::MergeStateOrphanSource {
@@ -702,14 +729,14 @@ pub fn doctor_verdict(repo_root: &Path) -> DoctorVerdict {
                 let Some(ws) = name.strip_prefix(refs::HEAD_PREFIX) else {
                     return false;
                 };
-                !ws.is_empty() && !repo_root.join("ws").join(ws).exists()
+                !ws.is_empty() && !ws_dir_exists(repo_root, ws)
             })
             .count()
     });
 
     // Merge-state coherence: replicate `check_merge_state`'s incoherent
     // verdict (terminal-leftover, orphaned, indeterminate, unreadable).
-    let state_path = MergeStateFile::default_path(&repo_root.join(".manifold"));
+    let state_path = MergeStateFile::default_path(&manifold_dir_path(repo_root));
     let merge_state_incoherent = match MergeStateFile::read(&state_path) {
         Err(_) if state_path.exists() => true,  // unreadable
         Err(_) => false,                        // legitimately absent
@@ -760,7 +787,7 @@ pub fn _internal_oracle_paths(repo_root: &Path) -> (PathBuf, HashMap<String, Str
     // Visible only for test fixtures that want to inspect what the oracle
     // is looking at. Not part of the public surface. Intentionally
     // not exposed as `pub` outside test infra.
-    let state = MergeStateFile::default_path(&repo_root.join(".manifold"));
+    let state = MergeStateFile::default_path(&manifold_dir_path(repo_root));
     let refs_map: HashMap<String, String> = list_all_refs(repo_root)
         .unwrap_or_default()
         .into_iter()

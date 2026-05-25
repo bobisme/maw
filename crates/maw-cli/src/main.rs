@@ -13,6 +13,7 @@ use maw_cli::exec;
 use maw_cli::format;
 use maw_cli::init;
 use maw_cli::merge_cmd;
+use maw_cli::migrate;
 use maw_cli::push;
 use maw_cli::ref_gc;
 use maw_cli::release;
@@ -163,13 +164,43 @@ enum Commands {
     /// Quick repo and workspace status
     Status(status::StatusArgs),
 
-    /// Upgrade v1 repo (.workspaces/) to v2 bare model (ws/)
+    /// Upgrade v1 repo (.workspaces/) to v2 bare model (ws/) — DEPRECATED
     ///
     /// Migrates from the old .workspaces/ layout to the new bare repo model
     /// with ws/ directory, default workspace at ws/default/, and a bare
     /// common-dir topology (`repo.git`, root `.git` gitfile).
     /// Safe to run multiple times — detects v2 and exits early.
+    ///
+    /// NOTE: This is the legacy v1→v2 path. For v2→consolidated `.maw/`
+    /// migration, use `maw migrate` (T3.3).
     Upgrade,
+
+    /// Migrate a populated v2 `ws/` repo to the consolidated `.maw/` layout
+    ///
+    /// Implements the 14-step Prime-Invariant-preserving algorithm from
+    /// notes/sg3-layout-design.md §7. Phases:
+    ///
+    ///   A. Preflight (refuse if a merge is in flight; enumerate worktrees)
+    ///   B. Preserve  (pin recovery refs for every workspace)
+    ///   C. Relocate  (ws/<name>/ → .maw/workspaces/<name>/)
+    ///   D. Un-bare   (core.bare=false, materialize branch at root,
+    ///                 decommission ws/default/, move .manifold/ → .maw/manifold/)
+    ///   E. Finalize  (write/update root .gitignore, rmdir ws/, verify)
+    ///
+    /// Crash-safe via .manifold/migration/journal.json (then
+    /// .maw/manifold/migration/journal.json after Phase D). Use
+    /// `--resume` to continue an interrupted migration. Recovery refs
+    /// pinned in Phase B remain available via `maw ws recover` even on
+    /// catastrophic failure.
+    #[command(verbatim_doc_comment)]
+    Migrate {
+        /// Resume an interrupted migration from the on-disk journal.
+        #[arg(long)]
+        resume: bool,
+        /// Print the planned actions and exit without mutating the repo.
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Run a command inside a workspace directory
     ///
@@ -438,6 +469,10 @@ fn main() {
             legacy_ws_layout: legacy_ws,
         }),
         Commands::Upgrade => upgrade::run(),
+        Commands::Migrate { resume, dry_run } => migrate::run(&migrate::MigrateOptions {
+            resume,
+            dry_run,
+        }),
         Commands::Doctor { format, json, repair } => doctor::run_with_repair(
             format::OutputFormat::with_json_flag(format, json),
             repair,

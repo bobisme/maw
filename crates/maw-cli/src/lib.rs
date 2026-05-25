@@ -18,6 +18,7 @@ pub mod init;
 #[cfg(feature = "lfs")]
 pub mod lfs_push;
 pub mod merge_cmd;
+pub mod migrate;
 pub mod push;
 pub mod ref_gc;
 pub mod release;
