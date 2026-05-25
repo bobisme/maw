@@ -270,8 +270,14 @@ pub fn init_from_env() {
 ///
 /// Lets call sites invoke `failpoints::init_from_env()` unconditionally
 /// without a `#[cfg]` at every site; without the feature this compiles away.
+///
+/// NOTE (bn-2ors, same class as bn-1cww): the scoped allow below silences
+/// clippy's nursery `missing_const_for_fn` on this no-feature shape only.
+/// The `--features failpoints` shape (lines above) has a fallible body that
+/// cannot be `const fn`, so we mustn't unify the two by making this `const`.
 #[cfg(not(feature = "failpoints"))]
 #[inline]
+#[allow(clippy::missing_const_for_fn)]
 pub fn init_from_env() {}
 
 #[cfg(test)]

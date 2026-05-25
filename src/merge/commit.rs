@@ -282,15 +282,22 @@ fn write_merge_state(root: &Path, state: &CommitStateFile) -> Result<(), CommitE
 ///
 /// Without the `failpoints` feature this compiles to a no-op.
 ///
-/// NOTE (bn-imw8/SP1): this is intentionally NOT `const fn`. With
-/// `--features failpoints` the body calls `crate::fp!()` (a fallible,
+/// NOTE (bn-imw8/SP1, bn-1cww, bn-2ors): this is intentionally NOT `const fn`.
+/// With `--features failpoints` the body calls `crate::fp!()` (a fallible,
 /// non-const expression), so `const fn` makes the crate fail to compile
 /// under that feature on current Rust. Dropping `const` is zero-cost: the
-/// no-feature body is `Ok(())` and inlines away.
-fn fp_commit(_name: &str) -> Result<(), CommitError> {
+/// no-feature body is `Ok(())` and inlines away. The scoped allow below
+/// suppresses clippy's nursery `missing_const_for_fn` on the no-feature
+/// shape only, leaving the `--features failpoints` build (which is the
+/// build that would actually break with `const`) untouched.
+#[cfg_attr(
+    not(feature = "failpoints"),
+    allow(clippy::missing_const_for_fn, unused_variables)
+)]
+fn fp_commit(name: &str) -> Result<(), CommitError> {
     #[cfg(feature = "failpoints")]
     {
-        crate::fp!(_name).map_err(|e| CommitError::Failpoint(e.to_string()))?;
+        crate::fp!(name).map_err(|e| CommitError::Failpoint(e.to_string()))?;
     }
     Ok(())
 }
