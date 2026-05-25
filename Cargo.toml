@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/maw-git", "crates/maw-lfs", "crates/maw-core", "crates/maw-cli", "crates/maw-tui", "crates/maw-assurance"]
+members = [".", "crates/maw-git", "crates/maw-lfs", "crates/maw-core", "crates/maw-cli", "crates/maw-tui", "crates/maw-assurance", "crates/maw-scenario"]
 
 [workspace.package]
 version = "0.61.0"

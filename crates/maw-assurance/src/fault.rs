@@ -80,43 +80,15 @@ pub const DANGEROUS_FAILPOINTS: &[&str] = &[
 /// seed maps stably to a `(phase, failpoint)` pair across releases (new
 /// failpoints appended per-phase do not reshuffle existing seeds for earlier
 /// phases).
-pub const CRASHABLE_BY_PHASE: &[(&str, &[&str])] = &[
-    (
-        "prepare",
-        &[
-            "FP_PREPARE_BEFORE_STATE_WRITE",
-            "FP_PREPARE_AFTER_STATE_WRITE",
-        ],
-    ),
-    (
-        "build",
-        &[
-            "FP_BUILD_BEFORE_WORKTREE_ADD",
-            "FP_BUILD_AFTER_WORKTREE_ADD",
-            "FP_BUILD_BEFORE_MERGE_COMPUTE",
-            "FP_BUILD_AFTER_MERGE_COMPUTE",
-        ],
-    ),
-    (
-        "validate",
-        &["FP_VALIDATE_BEFORE_CHECK", "FP_VALIDATE_AFTER_CHECK"],
-    ),
-    (
-        "commit",
-        &[
-            "FP_COMMIT_BEFORE_BRANCH_CAS",
-            "FP_COMMIT_BETWEEN_CAS_OPS",
-            "FP_COMMIT_AFTER_EPOCH_CAS",
-        ],
-    ),
-    (
-        "cleanup",
-        &[
-            "FP_CLEANUP_AFTER_CAPTURE",
-            "FP_CLEANUP_BEFORE_DEFAULT_CHECKOUT",
-        ],
-    ),
-];
+///
+/// **bn-4qwp (T2.1):** the canonical definition now lives in `maw-scenario`
+/// because the scenario generator's [`maw_scenario::FaultSpec::Failpoint`]
+/// selection is the load-bearing use site (every driver — in-proc, faithful
+/// subprocess, real-agent — picks failpoint sites by indexing into this
+/// table). This re-export preserves the pre-factor public path
+/// `maw_assurance::fault::CRASHABLE_BY_PHASE` so existing consumers
+/// (in-proc tier, `InProcFault::arm`, fault tests below) compile unchanged.
+pub use maw_scenario::CRASHABLE_BY_PHASE;
 
 /// Which crash mechanism a [`FaultPlan`] uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -16,6 +16,13 @@ stateright = { version = "0.30", optional = true }
 # maw-core gives the failpoint registry + MAW_FP parser; rand gives seeded
 # plan selection (reused by both features).
 maw-core = { path = "../maw-core", version = "0.61.0", optional = true }
+# bn-4qwp (T2.1): the deterministic scenario+condition generator was factored
+# out of this crate into a sibling `maw-scenario` so the SG2 real-agent driver
+# (T2.2 bn-1sqo) and substrate adapters (T2.3 bn-mit2) can consume the same
+# plan-stream without dragging in maw-core / failpoints / tempfile / oracles.
+# This crate keeps the `scenario` feature flag as a thin re-export so the
+# pre-factor import path `maw_assurance::scenario::*` still resolves.
+maw-scenario = { path = "../maw-scenario", version = "0.61.0", optional = true }
 rand = { version = "0.9", optional = true }
 # T1.6 (bn-32k3): the in-proc driver (oracles feature) owns a tempdir-
 # backed git repo per replay so the shrinker can run thousands of cheap
@@ -33,12 +40,19 @@ stateright = ["dep:stateright"]
 # bn-263u: DST fault-injection / real-SIGKILL / recovery driver. Off by
 # default so the base maw-assurance build (and the default maw release) stay
 # clean; activating it turns on maw-core's `failpoints` registry control.
-fault-injection = ["dep:maw-core", "dep:rand", "maw-core/failpoints"]
+# Also pulls in maw-scenario so the CRASHABLE_BY_PHASE failpoint table (now
+# owned by maw-scenario after the bn-4qwp factor) is in scope for the
+# in-proc/faithful fault drivers.
+fault-injection = ["dep:maw-core", "dep:rand", "maw-core/failpoints", "dep:maw-scenario"]
 # bn-1f53 (T1.2): deterministic scenario + condition generator. Off by
-# default so the base maw-assurance build stays zero-overhead; activating
-# pulls in `rand` and reuses `fault-injection`'s CRASHABLE_BY_PHASE table
-# so the generator's FaultSpec sites stay synchronised with the executor.
-scenario = ["dep:rand", "fault-injection"]
+# default so the base maw-assurance build stays zero-overhead. After the
+# bn-4qwp factor this is a thin re-export of `maw-scenario` — it no longer
+# implies `fault-injection`, so downstream SG2 consumers that only want the
+# plan stream (T2.2 bn-1sqo, T2.3 bn-mit2) get a tiny dep footprint. The
+# previous implication has been replaced with: `fault-injection` ⇒
+# `scenario` (so anything turning on the fault layer still pulls the plan
+# types in, preserving the back-compat import path).
+scenario = ["dep:maw-scenario"]
 # bn-1z8q (T1.3 Oracle A) + bn-3ji6 (T1.4 Oracle B): SG1 state-coherence /
 # content-reachability oracles. Pulls in maw-core so Oracle B's live-merge
 # guard (B1) and workspace-owned-ref set (B2) call the exact same
