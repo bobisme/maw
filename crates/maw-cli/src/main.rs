@@ -107,6 +107,12 @@ enum Commands {
         /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+
+        /// Apply auto-fixes for issues with a known-safe repair path
+        /// (currently: `ff_absorbable` epoch drift → `maw epoch sync`
+        /// equivalent). Skipped issues are reported as before.
+        #[arg(long)]
+        repair: bool,
     },
 
     /// Launch the terminal UI
@@ -328,9 +334,10 @@ fn main() {
         Commands::Changes(ref cmd) => changes::run(cmd),
         Commands::Init => init::run(),
         Commands::Upgrade => upgrade::run(),
-        Commands::Doctor { format, json } => {
-            doctor::run(format::OutputFormat::with_json_flag(format, json))
-        }
+        Commands::Doctor { format, json, repair } => doctor::run_with_repair(
+            format::OutputFormat::with_json_flag(format, json),
+            repair,
+        ),
         #[cfg(feature = "tui")]
         Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),

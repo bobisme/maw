@@ -22,6 +22,7 @@ mod create_lock;
 mod describe;
 pub(crate) mod destroy_record;
 mod diff;
+pub(crate) mod epoch_drift;
 pub(crate) mod ff_absorb;
 mod history;
 pub(crate) mod lifecycle;

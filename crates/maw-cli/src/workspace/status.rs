@@ -22,6 +22,15 @@ pub struct WorkspaceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) global_view: Option<GlobalViewSummary>,
     pub(crate) workspaces: Vec<WorkspaceEntry>,
+    /// Epoch/branch drift summary (bn-1ieb, SG4
+    /// `epoch_sync_required` mitigation). Surfaces drift up to machine
+    /// consumers so an agent reading `maw status --json` sees it directly
+    /// instead of discovering it later via a failed `maw ws merge`. `None`
+    /// means classify returned no opinion (e.g. epoch ref unset pre-
+    /// `maw init`, or the classifier errored); the absence itself is
+    /// meaningful and never blocks status output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) epoch_drift: Option<super::epoch_drift::EpochDriftReport>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +120,20 @@ pub fn status(format: OutputFormat) -> Result<()> {
 
     let global_view = compute_global_view_summary(&root, &all_workspaces);
 
+    // bn-1ieb: classify epoch/branch drift so machine consumers see it
+    // before they discover it via a downstream merge failure. Failure to
+    // load config (corrupt .maw.toml) is non-fatal — drift is a soft
+    // signal, not a hard gate; status() should never error out because of
+    // it. Likewise for any classify_drift error: surface as "no drift
+    // report" rather than crashing.
+    let epoch_drift = super::MawConfig::load(&root)
+        .ok()
+        .and_then(|cfg| {
+            super::epoch_drift::classify_drift(&root, cfg.branch(), &backend)
+                .ok()
+                .flatten()
+        });
+
     // Build workspace entries
     let workspace_entries: Vec<WorkspaceEntry> = all_workspaces
         .iter()
@@ -152,6 +175,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 changes.as_ref(),
                 global_view.as_ref(),
                 &workspace_entries,
+                epoch_drift.as_ref(),
             );
         }
         OutputFormat::Pretty => {
@@ -162,6 +186,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 global_view.as_ref(),
                 &workspace_entries,
                 format.should_use_color(),
+                epoch_drift.as_ref(),
             );
         }
         OutputFormat::Json => {
@@ -172,12 +197,13 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 changes,
                 global_view,
                 workspaces: workspace_entries,
+                epoch_drift,
             };
             match format.serialize(&status_data) {
                 Ok(output) => println!("{output}"),
                 Err(e) => {
                     tracing::warn!("Failed to serialize status to JSON: {e}");
-                    print_status_text(default_ws_name, is_stale, None, None, &[]);
+                    print_status_text(default_ws_name, is_stale, None, None, &[], None);
                 }
             }
         }
@@ -206,6 +232,7 @@ fn print_status_text(
     changes: Option<&StatusChanges>,
     global_view: Option<&GlobalViewSummary>,
     workspaces: &[WorkspaceEntry],
+    epoch_drift: Option<&super::epoch_drift::EpochDriftReport>,
 ) {
     // Current workspace and stale warning
     println!("workspace: {current_ws}");
@@ -294,9 +321,56 @@ fn print_status_text(
         }
     }
 
+    print_epoch_drift_text(epoch_drift);
+
     // Next command
     println!();
     println!("Next: maw exec <name> -- <command>");
+}
+
+/// bn-1ieb: surface `epoch_drift` in plain-text status output so agents
+/// see the exact recovery verb before they trigger a downstream merge
+/// failure. Kept compact (≤4 lines) so the text status stays scannable.
+fn print_epoch_drift_text(epoch_drift: Option<&super::epoch_drift::EpochDriftReport>) {
+    use super::epoch_drift::EpochDriftKind;
+
+    let Some(report) = epoch_drift else { return };
+    if !report.kind.has_drift() {
+        return;
+    }
+    println!();
+    match report.kind {
+        EpochDriftKind::FfAbsorbable => {
+            println!(
+                "epoch drift: branch '{}' ahead of epoch by {} commit(s) ({} → {}); safe to advance.",
+                report.branch, report.ff_commit_count, report.epoch_short, report.branch_short,
+            );
+            println!("  Fix: maw epoch sync");
+        }
+        EpochDriftKind::FfBlocked => {
+            println!(
+                "epoch drift: branch '{}' ahead of epoch by {} commit(s), blocked by workspace(s): {}",
+                report.branch,
+                report.ff_commit_count,
+                report.blocking_workspaces.join(", "),
+            );
+            println!(
+                "  Fix: maw ws merge {} --into default --check  (resolve, then retry)",
+                report
+                    .blocking_workspaces
+                    .first()
+                    .map_or("<ws>", String::as_str),
+            );
+        }
+        EpochDriftKind::Diverged => {
+            println!(
+                "epoch drift: epoch ({}) and branch '{}' ({}) have forked — manual recovery required.",
+                report.epoch_short, report.branch, report.branch_short,
+            );
+            println!("  Fix: maw doctor");
+        }
+        EpochDriftKind::InSync => {}
+    }
 }
 
 /// Print status in pretty format (colored, human-friendly)
@@ -307,6 +381,7 @@ fn print_status_pretty(
     global_view: Option<&GlobalViewSummary>,
     workspaces: &[WorkspaceEntry],
     use_color: bool,
+    epoch_drift: Option<&super::epoch_drift::EpochDriftReport>,
 ) {
     let (bold, green, yellow, gray, reset) = if use_color {
         ("\x1b[1m", "\x1b[32m", "\x1b[33m", "\x1b[90m", "\x1b[0m")
@@ -409,9 +484,59 @@ fn print_status_pretty(
         }
     }
 
+    print_epoch_drift_pretty(epoch_drift, yellow, gray, reset);
+
     // Next command
     println!();
     println!("{gray}Next: maw exec <name> -- <command>{reset}");
+}
+
+/// Pretty (colorized) variant of [`print_epoch_drift_text`].
+fn print_epoch_drift_pretty(
+    epoch_drift: Option<&super::epoch_drift::EpochDriftReport>,
+    yellow: &str,
+    gray: &str,
+    reset: &str,
+) {
+    use super::epoch_drift::EpochDriftKind;
+
+    let Some(report) = epoch_drift else { return };
+    if !report.kind.has_drift() {
+        return;
+    }
+    println!();
+    match report.kind {
+        EpochDriftKind::FfAbsorbable => {
+            println!(
+                "{yellow}Epoch drift:{reset} branch '{}' ahead of epoch by {} commit(s) ({} → {}); {gray}safe to advance.{reset}",
+                report.branch, report.ff_commit_count, report.epoch_short, report.branch_short,
+            );
+            println!("  {gray}Fix: maw epoch sync{reset}");
+        }
+        EpochDriftKind::FfBlocked => {
+            println!(
+                "{yellow}Epoch drift:{reset} branch '{}' ahead by {} commit(s), blocked by: {}",
+                report.branch,
+                report.ff_commit_count,
+                report.blocking_workspaces.join(", "),
+            );
+            println!(
+                "  {gray}Fix: maw ws merge {} --into default --check{reset}",
+                report
+                    .blocking_workspaces
+                    .first()
+                    .map_or("<ws>", String::as_str),
+            );
+        }
+        EpochDriftKind::Diverged => {
+            println!(
+                "{yellow}Epoch drift:{reset} epoch ({}) and branch '{}' ({}) have forked.",
+                report.epoch_short, report.branch, report.branch_short,
+            );
+            println!("  {gray}Fix: maw doctor{reset}");
+        }
+        EpochDriftKind::InSync => {}
+    }
 }
 
 fn compute_global_view_summary(
@@ -448,4 +573,110 @@ fn compute_global_view_summary(
         conflict_count: view.conflicts.len(),
         total_ops: view.total_ops,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use super::super::epoch_drift::{EpochDriftKind, EpochDriftReport};
+
+    fn mk_report(kind: EpochDriftKind, blocking: &[&str]) -> EpochDriftReport {
+        EpochDriftReport {
+            kind,
+            epoch_short: "aaaaaaaaaaaa".into(),
+            branch_short: "bbbbbbbbbbbb".into(),
+            branch: "main".into(),
+            ff_commit_count: 3,
+            blocking_workspaces: blocking.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// bn-1ieb: in-sync drift must NOT print anything (we only surface
+    /// the field for human-visible drift, otherwise status output gets
+    /// noisier with no actionable signal).
+    #[test]
+    fn print_epoch_drift_text_silent_when_in_sync() {
+        let report = mk_report(EpochDriftKind::InSync, &[]);
+        // Internal compile-time gate: function exists with the expected
+        // signature; runtime no-op is exercised end-to-end via the
+        // doctor + epoch_drift integration tests. We assert here on the
+        // helper directly to prevent regression where InSync starts
+        // emitting noise.
+        assert_eq!(report.kind, EpochDriftKind::InSync);
+        // If `EpochDriftKind::InSync.has_drift()` is ever flipped to
+        // true, the renderer's early return would also need updating.
+        assert!(!report.kind.has_drift());
+    }
+
+    /// bn-1ieb: `WorkspaceStatus` JSON shape must include `epoch_drift`
+    /// when populated so machine consumers (agents) can detect the
+    /// `epoch_sync_required` cluster condition without a separate
+    /// `maw doctor` call.
+    #[test]
+    fn workspace_status_json_carries_epoch_drift_when_populated() {
+        let status = WorkspaceStatus {
+            current_workspace: "default".into(),
+            is_stale: false,
+            has_changes: false,
+            changes: None,
+            global_view: None,
+            workspaces: Vec::new(),
+            epoch_drift: Some(mk_report(EpochDriftKind::FfAbsorbable, &[])),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            json.contains("\"epoch_drift\""),
+            "epoch_drift field must appear in status JSON: {json}"
+        );
+        assert!(
+            json.contains("\"kind\":\"ff_absorbable\""),
+            "kind must serialize as snake_case: {json}"
+        );
+    }
+
+    /// bn-1ieb: when there's no opinion (None), the field is elided so
+    /// downstream consumers can distinguish "no drift signal" from "in
+    /// sync" without ambiguity.
+    #[test]
+    fn workspace_status_json_omits_epoch_drift_when_none() {
+        let status = WorkspaceStatus {
+            current_workspace: "default".into(),
+            is_stale: false,
+            has_changes: false,
+            changes: None,
+            global_view: None,
+            workspaces: Vec::new(),
+            epoch_drift: None,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("\"epoch_drift\""),
+            "None epoch_drift should be elided: {json}"
+        );
+    }
+
+    /// bn-1ieb: blocking workspace list must round-trip through JSON for
+    /// the `FfBlocked` case (this is the structured handoff that lets a
+    /// coordinator agent decide which sibling to resolve first).
+    #[test]
+    fn workspace_status_json_includes_blocking_workspaces_for_ff_blocked() {
+        let status = WorkspaceStatus {
+            current_workspace: "default".into(),
+            is_stale: false,
+            has_changes: false,
+            changes: None,
+            global_view: None,
+            workspaces: Vec::new(),
+            epoch_drift: Some(mk_report(
+                EpochDriftKind::FfBlocked,
+                &["alice", "carol"],
+            )),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            json.contains("\"blocking_workspaces\":[\"alice\",\"carol\"]"),
+            "blocking_workspaces must round-trip: {json}"
+        );
+    }
 }

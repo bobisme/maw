@@ -83,7 +83,7 @@ struct DoctorEnvelope {
     advice: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct DoctorCheck {
     name: String,
     status: String,
@@ -110,6 +110,24 @@ fn print_check(check: &DoctorCheck) {
 ///
 /// Returns an error if repository checks or output serialization fail.
 pub fn run(format: Option<OutputFormat>) -> Result<()> {
+    run_with_repair(format, false)
+}
+
+/// Run all doctor checks (bn-1ieb).
+///
+/// When `repair = true`, attempt auto-fixes for checks with a known-safe
+/// repair path. Currently the only such path is `ff_absorbable` epoch
+/// drift, which is auto-advanced via
+/// [`crate::workspace::epoch_drift::auto_advance_if_safe`] (the FF-absorb
+/// safety predicate guarantees no in-flight workspace's diff3 base would
+/// change). All other checks are run unchanged.
+///
+/// # Errors
+///
+/// Returns an error if output serialization fails. Individual check or
+/// repair errors are reported in-band as `DoctorCheck` entries.
+#[allow(clippy::unnecessary_wraps)]
+pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()> {
     let format = OutputFormat::resolve(format);
     let mut checks = Vec::new();
 
@@ -130,6 +148,15 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     checks.push(check_dangling_snapshots(root.as_deref()));
     checks.push(check_stale_head_refs(root.as_deref()));
     checks.push(check_merge_state(root.as_deref()));
+    if repair {
+        // Try the auto-advance BEFORE the drift check so the check reflects
+        // the post-repair state. Push a repair receipt so the user sees
+        // exactly what was advanced.
+        if let Some(receipt) = try_repair_epoch_drift(root.as_deref()) {
+            checks.push(receipt);
+        }
+    }
+    checks.push(check_epoch_drift(root.as_deref()));
     checks.push(check_git_head());
 
     let all_ok = checks.iter().all(|c| c.status == "ok");
@@ -162,6 +189,64 @@ pub fn run(format: Option<OutputFormat>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Attempt the epoch auto-advance when safe (bn-1ieb). Returns a
+/// `DoctorCheck` "receipt" entry only when a meaningful action was taken
+/// (advance succeeded) or when the user explicitly asked to repair but
+/// the drift was non-auto-fixable (so they see the structured "skipped:
+/// reason" message). Returns `None` for the in-sync / epoch-unset cases
+/// to avoid noise.
+fn try_repair_epoch_drift(root: Option<&Path>) -> Option<DoctorCheck> {
+    use crate::workspace::epoch_drift::{AutoAdvanceOutcome, AutoAdvanceSkip, auto_advance_if_safe};
+
+    let root = root?;
+    let config = crate::workspace::MawConfig::load(root).ok()?;
+    let branch = config.branch();
+    let default_ws = config.default_workspace();
+    let backend = maw_core::backend::git::GitWorktreeBackend::new(root.to_path_buf());
+
+    match auto_advance_if_safe(root, branch, default_ws, &backend) {
+        Ok(AutoAdvanceOutcome::Advanced { report, new_epoch_short }) => Some(DoctorCheck {
+            name: "epoch repair".to_string(),
+            status: "ok".to_string(),
+            message: format!(
+                "epoch repair: advanced epoch {} → {} ({} commit(s) absorbed on branch '{}').",
+                report.epoch_short, new_epoch_short, report.ff_commit_count, report.branch,
+            ),
+            fix: None,
+        }),
+        Ok(AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::InSync | AutoAdvanceSkip::EpochUnset }) => None,
+        Ok(AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::FfBlocked(report) }) => Some(DoctorCheck {
+            name: "epoch repair".to_string(),
+            status: "warn".to_string(),
+            message: format!(
+                "epoch repair: skipped — branch '{}' ahead by {} commit(s) but blocked by workspace(s): {}",
+                report.branch,
+                report.ff_commit_count,
+                report.blocking_workspaces.join(", "),
+            ),
+            fix: Some(format!(
+                "Resolve first: maw ws merge {} --into default --check",
+                report.blocking_workspaces.first().map_or("<ws>", String::as_str),
+            )),
+        }),
+        Ok(AutoAdvanceOutcome::NoOp { reason: AutoAdvanceSkip::Diverged(report) }) => Some(DoctorCheck {
+            name: "epoch repair".to_string(),
+            status: "fail".to_string(),
+            message: format!(
+                "epoch repair: refused — epoch ({}) and branch '{}' ({}) have forked; auto-advance unsafe.",
+                report.epoch_short, report.branch, report.branch_short,
+            ),
+            fix: Some("Investigate with: git log --oneline --all".to_string()),
+        }),
+        Err(e) => Some(DoctorCheck {
+            name: "epoch repair".to_string(),
+            status: "warn".to_string(),
+            message: format!("epoch repair: classify/advance failed ({e})"),
+            fix: None,
+        }),
+    }
 }
 
 /// Diagnostic carveout: probes the user's installed `<name>` binary (here:
@@ -629,6 +714,122 @@ fn check_stale_head_refs(root: Option<&Path>) -> DoctorCheck {
     }
 }
 
+/// Detect drift between `refs/manifold/epoch/current` and the configured
+/// branch HEAD (bn-1ieb / SG4 `epoch_sync_required` mitigation).
+///
+/// This is the proactive surface for the `epoch_sync_required` friction
+/// cluster: when an agent runs `maw doctor` (or any tool that invokes the
+/// check), drift is named with the exact recovery verb instead of waiting
+/// for a downstream `maw ws merge` to fail with "Target branch has
+/// diverged".
+///
+/// Status mapping:
+/// - `in_sync` → `[OK]` "epoch is in sync".
+/// - `ff_absorbable` → `[WARN]` "branch ahead of epoch by N commit(s);
+///   safe to advance" + fix hint `maw epoch sync`.
+/// - `ff_blocked` → `[WARN]` "auto-advance blocked by workspace(s) ...";
+///   the merge will absorb when those workspaces resolve.
+/// - `diverged` → `[FAIL]` "epoch and branch have forked".
+///
+/// `warn` (not `fail`) for the auto-advanceable case because the system is
+/// not broken — the next `maw ws merge` would absorb it transparently via
+/// the existing FF-absorb path. The check exists to short-circuit the
+/// agent's discovery cost; the architectural auto-advance is still doing
+/// most of the work.
+fn check_epoch_drift(root: Option<&Path>) -> DoctorCheck {
+    use crate::workspace::epoch_drift::{EpochDriftKind, classify_drift};
+
+    let name = "epoch drift".to_string();
+
+    let Some(root) = root else {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "epoch drift: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    let Ok(config) = crate::workspace::MawConfig::load(root) else {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "epoch drift: could not check (config unreadable)".to_string(),
+            fix: None,
+        };
+    };
+    let branch = config.branch();
+
+    let backend = maw_core::backend::git::GitWorktreeBackend::new(root.to_path_buf());
+    let report = match classify_drift(root, branch, &backend) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return DoctorCheck {
+                name,
+                status: "ok".to_string(),
+                message: "epoch drift: epoch ref not set (run `maw init`)".to_string(),
+                fix: None,
+            };
+        }
+        Err(e) => {
+            return DoctorCheck {
+                name,
+                status: "warn".to_string(),
+                message: format!("epoch drift: could not classify drift ({e})"),
+                fix: None,
+            };
+        }
+    };
+
+    match report.kind {
+        EpochDriftKind::InSync => DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: format!("epoch drift: in sync ({} == '{branch}')", report.epoch_short),
+            fix: None,
+        },
+        EpochDriftKind::FfAbsorbable => DoctorCheck {
+            name,
+            status: "warn".to_string(),
+            message: format!(
+                "epoch drift: branch '{branch}' is {} commit(s) ahead of epoch \
+                 ({} → {}); safe to auto-advance.",
+                report.ff_commit_count, report.epoch_short, report.branch_short,
+            ),
+            fix: Some("Fix: maw epoch sync".to_string()),
+        },
+        EpochDriftKind::FfBlocked => DoctorCheck {
+            name,
+            status: "warn".to_string(),
+            message: format!(
+                "epoch drift: branch '{branch}' is {} commit(s) ahead of epoch \
+                 ({} → {}), blocked by workspace(s) {}. The next `maw ws merge` \
+                 will absorb the FF range once those workspaces are resolved.",
+                report.ff_commit_count,
+                report.epoch_short,
+                report.branch_short,
+                report.blocking_workspaces.join(", "),
+            ),
+            fix: Some(format!(
+                "Fix: maw ws merge {} --into default --check  (resolve, then retry)",
+                report.blocking_workspaces.first().map_or("<ws>", String::as_str),
+            )),
+        },
+        EpochDriftKind::Diverged => DoctorCheck {
+            name,
+            status: "fail".to_string(),
+            message: format!(
+                "epoch drift: epoch ({}) and branch '{branch}' ({}) have forked. \
+                 Manual recovery required — auto-advance is unsafe.",
+                report.epoch_short, report.branch_short,
+            ),
+            fix: Some("Fix: investigate with `git log --oneline --all`; \
+                       reset branch or epoch ref deliberately."
+                .to_string()),
+        },
+    }
+}
+
 fn check_git_head() -> DoctorCheck {
     // Read the HEAD file directly to determine if it's symbolic. A symbolic
     // HEAD has the form "ref: refs/heads/<branch>\n"; a detached HEAD contains
@@ -1034,5 +1235,91 @@ mod tests {
         let check = check_lfs(Some(root));
         assert_eq!(check.status, "ok", "message: {}", check.message);
         assert!(check.message.contains("healthy"));
+    }
+
+    /// bn-1ieb: end-to-end doctor coverage for the `epoch_sync_required`
+    /// mitigation. `check_epoch_drift` must surface the structured warning
+    /// (status=warn, fix=maw epoch sync) for a real ff-absorbable drift —
+    /// agents reading doctor output thus get the exact recovery verb
+    /// without having to run a separate merge attempt to discover it.
+    #[test]
+    fn check_epoch_drift_warns_for_ff_absorbable_state() {
+        let (dir, root, _epoch0) = maw_git::test_support::init_test_repo_with_commit();
+        let _ = dir;
+
+        // Set up manifold metadata + epoch ref pointing at the initial
+        // commit; advance branch HEAD by 2 commits without advancing epoch.
+        std::fs::create_dir_all(root.join(".manifold/epochs")).expect("mkdir manifold");
+        let epoch0 = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
+        let epoch0 = epoch0.trim();
+        maw_core::refs::write_epoch_current(
+            &root,
+            &maw_core::model::types::GitOid::new(epoch0).expect("oid"),
+        )
+        .expect("write epoch_current");
+
+        std::fs::write(root.join("ff1.txt"), "ff1").expect("write");
+        let _ = maw_git::test_support::commit_all(&root, "ff1");
+        std::fs::write(root.join("ff2.txt"), "ff2").expect("write");
+        let _ = maw_git::test_support::commit_all(&root, "ff2");
+
+        let check = check_epoch_drift(Some(&root));
+        assert_eq!(
+            check.status, "warn",
+            "ff-absorbable drift must surface as [WARN], got: {check:?}"
+        );
+        assert!(
+            check.message.contains("ahead of epoch"),
+            "message must name the drift direction: {}",
+            check.message
+        );
+        // The fix string is the load-bearing signal for the agent —
+        // hardcode the exact verb the friction cluster names.
+        let fix = check.fix.as_deref().unwrap_or("");
+        assert!(
+            fix.contains("maw epoch sync"),
+            "fix must recommend `maw epoch sync` verbatim, got: {fix}"
+        );
+    }
+
+    /// bn-1ieb: in-sync state must NOT raise a doctor warning (no false
+    /// positives — otherwise the check becomes noise and agents start
+    /// ignoring it).
+    #[test]
+    fn check_epoch_drift_ok_when_in_sync() {
+        let (dir, root, _oid) = maw_git::test_support::init_test_repo_with_commit();
+        let _ = dir;
+        std::fs::create_dir_all(root.join(".manifold/epochs")).expect("mkdir manifold");
+        let head = maw_git::test_support::git_capture(&root, &["rev-parse", "HEAD"]);
+        let head = head.trim();
+        maw_core::refs::write_epoch_current(
+            &root,
+            &maw_core::model::types::GitOid::new(head).expect("oid"),
+        )
+        .expect("write epoch_current");
+
+        let check = check_epoch_drift(Some(&root));
+        assert_eq!(check.status, "ok", "in-sync must be [OK]: {check:?}");
+        assert!(check.fix.is_none(), "no fix needed when in sync");
+    }
+
+    /// bn-1ieb: when the epoch ref has never been set (pre-`maw init`),
+    /// the check is informational, not a fail — `check_manifold_initialized`
+    /// owns that diagnosis.
+    #[test]
+    fn check_epoch_drift_ok_when_epoch_unset() {
+        let (dir, root, _oid) = maw_git::test_support::init_test_repo_with_commit();
+        let _ = dir;
+        // Deliberately do NOT write epoch_current.
+        let check = check_epoch_drift(Some(&root));
+        assert_eq!(
+            check.status, "ok",
+            "epoch-unset should not raise here: {check:?}"
+        );
+        assert!(
+            check.message.contains("not set") || check.message.contains("unset"),
+            "message should name the unset state: {}",
+            check.message
+        );
     }
 }
