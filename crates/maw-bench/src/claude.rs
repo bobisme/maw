@@ -99,6 +99,8 @@ impl AgentBackend for ClaudeBackend {
                     args_json: String::new(),
                     ts_unix_ms: 0,
                     result_truncated: None,
+                    attributed_op: None,
+                    attributed_outcome: None,
                 }],
             }],
             done: false,

@@ -28,7 +28,10 @@
 //!   future BenchRun fields; placeholder = `Unavailable` today.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
+
+use crate::attribution::MawVerbAttribution;
 
 /// Which axis a metric belongs to. The reporter prints axes in
 /// separated blocks; never combined. The pre-registration §4
@@ -191,15 +194,41 @@ pub struct MetricRecord {
     /// Provider-reported cost. `Unavailable` for MockAgent.
     pub cost_usd: MetricValue,
     /// Turns the agent spent re-doing or recovering already-done
-    /// work. Conservative heuristic; see
-    /// `notes/sg2-metric-definitions.md` §work_redone_turns. Per-reg
-    /// §6.3 specifies blind double-coding; T2.5 (`bn-1rgk`) tightens.
+    /// work. As of T2.5 (schema v2) this is **attribution-driven**:
+    /// counts turns whose call is attributed to a
+    /// [`crate::MawVerbAttribution`] cluster (i.e. the agent retried
+    /// after a `StepOutcome { conflicted: true }` and re-issued an op
+    /// of the same class on the same target). Pre-T2.5 records (schema
+    /// v1) used a substring heuristic.
     pub work_redone_turns: MetricValue,
+
+    // ----- T2.5 diagnostic axis (schema v2) -----
+    /// Per-verb attribution histogram. **Diagnostic axis ONLY** — never
+    /// folded into a single score and never compared cross-axis.
+    ///
+    /// `BTreeMap` for stable serialization order (every read gets the
+    /// same JSON bytes regardless of insertion order). Empty for
+    /// non-maw arms (substrate has no maw verbs).
+    ///
+    /// New in schema v2 (T2.5 / `bn-1rgk`). Default empty so v1
+    /// records still load.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_verb_wasted_turns: BTreeMap<MawVerbAttribution, u32>,
 }
 
 impl MetricRecord {
-    /// Current schema version. Additive optional fields do NOT bump.
-    pub const SCHEMA_VERSION: u32 = 1;
+    /// Current schema version.
+    ///
+    /// # Migration history
+    ///
+    /// - **v1 → v2 (T2.5 / `bn-1rgk`)**: added optional
+    ///   `per_verb_wasted_turns` (BTreeMap, default empty). v1 records
+    ///   load cleanly into v2 with the new field empty. The schema
+    ///   bumped (even though additive) so downstream tools can assert
+    ///   "this record carries attribution data" rather than guess from
+    ///   field presence — same migration discipline as
+    ///   `BenchRun::SCHEMA_VERSION`.
+    pub const SCHEMA_VERSION: u32 = 2;
 
     /// Return all metric (name, value, axis) triples in **rendered
     /// order** (correctness first, then efficiency). Used by the
@@ -261,14 +290,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_version_is_one() {
-        assert_eq!(MetricRecord::SCHEMA_VERSION, 1);
+    fn schema_version_is_two() {
+        // v2 in T2.5 — adds per_verb_wasted_turns.
+        assert_eq!(MetricRecord::SCHEMA_VERSION, 2);
     }
 
     #[test]
     fn axed_correctness_first_then_efficiency() {
         let r = MetricRecord {
-            schema_version: 1,
+            schema_version: MetricRecord::SCHEMA_VERSION,
             run_id: "r".into(),
             arm: "maw".into(),
             condition_id: String::new(),
@@ -280,6 +310,7 @@ mod tests {
             wall_duration_ms: MetricValue::duration_ms(1000),
             cost_usd: MetricValue::usd_cents(100),
             work_redone_turns: MetricValue::count(0),
+            per_verb_wasted_turns: BTreeMap::new(),
         };
         let axes: Vec<Axis> = r.axed().iter().map(|t| t.2).collect();
         // Correctness block must come first.
@@ -300,8 +331,10 @@ mod tests {
 
     #[test]
     fn roundtrip_json() {
+        let mut per_verb = BTreeMap::new();
+        per_verb.insert(MawVerbAttribution::WsMergeStructuredConflict, 2);
         let r = MetricRecord {
-            schema_version: 1,
+            schema_version: MetricRecord::SCHEMA_VERSION,
             run_id: "abc".into(),
             arm: "maw".into(),
             condition_id: "C0".into(),
@@ -313,11 +346,39 @@ mod tests {
             wall_duration_ms: MetricValue::duration_ms(1500),
             cost_usd: MetricValue::usd_cents(2500),
             work_redone_turns: MetricValue::count(1),
+            per_verb_wasted_turns: per_verb,
         };
         let s = r.to_json().expect("ser");
         let back = MetricRecord::from_json(&s).expect("de");
         assert_eq!(r, back);
         back.verify_schema().expect("schema");
+    }
+
+    /// v1 → v2 migration for MetricRecord: a v1 JSON (no
+    /// `per_verb_wasted_turns` field) must deserialize cleanly into
+    /// v2 with the new field empty.
+    #[test]
+    fn v1_metric_record_loads_into_v2_with_empty_per_verb() {
+        let v1_json = serde_json::json!({
+            "schema_version": 1,
+            "run_id": "legacy-1",
+            "arm": "maw",
+            "condition_id": "C0",
+            "t_class": "T2",
+            "work_lost_events": {"kind": "count", "n": 0},
+            "human_intervention_events": {"kind": "unavailable"},
+            "tool_calls_total": {"kind": "count", "n": 10},
+            "turns_to_done": {"kind": "count", "n": 3},
+            "wall_duration_ms": {"kind": "duration_ms", "ms": 1000},
+            "cost_usd": {"kind": "usd_cents", "cents": 100},
+            "work_redone_turns": {"kind": "count", "n": 0}
+        });
+        let r: MetricRecord = serde_json::from_value(v1_json).expect("v1 -> v2 deserialize");
+        assert_eq!(r.schema_version, 1, "field carries v1 verbatim");
+        assert!(
+            r.per_verb_wasted_turns.is_empty(),
+            "missing v1 field defaults to empty"
+        );
     }
 
     #[test]
@@ -335,6 +396,7 @@ mod tests {
             wall_duration_ms: MetricValue::duration_ms(0),
             cost_usd: MetricValue::Unavailable,
             work_redone_turns: MetricValue::count(0),
+            per_verb_wasted_turns: BTreeMap::new(),
         };
         assert!(r.verify_schema().is_err());
         r.schema_version = MetricRecord::SCHEMA_VERSION;

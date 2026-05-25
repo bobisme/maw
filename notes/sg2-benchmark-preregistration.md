@@ -653,6 +653,18 @@ after seeing transcripts.
   states this explicitly. Raw transcripts used for attribution are
   published in either case.
 
+**T2.5 implementation note (pre-freeze amendment in spirit; not §9):**
+the bn-1rgk attribution rule above is now backed by an automated
+conservative classifier (`MawVerbAttribution` enum + `attribute_tool_call`
+in `crates/maw-bench-metrics`; 12 named verb/state clusters with
+positive transcript tests). The classifier is the **first-pass coder**
+that produces the diagnostic axis the renderer prints; the human
+double-coding protocol in this section remains binding for the
+publication-grade number per §6.3. Classifier under-attribution
+surfaces as `DiagnosticBundle.total_unattributed_wasted_turns` so the
+human coders see exactly which turns need adjudication. See
+`notes/sg2-metric-definitions.md` "T2.5 update" subsection.
+
 ### 6.4 Version-capture manifest (frozen)
 
 Each run records, alongside metrics, a fixed manifest (reviewer point P0-3 /

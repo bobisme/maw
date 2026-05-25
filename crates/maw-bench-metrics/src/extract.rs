@@ -12,8 +12,11 @@
 //! that section. If you change a counting rule, update the doc in the
 //! same commit — the rule of record is the doc, not the code.
 
-use maw_bench::run::{BenchRun, OracleBSummary, RunVerdict, ToolCall, Turn};
+use std::collections::BTreeMap;
 
+use maw_bench::run::{BenchRun, OracleBSummary, RunVerdict, StepOutcome, ToolCall, Turn};
+
+use crate::attribution::{attribute_tool_call, MawVerbAttribution};
 use crate::record::{MetricRecord, MetricValue};
 
 #[cfg(test)]
@@ -65,6 +68,24 @@ pub fn extract_metrics(run: &BenchRun) -> MetricRecord {
         _ => MetricValue::Unavailable,
     };
 
+    // T2.5: per-verb attribution. The maw arm gets a populated map;
+    // non-maw arms get an empty map (substrate has no maw verbs).
+    let per_verb_wasted_turns = if is_maw_arm(&run.manifest.arm) {
+        per_verb_attribution(&run.transcript.turns)
+    } else {
+        BTreeMap::new()
+    };
+
+    // T2.5: attribution-driven work_redone_turns. For maw arm, count
+    // the attributed clusters (each attribution = one wasted turn).
+    // For non-maw arms, fall back to the T2.4 substring heuristic so
+    // those arms still have a comparable signal.
+    let work_redone = if is_maw_arm(&run.manifest.arm) {
+        per_verb_wasted_turns.values().map(|n| u64::from(*n)).sum()
+    } else {
+        count_work_redone_turns(&run.transcript.turns)
+    };
+
     MetricRecord {
         schema_version: MetricRecord::SCHEMA_VERSION,
         run_id: run.run_id.clone(),
@@ -81,8 +102,83 @@ pub fn extract_metrics(run: &BenchRun) -> MetricRecord {
         turns_to_done,
         wall_duration_ms: MetricValue::duration_ms(run.duration_ms),
         cost_usd,
-        work_redone_turns: MetricValue::count(count_work_redone_turns(&run.transcript.turns)),
+        work_redone_turns: MetricValue::count(work_redone),
+
+        // ----- T2.5 diagnostic axis -----
+        per_verb_wasted_turns,
     }
+}
+
+/// Is `arm` the maw arm? The diagnostic axis only applies there.
+/// Treats any arm name starting with `"maw"` as maw (covers `"maw"`,
+/// future variants like `"maw-bare"`). Non-maw arms get an empty
+/// attribution map.
+fn is_maw_arm(arm: &str) -> bool {
+    arm == "maw" || arm.starts_with("maw-")
+}
+
+/// Compute per-verb attribution for a transcript.
+///
+/// Walks the turn sequence linearly, threading `prior_outcome` between
+/// adjacent calls so the conservative attribution can distinguish
+/// "first attempt" from "retry after conflict".
+///
+/// Tracks two attribution sources:
+///
+/// 1. **Per-call attribution** via [`attribute_tool_call`] — covers
+///    the verb-failure cluster family (merge conflict, sync stale,
+///    destroy refused, etc.).
+/// 2. **Read-from-X detection** via [`crate::attribution::detect_stale_read`]
+///    — covers the state-misread cluster family (a status call
+///    followed by an op the workspace state shouldn't have permitted).
+///
+/// Returns a `BTreeMap` (stable iteration order for JSON output).
+#[must_use]
+pub fn per_verb_attribution(turns: &[Turn]) -> BTreeMap<MawVerbAttribution, u32> {
+    let mut counts: BTreeMap<MawVerbAttribution, u32> = BTreeMap::new();
+    let mut prior_outcome: Option<StepOutcome> = None;
+    let mut prior_call: Option<&ToolCall> = None;
+
+    for turn in turns {
+        for call in &turn.tool_calls {
+            // (1) Per-call attribution.
+            if let Some(att) = attribute_tool_call(call, prior_outcome.as_ref()) {
+                *counts.entry(att).or_insert(0) += 1;
+            }
+            // (2) Two-call window: prior was a status/list/diff, now
+            //     we see the next call's outcome reveal a misread.
+            if let (Some(prev), Some(next_out)) = (prior_call, call.attributed_outcome.as_ref())
+                && let Some(att) = crate::attribution::detect_stale_read(prev, Some(next_out))
+            {
+                *counts.entry(att).or_insert(0) += 1;
+            }
+            // Update the rolling-window state.
+            prior_outcome.clone_from(&call.attributed_outcome);
+            prior_call = Some(call);
+        }
+    }
+    counts
+}
+
+/// Public: replacement for `count_work_redone_turns` — attribution-
+/// driven count. Equals `per_verb_attribution(turns).values().sum()`
+/// for the maw arm; identical fallback behavior on non-maw arms.
+///
+/// Returns the count of turns whose calls attributed to any
+/// [`MawVerbAttribution`] cluster — i.e. wasted turns explicitly
+/// linked to a named maw friction point.
+///
+/// **Semantics (T2.5 update):** a turn is "redone" iff the agent
+/// retried after a `StepOutcome { conflicted: true }` (or other
+/// failure signal) and re-issued an op of the same class on the same
+/// target. Implemented by routing through [`per_verb_attribution`]
+/// so the same signal feeds both metrics — no drift possible.
+#[must_use]
+pub fn count_attribution_driven_redone_turns(turns: &[Turn]) -> u64 {
+    per_verb_attribution(turns)
+        .values()
+        .map(|n| u64::from(*n))
+        .sum()
 }
 
 /// Count work-loss events for a run.
@@ -405,6 +501,37 @@ mod tests {
             args_json: args.into(),
             ts_unix_ms: 0,
             result_truncated: None,
+            attributed_op: None,
+            attributed_outcome: None,
+        }
+    }
+
+    fn bash_with_outcome(args: &str, outcome: StepOutcome) -> ToolCall {
+        ToolCall {
+            name: "Bash".into(),
+            args_json: args.into(),
+            ts_unix_ms: 0,
+            result_truncated: None,
+            attributed_op: None,
+            attributed_outcome: Some(outcome),
+        }
+    }
+
+    fn conflicted() -> StepOutcome {
+        StepOutcome {
+            ok: true,
+            conflicted: true,
+            advanced_integration: false,
+            notes: "structured conflict".into(),
+        }
+    }
+
+    fn refused() -> StepOutcome {
+        StepOutcome {
+            ok: false,
+            conflicted: false,
+            advanced_integration: false,
+            notes: "refused".into(),
         }
     }
 
@@ -440,5 +567,112 @@ mod tests {
             turn_with_calls(3, vec![bash(r#"{"cmd":"git commit -m foo"}"#)]),
         ];
         assert_eq!(count_work_redone_turns(&turns), 0);
+    }
+
+    // ---------- T2.5 attribution-driven tests ----------
+
+    /// End-to-end: synthetic BenchRun with a planted retry-after-conflict.
+    /// `count_attribution_driven_redone_turns` matches the cluster sum.
+    #[test]
+    fn attribution_driven_matches_per_verb_sum() {
+        // Turn 1: merge that conflicts. Turn 2: retry merge after the
+        // conflict — should attribute as WsMergeStructuredConflict.
+        let merge_attempt = bash_with_outcome(
+            r#"{"cmd":"maw ws merge a --into default"}"#,
+            conflicted(),
+        );
+        let retry = bash(r#"{"cmd":"maw ws merge a --into default"}"#);
+        let turns = vec![
+            turn_with_calls(1, vec![merge_attempt]),
+            turn_with_calls(2, vec![retry]),
+        ];
+        let per_verb = per_verb_attribution(&turns);
+        let total = count_attribution_driven_redone_turns(&turns);
+        let sum: u64 = per_verb.values().map(|n| u64::from(*n)).sum();
+        assert_eq!(total, sum, "per-verb sum must equal aggregate count");
+        assert_eq!(
+            per_verb.get(&MawVerbAttribution::WsMergeStructuredConflict),
+            Some(&1),
+            "retry-after-conflict attributed to merge cluster"
+        );
+    }
+
+    #[test]
+    fn maw_arm_record_carries_per_verb_axis() {
+        let conflict_then_retry = [
+            bash_with_outcome(
+                r#"{"cmd":"maw ws merge a --into default"}"#,
+                conflicted(),
+            ),
+            bash(r#"{"cmd":"maw ws merge a --into default"}"#),
+        ];
+        let mut run = synth_run("maw", RunVerdict::Success, OracleBSummary::Green, 0, 2, None);
+        run.transcript.turns = vec![
+            turn_with_calls(1, vec![conflict_then_retry[0].clone()]),
+            turn_with_calls(2, vec![conflict_then_retry[1].clone()]),
+        ];
+        run.total_turns = 2;
+        let m = extract_metrics(&run);
+        // Diagnostic axis populated for maw arm.
+        assert!(!m.per_verb_wasted_turns.is_empty());
+        assert_eq!(
+            m.per_verb_wasted_turns
+                .get(&MawVerbAttribution::WsMergeStructuredConflict),
+            Some(&1)
+        );
+        // work_redone_turns matches the diagnostic-axis sum (no drift).
+        let sum: u64 = m.per_verb_wasted_turns.values().map(|n| u64::from(*n)).sum();
+        assert_eq!(m.work_redone_turns, MetricValue::count(sum));
+    }
+
+    #[test]
+    fn non_maw_arm_record_has_empty_per_verb_axis() {
+        let run = synth_run(
+            "jj-workspaces",
+            RunVerdict::Success,
+            OracleBSummary::NotApplicable {
+                reason: "arm = jj".into(),
+            },
+            3,
+            5,
+            None,
+        );
+        let m = extract_metrics(&run);
+        assert!(
+            m.per_verb_wasted_turns.is_empty(),
+            "non-maw arm must have empty per-verb axis"
+        );
+    }
+
+    #[test]
+    fn destroy_refused_attribution_end_to_end() {
+        // Agent issues `maw ws destroy x` -> refused. Then retries
+        // with --force. The retry attributes to WsDestroyRefused.
+        let attempt =
+            bash_with_outcome(r#"{"cmd":"maw ws destroy alice"}"#, refused());
+        let retry = bash(r#"{"cmd":"maw ws destroy alice --force"}"#);
+        let turns = vec![
+            turn_with_calls(1, vec![attempt]),
+            turn_with_calls(2, vec![retry]),
+        ];
+        let per_verb = per_verb_attribution(&turns);
+        assert_eq!(
+            per_verb.get(&MawVerbAttribution::WsDestroyRefused),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn recover_invoked_attribution_independent_of_prior() {
+        // Recover is intrinsic recovery — attributes even on turn 1.
+        let turns = vec![turn_with_calls(
+            1,
+            vec![bash(r#"{"cmd":"maw ws recover alice --to alice2"}"#)],
+        )];
+        let per_verb = per_verb_attribution(&turns);
+        assert_eq!(
+            per_verb.get(&MawVerbAttribution::WsRecoverInvoked),
+            Some(&1)
+        );
     }
 }

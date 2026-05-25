@@ -74,5 +74,8 @@ pub mod claude;
 pub use agent::{AgentBackend, AgentConfig, AgentReply, AgentTurn, MockAgent, MockScript, MockTurnScript};
 pub use harness::{BenchConfig, BenchHarness, HarnessError};
 pub use prompt::{render_prompt, PromptInputs};
-pub use run::{BenchRun, OracleBSummary, RunVerdict, Substrate as SubstrateLabel, ToolCall, Transcript, Turn};
+pub use run::{
+    BenchRun, OpClass, OracleBSummary, RunVerdict, StepOutcome,
+    Substrate as SubstrateLabel, ToolCall, Transcript, Turn,
+};
 pub use substrate::{NoopSubstrate, Substrate, SubstrateError, SubstrateHandle};

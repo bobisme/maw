@@ -29,8 +29,109 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::substrate::SubstrateLabel as Substrate;
 
+/// Substrate-op classification a tool call maps to (schema v2 addition).
+///
+/// Mirrors the per-op vocabulary of [`maw_bench_adapters::Substrate`]
+/// (T2.3 / `bn-mit2`). Carried as an opt-in attribution rather than
+/// re-derived at read time so the on-disk record IS the audit trail —
+/// downstream analysts see what the harness (or post-hoc coder)
+/// attributed without re-running the heuristic.
+///
+/// `Other` is the explicit "the tool call was issued but does not map
+/// to a substrate-op verb" bucket (Read / Glob / web search / etc.).
+/// Distinguished from "no attribution" (`ToolCall.attributed_op =
+/// None`) so a future re-coding pass can tell "we looked and saw
+/// nothing maw-shaped" from "we never looked".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpClass {
+    /// `maw ws create <ws> [--from ...]`. Adapter verb:
+    /// `Substrate::create_workspace`.
+    CreateWorkspace,
+    /// File edit inside a workspace. Adapter verb: `Substrate::edit_file`.
+    EditFile,
+    /// `git commit` / equivalent inside a workspace. Adapter verb:
+    /// `Substrate::commit`.
+    Commit,
+    /// `maw ws merge ... [--check] [--destroy]` / equivalent merge into
+    /// the integration label. Adapter verb: `Substrate::merge`.
+    Merge,
+    /// `maw ws sync` (refresh stale workspace to current epoch).
+    /// Adapter verb: `Substrate::sync`.
+    Sync,
+    /// `maw ws destroy <ws> [--force]`. Adapter verb:
+    /// `Substrate::destroy`.
+    Destroy,
+    /// `maw ws resolve <ws> [--list] [--keep ...]` — applies a
+    /// conflict-resolution decision. No 1:1 adapter verb; conflict
+    /// resolution lives in the agent loop, not the substrate trait,
+    /// but we name the op class so attribution can talk about it.
+    ResolveConflict,
+    /// `maw ws recover [<ws>] [--to <new>] [--show ...] [--search ...]`.
+    /// The Prime-Invariant rescue path; named so attribution can
+    /// distinguish recovery from progress.
+    Recover,
+    /// `maw ws abort` / cancellation of an in-flight rebase or merge.
+    /// Named so a "started rebase, panicked, aborted" cluster is
+    /// distinguishable from a successful rebase + cleanup.
+    Abort,
+    /// `maw epoch sync` — advances the workspace's epoch baseline
+    /// after a direct commit to the integration branch.
+    EpochSync,
+    /// `maw ws status` / `maw ws list` / `maw ws diff` / `maw status` —
+    /// read-only inspection. Named because state-misread clusters
+    /// often start with a poorly-interpreted status call.
+    Inspect,
+    /// Tool call was issued but does not map to a substrate-op verb
+    /// (e.g. `Read` of a source file, generic `Glob`, `WebSearch`).
+    /// Explicit so "we looked and it's non-op" is distinguishable
+    /// from "we never looked" (the latter is `attributed_op = None`).
+    Other,
+}
+
+/// Substrate-visible side-effect outcome for one op. Schema v2
+/// addition. **Inlined** (not imported from `maw-bench-adapters`) so
+/// the `BenchRun` record stays self-describing and `maw-bench` keeps
+/// its current dep set — adapters depend on `maw-scenario` but
+/// `maw-bench` deliberately does not pull `maw-bench-adapters` (would
+/// introduce a coupling cycle). The field set matches
+/// [`maw_bench_adapters::StepOutcome`] exactly so the two structs are
+/// interconvertible by the harness's per-arm attribution code.
+///
+/// The "outcome" attached to a tool call is the *substrate result the
+/// tool call produced*, NOT the precondition. So when an attribution
+/// extractor looks at `turn[N].tool_calls[i].attributed_outcome`, it
+/// reads the substrate's verdict on that specific op; whether the
+/// agent retried because of a *prior* conflict is determined by
+/// inspecting `turn[N-k].tool_calls[*].attributed_outcome`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepOutcome {
+    /// True iff the substrate completed the op without an
+    /// adapter-visible error.
+    pub ok: bool,
+    /// True iff the op succeeded but left a substrate-visible conflict
+    /// the agent must resolve (jj-style: conflict is data, not error).
+    pub conflicted: bool,
+    /// True iff the op advanced the integration point (epoch for maw,
+    /// merge commit on target branch for worktrees, etc.).
+    pub advanced_integration: bool,
+    /// Free-form per-adapter notes (bounded length; treat as audit
+    /// surface, not load-bearing for metric computation).
+    pub notes: String,
+}
+
 /// One tool call the agent made. The pre-registration §1.1 counts
 /// `tool_calls` per run as `len(every turn's tool_calls)`.
+///
+/// # Schema v2 additions (T2.5 / `bn-1rgk`)
+///
+/// Two **optional** fields were added in schema v2:
+///
+/// - `attributed_op`: the substrate-op verb this call maps to (if any).
+/// - `attributed_outcome`: the substrate's result for this op (if any).
+///
+/// Both default to `None` for v1 records, preserving backwards
+/// compatibility. See the schema-version doc-comment on [`BenchRun`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Tool name (e.g. `Bash`, `Read`, `Edit`).
@@ -45,6 +146,17 @@ pub struct ToolCall {
     /// stream — analyst can re-derive full results from substrate logs
     /// when needed).
     pub result_truncated: Option<String>,
+    /// Schema v2: substrate-op classification, if attributed. `None`
+    /// means "not classified" (either v1 record or post-hoc coding
+    /// not yet run); `Some(OpClass::Other)` means "classified as
+    /// non-op". The two are deliberately distinguishable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributed_op: Option<OpClass>,
+    /// Schema v2: substrate result for the attributed op, if known.
+    /// `None` is again distinct from "no outcome" — a Read call has
+    /// no substrate outcome to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributed_outcome: Option<StepOutcome>,
 }
 
 /// One agent turn — what the model produced this round.
@@ -233,9 +345,20 @@ pub struct BenchRun {
 }
 
 impl BenchRun {
-    /// Current schema version. Bumped only when an incompatible field
-    /// change is made; downstream parsers gate on this.
-    pub const SCHEMA_VERSION: u32 = 1;
+    /// Current schema version.
+    ///
+    /// # Migration history
+    ///
+    /// - **v1 → v2 (T2.5 / `bn-1rgk`)**: added two OPTIONAL fields on
+    ///   [`ToolCall`] — `attributed_op: Option<OpClass>` and
+    ///   `attributed_outcome: Option<StepOutcome>`. Both default to
+    ///   `None` for legacy records; v1 JSON files load cleanly into
+    ///   v2 with the new fields filled with `None`. No field was
+    ///   removed or had its type changed; only the schema-version
+    ///   integer bumped because downstream tools (T2.6, T2.8) want
+    ///   to assert "this run has v2 attribution data" before reading
+    ///   the new fields.
+    pub const SCHEMA_VERSION: u32 = 2;
 
     /// Serialize to JSON. Uses `to_string_pretty` so on-disk records are
     /// readable in a code review.
@@ -265,7 +388,126 @@ mod tests {
 
     #[test]
     fn schema_version_is_constant() {
-        assert_eq!(BenchRun::SCHEMA_VERSION, 1);
+        // v2 in T2.5: added optional attribution fields on ToolCall.
+        assert_eq!(BenchRun::SCHEMA_VERSION, 2);
+    }
+
+    /// v1 → v2 migration: a v1 JSON (no attribution fields on
+    /// ToolCall, schema_version=1) must deserialize cleanly into the
+    /// v2 struct; the new fields default to `None`.
+    #[test]
+    fn v1_bench_run_loads_into_v2_with_none_attribution() {
+        // A minimal v1 BenchRun JSON. Mirrors the v1 schema fields
+        // exactly — no `attributed_op` or `attributed_outcome` keys.
+        let v1_json = serde_json::json!({
+            "schema_version": 1,
+            "run_id": "legacy-1",
+            "manifest": {
+                "claude_code_version": "",
+                "claude_model_id": "",
+                "claude_effective_model": "",
+                "git_version": "",
+                "jj_version": "",
+                "maw_version": "",
+                "benchmark_harness_commit": "",
+                "scenario_generator_commit": "",
+                "prompt_hash": "",
+                "seed": 0,
+                "condition_id": "",
+                "t_class": "",
+                "arm": "maw",
+                "os_kernel": "",
+                "start_ts_unix_ms": 0,
+                "end_ts_unix_ms": 0
+            },
+            "verdict": {"outcome": "success"},
+            "oracle_b": {"verdict": "green"},
+            "transcript": {
+                "prompt": "",
+                "prompt_sha256": "",
+                "convention_text": "",
+                "turns": [{
+                    "index": 1,
+                    "ts_unix_ms": 0,
+                    "reply_text": "",
+                    "tool_calls": [{
+                        "name": "Bash",
+                        "args_json": "{}",
+                        "ts_unix_ms": 0,
+                        "result_truncated": null
+                    }]
+                }]
+            },
+            "total_tool_calls": 1,
+            "total_turns": 1,
+            "cost_usd": null,
+            "duration_ms": 0,
+            "substrate_final_files": []
+        });
+        let run: BenchRun =
+            serde_json::from_value(v1_json).expect("v1 JSON deserializes into v2 struct");
+        assert_eq!(run.schema_version, 1, "schema field carries v1 verbatim");
+        let tc = &run.transcript.turns[0].tool_calls[0];
+        assert!(tc.attributed_op.is_none(), "missing v1 field defaults to None");
+        assert!(
+            tc.attributed_outcome.is_none(),
+            "missing v1 field defaults to None"
+        );
+    }
+
+    #[test]
+    fn op_class_serializes_to_snake_case() {
+        let s = serde_json::to_string(&OpClass::CreateWorkspace).expect("ser");
+        assert_eq!(s, "\"create_workspace\"");
+        let s = serde_json::to_string(&OpClass::ResolveConflict).expect("ser");
+        assert_eq!(s, "\"resolve_conflict\"");
+        let s = serde_json::to_string(&OpClass::EpochSync).expect("ser");
+        assert_eq!(s, "\"epoch_sync\"");
+    }
+
+    #[test]
+    fn step_outcome_default_is_all_false() {
+        let s = StepOutcome::default();
+        assert!(!s.ok);
+        assert!(!s.conflicted);
+        assert!(!s.advanced_integration);
+        assert!(s.notes.is_empty());
+    }
+
+    #[test]
+    fn tool_call_v2_serializes_only_set_attribution_fields() {
+        // With attribution unset, the optional fields skip serialization
+        // so v2 ToolCall JSON byte-matches v1 ToolCall JSON.
+        let tc = ToolCall {
+            name: "Bash".into(),
+            args_json: "{}".into(),
+            ts_unix_ms: 0,
+            result_truncated: None,
+            attributed_op: None,
+            attributed_outcome: None,
+        };
+        let s = serde_json::to_string(&tc).expect("ser");
+        assert!(!s.contains("attributed_op"));
+        assert!(!s.contains("attributed_outcome"));
+
+        // With attribution set, the fields appear.
+        let tc = ToolCall {
+            name: "Bash".into(),
+            args_json: "{\"cmd\":\"maw ws merge a\"}".into(),
+            ts_unix_ms: 0,
+            result_truncated: None,
+            attributed_op: Some(OpClass::Merge),
+            attributed_outcome: Some(StepOutcome {
+                ok: true,
+                conflicted: true,
+                advanced_integration: false,
+                notes: String::new(),
+            }),
+        };
+        let s = serde_json::to_string(&tc).expect("ser");
+        assert!(s.contains("\"attributed_op\":\"merge\""));
+        assert!(s.contains("\"attributed_outcome\""));
+        assert!(s.contains("\"conflicted\":true"));
     }
 
     #[test]

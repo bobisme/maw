@@ -13,11 +13,13 @@
 //! other clearly wins correctness) and asserts the renderer does
 //! not collapse the comparison.
 
+use std::collections::BTreeMap;
+
 use maw_bench_metrics::{render_dominance_table, MetricRecord, MetricValue, ReportOptions};
 
 fn rec(arm: &str, run_id: &str, lost: u64, turns: u64, calls: u64) -> MetricRecord {
     MetricRecord {
-        schema_version: 1,
+        schema_version: MetricRecord::SCHEMA_VERSION,
         run_id: run_id.into(),
         arm: arm.into(),
         condition_id: "C2".into(),
@@ -29,6 +31,7 @@ fn rec(arm: &str, run_id: &str, lost: u64, turns: u64, calls: u64) -> MetricReco
         wall_duration_ms: MetricValue::duration_ms(1000),
         cost_usd: MetricValue::usd_cents(100),
         work_redone_turns: MetricValue::count(0),
+        per_verb_wasted_turns: BTreeMap::new(),
     }
 }
 

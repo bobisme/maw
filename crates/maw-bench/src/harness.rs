@@ -476,6 +476,8 @@ mod tests {
                         args_json: r#"{"path":"AGENTS.md"}"#.to_string(),
                         ts_unix_ms: 0,
                         result_truncated: Some("(crib text)".to_string()),
+                        attributed_op: None,
+                        attributed_outcome: None,
                     }],
                 },
                 MockTurnScript {
@@ -485,6 +487,8 @@ mod tests {
                         args_json: r#"{"cmd":"maw ws create alice"}"#.to_string(),
                         ts_unix_ms: 0,
                         result_truncated: Some("OK".to_string()),
+                        attributed_op: None,
+                        attributed_outcome: None,
                     }],
                 },
                 MockTurnScript {

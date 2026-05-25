@@ -199,6 +199,71 @@ not a runtime axis change.
   underlying definition is the same; T2.5 produces the human-coded
   pass that supersedes the heuristic.
 
+### `work_redone_turns` — T2.5 update (per-verb attribution)
+
+As of T2.5 (`bn-1rgk`, schema v2) the `work_redone_turns` count is
+**attribution-driven** for the maw arm and still uses the T2.4
+substring heuristic for non-maw arms. Migration is additive — the
+metric name does not change; the count for non-maw arms is
+unchanged; the count for the maw arm is "the same event class via a
+principled signal" rather than "the same event class via a
+substring heuristic".
+
+**New counting rule (maw arm).** A turn is counted as redone iff at
+least one of its tool calls is attributed to a
+[`MawVerbAttribution`](../crates/maw-bench-metrics/src/attribution.rs)
+cluster. Attribution is **conservative**: when the heuristic cannot
+confidently attribute, it returns `None` and the wasted turn
+surfaces in `DiagnosticBundle::total_unattributed_wasted_turns`
+instead of being silently dropped.
+
+**Per-verb diagnostic axis (new in schema v2).** Alongside the
+roll-up count, `MetricRecord` now carries
+`per_verb_wasted_turns: BTreeMap<MawVerbAttribution, u32>` — a
+diagnostic axis that **is never folded into a composite**. The
+dominance-table renderer adds a per-arm diagnostic block under each
+arm; for non-maw arms the block renders the explicit line
+`n/a (substrate has no maw verbs)`. The `no_composite.rs`
+invariant test continues to pass — the diagnostic block is
+per-verb counts only, never a cross-axis aggregate.
+
+**Friction cluster taxonomy.** The `MawVerbAttribution` enum names
+12 cluster variants split into three families:
+
+- **Verb-failures**: `WsCreateNameClash`, `WsMergeStructuredConflict`,
+  `WsSyncStaleWorkspace`, `WsResolveRetry`, `WsDestroyRefused`,
+  `WsRecoverInvoked`, `WsAbortInvoked`, `EpochSyncRequired`.
+- **State-misreads**: `ReadFromStaleWorkspace`,
+  `ReadFromConflictedWorkspace`, `ReadFromDetachedHead`.
+- **Vocabulary**: `VocabularyScarcity` — the bone's "scarce maw
+  vocabulary" cluster (agent typed a nonexistent verb / flag).
+
+Each variant has at least one positive transcript-evidence test in
+`crates/maw-bench-metrics/src/attribution.rs`'s `tests` module.
+`ReadFromDetachedHead` is reserved for the human-coded pass (no
+automated single-call signal is strong enough).
+
+**Substrate-op vocabulary mapping (refined).** The principled
+grounding from the T2.4 doc — "count turns where the agent retried
+after a `StepOutcome { conflicted: true }` outcome" — is now the
+literal implementation: `attribute_tool_call` reads
+`call.attributed_outcome` (from the prior call) and emits
+attributions only when the conflict / refusal / stale signal is
+present. The transcript-side substring heuristic remains as the
+fallback for runs whose `ToolCall` lacks the v2 attribution fields
+(legacy v1 records).
+
+**Output for T2.8.** The downstream consumer is the diagnostic
+report (`bn-u9iy`). T2.5 pins the input contract as
+`DiagnosticBundle { run_id, arm, per_verb_clusters,
+total_attributed_wasted_turns, total_unattributed_wasted_turns }`
+— see `crates/maw-bench-metrics/src/attribution.rs`
+`DiagnosticBundle` and its `diagnostic_bundle_schema_is_pinned`
+fixture test. T2.8 may aggregate bundles across runs to compute
+the prioritized friction list; the per-cluster `evidence_run_ids`
+field provides the back-link from a friction row to the transcripts
+that motivated it.
+
 ## `human_intervention_events`
 
 - **Axis:** correctness (higher-is-worse).
@@ -230,13 +295,20 @@ not a runtime axis change.
 
 ## Schema version
 
-- `MetricRecord::SCHEMA_VERSION = 1`. Additive optional fields do
-  NOT bump. Field removal or type change bumps.
-- `BenchRun::SCHEMA_VERSION = 1` is the upstream schema this version
-  consumes. When T2.6 extends BenchRun to v2 (scenario-oracle
-  fields), the `work_lost_events` metric definition splits per its
-  edge-case section above; `MetricRecord` bumps to v2 in the same
-  PR; the doc gets the new sections.
+- `MetricRecord::SCHEMA_VERSION = 2` (as of T2.5; see "T2.5 update"
+  subsection below). Additive optional fields do NOT bump in
+  principle, but T2.5 chose to bump alongside the BenchRun bump so
+  downstream tools can assert "this record carries per-verb
+  attribution data" rather than guess from field presence. Field
+  removal or type change still bumps.
+- `BenchRun::SCHEMA_VERSION = 2` (as of T2.5). v2 added two
+  OPTIONAL fields on `ToolCall` (`attributed_op: Option<OpClass>`,
+  `attributed_outcome: Option<StepOutcome>`). v1 records load
+  cleanly into v2 with the new fields filled as `None`. No field
+  was removed or had its type changed.
+- When T2.6 extends BenchRun further (scenario-oracle fields),
+  the `work_lost_events` metric definition splits per its
+  edge-case section above; both schemas bump to v3 in that PR.
 
 ## Renderer invariants (testable)
 
@@ -257,19 +329,49 @@ These invariants are asserted by
 
 ---
 
-## Downstream constraints (for T2.5 / bn-1rgk)
+## Downstream constraints (for T2.5 / bn-1rgk) — DELIVERED
 
-T2.5 (maw-per-verb attribution) will:
+T2.5 has delivered (see "T2.5 update" subsection on
+`work_redone_turns` above):
 
-1. Extend `BenchRun` (schema bump) with per-tool-call substrate-op
-   attribution. Each `ToolCall` gains an optional
-   `attributed_op: Option<OpClass>` plus an optional
-   `attributed_outcome: Option<StepOutcome>` so the per-verb mapping
-   becomes machine-derivable rather than heuristic-derived.
-2. Replace the `count_work_redone_turns` heuristic with the
-   attribution-driven count (a turn is redone iff it follows a
-   `StepOutcome { conflicted: true }` and re-issues an op of the
-   same class on the same target). The metric name does not
-   change; the doc section gains a `T2.5 update` subsection.
-3. Add a per-verb summary block to the rendered table (still
-   per-arm, still no cross-axis aggregation).
+1. ✅ Extended `BenchRun` (schema v2) with per-tool-call substrate-op
+   attribution: `ToolCall.attributed_op: Option<OpClass>` +
+   `ToolCall.attributed_outcome: Option<StepOutcome>`. v1 records
+   load cleanly into v2 with the new fields filled as `None`.
+2. ✅ Replaced the substring heuristic with the attribution-driven
+   count for the maw arm. Non-maw arms still use the heuristic
+   (substrate has no maw verbs to attribute to). The metric name
+   did not change.
+3. ✅ Added a per-arm diagnostic block to the rendered table; only
+   the maw arm produces a populated block, non-maw arms render
+   `n/a (substrate has no maw verbs)`.
+4. ✅ Pinned T2.8's input contract as `DiagnosticBundle`
+   (schema_version=1), fixture-backed.
+
+## Downstream constraints (for T2.6 / bn-3l1f, sweep)
+
+T2.6 (the sweep) will:
+
+- Set `ToolCall.attributed_op` and `ToolCall.attributed_outcome`
+  during real-agent runs by intercepting maw verb invocations and
+  recording the substrate's response. The current heuristic still
+  works without this (returns None more often) — the sweep just
+  raises attribution density.
+- Carry `BenchRun::SCHEMA_VERSION = 2` in every produced record.
+
+## Downstream constraints (for T2.8 / bn-u9iy, diagnostic report)
+
+T2.8 consumes the `DiagnosticBundle` schema pinned by T2.5. It
+should:
+
+- Aggregate bundles across runs per `(condition, T-class)` cell.
+- Surface `total_unattributed_wasted_turns` separately from
+  attributed counts — the unattributed bucket is "friction the
+  report missed; coder follow-up needed".
+- Treat per-cluster `evidence_run_ids` as a bounded sample of
+  transcripts to link to (T2.5 produces full lists; T2.8 caps at
+  render time).
+- NEVER fold per-verb counts into a composite. The `no_composite.rs`
+  invariant test in `maw-bench-metrics` already covers the
+  renderer's output; T2.8's own renderer must enforce the same
+  invariant (lift the test pattern).

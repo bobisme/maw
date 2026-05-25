@@ -110,10 +110,17 @@
 #![cfg_attr(test, allow(clippy::cast_sign_loss))]
 #![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
+pub mod attribution;
 pub mod extract;
 pub mod record;
 pub mod report;
 
-pub use extract::{extract_metrics, count_work_redone_turns};
+pub use attribution::{
+    attribute_tool_call, DiagnosticBundle, MawVerbAttribution, PerVerbCluster,
+};
+pub use extract::{
+    count_attribution_driven_redone_turns, count_work_redone_turns, extract_metrics,
+    per_verb_attribution,
+};
 pub use record::{Axis, MetricRecord, MetricValue, MetricsSchemaError};
 pub use report::{render_dominance_table, ReportOptions};
