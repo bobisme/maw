@@ -212,3 +212,71 @@ sg2-report dir *flags:
 #   just sg2-sweep-pilot <dir>        # explicit artifact dir
 sg2-sweep-pilot dir='':
   cargo run --quiet -p maw-bench-sweep --features bench --bin sg2-sweep-pilot -- {{dir}}
+
+# sg2-friction-list: reduce a directory of BenchRun JSONs into the
+# prioritized maw friction list (SG4's input). T2.8 / bn-u9iy.
+#
+# Output: pretty-JSON FrictionList on stdout (the SG4 input format);
+# Markdown preview on stderr (the human-readable peer).
+#
+# Per pre-reg §3.1 Pilot rule: pilot-run numbers are HARNESS-ONLY and
+# the Markdown stamps an explicit TEMPLATE banner. The real friction
+# list lands when the publication-grade campaign artifacts are reduced.
+#
+#   just sg2-friction-list <artifact-dir>
+sg2-friction-list dir:
+  cargo run --quiet -p maw-bench-metrics --features bench --bin sg2-friction-list -- {{dir}}
+
+# sg2-friction-list-pilot: end-to-end pilot for T2.8. Runs the T2.6
+# sweep pilot to produce BenchRun JSONs, then reduces them into a
+# FrictionList + Markdown scaffold. Asserts the ranking is well-formed
+# (sort DESC by total_cost), the unattributed bucket is surfaced, and
+# the doc has the expected sections. T2.8 / bn-u9iy.
+#
+# Per pre-reg §3.1: harness-only data; the Markdown carries the
+# TEMPLATE banner so a reader cannot mistake it for publication.
+sg2-friction-list-pilot:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  PILOT_DIR="${TMPDIR:-/tmp}/sg2-friction-list-pilot-$$"
+  rm -rf "$PILOT_DIR"
+  mkdir -p "$PILOT_DIR"
+  echo "sg2-friction-list-pilot: artifact dir = $PILOT_DIR"
+  # Stage 1: real T2.6 sweep pilot (MockAgent → clean transcripts).
+  # Exercises the read-recursive BenchRun path; expected outcome is
+  # an empty friction list (the MockAgent doesn't plant friction).
+  cargo run --quiet -p maw-bench-sweep --features bench --bin sg2-sweep-pilot -- "$PILOT_DIR" >/dev/null
+  RUN_COUNT=$(find "$PILOT_DIR" -name '*.json' | wc -l)
+  echo "sg2-friction-list-pilot: BenchRun count = $RUN_COUNT"
+  cargo run --quiet -p maw-bench-metrics --features bench --bin sg2-friction-list -- \
+    "$PILOT_DIR" \
+    --out-json "$PILOT_DIR/friction-list-from-sweep.json" \
+    --out-md "$PILOT_DIR/friction-list-from-sweep.md"
+  # Stage 2: synthetic-demo with planted clusters so the doc scaffold
+  # surfaces non-trivial rows (the publication path will replace this
+  # with real-campaign data — the TEMPLATE banner makes the
+  # provenance unambiguous).
+  cargo run --quiet -p maw-bench-metrics --features bench --bin sg2-friction-list -- \
+    --synthetic-demo \
+    --out-json "$PILOT_DIR/friction-list.json" \
+    --out-md "$PILOT_DIR/friction-list.md"
+  echo ""
+  echo "----- friction-list.md (synthetic-demo, head) -----"
+  head -60 "$PILOT_DIR/friction-list.md"
+  echo "----- end head -----"
+  # Smoke assertions on the rendered doc.
+  grep -q "TEMPLATE" "$PILOT_DIR/friction-list.md"
+  grep -q "## Unattributed bucket" "$PILOT_DIR/friction-list.md"
+  grep -q "## SG4 handoff" "$PILOT_DIR/friction-list.md"
+  grep -q "## #1 — " "$PILOT_DIR/friction-list.md"
+  # Ranking well-formed: rank 1 has the largest total_cost.
+  python3 -c "import json; d=json.load(open('$PILOT_DIR/friction-list.json')); \
+    assert d['schema_version']==1, d; \
+    assert 'ranked_clusters' in d and len(d['ranked_clusters']) > 0; \
+    costs=[c['total_cost_turns'] for c in d['ranked_clusters']]; \
+    assert costs == sorted(costs, reverse=True), costs; \
+    assert d['ranked_clusters'][0]['rank']==1; \
+    assert 'total_unattributed_wasted_turns' in d and d['total_unattributed_wasted_turns'] >= 0"
+  echo "sg2-friction-list-pilot: OK"
+  echo "  sweep-derived:   $PILOT_DIR/friction-list-from-sweep.{json,md}"
+  echo "  synthetic-demo:  $PILOT_DIR/friction-list.{json,md}"

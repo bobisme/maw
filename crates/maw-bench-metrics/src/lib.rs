@@ -112,6 +112,7 @@
 
 pub mod attribution;
 pub mod extract;
+pub mod friction_list;
 pub mod record;
 pub mod report;
 
@@ -121,6 +122,11 @@ pub use attribution::{
 pub use extract::{
     count_attribution_driven_redone_turns, count_work_redone_turns, extract_metrics,
     per_verb_attribution,
+};
+pub use friction_list::{
+    friction_list_from_bundles, recommended_fix_class, render_friction_list_md, ExcerptOutcome,
+    FrictionCluster, FrictionList, FrictionSource, SweepRunRef, TranscriptExcerpt,
+    EVIDENCE_RUN_ID_CAP, EXAMPLE_EXCERPT_CAP, FRICTION_LIST_SCHEMA_VERSION,
 };
 pub use record::{Axis, MetricRecord, MetricValue, MetricsSchemaError};
 pub use report::{render_dominance_table, ReportOptions};

@@ -70,5 +70,13 @@ name = "sg2-report"
 path = "src/bin/sg2_report.rs"
 required-features = ["bench"]
 
+# T2.8 (bn-u9iy): prioritized friction-list generator. Reads BenchRun
+# JSONs from an artifact dir, extracts DiagnosticBundles via T2.5's
+# attribute_tool_call, and emits the SG4 input format + Markdown.
+[[bin]]
+name = "sg2-friction-list"
+path = "src/bin/sg2_friction_list.rs"
+required-features = ["bench"]
+
 [lints]
 workspace = true
