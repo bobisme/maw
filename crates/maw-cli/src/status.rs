@@ -14,8 +14,10 @@ use crate::changes::store::ChangesStore;
 use crate::doctor;
 use crate::format::OutputFormat;
 use crate::push::{SyncStatus, main_sync_status_inner};
+use crate::workspace::lifecycle::{LifecycleSignals, LifecycleState};
 use crate::workspace::{self, MawConfig, get_backend};
 use maw_core::backend::WorkspaceBackend;
+use maw_core::model::types::WorkspaceState;
 use serde::Serialize;
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -98,6 +100,10 @@ pub fn run(args: &StatusArgs) -> Result<()> {
             main_sync: summary.main_sync.oneline(),
             stray_root_files: summary.stray_root_files,
             advice: vec![],
+            current_workspace: summary.current_workspace.clone(),
+            current_workspace_state: summary.current_workspace_state,
+            stale_workspaces: summary.stale_workspaces.clone(),
+            integrate_ready: summary.integrate_ready,
         };
         println!("{}", format.serialize(&envelope)?);
         return Ok(());
@@ -168,6 +174,28 @@ struct StatusEnvelope {
     main_sync: String,
     stray_root_files: Vec<String>,
     advice: Vec<serde_json::Value>,
+    /// bn-221b (SG4 / stale-state-self-healing): name of the workspace
+    /// the cwd is currently inside, or `null` if the cwd is at the
+    /// repo root (or outside any workspace). Lets the agent confirm
+    /// "where am I" without a separate `maw ws status` call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_workspace: Option<String>,
+    /// Lifecycle state of the cwd workspace (`current_workspace`),
+    /// using the safe-cleanup vocabulary from the bn-221b mitigation
+    /// class. Absent when `current_workspace` is null or the workspace
+    /// could not be resolved through the backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_workspace_state: Option<LifecycleState>,
+    /// bn-221b: every non-default workspace whose base epoch trails
+    /// the current authoritative epoch. Each item carries its own
+    /// `fix_command` so the agent's first attempt is the right one
+    /// instead of a `maw ws merge → stale error → maw ws sync` cycle.
+    /// Empty list when no workspace is stale.
+    stale_workspaces: Vec<StaleWorkspace>,
+    /// bn-221b: every non-default workspace with committed work that
+    /// is not yet on the integration branch. Mirrors the "what to
+    /// integrate" leg of the mitigation class.
+    integrate_ready: Vec<IntegrateReady>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +203,51 @@ struct WorkspaceStatusItem {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
+    /// bn-221b: short, stable lifecycle state for the workspace —
+    /// `clean | dirty-uncommitted | committed-unintegrated | stale |
+    /// conflicted | missing | integrated`. Lets agents branch on a
+    /// named value without parsing free-text `state` strings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle_state: Option<LifecycleState>,
+    /// bn-221b: 12-char prefix of the workspace's base epoch OID.
+    /// Mirrors what `maw ws list` shows so agents can correlate
+    /// across the two outputs without an extra call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<String>,
+    /// bn-221b: number of epoch advances the workspace is behind the
+    /// current epoch (0 when not stale).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behind_epochs: Option<u32>,
+    /// bn-221b: count of commits on the workspace HEAD ahead of its
+    /// base epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commits_ahead: Option<u32>,
+    /// bn-221b: recommended next action for the workspace based on
+    /// its lifecycle state. `null` for `clean`/`integrated`. Lets the
+    /// agent paste rather than synthesize.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix_command: Option<String>,
+}
+
+/// bn-221b: structured stale-workspace summary embedded in
+/// `StatusEnvelope::stale_workspaces`. Carries everything an agent
+/// needs to resolve the staleness in a single follow-up command.
+#[derive(Debug, Clone, Serialize)]
+struct StaleWorkspace {
+    name: String,
+    behind_epochs: u32,
+    mode: String,
+    fix_command: String,
+}
+
+/// bn-221b: structured integrate-ready summary embedded in
+/// `StatusEnvelope::integrate_ready`. Workspaces that have committed
+/// work the agent might want to merge before doing anything else.
+#[derive(Debug, Clone, Serialize)]
+struct IntegrateReady {
+    name: String,
+    commits_ahead: u32,
+    fix_command: String,
 }
 
 impl WorkspaceStatusItem {
@@ -228,6 +301,14 @@ struct StatusSummary {
     is_stale: bool,
     main_sync: SyncStatus,
     stray_root_files: Vec<String>,
+    /// bn-221b: cwd-detected workspace name (None when at repo root).
+    current_workspace: Option<String>,
+    /// bn-221b: lifecycle state of `current_workspace`.
+    current_workspace_state: Option<LifecycleState>,
+    /// bn-221b: stale non-default workspaces with their fix commands.
+    stale_workspaces: Vec<StaleWorkspace>,
+    /// bn-221b: workspaces with committed work ready to integrate.
+    integrate_ready: Vec<IntegrateReady>,
 }
 
 impl StatusSummary {
@@ -634,33 +715,43 @@ fn render(summary: &StatusSummary, opts: &RenderOptions) {
 /// - Changed/untracked files in the default workspace (via git status)
 /// - Branch sync status vs origin (via git rev-list)
 /// - Stray files at repo root
+/// - bn-221b: per-workspace lifecycle state, stale list with fix
+///   commands, and integrate-ready list — the "where am I / what is
+///   stale / what to integrate" answers in one call so agents stop
+///   paying a turn to discover staleness.
 fn collect_status() -> Result<StatusSummary> {
     let root = workspace::repo_root()?;
     let config = MawConfig::load(&root)?;
     let branch = config.branch();
     let default_ws_name = config.default_workspace();
 
-    // Get non-default workspace names from backend
-    let workspace_details = get_backend()
+    // Get raw WorkspaceInfo from the backend so we can derive lifecycle
+    // signals without a second round of discovery calls. Layout-agnostic
+    // per bn-2sw3 T3.2: we use the backend's path/state/epoch fields,
+    // not raw `ws/` joins.
+    let backend_workspaces = get_backend()
         .ok()
         .and_then(|backend| backend.list().ok())
-        .map_or_else(Vec::new, |infos| {
-            infos
-                .into_iter()
-                .filter(|ws| ws.id.as_str() != default_ws_name)
-                .map(|ws| {
-                    let name = ws.id.as_str().to_string();
-                    let branch = workspace::metadata::read(&root, ws.id.as_str())
-                        .ok()
-                        .and_then(|meta| meta.branch);
-                    WorkspaceStatusItem { name, branch }
-                })
-                .collect()
-        });
+        .unwrap_or_default();
+
+    // Build the enriched per-workspace details for non-default
+    // workspaces. (Default appears in `current_workspace`/`is_stale`,
+    // not in this list, matching pre-bn-221b semantics.)
+    let workspace_details: Vec<WorkspaceStatusItem> = backend_workspaces
+        .iter()
+        .filter(|ws| ws.id.as_str() != default_ws_name)
+        .map(|ws| build_workspace_status_item(&root, ws))
+        .collect();
     let workspace_names = workspace_details
         .iter()
         .map(|workspace| workspace.name.clone())
         .collect();
+
+    // Stale + integrate-ready slices, derived from the same backend
+    // info we already collected. Each entry carries its own
+    // `fix_command` — the load-bearing piece of the bn-221b fix.
+    let stale_workspaces = collect_stale_workspaces(&root, &backend_workspaces, default_ws_name);
+    let integrate_ready = collect_integrate_ready(&backend_workspaces, default_ws_name);
 
     // Get active changes from metadata store
     let changes = ChangesStore::open(&root)
@@ -676,8 +767,17 @@ fn collect_status() -> Result<StatusSummary> {
         })
         .collect();
 
-    // Get changed/untracked files in the default workspace
-    let default_ws_path = root.join("ws").join(default_ws_name);
+    // Resolve the default workspace path via the backend (layout-agnostic
+    // per bn-2sw3 T3.2) — falls back to the legacy root.join("ws") only
+    // if the backend has no entry for it.
+    let default_ws_path = backend_workspaces
+        .iter()
+        .find(|ws| ws.id.as_str() == default_ws_name)
+        .map_or_else(
+            || root.join("ws").join(default_ws_name),
+            |ws| ws.path.clone(),
+        );
+
     let (changed_files, untracked_files) = if default_ws_path.exists() {
         collect_git_status(&default_ws_path)?
     } else {
@@ -687,6 +787,19 @@ fn collect_status() -> Result<StatusSummary> {
     // The default workspace tracks the configured branch and should not be
     // treated as an ephemeral stale workspace.
     let is_stale = false;
+
+    // bn-221b: cwd-detected workspace (None when at repo root). Use the
+    // backend-provided paths to avoid hardcoding `ws/`.
+    let current_workspace = detect_current_workspace_from_backend(&backend_workspaces);
+    let current_workspace_state = current_workspace.as_deref().and_then(|name| {
+        backend_workspaces
+            .iter()
+            .find(|ws| ws.id.as_str() == name)
+            .map(|ws| {
+                let signals = collect_lifecycle_signals(&root, ws);
+                LifecycleState::classify(signals)
+            })
+    });
 
     // Check main branch sync status vs origin
     let main_sync = main_sync_status_inner(&root, branch);
@@ -703,7 +816,158 @@ fn collect_status() -> Result<StatusSummary> {
         is_stale,
         main_sync,
         stray_root_files,
+        current_workspace,
+        current_workspace_state,
+        stale_workspaces,
+        integrate_ready,
     })
+}
+
+/// bn-221b: collect the stale-workspace list with per-entry fix
+/// commands. Skips the default workspace (it tracks the branch and
+/// can't go stale in the ephemeral sense).
+fn collect_stale_workspaces(
+    root: &Path,
+    backend_workspaces: &[maw_core::model::types::WorkspaceInfo],
+    default_ws_name: &str,
+) -> Vec<StaleWorkspace> {
+    backend_workspaces
+        .iter()
+        .filter(|ws| ws.id.as_str() != default_ws_name)
+        .filter_map(|ws| {
+            let WorkspaceState::Stale { behind_epochs } = ws.state else {
+                return None;
+            };
+            let meta = workspace::metadata::read(root, ws.id.as_str()).unwrap_or_default();
+            let mode_persistent = meta.mode.is_persistent();
+            let name = ws.id.as_str().to_string();
+            let fix_command = LifecycleState::Stale
+                .fix_command(&name, mode_persistent)
+                .unwrap_or_else(|| format!("maw ws sync {name}"));
+            Some(StaleWorkspace {
+                name,
+                behind_epochs,
+                mode: format!("{}", meta.mode),
+                fix_command,
+            })
+        })
+        .collect()
+}
+
+/// bn-221b: collect workspaces with committed work that can be merged
+/// into the integration target right now. Stale workspaces are
+/// excluded — they appear in `stale_workspaces` with a sync fix
+/// instead.
+fn collect_integrate_ready(
+    backend_workspaces: &[maw_core::model::types::WorkspaceInfo],
+    default_ws_name: &str,
+) -> Vec<IntegrateReady> {
+    backend_workspaces
+        .iter()
+        .filter(|ws| ws.id.as_str() != default_ws_name)
+        .filter(|ws| ws.commits_ahead > 0)
+        .filter(|ws| !ws.state.is_stale())
+        .map(|ws| {
+            let name = ws.id.as_str().to_string();
+            let fix_command = format!("maw ws merge {name} --into {default_ws_name} --check");
+            IntegrateReady {
+                name,
+                commits_ahead: ws.commits_ahead,
+                fix_command,
+            }
+        })
+        .collect()
+}
+
+/// bn-221b: build the enriched per-workspace JSON item, deriving the
+/// lifecycle state from already-collected signals.
+fn build_workspace_status_item(
+    root: &Path,
+    ws: &maw_core::model::types::WorkspaceInfo,
+) -> WorkspaceStatusItem {
+    let name = ws.id.as_str().to_string();
+    let meta = workspace::metadata::read(root, ws.id.as_str()).unwrap_or_default();
+    let signals = collect_lifecycle_signals(root, ws);
+    let state = LifecycleState::classify(signals);
+    let behind = match ws.state {
+        WorkspaceState::Stale { behind_epochs } => Some(behind_epochs),
+        _ => None,
+    };
+    let fix_command = state.fix_command(&name, meta.mode.is_persistent());
+    let epoch = if ws.epoch.as_str().len() >= 12 {
+        Some(ws.epoch.as_str()[..12].to_string())
+    } else {
+        Some(ws.epoch.as_str().to_string())
+    };
+    WorkspaceStatusItem {
+        name,
+        branch: meta.branch,
+        lifecycle_state: Some(state),
+        epoch,
+        behind_epochs: behind,
+        commits_ahead: Some(ws.commits_ahead),
+        fix_command,
+    }
+}
+
+/// bn-221b: gather lifecycle signals for one workspace from the
+/// information the backend already exposes plus cheap on-disk checks.
+/// Conservative on errors — unknown signals default to "no friction"
+/// so the classifier never falsely promotes a healthy ws to
+/// `Conflicted` or `Missing`.
+fn collect_lifecycle_signals(
+    root: &Path,
+    ws: &maw_core::model::types::WorkspaceInfo,
+) -> LifecycleSignals {
+    let missing = !ws.path.exists();
+    let rebase_conflicts = if missing {
+        0
+    } else {
+        workspace::resolve::find_conflicted_files(&ws.path)
+            .map_or(0, |files| u32::try_from(files.len()).unwrap_or(u32::MAX))
+    };
+    let has_uncommitted = if missing {
+        false
+    } else {
+        maw_git::GixRepo::open(&ws.path)
+            .ok()
+            .and_then(|repo| repo.count_dirty_tracked().ok())
+            .is_some_and(|count| count > 0)
+    };
+    let _ = root; // reserved for future event-log enrichment (bn-221b follow-up).
+    LifecycleSignals {
+        missing,
+        rebase_conflicts,
+        is_stale: ws.state.is_stale(),
+        commits_ahead: ws.commits_ahead,
+        has_uncommitted,
+        was_integrated: false,
+    }
+}
+
+/// bn-221b: resolve "which workspace contains the cwd" by matching
+/// the cwd against backend-provided workspace paths. Layout-agnostic:
+/// no `ws/` literal. Returns the first workspace whose path is an
+/// ancestor of (or equal to) the cwd.
+fn detect_current_workspace_from_backend(
+    workspaces: &[maw_core::model::types::WorkspaceInfo],
+) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    workspaces
+        .iter()
+        .filter_map(|ws| {
+            let ws_path = ws.path.canonicalize().unwrap_or_else(|_| ws.path.clone());
+            if cwd.starts_with(&ws_path) {
+                Some((ws_path.components().count(), ws.id.as_str().to_string()))
+            } else {
+                None
+            }
+        })
+        // Most-specific match wins (longest path) — defends against
+        // pathological setups where two workspaces nest.
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, name)| name)
 }
 
 /// Lightweight status collection for `--status-bar`.
@@ -764,6 +1028,11 @@ fn collect_status_fast() -> Result<StatusSummary> {
             .map(|name| WorkspaceStatusItem {
                 name: name.clone(),
                 branch: None,
+                lifecycle_state: None,
+                epoch: None,
+                behind_epochs: None,
+                commits_ahead: None,
+                fix_command: None,
             })
             .collect(),
         workspace_names,
@@ -773,6 +1042,13 @@ fn collect_status_fast() -> Result<StatusSummary> {
         is_stale: false,
         main_sync,
         stray_root_files: Vec::new(),
+        // bn-221b: status-bar path is the prompt-display fast path; it
+        // skips lifecycle classification to keep ~50ms target. The JSON
+        // consumer uses collect_status() and gets the full vocabulary.
+        current_workspace: None,
+        current_workspace_state: None,
+        stale_workspaces: Vec::new(),
+        integrate_ready: Vec::new(),
     })
 }
 
@@ -837,6 +1113,10 @@ mod tests {
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
+            current_workspace: None,
+            current_workspace_state: None,
+            stale_workspaces: Vec::new(),
+            integrate_ready: Vec::new(),
         }
     }
 
