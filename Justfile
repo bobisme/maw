@@ -195,3 +195,20 @@ sg1-faithful-build:
 #   just sg2-report <artifact-dir> --median  # add per-arm median rows
 sg2-report dir *flags:
   cargo run --quiet -p maw-bench-metrics --features bench --bin sg2-report -- {{dir}} {{flags}}
+
+# sg2-sweep-pilot: drive the condition-spectrum sweep harness end-to-end
+# under MockAgent + NoopSubstrate (no spend, no network). 2 cells x 3
+# substrates x 3 seeds = 18 BenchRuns; aggregates them; prints the
+# spectrum table + crossover doc scaffold. T2.6 / bn-3l1f.
+#
+# Per pre-reg §3.1 Pilot rule: this is HARNESS-ONLY data. Output MUST
+# NOT be used to set bars or support publication claims; the recipe
+# exists to confirm the pipeline writes/aggregates/renders end-to-end.
+# The real condition-spectrum campaign is a downstream calendar
+# artifact (real-LLM, ~$100s of tokens) — invoked by the lead, not by
+# this recipe.
+#
+#   just sg2-sweep-pilot              # tempdir under /tmp
+#   just sg2-sweep-pilot <dir>        # explicit artifact dir
+sg2-sweep-pilot dir='':
+  cargo run --quiet -p maw-bench-sweep --features bench --bin sg2-sweep-pilot -- {{dir}}

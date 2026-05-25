@@ -1,0 +1,76 @@
+[package]
+name = "maw-bench-sweep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SG2 condition-spectrum sweep harness + crossover analysis (T2.6 / bn-3l1f)."
+keywords = ["maw", "benchmark", "sg2", "sweep", "crossover"]
+categories = ["development-tools::testing"]
+
+# Why a sibling crate (T2.6 architectural decision — bn-3l1f):
+# --------------------------------------------------------------------------
+# Two options were considered:
+#
+#   A. Module under `maw-bench-metrics` (`maw_bench_metrics::sweep`).
+#   B. New sibling crate `maw-bench-sweep`. <- CHOSEN.
+#
+# Rationale for (B):
+#
+# 1. **Dependency-graph cleanliness.** The sweep DRIVER half needs
+#    `maw-bench` (BenchHarness, MockAgent, Substrate). The
+#    AGGREGATOR / CROSSOVER halves need `maw-bench-metrics`
+#    (MetricRecord, extract_metrics). Co-locating with
+#    `maw-bench-metrics` would force the metrics crate to depend on
+#    the harness — flipping the "metrics is a read-only consumer"
+#    relationship documented in maw-bench-metrics/Cargo.toml.
+#
+# 2. **Mirrors the established pattern.** maw-bench /
+#    maw-bench-adapters / maw-bench-metrics are all siblings, all
+#    gated behind `bench`. T2.6 follows the same shape.
+#
+# 3. **Compile-cycle isolation.** The pure-data SweepSummary,
+#    crossover finder, and renderer can be exercised in isolation
+#    without rebuilding the LLM-bearing harness.
+#
+# 4. **Forward-compat to T2.5 schema v2.** The aggregator parses
+#    BenchRun JSON via serde_json::Value (then attempts both
+#    schema_version=1 and schema_version=2 decoders). Living in its
+#    own crate keeps that parser surface from leaking into the
+#    metric-extraction code path.
+#
+# Tests are MockAgent-shaped: they fabricate `BenchRun` records /
+# `MetricRecord` aggregates in memory (no I/O outside tempdir) and
+# assert sweep + crossover invariants.
+
+[features]
+default = []
+# Pulls the sweep driver, aggregator, crossover finder, and renderer.
+bench = [
+    "dep:maw-bench",
+    "maw-bench/bench",
+    "dep:maw-bench-metrics",
+    "maw-bench-metrics/bench",
+    "dep:maw-scenario",
+    "dep:serde",
+    "dep:serde_json",
+]
+
+[dependencies]
+maw-bench = { path = "../maw-bench", version = "0.61.0", optional = true }
+maw-bench-metrics = { path = "../maw-bench-metrics", version = "0.61.0", optional = true }
+maw-scenario = { path = "../maw-scenario", version = "0.61.0", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "sg2-sweep-pilot"
+path = "src/bin/sg2_sweep_pilot.rs"
+required-features = ["bench"]
+
+[lints]
+workspace = true
