@@ -78,5 +78,13 @@ name = "sg2-friction-list"
 path = "src/bin/sg2_friction_list.rs"
 required-features = ["bench"]
 
+# T4.3 (bn-1qty): SG4 re-bench runner. Diffs a baseline/after
+# FrictionList pair (or sweep-artifact-directory pair) and emits the
+# per-cluster delta report + iteration triggers.
+[[bin]]
+name = "sg4-rebench"
+path = "src/bin/sg4_rebench.rs"
+required-features = ["bench"]
+
 [lints]
 workspace = true

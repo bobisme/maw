@@ -281,6 +281,79 @@ sg2-friction-list-pilot:
   echo "  sweep-derived:   $PILOT_DIR/friction-list-from-sweep.{json,md}"
   echo "  synthetic-demo:  $PILOT_DIR/friction-list.{json,md}"
 
+# ----------------------------------------------------------------------------
+# SG4 — re-bench + per-cluster delta report. T4.3 / bn-1qty.
+# ----------------------------------------------------------------------------
+
+# sg4-rebench: diff two FrictionList sources (JSON files OR sweep
+# artifact directories of BenchRun JSONs) and emit the per-cluster
+# delta report + iteration triggers. The two args are positional in
+# the production path: baseline first, after second; optional out-dir
+# defaults to the workspace root (writes sg4-fix-deltas.{json,md}).
+#
+# Per pre-reg §3.1: numbers stamped onto the rendered Markdown carry
+# an explicit PILOT vs PRODUCTION banner. Pilot data MUST NOT set bars
+# or feed publication; the real re-bench replaces the rows when the
+# real-LLM after-run lands (calendar artifact, ~$100s of tokens, lead
+# invokes — not this recipe).
+#
+#   just sg4-rebench <baseline> <after>          # writes to ./sg4-fix-deltas.{json,md}
+#   just sg4-rebench <baseline> <after> <outdir> # writes <outdir>/sg4-fix-deltas.{json,md}
+sg4-rebench baseline after outdir='.':
+  cargo run --quiet -p maw-bench-metrics --features bench --bin sg4-rebench -- \
+    --baseline {{baseline}} \
+    --after {{after}} \
+    --out-json {{outdir}}/sg4-fix-deltas.json \
+    --out-md {{outdir}}/sg4-fix-deltas.md
+
+# sg4-rebench-pilot: end-to-end pilot for T4.3. Builds a planted
+# baseline+after FrictionList pair in-memory (MockAgent-shaped — no
+# BenchRuns, no LLM spend, no network), diffs them, and emits the
+# sg4-fix-deltas.md scaffold + JSON peer. Asserts:
+#
+#   - Diff JSON has the expected per-cluster rows for the T4.1 backlog.
+#   - The Markdown carries the PILOT banner (per pre-reg §3.1).
+#   - Pass-through case: every cluster meets target in the planted
+#     after-run, so iteration_triggers is empty.
+#   - Renderer emits the renegotiation-template section (TEMPLATE
+#     only in pilot; real-run populates it when a target is missed).
+sg4-rebench-pilot:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  PILOT_DIR="${TMPDIR:-/tmp}/sg4-rebench-pilot-$$"
+  rm -rf "$PILOT_DIR"
+  mkdir -p "$PILOT_DIR"
+  echo "sg4-rebench-pilot: artifact dir = $PILOT_DIR"
+  cargo run --quiet -p maw-bench-metrics --features bench --bin sg4-rebench -- \
+    --pilot \
+    --out-json "$PILOT_DIR/sg4-fix-deltas.json" \
+    --out-md "$PILOT_DIR/sg4-fix-deltas.md"
+  echo ""
+  echo "----- sg4-fix-deltas.md (head) -----"
+  head -80 "$PILOT_DIR/sg4-fix-deltas.md"
+  echo "----- end head -----"
+  # Smoke assertions on the rendered doc.
+  grep -q "PILOT" "$PILOT_DIR/sg4-fix-deltas.md"
+  grep -q "## Per-cluster delta table" "$PILOT_DIR/sg4-fix-deltas.md"
+  grep -q "## Unattributed bucket delta" "$PILOT_DIR/sg4-fix-deltas.md"
+  grep -q "## Iteration triggers" "$PILOT_DIR/sg4-fix-deltas.md"
+  grep -q "## Renegotiated targets" "$PILOT_DIR/sg4-fix-deltas.md"
+  # JSON pin: schema_version=1, rows is a 7-element list (the
+  # T4.1 backlog), iteration_triggers is empty in the happy-path
+  # pilot, unattributed delta is present.
+  python3 -c "import json; d=json.load(open('$PILOT_DIR/sg4-fix-deltas.json')); \
+    assert d['schema_version']==1, d; \
+    assert d['is_pilot'] is True, d; \
+    assert len(d['rows'])==7, ('expected 7 rows', len(d['rows'])); \
+    assert d['iteration_triggers']==[], ('pilot happy-path must have no triggers', d['iteration_triggers']); \
+    assert 'unattributed' in d and 'baseline_count' in d['unattributed']; \
+    bones={r['fix_task_bone'] for r in d['rows']}; \
+    assert bones=={'bn-yyx','bn-221b','bn-1ieb','bn-1t17','bn-29fi','bn-c6l3','bn-242l'}, bones; \
+    verdicts={r['verdict'] for r in d['rows']}; \
+    assert verdicts=={'target_met'}, ('pilot happy-path must have all rows TargetMet', verdicts)"
+  echo "sg4-rebench-pilot: OK"
+  echo "  pilot deltas:    $PILOT_DIR/sg4-fix-deltas.{json,md}"
+
 # sp5-pilot: SP5 layout-ergonomics directional spike (bone bn-2kgu).
 # Runs the structural-ergonomics comparison between the current `ws/`
 # layout and the proposed consolidated `.maw/workspaces/` layout under
