@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::workspace::lifecycle::{LifecycleSignals, LifecycleState};
 use crate::workspace::templates::TemplateDefaults;
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceState;
@@ -50,6 +51,25 @@ pub struct WorkspaceInfo {
     /// guidance.
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) missing: bool,
+    /// bn-242l (SG4 / `read_from_stale_workspace` mitigation): named
+    /// safe-cleanup vocabulary slug for the workspace. Mirrors
+    /// `WorkspaceEntry::lifecycle_state` from `maw ws status` and the
+    /// `workspace_details[].lifecycle_state` field of `maw status --json`
+    /// so all three discovery surfaces agree on a single enum vocabulary.
+    /// Cluster `read_from_stale_workspace` fires when an agent reads
+    /// `maw ws list` (or `status`/`diff`) output and its next op is
+    /// inconsistent with a stale workspace — carrying the same named
+    /// slug everywhere closes the prose-misread gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lifecycle_state: Option<LifecycleState>,
+    /// bn-242l: exact recovery command for the workspace's current
+    /// lifecycle state — `maw ws sync <name>`, `maw ws merge <name>
+    /// --into default --check`, etc. Same shape as the load-bearing
+    /// `fix_command` field of `maw status --json` so the agent's first
+    /// attempt is the right one whether they read `status`, `ws list`,
+    /// or `ws status`. Absent for `clean`/`integrated`/default workspaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fix_command: Option<String>,
 }
 
 /// Compact merge-check result for ws list output.
@@ -201,6 +221,40 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 super::resolve::find_conflicted_files(&ws_path)
                     .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
             };
+            // bn-242l: classify lifecycle state and compute the
+            // exact fix command. Use the same signals/priority order
+            // as `maw status --json` and `maw ws status` so the three
+            // discovery surfaces cannot disagree. Skip classification
+            // for the default workspace (it's not a candidate for the
+            // stale/integrate-ready vocabulary) and for quarantine
+            // workspaces (they have their own special-case wiring
+            // and an opaque-lifecycle classifier would be misleading).
+            let (lifecycle_state, fix_command) = if is_default || is_quarantine {
+                (None, None)
+            } else {
+                let has_uncommitted = if missing {
+                    false
+                } else {
+                    maw_git::GixRepo::open(&ws.path)
+                        .ok()
+                        .and_then(|repo| {
+                            use maw_git::GitRepo as _;
+                            repo.count_dirty_tracked().ok()
+                        })
+                        .is_some_and(|c| c > 0)
+                };
+                let signals = LifecycleSignals {
+                    missing,
+                    rebase_conflicts,
+                    is_stale: ws.state.is_stale(),
+                    commits_ahead: ws.commits_ahead,
+                    has_uncommitted,
+                    was_integrated: false,
+                };
+                let state = LifecycleState::classify(signals);
+                let fix = state.fix_command(ws.id.as_str(), ws_mode.is_persistent());
+                (Some(state), fix)
+            };
             WorkspaceInfo {
                 is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),
@@ -236,6 +290,8 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 rebase_conflicts,
                 description: ws_meta.description,
                 missing,
+                lifecycle_state,
+                fix_command,
                 name,
             }
         })
@@ -335,7 +391,18 @@ const fn is_conflicted(ws: &WorkspaceInfo) -> bool {
 /// provably consistent with `ws status` (bn-2l00). A conflicted workspace must
 /// never be classified "ready to merge" — the merge gate hard-refuses it.
 fn text_annotation(ws: &WorkspaceInfo, check_annotation: Option<&str>) -> String {
-    if ws.missing {
+    // bn-242l: append the named lifecycle slug as a `[lifecycle:<slug>]`
+    // suffix so the prose carries the same canonical vocabulary the
+    // JSON consumer reads from `lifecycle_state`. The cluster this
+    // bone is funded to reduce (`read_from_stale_workspace`) fires
+    // when an agent reads this output and misclassifies the state;
+    // the slug suffix makes the misread mechanical — the token is
+    // literally present in the line.
+    let lifecycle_tag = ws
+        .lifecycle_state
+        .map(|state| format!(" [lifecycle:{}]", state.slug()))
+        .unwrap_or_default();
+    let base = if ws.missing {
         format!(" (MISSING — fix: maw ws destroy {} --force)", ws.name)
     } else if is_conflicted(ws) {
         // bn-2l00: a workspace whose HEAD still carries unresolved rebase
@@ -357,7 +424,8 @@ fn text_annotation(ws: &WorkspaceInfo, check_annotation: Option<&str>) -> String
         " (quarantine)".to_string()
     } else {
         String::new()
-    }
+    };
+    format!("{base}{lifecycle_tag}")
 }
 
 /// Print workspace list in minimal text format (agent-friendly).
@@ -518,9 +586,31 @@ fn print_list_pretty(
                 }
             })
             .unwrap_or_default();
+        // bn-242l: named lifecycle slug tag, identical to the JSON
+        // `lifecycle_state` field so prose-reading and JSON-reading
+        // agents branch on the same vocabulary.
+        let lifecycle_tag = ws
+            .lifecycle_state
+            .map(|state| {
+                if use_color {
+                    format!(" \x1b[35m[lifecycle:{}]\x1b[0m", state.slug())
+                } else {
+                    format!(" [lifecycle:{}]", state.slug())
+                }
+            })
+            .unwrap_or_default();
         println!(
-            "{} {}{}{} {} {}{}{}{}",
-            glyph, name_style, ws.name, reset, ws.epoch, ws.state, mode_tag, branch_tag, check_tag
+            "{} {}{}{} {} {}{}{}{}{}",
+            glyph,
+            name_style,
+            ws.name,
+            reset,
+            ws.epoch,
+            ws.state,
+            mode_tag,
+            branch_tag,
+            check_tag,
+            lifecycle_tag
         );
 
         if let Some(desc) = &ws.description {
@@ -812,6 +902,19 @@ mod tests {
     use super::*;
 
     fn ws_info(name: &str, commits_ahead: u32, rebase_conflicts: u32) -> WorkspaceInfo {
+        // bn-242l: build a synthetic LifecycleSignals so the test
+        // fixture mirrors what `list()` does at runtime — same
+        // classifier output the production code path would compute.
+        let signals = LifecycleSignals {
+            missing: false,
+            rebase_conflicts,
+            is_stale: false,
+            commits_ahead,
+            has_uncommitted: false,
+            was_integrated: false,
+        };
+        let lifecycle_state = LifecycleState::classify(signals);
+        let fix_command = lifecycle_state.fix_command(name, false);
         WorkspaceInfo {
             name: name.to_string(),
             is_default: false,
@@ -834,6 +937,8 @@ mod tests {
             rebase_conflicts,
             description: None,
             missing: false,
+            lifecycle_state: Some(lifecycle_state),
+            fix_command,
         }
     }
 

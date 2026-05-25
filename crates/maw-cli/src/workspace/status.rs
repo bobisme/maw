@@ -4,8 +4,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
+use crate::workspace::lifecycle::{LifecycleSignals, LifecycleState};
 use maw_core::backend::WorkspaceBackend;
-use maw_core::model::types::WorkspaceMode;
+use maw_core::model::types::{WorkspaceMode, WorkspaceState};
 use maw_core::oplog::global_view::compute_global_view;
 use maw_core::oplog::read::read_head;
 use maw_core::oplog::view::read_patch_set_blob;
@@ -49,6 +50,38 @@ pub struct WorkspaceEntry {
     /// Number of unresolved rebase conflicts (0 = none).
     #[serde(skip_serializing_if = "is_zero")]
     pub(crate) rebase_conflicts: u32,
+    /// bn-242l (SG4 / `read_from_stale_workspace` mitigation):
+    /// named safe-cleanup vocabulary slug for the workspace. Mirrors
+    /// the per-workspace classifier behind `maw status --json` so an
+    /// agent reading `maw ws status --format json` can branch on the
+    /// same enum vocabulary as `maw status --json` without re-parsing
+    /// the free-text `state` string. Absent for the default workspace
+    /// (it cannot go stale in the ephemeral sense) and when the
+    /// classifier has insufficient signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lifecycle_state: Option<LifecycleState>,
+    /// bn-242l: count of commits ahead of the base epoch — i.e.,
+    /// "work to merge". Mirrors `WorkspaceInfo::commits_ahead` from
+    /// `maw ws list` so the two outputs agree on the integer the
+    /// agent should branch on. 0 when the workspace has no committed
+    /// work waiting to integrate.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) commits_ahead: u32,
+    /// bn-242l: count of epoch advances the workspace is behind the
+    /// current epoch (1+ when stale, absent otherwise). Lets the agent
+    /// distinguish "stale by 1 advance" from "stale by N" without
+    /// reading the prose `state` string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) behind_epochs: Option<u32>,
+    /// bn-242l: exact recovery command for the workspace's current
+    /// lifecycle state — `maw ws sync <name>` when stale, `maw ws
+    /// merge <name> --into default --check` when committed-unintegrated,
+    /// etc. Absent for `clean`/`integrated` and the default workspace.
+    /// Same shape as the load-bearing `fix_command` field in
+    /// `maw status --json`'s `stale_workspaces` / `integrate_ready`
+    /// lists — keeps the agent's first attempt the right one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fix_command: Option<String>,
 }
 
 #[expect(
@@ -57,6 +90,33 @@ pub struct WorkspaceEntry {
 )]
 const fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+/// bn-242l: build the legacy `state` free-text field of a
+/// [`WorkspaceEntry`]. The shape is intentionally unchanged from the
+/// pre-bn-242l output so existing parsers stay green; the canonical
+/// safe-cleanup vocabulary slug now rides alongside on the new
+/// [`WorkspaceEntry::lifecycle_state`] field and is rendered as a
+/// dedicated line in the text/pretty output (see
+/// `print_status_text` / `print_status_pretty`).
+///
+/// Centralising the construction here is what lets `ws status` and
+/// `ws list` (whose `WorkspaceInfo::state` is built the same way)
+/// stay in lock-step — the bn-2l00 parity assertion in `list.rs`'s
+/// tests is preserved by this function being the single producer.
+fn build_entry_state(
+    is_default: bool,
+    rebase_conflicts: u32,
+    _lifecycle_state: Option<LifecycleState>,
+    backend_state: &WorkspaceState,
+) -> String {
+    if is_default {
+        return "active".to_owned();
+    }
+    if rebase_conflicts > 0 {
+        return format!("conflicted ({rebase_conflicts} conflict(s))");
+    }
+    format!("{backend_state}")
 }
 
 #[derive(Serialize)]
@@ -145,24 +205,67 @@ pub fn status(format: OutputFormat) -> Result<()> {
             } else {
                 ws_meta.mode
             };
-            let rebase_conflicts = {
-                let ws_path = root.join("ws").join(ws.id.as_str());
-                super::resolve::find_conflicted_files(&ws_path)
-                    .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
+            // bn-242l: use the backend-provided `ws.path` rather than
+            // re-joining `root/ws/<id>` so this stays layout-agnostic
+            // (T3.2 / bn-2sw3 flips the on-disk root via the layout
+            // flavor enum; the backend already returns the resolved path).
+            let rebase_conflicts = super::resolve::find_conflicted_files(&ws.path)
+                .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX));
+            // bn-242l: classify the workspace using the same signals
+            // and priority order as `maw status --json` so the two
+            // outputs cannot disagree. Skip classification for the
+            // default workspace — it's a permanent fixture, not a
+            // candidate for the stale/integrate-ready vocabulary.
+            let (lifecycle_state, behind, commits_ahead_field, fix_command) = if is_default {
+                (None, None, 0_u32, None)
+            } else {
+                let has_uncommitted = maw_git::GixRepo::open(&ws.path)
+                    .ok()
+                    .and_then(|repo| {
+                        use maw_git::GitRepo as _;
+                        repo.count_dirty_tracked().ok()
+                    })
+                    .is_some_and(|c| c > 0);
+                let signals = LifecycleSignals {
+                    missing: !ws.path.exists(),
+                    rebase_conflicts,
+                    is_stale: ws.state.is_stale(),
+                    commits_ahead: ws.commits_ahead,
+                    has_uncommitted,
+                    was_integrated: false,
+                };
+                let state = LifecycleState::classify(signals);
+                let behind = match ws.state {
+                    WorkspaceState::Stale { behind_epochs } => Some(behind_epochs),
+                    _ => None,
+                };
+                let fix = state.fix_command(ws.id.as_str(), ws_mode.is_persistent());
+                (Some(state), behind, ws.commits_ahead, fix)
             };
             WorkspaceEntry {
                 name: ws.id.as_str().to_string(),
                 is_default,
                 epoch: ws.epoch.as_str()[..12].to_string(),
-                state: if is_default {
-                    "active".to_owned()
-                } else if rebase_conflicts > 0 {
-                    format!("conflicted ({rebase_conflicts} conflict(s))")
-                } else {
-                    format!("{}", ws.state)
-                },
+                // bn-242l: prefix the free-text state with the named
+                // safe-cleanup vocabulary slug in brackets when the
+                // classifier returned one, so prose-reading agents see
+                // the same canonical token (`stale`, `committed-
+                // unintegrated`, etc.) the JSON consumer sees in
+                // `lifecycle_state`. Cluster `read_from_stale_workspace`
+                // fires when an agent misreads this surface; the
+                // prefixed slug closes the inference gap.
+                state: build_entry_state(
+                    is_default,
+                    rebase_conflicts,
+                    lifecycle_state,
+                    &ws.state,
+                ),
                 mode: format!("{ws_mode}"),
                 rebase_conflicts,
+                lifecycle_state,
+                commits_ahead: commits_ahead_field,
+                behind_epochs: behind,
+                fix_command,
             }
         })
         .collect();
@@ -282,10 +385,33 @@ fn print_status_text(
         } else {
             ""
         };
+        // bn-242l (SG4 / status-output-discoverability): tag every
+        // non-default workspace with its named lifecycle slug. The
+        // cluster `read_from_stale_workspace` fires when an agent
+        // reads this surface and misreads the prose; carrying the
+        // canonical token here means the prose-reader sees the same
+        // vocabulary as the JSON consumer.
+        let lifecycle_marker = ws
+            .lifecycle_state
+            .map(|state| format!(" [lifecycle:{}]", state.slug()))
+            .unwrap_or_default();
         println!(
-            "  {}  epoch:{}{}{}{}{}",
-            ws.name, ws.epoch, stale_marker, conflict_marker, mode_marker, default_marker
+            "  {}  epoch:{}{}{}{}{}{}",
+            ws.name,
+            ws.epoch,
+            stale_marker,
+            conflict_marker,
+            mode_marker,
+            lifecycle_marker,
+            default_marker
         );
+        // bn-242l: paste-able fix command on its own line for any
+        // workspace that has an actionable next step. Mirrors the
+        // `fix_command` field in the JSON envelope so the agent can
+        // copy from either output surface.
+        if let Some(fix) = ws.fix_command.as_deref() {
+            println!("    Fix: {fix}");
+        }
     }
 
     // Stale workspace hints
@@ -433,21 +559,32 @@ fn print_status_pretty(
         } else {
             ""
         };
+        // bn-242l: render the named lifecycle slug as a dedicated
+        // tag in the pretty output so a prose-reading agent sees the
+        // canonical `[lifecycle:<slug>]` token alongside the existing
+        // free-text state. Same vocabulary as JSON's `lifecycle_state`.
+        let lifecycle_tag = ws
+            .lifecycle_state
+            .map(|state| format!(" [lifecycle:{}]", state.slug()))
+            .unwrap_or_default();
         if ws.is_default {
             println!(
-                "  {green}\u{25cf} {}{reset} epoch:{} {}{}",
-                ws.name, ws.epoch, ws.state, mode_tag
+                "  {green}\u{25cf} {}{reset} epoch:{} {}{}{}",
+                ws.name, ws.epoch, ws.state, mode_tag, lifecycle_tag
             );
         } else if ws.state.contains("stale") {
             println!(
-                "  {yellow}\u{25b2} {}{reset} epoch:{} {}{}",
-                ws.name, ws.epoch, ws.state, mode_tag
+                "  {yellow}\u{25b2} {}{reset} epoch:{} {}{}{}",
+                ws.name, ws.epoch, ws.state, mode_tag, lifecycle_tag
             );
         } else {
             println!(
-                "  {gray}\u{25cc} {}{reset} epoch:{} {}{}",
-                ws.name, ws.epoch, ws.state, mode_tag
+                "  {gray}\u{25cc} {}{reset} epoch:{} {}{}{}",
+                ws.name, ws.epoch, ws.state, mode_tag, lifecycle_tag
             );
+        }
+        if let Some(fix) = ws.fix_command.as_deref() {
+            println!("    {gray}Fix: {fix}{reset}");
         }
     }
 

@@ -7,11 +7,12 @@ use glob::Pattern;
 use maw_git::GitRepo as _;
 use serde::Serialize;
 
+use crate::workspace::lifecycle::{LifecycleSignals, LifecycleState};
 use maw_core::backend::WorkspaceBackend;
-use maw_core::model::types::WorkspaceId;
+use maw_core::model::types::{WorkspaceId, WorkspaceState};
 use maw_core::refs as manifold_refs;
 
-use super::{DEFAULT_WORKSPACE, get_backend, repo_root};
+use super::{DEFAULT_WORKSPACE, get_backend, metadata, repo_root};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffFormat {
@@ -54,6 +55,26 @@ struct DiffJsonOutput {
     head: DiffRevisionJson,
     stats: DiffStatsJson,
     files: Vec<DiffFileJson>,
+    /// bn-242l (SG4 / `read_from_stale_workspace` mitigation):
+    /// safe-cleanup vocabulary slug for the workspace being diffed.
+    /// Pre-bn-242l, `maw ws diff --format json` returned a file list
+    /// with no liveness signal — an agent inspecting diff output to
+    /// decide "is this workspace ready to merge" then issued a verb
+    /// inconsistent with a stale base. Carrying the same
+    /// `lifecycle_state` slug `maw status --json` / `maw ws status`
+    /// / `maw ws list` expose closes that misread loop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle_state: Option<LifecycleState>,
+    /// bn-242l: count of epoch advances the workspace is behind, when
+    /// stale. Absent when not stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behind_epochs: Option<u32>,
+    /// bn-242l: paste-able fix command for the workspace's current
+    /// lifecycle state. Absent for `clean`/`integrated` workspaces.
+    /// Mirrors the field on `WorkspaceInfo` / `WorkspaceEntry` /
+    /// `StaleWorkspace`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix_command: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,7 +163,13 @@ pub fn diff(
         DiffFormat::Json => {
             let mut entries = collect_diff_entries_worktree(diff_dir, &base.rev, &pathspecs)?;
             entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.status.cmp(&b.status)));
-            print_json(&ws_id, &base, &head, &entries)?;
+            // bn-242l: compute the workspace's named lifecycle state so
+            // the JSON payload carries the same safe-cleanup vocabulary
+            // as `maw status --json` / `maw ws status` / `maw ws list`.
+            // Agents inspecting `ws diff` output to decide their next
+            // verb get the staleness signal up front.
+            let lifecycle = classify_lifecycle_for_diff(&backend, &root, &ws_id);
+            print_json(&ws_id, &base, &head, &entries, lifecycle.as_ref())?;
         }
     }
 
@@ -337,6 +364,7 @@ fn print_json(
     base: &ResolvedRev,
     head: &ResolvedRev,
     entries: &[DiffEntry],
+    lifecycle: Option<&DiffLifecycleInfo>,
 ) -> Result<()> {
     let stats = summarize(entries);
     let out = DiffJsonOutput {
@@ -363,9 +391,80 @@ fn print_json(
                 binary: e.binary,
             })
             .collect(),
+        lifecycle_state: lifecycle.map(|l| l.state),
+        behind_epochs: lifecycle.and_then(|l| l.behind_epochs),
+        fix_command: lifecycle.and_then(|l| l.fix_command.clone()),
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+/// bn-242l: lifecycle bundle for `maw ws diff --format json` output.
+/// Keeps `print_json` total — the helper produces `None` only when
+/// the backend has no record of the workspace (shouldn't happen
+/// because `diff()` already gated on `backend.exists`), so this is
+/// effectively always populated for non-default targets.
+#[derive(Debug)]
+struct DiffLifecycleInfo {
+    state: LifecycleState,
+    behind_epochs: Option<u32>,
+    fix_command: Option<String>,
+}
+
+/// bn-242l: classify the lifecycle state of the diff target. Uses the
+/// same signal set / priority order as `maw status --json` and `maw
+/// ws status` / `maw ws list` so the four discovery surfaces cannot
+/// disagree on whether a workspace is stale / committed-unintegrated /
+/// dirty / clean. Conservative on errors — returns `None` rather
+/// than crashing the diff command.
+fn classify_lifecycle_for_diff<B: WorkspaceBackend>(
+    backend: &B,
+    root: &Path,
+    ws_id: &WorkspaceId,
+) -> Option<DiffLifecycleInfo>
+where
+    B::Error: std::fmt::Display,
+{
+    if ws_id.as_str() == DEFAULT_WORKSPACE {
+        return None;
+    }
+    let workspaces = backend.list().ok()?;
+    let ws = workspaces.into_iter().find(|w| &w.id == ws_id)?;
+    let missing = !ws.path.exists();
+    let rebase_conflicts = if missing {
+        0
+    } else {
+        super::resolve::find_conflicted_files(&ws.path)
+            .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
+    };
+    let has_uncommitted = if missing {
+        false
+    } else {
+        maw_git::GixRepo::open(&ws.path)
+            .ok()
+            .and_then(|repo| repo.count_dirty_tracked().ok())
+            .is_some_and(|c| c > 0)
+    };
+    let meta = metadata::read(root, ws.id.as_str()).unwrap_or_default();
+    let signals = LifecycleSignals {
+        missing,
+        rebase_conflicts,
+        is_stale: ws.state.is_stale(),
+        commits_ahead: ws.commits_ahead,
+        has_uncommitted,
+        was_integrated: false,
+    };
+    let state = LifecycleState::classify(signals);
+    let behind = match ws.state {
+        WorkspaceState::Stale { behind_epochs } => Some(behind_epochs),
+        _ => None,
+    };
+    let fix_command = state.fix_command(ws.id.as_str(), meta.mode.is_persistent());
+    Some(DiffLifecycleInfo {
+        state,
+        behind_epochs: behind,
+        fix_command,
+    })
 }
 
 fn summarize(entries: &[DiffEntry]) -> DiffStatsJson {
