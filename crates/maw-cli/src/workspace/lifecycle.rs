@@ -64,6 +64,14 @@ pub enum LifecycleState {
     /// `Clean` for safety purposes but distinguishes the lineage —
     /// the workspace had work and that work landed.
     Integrated,
+    /// Workspace was destroyed (typically with `--force` while it had
+    /// committed work) and a recovery snapshot is pinned. The
+    /// workspace dir no longer exists, but its committed work lives
+    /// in a recovery ref and has NOT yet been integrated to the
+    /// branch. SG4 `bn-29fi` (destroy-prevention) cue: when this
+    /// state is visible, the next action is to recover and merge
+    /// the queued work, NOT to destroy another workspace.
+    AbandonedWithSnapshot,
 }
 
 impl LifecycleState {
@@ -85,6 +93,7 @@ impl LifecycleState {
             Self::DirtyUncommitted => "dirty-uncommitted",
             Self::Clean => "clean",
             Self::Integrated => "integrated",
+            Self::AbandonedWithSnapshot => "abandoned-with-snapshot",
         }
     }
 
@@ -92,18 +101,24 @@ impl LifecycleState {
     /// already-collected discovery signals.
     ///
     /// Priority (highest first):
-    /// 1. `Missing` — worktree dir gone (invalidates other checks)
-    /// 2. `Conflicted` — unresolved conflict markers
-    /// 3. `Stale` — base epoch behind current
-    /// 4. `CommittedUnintegrated` — commits ahead of epoch
-    /// 5. `DirtyUncommitted` — uncommitted edits
-    /// 6. `Integrated` — previously-recorded work that landed (currently
+    /// 1. `AbandonedWithSnapshot` — worktree dir gone AND a pinned
+    ///    recovery snapshot exists (bn-29fi destroy-prevention cue:
+    ///    more specific than plain `Missing`).
+    /// 2. `Missing` — worktree dir gone (invalidates other checks)
+    /// 3. `Conflicted` — unresolved conflict markers
+    /// 4. `Stale` — base epoch behind current
+    /// 5. `CommittedUnintegrated` — commits ahead of epoch
+    /// 6. `DirtyUncommitted` — uncommitted edits
+    /// 7. `Integrated` — previously-recorded work that landed (currently
     ///    a hint surface; classifier returns this only when
     ///    `commits_ahead == 0` AND the caller passes `was_integrated = true`)
-    /// 7. `Clean` — otherwise
+    /// 8. `Clean` — otherwise
     #[must_use]
     pub const fn classify(signals: LifecycleSignals) -> Self {
         if signals.missing {
+            if signals.has_pinned_snapshot {
+                return Self::AbandonedWithSnapshot;
+            }
             return Self::Missing;
         }
         if signals.rebase_conflicts > 0 {
@@ -135,6 +150,12 @@ impl LifecycleState {
     pub fn fix_command(self, ws_name: &str, mode_persistent: bool) -> Option<String> {
         match self {
             Self::Missing => Some(format!("maw ws recover {ws_name}")),
+            Self::AbandonedWithSnapshot => {
+                // bn-29fi destroy-prevention: the snapshot exists AND
+                // typically carries committed-unintegrated work. The
+                // mergeback cue is recover-into-new-ws then merge.
+                Some(format!("maw ws recover {ws_name} --to {ws_name}-restored"))
+            }
             Self::Conflicted => Some(format!("maw ws resolve {ws_name} --list")),
             Self::Stale => {
                 if mode_persistent {
@@ -185,6 +206,14 @@ pub struct LifecycleSignals {
     /// to distinguish a freshly-merged workspace from a never-edited
     /// one). The classifier never sets this from other signals.
     pub was_integrated: bool,
+    /// Caller-provided hint (bn-29fi): a pinned recovery snapshot
+    /// exists for this workspace (a destroy-record under
+    /// `.manifold/artifacts/ws/<name>/destroy/` and/or a recovery ref
+    /// under `refs/manifold/recovery/<name>/`). Combined with
+    /// `missing = true`, promotes the classification from `Missing`
+    /// to `AbandonedWithSnapshot` so the agent's next action is
+    /// recover-and-merge (or recover-and-restore), NOT discovery.
+    pub has_pinned_snapshot: bool,
 }
 
 #[cfg(test)]
@@ -204,6 +233,48 @@ mod tests {
         s.commits_ahead = 2;
         s.has_uncommitted = true;
         assert_eq!(LifecycleState::classify(s), LifecycleState::Missing);
+    }
+
+    /// bn-29fi: a missing workspace WITH a pinned recovery snapshot
+    /// classifies as `AbandonedWithSnapshot`, not `Missing`. This is
+    /// the destroy-prevention cue: the agent sees the more specific
+    /// name and reaches for `recover --to` instead of "discovery
+    /// then guess".
+    #[test]
+    fn abandoned_with_snapshot_beats_plain_missing() {
+        let mut s = signals();
+        s.missing = true;
+        s.has_pinned_snapshot = true;
+        assert_eq!(
+            LifecycleState::classify(s),
+            LifecycleState::AbandonedWithSnapshot
+        );
+    }
+
+    /// bn-29fi: classifier never elevates a present workspace to
+    /// `AbandonedWithSnapshot` — the variant is reserved for the
+    /// destroyed-but-snapshot-pinned case.
+    #[test]
+    fn abandoned_with_snapshot_requires_missing() {
+        let mut s = signals();
+        s.has_pinned_snapshot = true; // present + pinned snapshot
+        assert_eq!(LifecycleState::classify(s), LifecycleState::Clean);
+    }
+
+    /// bn-29fi: `AbandonedWithSnapshot`'s fix command names the
+    /// recover-into-new-workspace path because that's the only
+    /// destroy-prevention-correct action (the original workspace dir
+    /// is gone, so a same-name recover is itself a creation).
+    #[test]
+    fn abandoned_with_snapshot_fix_command_is_recover_to() {
+        let cmd = LifecycleState::AbandonedWithSnapshot
+            .fix_command("alice", false)
+            .expect("abandoned-with-snapshot has a fix");
+        assert!(cmd.contains("maw ws recover alice"));
+        assert!(
+            cmd.contains("--to"),
+            "fix should name the recover-to path: {cmd}"
+        );
     }
 
     #[test]
@@ -304,6 +375,7 @@ mod tests {
             LifecycleState::DirtyUncommitted,
             LifecycleState::Clean,
             LifecycleState::Integrated,
+            LifecycleState::AbandonedWithSnapshot,
         ] {
             let slug = state.slug();
             // Stable: no internal whitespace, no underscores.

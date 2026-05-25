@@ -934,7 +934,13 @@ fn collect_lifecycle_signals(
             .and_then(|repo| repo.count_dirty_tracked().ok())
             .is_some_and(|count| count > 0)
     };
-    let _ = root; // reserved for future event-log enrichment (bn-221b follow-up).
+    // bn-29fi: surface "this workspace was previously destroyed with a
+    // pinned snapshot" as a signal so the classifier can promote a
+    // missing workspace to `AbandonedWithSnapshot` (more specific than
+    // plain `Missing`). Cheap on-disk check; layout-agnostic via
+    // `destroy_preview::workspace_has_pinned_snapshot`.
+    let has_pinned_snapshot =
+        workspace::destroy_preview::workspace_has_pinned_snapshot(root, ws.id.as_str());
     LifecycleSignals {
         missing,
         rebase_conflicts,
@@ -942,6 +948,7 @@ fn collect_lifecycle_signals(
         commits_ahead: ws.commits_ahead,
         has_uncommitted,
         was_integrated: false,
+        has_pinned_snapshot,
     }
 }
 

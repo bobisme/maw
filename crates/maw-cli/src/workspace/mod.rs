@@ -20,6 +20,7 @@ mod clean;
 pub(crate) mod create;
 mod create_lock;
 mod describe;
+pub(crate) mod destroy_preview;
 pub(crate) mod destroy_record;
 mod diff;
 pub(crate) mod epoch_drift;
@@ -421,6 +422,11 @@ pub enum WorkspaceCommands {
     /// If the workspace has unmerged changes, destroy is refused by default.
     /// Use --force to discard those changes.
     ///
+    /// Use --dry-run to preview the outcome (lifecycle state,
+    /// would-capture-snapshot, recommended safer command) without
+    /// touching the workspace. This is the destroy-prevention surface
+    /// (SG4 bn-29fi): consult before deciding which verb to run.
+    ///
     /// To undo: maw ws restore <name>
     Destroy {
         /// Name of the workspace to destroy
@@ -433,6 +439,18 @@ pub enum WorkspaceCommands {
         /// Force destroy even if workspace has unmerged local changes
         #[arg(long)]
         force: bool,
+
+        /// Preview the destroy outcome without performing it. Prints
+        /// a structured plan (lifecycle state, `would_capture_snapshot`,
+        /// `would_need_recovery`, `recommended_command`). Combine with
+        /// `--format json` for parseable output. (SG4 bn-29fi.)
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output format for `--dry-run` (text|json|pretty). Ignored
+        /// when `--dry-run` is not set.
+        #[arg(long)]
+        format: Option<OutputFormat>,
     },
 
     /// Restore a previously destroyed workspace
@@ -1304,7 +1322,15 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             name,
             confirm,
             force,
-        } => create::destroy(&name, confirm, force),
+            dry_run,
+            format,
+        } => {
+            if dry_run {
+                destroy_preview::preview(&name, force, format)
+            } else {
+                create::destroy(&name, confirm, force)
+            }
+        }
         WorkspaceCommands::Restore { name } => restore::restore(&name),
         WorkspaceCommands::Recover {
             name,

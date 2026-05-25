@@ -686,8 +686,10 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
     if touched_count > 0 && !force {
         bail!(
             "Workspace '{name}' has {touched_count} unmerged change(s). Refusing destroy to avoid data loss.\n  \
-             Review changes: maw ws touched {name} --format json\n  \
-             Destroy anyway: maw ws destroy {name} --force"
+             Preview options:  maw ws destroy {name} --dry-run --format json   (bn-29fi)\n  \
+             Review changes:   maw ws touched {name} --format json\n  \
+             Merge + destroy:  maw ws merge {name} --into default --destroy   (preferred)\n  \
+             Destroy anyway:   maw ws destroy {name} --force"
         );
     }
 
@@ -752,7 +754,17 @@ pub fn destroy(name: &str, confirm: bool, force: bool) -> Result<()> {
         if let Some(ref capture) = capture_result {
             let short_oid = &capture.commit_oid.as_str()[..12];
             println!("Snapshot saved: {short_oid}");
-            println!("  Recover with: maw ws recover {name}");
+            println!("  State: abandoned-with-snapshot (lifecycle vocabulary, bn-29fi).");
+            println!("  Recover (inspect):       maw ws recover {name}");
+            // bn-29fi mergeback queue cue: when force-destroy left
+            // committed work behind, the agent's next safe action is
+            // recover-into-new-ws-then-merge. Naming the two-step
+            // sequence eliminates the discovery cost that drives
+            // `ws_recover_invoked` cluster turns.
+            println!(
+                "  Recover + merge (full):  maw ws recover {name} --to {name}-restored \
+                 && maw ws merge {name}-restored --into default --destroy"
+            );
             println!("Workspace '{name}' destroyed.");
             // Emit full recovery surface contract
             super::capture::emit_recovery_surface(

@@ -146,6 +146,7 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
     checks.push(check_root_bare(root.as_deref()));
     checks.push(check_ghost_working_copy(root.as_deref()));
     checks.push(check_dangling_snapshots(root.as_deref()));
+    checks.push(check_abandoned_with_snapshot(root.as_deref()));
     checks.push(check_stale_head_refs(root.as_deref()));
     checks.push(check_merge_state(root.as_deref()));
     if repair {
@@ -576,6 +577,84 @@ fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
             message: "dangling snapshots: could not check (git error)".to_string(),
             fix: None,
         },
+    }
+}
+
+/// SG4 / bn-29fi (destroy-prevention): surface workspaces whose
+/// destroy-record + recovery snapshot is still on disk, distinct from
+/// the "dangling snapshots" check (which targets ref-only leakage from
+/// crashed merges).
+///
+/// Why this check exists:
+/// - `dangling snapshots` warns when a `refs/manifold/recovery/...`
+///   ref has no owning destroy-record (clean-up garbage).
+/// - This check warns when destroyed workspaces have **valid** destroy
+///   records that the agent may have forgotten about — the
+///   "abandoned-with-snapshot" state from the safe-cleanup vocabulary.
+///
+/// The destroy-prevention impact is upstream: an agent who runs
+/// `maw doctor` and sees "3 abandoned-with-snapshot workspace(s)" is
+/// far more likely to `maw ws recover` the queued work BEFORE
+/// destroying yet another workspace it will later need to recover.
+/// Naming the queue makes it actionable.
+///
+/// Status is `warn` (not `fail`) because the data is preserved by the
+/// Prime Invariant — this is a *prompt to drain the mergeback queue*,
+/// not a corruption signal.
+fn check_abandoned_with_snapshot(root: Option<&Path>) -> DoctorCheck {
+    let name = "abandoned-with-snapshot".to_string();
+    let Some(root) = root else {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "abandoned-with-snapshot: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    let Ok(abandoned) = workspace::destroy_record::list_destroyed_workspaces(root) else {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "abandoned-with-snapshot: could not check (read error)".to_string(),
+            fix: None,
+        };
+    };
+
+    if abandoned.is_empty() {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "abandoned-with-snapshot: no queued recovery snapshots".to_string(),
+            fix: None,
+        };
+    }
+
+    // Emit the first three names as a sample so the agent can act
+    // without a separate `maw ws recover` call to discover them.
+    let preview: Vec<&String> = abandoned.iter().take(3).collect();
+    let preview_str = preview
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if abandoned.len() > 3 {
+        format!(" (+{} more)", abandoned.len() - 3)
+    } else {
+        String::new()
+    };
+    let first = abandoned.first().expect("non-empty checked above");
+    DoctorCheck {
+        name,
+        status: "warn".to_string(),
+        message: format!(
+            "abandoned-with-snapshot: {} destroyed workspace(s) with pinned recovery \
+             snapshot(s): {preview_str}{suffix}",
+            abandoned.len()
+        ),
+        fix: Some(format!(
+            "Review: maw ws recover  |  Restore one: maw ws recover {first} --to {first}-restored"
+        )),
     }
 }
 
