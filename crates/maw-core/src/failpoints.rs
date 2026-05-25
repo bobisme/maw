@@ -278,9 +278,31 @@ pub fn init_from_env() {}
 mod tests {
     use super::*;
 
+    // bn-2017: The `REGISTRY` is a process-global; tests that mutate it via
+    // `set`/`clear`/`clear_all` race when cargo's default parallel test runner
+    // schedules them concurrently (e.g. one test's `clear_all` wipes another
+    // test's `FP_KEEP`). Production semantics of `set`/`check`/`clear*` are
+    // unchanged — we only serialize the *test-side* access via a shared
+    // `Mutex` guard. The non-failpoints build is unaffected (this module is
+    // `#[cfg(test)]`-only and the `failpoints` feature still gates the
+    // env-bridge tests below).
+    //
+    // We use `Mutex<()>` with explicit poison recovery: if one test panics
+    // while holding the guard, sibling tests should still run rather than
+    // cascade-fail with `PoisonError`. The guard scope covers each test from
+    // its first registry mutation through its last assertion.
+    static TEST_REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_registry() -> std::sync::MutexGuard<'static, ()> {
+        TEST_REGISTRY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// check returns Ok when no failpoint is set.
     #[test]
     fn check_noop_when_not_set() {
+        let _g = lock_registry();
         clear_all();
         assert!(check("FP_TEST_NOOP").is_ok());
     }
@@ -288,6 +310,7 @@ mod tests {
     /// check returns error when failpoint is set to Error.
     #[test]
     fn check_returns_error_when_set() {
+        let _g = lock_registry();
         clear_all();
         set("FP_TEST_ERROR", FailpointAction::Error("injected".into()));
         let result = check("FP_TEST_ERROR");
@@ -303,6 +326,7 @@ mod tests {
     /// `clear_all` resets all failpoints.
     #[test]
     fn clear_all_resets() {
+        let _g = lock_registry();
         set("FP_A", FailpointAction::Error("a".into()));
         set("FP_B", FailpointAction::Error("b".into()));
         clear_all();
@@ -313,6 +337,7 @@ mod tests {
     /// Off action behaves like no failpoint set.
     #[test]
     fn check_off_action_is_noop() {
+        let _g = lock_registry();
         clear_all();
         set("FP_OFF", FailpointAction::Off);
         assert!(check("FP_OFF").is_ok());
@@ -322,6 +347,7 @@ mod tests {
     /// Sleep action returns Ok after sleeping.
     #[test]
     fn check_sleep_returns_ok() {
+        let _g = lock_registry();
         clear_all();
         set("FP_SLEEP", FailpointAction::Sleep(Duration::from_millis(1)));
         assert!(check("FP_SLEEP").is_ok());
@@ -331,6 +357,7 @@ mod tests {
     /// clear removes a single failpoint without affecting others.
     #[test]
     fn clear_single_failpoint() {
+        let _g = lock_registry();
         clear_all();
         set("FP_KEEP", FailpointAction::Error("keep".into()));
         set("FP_REMOVE", FailpointAction::Error("remove".into()));
