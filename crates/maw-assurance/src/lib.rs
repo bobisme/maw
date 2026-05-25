@@ -17,6 +17,8 @@
 //! - [`scenario`] — deterministic scenario + condition generator
 //!   (bn-1f53; behind the `scenario` feature). The driver-agnostic plan
 //!   stream "build once, drive two ways" (sg1-dst-architecture.md §2).
+//! - [`oracle_b`] — SG1 Oracle B: state-coherence predicate (B1-B4) that
+//!   catches the bn-cm63 class (bn-3ji6, behind the `oracles` feature).
 //!
 //! # Usage
 //!
@@ -34,6 +36,16 @@ pub mod fault;
 #[cfg(feature = "stateright")]
 pub mod model;
 pub mod oracle;
+/// **Oracle B** — state coherence (B1–B4) for SG1 (bn-3ji6 / T1.4).
+///
+/// Pure predicate over `(refs, ws-dirs, merge-state.json)`. Catches the
+/// **bn-cm63 class** (dangling `refs/manifold/head/<ws>` for a non-existent
+/// workspace with no live merge protecting it) that Oracle A
+/// (content-reachability) cannot see by construction. See
+/// `notes/oracle-ab-spec.md` §3 for the predicate definitions and
+/// `notes/sg1-dst-architecture.md` §4.2 for the harness integration point.
+#[cfg(feature = "oracles")]
+pub mod oracle_b;
 #[cfg(feature = "scenario")]
 pub mod scenario;
 pub mod trace;

@@ -34,6 +34,14 @@ fault-injection = ["dep:maw-core", "dep:rand", "maw-core/failpoints"]
 # pulls in `rand` and reuses `fault-injection`'s CRASHABLE_BY_PHASE table
 # so the generator's FaultSpec sites stay synchronised with the executor.
 scenario = ["dep:rand", "fault-injection"]
+# bn-1z8q (T1.3 Oracle A) + bn-3ji6 (T1.4 Oracle B): SG1 state-coherence /
+# content-reachability oracles. Pulls in maw-core so Oracle B's live-merge
+# guard (B1) and workspace-owned-ref set (B2) call the exact same
+# `maw_core::merge_state::staleness` / `refs::workspace_owned_refs`
+# production APIs that `crates/maw-cli/src/ref_gc.rs` uses, so the oracle
+# and the GC guard can never diverge. Off by default so the base
+# maw-assurance build stays zero-overhead.
+oracles = ["dep:maw-core", "fault-injection"]
 
 [lints]
 workspace = true
