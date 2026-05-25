@@ -12,8 +12,9 @@ categories = ["development-tools"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 stateright = { version = "0.30", optional = true }
-# bn-263u: only pulled in by the `fault-injection` feature. maw-core gives
-# the failpoint registry + MAW_FP parser; rand gives seeded plan selection.
+# bn-263u + bn-1f53: only pulled in by `fault-injection` and/or `scenario`.
+# maw-core gives the failpoint registry + MAW_FP parser; rand gives seeded
+# plan selection (reused by both features).
 maw-core = { path = "../maw-core", version = "0.61.0", optional = true }
 rand = { version = "0.9", optional = true }
 
@@ -28,6 +29,11 @@ stateright = ["dep:stateright"]
 # default so the base maw-assurance build (and the default maw release) stay
 # clean; activating it turns on maw-core's `failpoints` registry control.
 fault-injection = ["dep:maw-core", "dep:rand", "maw-core/failpoints"]
+# bn-1f53 (T1.2): deterministic scenario + condition generator. Off by
+# default so the base maw-assurance build stays zero-overhead; activating
+# pulls in `rand` and reuses `fault-injection`'s CRASHABLE_BY_PHASE table
+# so the generator's FaultSpec sites stay synchronised with the executor.
+scenario = ["dep:rand", "fault-injection"]
 
 [lints]
 workspace = true

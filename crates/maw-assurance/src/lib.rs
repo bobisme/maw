@@ -14,6 +14,9 @@
 //! - [`model`] — Stateright model-checking definitions
 //! - [`fault`] — DST fault-injection / real-SIGKILL / recovery driver
 //!   (bn-263u; behind the `fault-injection` feature)
+//! - [`scenario`] — deterministic scenario + condition generator
+//!   (bn-1f53; behind the `scenario` feature). The driver-agnostic plan
+//!   stream "build once, drive two ways" (sg1-dst-architecture.md §2).
 //!
 //! # Usage
 //!
@@ -31,6 +34,8 @@ pub mod fault;
 #[cfg(feature = "stateright")]
 pub mod model;
 pub mod oracle;
+#[cfg(feature = "scenario")]
+pub mod scenario;
 pub mod trace;
 
 // Re-export key types for convenience.
