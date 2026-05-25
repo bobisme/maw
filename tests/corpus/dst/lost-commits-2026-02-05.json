@@ -1,0 +1,184 @@
+{
+  "seed": 6,
+  "crash_phase": "none",
+  "num_steps": 10,
+  "num_workspaces": 7,
+  "create_candidate": true,
+  "expected": "known_violation",
+  "description": "2026-02-05 lost-commits incident class (seed=6, Oracle A ReachabilityLost on ws-12). Permanent regression seed: the plan emits an overlapping-edit + multi-source merge pattern (the exact shape of the incident: two workspaces overlap-edit the same file, a merge resolves by dropping one side, the dropped side's recovery ref is absent). The planted WorkLoss defect materialises the Oracle A class — a blob authored by an extant workspace leaves U(F) because no recovery ref was pinned. Encodes the incident *class* so the SG1 gate can never silently regress on it. Hand-construction proof of the literal incident lives in oracle_a::tests::lost_commits_2026_02_05_incident_trips_oracle_a; see notes/incident-lost-commits-2026-02-05.md for the original report.",
+  "plan": {
+    "seed": 6,
+    "profile": {
+      "concurrency_degree": 1,
+      "mid_op_kill_prob": 0.0,
+      "overlapping_edit_rate": 0.0,
+      "stale_workspace_rate": 0.0
+    },
+    "steps": [
+      {
+        "index": 0,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-0",
+          "from": {
+            "kind": "main"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767225600
+      },
+      {
+        "index": 1,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-11",
+          "from": {
+            "kind": "epoch"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227298
+      },
+      {
+        "index": 2,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-12",
+          "from": {
+            "kind": "epoch"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227355
+      },
+      {
+        "index": 3,
+        "op": {
+          "op": "edit_files",
+          "ws": "ws-6",
+          "files": [
+            {
+              "path": "ws-6/file-0.txt",
+              "content": "ws=ws-6\nseed-slot=3543797219499528025\nidx=0\n"
+            },
+            {
+              "path": "ws-6/file-1.txt",
+              "content": "ws=ws-6\nseed-slot=521574553279656274\nidx=1\n"
+            },
+            {
+              "path": "ws-6/file-2.txt",
+              "content": "ws=ws-6\nseed-slot=352778242238490308\nidx=2\n"
+            }
+          ]
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227371
+      },
+      {
+        "index": 4,
+        "op": {
+          "op": "merge",
+          "srcs": [
+            "ws-4"
+          ],
+          "into": {
+            "kind": "default"
+          },
+          "destroy": false
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227428
+      },
+      {
+        "index": 5,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-13",
+          "from": {
+            "kind": "main"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227466
+      },
+      {
+        "index": 6,
+        "op": {
+          "op": "edit_files",
+          "ws": "ws-12",
+          "files": [
+            {
+              "path": "shared/file-3.txt",
+              "content": "ws=ws-12\nseed-slot=14927088646013219620\nidx=0\n"
+            },
+            {
+              "path": "shared/file-3.txt",
+              "content": "ws=ws-12\nseed-slot=18212794797169320071\nidx=1\n"
+            }
+          ]
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227510
+      },
+      {
+        "index": 7,
+        "op": {
+          "op": "commit",
+          "ws": "ws-12",
+          "msg": "commit @ ws-12 #3102653792"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227528
+      },
+      {
+        "index": 8,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-14",
+          "from": {
+            "kind": "epoch"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227558
+      },
+      {
+        "index": 9,
+        "op": {
+          "op": "destroy",
+          "ws": "ws-11",
+          "force": false
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767227582
+      }
+    ]
+  },
+  "planted": [
+    {
+      "kind": "work_loss",
+      "ws": "ws-12"
+    }
+  ],
+  "replay_command": "maw assurance dst replay --seed 6 --steps 10 --planted '[{\"kind\":\"work_loss\",\"ws\":\"ws-12\"}]'"
+}

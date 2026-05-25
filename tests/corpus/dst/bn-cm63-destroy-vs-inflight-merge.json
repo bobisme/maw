@@ -1,0 +1,53 @@
+{
+  "seed": 1,
+  "crash_phase": "none",
+  "num_steps": 2,
+  "num_workspaces": 3,
+  "create_candidate": false,
+  "expected": "known_violation",
+  "description": "bn-cm63 destroy-vs-in-flight-merge head-ref leak (seed=1, Oracle B B1 DanglingHeadRef on ws-0). Permanent regression seed: the planted DanglingHeadRef defect materialises the exact ref shape of the bn-cm63 incident (refs/manifold/head/<ws> present, ws/<ws>/ absent, no live merge). Encodes the bn-cm63 *class* so the SG1 gate can never silently regress on it. Hand-construction proof that reverting the production guard (guard_destroy_against_inflight_merge in crates/maw-cli/src/workspace/create.rs OR prune_dangling_head_refs in crates/maw-cli/src/ref_gc.rs) would trip this class lives in oracle_b::tests::b1_fires_on_bn_cm63_reproduction.",
+  "plan": {
+    "seed": 1,
+    "profile": {
+      "concurrency_degree": 1,
+      "mid_op_kill_prob": 0.0,
+      "overlapping_edit_rate": 0.0,
+      "stale_workspace_rate": 0.0
+    },
+    "steps": [
+      {
+        "index": 0,
+        "op": {
+          "op": "ws_create",
+          "ws": "ws-0",
+          "from": {
+            "kind": "main"
+          }
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767225600
+      },
+      {
+        "index": 1,
+        "op": {
+          "op": "recover",
+          "ws": "ws-7",
+          "to": "ws-11"
+        },
+        "fault": {
+          "kind": "none"
+        },
+        "git_time": 1767226544
+      }
+    ]
+  },
+  "planted": [
+    {
+      "kind": "dangling_head_ref",
+      "ws": "ws-0"
+    }
+  ],
+  "replay_command": "maw assurance dst replay --seed 1 --steps 2 --planted '[{\"kind\":\"dangling_head_ref\",\"ws\":\"ws-0\"}]'"
+}
