@@ -12,6 +12,8 @@ use crate::changes::store::ChangesStore;
 use crate::format::OutputFormat;
 use maw::merge::build_phase::{BuildPhaseOutput, run_build_phase};
 use maw::merge::collect::collect_snapshots;
+use maw::merge::events::{self as merge_events, MergeEventKind};
+use maw::merge::last_conflict::{self as merge_last_conflict, LastConflict, LastConflictEntry};
 use maw::merge::commit::{
     CommitRecovery, CommitResult, recover_partial_commit_with_branch_base,
     run_commit_phase_with_branch_base,
@@ -938,6 +940,147 @@ fn print_conflict_report(conflicts_with_ids: &[ConflictWithId], ws_names: &[Stri
     print_conflict_report_with_resolve(conflicts_with_ids, ws_names, into, None);
 }
 
+/// bn-yyx: persist the conflict surface + emit a `ConflictDetected` event.
+///
+/// This is the *load-bearing* call for the `ws_merge_structured_conflict`
+/// friction reduction. After invocation, the agent can recall everything the
+/// scrollback showed via:
+///
+/// - `cat .manifold/artifacts/merge/last-conflict.json`
+/// - `maw merge last-conflict`
+/// - `maw merge events`
+///
+/// — without re-issuing `maw ws merge`, which is the wasted-turn this fix
+/// targets.
+///
+/// Both side-channel writes are *best-effort*: a full-disk or permission
+/// error here MUST NOT regress merge correctness (Prime Invariant), so we
+/// `let _ =` the results and continue. Tracing-level warnings make the
+/// failure visible without changing exit codes.
+fn persist_merge_conflict_surface(
+    manifold_dir: &Path,
+    sources: &[String],
+    into: &str,
+    conflicts_with_ids: &[ConflictWithId],
+) {
+    let conflict_ids: Vec<String> = conflicts_with_ids.iter().map(|c| c.id.clone()).collect();
+    let paths: Vec<String> = conflicts_with_ids
+        .iter()
+        .map(|c| c.record.path.display().to_string())
+        .collect();
+
+    // Append the event log entry first — even if last-conflict write fails,
+    // the event log still records that something happened.
+    if let Err(e) = merge_events::append_event(
+        manifold_dir,
+        MergeEventKind::ConflictDetected {
+            sources: sources.to_vec(),
+            into: into.to_string(),
+            conflict_count: conflict_ids.len(),
+            conflict_ids: conflict_ids.clone(),
+            paths,
+        },
+    ) {
+        tracing::warn!("merge event log write failed: {e}");
+    }
+
+    // Persist the snapshot.
+    let default_resolve_ws = sources.first().cloned().unwrap_or_default();
+    let entries: Vec<LastConflictEntry> = conflicts_with_ids
+        .iter()
+        .map(|c| LastConflictEntry {
+            id: c.id.clone(),
+            path: c.record.path.display().to_string(),
+            sides: c
+                .record
+                .sides
+                .iter()
+                .map(|s| s.workspace_id.as_str().to_string())
+                .collect(),
+            reason: format!("{}", c.record.reason),
+        })
+        .collect();
+    let recovery_commands = merge_last_conflict::build_recovery_commands(
+        sources,
+        into,
+        &conflict_ids,
+        &default_resolve_ws,
+    );
+    let snapshot = LastConflict {
+        schema_version: merge_last_conflict::LAST_CONFLICT_SCHEMA_VERSION,
+        ts_unix_ms: merge_events::now_unix_ms(),
+        sources: sources.to_vec(),
+        into: into.to_string(),
+        conflicts: entries,
+        recovery_commands,
+    };
+    if let Err(e) = merge_last_conflict::write(manifold_dir, &snapshot) {
+        tracing::warn!("last-conflict snapshot write failed: {e}");
+    }
+}
+
+/// bn-yyx: best-effort emit of an `IntegrationStarted` event.
+fn emit_integration_started(
+    manifold_dir: &Path,
+    sources: &[String],
+    into: &str,
+    check_only: bool,
+) {
+    if let Err(e) = merge_events::append_event(
+        manifold_dir,
+        MergeEventKind::IntegrationStarted {
+            sources: sources.to_vec(),
+            into: into.to_string(),
+            check_only,
+        },
+    ) {
+        tracing::warn!("merge event log write failed: {e}");
+    }
+}
+
+/// bn-yyx: best-effort emit of an `IntegrationCompleted` event + clear the
+/// persisted last-conflict snapshot (the merge succeeded, so the prior
+/// conflict is no longer the "latest").
+fn emit_integration_completed(
+    manifold_dir: &Path,
+    sources: &[String],
+    into: &str,
+    merge_commit: &str,
+) {
+    if let Err(e) = merge_events::append_event(
+        manifold_dir,
+        MergeEventKind::IntegrationCompleted {
+            sources: sources.to_vec(),
+            into: into.to_string(),
+            merge_commit: merge_commit.to_string(),
+        },
+    ) {
+        tracing::warn!("merge event log write failed: {e}");
+    }
+    if let Err(e) = merge_last_conflict::clear(manifold_dir) {
+        tracing::warn!("last-conflict clear failed: {e}");
+    }
+}
+
+/// bn-yyx: best-effort emit of an `IntegrationAborted` event.
+fn emit_integration_aborted(
+    manifold_dir: &Path,
+    sources: &[String],
+    into: &str,
+    reason: &str,
+) {
+    if let Err(e) = merge_events::append_event(
+        manifold_dir,
+        MergeEventKind::IntegrationAborted {
+            sources: sources.to_vec(),
+            into: into.to_string(),
+            reason: reason.to_string(),
+        },
+    ) {
+        tracing::warn!("merge event log write failed: {e}");
+    }
+}
+
 fn print_conflict_report_with_resolve(
     conflicts_with_ids: &[ConflictWithId],
     ws_names: &[String],
@@ -946,6 +1089,19 @@ fn print_conflict_report_with_resolve(
 ) {
     println!();
     println!("BUILD: {} conflict(s) detected.", conflicts_with_ids.len());
+    // bn-yyx: anti-retry cue — point the agent at the *recall* verbs FIRST
+    // so the next call lands on `maw merge last-conflict` / `maw ws conflicts`
+    // / `maw merge events` rather than another `maw ws merge`. Re-issuing the
+    // same merge is the wasted-turn the friction cluster attributes; making
+    // the alternative more visible than the doomed retry is the fix.
+    println!();
+    println!("IMPORTANT: do NOT re-run `maw ws merge` to re-discover this");
+    println!("conflict — it is recorded out-of-band. Recall it via:");
+    let ws_args_for_recall = ws_names.join(" ");
+    println!("  maw merge last-conflict                    # full surface (text)");
+    println!("  maw merge last-conflict --format json      # machine-parseable");
+    println!("  maw merge events --since-last-attempt      # event log tail");
+    println!("  maw ws conflicts {ws_args_for_recall} --format json   # re-derive via engine");
     println!();
 
     for c in conflicts_with_ids {
@@ -1189,6 +1345,18 @@ pub fn check_merge(
     target_updates_epoch: bool,
     force: bool,
 ) -> Result<()> {
+    // bn-yyx: anchor the event log even on dry-run checks so the agent can
+    // bound `maw merge events --since` to the latest attempt.
+    if let Ok(root) = repo_root() {
+        let into_display = target_change_id.unwrap_or(target_workspace).to_string();
+        emit_integration_started(
+            &root.join(".manifold"),
+            workspaces,
+            &into_display,
+            true,
+        );
+    }
+
     let result = match check_merge_result_for_target(
         workspaces,
         target_workspace,
@@ -1203,6 +1371,71 @@ pub fn check_merge(
         }
         Err(err) => return Err(err),
     };
+
+    // bn-yyx: if the check surfaced conflicts, persist them so the agent can
+    // recall via `maw merge last-conflict` instead of re-running the check.
+    if !result.ready && !result.conflicts.is_empty() && !result.stale && let Ok(root) = repo_root()
+    {
+        let manifold_dir = root.join(".manifold");
+        let into_display = target_change_id.unwrap_or(target_workspace).to_string();
+        // Derive the same `cf-<hash>` terseid `assign_conflict_ids` uses for
+        // full merges — so a `--check` snapshot and a follow-up real merge
+        // produce stable IDs for the same path.
+        let conflict_ids: Vec<String> = result
+            .conflicts
+            .iter()
+            .map(|c| {
+                if c.path.is_empty() {
+                    "cf-check".to_string()
+                } else {
+                    format!("cf-{}", terseid::hash(c.path.as_bytes(), 4))
+                }
+            })
+            .collect();
+        let paths: Vec<String> = result.conflicts.iter().map(|c| c.path.clone()).collect();
+        if let Err(e) = merge_events::append_event(
+            &manifold_dir,
+            MergeEventKind::ConflictDetected {
+                sources: workspaces.to_vec(),
+                into: into_display.clone(),
+                conflict_count: conflict_ids.len(),
+                conflict_ids: conflict_ids.clone(),
+                paths,
+            },
+        ) {
+            tracing::warn!("merge event log write failed: {e}");
+        }
+        let entries: Vec<LastConflictEntry> = result
+            .conflicts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| LastConflictEntry {
+                id: conflict_ids[i].clone(),
+                path: c.path.clone(),
+                sides: c.sides.clone(),
+                reason: c.reason.clone(),
+            })
+            .collect();
+        let default_resolve_ws = workspaces.first().cloned().unwrap_or_default();
+        let recovery_commands = merge_last_conflict::build_recovery_commands(
+            workspaces,
+            &into_display,
+            &conflict_ids,
+            &default_resolve_ws,
+        );
+        let snapshot = LastConflict {
+            schema_version: merge_last_conflict::LAST_CONFLICT_SCHEMA_VERSION,
+            ts_unix_ms: merge_events::now_unix_ms(),
+            sources: workspaces.to_vec(),
+            into: into_display,
+            conflicts: entries,
+            recovery_commands,
+        };
+        if let Err(e) = merge_last_conflict::write(&manifold_dir, &snapshot) {
+            tracing::warn!("last-conflict snapshot write failed: {e}");
+        }
+    }
+
     output_check_result(&result, format)
 }
 
@@ -3412,6 +3645,15 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
     textln!();
 
+    // bn-yyx: record the integration start so the event log carries an
+    // anchoring entry the agent can use to bound `maw merge events --since`.
+    emit_integration_started(
+        &root.join(".manifold"),
+        &ws_to_merge,
+        into_target,
+        false,
+    );
+
     // Set up paths
     let manifold_dir = root.join(".manifold");
     let default_ws_path = root.join("ws").join(default_ws);
@@ -3650,6 +3892,22 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             } else {
                 // Some conflicts remain unresolved — report them with IDs
                 abort_merge(&manifold_dir, "partially resolved conflicts");
+
+                // bn-yyx: persist the remaining conflict surface so the
+                // agent can recall it without re-running `maw ws merge`.
+                persist_merge_conflict_surface(
+                    &manifold_dir,
+                    &ws_to_merge,
+                    into_target,
+                    &remaining,
+                );
+                emit_integration_aborted(
+                    &manifold_dir,
+                    &ws_to_merge,
+                    into_target,
+                    "partially resolved conflicts",
+                );
+
                 let ws_args = ws_to_merge.join(" ");
                 let default_ws = ws_to_merge.first().map_or("WORKSPACE", |s| s.as_str());
 
@@ -3719,6 +3977,22 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         } else {
             // No --resolve flags: abort with conflict report including IDs
             abort_merge(&manifold_dir, "unresolved conflicts");
+
+            // bn-yyx: persist the conflict surface + emit ConflictDetected /
+            // IntegrationAborted events so the agent can recall the conflict
+            // without re-running `maw ws merge`.
+            persist_merge_conflict_surface(
+                &manifold_dir,
+                &ws_to_merge,
+                into_target,
+                &conflicts_with_ids,
+            );
+            emit_integration_aborted(
+                &manifold_dir,
+                &ws_to_merge,
+                into_target,
+                "unresolved conflicts",
+            );
 
             let ws_args = ws_to_merge.join(" ");
             let default_ws = ws_to_merge.first().map_or("WORKSPACE", |s| s.as_str());
@@ -4217,6 +4491,15 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             }
         },
         |change_id| format!("maw changes pr {change_id} --draft"),
+    );
+
+    // bn-yyx: emit IntegrationCompleted + clear last-conflict so a future
+    // `maw merge last-conflict` doesn't return a stale snapshot.
+    emit_integration_completed(
+        &manifold_dir,
+        &ws_to_merge,
+        into_target,
+        build_output.candidate.as_str(),
     );
 
     if format == OutputFormat::Json {

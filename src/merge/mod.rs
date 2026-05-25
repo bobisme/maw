@@ -33,6 +33,8 @@ pub mod ast_merge;
 pub mod build_phase;
 pub mod collect;
 pub mod commit;
+pub mod events;
+pub mod last_conflict;
 pub mod prepare;
 pub mod quarantine;
 pub mod resolve;
