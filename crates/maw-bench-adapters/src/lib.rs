@@ -68,11 +68,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[cfg(feature = "bench")]
+pub mod consolidated_layout_adapter;
+#[cfg(feature = "bench")]
 pub mod jj_adapter;
 #[cfg(feature = "bench")]
 pub mod maw_adapter;
 #[cfg(feature = "bench")]
 pub mod worktrees_adapter;
+#[cfg(feature = "bench")]
+pub mod ws_layout_adapter;
 
 // Re-export the file-walker helper so adapters share one collector and the
 // equivalence test compares against the same byte set.

@@ -280,3 +280,20 @@ sg2-friction-list-pilot:
   echo "sg2-friction-list-pilot: OK"
   echo "  sweep-derived:   $PILOT_DIR/friction-list-from-sweep.{json,md}"
   echo "  synthetic-demo:  $PILOT_DIR/friction-list.{json,md}"
+
+# sp5-pilot: SP5 layout-ergonomics directional spike (bone bn-2kgu).
+# Runs the structural-ergonomics comparison between the current `ws/`
+# layout and the proposed consolidated `.maw/workspaces/` layout under
+# MockAgent (no LLM spend, no network). Prints a directional verdict
+# and optional Markdown report.
+#
+# Per pre-reg §3.1 Pilot rule: SP5 output is HARNESS-VALIDATION ONLY.
+# It MUST NOT set bars and MUST NOT feed SG2/SG3/SG4 publication.
+# The verdict gates T3.2 (bn-2sw3) implementation strategy only;
+# T3.5 (bn-1uzn) is the binding real-LLM gate.
+#
+#   just sp5-pilot                     # prints verdict to stdout
+#   just sp5-pilot <out.md>            # also writes Markdown to file
+#   SP5_REPS=5 just sp5-pilot          # override wall-time replicate count (default 3)
+sp5-pilot out='':
+  cargo run --quiet -p maw-bench-adapters --features bench --bin sp5-layout-pilot -- {{out}}

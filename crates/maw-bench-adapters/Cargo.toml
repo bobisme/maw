@@ -25,6 +25,11 @@ categories = ["development-tools::testing"]
 # Off by default. Building the adapters and their tests requires `--features bench`.
 bench = []
 
+[[bin]]
+name = "sp5-layout-pilot"
+path = "src/bin/sp5_layout_pilot.rs"
+required-features = ["bench"]
+
 [dependencies]
 maw-scenario = { path = "../maw-scenario" }
 serde = { version = "1", features = ["derive"] }
