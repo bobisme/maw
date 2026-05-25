@@ -1,0 +1,70 @@
+[package]
+name = "maw-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SG2 real-agent benchmark driver harness for maw — the 'expensive driver' half of build-once/drive-two-ways."
+keywords = ["maw", "benchmark", "sg2", "agent", "harness"]
+categories = ["development-tools::testing", "simulation"]
+
+# Why this crate exists
+# --------------------------------------------------------------------------
+# T2.2 (bn-1sqo) is the SG2 "expensive driver" — fresh-context agents
+# executing a fixed multi-agent task battery against a pluggable substrate.
+# The cheap counterpart is `maw-assurance::in_proc::InProcDriver` (T1.6).
+# Both drivers consume the SAME `ScenarioPlan` emitted by `maw-scenario`,
+# per `notes/sg1-dst-architecture.md` §2 ("build once, drive two ways").
+#
+# All of this crate is gated behind the `bench` feature so the default
+# workspace build stays zero-overhead. The real-LLM `ClaudeBackend` is
+# additionally gated behind `claude-backend` so `cargo check -p maw-bench
+# --features bench` does NOT pull `reqwest` or require network creds.
+#
+# Tests in this crate are MockAgent-only — the harness MUST be reproducibly
+# invokable without spending money. Real benchmark sweeps are EXECUTION
+# work (later bones); they are a developer/CI choice, never a side-effect
+# of `cargo test`.
+
+[features]
+default = []
+# Pulls the harness, traits, MockAgent, and NoopSubstrate. Everything an
+# in-repo developer needs to exercise the harness against in-memory fakes.
+bench = [
+    "dep:maw-scenario",
+    "dep:maw-assurance",
+    "maw-assurance/oracles",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:rand",
+    "dep:tempfile",
+]
+# Adds the real-LLM Anthropic backend. Off by default so a vanilla
+# `cargo check --features bench` does not require reqwest's TLS deps,
+# and so accidentally running tests cannot fire a network call. Real
+# benchmark sweeps opt-in explicitly.
+claude-backend = ["bench", "dep:reqwest"]
+
+[dependencies]
+maw-scenario = { path = "../maw-scenario", version = "0.61.0", optional = true }
+# The harness's Oracle B integration calls `maw_assurance::oracle_b::check`
+# verbatim — Prime-Invariant coherence (the bn-cm63 class) is a substrate-
+# agnostic invariant and EVERY driver (cheap in-proc and expensive real-
+# agent) must surface it.
+maw-assurance = { path = "../maw-assurance", version = "0.61.0", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+rand = { version = "0.9", optional = true }
+# reqwest is only pulled by `claude-backend`. Blocking client to keep the
+# harness threadable without an async runtime; rustls-tls so we do not
+# require system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+# Used by NoopSubstrate to allocate per-run tempdirs. Behind `bench` so the
+# default (zero-feature) build does not pull it.
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

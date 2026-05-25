@@ -2239,6 +2239,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "maw-bench"
+version = "0.61.0"
+dependencies = [
+ "maw-assurance",
+ "maw-scenario",
+ "rand 0.9.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "maw-cli"
 version = "0.61.0"
 dependencies = [
