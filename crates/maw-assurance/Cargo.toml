@@ -17,6 +17,11 @@ stateright = { version = "0.30", optional = true }
 # plan selection (reused by both features).
 maw-core = { path = "../maw-core", version = "0.61.0", optional = true }
 rand = { version = "0.9", optional = true }
+# T1.6 (bn-32k3): the in-proc driver (oracles feature) owns a tempdir-
+# backed git repo per replay so the shrinker can run thousands of cheap
+# in-process iterations. Pulled in by the `oracles` feature only; the
+# default maw-assurance build (and the default maw release) stay clean.
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -41,7 +46,12 @@ scenario = ["dep:rand", "fault-injection"]
 # production APIs that `crates/maw-cli/src/ref_gc.rs` uses, so the oracle
 # and the GC guard can never diverge. Off by default so the base
 # maw-assurance build stays zero-overhead.
-oracles = ["dep:maw-core", "fault-injection"]
+# T1.6 (bn-32k3): `oracles` also pulls `scenario` because the in-proc
+# driver and the shrinker consume `ScenarioPlan` / `PlannedStep`. The two
+# features were previously independent (oracles tested via hand-built
+# fixtures, scenarios tested via plan-validity sweeps); the T1.6 driver
+# is the first consumer that needs both at once.
+oracles = ["dep:maw-core", "dep:tempfile", "fault-injection", "scenario"]
 
 [lints]
 workspace = true

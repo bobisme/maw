@@ -387,6 +387,13 @@ const DEFAULT_PLAN_STEPS: usize = 32;
 /// committer dates.
 const GIT_TIME_BASE: i64 = 1_767_225_600;
 
+/// Public re-export of [`GIT_TIME_BASE`] for downstream drivers
+/// ([`crate::in_proc::InProcDriver`]) that need to pin the repo-init
+/// commit's clock to the same epoch the generator uses for step 0. Without
+/// this, the repo-init commit OID would vary between runs even though
+/// every subsequent step's OID is bit-exact.
+pub const GIT_TIME_BASE_FOR_DRIVER: i64 = GIT_TIME_BASE;
+
 /// The canonical regression seed for the **bn-cm63 hostile interleaving**.
 ///
 /// Under [`ConditionProfile::default`], the plan produced by

@@ -8,6 +8,25 @@ use serde_json::Value;
 
 use crate::manifold_common::{TestRepo, maw_bin};
 
+// T1.6 (bn-32k3): the scaffolding for `minimized_replay_command` was
+// already in `FailureBundle` (the `minimized_replay_command:
+// Option<String>` field below + the matching parameter on
+// `write_failure_bundle`). T1.6 fills in the **shrinker** that
+// produces this string for plan-based DST failures —
+// `maw_assurance::shrinker::shrink` (gated behind the
+// `maw-assurance/oracles` feature). The shrinker takes a failing
+// `ScenarioPlan` + the tripped oracle's class signature and returns a
+// `ShrinkReport` whose `minimized_replay_command` is what callers pass
+// to `write_failure_bundle`'s `minimized_replay_command` argument.
+//
+// The existing harness families (`workflow_dst.rs`,
+// `action_workflow_dst.rs`) predate the `ScenarioPlan` substrate and
+// roll their own ad-hoc `minimize_prefix` (prefix binary search);
+// migrating them to the shrinker is T1.7 (bn-1gp4) CI-wiring work, not
+// T1.6's scope. The scaffolding contract this module exposes is
+// unchanged so both the existing prefix-minimization and the new
+// `ScenarioPlan` shrinker write through the SAME bundle writer.
+
 #[derive(Serialize)]
 struct FailureBundle {
     harness: String,
