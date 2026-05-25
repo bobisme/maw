@@ -159,8 +159,8 @@ impl SweepDriver {
         MS: FnMut(&str) -> Result<S, String>,
         MA: FnMut(u64) -> A,
     {
-        let mut out: Vec<BenchRun> = Vec::with_capacity(grid.cells.len() * grid.arms.len()
-            * grid.seeds_per_cell as usize);
+        let mut out: Vec<BenchRun> =
+            Vec::with_capacity(grid.cells.len() * grid.arms.len() * grid.seeds_per_cell as usize);
 
         for (cell, arm, replicate, seed) in grid.iter_runs() {
             let plan_steps = self.plan_steps;
@@ -232,7 +232,13 @@ pub fn stable_run_id(cell: &SweepCell, arm: &str, replicate: u32) -> String {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -248,11 +254,7 @@ fn skip_reason_for(arm: &str) -> String {
 /// harness's own persist routine but bypasses
 /// [`HarnessError::PersistFailed`] (we never need to box the
 /// failed run back for inspection — the sweep already owns it).
-fn persist_run_json(
-    run: &BenchRun,
-    dir: &Path,
-    run_id: &str,
-) -> Result<(), SweepDriverError> {
+fn persist_run_json(run: &BenchRun, dir: &Path, run_id: &str) -> Result<(), SweepDriverError> {
     let json = run
         .to_json()
         .map_err(|e| SweepDriverError::Harness(HarnessError::Encode(e)))?;
@@ -355,10 +357,9 @@ mod tests {
             let n = std::fs::read_dir(&dir)
                 .expect("cell dir")
                 .filter(|e| {
-                    e.as_ref()
-                        .is_ok_and(|x| {
-                            x.path().extension().and_then(|s| s.to_str()) == Some("json")
-                        })
+                    e.as_ref().is_ok_and(|x| {
+                        x.path().extension().and_then(|s| s.to_str()) == Some("json")
+                    })
                 })
                 .count();
             assert_eq!(n, 9, "cell {cell_id} should have 9 BenchRun JSONs");

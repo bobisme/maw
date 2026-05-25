@@ -201,8 +201,7 @@ pub fn find_crossover(
                 let Some(other_cell) = summary.cell(other, cond_id, t) else {
                     continue;
                 };
-                let (regime, stat) =
-                    classify(metric, ref_cell, other_cell);
+                let (regime, stat) = classify(metric, ref_cell, other_cell);
                 out.push(CrossoverPoint {
                     metric,
                     ref_arm: ref_arm.to_string(),

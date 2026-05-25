@@ -443,3 +443,73 @@ sg3-prereg-check:
     echo "  canary since pre-registration was frozen."
     exit 0
   fi
+
+# sg3-layout-eval: T3.5 / bn-1uzn layout-eval harness.
+# Drives the bn-iux4 frozen subset (SUB-A C0×T0 + SUB-B C2×T0) for
+# ONE or BOTH layout arms (maw@old-layout / maw@new-layout) and emits
+# the §3.1 R1-R6 go/no-go verdict as JSON.
+#
+# Defaults follow bn-iux4 §1.3: SUB-A N=20, SUB-B N=10. This is the
+# REAL-RUN config; budget per bn-iux4 §1.3 is ≈ $5-8 in real-LLM
+# spend, so this recipe is for the production calendar artifact, NOT
+# for ad-hoc dev work. Use `just sg3-layout-eval-pilot` for the
+# harness-validation pilot (MockAgent + N=3, < 60s wall, $0 spend).
+#
+#   just sg3-layout-eval                          # both arms, frozen N
+#   just sg3-layout-eval --layout=old             # one arm only
+#   just sg3-layout-eval --decision-json=out.json # write verdict to file
+#
+# Exit codes:
+#   0 — eval completed; verdict = GO.
+#   1 — eval completed; verdict = NO-GO (acceptable per bn-iux4 §5;
+#       v1.0 ships on ws/ layout per notes/sg3-go-no-go.md).
+#   2 — invalid arguments.
+#   3 — pipeline error.
+sg3-layout-eval *args:
+  cargo run --quiet -p maw-bench-sweep --features bench --bin sg3-layout-eval -- {{args}}
+
+# sg3-layout-eval-pilot: harness-validation pilot for T3.5 / bn-1uzn.
+# Runs the same SweepDriver pass with MockAgent + NoopSubstrate + N=3
+# per cell. Asserts the decision logic returns GO on identical pilot
+# substrates AND NO-GO on a planted R1 hard-bar regression.
+#
+# Per bn-iux4 §3.6 Pilot rule: pilot output is HARNESS-ONLY. It MUST
+# NOT set publication bars and MUST NOT feed the real-run go/no-go
+# writeup (notes/sg3-go-no-go.md "REAL-RUN RESULT" section is empty
+# until a real-LLM campaign runs).
+#
+# Wall budget: < 60s (bone HARD RULE).
+sg3-layout-eval-pilot:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo "sg3-layout-eval-pilot: running end-to-end pilot tests..."
+  cargo test --quiet -p maw-bench-sweep --features bench --test sg3_layout_eval_pilot
+  echo ""
+  echo "sg3-layout-eval-pilot: running binary in identical-substrate mode (expect GO)..."
+  cargo run --quiet -p maw-bench-sweep --features bench --bin sg3-layout-eval -- \
+    --pilot --layout=both > /tmp/sg3-pilot-go.json
+  GO_VERDICT=$(python3 -c 'import json,sys; print(json.load(open("/tmp/sg3-pilot-go.json"))["verdict"])')
+  if [ "$GO_VERDICT" != "go" ]; then
+    echo "FAIL: identical pilot substrates returned verdict=$GO_VERDICT (expected go)"
+    exit 1
+  fi
+  echo "  GO verdict on identical substrates: OK"
+  echo ""
+  echo "sg3-layout-eval-pilot: running binary with planted R1 regression (expect NO-GO)..."
+  set +e
+  cargo run --quiet -p maw-bench-sweep --features bench --bin sg3-layout-eval -- \
+    --pilot --layout=both --plant-r1 > /tmp/sg3-pilot-nogo.json
+  NOGO_EXIT=$?
+  set -e
+  NOGO_VERDICT=$(python3 -c 'import json,sys; print(json.load(open("/tmp/sg3-pilot-nogo.json"))["verdict"])')
+  NOGO_RULE=$(python3 -c 'import json,sys; print(json.load(open("/tmp/sg3-pilot-nogo.json"))["regression_rule"])')
+  if [ "$NOGO_VERDICT" != "no_go" ] || [ "$NOGO_RULE" != "R1" ] || [ "$NOGO_EXIT" != "1" ]; then
+    echo "FAIL: planted R1 returned verdict=$NOGO_VERDICT rule=$NOGO_RULE exit=$NOGO_EXIT"
+    echo "  expected: verdict=no_go rule=R1 exit=1"
+    exit 1
+  fi
+  echo "  NO-GO verdict with R1 named on planted regression: OK"
+  echo ""
+  echo "sg3-layout-eval-pilot: ALL CHECKS PASSED"
+  echo "  decision-logic JSONs at /tmp/sg3-pilot-go.json /tmp/sg3-pilot-nogo.json"
+  echo "  see notes/sg3-go-no-go.md for the go/no-go writeup template"

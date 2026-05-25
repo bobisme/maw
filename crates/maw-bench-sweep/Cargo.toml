@@ -72,5 +72,10 @@ name = "sg2-sweep-pilot"
 path = "src/bin/sg2_sweep_pilot.rs"
 required-features = ["bench"]
 
+[[bin]]
+name = "sg3-layout-eval"
+path = "src/bin/sg3_layout_eval.rs"
+required-features = ["bench"]
+
 [lints]
 workspace = true

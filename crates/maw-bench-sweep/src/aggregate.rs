@@ -233,10 +233,7 @@ fn visit_dir(dir: &Path, out: &mut Vec<(PathBuf, BenchRun)>) -> Result<(), Aggre
             path: path.clone(),
             source: e,
         })?;
-        let sv = v
-            .get("schema_version")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let sv = v.get("schema_version").and_then(Value::as_u64).unwrap_or(0);
         let sv = u32::try_from(sv).unwrap_or(0);
         if !SUPPORTED_SCHEMA_VERSIONS.contains(&sv) {
             return Err(AggregateError::UnsupportedSchema {
@@ -249,11 +246,10 @@ fn visit_dir(dir: &Path, out: &mut Vec<(PathBuf, BenchRun)>) -> Result<(), Aggre
         // (deny_unknown_fields is not set on BenchRun), so a v2 record
         // loads cleanly into a v1 BenchRun struct — the extras live
         // in the original Value if a future consumer wants them.
-        let run: BenchRun =
-            serde_json::from_value(v).map_err(|e| AggregateError::Parse {
-                path: path.clone(),
-                source: e,
-            })?;
+        let run: BenchRun = serde_json::from_value(v).map_err(|e| AggregateError::Parse {
+            path: path.clone(),
+            source: e,
+        })?;
         out.push((path, run));
     }
     Ok(())
@@ -263,7 +259,10 @@ fn visit_dir(dir: &Path, out: &mut Vec<(PathBuf, BenchRun)>) -> Result<(), Aggre
 ///
 /// Entry-point convenience that wraps `load_runs` + `aggregate_records`.
 pub fn aggregate_artifacts(artifact_dir: &Path) -> Result<SweepSummary, AggregateError> {
-    let runs: Vec<BenchRun> = load_runs(artifact_dir)?.into_iter().map(|(_, r)| r).collect();
+    let runs: Vec<BenchRun> = load_runs(artifact_dir)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     Ok(aggregate_records(&runs))
 }
 
@@ -351,10 +350,7 @@ fn summarize_cell(recs: &[&MetricRecord]) -> CellAggregate {
 /// `notes/sg2-metric-definitions.md` "median across runs" rule:
 /// `Unavailable` is dropped, `Infinite` is sorted as the maximum.
 #[allow(clippy::cast_possible_truncation)]
-fn lo_med_hi(
-    recs: &[&MetricRecord],
-    name: &str,
-) -> (MetricValue, MetricValue, MetricValue) {
+fn lo_med_hi(recs: &[&MetricRecord], name: &str) -> (MetricValue, MetricValue, MetricValue) {
     let mut finite: Vec<u64> = Vec::with_capacity(recs.len());
     let mut infinite_count: usize = 0;
     let mut total_measured: usize = 0;
@@ -464,8 +460,7 @@ pub fn wilson_ci(k: u64, n: u64) -> WilsonCi {
     let p = (k as f64) / n_f;
     let z2 = Z95 * Z95;
     let center = (p + z2 / (2.0 * n_f)) / (1.0 + z2 / n_f);
-    let half = (Z95 / (1.0 + z2 / n_f))
-        * f64::sqrt(p * (1.0 - p) / n_f + z2 / (4.0 * n_f * n_f));
+    let half = (Z95 / (1.0 + z2 / n_f)) * f64::sqrt(p * (1.0 - p) / n_f + z2 / (4.0 * n_f * n_f));
     let lower = (center - half).max(0.0);
     let upper = (center + half).min(1.0);
     WilsonCi {
@@ -553,14 +548,22 @@ mod tests {
             &MetricValue::count(3)
         );
         // min/max for tool_calls_total on the C0 cell.
-        assert_eq!(c0.min.get("tool_calls_total").unwrap(), &MetricValue::count(10));
-        assert_eq!(c0.max.get("tool_calls_total").unwrap(), &MetricValue::count(11));
+        assert_eq!(
+            c0.min.get("tool_calls_total").unwrap(),
+            &MetricValue::count(10)
+        );
+        assert_eq!(
+            c0.max.get("tool_calls_total").unwrap(),
+            &MetricValue::count(11)
+        );
     }
 
     #[test]
     fn zero_event_cell_publishes_wilson_upper_not_a_bare_zero() {
         // 10 maw runs, 0 work_lost_events.
-        let recs: Vec<_> = (0..10).map(|i| rec("maw", "C0", "T0", 0, 3 + i, 10)).collect();
+        let recs: Vec<_> = (0..10)
+            .map(|i| rec("maw", "C0", "T0", 0, 3 + i, 10))
+            .collect();
         let s = aggregate_metric_records(&recs);
         let c = s.cell("maw", "C0", "T0").expect("cell");
         assert_eq!(c.work_lost_rate_ci.k, 0);
@@ -589,10 +592,7 @@ mod tests {
             &MetricValue::count(5)
         );
         // max is INF.
-        assert_eq!(
-            c.max.get("turns_to_done").unwrap(),
-            &MetricValue::Infinite
-        );
+        assert_eq!(c.max.get("turns_to_done").unwrap(), &MetricValue::Infinite);
     }
 
     #[test]
@@ -614,7 +614,10 @@ mod tests {
         let bad = synth_benchrun_json(99);
         std::fs::write(tmp.path().join("bad.json"), bad).unwrap();
         let err = aggregate_artifacts(tmp.path()).expect_err("must error");
-        assert!(matches!(err, AggregateError::UnsupportedSchema { got: 99, .. }));
+        assert!(matches!(
+            err,
+            AggregateError::UnsupportedSchema { got: 99, .. }
+        ));
     }
 
     /// Build a minimal BenchRun JSON for tests. The v2 variant is

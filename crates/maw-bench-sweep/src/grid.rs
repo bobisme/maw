@@ -456,7 +456,12 @@ mod tests {
     fn arms_publication_constant_is_frozen_four_in_pre_reg_order() {
         assert_eq!(
             ARMS_PUBLICATION,
-            &["maw", "git-worktrees-bare", "claude-native-worktrees", "jj-workspaces"]
+            &[
+                "maw",
+                "git-worktrees-bare",
+                "claude-native-worktrees",
+                "jj-workspaces"
+            ]
         );
     }
 }

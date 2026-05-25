@@ -56,10 +56,7 @@ impl Default for SpectrumReportOptions {
 /// Render a spectrum-mode ASCII summary of `summary`. The output
 /// is plain text suitable for stdout / a CI log.
 #[must_use]
-pub fn render_spectrum_table(
-    summary: &SweepSummary,
-    opts: &SpectrumReportOptions,
-) -> String {
+pub fn render_spectrum_table(summary: &SweepSummary, opts: &SpectrumReportOptions) -> String {
     let mut out = String::new();
     if summary.cells.is_empty() {
         out.push_str("(no cells)\n");
@@ -72,7 +69,11 @@ pub fn render_spectrum_table(
         out,
         "SG2 spectrum-mode summary  (axes printed SEPARATELY; no cross-axis aggregation)"
     );
-    let _ = writeln!(out, "bone=bn-3l1f   pre-reg=§5+§4.1   ref_arm={}", opts.ref_arm);
+    let _ = writeln!(
+        out,
+        "bone=bn-3l1f   pre-reg=§5+§4.1   ref_arm={}",
+        opts.ref_arm
+    );
     out.push('\n');
 
     let arms = arm_order(summary, opts);
@@ -95,7 +96,11 @@ pub fn render_spectrum_table(
     // other arm classification at this condition × t_class for
     // that metric.
     out.push('\n');
-    let _ = writeln!(out, "--- per-(metric × condition) crossover (ref_arm = {}) ---", opts.ref_arm);
+    let _ = writeln!(
+        out,
+        "--- per-(metric × condition) crossover (ref_arm = {}) ---",
+        opts.ref_arm
+    );
     for metric in &opts.metrics {
         let cps = crate::find_crossover(summary, *metric, &opts.ref_arm);
         if cps.is_empty() {
@@ -143,7 +148,12 @@ fn render_cell_block(
     }
     // Axis 2 — efficiency.
     let _ = writeln!(out, "  --- efficiency (lower-is-better; NOT safety) ---");
-    for metric in ["tool_calls_total", "turns_to_done", "work_redone_turns", "cost_usd"] {
+    for metric in [
+        "tool_calls_total",
+        "turns_to_done",
+        "work_redone_turns",
+        "cost_usd",
+    ] {
         let _ = writeln!(out, "    {metric}");
         for arm in arms {
             let Some(c) = summary.cell(arm, cond_id, t_class) else {
@@ -152,10 +162,7 @@ fn render_cell_block(
             let lo = fmt_metric(c, metric, "min");
             let med = fmt_metric(c, metric, "median");
             let hi = fmt_metric(c, metric, "max");
-            let _ = writeln!(
-                out,
-                "      {arm:<24}  med={med:<10}  range=({lo}..{hi})",
-            );
+            let _ = writeln!(out, "      {arm:<24}  med={med:<10}  range=({lo}..{hi})",);
         }
     }
     out.push('\n');
@@ -224,10 +231,7 @@ fn arm_order(summary: &SweepSummary, opts: &SpectrumReportOptions) -> Vec<String
 /// shape is fixed here so the publication shape is review-able
 /// before the campaign starts.
 #[must_use]
-pub fn render_crossover_doc(
-    summary: &SweepSummary,
-    opts: &SpectrumReportOptions,
-) -> String {
+pub fn render_crossover_doc(summary: &SweepSummary, opts: &SpectrumReportOptions) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -240,7 +244,10 @@ pub fn render_crossover_doc(
         "_Pre-reg: `notes/sg2-benchmark-preregistration.md` §2 (publish-the-loss-regime), §4.2 (crossover figure), §5 (frozen spectrum). Bone: bn-3l1f / T2.6._"
     );
     out.push('\n');
-    let _ = writeln!(out, "**Binding format reminders (this scaffolding preserves them verbatim):**");
+    let _ = writeln!(
+        out,
+        "**Binding format reminders (this scaffolding preserves them verbatim):**"
+    );
     let _ = writeln!(out, "- Correctness axis is reported SEPARATELY from efficiency. Axes are not combined; there is no cross-axis aggregation.");
     let _ = writeln!(out, "- Zero-event proportion cells publish their Wilson 95% upper bound, NOT a bare zero (§6.1).");
     let _ = writeln!(out, "- The overkill regime (where {} loses on an efficiency metric) is shipped, never clipped (§2).", opts.ref_arm);
@@ -283,7 +290,10 @@ pub fn render_crossover_doc(
     out.push('\n');
     write_crossover_table(&mut out, &overkill_eff);
     out.push('\n');
-    let _ = writeln!(out, "**Narrative scaffold (fill from real-run artifacts):**");
+    let _ = writeln!(
+        out,
+        "**Narrative scaffold (fill from real-run artifacts):**"
+    );
     let _ = writeln!(out, "- _On low-coordination conditions ({{C0, C1}}), {} uses more tool calls / turns than the comparison arm. Margin: {{ratio range from the table above}}. This is expected and pre-registered._", opts.ref_arm);
     let _ = writeln!(out, "- _Recommendation (for the publication): \"Do not use {} below the {{C?}} condition class.\"_", opts.ref_arm);
     out.push('\n');
@@ -365,7 +375,10 @@ fn write_crossover_table(out: &mut String, cps: &[CrossoverPoint]) {
         let _ = writeln!(out, "_(no cells in this regime)_");
         return;
     }
-    let _ = writeln!(out, "| metric | condition | t_class | other arm | regime | statistic | N(ref / other) |");
+    let _ = writeln!(
+        out,
+        "| metric | condition | t_class | other arm | regime | statistic | N(ref / other) |"
+    );
     let _ = writeln!(out, "|---|---|---|---|---|---|---|");
     for cp in cps {
         let stat = fmt_stat(cp.statistic);
@@ -447,8 +460,14 @@ mod tests {
         let s = planted_summary();
         let doc = render_crossover_doc(&s, &SpectrumReportOptions::default());
         // The two load-bearing section headers, exactly.
-        assert!(doc.contains("## OVERKILL_REGIME"), "missing OVERKILL_REGIME:\n{doc}");
-        assert!(doc.contains("## HOSTILE_REGIME"), "missing HOSTILE_REGIME:\n{doc}");
+        assert!(
+            doc.contains("## OVERKILL_REGIME"),
+            "missing OVERKILL_REGIME:\n{doc}"
+        );
+        assert!(
+            doc.contains("## HOSTILE_REGIME"),
+            "missing HOSTILE_REGIME:\n{doc}"
+        );
         // The overkill regime narrative scaffold mentions the
         // "do not use" guidance.
         assert!(doc.to_ascii_lowercase().contains("do not use"));
@@ -502,6 +521,9 @@ mod tests {
         let s = planted_summary();
         let out = render_spectrum_table(&s, &SpectrumReportOptions::default());
         // C0 / maw should have a Wilson CI like "0.000 [0.000, 0.???]".
-        assert!(out.contains("[0.000,"), "wilson lower bound missing:\n{out}");
+        assert!(
+            out.contains("[0.000,"),
+            "wilson lower bound missing:\n{out}"
+        );
     }
 }
