@@ -2263,6 +2263,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "maw-bench-metrics"
+version = "0.61.0"
+dependencies = [
+ "maw-bench",
+ "maw-bench-adapters",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "maw-cli"
 version = "0.61.0"
 dependencies = [

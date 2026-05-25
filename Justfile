@@ -180,3 +180,18 @@ sg1-faithful-clippy:
 # zero-overhead — `fp!()` compiles to nothing without the feature.
 sg1-faithful-build:
   cargo build -p maw-cli --features failpoints --release
+
+# ----------------------------------------------------------------------------
+# SG2 — agent-ergonomics benchmark recipes (bn-2jwi). T2.4 / bn-oko4.
+# ----------------------------------------------------------------------------
+
+# sg2-report: render the per-arm dominance table over a directory of
+# BenchRun JSONs (one .json file per run, produced by maw-bench).
+# By the bone (bn-oko4) + the pre-reg §4 the table NEVER contains a
+# composite score; correctness and efficiency are printed as separate
+# axes and the reader composes their own dominance verdict.
+#
+#   just sg2-report <artifact-dir>           # per-run table only
+#   just sg2-report <artifact-dir> --median  # add per-arm median rows
+sg2-report dir *flags:
+  cargo run --quiet -p maw-bench-metrics --features bench --bin sg2-report -- {{dir}} {{flags}}

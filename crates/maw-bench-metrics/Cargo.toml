@@ -1,0 +1,74 @@
+[package]
+name = "maw-bench-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Per-run dominance metrics + report renderer for the SG2 benchmark. T2.4 / bn-oko4."
+keywords = ["maw", "benchmark", "metrics", "sg2", "dominance"]
+categories = ["development-tools::testing"]
+
+# Why a sibling crate (T2.4 architectural decision — bn-oko4):
+# --------------------------------------------------------------------------
+# Two options were considered:
+#
+#   A. Module inside `maw-bench` (`maw_bench::metrics`).
+#   B. New sibling crate `maw-bench-metrics`. <- CHOSEN.
+#
+# Rationale for (B):
+#
+# 1. **Compile-cycle isolation.** The harness (maw-bench) is the slow
+#    half: it pulls maw-scenario, maw-assurance, and (under
+#    `claude-backend`) reqwest. The metrics layer is pure extraction
+#    over a stable schema. Co-locating them means a metric tweak forces
+#    a harness rebuild (and vice-versa). The sibling pattern is already
+#    established by maw-bench-adapters.
+#
+# 2. **Dependency direction is one-way + read-only.** `extract_metrics`
+#    is a pure function `&BenchRun -> MetricRecord`. The metrics crate
+#    depends on `maw-bench` for the BenchRun schema and on
+#    `maw-bench-adapters` for the StepOutcome/StateSnapshot
+#    documentation vocabulary (the metric defs reference these op
+#    classes). Neither dependee depends on `maw-bench-metrics`.
+#
+# 3. **Mirrors the pre-reg's "T2.4 reads these files" framing
+#    (§1.1).** Making the consumer a separate crate makes the
+#    read-only relationship structural rather than convention-based.
+#
+# 4. **Bench feature gating is symmetric.** Like the other two,
+#    everything gates behind `bench`; the default workspace build pays
+#    zero compile cost.
+#
+# Tests are MockAgent-shaped: they fabricate `BenchRun` records in
+# memory (no I/O, no provider variance) and assert metric extraction
+# + report rendering invariants.
+
+[features]
+default = []
+# Activates the metric extractor + report renderer. Pulls maw-bench
+# (for the BenchRun schema) and maw-bench-adapters (for the
+# StepOutcome/StateSnapshot vocabulary that the metric definitions
+# reference).
+bench = [
+    "dep:maw-bench",
+    "maw-bench/bench",
+    "dep:maw-bench-adapters",
+    "maw-bench-adapters/bench",
+    "dep:serde",
+    "dep:serde_json",
+]
+
+[dependencies]
+maw-bench = { path = "../maw-bench", version = "0.61.0", optional = true }
+maw-bench-adapters = { path = "../maw-bench-adapters", version = "0.61.0", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+thiserror = "2"
+
+[[bin]]
+name = "sg2-report"
+path = "src/bin/sg2_report.rs"
+required-features = ["bench"]
+
+[lints]
+workspace = true
