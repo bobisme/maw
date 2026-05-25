@@ -250,6 +250,7 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                     commits_ahead: ws.commits_ahead,
                     has_uncommitted,
                     was_integrated: false,
+            has_pinned_snapshot: false,
                 };
                 let state = LifecycleState::classify(signals);
                 let fix = state.fix_command(ws.id.as_str(), ws_mode.is_persistent());
@@ -912,6 +913,7 @@ mod tests {
             commits_ahead,
             has_uncommitted: false,
             was_integrated: false,
+            has_pinned_snapshot: false,
         };
         let lifecycle_state = LifecycleState::classify(signals);
         let fix_command = lifecycle_state.fix_command(name, false);

@@ -233,6 +233,7 @@ pub fn status(format: OutputFormat) -> Result<()> {
                     commits_ahead: ws.commits_ahead,
                     has_uncommitted,
                     was_integrated: false,
+            has_pinned_snapshot: false,
                 };
                 let state = LifecycleState::classify(signals);
                 let behind = match ws.state {
