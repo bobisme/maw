@@ -1,0 +1,39 @@
+[package]
+name = "maw-bench-adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Substrate adapters (maw / git-worktrees+convention / jj-workspaces) for the SG2 agent-ergonomics benchmark. T2.3 / bn-mit2."
+keywords = ["maw", "benchmark", "substrate", "sg2", "adapters"]
+categories = ["development-tools::testing"]
+
+# Why this crate exists
+# --------------------------------------------------------------------------
+# T2.3 (bn-mit2): three substrate adapters presenting EQUIVALENT task
+# semantics so the SG2 benchmark measures substrate ergonomics, not task
+# wording. Implements the `Substrate` trait (also defined here, to be
+# consumed verbatim by T2.2 `maw-bench` once that crate lands — see
+# `notes/sg2-adapter-parity.md` for the parity audit table).
+#
+# The crate is gated behind the `bench` feature so the default workspace
+# build stays zero-overhead. Tests are tempfile-backed and never touch the
+# real maw repo, never call network, and isolate scenario repos under
+# `/tmp` per SP3 §Auth.
+
+[features]
+# Off by default. Building the adapters and their tests requires `--features bench`.
+bench = []
+
+[dependencies]
+maw-scenario = { path = "../maw-scenario" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
