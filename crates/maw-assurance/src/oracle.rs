@@ -371,11 +371,27 @@ fn read_merge_state_phase(root: &Path) -> Option<String> {
 // Check functions
 // ---------------------------------------------------------------------------
 
-/// **G1 — Committed no-loss**: every OID reachable via durable refs before
-/// the operation must still be reachable via durable or recovery refs after.
+/// **G1 — Committed no-loss (commit-ancestry; PROVEN-WRONG SEMANTICS,
+/// DEMOTED).**
+///
+/// SP2 (`notes/oracle-ab-spec.md` §0) empirically proved this
+/// commit-ancestry formulation **false-positives on every single maw
+/// merge**: maw's merge engine rebuilds the merged tree and emits a fresh
+/// epoch commit, and `maw ws destroy` writes a fresh recovery snapshot
+/// commit — neither is a descendant of the workspace's literal HEAD
+/// commit, yet the *content* (blob OIDs) is preserved. The Prime Invariant
+/// protects committed **content**, not commit identity. This function is
+/// retained for historical reference / unit-test backward compatibility
+/// ONLY and is **not** part of the SG1 release gate.
+///
+/// **The load-bearing successor is [`crate::oracle_a::OracleA`] (bn-1z8q,
+/// gated behind the `oracles` feature):** blob/content reachability with
+/// the mandatory incremental `W`/`U` design (SP2 §2, §2.1). New code MUST
+/// consume Oracle A.
 ///
 /// Uses `git merge-base --is-ancestor` to verify that each pre-state ref
-/// target is an ancestor of (or equal to) at least one post-state ref target.
+/// target is an ancestor of (or equal to) at least one post-state ref
+/// target.
 ///
 /// # Errors
 /// Returns `AssuranceViolation::ReachabilityLost` if any pre-op OID is no
@@ -705,6 +721,14 @@ pub fn check_g6_searchability(post: &AssuranceState) -> Result<(), AssuranceViol
 ///
 /// # Errors
 /// Returns the first `AssuranceViolation` encountered across G1-G6.
+///
+/// Note: G1 is the proven-wrong commit-ancestry check (see
+/// [`check_g1_reachability`]); the SG1 release gate consumes
+/// [`crate::oracle_a::OracleA`] (blob/content reachability) instead. G1 is
+/// kept in `check_all` only for backward-compatibility with the existing
+/// unit-test suite; callers building new infra MUST drive `OracleA` and
+/// `OracleB` directly.
+#[allow(deprecated)]
 pub fn check_all(pre: &AssuranceState, post: &AssuranceState) -> Result<(), AssuranceViolation> {
     check_g1_reachability(pre, post)?;
     check_g2_rewrite_preservation(pre, post)?;
@@ -720,6 +744,8 @@ pub fn check_all(pre: &AssuranceState, post: &AssuranceState) -> Result<(), Assu
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)] // G1 tests intentionally pin the proven-wrong semantics
+                     // for backward-compatibility; the SG1 gate uses Oracle A.
 mod tests {
     use super::*;
 

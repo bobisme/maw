@@ -17,6 +17,9 @@
 //! - [`scenario`] — deterministic scenario + condition generator
 //!   (bn-1f53; behind the `scenario` feature). The driver-agnostic plan
 //!   stream "build once, drive two ways" (sg1-dst-architecture.md §2).
+//! - [`oracle_a`] — SG1 Oracle A: blob/content reachability with
+//!   incremental witness `W` + reachable-set `U` design
+//!   (bn-1z8q; behind the `oracles` feature).
 //! - [`oracle_b`] — SG1 Oracle B: state-coherence predicate (B1-B4) that
 //!   catches the bn-cm63 class (bn-3ji6, behind the `oracles` feature).
 //!
@@ -36,6 +39,16 @@ pub mod fault;
 #[cfg(feature = "stateright")]
 pub mod model;
 pub mod oracle;
+/// **Oracle A** — content (blob) reachability for SG1 (bn-1z8q / T1.3).
+///
+/// Predicate `W ⊆ U(F)` with an incremental `W,U` design (SP2 §2.1, the
+/// mandatory amortised-`O(1)`/step design). Catches **work-loss** —
+/// committed blob content that has left the durable frontier. See
+/// `notes/oracle-ab-spec.md` §0/§2 for why this is **blob**, not
+/// commit-ancestry, reachability and `notes/sg1-dst-architecture.md` §4.1
+/// for the harness integration point.
+#[cfg(feature = "oracles")]
+pub mod oracle_a;
 /// **Oracle B** — state coherence (B1–B4) for SG1 (bn-3ji6 / T1.4).
 ///
 /// Pure predicate over `(refs, ws-dirs, merge-state.json)`. Catches the
