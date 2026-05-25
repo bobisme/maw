@@ -5,6 +5,7 @@ use clap_complete::Shell;
 
 use maw_cli::agents;
 use maw_cli::changes;
+use maw_cli::crib;
 use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
@@ -21,6 +22,7 @@ use maw_cli::transport;
 #[cfg(feature = "tui")]
 use maw_cli::tui;
 use maw_cli::upgrade;
+use maw_cli::vocab_hints;
 use maw_cli::workspace;
 
 /// Multi-Agent Workspaces coordinator
@@ -279,6 +281,23 @@ enum Commands {
     ///   maw merge abandon abc123     # discard quarantine workspace
     #[command(subcommand, verbatim_doc_comment)]
     Merge(merge_cmd::MergeCommands),
+
+    /// Print an agent crib sheet — per-agent verb protocol (machine-friendly).
+    ///
+    /// Designed to be the FIRST call an agent (or its coordinator) makes
+    /// at session start: emits the full maw verb surface in a copy-pasteable
+    /// form (markdown by default; `--format json` for parseable consumption),
+    /// the common vocabulary pitfalls, and the load-bearing "when NOT to
+    /// reach for maw" overkill-line. This is the verb-discoverability
+    /// mitigation for the `vocabulary_scarcity` friction cluster
+    /// (see SG4 / bn-1t17).
+    ///
+    /// Examples:
+    ///   maw crib claude                  # markdown cheat sheet for Claude
+    ///   maw crib codex --format json     # JSON for programmatic ingest
+    ///   maw crib --overkill-line         # one-line "when NOT to use maw"
+    #[command(verbatim_doc_comment)]
+    Crib(crib::CribArgs),
 }
 
 #[derive(Subcommand)]
@@ -311,6 +330,51 @@ fn emit_migration_notice_if_needed() {
     eprintln!("Your repository history is preserved.");
 }
 
+/// Parse the CLI; on parse failure, augment clap's error output with a
+/// vocabulary-scarcity recovery hint before exiting.
+///
+/// This is the "self-describing output" half of the SG4 verb-discoverability
+/// mitigation (bn-1t17): when an agent issues a verb that doesn't exist
+/// (`maw ws new`, `maw checkout`, `maw stash`, ...), clap's default output
+/// is `error: unrecognized subcommand 'X'` with no guidance — exactly the
+/// `vocabulary_scarcity` cluster the SG4 backlog targets. We classify the
+/// rejected token against the [`vocab_hints`] table and print a single
+/// `did you mean: ...` line plus a universal "tip: --help / crib"
+/// discoverability tail before exiting with clap's status code.
+///
+/// We only inject the hint on parse failure; successful parses are
+/// untouched and there is zero overhead on the hot path.
+fn parse_cli_with_vocab_hints() -> Cli {
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match Cli::try_parse_from(&raw_args) {
+        Ok(cli) => cli,
+        Err(err) => {
+            // Reproduce clap's own rendering (with colour/exit semantics)
+            // first so the user still gets the canonical error.
+            let exit_code = err.exit_code();
+            let _ = err.print();
+            // Then layer our vocabulary-scarcity hint on top, if applicable.
+            //
+            // Skip arg[0] (the binary). Use string conversions; OsStr
+            // tokens that fail UTF-8 simply skip classification (callers
+            // see clap's default error alone).
+            let token_strs: Vec<String> = raw_args
+                .iter()
+                .skip(1)
+                .filter_map(|s| s.to_str().map(str::to_string))
+                .collect();
+            let tokens: Vec<&str> = token_strs.iter().map(String::as_str).collect();
+            if let Some(hint) = vocab_hints::classify_rejected_verb(&tokens) {
+                eprintln!("{}", hint.render());
+            }
+            // Always emit the universal discovery tail — even tokens we
+            // can't classify benefit from the `--help` / `crib` pointer.
+            eprintln!("{}", vocab_hints::UNIVERSAL_DISCOVERY_TAIL);
+            std::process::exit(exit_code);
+        }
+    }
+}
+
 fn main() {
     let _telemetry = telemetry::init();
     // bn-263u: seed the failpoint registry from `MAW_FP` so the *shipped*
@@ -319,7 +383,7 @@ fn main() {
     // `--features failpoints` binary reads the env var. Zero-overhead release
     // contract preserved.
     maw_core::failpoints::init_from_env();
-    let cli = Cli::parse();
+    let cli = parse_cli_with_vocab_hints();
     emit_migration_notice_if_needed();
 
     let result = match cli.command {
@@ -370,6 +434,7 @@ fn main() {
             Ok(())
         }
         Commands::Merge(ref cmd) => merge_cmd::run(cmd),
+        Commands::Crib(ref args) => crib::run(args),
     };
 
     if let Err(e) = result {
@@ -526,5 +591,91 @@ mod tests {
     fn ws_create_accepts_from_source() {
         let result = Cli::try_parse_from(["maw", "ws", "create", "alice", "--from", "main"]);
         assert!(result.is_ok(), "create with --from should parse");
+    }
+
+    // -----------------------------------------------------------------
+    // SG4 / bn-1t17 — verb-discoverability mitigation surface.
+    // -----------------------------------------------------------------
+
+    /// `maw crib` is the headline verb-discoverability surface and must be
+    /// registered as a top-level subcommand (parity with `maw doctor`,
+    /// `maw status`). Regression guard: if a future refactor drops the
+    /// wiring, agents lose their cheat-sheet entry point and the
+    /// `vocabulary_scarcity` cluster cannot drop to 0.
+    #[test]
+    fn crib_subcommand_is_registered() {
+        let cmd = Cli::command();
+        let has_crib = cmd
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "crib");
+        assert!(
+            has_crib,
+            "expected 'crib' subcommand to be registered (SG4 / bn-1t17)"
+        );
+    }
+
+    /// `maw crib` parses without arguments (default agent + default format).
+    /// This is the "agent reaches for it without knowing the args" case —
+    /// it MUST succeed so the agent gets a useful response, not a clap
+    /// error.
+    #[test]
+    fn crib_parses_with_no_args() {
+        let err = Cli::try_parse_from(["maw", "crib"]).err();
+        assert!(
+            err.is_none(),
+            "`maw crib` (no args) must parse so agents get a usable response: {}",
+            err.map_or_else(String::new, |e| e.to_string()),
+        );
+    }
+
+    /// `maw crib claude --format json` is the canonical "machine-friendly
+    /// per-agent protocol" invocation; pin its parseability so the
+    /// integration shape doesn't quietly regress.
+    #[test]
+    fn crib_with_agent_and_json_format_parses() {
+        let err = Cli::try_parse_from(["maw", "crib", "claude", "--format", "json"]).err();
+        assert!(
+            err.is_none(),
+            "`maw crib claude --format json` must parse: {}",
+            err.map_or_else(String::new, |e| e.to_string()),
+        );
+    }
+
+    /// `maw crib --overkill-line` is the one-line "when NOT to use maw"
+    /// surface — agents can paste this verbatim into a system prompt to
+    /// avoid reaching for nonexistent verbs on tasks that don't need
+    /// workspace coordination at all.
+    #[test]
+    fn crib_overkill_line_flag_parses() {
+        let err = Cli::try_parse_from(["maw", "crib", "--overkill-line"]).err();
+        assert!(
+            err.is_none(),
+            "`maw crib --overkill-line` must parse: {}",
+            err.map_or_else(String::new, |e| e.to_string()),
+        );
+    }
+
+    /// `maw ws new` is the canonical training-data verb (agents reach for
+    /// it from git's `worktree add`). The vocabulary-hint classifier MUST
+    /// route it to `maw ws create` — otherwise the agent has to guess.
+    #[test]
+    fn vocab_hint_routes_ws_new_to_ws_create() {
+        let hint = maw_cli::vocab_hints::classify_rejected_verb(&["ws", "new"])
+            .expect("ws new should classify as a known pitfall");
+        assert!(
+            hint.suggestion.contains("maw ws create"),
+            "ws new should suggest `maw ws create`, got: {:?}",
+            hint.suggestion,
+        );
+    }
+
+    /// Universal-discovery tail names BOTH backstops (`--help` and
+    /// `maw crib`) so even unclassified verbs learn where to look. This
+    /// is the "self-describing output" promise from the bn-1t17 brief.
+    #[test]
+    fn universal_discovery_tail_advertises_both_backstops() {
+        let tail = maw_cli::vocab_hints::UNIVERSAL_DISCOVERY_TAIL;
+        assert!(tail.contains("maw --help"));
+        assert!(tail.contains("maw crib"));
     }
 }

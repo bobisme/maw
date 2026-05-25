@@ -6,6 +6,7 @@
 pub mod agents;
 pub mod audit;
 pub mod changes;
+pub mod crib;
 pub mod doctor;
 pub mod epoch;
 pub mod epoch_gc;
@@ -26,4 +27,5 @@ pub mod transport;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod upgrade;
+pub mod vocab_hints;
 pub mod workspace;
