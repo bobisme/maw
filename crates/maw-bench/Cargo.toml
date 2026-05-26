@@ -39,11 +39,14 @@ bench = [
     "dep:rand",
     "dep:tempfile",
 ]
-# Adds the real-LLM Anthropic backend. Off by default so a vanilla
-# `cargo check --features bench` does not require reqwest's TLS deps,
-# and so accidentally running tests cannot fire a network call. Real
-# benchmark sweeps opt-in explicitly.
-claude-backend = ["bench", "dep:reqwest"]
+# Adds the real-LLM Claude Code subprocess backend. Off by default so
+# a vanilla `cargo check --features bench` cannot accidentally fire a
+# network call. Real benchmark sweeps opt-in explicitly. NOTE (bn-3kxq):
+# this feature is now subprocess-based (`claude -p --output-format
+# stream-json`), so no extra crate dependencies are required — the
+# guard is purely a compile-time signal of "real-LLM dispatch enabled"
+# paired with the runtime `MAW_BENCH_ALLOW_REAL_LLM=1` env guard.
+claude-backend = ["bench"]
 
 [dependencies]
 maw-scenario = { path = "../maw-scenario", version = "0.61.0", optional = true }
@@ -55,10 +58,6 @@ maw-assurance = { path = "../maw-assurance", version = "0.61.0", optional = true
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 rand = { version = "0.9", optional = true }
-# reqwest is only pulled by `claude-backend`. Blocking client to keep the
-# harness threadable without an async runtime; rustls-tls so we do not
-# require system OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 # Used by NoopSubstrate to allocate per-run tempdirs. Behind `bench` so the
 # default (zero-feature) build does not pull it.
 tempfile = { version = "3", optional = true }
