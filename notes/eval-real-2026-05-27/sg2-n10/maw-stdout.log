@@ -1,0 +1,2 @@
+sg2-sweep-pilot: artifact_dir = notes/eval-real-2026-05-27/sg2-n10
+  backend=claude substrate=maw seeds_per_cell=10
