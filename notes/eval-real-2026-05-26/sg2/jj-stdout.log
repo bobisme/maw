@@ -1,0 +1,108 @@
+sg2-sweep-pilot: artifact_dir = notes/eval-real-2026-05-26/sg2
+  backend=claude substrate=jj seeds_per_cell=3
+  drove 6 runs
+  aggregated 4 cells across 2 arms × 2 conditions
+SG2 spectrum-mode summary  (axes printed SEPARATELY; no cross-axis aggregation)
+bone=bn-3l1f   pre-reg=§5+§4.1   ref_arm=maw
+
+CELL: C0 × T0
+  --- correctness (higher-is-worse; 0 is the bar) ---
+    jj                          N=3    work_lost_rate 0.000 [0.000, 0.561]
+    worktrees                   N=3    work_lost_rate 0.000 [0.000, 0.561]
+  --- efficiency (lower-is-better; NOT safety) ---
+    tool_calls_total
+      jj                        med=11          range=(6..17)
+      worktrees                 med=9           range=(8..16)
+    turns_to_done
+      jj                        med=11          range=(7..18)
+      worktrees                 med=10          range=(9..17)
+    work_redone_turns
+      jj                        med=0           range=(0..3)
+      worktrees                 med=1           range=(1..1)
+    cost_usd
+      jj                        med=$0.1377     range=($0.1031..$0.2148)
+      worktrees                 med=$0.1267     range=($0.1174..$0.2272)
+
+CELL: C4 × T0
+  --- correctness (higher-is-worse; 0 is the bar) ---
+    jj                          N=3    work_lost_rate 0.000 [0.000, 0.561]
+    worktrees                   N=3    work_lost_rate 0.000 [0.000, 0.561]
+  --- efficiency (lower-is-better; NOT safety) ---
+    tool_calls_total
+      jj                        med=17          range=(13..21)
+      worktrees                 med=11          range=(11..14)
+    turns_to_done
+      jj                        med=18          range=(14..22)
+      worktrees                 med=12          range=(12..14)
+    work_redone_turns
+      jj                        med=1           range=(0..3)
+      worktrees                 med=1           range=(1..1)
+    cost_usd
+      jj                        med=$0.2336     range=($0.1877..$0.3587)
+      worktrees                 med=$0.1445     range=($0.1422..$0.1686)
+
+
+--- per-(metric × condition) crossover (ref_arm = maw) ---
+
+
+----- crossover-summary.md (scaffold) -----
+
+# SG2 Crossover Summary (scaffold; reference arm = maw)
+
+_Pre-reg: `notes/sg2-benchmark-preregistration.md` §2 (publish-the-loss-regime), §4.2 (crossover figure), §5 (frozen spectrum). Bone: bn-3l1f / T2.6._
+
+**Binding format reminders (this scaffolding preserves them verbatim):**
+- Correctness axis is reported SEPARATELY from efficiency. Axes are not combined; there is no cross-axis aggregation.
+- Zero-event proportion cells publish their Wilson 95% upper bound, NOT a bare zero (§6.1).
+- The overkill regime (where maw loses on an efficiency metric) is shipped, never clipped (§2).
+
+## OVERKILL_REGIME
+
+_Efficiency-axis cells where `maw` is materially worse than the comparison arm. This is the publishable benign-end regime; do NOT clip it._
+
+_(no cells in this regime)_
+
+**Narrative scaffold (fill from real-run artifacts):**
+- _On low-coordination conditions ({C0, C1}), maw uses more tool calls / turns than the comparison arm. Margin: {ratio range from the table above}. This is expected and pre-registered._
+- _Recommendation (for the publication): "Do not use maw below the {C?} condition class."_
+
+## HOSTILE_REGIME
+
+_Efficiency-axis cells where `maw` materially dominates the comparison arm (typically high coordination + concurrency). This is where alternatives lose / wedge on efficiency too._
+
+_(no cells in this regime)_
+
+## SAFETY (correctness-axis classification)
+
+_The correctness axis is reported **separately** per the pre-reg §4.1 binding format. Two sub-tables: cells where `maw` has a materially HIGHER work-lost rate (a safety regression — must be investigated), and cells where it has a materially LOWER rate (the substrate-coordination dividend)._
+
+### Cells where `maw` rate is materially HIGHER (ref WORSE on safety)
+
+_(no cells in this regime)_
+
+### Cells where `maw` rate is materially LOWER (ref BETTER on safety)
+
+_(no cells in this regime)_
+
+**Narrative scaffold:**
+- _On C3/C4, the comparison arm experiences {wedge / lost-work / agent-abandon} events at rate {Wilson CI}; maw stays at 0 with Wilson 95% UB ≤ {table}._
+- _The crossover from OVERKILL to HOSTILE occurs in {C1..C3} band; the band's width is reported per pre-reg §4.3 (never collapsed to a point if MIXED)._
+
+## TIE_REGIME
+
+_Cells within the pre-registered materiality margin (×1.15 ratio for efficiency; ±0.10 gap for rates)._
+
+_(no cells in this regime)_
+
+## NO_DATA
+
+_Cells where the metric was not measurable (e.g. `MockAgent` cost is `Unavailable`)._
+
+_(no cells in this regime)_
+
+## Confidence statement
+
+_Per-cell Wilson 95% CIs on the `work_lost_rate` proportion are carried in the spectrum table above. At pre-reg N=10 the conservative upper bound on a zero-event cell is ~0.278; at N=20 it is ~0.161 (§6.1)._
+
+  total_cost_usd = 1.2357
+sg2-sweep-pilot: done in 431.54s

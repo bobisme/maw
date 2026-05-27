@@ -1,0 +1,234 @@
+{
+  "schema_version": 2,
+  "run_id": "C2-T0-maw-old-layout-r005",
+  "manifest": {
+    "claude_code_version": "",
+    "claude_model_id": "sonnet",
+    "claude_effective_model": "",
+    "git_version": "git version 2.54.0",
+    "jj_version": "jj 0.41.0",
+    "maw_version": "",
+    "benchmark_harness_commit": "0.61.0",
+    "scenario_generator_commit": "0.61.0",
+    "prompt_hash": "075ce8ae98f55a7e85d3e9ab1d2b0ea5700be51da34394fa12940872b4e31bac",
+    "seed": 8326944295969688603,
+    "condition_id": "C2",
+    "t_class": "T0",
+    "arm": "maw@old-layout",
+    "os_kernel": "Linux 7.0.5-arch1-1 x86_64",
+    "start_ts_unix_ms": 1000,
+    "end_ts_unix_ms": 2000
+  },
+  "verdict": {
+    "outcome": "success"
+  },
+  "oracle_b": {
+    "verdict": "not_applicable",
+    "reason": "arm = maw@old-layout; Oracle B scoped to maw refs"
+  },
+  "transcript": {
+    "prompt": "You are a fresh-context agent in a coordination-benchmark task. Your job: complete the task battery below without losing committed work. You may inspect the workspace freely. Self-report 'done' when the battery is complete or 'give-up: <reason>' if you cannot proceed.\n\n## Substrate convention\n\n# maw arm crib (current v2 `ws/` layout)\n\nYou coordinate multi-agent work using **maw**, a workspace-management tool built on git. The repo is laid out as a bare-style root containing `.git/` and a `ws/` directory; every workspace is an isolated git worktree under `ws/<name>/`. The default integration target lives at `ws/default/`. The `maw` binary is on `$PATH`.\n\n## Core verbs\n\n- `maw ws create <name>` — make a new workspace (worktree) at `ws/<name>/`.\n- `maw ws list` — list all workspaces with their state (active / stale / conflicted).\n- `maw ws sync` — bring the current workspace up to the latest epoch (rebases workspace commits onto integration head). Use when you see `stale` in `maw ws list`.\n- `maw ws diff <name>` — show the workspace's changes vs the epoch base.\n- `maw ws merge <a> [b ...] --into default --check` — dry-run a merge; reports conflicts without changing state.\n- `maw ws merge <a> [b ...] --into default --destroy` — merge workspace(s) into default and destroy the source(s) on success.\n- `maw ws destroy <name>` — drop the workspace (Prime Invariant: a recovery snapshot is captured automatically; with `--force` even on unmerged work).\n- `maw ws recover` — list / restore destroyed workspaces from their recovery snapshots.\n- `maw ws resolve <name> --list` / `--keep epoch|<name>|both` — resolve conflict markers left by `maw ws sync --rebase`.\n- `maw doctor` — substrate-health probe.\n\n## Running commands inside a workspace\n\nThe sandbox does not persist `cd` between tool calls. Use `maw exec <workspace> -- <cmd>` to run any command inside a workspace:\n\n```\nmaw exec alice -- git status\nmaw exec alice -- git add -A\nmaw exec alice -- git commit -m \"feat: …\"\n```\n\n## Conflicts are data, not errors\n\n- `maw ws sync --rebase` does not abort on conflict — it commits the marker-laden file, records structured conflict metadata under `.manifold/`, and continues. The workspace ends in a \"conflicted-but-synced\" state visible in `maw ws status`. Resolve via `maw ws resolve`.\n- `maw ws merge` refuses only one thing: a source workspace whose HEAD still contains unresolved textual conflict markers. Pass `--force` only when markers are legitimate content (test fixtures, docs).\n\n## Prime Invariant\n\nNo committed work is ever lost. `maw ws destroy` always captures a recovery snapshot under `refs/manifold/recovery/<name>/`; `maw ws recover` can list, inspect, search, and restore the contents of any destroyed workspace. If you suspect work was lost, run `maw ws recover` before reopening the task.\n\n## What to read first\n\n- This crib (always).\n- `maw --help` and `maw ws --help` for the full surface.\n- `maw doctor` if anything looks broken before you start.\n\n## Workspace\n\nWork under: /tmp/.tmpPqnpRK\nScenario seed: 8326944295969688603\n\n## Task battery\n\nComplete the following abstract tasks using the substrate vocabulary above. Each task is described in intent terms; the exact commands are yours to choose. Aim to leave the substrate coherent (no orphaned state, no lost work).\n\n1. Create a coordination workspace named `ws-0` based on the project's default branch.\n2. In workspace `ws-0`, edit the following files (any content is fine; the test cares about coordination): shared/file-3.txt, ws-0/file-0.txt, ws-0/file-2.txt\n3. Commit pending changes in workspace `ws-0` with a descriptive message.\n4. Integrate workspaces `ws-0` into the default branch and remove the sources after the merge succeeds.\n",
+    "prompt_sha256": "075ce8ae98f55a7e85d3e9ab1d2b0ea5700be51da34394fa12940872b4e31bac",
+    "convention_text": "# maw arm crib (current v2 `ws/` layout)\n\nYou coordinate multi-agent work using **maw**, a workspace-management tool built on git. The repo is laid out as a bare-style root containing `.git/` and a `ws/` directory; every workspace is an isolated git worktree under `ws/<name>/`. The default integration target lives at `ws/default/`. The `maw` binary is on `$PATH`.\n\n## Core verbs\n\n- `maw ws create <name>` — make a new workspace (worktree) at `ws/<name>/`.\n- `maw ws list` — list all workspaces with their state (active / stale / conflicted).\n- `maw ws sync` — bring the current workspace up to the latest epoch (rebases workspace commits onto integration head). Use when you see `stale` in `maw ws list`.\n- `maw ws diff <name>` — show the workspace's changes vs the epoch base.\n- `maw ws merge <a> [b ...] --into default --check` — dry-run a merge; reports conflicts without changing state.\n- `maw ws merge <a> [b ...] --into default --destroy` — merge workspace(s) into default and destroy the source(s) on success.\n- `maw ws destroy <name>` — drop the workspace (Prime Invariant: a recovery snapshot is captured automatically; with `--force` even on unmerged work).\n- `maw ws recover` — list / restore destroyed workspaces from their recovery snapshots.\n- `maw ws resolve <name> --list` / `--keep epoch|<name>|both` — resolve conflict markers left by `maw ws sync --rebase`.\n- `maw doctor` — substrate-health probe.\n\n## Running commands inside a workspace\n\nThe sandbox does not persist `cd` between tool calls. Use `maw exec <workspace> -- <cmd>` to run any command inside a workspace:\n\n```\nmaw exec alice -- git status\nmaw exec alice -- git add -A\nmaw exec alice -- git commit -m \"feat: …\"\n```\n\n## Conflicts are data, not errors\n\n- `maw ws sync --rebase` does not abort on conflict — it commits the marker-laden file, records structured conflict metadata under `.manifold/`, and continues. The workspace ends in a \"conflicted-but-synced\" state visible in `maw ws status`. Resolve via `maw ws resolve`.\n- `maw ws merge` refuses only one thing: a source workspace whose HEAD still contains unresolved textual conflict markers. Pass `--force` only when markers are legitimate content (test fixtures, docs).\n\n## Prime Invariant\n\nNo committed work is ever lost. `maw ws destroy` always captures a recovery snapshot under `refs/manifold/recovery/<name>/`; `maw ws recover` can list, inspect, search, and restore the contents of any destroyed workspace. If you suspect work was lost, run `maw ws recover` before reopening the task.\n\n## What to read first\n\n- This crib (always).\n- `maw --help` and `maw ws --help` for the full surface.\n- `maw doctor` if anything looks broken before you start.\n",
+    "turns": [
+      {
+        "index": 1,
+        "ts_unix_ms": 1779845398045,
+        "reply_text": "I'll work through this task battery step by step. Let me first inspect the workspace structure.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"maw ws list && ls ws/\",\"description\":\"List workspaces and directory contents\"}",
+            "ts_unix_ms": 1779845399337,
+            "result_truncated": "default\t/tmp/.tmpPqnpRK/ws/default\ndefault"
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "ts_unix_ms": 1779845402370,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls ws/default/ && ls ws/default/shared/ 2>/dev/null || echo \\\"no shared dir\\\"\",\"description\":\"Inspect default workspace contents\"}",
+            "ts_unix_ms": 1779845402370,
+            "result_truncated": "README.md\nno shared dir"
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "ts_unix_ms": 1779845405341,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"maw ws create ws-0\",\"description\":\"Create workspace ws-0\"}",
+            "ts_unix_ms": 1779845405343,
+            "result_truncated": "Exit code 1\nError: Workspace create requires an explicit source.\n  Use one of:\n    maw ws create --from main ws-0\n    maw ws create --change <change-id> ws-0"
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "ts_unix_ms": 1779845407397,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"maw ws create --from main ws-0\",\"description\":\"Create workspace ws-0 from main branch\"}",
+            "ts_unix_ms": 1779845407397,
+            "result_truncated": "Creating workspace 'ws-0' at ws/ws-0 ...\n\nWorkspace 'ws-0' ready!\n\n  Mode:   ephemeral\n  Epoch:  48fab77049d6 (base commit for this workspace)\n  Path:   /tmp/.tmpPqnpRK/ws/ws-0/\n\n  IMPORTANT: All file reads, writes, and edits must use this path.\n  This is your working directory for ALL operations, not just bash.\n\nTo start working:\n\n  # Edit files under /tmp/.tmpPqnpRK/ws/ws-0/\n  # Changes are detected automatically by the merge engine\n\n  # Run commands in the workspace:\n  maw exec ws-0 -- cargo test\n  maw ws merge ws-0 --into default --destroy\n\nNote: All edits in the workspace are tracked automatically.\nThe merge engine captures changes when merging."
+          }
+        ]
+      },
+      {
+        "index": 5,
+        "ts_unix_ms": 1779845409473,
+        "reply_text": "Workspace created. Now I'll create/edit the required files.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"mkdir -p ws/ws-0/shared ws/ws-0/ws-0\",\"description\":\"Create required directories in ws-0\"}",
+            "ts_unix_ms": 1779845410124,
+            "result_truncated": "(Bash completed with no output)"
+          }
+        ]
+      },
+      {
+        "index": 6,
+        "ts_unix_ms": 1779845412710,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"shared coordination file-3\\n\",\"file_path\":\"/tmp/.tmpPqnpRK/ws/ws-0/shared/file-3.txt\"}",
+            "ts_unix_ms": 1779845412710,
+            "result_truncated": "File created successfully at: /tmp/.tmpPqnpRK/ws/ws-0/shared/file-3.txt (file state is current in your context — no need to Read it back)"
+          },
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"ws-0 file-0\\n\",\"file_path\":\"/tmp/.tmpPqnpRK/ws/ws-0/ws-0/file-0.txt\"}",
+            "ts_unix_ms": 1779845413640,
+            "result_truncated": "File created successfully at: /tmp/.tmpPqnpRK/ws/ws-0/ws-0/file-0.txt (file state is current in your context — no need to Read it back)"
+          },
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"ws-0 file-2\\n\",\"file_path\":\"/tmp/.tmpPqnpRK/ws/ws-0/ws-0/file-2.txt\"}",
+            "ts_unix_ms": 1779845413875,
+            "result_truncated": "File created successfully at: /tmp/.tmpPqnpRK/ws/ws-0/ws-0/file-2.txt (file state is current in your context — no need to Read it back)"
+          }
+        ]
+      },
+      {
+        "index": 7,
+        "ts_unix_ms": 1779845415657,
+        "reply_text": "Files created. Now commit them in ws-0.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"maw exec ws-0 -- git add -A && maw exec ws-0 -- git commit -m \\\"feat: add coordination files for ws-0 (shared/file-3.txt, ws-0/file-0.txt, ws-0/file-2.txt)\\\"\",\"description\":\"Stage and commit all changes in ws-0\"}",
+            "ts_unix_ms": 1779845417116,
+            "result_truncated": "[detached HEAD 04f55b8] feat: add coordination files for ws-0 (shared/file-3.txt, ws-0/file-0.txt, ws-0/file-2.txt)\n 3 files changed, 3 insertions(+)\n create mode 100644 shared/file-3.txt\n create mode 100644 ws-0/file-0.txt\n create mode 100644 ws-0/file-2.txt"
+          }
+        ]
+      },
+      {
+        "index": 8,
+        "ts_unix_ms": 1779845419365,
+        "reply_text": "Committed. Now merge ws-0 into default and destroy the source.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"maw ws merge ws-0 --into default --destroy\",\"description\":\"Merge ws-0 into default and destroy source workspace\"}",
+            "ts_unix_ms": 1779845420009,
+            "result_truncated": "Exit code 1\nError: No --message provided and stdin is not a terminal.\n  Usage: maw ws merge <workspaces> --into <target> --message \"feat: description of changes\"\n  \n  A commit message is required so that merge history captures intent."
+          }
+        ]
+      },
+      {
+        "index": 9,
+        "ts_unix_ms": 1779845422289,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"maw ws merge ws-0 --into default --destroy --message \\\"feat: integrate ws-0 coordination files into default\\\"\",\"description\":\"Merge ws-0 into default with message and destroy source\"}",
+            "ts_unix_ms": 1779845422289,
+            "result_truncated": "Adopting workspace: ws-0\n\nPREPARE: Freezing merge inputs...\n  Epoch: 48fab77049d6\n  ws-0: 04f55b85fe9d\n\nBUILD: Running merge engine...\n  3 unique path(s), 0 shared path(s), 3 resolved\n  Candidate: cfbf95615a04\n\n\nVALIDATE: No validation commands configured — skipping.\n\nCOMMIT: Advancing epoch...\n  Epoch advanced: 48fab77049d6 → cfbf95615a04\n  Branch 'main' updated.\n\nAUTO-REBASE: replaying sibling workspaces onto new epoch...\n  ws-0 — skipped: in progress\n\nCLEANUP...\n  Default workspace updated to new epoch.\n  Cleaning up workspaces...\n    Destroyed: ws-0 (snapshot saved → maw ws recover ws-0)\n\nMerged to main: feat: integrate ws-0 coordination files into default from ws-0\n\nNext: push to remote:\n  maw push"
+          }
+        ]
+      },
+      {
+        "index": 10,
+        "ts_unix_ms": 1779845426285,
+        "reply_text": "All tasks complete. Here's a summary:\n\n1. **Created** `ws-0` from the main branch with `maw ws create --from main ws-0`.\n2. **Edited** all three required files: `shared/file-3.txt`, `ws-0/file-0.txt`, `ws-0/file-2.txt`.\n3. **Committed** the changes with a descriptive message in `ws-0`.\n4. **Merged** `ws-0` into default and destroyed the source workspace — epoch advanced from `48fab77` to `cfbf956`.\n\ndone",
+        "tool_calls": []
+      }
+    ]
+  },
+  "total_tool_calls": 11,
+  "total_turns": 10,
+  "cost_usd": 0.1285512,
+  "duration_ms": 1000,
+  "substrate_final_files": [
+    ".manifold/artifacts/ws/ws-0/destroy/2026-05-27T01-30-22.358459874Z.json",
+    ".manifold/artifacts/ws/ws-0/destroy/latest.json",
+    ".manifold/config.toml",
+    ".manifold/locks/create/ws-0.lock",
+    ".manifold/platform-capabilities",
+    "repo.git/COMMIT_EDITMSG",
+    "repo.git/HEAD",
+    "repo.git/config",
+    "repo.git/description",
+    "repo.git/hooks/applypatch-msg.sample",
+    "repo.git/hooks/commit-msg.sample",
+    "repo.git/hooks/fsmonitor-watchman.sample",
+    "repo.git/hooks/post-update.sample",
+    "repo.git/hooks/pre-applypatch.sample",
+    "repo.git/hooks/pre-commit.sample",
+    "repo.git/hooks/pre-merge-commit.sample",
+    "repo.git/hooks/pre-push.sample",
+    "repo.git/hooks/pre-rebase.sample",
+    "repo.git/hooks/pre-receive.sample",
+    "repo.git/hooks/prepare-commit-msg.sample",
+    "repo.git/hooks/push-to-checkout.sample",
+    "repo.git/hooks/sendemail-validate.sample",
+    "repo.git/hooks/update.sample",
+    "repo.git/info/exclude",
+    "repo.git/logs/HEAD",
+    "repo.git/logs/refs/heads/main",
+    "repo.git/objects/04/44bf74f1a8ffcd882a119f44b68d0d8290d293",
+    "repo.git/objects/04/f55b85fe9dc8cfa2483606bfeb997326c88967",
+    "repo.git/objects/48/fab77049d616254be40b44d04f71ac2483a62f",
+    "repo.git/objects/4e/fcb6622a2b8d2c532aae7eb4c89a61376230b5",
+    "repo.git/objects/69/b3428efd3ea71f640541c3189aee2f846c3d7f",
+    "repo.git/objects/70/6b8f9f3050309e8839069dc2562df3989e5379",
+    "repo.git/objects/77/c648ecc23994f7995e53303d0bb1f7b9b85866",
+    "repo.git/objects/97/b2492d101ae2ff78770c6e6307fd4356c7392f",
+    "repo.git/objects/a4/a8ebaac276361580b86075f1d6456b7b116a25",
+    "repo.git/objects/a9/40e99b43ad83a5e25f5166adca93f448f11371",
+    "repo.git/objects/cd/9e8d49828dfe2f2a810d9ae8ada6aca6131956",
+    "repo.git/objects/cf/0ebe3e71138a358b6653f3597ed58d54dc1a6d",
+    "repo.git/objects/cf/bf95615a044a19cabd7797b9721c10e8c3902a",
+    "repo.git/objects/de/43fb9bf234be330d7ce54bbf6f951fa6b4c9eb",
+    "repo.git/objects/fa/3ff58d4e526b0a0d05eebde17cc607bc4cf08f",
+    "repo.git/refs/heads/main",
+    "repo.git/refs/manifold/epoch/current",
+    "repo.git/refs/manifold/epoch/ws/default",
+    "repo.git/refs/manifold/recovery/ws-0/2026-05-27T01-30-22.357317432Z",
+    "repo.git/refs/manifold/ws/default",
+    "repo.git/worktrees/default/HEAD",
+    "repo.git/worktrees/default/ORIG_HEAD",
+    "repo.git/worktrees/default/commondir",
+    "repo.git/worktrees/default/gitdir",
+    "repo.git/worktrees/default/index",
+    "repo.git/worktrees/default/logs/HEAD",
+    "ws/default/.git",
+    "ws/default/README.md",
+    "ws/default/shared/file-3.txt",
+    "ws/default/ws-0/file-0.txt",
+    "ws/default/ws-0/file-2.txt"
+  ]
+}
