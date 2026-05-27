@@ -70,11 +70,44 @@ pub fn extract_metrics(run: &BenchRun) -> MetricRecord {
 
     // T2.5: per-verb attribution. The maw arm gets a populated map;
     // non-maw arms get an empty map (substrate has no maw verbs).
-    let per_verb_wasted_turns = if is_maw_arm(&run.manifest.arm) {
+    let mut per_verb_wasted_turns = if is_maw_arm(&run.manifest.arm) {
         per_verb_attribution(&run.transcript.turns)
     } else {
         BTreeMap::new()
     };
+
+    // Task-aware recover suppression (bn-27ai, Fix A.2 / Approach α).
+    //
+    // `WsRecoverInvoked` is unconditionally attributed by
+    // `attribute_tool_call` (recover is "intrinsically a recovery
+    // op"). That is correct when the agent is reacting to an
+    // unsolicited loss — but **wrong** when the scenario task
+    // literally instructs the agent to call recover (e.g. SG3 C2
+    // tasks include "Recover the previously destroyed workspace
+    // `ws-0` into a new workspace named `ws-1`"). Each such
+    // task-required recover invocation correctly executed by the
+    // agent is forward progress, not friction.
+    //
+    // Fix: count recover-tasks in the prompt's task battery and
+    // decrement the `WsRecoverInvoked` cluster by that count
+    // (saturating at 0). Removes the cluster entry entirely when the
+    // count zeroes out, so the diagnostic JSON does not surface a
+    // `0` row from a deletion.
+    //
+    // Approach β (cleaner, deferred): thread `task_intended` through
+    // `ToolCall.attributed_op` so the attribution function sees
+    // intent. Tracked separately if α's coverage proves insufficient.
+    // See `notes/sg3-no-go-rootcause-v2.md` §3 (root cause) and §5
+    // (fix taxonomy) for the full reasoning.
+    let task_required_recovers = count_recover_tasks_in_prompt(&run.transcript.prompt);
+    if task_required_recovers > 0
+        && let Some(slot) = per_verb_wasted_turns.get_mut(&MawVerbAttribution::WsRecoverInvoked)
+    {
+        *slot = slot.saturating_sub(task_required_recovers);
+        if *slot == 0 {
+            per_verb_wasted_turns.remove(&MawVerbAttribution::WsRecoverInvoked);
+        }
+    }
 
     // T2.5: attribution-driven work_redone_turns. For maw arm, count
     // the attributed clusters (each attribution = one wasted turn).
@@ -111,10 +144,20 @@ pub fn extract_metrics(run: &BenchRun) -> MetricRecord {
 
 /// Is `arm` the maw arm? The diagnostic axis only applies there.
 /// Treats any arm name starting with `"maw"` as maw (covers `"maw"`,
-/// future variants like `"maw-bare"`). Non-maw arms get an empty
-/// attribution map.
+/// `"maw-bare"`, and `"maw@<flavor>"` such as the SG3
+/// `maw@old-layout` / `maw@new-layout` arms). Non-maw arms get an
+/// empty attribution map.
+///
+/// **Why both `-` and `@` delimiters**: historical variants used
+/// `maw-<flavor>`; SG3 (`bn-iux4`) introduced `maw@<flavor>` to
+/// disambiguate layout-only deltas from substrate-rewrite arms. Both
+/// must route through the principled T2.5 attribution path —
+/// otherwise the substring fallback in
+/// [`count_work_redone_turns`] misclassifies task-required
+/// `maw ws recover` invocations as friction (see
+/// `notes/sg3-no-go-rootcause-v2.md` §3 for the full mechanism).
 fn is_maw_arm(arm: &str) -> bool {
-    arm == "maw" || arm.starts_with("maw-")
+    arm == "maw" || arm.starts_with("maw-") || arm.starts_with("maw@")
 }
 
 /// Compute per-verb attribution for a transcript.
@@ -293,6 +336,69 @@ where
     F: Fn(&ToolCall) -> bool,
 {
     turn.tool_calls.iter().any(f)
+}
+
+/// Count scenario tasks whose intent is "recover a destroyed
+/// workspace". Used by [`extract_metrics`] to suppress the
+/// `WsRecoverInvoked` cluster's count for task-required (i.e.
+/// expected, forward-progress) recover invocations.
+///
+/// The scenario generator emits prompts whose `## Task battery`
+/// section enumerates numbered tasks, one per line, in the form
+/// "`N. <imperative verb> ...`". The recover vocabulary is the
+/// canonical "Recover the previously destroyed workspace..." phrasing
+/// from `scenario_plan::tasks::recover_task`. We match
+/// case-insensitively on the verb token at the start of the task
+/// description (after the number+dot prefix) — conservative against
+/// false positives (a task that merely *mentions* "recover" without
+/// starting with the verb is not counted).
+///
+/// Returns 0 when the prompt has no `Task battery` section (e.g.
+/// non-SG scenario prompts), which is the safe default — no
+/// suppression happens.
+///
+/// **Why parse the prompt rather than thread intent through the
+/// harness?** Approach α (this function) is the cheapest patch: it
+/// works on every committed BenchRun without re-running anything.
+/// Approach β (intent-threading) is the principled long-term shape;
+/// see `notes/sg3-no-go-rootcause-v2.md` §5 for the taxonomy.
+#[must_use]
+pub fn count_recover_tasks_in_prompt(prompt: &str) -> u32 {
+    let Some(battery_start) = prompt.find("Task battery") else {
+        return 0;
+    };
+    let tail = &prompt[battery_start..];
+    // Tasks live in the same block until the next markdown section
+    // (next blank line followed by `## ` or end-of-prompt). Be
+    // tolerant: count every numbered line in the rest of the prompt
+    // whose body starts with the "recover" verb.
+    let mut count: u32 = 0;
+    for line in tail.lines() {
+        let trimmed = line.trim_start();
+        // Match `N.` or `N)` numbered list prefix (N may be
+        // multi-digit; future task batteries might enumerate past 9).
+        let digit_end = trimmed
+            .char_indices()
+            .find(|(_, c)| !c.is_ascii_digit())
+            .map(|(i, _)| i);
+        let Some(digit_end) = digit_end else { continue };
+        if digit_end == 0 {
+            continue;
+        }
+        let after_digits = &trimmed[digit_end..];
+        let body_after_num = after_digits
+            .strip_prefix('.')
+            .or_else(|| after_digits.strip_prefix(')'))
+            .map(str::trim_start);
+        let Some(body) = body_after_num else { continue };
+        let lower = body.to_ascii_lowercase();
+        // Conservative match: only counts tasks whose imperative verb
+        // is literally `recover` (the scenario generator's wording).
+        if lower.starts_with("recover ") || lower.starts_with("recover\t") {
+            count = count.saturating_add(1);
+        }
+    }
+    count
 }
 
 fn is_recovery_call(call: &ToolCall) -> bool {
@@ -687,6 +793,224 @@ mod tests {
         assert_eq!(
             per_verb.get(&MawVerbAttribution::WsRecoverInvoked),
             Some(&1)
+        );
+    }
+
+    // ---------- bn-27ai Fix A.1: `is_maw_arm` routes `maw@<flavor>` ----------
+
+    /// Regression test for bn-27ai Fix A.1. Pre-fix, both
+    /// `maw@old-layout` and `maw@new-layout` fell into the substring
+    /// fallback because `is_maw_arm` only matched `maw` / `maw-*`.
+    /// The SG3 R6 NO-GO root cause v2 (`notes/sg3-no-go-rootcause-v2.md`
+    /// §3) traced the asymmetry to this misrouting.
+    #[test]
+    fn is_maw_arm_recognises_sg3_at_flavors() {
+        assert!(is_maw_arm("maw"));
+        assert!(is_maw_arm("maw-bare"));
+        assert!(is_maw_arm("maw@old-layout"), "SG3 old-layout arm");
+        assert!(is_maw_arm("maw@new-layout"), "SG3 new-layout arm");
+        // Negative: non-maw arms still excluded.
+        assert!(!is_maw_arm("jj-workspaces"));
+        assert!(!is_maw_arm("git-worktrees-bare"));
+        assert!(!is_maw_arm("claude-native-worktrees"));
+        // Negative: arms that merely contain `maw` substring but
+        // do not start with it.
+        assert!(!is_maw_arm("not-maw"));
+    }
+
+    /// End-to-end: a `maw@new-layout` BenchRun now routes through
+    /// the principled T2.5 attribution path (per-verb map populated)
+    /// instead of the substring fallback.
+    #[test]
+    fn maw_at_flavor_arm_uses_attribution_path() {
+        let conflict_then_retry = [
+            bash_with_outcome(r#"{"cmd":"maw ws merge a --into default"}"#, conflicted()),
+            bash(r#"{"cmd":"maw ws merge a --into default"}"#),
+        ];
+        let mut run = synth_run(
+            "maw@new-layout",
+            RunVerdict::Success,
+            OracleBSummary::Green,
+            0,
+            2,
+            None,
+        );
+        run.transcript.turns = vec![
+            turn_with_calls(1, vec![conflict_then_retry[0].clone()]),
+            turn_with_calls(2, vec![conflict_then_retry[1].clone()]),
+        ];
+        run.total_turns = 2;
+        let m = extract_metrics(&run);
+        // Attribution path populated (substring fallback would leave
+        // the per-verb map empty).
+        assert!(
+            !m.per_verb_wasted_turns.is_empty(),
+            "maw@<flavor> arm must use the T2.5 attribution path"
+        );
+        assert_eq!(
+            m.per_verb_wasted_turns
+                .get(&MawVerbAttribution::WsMergeStructuredConflict),
+            Some(&1)
+        );
+    }
+
+    // ---------- bn-27ai Fix A.2: task-aware recover attribution ----------
+
+    /// `count_recover_tasks_in_prompt` matches the SG3 scenario
+    /// generator's wording. Used by [`extract_metrics`] to suppress
+    /// false-positive `WsRecoverInvoked` attribution for correctly-
+    /// executed recover tasks.
+    #[test]
+    fn count_recover_tasks_in_prompt_matches_sg3_battery() {
+        let prompt = "preamble\n\nTask battery\n\n\
+            Complete the following abstract tasks.\n\n\
+            1. Create a coordination workspace named `ws-0`.\n\
+            2. Remove workspace `ws-0`.\n\
+            3. Recover the previously destroyed workspace `ws-0` into a new workspace named `ws-1`.\n\
+            4. Remove workspace `ws-1`.\n";
+        assert_eq!(count_recover_tasks_in_prompt(prompt), 1);
+    }
+
+    #[test]
+    fn count_recover_tasks_in_prompt_zero_when_no_recover() {
+        let prompt = "Task battery\n\n\
+            1. Create `ws-0`.\n\
+            2. Edit a file.\n\
+            3. Commit changes.\n\
+            4. Merge `ws-0`.\n";
+        assert_eq!(count_recover_tasks_in_prompt(prompt), 0);
+    }
+
+    #[test]
+    fn count_recover_tasks_in_prompt_zero_when_no_battery_section() {
+        // Non-SG prompts (no `Task battery` heading) → safe default.
+        let prompt = "Just do the thing.";
+        assert_eq!(count_recover_tasks_in_prompt(prompt), 0);
+    }
+
+    #[test]
+    fn count_recover_tasks_in_prompt_handles_multiple_recover_tasks() {
+        // Defensive: a battery with two recover tasks counts both.
+        let prompt = "Task battery\n\n\
+            1. Create `ws-0`.\n\
+            2. Recover the previously destroyed `ws-X`.\n\
+            3. Recover the previously destroyed `ws-Y`.\n";
+        assert_eq!(count_recover_tasks_in_prompt(prompt), 2);
+    }
+
+    #[test]
+    fn count_recover_tasks_handles_multidigit_numbering() {
+        // Defensive: future task batteries might enumerate past 9.
+        let prompt = "Task battery\n\n\
+            10. Recover the previously destroyed `ws-X`.\n\
+            11. Recover the previously destroyed `ws-Y`.\n";
+        assert_eq!(count_recover_tasks_in_prompt(prompt), 2);
+    }
+
+    #[test]
+    fn count_recover_tasks_does_not_match_mere_mention() {
+        // Conservative: a task that *mentions* recover but does not
+        // start with the verb must not be counted.
+        let prompt = "Task battery\n\n\
+            1. Verify recover is documented in README.\n\
+            2. Test that the recover snapshot exists.\n";
+        assert_eq!(count_recover_tasks_in_prompt(prompt), 0);
+    }
+
+    /// End-to-end Fix A.2: a BenchRun whose prompt asks the agent to
+    /// recover, and whose transcript contains exactly one
+    /// `maw ws recover` invocation, must NOT classify that invocation
+    /// as friction. The `WsRecoverInvoked` cluster is suppressed.
+    #[test]
+    fn task_required_recover_is_not_classified_as_friction() {
+        let mut run = synth_run(
+            "maw@new-layout",
+            RunVerdict::Success,
+            OracleBSummary::Green,
+            0,
+            1,
+            None,
+        );
+        run.transcript.prompt =
+            "Task battery\n\n1. Recover the previously destroyed workspace `ws-0`.\n".to_string();
+        run.transcript.turns = vec![turn_with_calls(
+            1,
+            vec![bash(r#"{"cmd":"maw ws recover ws-0 --to ws-1"}"#)],
+        )];
+        run.total_turns = 1;
+        let m = extract_metrics(&run);
+        // WsRecoverInvoked cluster suppressed (decremented from 1
+        // to 0, and the zeroed entry removed).
+        assert_eq!(
+            m.per_verb_wasted_turns
+                .get(&MawVerbAttribution::WsRecoverInvoked),
+            None,
+            "task-required recover must not surface as WsRecoverInvoked"
+        );
+        // And the aggregate work_redone_turns is 0.
+        assert_eq!(m.work_redone_turns, MetricValue::count(0));
+    }
+
+    /// Inverse: an unsolicited `maw ws recover` (no recover task in
+    /// the prompt) IS classified as friction — the suppression is
+    /// task-conditional, not unconditional.
+    #[test]
+    fn unsolicited_recover_still_classified_as_friction() {
+        let mut run = synth_run(
+            "maw@new-layout",
+            RunVerdict::Success,
+            OracleBSummary::Green,
+            0,
+            1,
+            None,
+        );
+        // Task battery has NO recover task.
+        run.transcript.prompt =
+            "Task battery\n\n1. Create `ws-0`.\n2. Edit a file.\n3. Commit.\n".to_string();
+        run.transcript.turns = vec![turn_with_calls(
+            1,
+            vec![bash(r#"{"cmd":"maw ws recover ws-0 --to ws-1"}"#)],
+        )];
+        run.total_turns = 1;
+        let m = extract_metrics(&run);
+        assert_eq!(
+            m.per_verb_wasted_turns
+                .get(&MawVerbAttribution::WsRecoverInvoked),
+            Some(&1),
+            "unsolicited recover IS friction"
+        );
+        assert_eq!(m.work_redone_turns, MetricValue::count(1));
+    }
+
+    /// Excess recovers (more invocations than tasks asked for) are
+    /// partially suppressed: only the task-required count is removed.
+    #[test]
+    fn excess_recovers_beyond_task_count_remain_friction() {
+        let mut run = synth_run(
+            "maw@new-layout",
+            RunVerdict::Success,
+            OracleBSummary::Green,
+            0,
+            3,
+            None,
+        );
+        // 1 recover task in the battery.
+        run.transcript.prompt =
+            "Task battery\n\n1. Recover the previously destroyed `ws-0`.\n".to_string();
+        // Agent invoked recover 3 times (2 are noise).
+        run.transcript.turns = vec![
+            turn_with_calls(1, vec![bash(r#"{"cmd":"maw ws recover ws-0 --to ws-1"}"#)]),
+            turn_with_calls(2, vec![bash(r#"{"cmd":"maw ws recover ws-2 --to ws-3"}"#)]),
+            turn_with_calls(3, vec![bash(r#"{"cmd":"maw ws recover ws-4 --to ws-5"}"#)]),
+        ];
+        run.total_turns = 3;
+        let m = extract_metrics(&run);
+        // 3 attributed - 1 task-required = 2 remaining friction.
+        assert_eq!(
+            m.per_verb_wasted_turns
+                .get(&MawVerbAttribution::WsRecoverInvoked),
+            Some(&2),
+            "excess recover invocations beyond the task count remain attributed"
         );
     }
 }

@@ -86,5 +86,14 @@ name = "sg3-layout-eval"
 path = "src/bin/sg3_layout_eval.rs"
 required-features = ["bench"]
 
+# bn-27ai: offline recomputation of the SG3 decision from committed
+# BenchRun artifacts. Loads the per-arm BenchRun JSONs through the
+# (post-Fix-A.1/A.2/A.3) metric pipeline and writes a fresh
+# decision.json. No new LLM runs; pure offline math.
+[[bin]]
+name = "sg3-recompute-decision"
+path = "src/bin/sg3_recompute_decision.rs"
+required-features = ["bench"]
+
 [lints]
 workspace = true

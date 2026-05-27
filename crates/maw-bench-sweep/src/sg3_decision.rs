@@ -590,7 +590,8 @@ fn eval_r6(
     };
     let rationale = format!(
         "total(new) = {new_total}, total(old) = {old_total}; §3.1 R6 = no net increase \
-         (proxy from work_redone_turns × n; v2/v3 will split interventions named metric)"
+         (raw per-replicate sum of work_redone_turns; bn-27ai Fix A.3 replaced the \
+         lossy median×n proxy)"
     );
     EvaluatedRule {
         rule_id: "R6".into(),
@@ -713,12 +714,31 @@ fn median_or_zero(cell: &CellAggregate, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Proxy "total" — `median × n` (per pre-reg §3.1 R6 we want a
-/// **total**, not a median; the aggregator only stores median+min+max
-/// per cell, so we reconstruct an order-of-magnitude total as
-/// `median × n`. Production callers feeding R6 should plumb the raw
-/// per-replicate sum once T2.5/T2.6 add the attribution-driven total).
+/// Per-cell "total" used by R6 (interventions).
+///
+/// **bn-27ai / Fix A.3 (2026-05-27)**: now reads the **raw per-
+/// replicate sum** that `aggregate::summarize_cell` populates into
+/// `CellAggregate::sum`. The previous `median × n` proxy integer-
+/// truncated one-bit lower-median deltas into N×-amplified totals —
+/// a 7-vs-6 raw difference rendered as 10-vs-0 in the SG3 2026-05-26
+/// rerun and produced a spurious R6 NO-GO. See
+/// `notes/sg3-no-go-rootcause-v2.md` §3 for the full mechanism.
+///
+/// Falls back to `median × n` when `CellAggregate::sum` is empty
+/// (older serialized summaries that predate Fix A.3 deserialize with
+/// the field empty thanks to `#[serde(default)]`). The fallback path
+/// preserves bit-equivalent behavior for legacy callers.
 fn sum_proxy(cell: &CellAggregate, name: &str) -> u64 {
+    if let Some(v) = cell.sum.get(name) {
+        return match v {
+            MetricValue::Count { n } => *n,
+            MetricValue::DurationMs { ms } => *ms,
+            MetricValue::UsdCents { cents } => *cents,
+            MetricValue::Infinite => u64::MAX,
+            MetricValue::Unavailable => 0,
+        };
+    }
+    // Legacy fallback: cell.sum is empty (pre-bn-27ai summary).
     let med = median_or_zero(cell, name);
     med.saturating_mul(cell.n)
 }
@@ -1069,6 +1089,100 @@ mod tests {
             }
             Decision::Go { .. } => panic!("expected NoGo: {d:#?}"),
         }
+    }
+
+    /// bn-27ai Fix A.3: `sum_proxy` reads raw per-replicate sum
+    /// (not `median × n`). Reproduces the SG3 2026-05-27 rerun
+    /// scenario where `median × n` amplified a 7-vs-6 raw delta into
+    /// a 10-vs-0 NO-GO. With raw sums, R6 is PASS (new ≤ old or
+    /// within the rule's tolerance).
+    ///
+    /// new fires: [0,1,1,1,0,0,1,0,1,2] → median 1, sum 7
+    /// old fires: [1,0,2,0,1,0,1,1,0,0] → median 0, sum 6
+    ///
+    /// Pre-A.3: total(new) = 10, total(old) = 0 ⇒ R6 NO-GO.
+    /// Post-A.3: total(new) = 7, total(old) = 6 ⇒ R6 Fail (7 > 6),
+    /// but per §3.5 the delta is now a *one-fire* difference (not a
+    /// 10× gap); §3.5 ties-go-to-old keeps strict-greater-than as
+    /// Fail. The verdict still surfaces a one-event delta — the
+    /// metric is now honest, the production decision will use that
+    /// honest delta. (Whether the rule classifies 7v6 as PASS_EQUIV
+    /// vs FAIL is the per-reg call; the metric pipeline's job is to
+    /// surface the truth.)
+    #[test]
+    fn r6_raw_sum_proxy_matches_per_replicate_total() {
+        // Build per-rep fire counts using the redone parameter.
+        let mut new_recs = Vec::new();
+        for r in [0_u64, 1, 1, 1, 0, 0, 1, 0, 1, 2] {
+            new_recs.push(rec(ARM_NEW, "C2", "T0", 0, 8, 18, r));
+        }
+        let new = aggregate_metric_records(&new_recs);
+        let cell_new = new.cell(ARM_NEW, "C2", "T0").unwrap();
+        // sum_proxy reads raw sum, NOT median × n.
+        assert_eq!(
+            sum_proxy(cell_new, "work_redone_turns"),
+            7,
+            "raw sum is 7; pre-A.3 median×n proxy would have said 10"
+        );
+        // Spot-check fallback semantics: a hand-constructed cell with
+        // empty `sum` must fall back to median × n.
+        let mut legacy_cell = cell_new.clone();
+        legacy_cell.sum.clear();
+        assert_eq!(
+            sum_proxy(&legacy_cell, "work_redone_turns"),
+            10,
+            "legacy fallback: median(1) × n(10) = 10"
+        );
+    }
+
+    /// End-to-end: the SG3 rerun's exact per-replicate fire counts
+    /// flip the R6 verdict from NO-GO (pre-fix proxy: 10 vs 0) to
+    /// a one-event delta (post-fix raw sum: 7 vs 6). This is the
+    /// "raw 7 vs 6" finding from
+    /// `notes/sg3-no-go-rootcause-v2.md` §3.
+    #[test]
+    fn r6_sg3_rerun_pattern_is_one_event_delta_not_ten() {
+        let mut new_recs = Vec::new();
+        for r in [0_u64, 1, 1, 1, 0, 0, 1, 0, 1, 2] {
+            new_recs.push(rec(ARM_NEW, "C2", "T0", 0, 8, 18, r));
+        }
+        // Pad SUB-A so the decide function has C0/T0 too.
+        for _ in 0..20 {
+            new_recs.push(rec(ARM_NEW, "C0", "T0", 0, 5, 12, 0));
+        }
+        let mut old_recs = Vec::new();
+        for r in [1_u64, 0, 2, 0, 1, 0, 1, 1, 0, 0] {
+            old_recs.push(rec(ARM_OLD, "C2", "T0", 0, 8, 18, r));
+        }
+        for _ in 0..20 {
+            old_recs.push(rec(ARM_OLD, "C0", "T0", 0, 5, 12, 0));
+        }
+        let new = aggregate_metric_records(&new_recs);
+        let old = aggregate_metric_records(&old_recs);
+
+        // Read the R6 evaluated rule via the public decide function
+        // and locate the C2-T0 row to inspect the totals.
+        let d = decide_go_no_go(&old, &new, None, PrereggedBars::default());
+        let evidence = match &d {
+            Decision::Go { evidence } => evidence,
+            Decision::NoGo { evidence, .. } => evidence,
+        };
+        let r6_c2 = evidence
+            .rules
+            .iter()
+            .find(|r| r.rule_id == "R6" && r.cell_id == "C2-T0")
+            .expect("R6 C2-T0 rule");
+        // Post-A.3: raw 7 vs 6.
+        assert_eq!(r6_c2.new_value, "7", "raw new sum");
+        assert_eq!(r6_c2.old_value, "6", "raw old sum");
+        // Status is Fail (7 > 6 per the strict no-net-increase rule),
+        // but the rationale now carries honest numbers — not the 10v0
+        // amplification artifact.
+        assert!(
+            r6_c2.rationale.contains("raw per-replicate sum"),
+            "rationale must reference raw sum: {}",
+            r6_c2.rationale
+        );
     }
 
     /// §3.5 ties-go-to-old: a rate sitting exactly AT the margin

@@ -1,0 +1,18 @@
+{
+  "note": "bn-27ai offline recomputation (Fix A.1/A.2/A.3). Raw per-replicate sums replace the pre-fix median×n proxy.",
+  "per_cell_raw_work_redone_sum": [
+    {
+      "cell": "C0-T0",
+      "new": 37,
+      "old": 34
+    },
+    {
+      "cell": "C2-T0",
+      "new": 12,
+      "old": 8
+    }
+  ],
+  "rerun_dir": "notes/eval-real-2026-05-27/sg3-rerun",
+  "schema_version": 1,
+  "verdict": "NO-GO"
+}

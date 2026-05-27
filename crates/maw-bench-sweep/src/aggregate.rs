@@ -163,6 +163,21 @@ pub struct CellAggregate {
     pub min: BTreeMap<String, MetricValue>,
     /// Per-metric max (the "(lo–hi)" footprint).
     pub max: BTreeMap<String, MetricValue>,
+    /// Per-metric **raw per-replicate sum** across the cell's
+    /// replicates. Added for bn-27ai / Fix A.3 so SG3's R6
+    /// "interventions total" rule can compute against the actual sum
+    /// rather than the lossy `median × n` proxy that integer-
+    /// truncates one-bit median deltas into N×-amplified totals.
+    ///
+    /// `Unavailable` / `Infinite` replicates are excluded (consistent
+    /// with the median/min/max convention in [`lo_med_hi`]); the sum
+    /// is over the finite measured values only.
+    ///
+    /// Serde-`default` so older serialized summaries (pre-bn-27ai)
+    /// deserialize cleanly with an empty map — `sum_proxy` falls back
+    /// to `median × n` in that case.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sum: BTreeMap<String, MetricValue>,
     /// Wilson 95% CI on the `work_lost_events > 0` rate.
     /// Mirrors pre-reg §4.1 (every proportion cell carries Wilson)
     /// and T1.9 §3.1 (zero-event cells published as `[0.0, U]`).
@@ -321,11 +336,13 @@ fn summarize_cell(recs: &[&MetricRecord]) -> CellAggregate {
     let mut median = BTreeMap::new();
     let mut min = BTreeMap::new();
     let mut max = BTreeMap::new();
+    let mut sum = BTreeMap::new();
     for name in &metric_names {
         let (lo, mid, hi) = lo_med_hi(recs, name);
         min.insert((*name).to_string(), lo);
         median.insert((*name).to_string(), mid);
         max.insert((*name).to_string(), hi);
+        sum.insert((*name).to_string(), sum_of(recs, name));
     }
 
     // Wilson CI on the work_lost_events > 0 rate (the headline
@@ -341,8 +358,57 @@ fn summarize_cell(recs: &[&MetricRecord]) -> CellAggregate {
         median,
         min,
         max,
+        sum,
         work_lost_rate_ci,
         extras: AggregateExtras::default(),
+    }
+}
+
+/// Compute the raw per-replicate sum of a metric across a cell's
+/// records. Mirrors [`lo_med_hi`]'s handling of value variants:
+///
+/// - `Count`, `DurationMs`, `UsdCents`: numeric values summed
+///   (saturating to guard against pathological inputs).
+/// - `Infinite`: returned as `Infinite` if any replicate is infinite
+///   (a single non-finite replicate makes the sum non-finite).
+/// - `Unavailable`: excluded from the sum (treated as no measurement,
+///   consistent with the median convention).
+/// - All-`Unavailable` cells return `Unavailable`.
+///
+/// Added for bn-27ai / Fix A.3.
+#[allow(clippy::cast_possible_truncation)]
+fn sum_of(recs: &[&MetricRecord], name: &str) -> MetricValue {
+    let mut total: u64 = 0;
+    let mut measured: usize = 0;
+    let mut kind: Option<&'static str> = None;
+    for r in recs {
+        match lookup(r, name) {
+            MetricValue::Count { n } => {
+                kind.get_or_insert("count");
+                total = total.saturating_add(n);
+                measured += 1;
+            }
+            MetricValue::DurationMs { ms } => {
+                kind.get_or_insert("duration_ms");
+                total = total.saturating_add(ms);
+                measured += 1;
+            }
+            MetricValue::UsdCents { cents } => {
+                kind.get_or_insert("usd_cents");
+                total = total.saturating_add(cents);
+                measured += 1;
+            }
+            MetricValue::Infinite => return MetricValue::Infinite,
+            MetricValue::Unavailable => {}
+        }
+    }
+    if measured == 0 {
+        return MetricValue::Unavailable;
+    }
+    match kind {
+        Some("duration_ms") => MetricValue::duration_ms(total),
+        Some("usd_cents") => MetricValue::usd_cents(total),
+        _ => MetricValue::count(total),
     }
 }
 
@@ -593,6 +659,66 @@ mod tests {
         );
         // max is INF.
         assert_eq!(c.max.get("turns_to_done").unwrap(), &MetricValue::Infinite);
+    }
+
+    /// bn-27ai Fix A.3: `CellAggregate::sum` carries the raw
+    /// per-replicate sum, not `median × n`. Demonstrates the
+    /// integer-truncation bug that the old proxy had:
+    /// `[0,1,1,1,0,0,1,0,1,2]` has lower-median 1, sum 7;
+    /// `median × n = 10` but the true sum is 7.
+    #[test]
+    fn cell_aggregate_carries_raw_per_replicate_sum() {
+        // Match the SG3-rerun new-layout C2-T0 fire pattern
+        // (per notes/sg3-no-go-rootcause-v2.md §3): redone values
+        // [0,1,1,1,0,0,1,0,1,2] across 10 reps.
+        let redone_pattern = [0_u64, 1, 1, 1, 0, 0, 1, 0, 1, 2];
+        let recs: Vec<MetricRecord> = redone_pattern
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                let mut m = rec("maw@new-layout", "C2", "T0", 0, 8, 18);
+                m.work_redone_turns = MetricValue::count(r);
+                m.run_id = format!("synth-r{i:03}");
+                m
+            })
+            .collect();
+        let s = aggregate_metric_records(&recs);
+        let c = s.cell("maw@new-layout", "C2", "T0").expect("cell");
+        assert_eq!(c.n, 10);
+        // Raw sum is 7 (matches the rerun's per-replicate sum).
+        assert_eq!(
+            c.sum.get("work_redone_turns").unwrap(),
+            &MetricValue::count(7),
+            "raw sum = 7; the pre-A.3 median×n proxy would have said 10"
+        );
+        // Sanity-check the median is still 1 (so the pre-A.3 proxy
+        // would have been 1×10 = 10 — the headline bug).
+        assert_eq!(
+            c.median.get("work_redone_turns").unwrap(),
+            &MetricValue::count(1)
+        );
+    }
+
+    /// Sum tolerates `Unavailable` (excluded) and is sentinel-aware
+    /// for `Infinite` (a single non-finite replicate makes the sum
+    /// non-finite).
+    #[test]
+    fn cell_aggregate_sum_handles_sentinel_values() {
+        // Three records: 2 finite, 1 Infinite turns_to_done.
+        let mut recs = vec![rec("maw", "C0", "T0", 0, 3, 10)];
+        let mut inf = rec("maw", "C0", "T0", 0, 0, 10);
+        inf.turns_to_done = MetricValue::Infinite;
+        recs.push(inf);
+        recs.push(rec("maw", "C0", "T0", 0, 5, 10));
+        let s = aggregate_metric_records(&recs);
+        let c = s.cell("maw", "C0", "T0").unwrap();
+        // turns_to_done sum: Infinite present → Infinite.
+        assert_eq!(c.sum.get("turns_to_done").unwrap(), &MetricValue::Infinite);
+        // tool_calls_total: all finite (10 + 10 + 10) = 30.
+        assert_eq!(
+            c.sum.get("tool_calls_total").unwrap(),
+            &MetricValue::count(30)
+        );
     }
 
     #[test]
