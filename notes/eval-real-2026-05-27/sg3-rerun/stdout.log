@@ -1,0 +1,123 @@
+sg3-layout-eval: artifact_dir = notes/eval-real-2026-05-27/sg3-rerun
+  layout=both n-a=20 n-b=10 pilot=false backend=claude substrate=per-layout maw (auto)
+  drove 2 arm(s) in 2351.53s
+  total_cost_usd = 8.6535
+{
+  "verdict": "no_go",
+  "evidence": {
+    "rules": [
+      {
+        "rule_id": "R1",
+        "cell_id": "C0-T0",
+        "metric": "irrecoverable_lost_work",
+        "old_value": "0",
+        "new_value": "0",
+        "status": "pass",
+        "rationale": "hard bar: new-layout work_lost_events = 0, old = 0; §3.1 R1 = exactly 0 across all subset runs"
+      },
+      {
+        "rule_id": "R2",
+        "cell_id": "C0-T0",
+        "metric": "workflow_loss",
+        "old_value": "0.000",
+        "new_value": "0.000",
+        "status": "pass_equivalent",
+        "rationale": "rate(new) = 0.000, rate(old) = 0.000, Δ = +0.000; §3.1 R2 margin = +0.050 absolute (ties → NO-GO per §3.5)"
+      },
+      {
+        "rule_id": "R3",
+        "cell_id": "C0-T0",
+        "metric": "wedge_incident",
+        "old_value": "0.000",
+        "new_value": "0.000",
+        "status": "pass_equivalent",
+        "rationale": "rate(new) = 0.000, rate(old) = 0.000, Δ = +0.000; §3.1 R3 margin = +0.100 absolute (proxy from work_lost_rate; v3 will split via wedge_incident named metric)"
+      },
+      {
+        "rule_id": "R4",
+        "cell_id": "C0-T0",
+        "metric": "turns_to_done",
+        "old_value": "11",
+        "new_value": "12",
+        "status": "pass",
+        "rationale": "median(new) = 12, median(old) = 11, ratio = 1.091; margin ×1.150; paired_CI_excludes_0_on_worse_side = false; §3.1 R4 requires BOTH worse-CI AND ratio > margin for NO-GO (ties → NO-GO per §3.5)"
+      },
+      {
+        "rule_id": "R5",
+        "cell_id": "C0-T0",
+        "metric": "tool_calls_total",
+        "old_value": "10",
+        "new_value": "11",
+        "status": "pass",
+        "rationale": "median(new) = 11, median(old) = 10, ratio = 1.100; margin ×1.150; paired_CI_excludes_0_on_worse_side = false; §3.1 R5 requires BOTH worse-CI AND ratio > margin for NO-GO (ties → NO-GO per §3.5)"
+      },
+      {
+        "rule_id": "R6",
+        "cell_id": "C0-T0",
+        "metric": "interventions",
+        "old_value": "20",
+        "new_value": "20",
+        "status": "pass_equivalent",
+        "rationale": "total(new) = 20, total(old) = 20; §3.1 R6 = no net increase (proxy from work_redone_turns × n; v2/v3 will split interventions named metric)"
+      },
+      {
+        "rule_id": "R1",
+        "cell_id": "C2-T0",
+        "metric": "irrecoverable_lost_work",
+        "old_value": "0",
+        "new_value": "0",
+        "status": "pass",
+        "rationale": "hard bar: new-layout work_lost_events = 0, old = 0; §3.1 R1 = exactly 0 across all subset runs"
+      },
+      {
+        "rule_id": "R2",
+        "cell_id": "C2-T0",
+        "metric": "workflow_loss",
+        "old_value": "0.000",
+        "new_value": "0.000",
+        "status": "pass_equivalent",
+        "rationale": "rate(new) = 0.000, rate(old) = 0.000, Δ = +0.000; §3.1 R2 margin = +0.050 absolute (ties → NO-GO per §3.5)"
+      },
+      {
+        "rule_id": "R3",
+        "cell_id": "C2-T0",
+        "metric": "wedge_incident",
+        "old_value": "0.000",
+        "new_value": "0.000",
+        "status": "pass_equivalent",
+        "rationale": "rate(new) = 0.000, rate(old) = 0.000, Δ = +0.000; §3.1 R3 margin = +0.100 absolute (proxy from work_lost_rate; v3 will split via wedge_incident named metric)"
+      },
+      {
+        "rule_id": "R4",
+        "cell_id": "C2-T0",
+        "metric": "turns_to_done",
+        "old_value": "10",
+        "new_value": "10",
+        "status": "pass_equivalent",
+        "rationale": "median(new) = 10, median(old) = 10, ratio = 1.000; margin ×1.150; paired_CI_excludes_0_on_worse_side = false; §3.1 R4 requires BOTH worse-CI AND ratio > margin for NO-GO (ties → NO-GO per §3.5)"
+      },
+      {
+        "rule_id": "R5",
+        "cell_id": "C2-T0",
+        "metric": "tool_calls_total",
+        "old_value": "10",
+        "new_value": "12",
+        "status": "pass",
+        "rationale": "median(new) = 12, median(old) = 10, ratio = 1.200; margin ×1.150; paired_CI_excludes_0_on_worse_side = false; §3.1 R5 requires BOTH worse-CI AND ratio > margin for NO-GO (ties → NO-GO per §3.5)"
+      },
+      {
+        "rule_id": "R6",
+        "cell_id": "C2-T0",
+        "metric": "interventions",
+        "old_value": "0",
+        "new_value": "10",
+        "status": "fail",
+        "rationale": "total(new) = 10, total(old) = 0; §3.1 R6 = no net increase (proxy from work_redone_turns × n; v2/v3 will split interventions named metric)"
+      }
+    ]
+  },
+  "regression_rule": "R6",
+  "regression_metric": "interventions",
+  "by_amount": "total(new) = 10, total(old) = 0; §3.1 R6 = no net increase (proxy from work_redone_turns × n; v2/v3 will split interventions named metric)"
+}
+sg3-layout-eval: verdict = NO-GO
