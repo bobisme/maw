@@ -178,6 +178,14 @@ A reviewer signing off on adapter parity must confirm:
       per substrate per the **Chaos overlay** section below; the
       default trait impl (no-op) covers `NoopSubstrate` and any
       future arm that hasn't opted in.
+- [ ] (bn-1q6z) WorktreesConventionAdapter + JjAdapter materialise a
+      PATH-shim under `<substrate-root>/.shim/` and expose it via
+      `shim()`. `RealSubstrate::setup` wires the shim dir into
+      `SubstrateHandle::agent_extra_env`, which the harness merges
+      into `AgentConfig::extra_env` so the spawned `claude -p`
+      inherits the modified `PATH`. Default-disabled (passthrough);
+      `BenchConfig::chaos_env` arms it via
+      `MAW_BENCH_CHAOS_KILL_PROB` + `MAW_BENCH_CHAOS_KILL_MS`.
 
 If any item fails, the offending adapter step is removed or the table is
 amended (with the amendment timestamped, before the next measured SG2
@@ -213,16 +221,41 @@ actually ship with). The substrate-process kill is the honest
 analogue: kill the verb mid-flight, observe what the agent does
 with the resulting state.
 
-**Real-agent path caveat (TODO):** the `arm_chaos` seam fires when
-the adapter's own `merge()` is called (the scripted-driver /
-equivalence-test path). For the **real-LLM agent path** under
-worktrees / jj, the agent invokes `git` / `jj` itself via `Bash`,
-NOT via the adapter; intercepting those invocations requires a
-wrapper-script shim on the agent's `$PATH`. That shim is
-out-of-scope for the bn-3hzt wire-up; it will land in a follow-up
-bone before the first real-LLM chaos campaign runs against the
-worktrees / jj arms. The maw arm has no such gap — the agent's
-`maw` invocation inherits `MAW_FP` directly from the harness env.
+**Real-agent path (bn-1q6z): PATH-shim.** The `arm_chaos` seam
+fires when the adapter's own `merge()` is called (the
+scripted-driver / equivalence-test path). For the **real-LLM agent
+path** under worktrees / jj, the agent invokes `git` / `jj` itself
+via `Bash`, NOT via the adapter; bn-1q6z closes this gap with a
+wrapper-script `$PATH` shim materialized per substrate setup:
+
+- The `WorktreesConventionAdapter` and `JjAdapter` each materialise a
+  shim dir (`<substrate-root>/.shim/`) containing two bash wrappers
+  (`git`, `jj`) on construction.
+- `RealSubstrate::setup` in `maw-bench-sweep` prepends that dir to
+  the spawned agent's `PATH` via `SubstrateHandle::agent_extra_env`
+  (the bn-1q6z field), which the harness merges into
+  `AgentConfig::extra_env` (the bn-3hzt seam). The spawned `claude
+  -p` inherits the modified `PATH`.
+- The shim defaults to **passthrough** (one `exec` to the real
+  binary; no measurable overhead, byte-identical to the
+  pre-shim path) unless the chaos env is armed. The harness wires
+  `MAW_BENCH_CHAOS_KILL_PROB` (per-invocation kill probability,
+  driven from the scenario's `mid_op_kill_prob`) and
+  `MAW_BENCH_CHAOS_KILL_MS` (kill delay, default 50ms) through the
+  existing `BenchConfig::chaos_env` overlay.
+- When armed, the shim spawns the real binary under `setsid` and
+  delivers `kill -9 -<pgid>` after `MAW_BENCH_CHAOS_KILL_MS` ms,
+  exactly mirroring the adapter-level `run_with_chaos_kill` pattern.
+
+The maw arm has no such gap — the agent's `maw` invocation inherits
+`MAW_FP` directly from the harness env.
+
+Audit surface: `crates/maw-bench-adapters/src/shim/{git,jj}-shim`
+(bash, ~60 lines each) + `crates/maw-bench-adapters/src/shim/mod.rs`
+(Rust factory). Smoke test:
+`crates/maw-bench-adapters/tests/path_shim_smoke.rs` asserts
+passthrough byte-identity, kill firing under chaos-armed env, and
+adapter integration.
 
 **Equivalence-test impact (none):** the equivalence test
 (`tests/equivalence.rs`) does NOT arm chaos. It only exercises the

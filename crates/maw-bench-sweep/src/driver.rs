@@ -270,9 +270,35 @@ impl SweepDriver {
             // the run. Plans with zero failpoint steps (low
             // `mid_op_kill_prob`) get an empty chaos env — chaos
             // is a per-run conditional, not a guaranteed crash.
+            //
+            // bn-1q6z: for the worktrees / jj arms the MAW_FP
+            // failpoint mechanism doesn't apply (the agent invokes
+            // `git`/`jj` directly, not `maw`). The equivalent chaos
+            // for those arms is delivered by the PATH-shim already
+            // on the agent's PATH (see `RealSubstrate::setup`); we
+            // arm the shim by setting
+            // `MAW_BENCH_CHAOS_KILL_PROB`/`MAW_BENCH_CHAOS_KILL_MS`
+            // in the chaos_env so the shim's bash logic fires per
+            // invocation with that probability.
             if self.chaos_enabled {
                 if let Some(spec) = first_failpoint_spec(&plan) {
                     config.chaos_env.insert("MAW_FP".to_string(), spec);
+                }
+                // The scenario's per-cell `mid_op_kill_prob` is the
+                // single source of truth for chaos likelihood. Same
+                // value drives MAW_FP (sparse-by-design via plan
+                // step selection) and the PATH-shim's per-invocation
+                // roll. arm-agnostic — the shim is only ON the
+                // PATH for arms whose adapter materialised it, so
+                // arms without a shim see no effect from these vars.
+                let prob = cell.condition.to_profile().mid_op_kill_prob;
+                if prob > 0.0 {
+                    config
+                        .chaos_env
+                        .insert("MAW_BENCH_CHAOS_KILL_PROB".to_string(), format!("{prob}"));
+                    config
+                        .chaos_env
+                        .insert("MAW_BENCH_CHAOS_KILL_MS".to_string(), "50".to_string());
                 }
             }
 

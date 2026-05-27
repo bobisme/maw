@@ -74,6 +74,8 @@ pub mod jj_adapter;
 #[cfg(feature = "bench")]
 pub mod maw_adapter;
 #[cfg(feature = "bench")]
+pub mod shim;
+#[cfg(feature = "bench")]
 pub mod worktrees_adapter;
 #[cfg(feature = "bench")]
 pub mod ws_layout_adapter;

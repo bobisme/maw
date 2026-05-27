@@ -26,6 +26,7 @@ use maw_scenario::{BaseRef, FaultSpec, WsId};
 use tempfile::TempDir;
 
 use crate::proc_util;
+use crate::shim::ShimSet;
 use crate::{Result, StateSnapshot, StepOutcome, Substrate, SubstrateError};
 
 /// `jj` substrate adapter.
@@ -39,6 +40,10 @@ pub struct JjAdapter {
     /// `jj new ...` subprocess (analogous to the worktrees adapter's
     /// `git merge` kill). One-shot — `merge()` consumes it.
     armed_chaos: Option<FaultSpec>,
+    /// bn-1q6z: PATH-shim for the real-LLM agent path. Mirror of
+    /// [`crate::worktrees_adapter::WorktreesConventionAdapter::shim`]
+    /// — lives under `<root>/.shim/`, inert by default.
+    shim: ShimSet,
 }
 
 impl JjAdapter {
@@ -88,12 +93,25 @@ impl JjAdapter {
         // workspace and never `jj workspace add` an extra one for it.
         let integration_dir = repo_dir;
 
+        // bn-1q6z: materialize the PATH-shim under <root>/.shim/.
+        let shim_dir = root.join(".shim");
+        let shim = ShimSet::materialize_in(shim_dir)?;
+
         Ok(Self {
             root,
             integration_dir,
             _tmp: owned_tmp,
             armed_chaos: None,
+            shim,
         })
+    }
+
+    /// Borrow the per-substrate PATH-shim. See
+    /// [`crate::worktrees_adapter::WorktreesConventionAdapter::shim`]
+    /// for the bn-1q6z rationale.
+    #[must_use]
+    pub fn shim(&self) -> &ShimSet {
+        &self.shim
     }
 
     fn ws_dir(&self, ws: &WsId) -> PathBuf {

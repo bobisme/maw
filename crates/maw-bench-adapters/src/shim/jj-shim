@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# bn-1q6z: PATH-shim for `jj` — mirror of git-shim. See git-shim for
+# rationale + shape; the only difference is the binary name.
+
+set -u
+
+real="${_MAW_SHIM_REAL_JJ:-}"
+if [ -z "$real" ]; then
+  shim_dir="${_MAW_SHIM_DIR:-}"
+  if [ -n "$shim_dir" ]; then
+    IFS=':' read -r -a _parts <<< "$PATH"
+    _new=()
+    for p in "${_parts[@]}"; do
+      if [ "$p" != "$shim_dir" ]; then
+        _new+=("$p")
+      fi
+    done
+    PATH="$(IFS=':' ; echo "${_new[*]}")"
+    export PATH
+  fi
+  real="$(command -v jj || true)"
+fi
+
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+  printf 'maw-bench jj-shim: real jj not found (PATH=%s)\n' "$PATH" >&2
+  exit 127
+fi
+
+prob="${MAW_BENCH_CHAOS_KILL_PROB:-0}"
+if [ "$prob" = "0" ] || [ -z "$prob" ]; then
+  exec "$real" "$@"
+fi
+
+roll="$(awk -v p="$prob" 'BEGIN{srand(); r=rand(); print (r<p)?1:0}')"
+if [ "$roll" != "1" ]; then
+  exec "$real" "$@"
+fi
+
+kill_ms="${MAW_BENCH_CHAOS_KILL_MS:-50}"
+kill_ms="$(awk -v v="$kill_ms" 'BEGIN{n=v+0; if(n<1)n=50; printf "%d",n}')"
+sleep_secs="$(awk -v ms="$kill_ms" 'BEGIN{printf "%.3f", ms/1000}')"
+
+printf 'maw-bench jj-shim: chaos firing (prob=%s, kill_ms=%s)\n' "$prob" "$kill_ms" >&2
+
+setsid "$real" "$@" &
+child=$!
+
+(
+  sleep "$sleep_secs"
+  kill -9 -"$child" 2>/dev/null || true
+) &
+killer=$!
+
+wait "$child"
+rc=$?
+wait "$killer" 2>/dev/null || true
+exit "$rc"

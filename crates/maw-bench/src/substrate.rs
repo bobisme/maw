@@ -106,6 +106,46 @@ pub struct SubstrateHandle {
     /// Frozen per arm by §8.1 of the pre-registration — implementors
     /// must NOT vary it between runs.
     pub convention_text: String,
+    /// bn-1q6z: substrate-supplied env overlay merged into the
+    /// spawned agent's [`crate::agent::AgentConfig::extra_env`] before
+    /// the [`crate::harness::BenchConfig::chaos_env`] overlay.
+    ///
+    /// Load-bearing use is the PATH-shim seam for the worktrees / jj
+    /// arms: the adapter materializes a per-run shim dir during
+    /// setup and prepends it to `PATH` here. With chaos disabled the
+    /// shim is on `PATH` but inert (one `exec` to the real binary);
+    /// with chaos enabled the [`crate::harness::BenchConfig::chaos_env`]
+    /// adds `MAW_BENCH_CHAOS_KILL_PROB` + `MAW_BENCH_CHAOS_KILL_MS`
+    /// which the shim picks up.
+    ///
+    /// Empty by default — arms that don't materialize a shim (maw,
+    /// noop, claude-native-worktrees) populate nothing here and the
+    /// pre-bn-1q6z behaviour is unchanged. `BTreeMap` for stable
+    /// ordering (matters because we merge into `extra_env` which is
+    /// itself stable-ordered for §6.4 manifest hygiene).
+    pub agent_extra_env: std::collections::BTreeMap<String, String>,
+}
+
+impl SubstrateHandle {
+    /// Convenience constructor matching the pre-bn-1q6z four-field
+    /// shape (label/workspace_root/repo_root/convention_text). Used
+    /// by adapters that don't materialize a shim — the new
+    /// `agent_extra_env` field defaults to empty.
+    #[must_use]
+    pub fn new(
+        label: SubstrateLabel,
+        workspace_root: PathBuf,
+        repo_root: PathBuf,
+        convention_text: String,
+    ) -> Self {
+        Self {
+            label,
+            workspace_root,
+            repo_root,
+            convention_text,
+            agent_extra_env: std::collections::BTreeMap::new(),
+        }
+    }
 }
 
 /// Errors a substrate can surface to the harness.
@@ -252,6 +292,7 @@ impl Substrate for NoopSubstrate {
             workspace_root: root.clone(),
             repo_root: root,
             convention_text: Self::NOOP_CRIB.to_string(),
+            agent_extra_env: std::collections::BTreeMap::new(),
         })
     }
 

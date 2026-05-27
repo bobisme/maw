@@ -40,7 +40,7 @@
 
 #![cfg(feature = "bench")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use maw_bench::agent::{AgentBackend, AgentConfig, AgentError, AgentReply};
 use maw_bench::substrate::{
@@ -374,7 +374,49 @@ fn handle_at(
         workspace_root: root.clone(),
         repo_root: root,
         convention_text: convention.to_string(),
+        agent_extra_env: std::collections::BTreeMap::new(),
     }
+}
+
+/// bn-1q6z: as [`handle_at`] but with a substrate-supplied env
+/// overlay merged into the spawned agent's `extra_env`. Load-bearing
+/// use is the PATH-shim seam for worktrees/jj — the adapter
+/// materialises a per-run shim dir and prepends it to PATH here so
+/// the real-LLM agent's `git`/`jj` invocations are intercepted by
+/// the shim. With chaos disabled the shim is inert (`exec`-thru).
+fn handle_at_with_env(
+    label: SubstrateLabel,
+    root: PathBuf,
+    convention: &'static str,
+    extra_env: std::collections::BTreeMap<String, String>,
+) -> SubstrateHandle {
+    SubstrateHandle {
+        label,
+        workspace_root: root.clone(),
+        repo_root: root,
+        convention_text: convention.to_string(),
+        agent_extra_env: extra_env,
+    }
+}
+
+/// bn-1q6z: build the `agent_extra_env` overlay carrying the PATH
+/// prepend for a per-run shim dir. Reads the caller's current `PATH`
+/// at substrate-setup time (the agent inherits the harness's env
+/// modulo `extra_env` overrides).
+fn shim_path_overlay(shim_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let orig_path = std::env::var("PATH").unwrap_or_default();
+    let prepended = if orig_path.is_empty() {
+        shim_dir.display().to_string()
+    } else {
+        format!("{}:{}", shim_dir.display(), orig_path)
+    };
+    let mut out = std::collections::BTreeMap::new();
+    out.insert("PATH".to_string(), prepended);
+    out.insert(
+        maw_bench_adapters::shim::env_keys::SHIM_DIR.to_string(),
+        shim_dir.display().to_string(),
+    );
+    out
 }
 
 impl Substrate for RealSubstrate {
@@ -420,19 +462,34 @@ impl Substrate for RealSubstrate {
                     maw_bench_adapters::worktrees_adapter::WorktreesConventionAdapter::new()
                         .map_err(|e| setup_err("WorktreesConventionAdapter::new", e))?;
                 let root = adapter.root().clone();
+                // bn-1q6z: prepend the adapter's per-substrate shim
+                // dir to the spawned agent's PATH so its real-LLM
+                // `git` invocations are intercepted by the shim
+                // (inert when MAW_BENCH_CHAOS_KILL_PROB unset).
+                let extra_env = shim_path_overlay(adapter.shim().dir());
                 state.inner = Some(adapter);
-                Ok(handle_at(
+                Ok(handle_at_with_env(
                     SubstrateLabel::GitWorktreesBare,
                     root,
                     cribs::WORKTREES_CONVENTION_CRIB,
+                    extra_env,
                 ))
             }
             Self::Jj(state) => {
                 let adapter = maw_bench_adapters::jj_adapter::JjAdapter::new()
                     .map_err(|e| setup_err("JjAdapter::new", e))?;
                 let root = adapter.root().clone();
+                // bn-1q6z: same PATH-shim overlay as worktrees. The
+                // shim intercepts both `git` and `jj` (the jj arm is
+                // colocated, so the agent may run either).
+                let extra_env = shim_path_overlay(adapter.shim().dir());
                 state.inner = Some(adapter);
-                Ok(handle_at(SubstrateLabel::JjWorkspaces, root, cribs::JJ_WORKSPACES_CRIB))
+                Ok(handle_at_with_env(
+                    SubstrateLabel::JjWorkspaces,
+                    root,
+                    cribs::JJ_WORKSPACES_CRIB,
+                    extra_env,
+                ))
             }
         }
     }

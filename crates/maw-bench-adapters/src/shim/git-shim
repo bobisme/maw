@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# bn-1q6z: PATH-shim for `git` — intercepts the agent's real-LLM
+# subprocess invocations under SG2 chaos, delivers a SIGKILL after
+# MAW_BENCH_CHAOS_KILL_MS milliseconds with probability
+# MAW_BENCH_CHAOS_KILL_PROB. Default disabled — when no chaos env is
+# set, the shim is a transparent passthrough (one `exec` away from
+# the real binary; no fork, no kill, no measurable overhead).
+#
+# Selection of the real `git` binary:
+# - Honour _MAW_SHIM_REAL_GIT if set (explicit override; used by
+#   tests and by the Rust factory when the real binary path is
+#   already known at shim materialization time).
+# - Else strip _MAW_SHIM_DIR from PATH and resolve via `command -v`.
+#
+# Why bash, not Rust: the shim must be droppable into any agent's
+# $PATH (the agent has no Rust runtime). The script is ~50 lines,
+# audit-trivial, and the no-kill path is one `exec`.
+
+set -u
+
+# --- 1. Locate the real binary (defaults to system git on PATH minus shim dir).
+real="${_MAW_SHIM_REAL_GIT:-}"
+if [ -z "$real" ]; then
+  # Strip our shim dir from PATH so `command -v git` finds the next one.
+  shim_dir="${_MAW_SHIM_DIR:-}"
+  if [ -n "$shim_dir" ]; then
+    # Split-rebuild PATH excluding the shim dir.
+    IFS=':' read -r -a _parts <<< "$PATH"
+    _new=()
+    for p in "${_parts[@]}"; do
+      if [ "$p" != "$shim_dir" ]; then
+        _new+=("$p")
+      fi
+    done
+    PATH="$(IFS=':' ; echo "${_new[*]}")"
+    export PATH
+  fi
+  real="$(command -v git || true)"
+fi
+
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+  printf 'maw-bench git-shim: real git not found (PATH=%s)\n' "$PATH" >&2
+  exit 127
+fi
+
+# --- 2. Default passthrough (chaos disabled). One exec, no overhead.
+prob="${MAW_BENCH_CHAOS_KILL_PROB:-0}"
+if [ "$prob" = "0" ] || [ -z "$prob" ]; then
+  exec "$real" "$@"
+fi
+
+# --- 3. Chaos roll. Sample a uniform [0,1) and compare to `prob`.
+# bash has no float arithmetic; use awk for the comparison.
+roll="$(awk -v p="$prob" 'BEGIN{srand(); r=rand(); print (r<p)?1:0}')"
+if [ "$roll" != "1" ]; then
+  exec "$real" "$@"
+fi
+
+# --- 4. Chaos fires. Spawn real git in its own process group, sleep
+# MAW_BENCH_CHAOS_KILL_MS, then kill -9 the whole group.
+kill_ms="${MAW_BENCH_CHAOS_KILL_MS:-50}"
+# Coerce to integer (awk produces "50" for "50"; rejects bogus).
+kill_ms="$(awk -v v="$kill_ms" 'BEGIN{n=v+0; if(n<1)n=50; printf "%d",n}')"
+sleep_secs="$(awk -v ms="$kill_ms" 'BEGIN{printf "%.3f", ms/1000}')"
+
+# `setsid` puts the child in a new session; the kill -9 targets the
+# whole group via the negative pid sign trick. Optional log line on
+# stderr lets the agent's transcript record that chaos fired (the
+# bench harness's discard taxonomy reads this).
+printf 'maw-bench git-shim: chaos firing (prob=%s, kill_ms=%s)\n' "$prob" "$kill_ms" >&2
+
+setsid "$real" "$@" &
+child=$!
+
+(
+  sleep "$sleep_secs"
+  # Negative pid → process group. Best-effort; already-dead group is OK.
+  kill -9 -"$child" 2>/dev/null || true
+) &
+killer=$!
+
+wait "$child"
+rc=$?
+# Reap the killer (it may already be done after the kill fired).
+wait "$killer" 2>/dev/null || true
+exit "$rc"

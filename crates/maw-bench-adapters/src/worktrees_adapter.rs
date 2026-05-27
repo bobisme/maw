@@ -15,6 +15,7 @@ use maw_scenario::{BaseRef, FaultSpec, WsId};
 use tempfile::TempDir;
 
 use crate::proc_util;
+use crate::shim::ShimSet;
 use crate::{Result, StateSnapshot, StepOutcome, Substrate, SubstrateError};
 
 /// `git worktree` adapter implementing the SG2 thin coordination convention.
@@ -63,6 +64,14 @@ pub struct WorktreesConventionAdapter {
     /// a short delay (default ~50ms). One-shot: `merge()` `.take()`s
     /// the field so chaos never leaks across ops.
     armed_chaos: Option<FaultSpec>,
+    /// bn-1q6z: PATH-shim for the **real-LLM agent path**. The shim
+    /// dir lives under `<root>/.shim/` and is owned by this adapter
+    /// (dropped with the tempdir on `cleanup`). The shim is always
+    /// materialized; it is inert (pure passthrough) unless the
+    /// agent's env carries `MAW_BENCH_CHAOS_KILL_PROB`. The harness
+    /// reaches this via [`Self::shim`] when building the
+    /// `SubstrateHandle::agent_extra_env` for the worktrees arm.
+    shim: ShimSet,
 }
 
 impl WorktreesConventionAdapter {
@@ -124,13 +133,30 @@ impl WorktreesConventionAdapter {
             &bare_dir,
         )?;
 
+        // bn-1q6z: materialize the PATH-shim under <root>/.shim/. The
+        // shim is inert by default — the agent only sees a kill when
+        // MAW_BENCH_CHAOS_KILL_PROB is also in the spawned env.
+        let shim_dir = root.join(".shim");
+        let shim = ShimSet::materialize_in(shim_dir)?;
+
         Ok(Self {
             root,
             integration_dir,
             coord_dir,
             _tmp: owned_tmp,
             armed_chaos: None,
+            shim,
         })
+    }
+
+    /// Borrow the per-substrate PATH-shim. Used by the harness wiring
+    /// (`maw-bench-sweep::real_runtime`) to build the
+    /// `SubstrateHandle::agent_extra_env` overlay for the worktrees
+    /// arm. The shim is materialized in `new()` and tied to the
+    /// adapter's tempdir lifetime.
+    #[must_use]
+    pub fn shim(&self) -> &ShimSet {
+        &self.shim
     }
 
     fn ws_dir(&self, ws: &WsId) -> PathBuf {
@@ -482,7 +508,7 @@ pub(crate) fn collect_files(
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str == ".git" || name_str == ".jj" {
+        if name_str == ".git" || name_str == ".jj" || name_str == ".shim" {
             continue;
         }
         let ft = entry

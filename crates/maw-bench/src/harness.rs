@@ -190,10 +190,21 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
         // vars). We clone the harness's AgentConfig and never mutate
         // the harness state itself — this keeps `BenchHarness` safe
         // to reuse across runs without per-call chaos leakage.
-        let agent_result = if config.chaos_env.is_empty() {
+        //
+        // bn-1q6z: also fold in the substrate-supplied
+        // `agent_extra_env` (typically the PATH-shim overlay for the
+        // worktrees / jj arms). Substrate env lands FIRST so the
+        // per-run chaos_env can override individual keys
+        // (`MAW_BENCH_CHAOS_KILL_PROB` overrides any default the
+        // substrate set; PATH is purely additive from the substrate
+        // and not touched by chaos_env in current use).
+        let agent_result = if config.chaos_env.is_empty() && handle.agent_extra_env.is_empty() {
             self.agent.run(&prompt, &self.agent_config, &handle)
         } else {
             let mut per_run = self.agent_config.clone();
+            for (k, v) in &handle.agent_extra_env {
+                per_run.extra_env.insert(k.clone(), v.clone());
+            }
             for (k, v) in &config.chaos_env {
                 per_run.extra_env.insert(k.clone(), v.clone());
             }
@@ -869,6 +880,7 @@ mod tests {
                     workspace_root: root.clone(),
                     repo_root: root,
                     convention_text: "# planted maw substrate (test)\n".to_string(),
+                    agent_extra_env: std::collections::BTreeMap::new(),
                 })
             }
 
