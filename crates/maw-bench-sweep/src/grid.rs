@@ -88,11 +88,23 @@ impl ConditionPoint {
     /// scenario generator. See module docs for the rule.
     #[must_use]
     pub fn to_profile(&self) -> ConditionProfile {
+        self.to_profile_with_chaos(0.0)
+    }
+
+    /// Same as `to_profile` but lets callers inject `mid_op_kill_prob`
+    /// instead of the hardcoded 0.0. The default `to_profile()` keeps
+    /// the original "SG2 is fault-orthogonal to SG1" stance for
+    /// back-compat. SweepDriver passes a non-zero kill-prob here when
+    /// `--chaos=on` so the scenario generator emits Failpoint steps
+    /// the chaos overlay can translate to MAW_FP. Per pre-reg §9
+    /// Amendment A1 (bn-3hzt).
+    #[must_use]
+    pub fn to_profile_with_chaos(&self, mid_op_kill_prob: f64) -> ConditionProfile {
         let overlap_rate = f64::from(self.k_overlap_numerator) / 8.0;
         let stale_rate = if self.burst { 0.2 } else { 0.0 };
         ConditionProfile::new(
             u8::try_from(self.k_concurrency.min(255)).unwrap_or(1),
-            0.0,
+            mid_op_kill_prob,
             overlap_rate,
             stale_rate,
         )

@@ -218,9 +218,19 @@ impl SweepDriver {
         let mut out: Vec<BenchRun> =
             Vec::with_capacity(grid.cells.len() * grid.arms.len() * grid.seeds_per_cell as usize);
 
+        // bn-3hzt amendment: when chaos is on, inject a non-zero
+        // mid_op_kill_prob into the per-cell profile so the scenario
+        // generator emits FaultSpec::Failpoint steps that the chaos
+        // overlay can translate to MAW_FP. Default 0 preserves the
+        // pre-bn-3hzt "SG2 is fault-orthogonal to SG1" stance.
+        let chaos_prob: f64 = if self.chaos_enabled { 0.30 } else { 0.0 };
         for (cell, arm, replicate, seed) in grid.iter_runs() {
             let plan_steps = self.plan_steps;
-            let plan = generate_plan(seed, &cell.condition.to_profile(), plan_steps);
+            let plan = generate_plan(
+                seed,
+                &cell.condition.to_profile_with_chaos(chaos_prob),
+                plan_steps,
+            );
 
             let substrate = make_substrate(&arm)
                 .map_err(|e| SweepDriverError::SubstrateFactory(arm.clone(), e))?;
