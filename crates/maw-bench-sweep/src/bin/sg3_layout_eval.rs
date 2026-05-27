@@ -82,7 +82,7 @@ use maw_bench_sweep::{
 fn usage() -> &'static str {
     "usage: sg3-layout-eval [--layout=old|new|both] [--n-a=N] [--n-b=N] \
      [--artifact-dir=<dir>] [--pilot] [--decision-json=<path>] \
-     [--real-llm] [--substrate=<arm>]\n\
+     [--real-llm] [--substrate=<arm>] [--model=<id>]\n\
      \n\
      Runs the T3.5 SG3 layout-eval harness against the bn-iux4 frozen subset.\n\
      Defaults: --layout=both --n-a=20 --n-b=10 (frozen by bn-iux4 §1.3).\n\
@@ -92,6 +92,10 @@ fn usage() -> &'static str {
        Requires --features claude-backend at build + MAW_BENCH_ALLOW_REAL_LLM=1.\n\
      --substrate=<arm>: override substrate (only with --layout=old|new).\n\
        Valid: noop|maw|maw-consolidated|worktrees|jj.\n\
+     --model=<id>: override AgentConfig.model (e.g. haiku, sonnet, opus,\n\
+       claude-sonnet-4-7). Default: sonnet (the SP3 pin per pre-reg §8.6).\n\
+       Per-campaign discipline: each invocation uses ONE model; cross-model\n\
+       comparison = separate side-by-side campaigns (NOT a sweep axis).\n\
      \n\
      Use `just sg3-layout-eval-pilot` for the canonical pilot invocation.\n\
      Use `just sg3-layout-eval-real n_a=1 n_b=1` for the canonical real-LLM smoke."
@@ -110,6 +114,11 @@ struct Args {
     /// means: derive per-arm from layout (`old → MawWsLayout`,
     /// `new → MawConsolidatedLayout`, MockAgent → Noop).
     substrate_override: Option<SubstrateChoice>,
+    /// Optional `AgentConfig.model` override (`--model=<id>`, bn-3w0c).
+    /// `None` ⇒ driver uses `AgentConfig::default()` (sonnet, the
+    /// SP3 §8.6 pin). The override threads through to the BenchRun
+    /// manifest's `claude_model_id`.
+    model: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,6 +147,7 @@ fn parse_args() -> Result<Args, String> {
     let mut plant_regression = PlantedRegression::None;
     let mut backend = BackendChoice::Mock;
     let mut substrate_override: Option<SubstrateChoice> = None;
+    let mut model: Option<String> = None;
 
     let argv: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -169,6 +179,11 @@ fn parse_args() -> Result<Args, String> {
             backend = BackendChoice::Claude;
         } else if let Some(v) = a.strip_prefix("--substrate=") {
             substrate_override = Some(SubstrateChoice::parse(v)?);
+        } else if let Some(v) = a.strip_prefix("--model=") {
+            if v.is_empty() {
+                return Err("--model=<id>: id must not be empty".to_string());
+            }
+            model = Some(v.to_string());
         } else {
             return Err(format!("unknown arg: {a}"));
         }
@@ -217,6 +232,7 @@ fn parse_args() -> Result<Args, String> {
         plant_regression,
         backend,
         substrate_override,
+        model,
     })
 }
 
@@ -247,7 +263,7 @@ fn main() -> ExitCode {
 
     eprintln!("sg3-layout-eval: artifact_dir = {}", dir.display());
     eprintln!(
-        "  layout={} n-a={} n-b={} pilot={} backend={} substrate={}",
+        "  layout={} n-a={} n-b={} pilot={} backend={} substrate={} model={}",
         match args.layout {
             Layout::Old => "old",
             Layout::New => "new",
@@ -263,6 +279,7 @@ fn main() -> ExitCode {
                 BackendChoice::Mock => "noop (auto)".to_string(),
                 BackendChoice::Claude => "per-layout maw (auto)".to_string(),
             }),
+        args.model.as_deref().unwrap_or("sonnet (default)"),
     );
 
     let start = Instant::now();
@@ -280,7 +297,16 @@ fn main() -> ExitCode {
             PlantedRegression::None
         };
         let substrate_for_arm = resolve_substrate_for_arm(&args, arm);
-        match run_arm(arm, args.n_a, args.n_b, &dir, plant_for_arm, args.backend, substrate_for_arm) {
+        match run_arm(
+            arm,
+            args.n_a,
+            args.n_b,
+            &dir,
+            plant_for_arm,
+            args.backend,
+            substrate_for_arm,
+            args.model.as_deref(),
+        ) {
             Ok(cost) => total_cost += cost,
             Err(e) => {
                 eprintln!("run_arm({arm}): {e}");
@@ -386,12 +412,18 @@ fn run_arm(
     plant: PlantedRegression,
     backend: BackendChoice,
     substrate: SubstrateChoice,
+    model: Option<&str>,
 ) -> Result<f64, String> {
     let arm_root = arm_dir(base_dir, arm);
+    let agent_cfg_override = model.map(|m| maw_bench::agent::AgentConfig {
+        model: m.to_string(),
+        ..maw_bench::agent::AgentConfig::default()
+    });
     let driver = SweepDriver::new(&arm_root)
         .map_err(|e| format!("driver: {e}"))?
         .with_plan_steps(4)
-        .with_pinned_clock(1_000, 2_000);
+        .with_pinned_clock(1_000, 2_000)
+        .with_agent_config(agent_cfg_override);
 
     // SUB-A grid: C0×T0, N=n_a.
     let sub_a = SweepGrid {

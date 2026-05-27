@@ -900,6 +900,23 @@ per §8.7), NOT a substrate outcome and NOT counted in metrics. Other arms
 (`maw`, `git-worktrees-bare`, `jj-workspaces`) do not have this preflight
 requirement.
 
+**Cross-model spot-checks (bn-3w0c, non-publication).** The
+`sg2-sweep-pilot` / `sg3-layout-eval` bins (and their `just sg2-sweep-real`
+/ `just sg3-layout-eval-real` recipes) accept an optional `--model=<id>`
+override (e.g. `--model=haiku`). When omitted, the driver uses
+`AgentConfig::default()` = **sonnet** — the SP3 pin preserved here. The
+override flows through to the §6.4 manifest as `claude_model_id` so any
+artifact is self-describing about which model produced it.
+
+The override is a **spot-check tool** — not a sweep-grid axis. Per-campaign
+pinning discipline still holds: each invocation uses ONE model, and any
+cross-model comparison is published as **separate side-by-side campaigns**.
+Folding model into the §3.2 condition-spectrum sweep would conflate
+substrate-effect with model-effect — explicitly out of scope. Typical
+use: sanity-check the SG3 subset against haiku before committing sonnet
+quota for the full 60-run campaign; re-bench the highest-cost SG4 cluster
+against opus to see if fix efficacy holds at the largest model.
+
 ### 8.7 Discard taxonomy and retry cap (frozen — reviewer point P1-6)
 
 Every run that does not produce a counted measurement is classified by one

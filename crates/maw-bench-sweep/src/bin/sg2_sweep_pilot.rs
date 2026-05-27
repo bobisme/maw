@@ -50,7 +50,7 @@ use maw_bench_sweep::{
 };
 
 fn usage() -> &'static str {
-    "usage: sg2-sweep-pilot [<artifact-dir>] [--real-llm] [--substrate=<arm>] [--n=<seeds-per-cell>]\n\
+    "usage: sg2-sweep-pilot [<artifact-dir>] [--real-llm] [--substrate=<arm>] [--n=<seeds-per-cell>] [--model=<id>]\n\
      \n\
      Default: runs the 18-cell sweep pilot under MockAgent + NoopSubstrate.\n\
        <artifact-dir> defaults to a tempdir under /tmp/.\n\
@@ -60,7 +60,12 @@ fn usage() -> &'static str {
                           MAW_BENCH_ALLOW_REAL_LLM=1 at runtime.\n\
      --substrate=<arm>    one of: noop|maw|maw-consolidated|worktrees|jj.\n\
                           default: noop (Mock); maw (real-LLM).\n\
-     --n=<N>              seeds per cell (default 3). Smaller = cheaper smoke run."
+     --n=<N>              seeds per cell (default 3). Smaller = cheaper smoke run.\n\
+     --model=<id>         override AgentConfig.model (e.g. haiku, sonnet, opus,\n\
+                          claude-sonnet-4-7). Default: sonnet (pre-reg §8.6 pin).\n\
+                          Per-campaign discipline: each invocation uses ONE\n\
+                          model; cross-model comparison = separate side-by-side\n\
+                          campaigns (NOT a sweep axis)."
 }
 
 struct Args {
@@ -68,6 +73,10 @@ struct Args {
     backend: BackendChoice,
     substrate: SubstrateChoice,
     seeds_per_cell: Option<u32>,
+    /// Optional `AgentConfig.model` override (`--model=<id>`).
+    /// `None` ⇒ driver uses `AgentConfig::default()` (sonnet, the
+    /// SP3 pin per pre-reg §8.6 — production sweeps untouched).
+    model: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -75,6 +84,7 @@ fn parse_args() -> Result<Args, String> {
     let mut backend = BackendChoice::Mock;
     let mut substrate: Option<SubstrateChoice> = None;
     let mut seeds_per_cell: Option<u32> = None;
+    let mut model: Option<String> = None;
 
     let argv: Vec<String> = env::args().skip(1).collect();
     for a in argv {
@@ -87,6 +97,11 @@ fn parse_args() -> Result<Args, String> {
             substrate = Some(SubstrateChoice::parse(v)?);
         } else if let Some(v) = a.strip_prefix("--n=") {
             seeds_per_cell = Some(v.parse().map_err(|e| format!("--n: {e}"))?);
+        } else if let Some(v) = a.strip_prefix("--model=") {
+            if v.is_empty() {
+                return Err("--model=<id>: id must not be empty".to_string());
+            }
+            model = Some(v.to_string());
         } else if a.starts_with("--") {
             return Err(format!("unknown arg: {a}"));
         } else if dir.is_none() {
@@ -108,6 +123,7 @@ fn parse_args() -> Result<Args, String> {
         backend,
         substrate,
         seeds_per_cell,
+        model,
     })
 }
 
@@ -132,11 +148,15 @@ fn main() -> ExitCode {
     let start = Instant::now();
     eprintln!("sg2-sweep-pilot: artifact_dir = {}", dir.display());
     eprintln!(
-        "  backend={} substrate={}{}",
+        "  backend={} substrate={}{}{}",
         args.backend.as_str(),
         args.substrate.as_str(),
         args.seeds_per_cell
             .map(|n| format!(" seeds_per_cell={n}"))
+            .unwrap_or_default(),
+        args.model
+            .as_deref()
+            .map(|m| format!(" model={m}"))
             .unwrap_or_default(),
     );
 
@@ -145,8 +165,17 @@ fn main() -> ExitCode {
     //    real-LLM path, we use the chosen substrate adapter; the
     //    pilot_grid arm list is overridden to only run the chosen
     //    arm (otherwise we'd burn 3x the spend running 3 substrates).
+    let agent_cfg_override = args.model.as_ref().map(|m| {
+        maw_bench::agent::AgentConfig {
+            model: m.clone(),
+            ..maw_bench::agent::AgentConfig::default()
+        }
+    });
     let driver = match SweepDriver::new(&dir) {
-        Ok(d) => d.with_plan_steps(4).with_pinned_clock(1_000, 2_000),
+        Ok(d) => d
+            .with_plan_steps(4)
+            .with_pinned_clock(1_000, 2_000)
+            .with_agent_config(agent_cfg_override),
         Err(e) => {
             eprintln!("driver setup: {e}");
             return ExitCode::from(3);

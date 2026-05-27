@@ -224,12 +224,18 @@ sg2-sweep-pilot dir='':
 #   - `claude` on $PATH with valid auth (OAuth keychain or
 #     ANTHROPIC_API_KEY).
 #
-#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real            # n=3, maw arm
-#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=5        # bigger N
-#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=3 arm=jj # different arm
-sg2-sweep-real n='3' arm='maw' dir='':
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real                          # n=3, maw arm, sonnet
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=5                      # bigger N
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=3 arm=jj               # different arm
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=3 arm=maw model=haiku  # cross-model spot-check (bn-3w0c)
+#
+# `model=` is a bn-3w0c spot-check tool; the SP3 default stays sonnet.
+# Each invocation uses ONE model — cross-model comparison runs as
+# SEPARATE side-by-side campaigns (NOT a sweep axis; see
+# notes/sg2-benchmark-preregistration.md §8.6).
+sg2-sweep-real n='3' arm='maw' model='' dir='':
   cargo run --quiet -p maw-bench-sweep --features bench,claude-backend --bin sg2-sweep-pilot -- \
-    --real-llm --substrate={{arm}} --n={{n}} {{dir}}
+    --real-llm --substrate={{arm}} --n={{n}} {{ if model == '' { '' } else { '--model=' + model } }} {{dir}}
 
 # sg2-friction-list: reduce a directory of BenchRun JSONs into the
 # prioritized maw friction list (SG4's input). T2.8 / bn-u9iy.
@@ -495,14 +501,20 @@ sg3-layout-eval *args:
 #   - MAW_BENCH_ALLOW_REAL_LLM=1 in env (bn-3kxq runtime guard).
 #   - `claude` and `maw` on $PATH (real-substrate adapter spawns maw).
 #
-#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real            # n_a=3 n_b=3
-#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=1 n_b=1 # cheapest
-#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=20 n_b=10 # bn-iux4 frozen N
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real                                # n_a=3 n_b=3, sonnet
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=1 n_b=1                    # cheapest
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=20 n_b=10                  # bn-iux4 frozen N
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=3 n_b=3 model=haiku        # cross-model spot-check (bn-3w0c)
+#
+# `model=` is a bn-3w0c spot-check tool; the SP3 default stays sonnet.
+# Each invocation uses ONE model — cross-model comparison runs as
+# SEPARATE side-by-side campaigns (NOT a sweep axis; see
+# notes/sg2-benchmark-preregistration.md §8.6).
 #
 # Exit codes mirror sg3-layout-eval: 0=GO, 1=NO-GO, 2=invalid args, 3=pipeline error.
-sg3-layout-eval-real n_a='3' n_b='3' *extra:
+sg3-layout-eval-real n_a='3' n_b='3' model='' *extra='':
   cargo run --quiet -p maw-bench-sweep --features bench,claude-backend --bin sg3-layout-eval -- \
-    --real-llm --layout=both --n-a={{n_a}} --n-b={{n_b}} {{extra}}
+    --real-llm --layout=both --n-a={{n_a}} --n-b={{n_b}} {{ if model == '' { '' } else { '--model=' + model } }} {{extra}}
 
 # sg3-layout-eval-pilot: harness-validation pilot for T3.5 / bn-1uzn.
 # Runs the same SweepDriver pass with MockAgent + NoopSubstrate + N=3

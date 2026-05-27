@@ -39,7 +39,7 @@
 
 use std::path::{Path, PathBuf};
 
-use maw_bench::agent::AgentBackend;
+use maw_bench::agent::{AgentBackend, AgentConfig};
 use maw_bench::harness::{BenchConfig, BenchHarness, HarnessError};
 use maw_bench::run::BenchRun;
 use maw_bench::substrate::Substrate;
@@ -97,6 +97,13 @@ pub struct SweepDriver {
     /// Pin timestamps in BenchRun manifests for deterministic JSON
     /// in tests. `Some((start, end))` ⇒ every run sets both.
     pinned_clock_ms: Option<(u64, u64)>,
+    /// Per-driver [`AgentConfig`] override. `None` ⇒ each run uses
+    /// [`AgentConfig::default`] (sonnet pin per pre-reg §8.6).
+    /// `Some(cfg)` ⇒ every run uses the supplied config (used by
+    /// bn-3w0c's `--model` flag for cross-model spot-checks; the
+    /// model field flows through into the §6.4 BenchRun manifest's
+    /// `claude_model_id` via [`crate::harness::BenchHarness`]).
+    agent_config_override: Option<AgentConfig>,
 }
 
 impl SweepDriver {
@@ -109,6 +116,7 @@ impl SweepDriver {
             artifact_dir: dir,
             plan_steps: DEFAULT_PLAN_STEPS,
             pinned_clock_ms: None,
+            agent_config_override: None,
         })
     }
 
@@ -124,6 +132,33 @@ impl SweepDriver {
     #[must_use]
     pub fn with_pinned_clock(mut self, start_ms: u64, end_ms: u64) -> Self {
         self.pinned_clock_ms = Some((start_ms, end_ms));
+        self
+    }
+
+    /// Override the [`AgentConfig`] used for every run in this
+    /// driver pass. When `None` (the default), each run uses
+    /// [`AgentConfig::default`] (sonnet pin per pre-reg §8.6) —
+    /// the production sweep path is unchanged.
+    ///
+    /// Use this for cross-model spot-checks (bn-3w0c) where you want
+    /// to swap the model id without re-pinning the default:
+    ///
+    /// ```ignore
+    /// let cfg = AgentConfig { model: "haiku".to_string(), ..AgentConfig::default() };
+    /// let driver = SweepDriver::new(dir)?.with_agent_config(Some(cfg));
+    /// ```
+    ///
+    /// The override flows through to each run's §6.4 manifest as
+    /// `claude_model_id` (see `harness::build_manifest`).
+    ///
+    /// **Per-campaign discipline (pre-reg §8.6):** each invocation
+    /// uses ONE model. Cross-model comparison is published as
+    /// SEPARATE campaigns side-by-side, never folded into a single
+    /// sweep grid axis (that would conflate substrate-effect with
+    /// model-effect).
+    #[must_use]
+    pub fn with_agent_config(mut self, cfg: Option<AgentConfig>) -> Self {
+        self.agent_config_override = cfg;
         self
     }
 
@@ -169,7 +204,15 @@ impl SweepDriver {
             let substrate = make_substrate(&arm)
                 .map_err(|e| SweepDriverError::SubstrateFactory(arm.clone(), e))?;
             let agent = make_agent(seed);
-            let agent_config = maw_bench::agent::AgentConfig::default();
+            // Per bn-3w0c: honour the optional driver-level override
+            // (so `--model` from sg2/sg3 bins flows into the §6.4
+            // manifest's `claude_model_id`). Cloned per run because
+            // the harness takes ownership; one driver pass can drive
+            // many runs.
+            let agent_config = self
+                .agent_config_override
+                .clone()
+                .unwrap_or_default();
 
             let mut harness = BenchHarness::new(substrate, agent, agent_config);
 
@@ -333,6 +376,67 @@ mod tests {
             })
             .collect();
         assert_eq!(json_files.len(), 2, "expected 2 BenchRun JSONs");
+    }
+
+    #[test]
+    fn agent_config_override_flows_into_manifest_claude_model_id() {
+        // bn-3w0c AC §4 + §6: the --model override must land in the
+        // BenchRun manifest's `claude_model_id` field (the audit-only
+        // AC that confirms cross-model comparison is attributable
+        // per-run without re-pinning the default).
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let custom = maw_bench::agent::AgentConfig {
+            model: "haiku".to_string(),
+            ..maw_bench::agent::AgentConfig::default()
+        };
+        let driver = SweepDriver::new(tmp.path())
+            .expect("driver")
+            .with_plan_steps(2)
+            .with_pinned_clock(1000, 2000)
+            .with_agent_config(Some(custom.clone()));
+
+        let grid = SweepGrid {
+            cells: vec![SweepCell {
+                condition: ConditionPoint::c0_benign(),
+                t_class: TClass::T0,
+            }],
+            arms: vec!["noop-arm".to_string()],
+            seeds_per_cell: 1,
+            base_seed: 7,
+        };
+
+        let runs = driver
+            .drive(
+                &grid,
+                |_arm| Ok::<NoopSubstrate, String>(NoopSubstrate::new()),
+                |_seed| MockAgent::with_pinned_clock(finished_script(), 1234),
+            )
+            .expect("drive ok");
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].manifest.claude_model_id, "haiku",
+            "--model override must thread through to manifest.claude_model_id"
+        );
+
+        // Sanity: omitting the override falls back to the SP3-pinned
+        // default (sonnet) so production sweeps are untouched.
+        let default_driver = SweepDriver::new(tmp.path().join("default"))
+            .expect("driver")
+            .with_plan_steps(2)
+            .with_pinned_clock(1000, 2000);
+        let default_runs = default_driver
+            .drive(
+                &grid,
+                |_arm| Ok::<NoopSubstrate, String>(NoopSubstrate::new()),
+                |_seed| MockAgent::with_pinned_clock(finished_script(), 1234),
+            )
+            .expect("drive ok");
+        assert_eq!(
+            default_runs[0].manifest.claude_model_id, "sonnet",
+            "no override ⇒ AgentConfig::default() preserves SP3 sonnet pin"
+        );
     }
 
     #[test]
