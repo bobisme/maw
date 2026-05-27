@@ -75,7 +75,8 @@ use std::time::Instant;
 use maw_bench_sweep::{
     ARM_NEW, ARM_OLD, BackendChoice, ConditionPoint, Decision, PairedCiSignals, PrereggedBars,
     SubstrateChoice, SweepCell, SweepDriver, SweepGrid, TClass, aggregate_artifacts,
-    decide_go_no_go, make_any_agent, real_runtime::RealSubstrate, validate_pairing,
+    check_maw_version_skew, decide_go_no_go, make_any_agent, real_runtime::RealSubstrate,
+    validate_pairing,
 };
 
 fn usage() -> &'static str {
@@ -227,6 +228,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // bn-f5zu: preflight binary-vs-source version skew before doing
+    // any work. Warning-only (operators may intentionally bench an
+    // older binary — e.g. to A/B a fix's effect). See
+    // `notes/sg3-no-go-rootcause.md` for the bn-2ert root cause this
+    // catches at-source.
+    let _ = check_maw_version_skew(env!("CARGO_PKG_VERSION"));
 
     let dir = match args.artifact_dir.clone() {
         Some(d) => d,

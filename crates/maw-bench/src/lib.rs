@@ -67,6 +67,7 @@ pub mod harness;
 pub mod prompt;
 pub mod run;
 pub mod substrate;
+pub mod version_capture;
 
 #[cfg(feature = "claude-backend")]
 pub mod claude;
@@ -81,3 +82,4 @@ pub use run::{
     ToolCall, Transcript, Turn,
 };
 pub use substrate::{NoopSubstrate, Substrate, SubstrateError, SubstrateHandle};
+pub use version_capture::{CapturedVersions, ToolVersion, capture_tool_version, capture_versions};

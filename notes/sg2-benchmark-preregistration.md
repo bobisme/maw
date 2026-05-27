@@ -674,9 +674,9 @@ Each run records, alongside metrics, a fixed manifest (reviewer point P0-3 /
 claude_code_version
 claude_model_id          # the model param value
 claude_effective_model   # what the response envelope reports
-git_version
-jj_version
-maw_version              # commit SHA + tag
+git_version              # `git --version` first line, captured once per run
+jj_version               # `jj --version` first line, captured once per run
+maw_version              # `maw --version` first line, captured once per run
 benchmark_harness_commit
 scenario_generator_commit
 prompt_hash              # SHA-256 of the exact prompt sent
@@ -695,10 +695,39 @@ start_ts_utc
 end_ts_utc
 ```
 
+**Version-capture provenance (bn-f5zu, 2026-05-27):** the `maw_version`,
+`git_version`, and `jj_version` fields are populated by
+`maw_bench::capture_versions()` at the end of each
+[`BenchHarness::run`] (once per run, ms-fast). When a binary is missing
+on `$PATH` the field carries the literal string `error: <message>`
+rather than empty — empty-string is reserved for "harness deliberately
+did not look". This closes the version-skew confound class identified
+in `notes/sg3-no-go-rootcause.md` (the 2026-05-26 SG3 NO-GO had an
+empty `maw_version` so the binary-vs-substrate skew required a 20-run
+forensic trace to identify). A complementary bin-startup preflight in
+`sg3-layout-eval` and `sg2-sweep-pilot` warns when the installed `maw`
+is older than the source tree the bin was built from — warning-only
+because operators sometimes intentionally bench an older binary to
+A/B a fix's effect.
+
 The full per-run manifest is published with the dataset. Any
 substrate-attributed metric difference that disappears when grouped by
 `host_id` or `arm_order_index` MUST be flagged in the publication, not
 suppressed.
+
+**Example populated manifest fragment** (post-bn-f5zu):
+
+```json
+{
+  "claude_code_version": "claude-code/2.1.150",
+  "claude_model_id": "sonnet",
+  "git_version": "git version 2.45.0",
+  "jj_version": "jj 0.21.0",
+  "maw_version": "maw 0.62.0",
+  "benchmark_harness_commit": "0.62.0",
+  "scenario_generator_commit": "0.62.0"
+}
+```
 
 ---
 

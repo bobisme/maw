@@ -45,8 +45,8 @@ use std::time::Instant;
 
 use maw_bench_sweep::{
     BackendChoice, SpectrumReportOptions, SubstrateChoice, SweepDriver, aggregate_artifacts,
-    make_any_agent, pilot_grid, real_runtime::RealSubstrate, render_crossover_doc,
-    render_spectrum_table, validate_pairing,
+    check_maw_version_skew, make_any_agent, pilot_grid, real_runtime::RealSubstrate,
+    render_crossover_doc, render_spectrum_table, validate_pairing,
 };
 
 fn usage() -> &'static str {
@@ -119,6 +119,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // bn-f5zu: preflight binary-vs-source version skew before doing
+    // any work. Warning-only — see `notes/sg3-no-go-rootcause.md` for
+    // the version-skew root cause that motivated this guard.
+    let _ = check_maw_version_skew(env!("CARGO_PKG_VERSION"));
+
     let dir: PathBuf = args
         .dir
         .clone()

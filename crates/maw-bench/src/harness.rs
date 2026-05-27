@@ -44,6 +44,7 @@ use crate::agent::{AgentBackend, AgentConfig, AgentError};
 use crate::prompt::{PromptInputs, prompt_sha256_hex, render_prompt};
 use crate::run::{BenchRun, OracleBSummary, RunManifest, RunVerdict, Transcript};
 use crate::substrate::{Substrate, SubstrateConfig, SubstrateError, SubstrateLabel};
+use crate::version_capture::capture_versions;
 
 /// Per-run configuration controlling the harness's behaviour.
 ///
@@ -228,6 +229,14 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
         let verdict = classify_verdict(agent_done, &oracle_b, &agent_stop);
 
         // -- 9. Manifest. --
+        //
+        // `build_manifest` captures maw/git/jj versions once per run
+        // (bn-f5zu). Previously `maw_version` was left empty; the
+        // 2026-05-26 SG3 NO-GO root cause
+        // (`notes/sg3-no-go-rootcause.md`) traced to v0.61.0-vs-post-
+        // T3.2 binary skew that would have been one grep away if the
+        // field had been populated. Captures are ms-fast (three
+        // `Command::output` calls) at the end of the agent subprocess.
         let manifest = build_manifest(
             plan,
             &self.agent_config,
@@ -340,13 +349,19 @@ fn build_manifest(
     end_ms: u64,
     bcfg: &BenchConfig,
 ) -> RunManifest {
+    // §6.4 fields for external binaries. Each carries either the
+    // captured `--version` first line OR `"error: <msg>"` (bn-f5zu).
+    // Empty-string remains reserved for "we deliberately didn't look"
+    // — currently never produced by the harness, but tests / future
+    // callers can construct that shape via [`RunManifest::default`].
+    let versions = capture_versions();
     RunManifest {
         claude_code_version: String::new(),
         claude_model_id: cfg.model.clone(),
         claude_effective_model: String::new(),
-        git_version: detect_tool_version("git"),
-        jj_version: detect_tool_version("jj"),
-        maw_version: String::new(),
+        git_version: versions.git.manifest_string(),
+        jj_version: versions.jj.manifest_string(),
+        maw_version: versions.maw.manifest_string(),
         benchmark_harness_commit: env!("CARGO_PKG_VERSION").to_string(),
         scenario_generator_commit: env!("CARGO_PKG_VERSION").to_string(),
         prompt_hash: prompt_hash.to_string(),
@@ -358,17 +373,6 @@ fn build_manifest(
         start_ts_unix_ms: start_ms,
         end_ts_unix_ms: end_ms,
     }
-}
-
-/// Best-effort tool-version probe. Empty string on failure.
-fn detect_tool_version(tool: &str) -> String {
-    std::process::Command::new(tool)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
 }
 
 /// Best-effort `uname -srm` probe. Empty on non-unix.
@@ -563,6 +567,92 @@ mod tests {
         assert_eq!(decoded.total_turns, run.total_turns);
     }
 
+    /// AC (bn-f5zu): the manifest's external-binary version fields are
+    /// populated per-run — never empty unless capture errored. Asserts
+    /// the bn-2ert "field exists but is empty" regression cannot
+    /// silently recur.
+    #[test]
+    fn manifest_populates_maw_git_jj_versions() {
+        let plan = small_plan();
+        let agent = MockAgent::with_pinned_clock(MockScript::finished_in_one("done"), 0);
+        let substrate = NoopSubstrate::new();
+        let mut h = BenchHarness::new(substrate, agent, AgentConfig::default());
+        let bcfg = deterministic_bench_config();
+        let run = h.run(&plan, &bcfg).expect("harness run");
+
+        // Each of the three external-binary fields is either populated
+        // with the captured version string OR carries the literal
+        // `error: ...` prefix when the binary is missing on $PATH.
+        // Empty-string is the explicit regression bn-f5zu prevents.
+        for (name, val) in [
+            ("maw_version", &run.manifest.maw_version),
+            ("git_version", &run.manifest.git_version),
+            ("jj_version", &run.manifest.jj_version),
+        ] {
+            assert!(
+                !val.is_empty(),
+                "{name} must be non-empty (populated or `error: ...`); got empty"
+            );
+        }
+        // Round-trip through JSON preserves the populated fields.
+        let json = run.to_json().expect("to_json");
+        let decoded: BenchRun = serde_json::from_str(&json).expect("decode");
+        assert_eq!(decoded.manifest.maw_version, run.manifest.maw_version);
+        assert_eq!(decoded.manifest.git_version, run.manifest.git_version);
+        assert_eq!(decoded.manifest.jj_version, run.manifest.jj_version);
+    }
+
+    /// AC: a synthetic BenchRun JSON with a populated maw_version
+    /// round-trips cleanly. This is the §6.4 manifest-schema test
+    /// called out in the bn-f5zu acceptance criteria (4).
+    #[test]
+    fn populated_maw_version_round_trips() {
+        let json = serde_json::json!({
+            "schema_version": 2,
+            "run_id": "round-trip-1",
+            "manifest": {
+                "claude_code_version": "claude-code/2.1.150",
+                "claude_model_id": "sonnet",
+                "claude_effective_model": "claude-sonnet-4-7",
+                "git_version": "git version 2.45.0",
+                "jj_version": "jj 0.21.0",
+                "maw_version": "maw 0.61.0",
+                "benchmark_harness_commit": "0.61.0",
+                "scenario_generator_commit": "0.61.0",
+                "prompt_hash": "deadbeef",
+                "seed": 7,
+                "condition_id": "C2",
+                "t_class": "T0",
+                "arm": "maw@new-layout",
+                "os_kernel": "Linux 7.0 x86_64",
+                "start_ts_unix_ms": 100,
+                "end_ts_unix_ms": 200,
+            },
+            "verdict": {"outcome": "success"},
+            "oracle_b": {"verdict": "green"},
+            "transcript": {
+                "prompt": "p",
+                "prompt_sha256": "h",
+                "convention_text": "c",
+                "turns": [],
+            },
+            "total_tool_calls": 0,
+            "total_turns": 0,
+            "cost_usd": null,
+            "duration_ms": 100,
+            "substrate_final_files": [],
+        });
+        let run: BenchRun = serde_json::from_value(json).expect("decode");
+        assert_eq!(run.manifest.maw_version, "maw 0.61.0");
+        assert_eq!(run.manifest.git_version, "git version 2.45.0");
+        assert_eq!(run.manifest.jj_version, "jj 0.21.0");
+        // Re-serialize and re-decode — the populated maw_version must
+        // round-trip identically (no field-name typo, no skip_serializing).
+        let s = run.to_json().expect("to_json");
+        let decoded: BenchRun = serde_json::from_str(&s).expect("decode2");
+        assert_eq!(decoded.manifest.maw_version, "maw 0.61.0");
+    }
+
     /// AC: same seed + same MockScript + pinned clock + pinned timestamps
     /// ⇒ byte-identical BenchRun JSON. The harness's own determinism
     /// contract — the SP3-variance framing applies only at the LLM
@@ -613,9 +703,11 @@ mod tests {
         // substrate_final_files contains nothing for NoopSubstrate but
         // be safe.
         run.substrate_final_files.clear();
-        // git/jj/uname output varies by host — scrub.
+        // git/jj/maw/uname output varies by host — scrub. (maw_version
+        // added bn-f5zu; previously empty.)
         run.manifest.git_version.clear();
         run.manifest.jj_version.clear();
+        run.manifest.maw_version.clear();
         run.manifest.os_kernel.clear();
     }
 
