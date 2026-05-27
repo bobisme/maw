@@ -251,6 +251,38 @@ pub trait Substrate {
     /// harness when a run ends, even if the run failed. Adapters
     /// generally drop their owned `TempDir` here.
     fn cleanup(&mut self) -> Result<()>;
+
+    /// Arm a chaos fault for the **next** substrate op (bn-3hzt).
+    ///
+    /// Default impl is a no-op so adapters that don't support chaos
+    /// (e.g. `NoopSubstrate`) compile unchanged. Chaos-capable
+    /// adapters override:
+    ///
+    /// - `MawAdapter` translates a [`maw_scenario::FaultSpec::Failpoint`]
+    ///   to `MAW_FP=...` env on the spawned `maw` subprocess (consumed
+    ///   by `maw_core::failpoints::init_from_env`).
+    /// - `WorktreesConventionAdapter` and `JjAdapter` translate the
+    ///   fault to a substrate-process-level **SIGKILL-mid-merge** seam
+    ///   — they have no failpoint hooks, so the parity-equivalent
+    ///   chaos is "kill the agent's currently-running git/jj
+    ///   subprocess at a random point mid-merge".
+    ///
+    /// Passing `None` (or [`maw_scenario::FaultSpec::None`]) disarms
+    /// any previously-armed chaos. The arming is **one-shot**:
+    /// adapters must auto-disarm after the next op consumes it, so
+    /// chaos never leaks across ops.
+    ///
+    /// # Why this is on the trait (not a per-adapter inherent method)
+    ///
+    /// The SG2 driver wires chaos generically across all arms (the
+    /// failure-asymmetry signal bn-3hzt unlocks needs the SAME
+    /// `--chaos=on` switch to apply across substrates). A trait
+    /// method with a default keeps every existing adapter compiling
+    /// while letting chaos-capable adapters opt in.
+    #[allow(unused_variables)]
+    fn arm_chaos(&mut self, fault: Option<&maw_scenario::FaultSpec>) {
+        // default: chaos not supported (NoopSubstrate, future adapters)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +521,89 @@ pub(crate) mod proc_util {
         let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
         s.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(s)
+    }
+
+    /// bn-3hzt: spawn `bin args` in its own process group, deliver a
+    /// real `SIGKILL` to the whole group after `kill_after`, and return
+    /// the (truncated) combined stdout+stderr from whatever ran before
+    /// the kill. Exit status is intentionally NOT consulted — a SIGKILL
+    /// always yields a non-zero exit; the caller decides what to make
+    /// of the killed state.
+    ///
+    /// This is the substrate-process-level analogue of maw's MAW_FP
+    /// failpoint injection. Worktrees + jj don't expose a failpoint
+    /// hook, so the parity-equivalent chaos is "kill the
+    /// currently-running git/jj subprocess at a random point
+    /// mid-merge". The kill goes to the process group (the `git`/`jj`
+    /// CLI plus any child it spawned) via `kill -9 -<pgid>`, matching
+    /// the bn-cm63 / SP1 SubprocFault pattern.
+    ///
+    /// `unsafe` is forbidden workspace-wide, so the kill is delivered
+    /// via the `kill(1)` binary rather than `libc::kill` FFI — same as
+    /// `maw_assurance::fault::SubprocFault`.
+    ///
+    /// Returns the (possibly-empty) combined output and an
+    /// `ExitStatus` so the caller can tell apart "killed before any
+    /// stderr" vs "killed mid-write". Never returns `BinaryNotFound`
+    /// in success path — that variant is reserved for the spawn-time
+    /// `setsid` lookup miss (extremely unlikely; coreutils is
+    /// preinstalled on every supported runner).
+    #[cfg(feature = "bench")]
+    pub fn run_with_chaos_kill(
+        bin: &str,
+        args: &[&str],
+        cwd: &Path,
+        envs: &[(&str, &str)],
+        kill_after: std::time::Duration,
+    ) -> Result<(std::process::ExitStatus, String), SubstrateError> {
+        use std::io::Read;
+        use std::process::Stdio;
+        let mut cmd = Command::new("setsid");
+        cmd.arg(bin)
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_AUTHOR_NAME", "bench")
+            .env("GIT_AUTHOR_EMAIL", "bench@localhost")
+            .env("GIT_COMMITTER_NAME", "bench")
+            .env("GIT_COMMITTER_EMAIL", "bench@localhost");
+        for (k, v) in envs {
+            cmd.env(OsStr::new(k), OsStr::new(v));
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => SubstrateError::BinaryNotFound(
+                "setsid (needed for chaos kill; install coreutils)".to_string(),
+            ),
+            _ => SubstrateError::Io(format!("spawn setsid {bin}: {e}")),
+        })?;
+        let pgid = child.id();
+        // Schedule the kill on a watcher thread. Sleep, then `kill -9
+        // -<pgid>`. Best-effort; an already-finished group is fine.
+        let watcher = std::thread::spawn(move || {
+            std::thread::sleep(kill_after);
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(format!("-{pgid}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
+        // Drain stdout+stderr into one combined buffer so the caller
+        // sees partial output from before the kill.
+        let mut combined = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut combined);
+        }
+        if let Some(mut err) = child.stderr.take() {
+            let _ = err.read_to_string(&mut combined);
+        }
+        let status = child
+            .wait()
+            .map_err(|e| SubstrateError::Io(format!("wait {bin}: {e}")))?;
+        let _ = watcher.join();
+        Ok((status, truncate(&combined, 8_192)))
     }
 
     fn truncate(s: &str, max: usize) -> String {

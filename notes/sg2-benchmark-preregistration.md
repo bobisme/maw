@@ -952,7 +952,86 @@ BEFORE the affected run. No entry may retroactively declare a missed target
 met. Review-pass edits made BEFORE the first measured run are NOT
 amendments — they are pre-acceptance revisions audited in §12.)_
 
-— no amendments —
+### Amendment A1 (`2026-05-27T00:00:00Z`) — chaos overlay seam (bn-3hzt)
+
+**Authorizer:** lead (bn-3hzt, parent bn-142y v1.0 plan).
+
+**Status:** wire-up only. NO measured chaos-enabled SG2 run has fired
+under this amendment; the first such run is calendar work scheduled
+on a future bone. This amendment is a **pre-run amendment** — it lands
+before the chaos cells are measured, so it is not a post-data
+retrofit (cf. §0 "post-data amendments … never to retroactively
+declare it met").
+
+**Superseded §1.2 stance (left readable, not deleted):** the original
+freeze took the posture _"fault injection is SG1's domain; SG2 keeps
+failure modes orthogonal"_ (the implicit non-goal is in §1.2's
+bullet `maw 'irrecoverable_lost_work' is expected to be ≈0 by
+design`, which presumed all hostile-state work happened in SG1). This
+non-goal is RELAXED, not removed: the §1.2 bullets remain valid; we
+are adding a new optional dimension under a documented `--chaos=on|off`
+switch, default `off`.
+
+**What changes:** SG2 may apply `FaultSpec` injection via `MAW_FP=...`
+env passed to the agent's spawned tool subprocess. Specifically:
+
+1. The agent subprocess (`claude -p ...`) inherits a per-run
+   `MAW_FP=<failpoint>=error:bn-3hzt-sg2-chaos` env when the driver
+   is run with `--chaos=on` AND the scenario plan emits a
+   `FaultSpec::Failpoint` step (per the SG1 generator's
+   `mid_op_kill_prob` knob, now end-to-end live).
+2. The shipped `maw` binary's `init_from_env` (gated by
+   `--features failpoints`) reads `MAW_FP` once at startup and seeds
+   the failpoint registry; the first matching site in the merge FSM
+   takes the configured action and crashes the merge mid-flight.
+3. The agent then observes the partial-merge state (the file
+   `<root>/.manifold/merge-state.json` exists; `maw ws status`
+   reports a stale lock) and must complete the task — typically by
+   re-running `maw ws merge`, which the recovery code path heals.
+4. Parity for `git-worktrees-bare` / `jj-workspaces` is at the
+   substrate-process-kill layer (SIGKILL the merge subprocess
+   mid-flight via the adapter `arm_chaos` seam). The real-agent
+   path for these arms additionally requires a wrapper-script shim
+   on the agent's `$PATH` to intercept the agent's own `git`/`jj`
+   invocations — that shim is out-of-scope for the bn-3hzt wire-up
+   and will land in a follow-up bone before the first chaos
+   campaign actually runs against these arms.
+
+**Why this is permitted under §0:** §0 allows amendments that "supersede
+[a frozen value] visibly, leaving the original readable" so long as
+they are "committed _before_ the run [they] affect" and never declare
+a missed target met. This amendment:
+- supersedes the §1.2 implicit non-goal **before** any chaos-cell run
+  exists in the dataset (no chaos-mode BenchRun JSONs are committed
+  alongside this amendment; first chaos run is calendar work),
+- leaves the §1.2 bullets unedited (the orthogonal-failure-modes
+  posture remains valid for `--chaos=off` runs, which are still the
+  default),
+- does NOT change a numeric bar / threshold / pass-fail rule.
+
+**Publication framing impact (binding for §2 / T5.3):** chaos-mode runs
+are reported as a **separate axis** from the §1.2 baseline. The
+publication MUST present:
+- the `--chaos=off` headline metric tables (the existing pre-reg
+  §1.1 axes) — these stay the authoritative SG2 result;
+- the `--chaos=on` failure-asymmetry deltas as a complementary
+  panel, NOT folded into the headline (folding would let chaos rate
+  be tuned post-hoc to flatter maw — the same trap §2 warns against);
+- the seed/cell list used to drive chaos cells, committed before the
+  run (§6.4 manifest discipline applies to chaos cells too: the
+  generator seed and the resulting `MAW_FP` value are recorded per
+  BenchRun and reproducible from the seed).
+
+**Non-goal preserved (binding):** chaos-mode runs do NOT attempt to
+manufacture a maw `irrecoverable_lost_work` event. The Prime
+Invariant remains the hard bar for maw under chaos: any chaos-cell
+run where Oracle B goes RED is a real Prime-Invariant breach and
+publishable as a maw bug (not as a "balanced story"). §1.2's
+"interesting cost is wasted recovery turns and workflow loss"
+applies under chaos with even more force — that's the headline
+chaos-mode metric.
+
+— end amendment A1 —
 
 ---
 

@@ -174,7 +174,58 @@ A reviewer signing off on adapter parity must confirm:
 - [ ] The jj adapter contains zero workarounds for the SP3 opfork-wedge
       (`tests/jj_opfork_wedge.rs` `#[ignore]`-gated must reproduce the
       wedge fingerprints).
+- [ ] (bn-3hzt) Adapter `arm_chaos(Option<&FaultSpec>)` is implemented
+      per substrate per the **Chaos overlay** section below; the
+      default trait impl (no-op) covers `NoopSubstrate` and any
+      future arm that hasn't opted in.
 
 If any item fails, the offending adapter step is removed or the table is
 amended (with the amendment timestamped, before the next measured SG2
 run).
+
+---
+
+## Chaos overlay (`arm_chaos` seam, bn-3hzt)
+
+Added 2026-05-27 (see pre-reg §9 Amendment A1). This is the chaos
+seam used when SG2 is run with `--chaos=on`. Default `--chaos=off`
+keeps the table above as the authoritative parity story.
+
+The seam is the `Substrate::arm_chaos(Option<&FaultSpec>)` trait
+method (default impl no-op so existing arms compile). It is
+**one-shot**: armed before the next op, consumed by it,
+auto-disarmed. The chaos vehicle differs per substrate but the
+abstract semantics ("crash the next merge somewhere inside the FSM")
+match:
+
+| arm                 | chaos mechanism                                                                                          | partial-state shape the agent sees                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| maw                 | `MAW_FP=<name>=error:bn-3hzt-sg2-chaos` env on the spawned `maw ws merge`. The shipped binary's `init_from_env` (gated by `--features failpoints`) seeds the failpoint registry; the first matching FSM site exits cleanly via the `error` action. | `merge-state.json` written but the partial commit is not finalized; next `maw ws merge` runs the recovery code path that heals the partial state (the `recovery_outcome_for_phase` logic in `maw-core`). |
+| git-worktrees-bare  | SIGKILL the `git merge` subprocess mid-flight (50ms after spawn, in a `setsid` process group, via `kill -9 -<pgid>`). The convention has no failpoint hooks so the parity-equivalent chaos is at the substrate-process layer. | Integration worktree may be left in a half-merged state with `.git/MERGE_HEAD` present; the agent has to choose between `git merge --abort` or completing the merge by hand. The convention does NOT auto-abort under chaos (the `git merge --abort` post-conflict rule is documented as a normal-path behavior, not a chaos-recovery one). |
+| jj-workspaces       | SIGKILL the `jj new` subprocess mid-flight (same mechanism as worktrees: setsid + 50ms + kill -9). jj has no failpoint hooks either; the parity is at the substrate-process layer. | The colocated working copy's op-log may have a partial op; the next `jj` invocation must reconcile it (and per SP3 §1, often surfaces a `sibling of the working copy's operation` opfork-wedge). The wedge is preserved verbatim, NOT papered over — observing wedge incidence under chaos is the load-bearing measurement. |
+
+**Why this asymmetry is justified (not a parity bug):** maw's chaos
+hook is in-binary because maw _has_ a failpoint feature; the
+worktrees / jj substrates _do not_, and adding a fake failpoint
+hook to make them "match" would itself be a bias (it would give
+agent-driving git / jj an artificial recovery surface they don't
+actually ship with). The substrate-process kill is the honest
+analogue: kill the verb mid-flight, observe what the agent does
+with the resulting state.
+
+**Real-agent path caveat (TODO):** the `arm_chaos` seam fires when
+the adapter's own `merge()` is called (the scripted-driver /
+equivalence-test path). For the **real-LLM agent path** under
+worktrees / jj, the agent invokes `git` / `jj` itself via `Bash`,
+NOT via the adapter; intercepting those invocations requires a
+wrapper-script shim on the agent's `$PATH`. That shim is
+out-of-scope for the bn-3hzt wire-up; it will land in a follow-up
+bone before the first real-LLM chaos campaign runs against the
+worktrees / jj arms. The maw arm has no such gap — the agent's
+`maw` invocation inherits `MAW_FP` directly from the harness env.
+
+**Equivalence-test impact (none):** the equivalence test
+(`tests/equivalence.rs`) does NOT arm chaos. It only exercises the
+no-fault scripted-op stream. Adding `arm_chaos` to the trait does
+not change any test assertion; the default no-op impl covers the
+test path verbatim.

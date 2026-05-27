@@ -95,7 +95,7 @@ use maw_bench_sweep::{
 fn usage() -> &'static str {
     "usage: sg3-layout-eval [--layout=old|new|both] [--n-a=N] [--n-b=N] \
      [--artifact-dir=<dir>] [--pilot] [--decision-json=<path>] \
-     [--real-llm] [--substrate=<arm>] [--model=<id>]\n\
+     [--real-llm] [--substrate=<arm>] [--chaos=on|off]\n\
      \n\
      Runs the T3.5 SG3 layout-eval harness against the bn-iux4 frozen subset.\n\
      Defaults: --layout=both --n-a=20 --n-b=10 (frozen by bn-iux4 §1.3).\n\
@@ -105,10 +105,10 @@ fn usage() -> &'static str {
        Requires --features claude-backend at build + MAW_BENCH_ALLOW_REAL_LLM=1.\n\
      --substrate=<arm>: override substrate (only with --layout=old|new).\n\
        Valid: noop|maw|maw-consolidated|worktrees|jj.\n\
-     --model=<id>: override AgentConfig.model (e.g. haiku, sonnet, opus,\n\
-       claude-sonnet-4-7). Default: sonnet (the SP3 pin per pre-reg §8.6).\n\
-       Per-campaign discipline: each invocation uses ONE model; cross-model\n\
-       comparison = separate side-by-side campaigns (NOT a sweep axis).\n\
+     --chaos=on|off: enable bn-3hzt chaos overlay (default off). When on,\n\
+       MAW_FP=... is injected into the agent subprocess env so the agent's\n\
+       next `maw ws merge` crashes deterministically at a failpoint.\n\
+       REQUIRES `maw` built with --features failpoints (preflight warns).\n\
      \n\
      Use `just sg3-layout-eval-pilot` for the canonical pilot invocation.\n\
      Use `just sg3-layout-eval-real n_a=1 n_b=1` for the canonical real-LLM smoke."
@@ -127,10 +127,9 @@ struct Args {
     /// means: derive per-arm from layout (`old → MawWsLayout`,
     /// `new → MawConsolidatedLayout`, MockAgent → Noop).
     substrate_override: Option<SubstrateChoice>,
-    /// Optional `AgentConfig.model` override (`--model=<id>`, bn-3w0c).
-    /// `None` ⇒ driver uses `AgentConfig::default()` (sonnet, the
-    /// SP3 §8.6 pin). The override threads through to the BenchRun
-    /// manifest's `claude_model_id`.
+    /// bn-3hzt: chaos overlay on/off. Default off for back-compat.
+    chaos: bool,
+    /// bn-3w0c: optional `--model=<id>` override.
     model: Option<String>,
 }
 
@@ -160,6 +159,7 @@ fn parse_args() -> Result<Args, String> {
     let mut plant_regression = PlantedRegression::None;
     let mut backend = BackendChoice::Mock;
     let mut substrate_override: Option<SubstrateChoice> = None;
+    let mut chaos = false;
     let mut model: Option<String> = None;
 
     let argv: Vec<String> = env::args().skip(1).collect();
@@ -192,10 +192,13 @@ fn parse_args() -> Result<Args, String> {
             backend = BackendChoice::Claude;
         } else if let Some(v) = a.strip_prefix("--substrate=") {
             substrate_override = Some(SubstrateChoice::parse(v)?);
+        } else if let Some(v) = a.strip_prefix("--chaos=") {
+            chaos = match v {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                other => return Err(format!("--chaos: expected on|off, got {other:?}")),
+            };
         } else if let Some(v) = a.strip_prefix("--model=") {
-            if v.is_empty() {
-                return Err("--model=<id>: id must not be empty".to_string());
-            }
             model = Some(v.to_string());
         } else {
             return Err(format!("unknown arg: {a}"));
@@ -245,6 +248,7 @@ fn parse_args() -> Result<Args, String> {
         plant_regression,
         backend,
         substrate_override,
+        chaos,
         model,
     })
 }
@@ -264,6 +268,13 @@ fn main() -> ExitCode {
     // `notes/sg3-no-go-rootcause.md` for the bn-2ert root cause this
     // catches at-source.
     let _ = check_maw_version_skew(env!("CARGO_PKG_VERSION"));
+    // bn-3hzt: when chaos is requested, advise that the installed
+    // maw binary must be built with --features failpoints (we can't
+    // reliably feature-detect from outside; the env-bridge is
+    // silently a no-op on a non-failpoints build).
+    if args.chaos {
+        let _ = maw_bench_sweep::check_maw_failpoints_advisory();
+    }
 
     let dir = match args.artifact_dir.clone() {
         Some(d) => d,
@@ -276,7 +287,7 @@ fn main() -> ExitCode {
 
     eprintln!("sg3-layout-eval: artifact_dir = {}", dir.display());
     eprintln!(
-        "  layout={} n-a={} n-b={} pilot={} backend={} substrate={} model={}",
+        "  layout={} n-a={} n-b={} pilot={} backend={} substrate={} chaos={}",
         match args.layout {
             Layout::Old => "old",
             Layout::New => "new",
@@ -292,7 +303,7 @@ fn main() -> ExitCode {
                 BackendChoice::Mock => "noop (auto)".to_string(),
                 BackendChoice::Claude => "per-layout maw (auto)".to_string(),
             }),
-        args.model.as_deref().unwrap_or("sonnet (default)"),
+        if args.chaos { "on" } else { "off" },
     );
 
     let start = Instant::now();
@@ -310,16 +321,7 @@ fn main() -> ExitCode {
             PlantedRegression::None
         };
         let substrate_for_arm = resolve_substrate_for_arm(&args, arm);
-        match run_arm(
-            arm,
-            args.n_a,
-            args.n_b,
-            &dir,
-            plant_for_arm,
-            args.backend,
-            substrate_for_arm,
-            args.model.as_deref(),
-        ) {
+        match run_arm(arm, args.n_a, args.n_b, &dir, plant_for_arm, args.backend, substrate_for_arm, args.chaos, args.model.as_deref()) {
             Ok(cost) => total_cost += cost,
             Err(e) => {
                 eprintln!("run_arm({arm}): {e}");
@@ -425,6 +427,7 @@ fn run_arm(
     plant: PlantedRegression,
     backend: BackendChoice,
     substrate: SubstrateChoice,
+    chaos: bool,
     model: Option<&str>,
 ) -> Result<f64, String> {
     let arm_root = arm_dir(base_dir, arm);
@@ -436,6 +439,7 @@ fn run_arm(
         .map_err(|e| format!("driver: {e}"))?
         .with_plan_steps(4)
         .with_pinned_clock(1_000, 2_000)
+        .with_chaos(chaos)
         .with_agent_config(agent_cfg_override);
 
     // SUB-A grid: C0×T0, N=n_a.

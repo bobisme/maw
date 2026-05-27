@@ -334,4 +334,64 @@ mod tests {
         assert_eq!(parse_maw_version("maw 1.2"), None);
         assert_eq!(parse_maw_version("maw a.b.c"), None);
     }
+
+    /// `check_maw_failpoints_advisory` always emits a stderr line
+    /// naming the feature flag + chaos mode (it's advisory; reliable
+    /// feature-detection from outside the binary is impossible).
+    #[test]
+    fn failpoints_advisory_always_emits_named_warning() {
+        let out = check_maw_failpoints_advisory();
+        assert!(
+            out.warning_line.contains("--features failpoints"),
+            "advisory should name the feature flag: {}",
+            out.warning_line
+        );
+        assert!(
+            out.warning_line.contains("chaos"),
+            "advisory should name chaos: {}",
+            out.warning_line
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bn-3hzt: failpoints-feature advisory
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`check_maw_failpoints_advisory`]. Always carries an
+/// advisory line because we cannot reliably feature-detect
+/// `--features failpoints` from the binary's `--version` output — the
+/// env-bridge is silently a no-op without the feature, so a chaos
+/// invocation against a stock binary would just produce zero crashes
+/// and look like a clean run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailpointsAdvisory {
+    /// Exact `WARN:` (advisory) line written to stderr.
+    pub warning_line: String,
+}
+
+/// bn-3hzt: emit a stderr advisory that chaos mode requires the
+/// installed `maw` binary to be built with `--features failpoints`.
+///
+/// Reliable feature-detection from outside the process is impossible
+/// — `init_from_env` is a no-op without the feature, so `MAW_FP=...`
+/// silently does nothing, and `maw --version` doesn't emit feature
+/// flags. The honest move is a loud advisory at chaos invocation time
+/// with the exact remediation command. Operators running chaos
+/// against a stock binary will see zero crash events in their run
+/// JSONs and (with this advisory in scrollback) immediately know why.
+///
+/// # Effects
+///
+/// Writes one `WARN:` line to stderr. Never errors. Never panics.
+#[must_use]
+pub fn check_maw_failpoints_advisory() -> FailpointsAdvisory {
+    let warning_line =
+        "WARN: --chaos=on requires the installed `maw` binary to be built with \
+         --features failpoints (otherwise MAW_FP is silently a no-op and chaos \
+         produces zero crashes). Install with: cargo install --path crates/maw-cli \
+         --features failpoints --force"
+            .to_string();
+    eprintln!("{warning_line}");
+    FailpointsAdvisory { warning_line }
 }

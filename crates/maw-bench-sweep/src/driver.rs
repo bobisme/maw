@@ -43,7 +43,7 @@ use maw_bench::agent::{AgentBackend, AgentConfig};
 use maw_bench::harness::{BenchConfig, BenchHarness, HarnessError};
 use maw_bench::run::BenchRun;
 use maw_bench::substrate::Substrate;
-use maw_scenario::generate_plan;
+use maw_scenario::{FaultSpec, ScenarioPlan, generate_plan};
 
 use crate::grid::{SweepCell, SweepGrid};
 
@@ -97,12 +97,17 @@ pub struct SweepDriver {
     /// Pin timestamps in BenchRun manifests for deterministic JSON
     /// in tests. `Some((start, end))` ⇒ every run sets both.
     pinned_clock_ms: Option<(u64, u64)>,
-    /// Per-driver [`AgentConfig`] override. `None` ⇒ each run uses
-    /// [`AgentConfig::default`] (sonnet pin per pre-reg §8.6).
-    /// `Some(cfg)` ⇒ every run uses the supplied config (used by
-    /// bn-3w0c's `--model` flag for cross-model spot-checks; the
-    /// model field flows through into the §6.4 BenchRun manifest's
-    /// `claude_model_id` via [`crate::harness::BenchHarness`]).
+    /// bn-3hzt: chaos overlay. When true, the driver inspects each
+    /// generated `ScenarioPlan` for a [`maw_scenario::FaultSpec::Failpoint`]
+    /// step and translates it to `MAW_FP=...` on the agent
+    /// subprocess env (via [`BenchConfig::chaos_env`]). Default
+    /// `false` — the bin's `--chaos=on` flag toggles this. With
+    /// `false` the SG2 driver is byte-identical to pre-bn-3hzt.
+    chaos_enabled: bool,
+    /// bn-3w0c: optional AgentConfig override. When `None`, defaults
+    /// to `AgentConfig::default()` (preserves the SP3 sonnet pin per
+    /// pre-reg §8.6). Set via `with_agent_config` to override model/
+    /// budget/etc. per-sweep without editing defaults.
     agent_config_override: Option<AgentConfig>,
 }
 
@@ -116,8 +121,24 @@ impl SweepDriver {
             artifact_dir: dir,
             plan_steps: DEFAULT_PLAN_STEPS,
             pinned_clock_ms: None,
+            chaos_enabled: false,
             agent_config_override: None,
         })
+    }
+
+    /// bn-3hzt: enable/disable the chaos overlay. When enabled, the
+    /// driver inspects each generated `ScenarioPlan` for a
+    /// [`maw_scenario::FaultSpec::Failpoint`] and injects
+    /// `MAW_FP=<name>=error:bn-3hzt-sg2-chaos` into the agent
+    /// subprocess env via [`BenchConfig::chaos_env`]. When disabled
+    /// (the default), the driver is byte-identical to pre-bn-3hzt.
+    ///
+    /// This is the single switch the `--chaos=on|off` CLI flag wires
+    /// up; no other code path activates chaos.
+    #[must_use]
+    pub const fn with_chaos(mut self, enabled: bool) -> Self {
+        self.chaos_enabled = enabled;
+        self
     }
 
     /// Override the plan-length used per cell.
@@ -240,6 +261,21 @@ impl SweepDriver {
                 config.pinned_end_ms = Some(e);
             }
 
+            // bn-3hzt: if chaos is enabled, harvest the FIRST
+            // `FaultSpec::Failpoint` from the plan's steps and
+            // translate to `MAW_FP=<name>=error:bn-3hzt-sg2-chaos`.
+            // First-only by design: the failpoint registry fires
+            // at most once per phase per run; the agent's recovery
+            // path then handles the partial state for the rest of
+            // the run. Plans with zero failpoint steps (low
+            // `mid_op_kill_prob`) get an empty chaos env — chaos
+            // is a per-run conditional, not a guaranteed crash.
+            if self.chaos_enabled {
+                if let Some(spec) = first_failpoint_spec(&plan) {
+                    config.chaos_env.insert("MAW_FP".to_string(), spec);
+                }
+            }
+
             let mut run = harness.run(&plan, &config)?;
             // Override the substrate-self-reported arm with the grid's
             // logical arm name — this is the load-bearing invariant
@@ -291,6 +327,28 @@ fn skip_reason_for(arm: &str) -> String {
     } else {
         format!("arm = {arm}; Oracle B scoped to maw refs")
     }
+}
+
+/// bn-3hzt: scan `plan.steps` for the first
+/// [`FaultSpec::Failpoint`] and translate to a `MAW_FP` env spec
+/// the shipped `maw --features failpoints` binary's
+/// `init_from_env` parses. Returns `None` if the plan carries no
+/// failpoint (low `mid_op_kill_prob` profiles routinely emit
+/// zero-fault plans — chaos is per-run-conditional).
+///
+/// The action is always `error:bn-3hzt-sg2-chaos` (clean unwind),
+/// not a panic: a panic aborts the whole `maw ws merge` before
+/// the merge-state file is written, defeating the test. The
+/// `error` action exits non-zero with the merge-state file
+/// already persisted, which is the exact partial-state the
+/// agent's recovery path is supposed to heal.
+fn first_failpoint_spec(plan: &ScenarioPlan) -> Option<String> {
+    plan.steps.iter().find_map(|s| match &s.fault {
+        FaultSpec::Failpoint { name, .. } => {
+            Some(format!("{name}=error:bn-3hzt-sg2-chaos"))
+        }
+        FaultSpec::None => None,
+    })
 }
 
 /// Atomic write of `run` to `<dir>/<run_id>.json`. Mirrors the

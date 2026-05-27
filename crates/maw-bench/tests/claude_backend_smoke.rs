@@ -99,6 +99,7 @@ fn smoke_lists_files_and_finishes() {
         max_budget_usd: 0.10,
         temperature: 1.0,
         permission_mode: "bypassPermissions".to_string(),
+        extra_env: std::collections::BTreeMap::new(),
     };
 
     let mut backend = ClaudeBackend::new();

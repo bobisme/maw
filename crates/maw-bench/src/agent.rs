@@ -60,6 +60,20 @@ pub struct AgentConfig {
     /// Permission mode (echoed for §6.4 manifest provenance). SP3 used
     /// `bypassPermissions` (non-interactive, no prompts).
     pub permission_mode: String,
+    /// bn-3hzt: extra env vars to pass to the spawned agent
+    /// subprocess. The load-bearing use is `MAW_FP=...` for the
+    /// chaos overlay (translates to a deterministic failpoint
+    /// crash inside the agent's next `maw` invocation, on a
+    /// `--features failpoints` binary). The agent subprocess
+    /// inherits the env and forwards it to anything it shells out
+    /// to (Bash → maw), so a single env var is the seam.
+    ///
+    /// `BTreeMap` for stable JSON ordering. Empty by default —
+    /// existing recipes that don't set anything serialize
+    /// byte-identically to pre-bn-3hzt (the field is
+    /// `skip_serializing_if = is_empty`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extra_env: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AgentConfig {
@@ -72,6 +86,7 @@ impl Default for AgentConfig {
             max_budget_usd: 2.00,
             temperature: 1.0,
             permission_mode: "bypassPermissions".to_string(),
+            extra_env: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use maw_scenario::{BaseRef, WsId};
+use maw_scenario::{BaseRef, FaultSpec, WsId};
 use tempfile::TempDir;
 
 use crate::proc_util;
@@ -55,6 +56,13 @@ pub struct WorktreesConventionAdapter {
     coord_dir: PathBuf,
     // Owned tempdir so the substrate vanishes on Drop / cleanup().
     _tmp: Option<TempDir>,
+    /// bn-3hzt chaos seam — armed `FaultSpec` consumed by the **next**
+    /// `merge()` call. `git` has no failpoint hooks, so the
+    /// parity-equivalent chaos here is SIGKILL-mid-merge: the merge
+    /// subprocess is spawned in its own process group and killed after
+    /// a short delay (default ~50ms). One-shot: `merge()` `.take()`s
+    /// the field so chaos never leaks across ops.
+    armed_chaos: Option<FaultSpec>,
 }
 
 impl WorktreesConventionAdapter {
@@ -121,6 +129,7 @@ impl WorktreesConventionAdapter {
             integration_dir,
             coord_dir,
             _tmp: owned_tmp,
+            armed_chaos: None,
         })
     }
 
@@ -254,6 +263,36 @@ impl Substrate for WorktreesConventionAdapter {
             args.push(s.0.clone());
         }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+        // bn-3hzt: if chaos is armed, spawn the merge detached, deliver
+        // a real SIGKILL to its process group after a short window,
+        // then return early. The integration worktree may be left in a
+        // half-merged state — exactly the "what does the agent do
+        // when its git merge gets killed mid-flight?" question the
+        // SG2 chaos overlay exists to answer.
+        if let Some(fault) = self.armed_chaos.take() {
+            let killed = proc_util::run_with_chaos_kill(
+                "git",
+                &arg_refs,
+                &self.integration_dir,
+                &[],
+                Duration::from_millis(50),
+            )?;
+            let fault_label = match &fault {
+                FaultSpec::Failpoint { name, .. } => name.as_str(),
+                FaultSpec::None => "<none>",
+            };
+            return Ok(StepOutcome {
+                ok: false,
+                notes: format!(
+                    "git merge: CHAOS-KILLED (SIGKILL-mid-merge, exit={:?}, fault={fault_label}); \
+                     integration may be in half-merged state",
+                    killed.0.code()
+                ),
+                ..StepOutcome::default()
+            });
+        }
+
         let result = proc_util::run("git", &arg_refs, &self.integration_dir);
         match result {
             Ok(_) => {
@@ -381,6 +420,18 @@ impl Substrate for WorktreesConventionAdapter {
         // Drop the tempdir.
         self._tmp.take();
         Ok(())
+    }
+
+    /// bn-3hzt: arm SIGKILL-mid-merge chaos for the next `merge()`
+    /// call. `git` has no failpoint hooks; the parity-equivalent
+    /// chaos at the substrate-process layer is to kill the
+    /// currently-running `git merge` subprocess mid-flight (the
+    /// `bn-cm63` chaos pattern). One-shot — `merge()` consumes it.
+    fn arm_chaos(&mut self, fault: Option<&FaultSpec>) {
+        self.armed_chaos = match fault {
+            Some(FaultSpec::None) | None => None,
+            Some(f @ FaultSpec::Failpoint { .. }) => Some(f.clone()),
+        };
     }
 }
 

@@ -77,6 +77,17 @@ pub struct BenchConfig {
     pub pinned_start_ms: Option<u64>,
     /// Same as `pinned_start_ms` but for end-of-run.
     pub pinned_end_ms: Option<u64>,
+    /// bn-3hzt: chaos overlay env vars merged into
+    /// [`AgentConfig::extra_env`] for this run only (the harness
+    /// adds them transiently around `agent.run` and never persists
+    /// them into the field). The load-bearing use is
+    /// `MAW_FP=<failpoint>=error:bn-3hzt-sg2-chaos`, which arms
+    /// the next `maw` invocation the agent spawns to crash at a
+    /// deterministic failpoint (on a `--features failpoints`
+    /// shipped binary). Empty by default — `--chaos=off` is the
+    /// SG2 pre-bn-3hzt default and the existing pilot recipes
+    /// pass an empty map, so this is back-compat for them.
+    pub chaos_env: std::collections::BTreeMap<String, String>,
 }
 
 /// Harness-level errors. Substrate / agent errors are propagated through
@@ -173,7 +184,21 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
         let start_ms = config.pinned_start_ms.unwrap_or_else(unix_ms_now);
 
         // -- 4. Agent run. --
-        let agent_result = self.agent.run(&prompt, &self.agent_config, &handle);
+        // bn-3hzt: if the caller supplied chaos_env, fold it into a
+        // PER-RUN AgentConfig so the spawned agent subprocess
+        // inherits MAW_FP=... (or any other operator-controlled env
+        // vars). We clone the harness's AgentConfig and never mutate
+        // the harness state itself — this keeps `BenchHarness` safe
+        // to reuse across runs without per-call chaos leakage.
+        let agent_result = if config.chaos_env.is_empty() {
+            self.agent.run(&prompt, &self.agent_config, &handle)
+        } else {
+            let mut per_run = self.agent_config.clone();
+            for (k, v) in &config.chaos_env {
+                per_run.extra_env.insert(k.clone(), v.clone());
+            }
+            self.agent.run(&prompt, &per_run, &handle)
+        };
 
         let end_ms = config
             .pinned_end_ms
@@ -525,6 +550,7 @@ mod tests {
             oracle_b_skip_reason: "test: noop substrate".to_string(),
             pinned_start_ms: Some(1000),
             pinned_end_ms: Some(2000),
+            chaos_env: std::collections::BTreeMap::new(),
         }
     }
 

@@ -50,8 +50,7 @@ use maw_bench_sweep::{
 };
 
 fn usage() -> &'static str {
-    "usage: sg2-sweep-pilot [<artifact-dir>] [--grid=pilot|spectrum] \
-     [--real-llm] [--substrate=<arm>] [--n=<seeds-per-cell>]\n\
+    "usage: sg2-sweep-pilot [<artifact-dir>] [--real-llm] [--substrate=<arm>] [--n=<seeds-per-cell>] [--chaos=on|off]\n\
      \n\
      Default: runs the 18-cell sweep pilot under MockAgent + NoopSubstrate.\n\
        <artifact-dir> defaults to a tempdir under /tmp/.\n\
@@ -66,7 +65,14 @@ fn usage() -> &'static str {
                           MAW_BENCH_ALLOW_REAL_LLM=1 at runtime.\n\
      --substrate=<arm>    one of: noop|maw|maw-consolidated|worktrees|jj.\n\
                           default: noop (Mock); maw (real-LLM).\n\
-     --n=<N>              seeds per cell. Pilot default: 3. Spectrum default: 10."
+     --n=<N>              seeds per cell (default 3). Smaller = cheaper smoke run.\n\
+     --chaos=on|off       enable bn-3hzt chaos overlay. Default off.\n\
+                          When on: MAW_FP=... is injected into the agent\n\
+                          subprocess env so the agent's next `maw ws merge`\n\
+                          deterministically crashes at a failpoint\n\
+                          (REQUIRES `maw` built with --features failpoints;\n\
+                          preflight warns when chaos=on if the installed\n\
+                          maw cannot be verified — chaos becomes a no-op)."
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,8 +103,11 @@ struct Args {
     backend: BackendChoice,
     substrate: SubstrateChoice,
     seeds_per_cell: Option<u32>,
+    /// bn-3hzt: chaos overlay on/off. Default off for back-compat.
+    chaos: bool,
+    /// bn-205s: pilot (2 cells) vs spectrum (10 cells) grid choice.
     grid: GridChoice,
-    /// bn-3w0c: optional `--model=<id>` override (defaults to `AgentConfig::default()`).
+    /// bn-3w0c: optional `--model=<id>` override.
     model: Option<String>,
 }
 
@@ -107,6 +116,7 @@ fn parse_args() -> Result<Args, String> {
     let mut backend = BackendChoice::Mock;
     let mut substrate: Option<SubstrateChoice> = None;
     let mut seeds_per_cell: Option<u32> = None;
+    let mut chaos = false;
     let mut grid = GridChoice::Pilot;
     let mut model: Option<String> = None;
 
@@ -125,6 +135,12 @@ fn parse_args() -> Result<Args, String> {
             grid = GridChoice::parse(v)?;
         } else if let Some(v) = a.strip_prefix("--model=") {
             model = Some(v.to_string());
+        } else if let Some(v) = a.strip_prefix("--chaos=") {
+            chaos = match v {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                other => return Err(format!("--chaos: expected on|off, got {other:?}")),
+            };
         } else if a.starts_with("--") {
             return Err(format!("unknown arg: {a}"));
         } else if dir.is_none() {
@@ -146,6 +162,7 @@ fn parse_args() -> Result<Args, String> {
         backend,
         substrate,
         seeds_per_cell,
+        chaos,
         grid,
         model,
     })
@@ -163,6 +180,13 @@ fn main() -> ExitCode {
     // any work. Warning-only — see `notes/sg3-no-go-rootcause.md` for
     // the version-skew root cause that motivated this guard.
     let _ = check_maw_version_skew(env!("CARGO_PKG_VERSION"));
+    // bn-3hzt: when chaos is requested, warn that the installed maw
+    // must be built with --features failpoints (we can't reliably
+    // detect this from outside; the env-bridge is silently a no-op
+    // on a non-failpoints build).
+    if args.chaos {
+        let _ = maw_bench_sweep::check_maw_failpoints_advisory();
+    }
 
     let dir: PathBuf = args
         .dir
@@ -179,9 +203,10 @@ fn main() -> ExitCode {
         eprintln!("  grid={}", args.grid.as_str());
     }
     eprintln!(
-        "  backend={} substrate={}{}{}",
+        "  backend={} substrate={} chaos={}{}{}",
         args.backend.as_str(),
         args.substrate.as_str(),
+        if args.chaos { "on" } else { "off" },
         args.seeds_per_cell
             .map(|n| format!(" seeds_per_cell={n}"))
             .unwrap_or_default(),
@@ -210,6 +235,7 @@ fn main() -> ExitCode {
         Ok(d) => d
             .with_plan_steps(4)
             .with_pinned_clock(1_000, 2_000)
+            .with_chaos(args.chaos)
             .with_agent_config(agent_cfg_override),
         Err(e) => {
             eprintln!("driver setup: {e}");

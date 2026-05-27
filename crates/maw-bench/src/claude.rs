@@ -462,6 +462,17 @@ impl AgentBackend for ClaudeBackend {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // bn-3hzt: pass extra env vars to the spawned agent
+        // subprocess. The agent inherits these and forwards them to
+        // anything it shells out to (Bash → maw). The load-bearing
+        // use is `MAW_FP=...` for the chaos overlay: the agent's
+        // next `maw ws merge` invocation hits the configured
+        // failpoint (on a `--features failpoints` shipped binary)
+        // and leaves a partial-merge state the next invocation has
+        // to recover from.
+        for (k, v) in &config.extra_env {
+            cmd.env(k, v);
+        }
 
         let mut child = cmd.spawn().map_err(|e| {
             AgentError::Provider(format!(
@@ -591,6 +602,7 @@ mod tests {
             max_budget_usd: 2.00,
             temperature: 1.0,
             permission_mode: "bypassPermissions".into(),
+            extra_env: std::collections::BTreeMap::new(),
         };
         let argv = build_argv(&c, &PathBuf::from("/tmp/ws"));
         // Anchor flags that MUST be present for the SP3 invocation

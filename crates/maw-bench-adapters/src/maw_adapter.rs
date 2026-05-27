@@ -31,7 +31,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use maw_scenario::{BaseRef, WsId};
+use maw_scenario::{BaseRef, FaultSpec, WsId};
 use tempfile::TempDir;
 
 use crate::proc_util;
@@ -43,6 +43,20 @@ pub struct MawAdapter {
     /// Resolved `maw` binary path (`MAW_BENCH_BIN` override or PATH lookup).
     maw_bin: String,
     _tmp: Option<TempDir>,
+    /// bn-3hzt chaos seam — armed `FaultSpec` consumed by the **next**
+    /// `merge()` call. One-shot: after consumption, this is `None` so
+    /// chaos never leaks across ops. Maw's chaos delivery is
+    /// `MAW_FP=...` on the spawned subprocess (consumed by
+    /// `maw_core::failpoints::init_from_env` in the `--features
+    /// failpoints` shipped binary). For `FP_*` sites in
+    /// `maw_assurance::fault::DANGEROUS_FAILPOINTS` the action is
+    /// `error`, which produces a clean-unwind partial-merge state the
+    /// recovery code path then heals; a real SIGKILL would require
+    /// the SP1 SubprocFault observer loop, which is out-of-scope for
+    /// the SG2 wire-up (the in-binary `error` action is sufficient to
+    /// surface the partial-state the SG2 agent then has to recover
+    /// from). The DST faithful tier still does the real-SIGKILL work.
+    armed_chaos: Option<FaultSpec>,
 }
 
 impl MawAdapter {
@@ -93,7 +107,26 @@ impl MawAdapter {
             root,
             maw_bin,
             _tmp: owned_tmp,
+            armed_chaos: None,
         })
+    }
+
+    /// Translate a [`FaultSpec`] to the `MAW_FP=...` env value the
+    /// shipped `maw` binary's `init_from_env` reads (bn-3hzt). Returns
+    /// `None` for `FaultSpec::None` (no chaos to deliver).
+    ///
+    /// The action is always `error:dst-injected` (clean unwind), not
+    /// `panic:` or a real SIGKILL: the SG2 chaos seam's purpose is to
+    /// land the partial-merge state the recovery path then heals;
+    /// a `panic:` would abort the whole `maw ws merge` process before
+    /// it could write the merge-state file, defeating the test.
+    fn maw_fp_spec_for(fault: &FaultSpec) -> Option<String> {
+        match fault {
+            FaultSpec::None => None,
+            FaultSpec::Failpoint { name, .. } => {
+                Some(format!("{name}=error:bn-3hzt-sg2-chaos"))
+            }
+        }
     }
 
     fn ws_dir(&self, ws: &WsId) -> PathBuf {
@@ -200,12 +233,33 @@ impl Substrate for MawAdapter {
                 .join(", ")
         ));
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let result = proc_util::run(&self.maw_bin, &arg_refs, &self.root);
+
+        // bn-3hzt: consume any armed chaos by injecting MAW_FP into the
+        // spawned `maw` subprocess. One-shot: take() ensures the next
+        // merge is clean unless the driver explicitly re-arms.
+        let armed = self.armed_chaos.take();
+        let fp_spec = armed.as_ref().and_then(Self::maw_fp_spec_for);
+        let chaos_note = fp_spec.clone().unwrap_or_else(|| "<none>".to_string());
+
+        let result = if let Some(spec) = fp_spec.as_deref() {
+            proc_util::run_envs(
+                &self.maw_bin,
+                &arg_refs,
+                &self.root,
+                &[("MAW_FP", spec)],
+            )
+        } else {
+            proc_util::run(&self.maw_bin, &arg_refs, &self.root)
+        };
+
         match result {
             Ok(out) => Ok(StepOutcome {
                 ok: true,
                 advanced_integration: true,
-                notes: format!("maw ws merge → {}", out.lines().last().unwrap_or("")),
+                notes: format!(
+                    "maw ws merge → {} (chaos: {chaos_note})",
+                    out.lines().last().unwrap_or("")
+                ),
                 ..StepOutcome::default()
             }),
             Err(SubstrateError::SubprocessFailed { stderr, .. })
@@ -214,7 +268,35 @@ impl Substrate for MawAdapter {
                 Ok(StepOutcome {
                     ok: true,
                     conflicted: true,
-                    notes: "maw ws merge: conflicts surfaced as data".into(),
+                    notes: format!(
+                        "maw ws merge: conflicts surfaced as data (chaos: {chaos_note})"
+                    ),
+                    ..StepOutcome::default()
+                })
+            }
+            // bn-3hzt: a MAW_FP-injected error/panic from the in-binary
+            // failpoint is the EXPECTED chaos outcome — surface it as a
+            // first-class "chaos-crashed" StepOutcome (not a Refused
+            // error) so the SG2 driver records it and the agent's next
+            // `maw ws merge` invocation runs the recovery path.
+            Err(SubstrateError::SubprocessFailed { stderr, .. })
+                if armed.is_some()
+                    && (stderr.contains("bn-3hzt-sg2-chaos")
+                        || stderr.contains("MAW_FP injected")
+                        || stderr.contains("dst-injected")) =>
+            {
+                Ok(StepOutcome {
+                    ok: false,
+                    notes: format!(
+                        "maw ws merge: CHAOS CRASHED at {} (next `maw ws merge` triggers recovery)",
+                        armed
+                            .as_ref()
+                            .map(|f| match f {
+                                FaultSpec::Failpoint { name, .. } => name.as_str(),
+                                FaultSpec::None => "<unknown>",
+                            })
+                            .unwrap_or("<unknown>")
+                    ),
                     ..StepOutcome::default()
                 })
             }
@@ -311,6 +393,17 @@ impl Substrate for MawAdapter {
     fn cleanup(&mut self) -> Result<()> {
         self._tmp.take();
         Ok(())
+    }
+
+    /// bn-3hzt: arm a chaos fault for the next `merge()` call.
+    /// `Some(FaultSpec::Failpoint{..})` translates to `MAW_FP=...` env
+    /// on the spawned subprocess; `None` / `FaultSpec::None` disarms.
+    /// One-shot — `merge()` `.take()`s the field so chaos never leaks.
+    fn arm_chaos(&mut self, fault: Option<&FaultSpec>) {
+        self.armed_chaos = match fault {
+            Some(FaultSpec::None) | None => None,
+            Some(f @ FaultSpec::Failpoint { .. }) => Some(f.clone()),
+        };
     }
 }
 

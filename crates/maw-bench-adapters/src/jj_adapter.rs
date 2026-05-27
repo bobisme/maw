@@ -20,8 +20,9 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use maw_scenario::{BaseRef, WsId};
+use maw_scenario::{BaseRef, FaultSpec, WsId};
 use tempfile::TempDir;
 
 use crate::proc_util;
@@ -32,6 +33,12 @@ pub struct JjAdapter {
     root: PathBuf,
     integration_dir: PathBuf,
     _tmp: Option<TempDir>,
+    /// bn-3hzt chaos seam — armed `FaultSpec` consumed by the **next**
+    /// `merge()` call. `jj` has no failpoint hooks, so the
+    /// parity-equivalent chaos is SIGKILL-mid-merge of the spawned
+    /// `jj new ...` subprocess (analogous to the worktrees adapter's
+    /// `git merge` kill). One-shot — `merge()` consumes it.
+    armed_chaos: Option<FaultSpec>,
 }
 
 impl JjAdapter {
@@ -85,6 +92,7 @@ impl JjAdapter {
             root,
             integration_dir,
             _tmp: owned_tmp,
+            armed_chaos: None,
         })
     }
 
@@ -200,6 +208,35 @@ impl Substrate for JjAdapter {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // bn-3hzt: chaos-kill seam. jj has no failpoint hooks; we
+        // SIGKILL the `jj new` subprocess mid-merge to model
+        // parity-equivalent chaos. The colocated working copy may be
+        // left in a state where `jj op log` shows the partial op and
+        // the next `jj` invocation has to reconcile it — exactly the
+        // class of wedge the SP3 reproduction memo documents.
+        if let Some(fault) = self.armed_chaos.take() {
+            let killed = proc_util::run_with_chaos_kill(
+                "jj",
+                &["new", &revset, "-m", &msg],
+                &self.integration_dir,
+                &env_refs,
+                Duration::from_millis(50),
+            )?;
+            let fault_label = match &fault {
+                FaultSpec::Failpoint { name, .. } => name.as_str(),
+                FaultSpec::None => "<none>",
+            };
+            return Ok(StepOutcome {
+                ok: false,
+                notes: format!(
+                    "jj new: CHAOS-KILLED (SIGKILL-mid-merge, exit={:?}, fault={fault_label}); \
+                     colocated working copy may be wedged",
+                    killed.0.code()
+                ),
+                ..StepOutcome::default()
+            });
+        }
+
         // `jj new <revset> -m "..."` in the integration workspace.
         let result = proc_util::run_envs(
             "jj",
@@ -356,6 +393,18 @@ impl Substrate for JjAdapter {
     fn cleanup(&mut self) -> Result<()> {
         self._tmp.take();
         Ok(())
+    }
+
+    /// bn-3hzt: arm SIGKILL-mid-merge chaos for the next `merge()`
+    /// call. `jj` has no failpoint hooks; the parity-equivalent
+    /// chaos at the substrate-process layer is to kill the
+    /// currently-running `jj new` subprocess mid-flight. One-shot —
+    /// `merge()` consumes it.
+    fn arm_chaos(&mut self, fault: Option<&FaultSpec>) {
+        self.armed_chaos = match fault {
+            Some(FaultSpec::None) | None => None,
+            Some(f @ FaultSpec::Failpoint { .. }) => Some(f.clone()),
+        };
     }
 }
 
