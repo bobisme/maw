@@ -82,6 +82,7 @@ pub mod aggregate;
 pub mod crossover;
 pub mod driver;
 pub mod grid;
+pub mod real_runtime;
 pub mod render;
 pub mod sg3_decision;
 
@@ -91,6 +92,9 @@ pub use aggregate::{
 };
 pub use crossover::{CrossoverPoint, CrossoverRegime, MetricName, find_crossover};
 pub use driver::{SweepDriver, SweepDriverError, SweepPlan};
+pub use real_runtime::{
+    AnyAgent, BackendChoice, RealSubstrate, SubstrateChoice, make_any_agent, validate_pairing,
+};
 pub use grid::{
     ARMS_PUBLICATION, ConditionPoint, SweepCell, SweepGrid, TClass, pilot_grid, spectrum_grid,
 };

@@ -49,15 +49,24 @@ default = []
 bench = [
     "dep:maw-bench",
     "maw-bench/bench",
+    "dep:maw-bench-adapters",
+    "maw-bench-adapters/bench",
     "dep:maw-bench-metrics",
     "maw-bench-metrics/bench",
     "dep:maw-scenario",
     "dep:serde",
     "dep:serde_json",
 ]
+# Passthrough for the real-LLM ClaudeBackend. Off by default so a
+# vanilla `cargo check --features bench` does NOT pull the real-LLM
+# wire. Real benchmark sweeps opt in by passing `--features
+# bench,claude-backend` (and exporting MAW_BENCH_ALLOW_REAL_LLM=1
+# at runtime — defence-in-depth per bn-3kxq).
+claude-backend = ["bench", "maw-bench/claude-backend"]
 
 [dependencies]
 maw-bench = { path = "../maw-bench", version = "0.61.0", optional = true }
+maw-bench-adapters = { path = "../maw-bench-adapters", version = "0.61.0", optional = true }
 maw-bench-metrics = { path = "../maw-bench-metrics", version = "0.61.0", optional = true }
 maw-scenario = { path = "../maw-scenario", version = "0.61.0", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }

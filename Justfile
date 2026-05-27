@@ -213,6 +213,24 @@ sg2-report dir *flags:
 sg2-sweep-pilot dir='':
   cargo run --quiet -p maw-bench-sweep --features bench --bin sg2-sweep-pilot -- {{dir}}
 
+# sg2-sweep-real: real-LLM variant of the sweep pilot (bn-1h4b).
+# Drives ONE arm (default: maw, current v2 ws/ layout) with
+# `--real-llm` + ClaudeBackend. Cheap by default (`n=3` seeds per cell).
+#
+# REQUIRES:
+#   - cargo features `bench,claude-backend` (this recipe passes them).
+#   - MAW_BENCH_ALLOW_REAL_LLM=1 in env (bn-3kxq runtime guard;
+#     the binary refuses real dispatch without it).
+#   - `claude` on $PATH with valid auth (OAuth keychain or
+#     ANTHROPIC_API_KEY).
+#
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real            # n=3, maw arm
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=5        # bigger N
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-real n=3 arm=jj # different arm
+sg2-sweep-real n='3' arm='maw' dir='':
+  cargo run --quiet -p maw-bench-sweep --features bench,claude-backend --bin sg2-sweep-pilot -- \
+    --real-llm --substrate={{arm}} --n={{n}} {{dir}}
+
 # sg2-friction-list: reduce a directory of BenchRun JSONs into the
 # prioritized maw friction list (SG4's input). T2.8 / bn-u9iy.
 #
@@ -467,6 +485,24 @@ sg3-prereg-check:
 #   3 — pipeline error.
 sg3-layout-eval *args:
   cargo run --quiet -p maw-bench-sweep --features bench --bin sg3-layout-eval -- {{args}}
+
+# sg3-layout-eval-real: real-LLM variant of the layout-eval harness (bn-1h4b).
+# Runs both layout arms (old ws/ + new .maw/) under ClaudeBackend at
+# small N for a cheap-first smoke. Defaults: n_a=3, n_b=3, ~$0.20-0.50.
+#
+# REQUIRES:
+#   - cargo features `bench,claude-backend` (this recipe passes them).
+#   - MAW_BENCH_ALLOW_REAL_LLM=1 in env (bn-3kxq runtime guard).
+#   - `claude` and `maw` on $PATH (real-substrate adapter spawns maw).
+#
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real            # n_a=3 n_b=3
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=1 n_b=1 # cheapest
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg3-layout-eval-real n_a=20 n_b=10 # bn-iux4 frozen N
+#
+# Exit codes mirror sg3-layout-eval: 0=GO, 1=NO-GO, 2=invalid args, 3=pipeline error.
+sg3-layout-eval-real n_a='3' n_b='3' *extra:
+  cargo run --quiet -p maw-bench-sweep --features bench,claude-backend --bin sg3-layout-eval -- \
+    --real-llm --layout=both --n-a={{n_a}} --n-b={{n_b}} {{extra}}
 
 # sg3-layout-eval-pilot: harness-validation pilot for T3.5 / bn-1uzn.
 # Runs the same SweepDriver pass with MockAgent + NoopSubstrate + N=3

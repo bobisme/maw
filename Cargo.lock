@@ -2277,6 +2277,7 @@ name = "maw-bench-sweep"
 version = "0.61.0"
 dependencies = [
  "maw-bench",
+ "maw-bench-adapters",
  "maw-bench-metrics",
  "maw-scenario",
  "serde",
