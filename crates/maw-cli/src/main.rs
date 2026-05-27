@@ -353,15 +353,16 @@ enum Commands {
     /// Designed to be the FIRST call an agent (or its coordinator) makes
     /// at session start: emits the full maw verb surface in a copy-pasteable
     /// form (markdown by default; `--format json` for parseable consumption),
-    /// the common vocabulary pitfalls, and the load-bearing "when NOT to
-    /// reach for maw" overkill-line. This is the verb-discoverability
-    /// mitigation for the `vocabulary_scarcity` friction cluster
-    /// (see SG4 / bn-1t17).
+    /// the common vocabulary pitfalls, and the affirmative `When to use maw`
+    /// framing (maw IS the workspace tool — it replaces the
+    /// git-worktrees + convention pattern, it is not an alternative to it).
+    /// This is the verb-discoverability mitigation for the
+    /// `vocabulary_scarcity` friction cluster (see SG4 / bn-1t17, realigned
+    /// in bn-232g).
     ///
     /// Examples:
     ///   maw crib claude                  # markdown cheat sheet for Claude
     ///   maw crib codex --format json     # JSON for programmatic ingest
-    ///   maw crib --overkill-line         # one-line "when NOT to use maw"
     #[command(verbatim_doc_comment)]
     Crib(crib::CribArgs),
 }
@@ -722,17 +723,18 @@ mod tests {
         );
     }
 
-    /// `maw crib --overkill-line` is the one-line "when NOT to use maw"
-    /// surface — agents can paste this verbatim into a system prompt to
-    /// avoid reaching for nonexistent verbs on tasks that don't need
-    /// workspace coordination at all.
+    /// Realignment guard (bn-232g, 2026-05-27): the `--overkill-line` flag
+    /// has been retired. Its body printed the retracted "use plain
+    /// Claude/Codex worktrees for one-off..." framing — exactly the wording
+    /// the bn-232g realignment dropped. This test asserts the flag is
+    /// rejected by the parser so a future refactor cannot silently
+    /// reintroduce it without an explicit decision.
     #[test]
-    fn crib_overkill_line_flag_parses() {
+    fn crib_overkill_line_flag_is_retired() {
         let err = Cli::try_parse_from(["maw", "crib", "--overkill-line"]).err();
         assert!(
-            err.is_none(),
-            "`maw crib --overkill-line` must parse: {}",
-            err.map_or_else(String::new, |e| e.to_string()),
+            err.is_some(),
+            "`maw crib --overkill-line` must be rejected — the flag was retired in bn-232g",
         );
     }
 

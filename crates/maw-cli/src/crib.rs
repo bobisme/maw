@@ -20,17 +20,21 @@
 //!
 //! # Outputs
 //!
-//! Three forms, all sourced from the same in-process protocol table
+//! Two forms, both sourced from the same in-process protocol table
 //! (so they cannot drift from each other):
 //!
 //! - `maw crib <agent>` — Markdown cheat-sheet (default; copy-pasteable
 //!   into an agent's context).
 //! - `maw crib <agent> --format json` — stable JSON for programmatic
 //!   consumption.
-//! - `maw crib --overkill-line` — the one-line "when to use maw vs.
-//!   when to use plain Claude/Codex worktrees" guidance (the second
-//!   half of the SG4 mitigation: don't reach for maw verbs at all if
-//!   the task is one-off-single-agent).
+//!
+//! Both outputs lead with the affirmative `When to use maw` framing:
+//! maw IS the workspace tool — it replaces the git-worktrees + convention
+//! pattern, it is not an alternative to it. Use it for every task. This
+//! is the lead's design correction (2026-05-27, bn-232g) over the
+//! original bn-1t17 framing, which positioned maw as overkill for
+//! one-off tasks. SG2 N=10 evidence confirms no overkill regime emerged
+//! at sonnet across the pre-registered cells; maw is efficiency-dominant.
 //!
 //! # Agent identifiers
 //!
@@ -68,16 +72,6 @@ pub struct CribArgs {
     /// stable protocol envelope (see `CribProtocol`).
     #[arg(long, default_value = "md")]
     pub format: CribFormat,
-
-    /// Print ONLY the "when to use maw vs. plain worktrees" guidance.
-    ///
-    /// Use this in an agent's system prompt so it has the correct
-    /// *mental model* up front and doesn't reach for nonexistent maw
-    /// verbs on tasks that don't need workspace coordination at all.
-    /// Mutually informative with the full crib — the overkill line is
-    /// already included as a section in the full output.
-    #[arg(long)]
-    pub overkill_line: bool,
 }
 
 /// Output format selector.
@@ -96,7 +90,14 @@ pub enum CribFormat {
 
 /// Stable schema version for the JSON output. Bump when the JSON
 /// shape changes in a breaking way (adding fields is non-breaking).
-pub const CRIB_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (2026-05-27, bn-232g): dropped `overkill_line` field and the
+/// `--overkill-line` flag; replaced with the affirmative `usage_guidance`
+/// field framing maw as THE workspace tool. The previous wording
+/// ("use plain Claude/Codex worktrees for one-off tasks") was retracted
+/// per the lead's design correction — maw replaces git-worktrees+convention,
+/// it is not an alternative to it.
+pub const CRIB_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level JSON envelope emitted by `maw crib --format json`.
 #[derive(Debug, Clone, Serialize)]
@@ -107,8 +108,9 @@ pub struct CribProtocol {
     pub maw_version: &'static str,
     /// Agent identifier passed on the command line.
     pub agent: String,
-    /// The one-line overkill guidance (when NOT to reach for maw).
-    pub overkill_line: &'static str,
+    /// Affirmative one-paragraph guidance: maw is the workspace tool;
+    /// use it for every task. This replaces the previous `overkill_line`.
+    pub usage_guidance: &'static str,
     /// Named verb groups (workspace, bones-via-exec, recovery, etc.).
     pub verb_groups: Vec<VerbGroup>,
     /// Common verb pitfalls (synonym/alias hints — what agents
@@ -154,14 +156,18 @@ pub struct VocabularyPitfall {
 // The crib content (single source of truth for both MD and JSON).
 // ---------------------------------------------------------------------------
 
-/// The one-line "overkill" guidance for when NOT to use maw.
+/// Affirmative usage guidance: maw IS the workspace tool. Replaces the
+/// retracted `OVERKILL_LINE` (bn-232g, 2026-05-27).
 ///
-/// Exposed as `pub const` so the `unknown_command_hint` (see `error_hints`
-/// module) can quote it verbatim in error-recovery output.
-pub const OVERKILL_LINE: &str = "Use plain Claude/Codex worktrees for one-off single-agent tasks. \
-Use maw when (a) two or more agents work in parallel, (b) work touches files another \
-in-flight workspace also touches, or (c) merges/rebases need to be coordinated against \
-an integration branch.";
+/// maw replaces the git-worktrees + convention pattern outright; it is
+/// not an alternative to it. Every task — solo or parallel, trivial or
+/// gnarly — runs in a maw workspace and merges back into `default` via
+/// the Prime Invariant ("no committed work is ever lost"). Multiple
+/// agents work in isolated workspaces without stepping on each other.
+pub const USAGE_GUIDANCE: &str = "maw is the workspace tool. Use it for every task. Each agent works in an \
+isolated workspace (`maw ws create <name> --from main`); commits land there; merge to default via \
+`maw ws merge <name> --into default --destroy`. Multiple agents can work in parallel without \
+stepping on each other. The Prime Invariant guarantees no committed work is ever lost.";
 
 /// Build the protocol envelope. Single source of truth shared by the
 /// MD renderer and the JSON serializer.
@@ -172,7 +178,7 @@ pub fn build_protocol(agent: &str) -> CribProtocol {
         schema_version: CRIB_SCHEMA_VERSION,
         maw_version: env!("CARGO_PKG_VERSION"),
         agent: agent.to_string(),
-        overkill_line: OVERKILL_LINE,
+        usage_guidance: USAGE_GUIDANCE,
         verb_groups: vec![
             VerbGroup {
                 name: "Workspace lifecycle",
@@ -373,9 +379,9 @@ pub fn render_markdown(proto: &CribProtocol) -> String {
     out.push('\n');
     let _ = writeln!(out, "_Schema v{}._\n", proto.schema_version);
 
-    let _ = writeln!(out, "## When NOT to use maw");
+    let _ = writeln!(out, "## When to use maw");
     out.push('\n');
-    let _ = writeln!(out, "{}", proto.overkill_line);
+    let _ = writeln!(out, "{}", proto.usage_guidance);
     out.push('\n');
 
     for group in &proto.verb_groups {
@@ -422,10 +428,6 @@ Map them to the correct verb up front."
         out,
         "- `maw crib <agent> --format json` — this same content as JSON."
     );
-    let _ = writeln!(
-        out,
-        "- `maw crib --overkill-line` — just the one-line guidance."
-    );
     out.push('\n');
 
     out
@@ -442,11 +444,6 @@ Map them to the correct verb up front."
 /// Returns an error only on output serialization or write failure (the
 /// content is statically built and cannot fail to construct).
 pub fn run(args: &CribArgs) -> Result<()> {
-    if args.overkill_line {
-        println!("{OVERKILL_LINE}");
-        return Ok(());
-    }
-
     let proto = build_protocol(&args.agent);
     match args.format {
         CribFormat::Md => {
@@ -465,25 +462,62 @@ pub fn run(args: &CribArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The overkill line is the load-bearing one-liner; agents quote it
-    /// verbatim from `maw crib --overkill-line`. Pin its prefix so a
-    /// rewrite doesn't silently change the contract.
+    /// The affirmative usage-guidance is the load-bearing one-liner; agents
+    /// read it from `maw crib <agent>` to learn that maw is THE workspace
+    /// tool (not an alternative to git-worktrees + convention). Pin its
+    /// core invariants so a rewrite doesn't silently regress the framing.
     #[test]
-    fn overkill_line_has_stable_prefix() {
+    fn usage_guidance_frames_maw_as_workspace_tool() {
+        // Must affirm maw IS the workspace tool — not optional, not overkill.
         assert!(
-            OVERKILL_LINE.starts_with("Use plain"),
-            "overkill line must lead with 'Use plain...' (agent prompt-template uses prefix match)"
+            USAGE_GUIDANCE.contains("maw is the workspace tool"),
+            "usage guidance must lead with the affirmative framing: maw is THE workspace tool"
+        );
+        // Must name the multi-agent isolation benefit.
+        assert!(
+            USAGE_GUIDANCE.contains("parallel") || USAGE_GUIDANCE.contains("agents"),
+            "usage guidance must name the multi-agent isolation benefit"
+        );
+        // Must mention the Prime Invariant (no work lost).
+        assert!(
+            USAGE_GUIDANCE.contains("Prime Invariant") || USAGE_GUIDANCE.contains("never lost"),
+            "usage guidance must reference the Prime Invariant safety guarantee"
+        );
+    }
+
+    /// Regression guard for the bn-232g realignment: the retracted
+    /// "use plain Claude/Codex worktrees for one-off..." framing MUST
+    /// NOT reappear anywhere in the crib output. maw is the workspace
+    /// tool, period.
+    #[test]
+    fn retracted_overkill_framing_is_absent() {
+        let proto = build_protocol("claude");
+        let md = render_markdown(&proto);
+        let json = serde_json::to_string(&proto).expect("serializes");
+
+        for haystack in [USAGE_GUIDANCE.to_string(), md.clone(), json] {
+            assert!(
+                !haystack.contains("Use plain Claude/Codex worktrees"),
+                "retracted overkill framing must not appear in crib output (bn-232g)"
+            );
+            assert!(
+                !haystack.contains("plain Claude/Codex worktrees"),
+                "retracted overkill framing must not appear in crib output (bn-232g)"
+            );
+            assert!(
+                !haystack.contains("overkill"),
+                "the overkill framing is retracted; do not reintroduce it"
+            );
+        }
+
+        // The section header must be the affirmative one.
+        assert!(
+            md.contains("## When to use maw"),
+            "MD output must surface the affirmative `When to use maw` section"
         );
         assert!(
-            OVERKILL_LINE.contains("two or more agents")
-                || OVERKILL_LINE.contains("2+")
-                || OVERKILL_LINE.contains("multiple agents")
-                || OVERKILL_LINE.contains("two or more"),
-            "overkill line must name the multi-agent trigger"
-        );
-        assert!(
-            OVERKILL_LINE.contains("integration branch") || OVERKILL_LINE.contains("merge"),
-            "overkill line must name coordination as the qualifying use-case"
+            !md.contains("When NOT to use maw"),
+            "the retracted `When NOT to use maw` section must not be present"
         );
     }
 
@@ -577,34 +611,39 @@ mod tests {
         let json = serde_json::to_value(&proto).expect("serializes");
         assert_eq!(json["schema_version"], CRIB_SCHEMA_VERSION);
         assert_eq!(json["agent"], "codex");
-        assert!(json["overkill_line"].is_string());
+        assert!(json["usage_guidance"].is_string());
         assert!(json["verb_groups"].is_array());
         assert!(json["vocabulary_pitfalls"].is_array());
         assert!(json["contracts"].is_array());
+        // Realignment guard: the deprecated `overkill_line` field must
+        // not reappear (it was the JSON home for the retracted framing).
+        assert!(
+            json.get("overkill_line").is_none(),
+            "deprecated `overkill_line` field must not be present in v2+ envelopes (bn-232g)"
+        );
     }
 
-    /// Schema version is non-zero and pinned (changing it is a breaking
-    /// change for downstream consumers).
+    /// Schema version is pinned at v2 (bumped from v1 in bn-232g when the
+    /// `overkill_line` field was dropped in favor of `usage_guidance`).
     #[test]
     fn schema_version_is_pinned() {
-        assert_eq!(CRIB_SCHEMA_VERSION, 1);
+        assert_eq!(CRIB_SCHEMA_VERSION, 2);
     }
 
-    /// The Markdown renderer must mention the overkill line so a single
-    /// `maw crib <agent>` invocation gives the agent both the verbs AND
-    /// the mental model. Otherwise the overkill line is hidden behind a
-    /// separate flag that agents won't discover.
+    /// The Markdown renderer must surface the affirmative `When to use maw`
+    /// section so a single `maw crib <agent>` invocation gives the agent
+    /// both the verbs AND the mental model.
     #[test]
-    fn markdown_includes_overkill_line() {
+    fn markdown_includes_usage_guidance() {
         let proto = build_protocol("claude");
         let md = render_markdown(&proto);
         assert!(
-            md.contains("When NOT to use maw"),
-            "MD output must surface the overkill-line section"
+            md.contains("When to use maw"),
+            "MD output must surface the `When to use maw` section"
         );
         assert!(
-            md.contains(OVERKILL_LINE),
-            "MD output must include the overkill line verbatim"
+            md.contains(USAGE_GUIDANCE),
+            "MD output must include the usage guidance verbatim"
         );
     }
 
@@ -630,23 +669,5 @@ mod tests {
         // round-tripping through clap.
         let proto = build_protocol("generic");
         assert_eq!(proto.agent, "generic");
-    }
-
-    /// `run` with --overkill-line short-circuits to print just the line
-    /// (regression guard: a refactor that drops this branch would push
-    /// agents back into trial-and-error discovery).
-    #[test]
-    fn overkill_line_is_a_first_class_output() {
-        // Smoke: the field exists on CribArgs and the const is non-empty.
-        let _args = CribArgs {
-            agent: "generic".to_string(),
-            format: CribFormat::Md,
-            overkill_line: true,
-        };
-        assert!(!OVERKILL_LINE.is_empty());
-        assert!(
-            OVERKILL_LINE.len() < 400,
-            "overkill line stays one screen-line of context"
-        );
     }
 }
