@@ -58,6 +58,19 @@
 //! - Frozen subset N defaults to bn-iux4 §1.3 (SUB-A N=20,
 //!   SUB-B N=10); overridable per run for pilot validation.
 //!
+//! ## Why no `--grid=pilot|spectrum` flag (bn-205s)
+//!
+//! sg2-sweep-pilot accepts `--grid=pilot|spectrum` to choose between
+//! the 2-cell harness pilot and the 10-cell §5.1 spectrum. sg3 does
+//! NOT accept that flag: its cell layout is **bn-iux4 §1.3 frozen**
+//! (SUB-A = `C0×T0`, SUB-B = `C2×T0`) and a different schedule would
+//! void the §3.1 R1–R6 verdict — the pre-registered hard bars are
+//! defined against exactly that two-cell subset, not against the
+//! spectrum. Adding `--grid` here would let an operator generate a
+//! verdict against a different schedule than the one the bars were
+//! pre-registered against — a §3.6 violation. Tune SUB-A/SUB-B N via
+//! `--n-a` / `--n-b` instead.
+//!
 //! Exit codes:
 //! - `0` — eval completed; (if `--layout=both`) decision was GO.
 //! - `1` — eval completed; decision was NO-GO (this is an

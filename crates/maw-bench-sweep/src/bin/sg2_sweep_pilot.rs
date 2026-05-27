@@ -46,26 +46,50 @@ use std::time::Instant;
 use maw_bench_sweep::{
     BackendChoice, SpectrumReportOptions, SubstrateChoice, SweepDriver, aggregate_artifacts,
     check_maw_version_skew, make_any_agent, pilot_grid, real_runtime::RealSubstrate,
-    render_crossover_doc, render_spectrum_table, validate_pairing,
+    render_crossover_doc, render_spectrum_table, spectrum_grid, validate_pairing,
 };
 
 fn usage() -> &'static str {
-    "usage: sg2-sweep-pilot [<artifact-dir>] [--real-llm] [--substrate=<arm>] [--n=<seeds-per-cell>] [--model=<id>]\n\
+    "usage: sg2-sweep-pilot [<artifact-dir>] [--grid=pilot|spectrum] \
+     [--real-llm] [--substrate=<arm>] [--n=<seeds-per-cell>]\n\
      \n\
      Default: runs the 18-cell sweep pilot under MockAgent + NoopSubstrate.\n\
        <artifact-dir> defaults to a tempdir under /tmp/.\n\
      \n\
+     --grid=<g>           which grid to drive (default: pilot — back-compat).\n\
+                          pilot:    2 cells (C0 + C4 endpoints), 3 arms, 3 seeds.\n\
+                          spectrum: 10 cells (5 T0 across C0..C4 + 5 T1..T5 at C2),\n\
+                                    4 arms (publication order). Seeds_per_cell\n\
+                                    defaults to 10 unless --n=<N> is set.\n\
      --real-llm           use ClaudeBackend (real LLM subprocess).\n\
                           requires --features claude-backend at build time +\n\
                           MAW_BENCH_ALLOW_REAL_LLM=1 at runtime.\n\
      --substrate=<arm>    one of: noop|maw|maw-consolidated|worktrees|jj.\n\
                           default: noop (Mock); maw (real-LLM).\n\
-     --n=<N>              seeds per cell (default 3). Smaller = cheaper smoke run.\n\
-     --model=<id>         override AgentConfig.model (e.g. haiku, sonnet, opus,\n\
-                          claude-sonnet-4-7). Default: sonnet (pre-reg §8.6 pin).\n\
-                          Per-campaign discipline: each invocation uses ONE\n\
-                          model; cross-model comparison = separate side-by-side\n\
-                          campaigns (NOT a sweep axis)."
+     --n=<N>              seeds per cell. Pilot default: 3. Spectrum default: 10."
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridChoice {
+    Pilot,
+    Spectrum,
+}
+
+impl GridChoice {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "pilot" => Ok(Self::Pilot),
+            "spectrum" => Ok(Self::Spectrum),
+            other => Err(format!("--grid: unknown value `{other}` (want pilot|spectrum)")),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pilot => "pilot",
+            Self::Spectrum => "spectrum",
+        }
+    }
 }
 
 struct Args {
@@ -73,9 +97,8 @@ struct Args {
     backend: BackendChoice,
     substrate: SubstrateChoice,
     seeds_per_cell: Option<u32>,
-    /// Optional `AgentConfig.model` override (`--model=<id>`).
-    /// `None` ⇒ driver uses `AgentConfig::default()` (sonnet, the
-    /// SP3 pin per pre-reg §8.6 — production sweeps untouched).
+    grid: GridChoice,
+    /// bn-3w0c: optional `--model=<id>` override (defaults to `AgentConfig::default()`).
     model: Option<String>,
 }
 
@@ -84,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
     let mut backend = BackendChoice::Mock;
     let mut substrate: Option<SubstrateChoice> = None;
     let mut seeds_per_cell: Option<u32> = None;
+    let mut grid = GridChoice::Pilot;
     let mut model: Option<String> = None;
 
     let argv: Vec<String> = env::args().skip(1).collect();
@@ -97,10 +121,9 @@ fn parse_args() -> Result<Args, String> {
             substrate = Some(SubstrateChoice::parse(v)?);
         } else if let Some(v) = a.strip_prefix("--n=") {
             seeds_per_cell = Some(v.parse().map_err(|e| format!("--n: {e}"))?);
+        } else if let Some(v) = a.strip_prefix("--grid=") {
+            grid = GridChoice::parse(v)?;
         } else if let Some(v) = a.strip_prefix("--model=") {
-            if v.is_empty() {
-                return Err("--model=<id>: id must not be empty".to_string());
-            }
             model = Some(v.to_string());
         } else if a.starts_with("--") {
             return Err(format!("unknown arg: {a}"));
@@ -123,6 +146,7 @@ fn parse_args() -> Result<Args, String> {
         backend,
         substrate,
         seeds_per_cell,
+        grid,
         model,
     })
 }
@@ -147,6 +171,13 @@ fn main() -> ExitCode {
 
     let start = Instant::now();
     eprintln!("sg2-sweep-pilot: artifact_dir = {}", dir.display());
+    // Preserve pre-bn-205s stderr shape exactly for the default
+    // (--grid=pilot) path; only print the grid label when the user
+    // opts into a non-default grid. Keeps `just sg2-sweep-pilot`
+    // byte-identical with prior releases.
+    if matches!(args.grid, GridChoice::Spectrum) {
+        eprintln!("  grid={}", args.grid.as_str());
+    }
     eprintln!(
         "  backend={} substrate={}{}{}",
         args.backend.as_str(),
@@ -160,11 +191,15 @@ fn main() -> ExitCode {
             .unwrap_or_default(),
     );
 
-    // 1. Drive the pilot grid. For the Mock path, this is identical
-    //    to pre-bn-1h4b behavior (byte-identical JSONs). For the
-    //    real-LLM path, we use the chosen substrate adapter; the
-    //    pilot_grid arm list is overridden to only run the chosen
-    //    arm (otherwise we'd burn 3x the spend running 3 substrates).
+    // 1. Drive the selected grid. The default `--grid=pilot` path is
+    //    identical to pre-bn-205s behavior (byte-identical JSONs).
+    //    `--grid=spectrum` exposes the full 10-cell §5.1 schedule
+    //    (5 T0 across C0..C4 + 5 T1..T5 at C2) defined in
+    //    `grid::spectrum_grid`. Default seeds_per_cell for spectrum is
+    //    10 per pre-reg §6.1 headline N; pilot keeps 3 per `pilot_grid`.
+    //    For the real-LLM path, the arm list is collapsed to ONE arm
+    //    matching the chosen substrate (otherwise we'd burn 3-4× the
+    //    spend running every baseline arm).
     let agent_cfg_override = args.model.as_ref().map(|m| {
         maw_bench::agent::AgentConfig {
             model: m.clone(),
@@ -181,11 +216,21 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let mut grid = pilot_grid(42);
+    let mut grid = match args.grid {
+        GridChoice::Pilot => pilot_grid(42),
+        // Default spectrum N=10 per pre-reg §6.1 headline; overridable
+        // by `--n=<N>` below (applied uniformly to both grids).
+        GridChoice::Spectrum => spectrum_grid(42, 10),
+    };
+    if matches!(args.grid, GridChoice::Spectrum) {
+        // Useful at-a-glance count for the spectrum sweep; suppressed
+        // for the pilot path to preserve byte-identical stderr.
+        eprintln!("  grid cells: {}", grid.cells.len());
+    }
     if matches!(args.backend, BackendChoice::Claude) {
         // Real-LLM: collapse to ONE arm matching the chosen substrate
-        // (otherwise the same `pilot_grid` would run all 3 baseline arms
-        // and triple the spend). The arm string the driver writes into
+        // (otherwise the same grid would run all baseline arms and
+        // multiply the spend). The arm string the driver writes into
         // BenchRun.manifest.arm is the substrate's stable label.
         grid.arms = vec![args.substrate.as_str().to_string()];
     }
@@ -264,4 +309,42 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_choice_parse_accepts_pilot_and_spectrum() {
+        assert_eq!(GridChoice::parse("pilot").unwrap(), GridChoice::Pilot);
+        assert_eq!(
+            GridChoice::parse("spectrum").unwrap(),
+            GridChoice::Spectrum
+        );
+    }
+
+    #[test]
+    fn grid_choice_parse_rejects_unknown_value() {
+        let err = GridChoice::parse("full").unwrap_err();
+        assert!(
+            err.contains("pilot|spectrum"),
+            "error should name valid values: {err}"
+        );
+    }
+
+    #[test]
+    fn grid_choice_pilot_drives_two_cells() {
+        // The default --grid=pilot path must keep driving the 2-cell
+        // pilot grid (back-compat with pre-bn-205s callers).
+        let g = pilot_grid(42);
+        assert_eq!(g.cells.len(), 2);
+    }
+
+    #[test]
+    fn grid_choice_spectrum_drives_ten_cells() {
+        // --grid=spectrum must drive the full §5.1 10-cell schedule.
+        let g = spectrum_grid(42, 10);
+        assert_eq!(g.cells.len(), 10);
+    }
 }

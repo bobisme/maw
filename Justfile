@@ -237,6 +237,27 @@ sg2-sweep-real n='3' arm='maw' model='' dir='':
   cargo run --quiet -p maw-bench-sweep --features bench,claude-backend --bin sg2-sweep-pilot -- \
     --real-llm --substrate={{arm}} --n={{n}} {{ if model == '' { '' } else { '--model=' + model } }} {{dir}}
 
+# sg2-sweep-spectrum: full §5.1 10-cell spectrum sweep (bn-205s).
+# Drives the spectrum_grid (5 T0 cells across C0..C4 + 5 T1..T5 chaos
+# overlays at C2) via the real-LLM path. Defaults: n=10 seeds/cell
+# (pre-reg §6.1 headline N), arm=maw. Use this for the calendar
+# eval-blast after bn-205s lands.
+#
+# REQUIRES:
+#   - cargo features `bench,claude-backend` (this recipe passes them).
+#   - MAW_BENCH_ALLOW_REAL_LLM=1 in env (bn-3kxq runtime guard).
+#   - `claude` on $PATH with valid auth.
+#
+# Cost note: spectrum has 5× the cells of pilot; at default n=10 this
+# is ~50× the spend of `just sg2-sweep-real n=3`. Size your budget.
+#
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-spectrum            # n=10, maw arm
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-spectrum n=3        # smoke
+#   MAW_BENCH_ALLOW_REAL_LLM=1 just sg2-sweep-spectrum n=20 arm=jj
+sg2-sweep-spectrum n='10' arm='maw' dir='':
+  cargo run --quiet -p maw-bench-sweep --features bench,claude-backend --bin sg2-sweep-pilot -- \
+    --grid=spectrum --real-llm --substrate={{arm}} --n={{n}} {{dir}}
+
 # sg2-friction-list: reduce a directory of BenchRun JSONs into the
 # prioritized maw friction list (SG4's input). T2.8 / bn-u9iy.
 #
