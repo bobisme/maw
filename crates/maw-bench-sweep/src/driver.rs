@@ -223,7 +223,7 @@ impl SweepDriver {
         // generator emits FaultSpec::Failpoint steps that the chaos
         // overlay can translate to MAW_FP. Default 0 preserves the
         // pre-bn-3hzt "SG2 is fault-orthogonal to SG1" stance.
-        let chaos_prob: f64 = if self.chaos_enabled { 0.30 } else { 0.0 };
+        let chaos_prob: f64 = if self.chaos_enabled { 1.0 } else { 0.0 };
         // bn-18mv: at very short `plan_steps` (the sg2-sweep-pilot bin's
         // default of 4) the validity-narrowed chooser frequently emits
         // plans with ZERO fault-eligible ops (Commit/Merge) — empirically
