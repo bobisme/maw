@@ -1,0 +1,1334 @@
+[
+ {
+  "run_id": "C0-T0-maw-old-layout-r001",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp56xuiR",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmp56xuiR/ws/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmp56xuiR/ws/ws-0/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r002",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp71LzmF",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r003",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpmsPl96",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmsPl96/ws/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmsPl96/ws/ws-0/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmsPl96/ws/ws-0/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r004",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpwRmLGx",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r005",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpJy6VEI",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpJy6VEI/ws/ws-1/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r006",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmprI2KZO",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r007",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpp5enYv",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpp5enYv/ws/ws-1/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpp5enYv/ws/ws-1/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpp5enYv/ws/ws-1/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r008",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpn8IPp5",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpn8IPp5/ws/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpn8IPp5/ws/ws-0/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r009",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpG3b42I",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r010",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpPhDqYu",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpPhDqYu/ws/ws-1/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r011",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpyhdzRi",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r012",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpRBI2A1",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r013",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp63SWyJ",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r014",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp7GAE3k",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r015",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpXlnz2M",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXlnz2M/ws/ws-1/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXlnz2M/ws/ws-1/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXlnz2M/ws/ws-1/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r016",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpmi3Gft",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmi3Gft/ws/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmi3Gft/ws/ws-0/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmi3Gft/ws/ws-0/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r017",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp0NsLyx",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r018",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp9qCf5k",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r019",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp8c5m9u",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-old-layout-r020",
+  "layout": "maw-old-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpOAIx4d",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r001",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpLqrql9",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpLqrql9/ws/ws-0/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r002",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpwMrsBh",
+  "in_ws": 5,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 5,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpwMrsBh/ws/ws-0/shared/file-2.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpwMrsBh/ws/ws-0/ws-0/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpwMrsBh/ws/ws-1/ws-1/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpwMrsBh/ws/ws-1/ws-1/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpwMrsBh/ws/ws-1/ws-1/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r003",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpo6crxW",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r004",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmppFhqOX",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmppFhqOX/ws/ws-0/shared/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmppFhqOX/ws/ws-0/shared/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r005",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpb08jUX",
+  "in_ws": 4,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 4,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpb08jUX/ws/ws-0/shared/file-3.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpb08jUX/ws/ws-0/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpb08jUX/ws/ws-0/ws-0/file-2.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpb08jUX/ws/ws-0/shared/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r006",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpd3e8HK",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpd3e8HK/ws/ws-0/shared/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpd3e8HK/ws/ws-0/shared/file-3.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpd3e8HK/ws/ws-0/ws-0/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r007",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmp7N2zvs",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmp7N2zvs/ws/ws-1/shared/file-3.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r008",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpbWLUPc",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r009",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpaG0y0u",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-old-layout-r010",
+  "layout": "maw-old-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpYqZsnp",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpYqZsnp/ws/ws-0/shared/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpYqZsnp/ws/ws-0/ws-0/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r001",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpaQYwJo",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r002",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpP1G5N5",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpP1G5N5/.maw/workspaces/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpP1G5N5/.maw/workspaces/ws-0/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpP1G5N5/.maw/workspaces/ws-0/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r003",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpglwmhn",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpglwmhn/.maw/workspaces/ws-1/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r004",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmppub8PH",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r005",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpq1oeGL",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r006",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpnIhglv",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r007",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp9tP0pN",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r008",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp7RJkQL",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r009",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpFYiXmi",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpFYiXmi/.maw/workspaces/ws-0/file-0.txt"
+   ],
+   [
+    "Edit",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpFYiXmi/.maw/workspaces/ws-0/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r010",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmp3GdNao",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmp3GdNao/.maw/workspaces/ws-0/ws-0/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r011",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpar93SG",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r012",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpHwCMJw",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r013",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpt6anZU",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpt6anZU/.maw/workspaces/ws-1/ws-1/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpt6anZU/.maw/workspaces/ws-1/ws-1/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r014",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpBLbgMc",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r015",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpkq3RUL",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpkq3RUL/.maw/workspaces/ws-0/ws-0/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpkq3RUL/.maw/workspaces/ws-0/ws-0/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpkq3RUL/.maw/workspaces/ws-0/ws-0/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r016",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpECgFM1",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r017",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpOBgej5",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpOBgej5/.maw/workspaces/ws-1/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpOBgej5/.maw/workspaces/ws-1/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpOBgej5/.maw/workspaces/ws-1/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r018",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpHJW8xC",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpHJW8xC/.maw/workspaces/ws-1/ws-1/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpHJW8xC/.maw/workspaces/ws-1/ws-1/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpHJW8xC/.maw/workspaces/ws-1/ws-1/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r019",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpZEd4bq",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C0-T0-maw-new-layout-r020",
+  "layout": "maw-new-layout",
+  "cell": "C0-T0",
+  "root": "/tmp/claude-1000/.tmpPdMLDx",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r001",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmp3Qdjil",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmp3Qdjil/.maw/workspaces/ws-0/shared/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmp3Qdjil/.maw/workspaces/ws-0/shared/file-3.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmp3Qdjil/.maw/workspaces/ws-0/ws-0/file-0.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r002",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpytG42M",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r003",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmp4XeZST",
+  "in_ws": 1,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 1,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "shared/file-3.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r004",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmp2YNgBr",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r005",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpmW1kr0",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmW1kr0/.maw/workspaces/ws-0/shared/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpmW1kr0/.maw/workspaces/ws-0/shared/file-3.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r006",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpGrZpmg",
+  "in_ws": 8,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 8,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/shared/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/shared/file-3.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/ws-0/file-2.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/ws-0/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/ws-0/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/ws-0/file-2.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/shared/file-2.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpGrZpmg/.maw/workspaces/ws-0/ws-0/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r007",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpYav7Hr",
+  "in_ws": 2,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 2,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpYav7Hr/.maw/workspaces/ws-0/ws-0/file-0.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpYav7Hr/.maw/workspaces/ws-0/ws-0/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r008",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpXgpLgB",
+  "in_ws": 4,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 4,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXgpLgB/.maw/workspaces/ws-1/ws-1/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXgpLgB/.maw/workspaces/ws-1/ws-1/file-1.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXgpLgB/.maw/workspaces/ws-1/ws-1/file-0.txt"
+   ],
+   [
+    "Bash",
+    "in_ws",
+    "ws-1",
+    "/tmp/claude-1000/.tmpXgpLgB/.maw/workspaces/ws-1/ws-1/file-1.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r009",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpw6X4iw",
+  "in_ws": 3,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 3,
+  "ff_root_contam": [],
+  "detail": [
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpw6X4iw/.maw/workspaces/ws-0/shared/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpw6X4iw/.maw/workspaces/ws-0/ws-0/file-1.txt"
+   ],
+   [
+    "Write",
+    "in_ws",
+    "ws-0",
+    "/tmp/claude-1000/.tmpw6X4iw/.maw/workspaces/ws-0/ws-0/file-2.txt"
+   ]
+  ]
+ },
+ {
+  "run_id": "C2-T0-maw-new-layout-r010",
+  "layout": "maw-new-layout",
+  "cell": "C2-T0",
+  "root": "/tmp/claude-1000/.tmpk7kaOd",
+  "in_ws": 0,
+  "at_root": 0,
+  "ws_default": 0,
+  "admin": 0,
+  "tmp_other": 0,
+  "total_writes": 0,
+  "ff_root_contam": [],
+  "detail": []
+ }
+]
