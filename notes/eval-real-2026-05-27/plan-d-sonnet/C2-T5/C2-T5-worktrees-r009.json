@@ -1,0 +1,294 @@
+{
+  "schema_version": 2,
+  "run_id": "C2-T5-worktrees-r009",
+  "manifest": {
+    "claude_code_version": "",
+    "claude_model_id": "sonnet",
+    "claude_effective_model": "",
+    "git_version": "git version 2.54.0",
+    "jj_version": "jj 0.41.0",
+    "maw_version": "maw 0.61.0",
+    "benchmark_harness_commit": "0.61.0",
+    "scenario_generator_commit": "0.61.0",
+    "prompt_hash": "7ecef6cc3a46ef68b2529f620bc36ad75e286bb0c67eb50b4a0eee7f0a521de9",
+    "seed": 1166333968274010921,
+    "condition_id": "C2",
+    "t_class": "T5",
+    "arm": "worktrees",
+    "os_kernel": "Linux 7.0.5-arch1-1 x86_64",
+    "start_ts_unix_ms": 1000,
+    "end_ts_unix_ms": 2000
+  },
+  "verdict": {
+    "outcome": "success"
+  },
+  "oracle_b": {
+    "verdict": "not_applicable",
+    "reason": "arm = worktrees; Oracle B scoped to maw refs"
+  },
+  "transcript": {
+    "prompt": "You are a fresh-context agent in a coordination-benchmark task. Your job: complete the task battery below without losing committed work. You may inspect the workspace freely. Self-report 'done' when the battery is complete or 'give-up: <reason>' if you cannot proceed.\n\n## Substrate convention\n\n# git-worktrees-bare arm crib\n\nYou coordinate multi-agent work using **plain git worktrees plus a hand-rolled convention**. The repo is a bare repo at `<root>/repo.git/` with worktrees checked out under sibling directories. The default integration target is the `main` worktree (typically `<root>/main/`). `git` is on `$PATH`; there is no maw, no jj.\n\n## Core verbs\n\n- `git worktree add ../<name> -b <name>` — make a new worktree on a fresh branch.\n- `git worktree list` — list all worktrees.\n- `git worktree remove <name>` — remove a worktree's checkout (the branch ref stays unless you also `git branch -D <name>`).\n- `git fetch origin` and `git rebase origin/main` (or `git pull --rebase`) — bring a stale worktree up to the latest integration head.\n- `git diff <branch>..HEAD` — show a worktree's changes vs the integration head.\n- `git checkout main && git merge --no-ff <a> [b ...]` — merge worktree branches into `main`. On conflict, `git status` shows the marker-laden files; resolve manually then `git add` + `git commit`. `git merge --abort` rolls back.\n- `git push` / `git pull` — sync with the bare repo when applicable.\n\n## The coordination convention\n\nWithout a coordinator the agents must follow a written convention to avoid stepping on each other:\n\n- **Claim files**: before starting work on a workspace, write a small file like `.coord/claims/<name>.json` recording who owns it and when. Release it (delete or mark released) when done.\n- **Merge ordering**: integrate one workspace at a time into `main`. Never merge two unrelated worktrees in parallel.\n- **Stale worktrees**: rebase onto `origin/main` (or `main`) before requesting a merge.\n- **Recovery**: deleted worktree branches still live in `git reflog` and the bare repo's object store. Use `git reflog show <branch>` and `git checkout <sha>` to restore a lost branch.\n- **Cleanup**: after `git worktree remove`, run `git worktree prune` to clear stale metadata.\n\nThe full convention is the document at `notes/sg2-worktrees-convention.md` (and equivalent in this substrate). Read it before coordinating.\n\n## Conflicts\n\nThere is no \"conflict as data\" behavior here — `git rebase` and `git merge` abort or stop on conflict and require manual resolution. Resolve files in place, `git add` them, then `git rebase --continue` or `git commit`.\n\n## What to read first\n\n- This crib (always).\n- The coordination convention document.\n- `git worktree --help`.\n\n## Workspace\n\nWork under: /tmp/.tmpBXD8qz\nScenario seed: 1166333968274010921\n\n## Task battery\n\nComplete the following abstract tasks using the substrate vocabulary above. Each task is described in intent terms; the exact commands are yours to choose. Aim to leave the substrate coherent (no orphaned state, no lost work).\n\n1. Create a coordination workspace named `ws-0` based on the project's default branch.\n2. In workspace `ws-0`, edit the following files (any content is fine; the test cares about coordination): shared/file-2.txt\n3. In workspace `ws-0`, edit the following files (any content is fine; the test cares about coordination): shared/file-1.txt, shared/file-3.txt\n4. Commit pending changes in workspace `ws-0` with a descriptive message.\n",
+    "prompt_sha256": "7ecef6cc3a46ef68b2529f620bc36ad75e286bb0c67eb50b4a0eee7f0a521de9",
+    "convention_text": "# git-worktrees-bare arm crib\n\nYou coordinate multi-agent work using **plain git worktrees plus a hand-rolled convention**. The repo is a bare repo at `<root>/repo.git/` with worktrees checked out under sibling directories. The default integration target is the `main` worktree (typically `<root>/main/`). `git` is on `$PATH`; there is no maw, no jj.\n\n## Core verbs\n\n- `git worktree add ../<name> -b <name>` — make a new worktree on a fresh branch.\n- `git worktree list` — list all worktrees.\n- `git worktree remove <name>` — remove a worktree's checkout (the branch ref stays unless you also `git branch -D <name>`).\n- `git fetch origin` and `git rebase origin/main` (or `git pull --rebase`) — bring a stale worktree up to the latest integration head.\n- `git diff <branch>..HEAD` — show a worktree's changes vs the integration head.\n- `git checkout main && git merge --no-ff <a> [b ...]` — merge worktree branches into `main`. On conflict, `git status` shows the marker-laden files; resolve manually then `git add` + `git commit`. `git merge --abort` rolls back.\n- `git push` / `git pull` — sync with the bare repo when applicable.\n\n## The coordination convention\n\nWithout a coordinator the agents must follow a written convention to avoid stepping on each other:\n\n- **Claim files**: before starting work on a workspace, write a small file like `.coord/claims/<name>.json` recording who owns it and when. Release it (delete or mark released) when done.\n- **Merge ordering**: integrate one workspace at a time into `main`. Never merge two unrelated worktrees in parallel.\n- **Stale worktrees**: rebase onto `origin/main` (or `main`) before requesting a merge.\n- **Recovery**: deleted worktree branches still live in `git reflog` and the bare repo's object store. Use `git reflog show <branch>` and `git checkout <sha>` to restore a lost branch.\n- **Cleanup**: after `git worktree remove`, run `git worktree prune` to clear stale metadata.\n\nThe full convention is the document at `notes/sg2-worktrees-convention.md` (and equivalent in this substrate). Read it before coordinating.\n\n## Conflicts\n\nThere is no \"conflict as data\" behavior here — `git rebase` and `git merge` abort or stop on conflict and require manual resolution. Resolve files in place, `git add` them, then `git rebase --continue` or `git commit`.\n\n## What to read first\n\n- This crib (always).\n- The coordination convention document.\n- `git worktree --help`.\n",
+    "turns": [
+      {
+        "index": 1,
+        "ts_unix_ms": 1779938843797,
+        "reply_text": "I'll start by exploring the workspace structure to understand what we're working with.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls /tmp/.tmpBXD8qz/ && echo \\\"---\\\" && ls /tmp/.tmpBXD8qz/repo.git/ 2>/dev/null || echo \\\"no repo.git\\\"\",\"description\":\"Explore workspace structure\"}",
+            "ts_unix_ms": 1779938845196,
+            "result_truncated": "main\nrepo.git\n---\nconfig\ndescription\nHEAD\nhooks\ninfo\nobjects\nrefs"
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "ts_unix_ms": 1779938847571,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpBXD8qz/repo.git && git worktree list && echo \\\"---\\\" && git branch -a\",\"description\":\"List worktrees and branches\"}",
+            "ts_unix_ms": 1779938847571,
+            "result_truncated": "/tmp/.tmpBXD8qz/repo.git (bare)\n---\n* main"
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "ts_unix_ms": 1779938849785,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls /tmp/.tmpBXD8qz/main/ && echo \\\"---\\\" && ls /tmp/.tmpBXD8qz/main/shared/ 2>/dev/null || echo \\\"no shared dir\\\"\",\"description\":\"Explore main worktree contents\"}",
+            "ts_unix_ms": 1779938849785,
+            "result_truncated": "README.md\n---\nno shared dir"
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "ts_unix_ms": 1779938852226,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpBXD8qz/main && git log --oneline -5 && echo \\\"---\\\" && find . -type f | head -20\",\"description\":\"Check git log and files in main worktree\"}",
+            "ts_unix_ms": 1779938852226,
+            "result_truncated": "fb1ccab init\n---\n./README.md\n./.git/config\n./.git/logs/refs/remotes/origin/main\n./.git/logs/refs/heads/main\n./.git/logs/HEAD\n./.git/COMMIT_EDITMSG\n./.git/index\n./.git/HEAD\n./.git/refs/remotes/origin/main\n./.git/refs/heads/main\n./.git/objects/fb/1ccab39add411f8e3376bb019781e488462aa5\n./.git/objects/4e/fcb6622a2b8d2c532aae7eb4c89a61376230b5\n./.git/objects/de/43fb9bf234be330d7ce54bbf6f951fa6b4c9eb\n./.git/info/exclude\n./.git/hooks/pre-rebase.sample\n./.git/hooks/applypatch-msg.sample\n./.git/hooks/push-to-checkout.sample\n./.git/hooks/pre-commit.sample\n./.git/hooks/post-update.sample\n./.git/hooks/pre-push.sample"
+          }
+        ]
+      },
+      {
+        "index": 5,
+        "ts_unix_ms": 1779938856442,
+        "reply_text": "Now I'll create the `ws-0` worktree and complete all tasks.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpBXD8qz/main && git worktree add ../ws-0 -b ws-0\",\"description\":\"Create ws-0 worktree on a new branch\"}",
+            "ts_unix_ms": 1779938857735,
+            "result_truncated": "Preparing worktree (new branch 'ws-0')\nHEAD is now at fb1ccab init"
+          }
+        ]
+      },
+      {
+        "index": 6,
+        "ts_unix_ms": 1779938860508,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"mkdir -p /tmp/.tmpBXD8qz/ws-0/shared /tmp/.tmpBXD8qz/ws-0/.coord/claims\",\"description\":\"Create shared directory and claims directory\"}",
+            "ts_unix_ms": 1779938860508,
+            "result_truncated": "(Bash completed with no output)"
+          }
+        ]
+      },
+      {
+        "index": 7,
+        "ts_unix_ms": 1779938863795,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"{\\n  \\\"workspace\\\": \\\"ws-0\\\",\\n  \\\"owner\\\": \\\"agent-main\\\",\\n  \\\"claimed_at\\\": \\\"2026-05-27T00:00:00Z\\\",\\n  \\\"status\\\": \\\"active\\\"\\n}\\n\",\"file_path\":\"/tmp/.tmpBXD8qz/ws-0/.coord/claims/ws-0.json\"}",
+            "ts_unix_ms": 1779938863795,
+            "result_truncated": "File created successfully at: /tmp/.tmpBXD8qz/ws-0/.coord/claims/ws-0.json (file state is current in your context — no need to Read it back)"
+          }
+        ]
+      },
+      {
+        "index": 8,
+        "ts_unix_ms": 1779938865329,
+        "reply_text": "Now I'll create and edit the required files:",
+        "tool_calls": [
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"This file was created and edited in workspace ws-0.\\nTask: coordinate multi-agent work using git worktrees.\\n\",\"file_path\":\"/tmp/.tmpBXD8qz/ws-0/shared/file-2.txt\"}",
+            "ts_unix_ms": 1779938866560,
+            "result_truncated": "File created successfully at: /tmp/.tmpBXD8qz/ws-0/shared/file-2.txt (file state is current in your context — no need to Read it back)"
+          }
+        ]
+      },
+      {
+        "index": 9,
+        "ts_unix_ms": 1779938868676,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"This file was created and edited in workspace ws-0.\\nPart of the shared coordination files for the task battery.\\n\",\"file_path\":\"/tmp/.tmpBXD8qz/ws-0/shared/file-1.txt\"}",
+            "ts_unix_ms": 1779938868676,
+            "result_truncated": "File created successfully at: /tmp/.tmpBXD8qz/ws-0/shared/file-1.txt (file state is current in your context — no need to Read it back)"
+          }
+        ]
+      },
+      {
+        "index": 10,
+        "ts_unix_ms": 1779938870632,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Write",
+            "args_json": "{\"content\":\"This file was created and edited in workspace ws-0.\\nCoordination workspace for multi-agent git worktree tasks.\\n\",\"file_path\":\"/tmp/.tmpBXD8qz/ws-0/shared/file-3.txt\"}",
+            "ts_unix_ms": 1779938870632,
+            "result_truncated": "File created successfully at: /tmp/.tmpBXD8qz/ws-0/shared/file-3.txt (file state is current in your context — no need to Read it back)"
+          }
+        ]
+      },
+      {
+        "index": 11,
+        "ts_unix_ms": 1779938872066,
+        "reply_text": "Now commit all the changes in ws-0:",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpBXD8qz/ws-0 && git add shared/file-1.txt shared/file-2.txt shared/file-3.txt .coord/claims/ws-0.json && git status\",\"description\":\"Stage all changes in ws-0\"}",
+            "ts_unix_ms": 1779938873086,
+            "result_truncated": "On branch ws-0\nChanges to be committed:\n  (use \"git restore --staged <file>...\" to unstage)\n\tnew file:   .coord/claims/ws-0.json\n\tnew file:   shared/file-1.txt\n\tnew file:   shared/file-2.txt\n\tnew file:   shared/file-3.txt"
+          }
+        ]
+      },
+      {
+        "index": 12,
+        "ts_unix_ms": 1779938875946,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpBXD8qz/ws-0 && git commit -m \\\"$(cat <<'EOF'\\nAdd shared coordination files in workspace ws-0\\n\\n- Create shared/file-1.txt, shared/file-2.txt, shared/file-3.txt\\n- Add .coord/claims/ws-0.json to register workspace ownership\\nEOF\\n)\\\"\",\"description\":\"Commit changes in ws-0 with descriptive message\"}",
+            "ts_unix_ms": 1779938875946,
+            "result_truncated": "[ws-0 1a0b1a2] Add shared coordination files in workspace ws-0\n 4 files changed, 12 insertions(+)\n create mode 100644 .coord/claims/ws-0.json\n create mode 100644 shared/file-1.txt\n create mode 100644 shared/file-2.txt\n create mode 100644 shared/file-3.txt"
+          }
+        ]
+      },
+      {
+        "index": 13,
+        "ts_unix_ms": 1779938877882,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpBXD8qz/ws-0 && git log --oneline -3 && echo \\\"---\\\" && git worktree list\",\"description\":\"Verify commit and worktree state\"}",
+            "ts_unix_ms": 1779938877882,
+            "result_truncated": "1a0b1a2 Add shared coordination files in workspace ws-0\nfb1ccab init\n---\n/tmp/.tmpBXD8qz/main fb1ccab [main]\n/tmp/.tmpBXD8qz/ws-0 1a0b1a2 [ws-0]"
+          }
+        ]
+      },
+      {
+        "index": 14,
+        "ts_unix_ms": 1779938883432,
+        "reply_text": "All tasks complete. Here's what was done:\n\n1. **Created `ws-0`** — `git worktree add ../ws-0 -b ws-0` from the main worktree, branching off `main`.\n2. **Edited `shared/file-2.txt`** — created with coordination content.\n3. **Edited `shared/file-1.txt` and `shared/file-3.txt`** — created with coordination content.\n4. **Committed** all changes in `ws-0` with the message \"Add shared coordination files in workspace ws-0\", including the claim file at `.coord/claims/ws-0.json`.\n\nThe worktree at `/tmp/.tmpBXD8qz/ws-0` is on branch `ws-0` (commit `1a0b1a2`), ahead of `main` by one commit.\n\ndone",
+        "tool_calls": []
+      }
+    ]
+  },
+  "total_tool_calls": 13,
+  "total_turns": 14,
+  "cost_usd": 0.1693842,
+  "duration_ms": 1000,
+  "substrate_final_files": [
+    ".shim/git",
+    ".shim/jj",
+    "main/.git/COMMIT_EDITMSG",
+    "main/.git/HEAD",
+    "main/.git/config",
+    "main/.git/description",
+    "main/.git/hooks/applypatch-msg.sample",
+    "main/.git/hooks/commit-msg.sample",
+    "main/.git/hooks/fsmonitor-watchman.sample",
+    "main/.git/hooks/post-update.sample",
+    "main/.git/hooks/pre-applypatch.sample",
+    "main/.git/hooks/pre-commit.sample",
+    "main/.git/hooks/pre-merge-commit.sample",
+    "main/.git/hooks/pre-push.sample",
+    "main/.git/hooks/pre-rebase.sample",
+    "main/.git/hooks/pre-receive.sample",
+    "main/.git/hooks/prepare-commit-msg.sample",
+    "main/.git/hooks/push-to-checkout.sample",
+    "main/.git/hooks/sendemail-validate.sample",
+    "main/.git/hooks/update.sample",
+    "main/.git/index",
+    "main/.git/info/exclude",
+    "main/.git/logs/HEAD",
+    "main/.git/logs/refs/heads/main",
+    "main/.git/logs/refs/heads/ws-0",
+    "main/.git/logs/refs/remotes/origin/main",
+    "main/.git/objects/01/d6193716e241f464ce17303587f7eb287504cc",
+    "main/.git/objects/0a/f4d185b4a1e87ddb6a36e8f8d2a589e7a5d550",
+    "main/.git/objects/17/2255dda0cbf066be1939e99ac71c75b80adb45",
+    "main/.git/objects/1a/0b1a2eefa7cdec7749df806ec5691a84f9619c",
+    "main/.git/objects/2a/f9e114a86e11525e4e0a5bc2d5230c59f0eaf4",
+    "main/.git/objects/4e/fcb6622a2b8d2c532aae7eb4c89a61376230b5",
+    "main/.git/objects/c2/ba1dd22ac6558f259b1ae26b419b0fa7e657a0",
+    "main/.git/objects/d2/c911daf93f34a6ff07c4ee279194e40fb3e428",
+    "main/.git/objects/d8/36f2e30dd04ce17925ffdaa9c4f3e4e08f6499",
+    "main/.git/objects/de/43fb9bf234be330d7ce54bbf6f951fa6b4c9eb",
+    "main/.git/objects/f5/6b84d97cacc3a4b7774e79c1c781a5cad20fbe",
+    "main/.git/objects/fb/1ccab39add411f8e3376bb019781e488462aa5",
+    "main/.git/refs/heads/main",
+    "main/.git/refs/heads/ws-0",
+    "main/.git/refs/remotes/origin/main",
+    "main/.git/worktrees/ws-0/COMMIT_EDITMSG",
+    "main/.git/worktrees/ws-0/HEAD",
+    "main/.git/worktrees/ws-0/ORIG_HEAD",
+    "main/.git/worktrees/ws-0/commondir",
+    "main/.git/worktrees/ws-0/gitdir",
+    "main/.git/worktrees/ws-0/index",
+    "main/.git/worktrees/ws-0/logs/HEAD",
+    "main/README.md",
+    "repo.git/HEAD",
+    "repo.git/config",
+    "repo.git/description",
+    "repo.git/hooks/applypatch-msg.sample",
+    "repo.git/hooks/commit-msg.sample",
+    "repo.git/hooks/fsmonitor-watchman.sample",
+    "repo.git/hooks/post-update.sample",
+    "repo.git/hooks/pre-applypatch.sample",
+    "repo.git/hooks/pre-commit.sample",
+    "repo.git/hooks/pre-merge-commit.sample",
+    "repo.git/hooks/pre-push.sample",
+    "repo.git/hooks/pre-rebase.sample",
+    "repo.git/hooks/pre-receive.sample",
+    "repo.git/hooks/prepare-commit-msg.sample",
+    "repo.git/hooks/push-to-checkout.sample",
+    "repo.git/hooks/sendemail-validate.sample",
+    "repo.git/hooks/update.sample",
+    "repo.git/info/exclude",
+    "repo.git/objects/4e/fcb6622a2b8d2c532aae7eb4c89a61376230b5",
+    "repo.git/objects/de/43fb9bf234be330d7ce54bbf6f951fa6b4c9eb",
+    "repo.git/objects/fb/1ccab39add411f8e3376bb019781e488462aa5",
+    "repo.git/refs/heads/main",
+    "ws-0/.coord/claims/ws-0.json",
+    "ws-0/.git",
+    "ws-0/README.md",
+    "ws-0/shared/file-1.txt",
+    "ws-0/shared/file-2.txt",
+    "ws-0/shared/file-3.txt"
+  ]
+}

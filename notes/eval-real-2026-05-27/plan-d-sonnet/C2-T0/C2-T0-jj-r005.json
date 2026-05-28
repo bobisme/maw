@@ -1,0 +1,310 @@
+{
+  "schema_version": 2,
+  "run_id": "C2-T0-jj-r005",
+  "manifest": {
+    "claude_code_version": "",
+    "claude_model_id": "sonnet",
+    "claude_effective_model": "",
+    "git_version": "git version 2.54.0",
+    "jj_version": "jj 0.41.0",
+    "maw_version": "maw 0.61.0",
+    "benchmark_harness_commit": "0.61.0",
+    "scenario_generator_commit": "0.61.0",
+    "prompt_hash": "c44ba238aba5376328e7f2a3a525488e91c6d227de44fbd8f44e208840283559",
+    "seed": 17389421039016861640,
+    "condition_id": "C2",
+    "t_class": "T0",
+    "arm": "jj",
+    "os_kernel": "Linux 7.0.5-arch1-1 x86_64",
+    "start_ts_unix_ms": 1000,
+    "end_ts_unix_ms": 2000
+  },
+  "verdict": {
+    "outcome": "success"
+  },
+  "oracle_b": {
+    "verdict": "not_applicable",
+    "reason": "arm = jj; Oracle B scoped to maw refs"
+  },
+  "transcript": {
+    "prompt": "You are a fresh-context agent in a coordination-benchmark task. Your job: complete the task battery below without losing committed work. You may inspect the workspace freely. Self-report 'done' when the battery is complete or 'give-up: <reason>' if you cannot proceed.\n\n## Substrate convention\n\n# jj-workspaces arm crib\n\nYou coordinate multi-agent work using **jj** (Jujutsu), a git-compatible VCS that organizes work via change-ids and op-log. The repo is a colocated jj+git repo at the substrate root. Workspaces are jj's native multi-worktree feature (`jj workspace`). `jj` and `git` are both on `$PATH`.\n\n## Core verbs\n\n- `jj workspace add <path> --name <name>` — make a new jj workspace at `<path>` named `<name>`.\n- `jj workspace list` — list all workspaces with their working-copy change-ids.\n- `jj workspace update-stale` — refresh a workspace whose working copy is stale (someone else moved the underlying commit).\n- `jj log -r 'divergent()'` — show diverged changes (one change-id with multiple commits). **Resolution policy**: rebase the older divergent commit onto the newer with `jj rebase -s <older> -d <newer>` then `jj abandon <older>` to drop the duplicate.\n- `jj op log` — inspect the operation log (one op per state mutation).\n- `jj op restore <op-id>` — roll the whole repo back to a previous op.\n- `jj op integrate <op-id>` — **avoid this** when the op was a background workspace operation; integrating an unrelated workspace's op can produce divergent changes you did not intend. Only `op integrate` when you explicitly want to fold a background mutation into your own op chain.\n- `jj diff` — show the working-copy diff vs the parent change.\n- `jj new` / `jj commit -m \"...\"` — create a new change / set the description.\n- `jj git push --branch <name>` / `jj git fetch` — sync with the colocated git remote.\n- `jj squash` / `jj rebase -d <change>` — recombine changes.\n\n## Op-log inspection (when something is off)\n\n- `jj op log -n 20` shows the last 20 operations, who/what made each.\n- `jj op show <op-id>` shows the diff between two op states.\n- If you see a \"concurrent operations\" warning, examine `jj op log` to see what happened; pick the right ancestor with `jj op restore <op-id>` instead of blindly continuing.\n\n## Conflicts\n\njj's model: conflicts are a first-class state on a change. A conflicted change shows as `??` in `jj log`. Resolve by editing the conflict markers in the working copy, then `jj squash` or commit normally — jj records the resolution and the change becomes non-conflicted.\n\n## What to read first\n\n- This crib (always).\n- `jj help workspace` / `jj help op`.\n- Run `jj log -r 'divergent()'` and `jj op log -n 5` if anything looks off before acting.\n\n## Workspace\n\nWork under: /tmp/.tmpaW3M4Q\nScenario seed: 17389421039016861640\n\n## Task battery\n\nComplete the following abstract tasks using the substrate vocabulary above. Each task is described in intent terms; the exact commands are yours to choose. Aim to leave the substrate coherent (no orphaned state, no lost work).\n\n1. Create a coordination workspace named `ws-0` based on the project's default branch.\n2. In workspace `ws-0`, edit the following files (any content is fine; the test cares about coordination): shared/file-3.txt, ws-0/file-1.txt\n3. In workspace `ws-0`, edit the following files (any content is fine; the test cares about coordination): shared/file-0.txt, shared/file-2.txt, shared/file-3.txt\n4. Commit pending changes in workspace `ws-0` with a descriptive message.\n",
+    "prompt_sha256": "c44ba238aba5376328e7f2a3a525488e91c6d227de44fbd8f44e208840283559",
+    "convention_text": "# jj-workspaces arm crib\n\nYou coordinate multi-agent work using **jj** (Jujutsu), a git-compatible VCS that organizes work via change-ids and op-log. The repo is a colocated jj+git repo at the substrate root. Workspaces are jj's native multi-worktree feature (`jj workspace`). `jj` and `git` are both on `$PATH`.\n\n## Core verbs\n\n- `jj workspace add <path> --name <name>` — make a new jj workspace at `<path>` named `<name>`.\n- `jj workspace list` — list all workspaces with their working-copy change-ids.\n- `jj workspace update-stale` — refresh a workspace whose working copy is stale (someone else moved the underlying commit).\n- `jj log -r 'divergent()'` — show diverged changes (one change-id with multiple commits). **Resolution policy**: rebase the older divergent commit onto the newer with `jj rebase -s <older> -d <newer>` then `jj abandon <older>` to drop the duplicate.\n- `jj op log` — inspect the operation log (one op per state mutation).\n- `jj op restore <op-id>` — roll the whole repo back to a previous op.\n- `jj op integrate <op-id>` — **avoid this** when the op was a background workspace operation; integrating an unrelated workspace's op can produce divergent changes you did not intend. Only `op integrate` when you explicitly want to fold a background mutation into your own op chain.\n- `jj diff` — show the working-copy diff vs the parent change.\n- `jj new` / `jj commit -m \"...\"` — create a new change / set the description.\n- `jj git push --branch <name>` / `jj git fetch` — sync with the colocated git remote.\n- `jj squash` / `jj rebase -d <change>` — recombine changes.\n\n## Op-log inspection (when something is off)\n\n- `jj op log -n 20` shows the last 20 operations, who/what made each.\n- `jj op show <op-id>` shows the diff between two op states.\n- If you see a \"concurrent operations\" warning, examine `jj op log` to see what happened; pick the right ancestor with `jj op restore <op-id>` instead of blindly continuing.\n\n## Conflicts\n\njj's model: conflicts are a first-class state on a change. A conflicted change shows as `??` in `jj log`. Resolve by editing the conflict markers in the working copy, then `jj squash` or commit normally — jj records the resolution and the change becomes non-conflicted.\n\n## What to read first\n\n- This crib (always).\n- `jj help workspace` / `jj help op`.\n- Run `jj log -r 'divergent()'` and `jj op log -n 5` if anything looks off before acting.\n",
+    "turns": [
+      {
+        "index": 1,
+        "ts_unix_ms": 1779936015235,
+        "reply_text": "I'll start by exploring the workspace and understanding the current repository state.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"jj log --no-pager && echo \\\"---\\\" && jj workspace list\",\"description\":\"Show jj log and workspace list\"}",
+            "ts_unix_ms": 1779936016098,
+            "result_truncated": "Exit code 1\nError: There is no jj repo in \".\""
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "ts_unix_ms": 1779936018624,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls /tmp/.tmpaW3M4Q && jj -R /tmp/.tmpaW3M4Q log --no-pager 2>&1 | head -30\",\"description\":\"List files and show jj log in workspace\"}",
+            "ts_unix_ms": 1779936018624,
+            "result_truncated": "repo\nError: There is no jj repo in \"/tmp/.tmpaW3M4Q\""
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "ts_unix_ms": 1779936023548,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls /tmp/.tmpaW3M4Q/repo && jj -R /tmp/.tmpaW3M4Q/repo log --no-pager 2>&1 | head -30\",\"description\":\"Explore repo directory and show jj log\"}",
+            "ts_unix_ms": 1779936023548,
+            "result_truncated": "README.md\n@  xvnmtyox bench@localhost 2026-05-27 22:40:12 21daa3f3\n│  (empty) wip\n○  pwszplts bench@localhost 2026-05-27 22:40:12 main 67c5a805\n│  init\n◆  zzzzzzzz root() 00000000"
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "ts_unix_ms": 1779936025831,
+        "reply_text": "Found the repo. Let me explore its structure and check the current state.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls /tmp/.tmpaW3M4Q/repo && jj -R /tmp/.tmpaW3M4Q/repo workspace list\",\"description\":\"List repo contents and workspaces\"}",
+            "ts_unix_ms": 1779936026700,
+            "result_truncated": "README.md\ndefault: xvnmtyox 21daa3f3 (empty) wip"
+          }
+        ]
+      },
+      {
+        "index": 5,
+        "ts_unix_ms": 1779936028174,
+        "reply_text": "**Task 1: Create the `ws-0` workspace.**",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpaW3M4Q/repo && jj workspace add ../ws-0 --name ws-0\",\"description\":\"Create ws-0 workspace\"}",
+            "ts_unix_ms": 1779936028985,
+            "result_truncated": "Created workspace in \"../ws-0\"\nWorking copy  (@) now at: rslqmsqs f89d2739 (empty) (no description set)\nParent commit (@-)      : pwszplts 67c5a805 main | init\nAdded 1 files, modified 0 files, removed 0 files"
+          }
+        ]
+      },
+      {
+        "index": 6,
+        "ts_unix_ms": 1779936031036,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"ls /tmp/.tmpaW3M4Q/ws-0 && jj -R /tmp/.tmpaW3M4Q/ws-0 workspace list\",\"description\":\"Verify ws-0 workspace was created\"}",
+            "ts_unix_ms": 1779936031036,
+            "result_truncated": "README.md\ndefault: xvnmtyox 21daa3f3 (empty) wip\nws-0: rslqmsqs f89d2739 (empty) (no description set)"
+          }
+        ]
+      },
+      {
+        "index": 7,
+        "ts_unix_ms": 1779936033563,
+        "reply_text": "**Tasks 2 & 3: Edit the required files in ws-0.** I'll create the necessary directory structure and edit all files.",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"mkdir -p /tmp/.tmpaW3M4Q/ws-0/shared /tmp/.tmpaW3M4Q/ws-0/ws-0\",\"description\":\"Create shared and ws-0 directories\"}",
+            "ts_unix_ms": 1779936034028,
+            "result_truncated": "(Bash completed with no output)"
+          }
+        ]
+      },
+      {
+        "index": 8,
+        "ts_unix_ms": 1779936038162,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"echo \\\"coordination edit task-2\\\" > /tmp/.tmpaW3M4Q/ws-0/shared/file-3.txt && echo \\\"coordination edit task-2\\\" > /tmp/.tmpaW3M4Q/ws-0/ws-0/file-1.txt && echo \\\"coordination edit task-3\\\" > /tmp/.tmpaW3M4Q/ws-0/shared/file-0.txt && echo \\\"coordination edit task-3\\\" > /tmp/.tmpaW3M4Q/ws-0/shared/file-2.txt && echo \\\"coordination edit task-3 updated\\\" > /tmp/.tmpaW3M4Q/ws-0/shared/file-3.txt\",\"description\":\"Write all required files for tasks 2 and 3\"}",
+            "ts_unix_ms": 1779936038162,
+            "result_truncated": "(Bash completed with no output)"
+          }
+        ]
+      },
+      {
+        "index": 9,
+        "ts_unix_ms": 1779936040644,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpaW3M4Q/ws-0 && jj diff --no-pager\",\"description\":\"Check the diff in ws-0 workspace\"}",
+            "ts_unix_ms": 1779936040644,
+            "result_truncated": "Added regular file shared/file-0.txt:\n        1: coordination edit task-3\nAdded regular file shared/file-2.txt:\n        1: coordination edit task-3\nAdded regular file shared/file-3.txt:\n        1: coordination edit task-3 updated\nAdded regular file ws-0/file-1.txt:\n        1: coordination edit task-2"
+          }
+        ]
+      },
+      {
+        "index": 10,
+        "ts_unix_ms": 1779936042382,
+        "reply_text": "**Task 4: Commit the pending changes.**",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpaW3M4Q/ws-0 && jj commit -m \\\"ws-0: add coordination files for tasks 2 and 3 (shared/file-0, shared/file-2, shared/file-3, ws-0/file-1)\\\"\",\"description\":\"Commit pending changes in ws-0 with descriptive message\"}",
+            "ts_unix_ms": 1779936043255,
+            "result_truncated": "Working copy  (@) now at: uomzpzsn 16361d98 (empty) (no description set)\nParent commit (@-)      : rslqmsqs 08a36b86 ws-0: add coordination files for tasks 2 and 3 (shared/file-0, shared/file-2, shared/file-3, ws-0/file-1)"
+          }
+        ]
+      },
+      {
+        "index": 11,
+        "ts_unix_ms": 1779936048781,
+        "reply_text": "",
+        "tool_calls": [
+          {
+            "name": "Bash",
+            "args_json": "{\"command\":\"cd /tmp/.tmpaW3M4Q/ws-0 && jj log --no-pager -r 'all()' && echo \\\"---\\\" && jj workspace list\",\"description\":\"Verify final state of the repository\"}",
+            "ts_unix_ms": 1779936048781,
+            "result_truncated": "@  uomzpzsn bob@standardinput.co 2026-05-27 22:40:43 ws-0@ 16361d98\n│  (empty) (no description set)\n○  rslqmsqs bob@standardinput.co 2026-05-27 22:40:43 08a36b86\n│  ws-0: add coordination files for tasks 2 and 3 (shared/file-0, shared/file-2, shared/file-3, ws-0/file-1)\n│ ○  xvnmtyox bench@localhost 2026-05-27 22:40:12 default@ 21daa3f3\n├─╯  (empty) wip\n○  pwszplts bench@localhost 2026-05-27 22:40:12 main 67c5a805\n│  init\n◆  zzzzzzzz root() 00000000\n---\ndefault: xvnmtyox 21daa3f3 (empty) wip\nws-0: uomzpzsn 16361d98 (empty) (no description set)"
+          }
+        ]
+      },
+      {
+        "index": 12,
+        "ts_unix_ms": 1779936053463,
+        "reply_text": "All four tasks are complete:\n\n1. **ws-0 workspace created** — based on the `main` branch (parent: `pwszplts`/init).\n2. **Task 2 files edited** — `shared/file-3.txt` and `ws-0/file-1.txt` written in ws-0.\n3. **Task 3 files edited** — `shared/file-0.txt`, `shared/file-2.txt`, and `shared/file-3.txt` written in ws-0 (file-3 updated).\n4. **Changes committed** — change `rslqmsqs` with descriptive message covering all coordination files.\n\nThe repo is coherent: no divergent changes, no orphaned state.\n\ndone",
+        "tool_calls": []
+      }
+    ]
+  },
+  "total_tool_calls": 11,
+  "total_turns": 12,
+  "cost_usd": 0.1483257,
+  "duration_ms": 1000,
+  "substrate_final_files": [
+    ".shim/git",
+    ".shim/jj",
+    "repo/.git/HEAD",
+    "repo/.git/config",
+    "repo/.git/description",
+    "repo/.git/hooks/applypatch-msg.sample",
+    "repo/.git/hooks/commit-msg.sample",
+    "repo/.git/hooks/docs.url",
+    "repo/.git/hooks/fsmonitor-watchman.sample",
+    "repo/.git/hooks/post-update.sample",
+    "repo/.git/hooks/pre-applypatch.sample",
+    "repo/.git/hooks/pre-commit.sample",
+    "repo/.git/hooks/pre-merge-commit.sample",
+    "repo/.git/hooks/pre-push.sample",
+    "repo/.git/hooks/pre-rebase.sample",
+    "repo/.git/hooks/prepare-commit-msg.sample",
+    "repo/.git/index",
+    "repo/.git/info/exclude",
+    "repo/.git/logs/HEAD",
+    "repo/.git/logs/refs/heads/main",
+    "repo/.git/objects/08/a36b86fb944f8385fd5d27328010e5acde687a",
+    "repo/.git/objects/16/361d98f5d5f8cfce29e368040fda4b0818c940",
+    "repo/.git/objects/1a/f8c29df4658bceac6b85082990ea096601fabb",
+    "repo/.git/objects/1d/9328d316646cf2da9302c3a051377b8063aead",
+    "repo/.git/objects/21/daa3f3bad0c3bad9c2db874a96675fe02f4be6",
+    "repo/.git/objects/37/5952264ab1fec61359c2d0eb4e68d30d9f03ae",
+    "repo/.git/objects/46/f0da8b501b3a82cf8d74a763e43b91e777b180",
+    "repo/.git/objects/4b/825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "repo/.git/objects/4e/fcb6622a2b8d2c532aae7eb4c89a61376230b5",
+    "repo/.git/objects/53/6e15888bbf3d9bfd9f9d87b814a3fe2be58679",
+    "repo/.git/objects/56/d5b3d6516a4d2cd9692e8a04abf86a89e986f5",
+    "repo/.git/objects/67/c5a805b762ad4618e6722fb3637e8c982152b0",
+    "repo/.git/objects/67/e472b46fb16af2bb9c297ae61de687fc9bf798",
+    "repo/.git/objects/92/3d53c595f6992e1b7047198fd05c5de94986c7",
+    "repo/.git/objects/9b/5c3ff4af240606c43332a24a6bc8786aee7dd8",
+    "repo/.git/objects/9e/591925011f7efcfa1bd194ee6771a97f88f4cc",
+    "repo/.git/objects/de/43fb9bf234be330d7ce54bbf6f951fa6b4c9eb",
+    "repo/.git/objects/e6/9de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "repo/.git/objects/f8/9d2739b4f437dd42c67f0d5ce942abbd3f41e4",
+    "repo/.git/refs/heads/main",
+    "repo/.git/refs/jj/keep/08a36b86fb944f8385fd5d27328010e5acde687a",
+    "repo/.git/refs/jj/keep/16361d98f5d5f8cfce29e368040fda4b0818c940",
+    "repo/.git/refs/jj/keep/1af8c29df4658bceac6b85082990ea096601fabb",
+    "repo/.git/refs/jj/keep/1d9328d316646cf2da9302c3a051377b8063aead",
+    "repo/.git/refs/jj/keep/21daa3f3bad0c3bad9c2db874a96675fe02f4be6",
+    "repo/.git/refs/jj/keep/375952264ab1fec61359c2d0eb4e68d30d9f03ae",
+    "repo/.git/refs/jj/keep/56d5b3d6516a4d2cd9692e8a04abf86a89e986f5",
+    "repo/.git/refs/jj/keep/67c5a805b762ad4618e6722fb3637e8c982152b0",
+    "repo/.git/refs/jj/keep/f89d2739b4f437dd42c67f0d5ce942abbd3f41e4",
+    "repo/.jj/.gitignore",
+    "repo/.jj/repo/index/op_links/00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "repo/.jj/repo/index/op_links/0507e796dc2eb61e17a3b30885d0c62331fe4317d0f3b523f8d358241fbc6c9cad737a4c016877edd71556ca84d4c92cd440be79291ba7c41718ae55c239fcf4",
+    "repo/.jj/repo/index/op_links/0970f9a2be36bd38c8bd3412b22d41cee7ea96ce69eb2bd758af1d3a02a422f08edf561b734c40ccba064a5ee4a1c582daee3960d733632e0262852af35b2b93",
+    "repo/.jj/repo/index/op_links/22d7f9e1532c564bbe26efc9e5181745e61f85f55fa3ac760a3bd93683388d72771bc11bdc844e4d688d334cb15644765b31a89870ecf90d47935f14b3aed034",
+    "repo/.jj/repo/index/op_links/3506528fac3667def9cfadd3e015f8ff61da3a70cd22830992e04b1fe7cc88ceb02a2230192226f19e09d6fbc038c2e0ff50d034bc88f40b6e620c34fd5a29aa",
+    "repo/.jj/repo/index/op_links/45cce1e643bbf7e03d8f9f6faa6a5565c93e9871e1d70db2b88d1181173c91de34f9807ce6fd78b3fc2553b0553d2176f599c800ba2938c15fc1d4f481e9c899",
+    "repo/.jj/repo/index/op_links/52b65643a42d06f1ceb69e8473fb5128857243779b1d4fcf6cdea9d6d23577b7dd5ef628098138979f0fbd588f63a00c28dfebacd5b575127c006806634e3f3b",
+    "repo/.jj/repo/index/op_links/71f46dc8fbc681aeafba1321206156c416366f1c9013ba6192d3b9c5d00aea9447fe4dec3255f5c99f8fbb3204e5963011973adfd166d1ee678a6505b4a398f7",
+    "repo/.jj/repo/index/op_links/9d8aab415d3ce3d055ce10a33da4802fdfef1b8e6fde305d23d2089877a59e5718b16a82d5eb51ce4b2c051ca91d9cdb2958922de46ac88a4b1af2be76b695a9",
+    "repo/.jj/repo/index/op_links/a4adaa5dceae13721fa81e0fd3fef44de393cf53681b5713d8ab2bad166f71f32fbe6f0d16a59a4b5a057a2f0987508a040e49699a902f84cfe101f501ec9858",
+    "repo/.jj/repo/index/segments/1373d308d449b4d3b2bba10a03b9e70810db733c0d143ed1c53d33d9b33403e927d26bda996baf8297d5b1bafbfcc1b9544becbcc80678959a0396f3deb2c179",
+    "repo/.jj/repo/index/segments/32f43112261bf905e7b0fe42a5023eb08d36c87f305c04aa37811ecd9daeeedc3d150e87c93b91209657ec655950ea71ebbc47d665e9080307718762acc02ba1",
+    "repo/.jj/repo/index/segments/3be0b381f9782cfb18a2965b82f6efd21d25b12f63b49815c2fa2a19fdf6db997112f5b5f40a4419b7b63cfe00b307b812fa98217834f8197faf29df92bbaaaf",
+    "repo/.jj/repo/index/segments/3df62b976bbb1fc179265dc92451a8fabbd69794452a6f13814cf015d517c0630570cd59cdc23a4dc08a40671793a1339349bfc2a9716de07a5151ed4faddebf",
+    "repo/.jj/repo/index/segments/8514778bc62c2f4c398518078bf2fcf45725e4196cdba1faa3a1a905966c45ce142f40aeecf1516ecc27758f57334f26d77ac3bac4745756ccb657e8179e2560",
+    "repo/.jj/repo/index/segments/8b49fe2463b8a5286ebbd2c7a8a9c37e0619c0e8766faf159cb0594e301752c38b2d3ab01f6d3d83f30b4697ae300005f8efbbaf678ffa5f68c99dcd68d37ab1",
+    "repo/.jj/repo/index/segments/9452187ccd970b6abcc71a0cd5e6db65a2f9b4b7d9ae05b706b05da072c6fb67ab3a8e36a0cbc39bcaeab0bf4f96dd4fbdcac201e440c5787a9baf4ba82d827f",
+    "repo/.jj/repo/index/segments/d27ad326963b75736b636adad9fb812eb3f2871e0efb4bc7db37d4b701a4282911eaaee91bed3a759e940769b667be1ed66f2d7f2f41ac3906b87ab7eec19c3a",
+    "repo/.jj/repo/index/segments/e211f93b5ff82e8bf0a6eb0e3ed6b6610386f3c7cb48fb09c22a556846c323e761a692be61ff40f02cc3be456112fa3d9aef9fa14c5b10898ba1528573ded2a1",
+    "repo/.jj/repo/index/type",
+    "repo/.jj/repo/op_heads/heads/22d7f9e1532c564bbe26efc9e5181745e61f85f55fa3ac760a3bd93683388d72771bc11bdc844e4d688d334cb15644765b31a89870ecf90d47935f14b3aed034",
+    "repo/.jj/repo/op_heads/type",
+    "repo/.jj/repo/op_store/operations/0507e796dc2eb61e17a3b30885d0c62331fe4317d0f3b523f8d358241fbc6c9cad737a4c016877edd71556ca84d4c92cd440be79291ba7c41718ae55c239fcf4",
+    "repo/.jj/repo/op_store/operations/0970f9a2be36bd38c8bd3412b22d41cee7ea96ce69eb2bd758af1d3a02a422f08edf561b734c40ccba064a5ee4a1c582daee3960d733632e0262852af35b2b93",
+    "repo/.jj/repo/op_store/operations/22d7f9e1532c564bbe26efc9e5181745e61f85f55fa3ac760a3bd93683388d72771bc11bdc844e4d688d334cb15644765b31a89870ecf90d47935f14b3aed034",
+    "repo/.jj/repo/op_store/operations/3506528fac3667def9cfadd3e015f8ff61da3a70cd22830992e04b1fe7cc88ceb02a2230192226f19e09d6fbc038c2e0ff50d034bc88f40b6e620c34fd5a29aa",
+    "repo/.jj/repo/op_store/operations/45cce1e643bbf7e03d8f9f6faa6a5565c93e9871e1d70db2b88d1181173c91de34f9807ce6fd78b3fc2553b0553d2176f599c800ba2938c15fc1d4f481e9c899",
+    "repo/.jj/repo/op_store/operations/52b65643a42d06f1ceb69e8473fb5128857243779b1d4fcf6cdea9d6d23577b7dd5ef628098138979f0fbd588f63a00c28dfebacd5b575127c006806634e3f3b",
+    "repo/.jj/repo/op_store/operations/71f46dc8fbc681aeafba1321206156c416366f1c9013ba6192d3b9c5d00aea9447fe4dec3255f5c99f8fbb3204e5963011973adfd166d1ee678a6505b4a398f7",
+    "repo/.jj/repo/op_store/operations/9d8aab415d3ce3d055ce10a33da4802fdfef1b8e6fde305d23d2089877a59e5718b16a82d5eb51ce4b2c051ca91d9cdb2958922de46ac88a4b1af2be76b695a9",
+    "repo/.jj/repo/op_store/operations/a4adaa5dceae13721fa81e0fd3fef44de393cf53681b5713d8ab2bad166f71f32fbe6f0d16a59a4b5a057a2f0987508a040e49699a902f84cfe101f501ec9858",
+    "repo/.jj/repo/op_store/type",
+    "repo/.jj/repo/op_store/views/0c483cb25130804f9981d25deb15ffb30a66faf97b4846cc10234002e104a62b1758d10674716228762475c264948abcd708d66b9f42316c78f23045c7ef2587",
+    "repo/.jj/repo/op_store/views/26fe2fca79accc4882061dfcef622c369657034d91e4904f10948afc6e4766be16037b92c1e0cf060289696505b3f1e5cab24c788aeafbdbf916dca6a2d7d1a2",
+    "repo/.jj/repo/op_store/views/45e2bb2c4ee88877dd106ffd42737fd42fdf5b1f4ed03ad6cd897b9f2f18dee39c7150569ebad97fd57e5f44ad7e84ff38f3d0a6968784d5c828559e48c7e2db",
+    "repo/.jj/repo/op_store/views/6721fb4bba2e5d48289953502b218323ba795a40953ae23925ab432e460215a8d3131f6d14c1299f1d1fc55d4cb52384f8f5dbf1b3f84a9831361a5d179782e6",
+    "repo/.jj/repo/op_store/views/9f63b85adfa732412991e17a741ba8c46ada92b79d494ed3ba562595cda8773b275e561972aa7fb8646cd4c989ec936bdfb5bc0d2afc2223feeb25529bd0fc14",
+    "repo/.jj/repo/op_store/views/c347a4896a13b13f3189acd30a2efb4d31332e26cf4a359050e712fe501b38700126f333ad6d0fbce33e2a0cb30589d6cc45f0d2a0acaf84a2a1ab377c019f9c",
+    "repo/.jj/repo/op_store/views/f26db8039a8fd825d1dcc5fddc298f9583948601453db43bc5e9b1ea5add27f5a23b30f6e75cbe2afbbd3f1951e9afac6fd2ad8e2a2c7cfd6afc5b47f032f19e",
+    "repo/.jj/repo/op_store/views/f3ff6ca44852216bb49ac99a86a1aaf497164ccabf113497643acb1a085bfd4930db45eab6203259ff7c3f34f6b0139fc0383c505a788ca6cc54dd5cdd8d77c6",
+    "repo/.jj/repo/op_store/views/fca12e6f114d29b5339facf6e0f7c4c7c933db2e45beb7e0ea3cb74ae442ac2b4fb195df0ecb7086593f9657bac30399e2023b299d3777c136bdae77ca95e37e",
+    "repo/.jj/repo/store/extra/0199e04611a8f76e65441bcf5bd1a5ef7ed18ddcc186e49a6dbb85fd59e7fde262b6203f06e864b8a9b6a705827f1146854fc1de6128423bd1d5cbc4401589a7",
+    "repo/.jj/repo/store/extra/38cb2724e8fa4110ff67d89d3639908d0a2d3bc4ca503d9342e551c612caf964454cfd3a1425fab56f475c3bf66e3d43964821e5818a2074edcddef236bd1224",
+    "repo/.jj/repo/store/extra/40df9737371d939336d811a8b3ce7e8e4dc3f2dcff1b2fbebdcbaa9f79b0fb3cbaa5c2d382d9d9a6d367402179a6d4766ef0f76f6a851df883f0702459e5c77f",
+    "repo/.jj/repo/store/extra/45558fdb49fa468396335d85e1fccccd7ab199b569cf7cc1161a99ff2d11c98bf692b85590c3e09bdda9f32256375e514e1669d05f72e613beeb02b1194820ca",
+    "repo/.jj/repo/store/extra/482ae5a29fbe856c7272f2071b8b0f0359ee2d89ff392b8a900643fbd0836eccd067b8bf41909e206c90d45d6e7d8b6686b93ecaee5fe1a9060d87b672101310",
+    "repo/.jj/repo/store/extra/9b86aa97f050d74073fc1c06fafccff8daefe804478baaeb6c43a333ce3801c7309c14ac5eeaca613c42d63355dc78e9af64515fe93b8d9e7ee2a648e59047be",
+    "repo/.jj/repo/store/extra/9ddb3d55c91ffa39eca18b52b696256f3b4afcf0647ef32efc5818047f43652eacd9a3de7ba913a593c34b748ee672bac7265e7d5e08a3195ae036fb549f2449",
+    "repo/.jj/repo/store/extra/c35620a9c9009e5617c7a212935fb720681ca9b4f7a08b8516223edbdab9f702a9177b92a2270854b1f48d24ae3444903e41aaac9acb3a578e1801461c28a5b8",
+    "repo/.jj/repo/store/extra/df7f969d61f55b443b07a4a726306a90e3994f8ffd8b15582769e452fa36a55d31db24ac278a6af118c0a024559a12dde029c5da5369e781cccd366ad9f6f12a",
+    "repo/.jj/repo/store/extra/e2191ac149759819992f893bb709f7e30bb05cdfdc318e2a6f95f37f3add77fa4f1ab9b23219eab87ebf83633fd32073fe49b8677a2fce36e23302dce0d67931",
+    "repo/.jj/repo/store/extra/heads/9b86aa97f050d74073fc1c06fafccff8daefe804478baaeb6c43a333ce3801c7309c14ac5eeaca613c42d63355dc78e9af64515fe93b8d9e7ee2a648e59047be",
+    "repo/.jj/repo/store/git_target",
+    "repo/.jj/repo/store/type",
+    "repo/.jj/repo/submodule_store/type",
+    "repo/.jj/repo/workspace_store/index",
+    "repo/.jj/working_copy/checkout",
+    "repo/.jj/working_copy/tree_state",
+    "repo/.jj/working_copy/type",
+    "repo/README.md",
+    "ws-0/.jj/repo",
+    "ws-0/.jj/working_copy/checkout",
+    "ws-0/.jj/working_copy/tree_state",
+    "ws-0/.jj/working_copy/type",
+    "ws-0/README.md",
+    "ws-0/shared/file-0.txt",
+    "ws-0/shared/file-2.txt",
+    "ws-0/shared/file-3.txt",
+    "ws-0/ws-0/file-1.txt"
+  ]
+}
