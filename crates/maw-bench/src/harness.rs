@@ -408,6 +408,10 @@ fn build_manifest(
         os_kernel: detect_os_kernel(),
         start_ts_unix_ms: start_ms,
         end_ts_unix_ms: end_ms,
+        // bn-18mv: persist the per-run chaos env so analysts can grep
+        // manifests to confirm chaos fired. Empty for `--chaos=off` runs
+        // (skipped at serialization — see RunManifest::chaos_env).
+        chaos_env: bcfg.chaos_env.clone(),
     }
 }
 

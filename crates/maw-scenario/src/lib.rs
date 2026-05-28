@@ -485,6 +485,20 @@ pub const GIT_TIME_BASE_FOR_DRIVER: i64 = GIT_TIME_BASE;
 /// `seed_reaches_bn_cm63_class` test asserts this value remains the first
 /// such seed in `0..200`; if the chooser's distribution shifts, that test
 /// fires and we re-pin (and propagate to the corpus).
+///
+/// # History
+///
+/// **bn-18mv (2026-05-27)**: extended `choose_fault` to attach
+/// commit-phase failpoints to `Op::Commit` (in addition to `Op::Merge`).
+/// The extra RNG dice rolled per Commit step shift the chooser's
+/// deterministic stream, so this constant was re-verified end-to-end:
+/// the `seed_reaches_bn_cm63_class` test below sweeps `0..200` under
+/// the default profile and asserts seed `1` is still the first to
+/// reach the class. The committed corpus entry at
+/// `tests/corpus/dst/bn-cm63-destroy-vs-inflight-merge.json` ships a
+/// pre-recorded `plan` array (driven verbatim, not regenerated from
+/// seed), so the existing corpus replay is unaffected by changes to
+/// the generator's RNG stream.
 pub const CANONICAL_BN_CM63_SEED: u64 = 1;
 
 impl ScenarioGenerator for DefaultScenarioGenerator {
@@ -929,16 +943,56 @@ fn apply_to_model(model: &mut AbstractModel, op: &Op) {
 // ---------------------------------------------------------------------------
 
 /// Decide whether `op` carries a fault, and which named failpoint it lands
-/// on. Faults are only attached to ops that exercise a merge FSM phase —
-/// anything else has nothing the failpoint registry would trip.
+/// on. Faults attach only to ops whose execution path can plausibly reach
+/// a `maw` invocation that trips the failpoint registry — currently
+/// `Op::Merge` (any FSM phase) and `Op::Commit` (commit phase only, see
+/// bn-18mv note below). Other ops (`Edit`, `Sync`, `Destroy`, …) carry
+/// `FaultSpec::None` because the agent's reaction to them does not pass
+/// through a phase a failpoint registry site fires from.
+///
+/// # bn-18mv: Commit ops also carry faults (commit-phase only)
+///
+/// Originally faults attached only to `Op::Merge`. The 2026-05-27 chaos
+/// smoke surfaced that short plans (`plan_steps=4`, the sg2-sweep-pilot
+/// bin default) frequently never emit a `Merge` step — the typical
+/// shape is `ws_create / ws_create / edit / commit`. Without merges,
+/// no fault, no `MAW_FP` env, no chaos. The fix below extends the seam
+/// so an `Op::Commit` may carry one of the **commit-phase** failpoints
+/// (`FP_COMMIT_BEFORE_BRANCH_CAS`, `FP_COMMIT_BETWEEN_CAS_OPS`,
+/// `FP_COMMIT_AFTER_EPOCH_CAS`). These are legitimate chaos targets:
+/// the maw-bench harness exports `MAW_FP=<spec>` on the agent
+/// subprocess for the **entire run**, so any subsequent `maw ws merge`
+/// the agent performs (organically, to leave the substrate coherent)
+/// will trip the failpoint — even when the plan itself has no Merge.
+///
+/// Restricting Commit-op faults to the `commit` phase preserves the
+/// invariant that a fault's named phase matches an FSM phase a `maw`
+/// invocation can plausibly reach from the carrying op's execution
+/// context. Merges still draw from every phase (no behaviour change
+/// for the longer plans that contain Merge steps).
 fn choose_fault(rng: &mut StdRng, profile: &ConditionProfile, op: &Op) -> FaultSpec {
-    if !matches!(op, Op::Merge { .. }) {
-        return FaultSpec::None;
-    }
+    let phase_filter: Option<&str> = match op {
+        Op::Merge { .. } => None,           // any phase (preserves pre-bn-18mv behaviour)
+        Op::Commit { .. } => Some("commit"), // commit-phase failpoints only
+        _ => return FaultSpec::None,
+    };
     if !rng.random_bool(profile.mid_op_kill_prob) {
         return FaultSpec::None;
     }
-    let (phase, sites) = CRASHABLE_BY_PHASE[rng.random_range(0..CRASHABLE_BY_PHASE.len())];
+    let (phase, sites) = if let Some(want) = phase_filter {
+        // Find the entry for the named phase. The CRASHABLE_BY_PHASE table is
+        // a fixed compile-time constant so this lookup never fails in practice;
+        // the fallback to the full draw is defensive (a future edit that
+        // renames `"commit"` would otherwise silently revert to merge-only
+        // chaos for Commit ops).
+        CRASHABLE_BY_PHASE
+            .iter()
+            .copied()
+            .find(|(p, _)| *p == want)
+            .unwrap_or_else(|| CRASHABLE_BY_PHASE[rng.random_range(0..CRASHABLE_BY_PHASE.len())])
+    } else {
+        CRASHABLE_BY_PHASE[rng.random_range(0..CRASHABLE_BY_PHASE.len())]
+    };
     let name = sites[rng.random_range(0..sites.len())];
     FaultSpec::Failpoint {
         name: name.to_string(),
@@ -1096,7 +1150,9 @@ mod tests {
         let seed = found.expect("no seed in 0..200 reached the bn-cm63 class");
         // Pin the *canonical* seed (the first one) for downstream T1.4 /
         // T1.6 to hard-code as a permanent regression seed (bn-3ryq corpus).
-        // At the time of writing the first hit was seed = 0.
+        // At the time of writing the first hit was seed = 1 (re-verified
+        // post-bn-18mv: the extra RNG dice rolled per Commit step did NOT
+        // shift the first-hit index).
         assert_eq!(
             seed, CANONICAL_BN_CM63_SEED,
             "first bn-cm63-reaching seed shifted; downstream regression seeds need re-pinning",
@@ -1134,26 +1190,99 @@ mod tests {
         }
     }
 
-    /// `FaultSpec` only attaches to merge ops, and only at known failpoints.
+    /// `FaultSpec` only attaches to merge or commit ops (bn-18mv), and only
+    /// at known failpoints. Commit ops carry **commit-phase** failpoints only;
+    /// merges may carry any phase. Other ops (`Edit`, `Sync`, `Destroy`, …)
+    /// never carry a fault because no failpoint registry site fires from
+    /// their execution context.
     #[test]
-    fn faults_attach_only_to_merges_at_known_sites() {
+    fn faults_attach_only_to_merges_or_commits_at_known_sites() {
         let known: std::collections::HashSet<&str> = CRASHABLE_BY_PHASE
             .iter()
             .flat_map(|(_, sites)| sites.iter().copied())
             .collect();
-        let profile = ConditionProfile::new(4, 1.0, 0.5, 0.3); // force every merge to carry a fault
+        let commit_sites: std::collections::HashSet<&str> = CRASHABLE_BY_PHASE
+            .iter()
+            .find(|(p, _)| *p == "commit")
+            .map(|(_, sites)| sites.iter().copied().collect())
+            .unwrap_or_default();
+        // mid_op_kill_prob=1.0 forces every Merge/Commit op to carry a fault.
+        let profile = ConditionProfile::new(4, 1.0, 0.5, 0.3);
         let plan = generate_plan(7, &profile, 256);
         for step in &plan.steps {
             match (&step.op, &step.fault) {
                 (Op::Merge { .. }, FaultSpec::Failpoint { name, .. }) => {
                     assert!(known.contains(name.as_str()), "unknown failpoint {name}");
                 }
+                (Op::Commit { .. }, FaultSpec::Failpoint { name, phase }) => {
+                    assert!(known.contains(name.as_str()), "unknown failpoint {name}");
+                    assert_eq!(phase, "commit", "Commit op fault outside commit phase");
+                    assert!(
+                        commit_sites.contains(name.as_str()),
+                        "Commit op fault site {name} not in commit phase"
+                    );
+                }
                 (_, FaultSpec::None) => {}
                 (op, FaultSpec::Failpoint { .. }) => {
-                    panic!("non-merge op carries a fault: {op:?}");
+                    panic!("non-merge / non-commit op carries a fault: {op:?}");
                 }
             }
         }
+    }
+
+    /// bn-18mv: under a chaos-armed profile (`mid_op_kill_prob` at the C4
+    /// hostile knobs, the same value `SweepDriver::drive` injects via
+    /// `to_profile_with_chaos(1.0)` when `--chaos=on` is asserted) at the
+    /// driver's chaos-on plan-steps floor (8 — see `driver.rs:plan_steps_effective`),
+    /// at least M out of N fixed seeds must emit ≥1 `FaultSpec::Failpoint`
+    /// step. This is the integration pin for the chaos pipeline.
+    ///
+    /// Pre-bn-18mv, faults attached only to `Op::Merge` and ALL plans at
+    /// the bin's `plan_steps=4` carried zero faults (the 2026-05-27 smoke
+    /// surfaced empty `manifest.chaos_env`). The bn-18mv fix has two parts:
+    /// (a) `choose_fault` here may also attach commit-phase faults to
+    /// `Op::Commit`; (b) `SweepDriver` floors `plan_steps` to 8 when
+    /// chaos is on (short plans starve the chooser of fault-eligible ops).
+    /// Together these lift the per-plan failpoint coverage from ~0% to
+    /// ~57% at `mid_op_kill_prob=1.0` — empirically measured.
+    ///
+    /// The threshold (3 of 10) is Wilson-loose to be flake-resistant: with
+    /// p ≈ 0.57, Pr[<3 hits in 10] ≈ 0.7%. Any future regression that
+    /// removes commit-phase chaos OR re-lowers the plan_steps floor will
+    /// drop the hit rate to ~0% and trip this test deterministically.
+    #[test]
+    fn bn_18mv_chaos_armed_plans_emit_failpoint_at_target_rate() {
+        const PLAN_STEPS: usize = 8; // SweepDriver chaos-on floor (bn-18mv)
+        const N: usize = 10;
+        const MIN_HITS: usize = 3; // Wilson-loose; expected ~5-6
+        // Profile matches what `SweepDriver` builds at `--chaos=on` via
+        // `to_profile_with_chaos(1.0)` over the C4 hostile cell.
+        let profile = ConditionProfile::new(4, 1.0, 1.0, 0.2);
+        let mut hits = 0;
+        let mut plans_dump: Vec<String> = Vec::new();
+        for seed in 0..N as u64 {
+            let plan = generate_plan(seed, &profile, PLAN_STEPS);
+            let n_faults = plan
+                .steps
+                .iter()
+                .filter(|s| matches!(s.fault, FaultSpec::Failpoint { .. }))
+                .count();
+            if n_faults >= 1 {
+                hits += 1;
+            } else {
+                plans_dump.push(format!(
+                    "seed={seed} ops={:?}",
+                    plan.steps.iter().map(|s| &s.op).collect::<Vec<_>>(),
+                ));
+            }
+        }
+        assert!(
+            hits >= MIN_HITS,
+            "bn-18mv regression: only {hits}/{N} plans carried >=1 failpoint \
+             at plan_steps={PLAN_STEPS}, mid_op_kill_prob=1.0 \
+             (expected >={MIN_HITS}). Misses:\n  {}",
+            plans_dump.join("\n  "),
+        );
     }
 
     /// A plan with zero `mid_op_kill_prob` never carries a fault.

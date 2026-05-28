@@ -224,8 +224,25 @@ impl SweepDriver {
         // overlay can translate to MAW_FP. Default 0 preserves the
         // pre-bn-3hzt "SG2 is fault-orthogonal to SG1" stance.
         let chaos_prob: f64 = if self.chaos_enabled { 0.30 } else { 0.0 };
+        // bn-18mv: at very short `plan_steps` (the sg2-sweep-pilot bin's
+        // default of 4) the validity-narrowed chooser frequently emits
+        // plans with ZERO fault-eligible ops (Commit/Merge) — empirically
+        // only ~20% of seeds at plan_steps=4 carry any fault under
+        // `mid_op_kill_prob=1.0` (the rest collapse to
+        // `WsCreate/Destroy/Recover/...` patterns). To make chaos a
+        // dependable per-run signal without changing the bin defaults
+        // for non-chaos sweeps, lift `plan_steps` to a floor of 8 when
+        // chaos is on (~57% per-plan failpoint coverage at prob=1.0,
+        // ~37% at the default prob=0.30 — sufficient for a 3-run smoke
+        // to reliably surface ≥1 chaos event). Users who explicitly
+        // configured a larger value via `with_plan_steps` keep it.
+        let plan_steps_effective = if self.chaos_enabled {
+            self.plan_steps.max(8)
+        } else {
+            self.plan_steps
+        };
         for (cell, arm, replicate, seed) in grid.iter_runs() {
-            let plan_steps = self.plan_steps;
+            let plan_steps = plan_steps_effective;
             let plan = generate_plan(
                 seed,
                 &cell.condition.to_profile_with_chaos(chaos_prob),
@@ -301,7 +318,19 @@ impl SweepDriver {
                 // roll. arm-agnostic — the shim is only ON the
                 // PATH for arms whose adapter materialised it, so
                 // arms without a shim see no effect from these vars.
-                let prob = cell.condition.to_profile().mid_op_kill_prob;
+                //
+                // bn-18mv: use `to_profile_with_chaos(chaos_prob)` here, NOT
+                // the plain `to_profile()` — the latter hardcodes
+                // `mid_op_kill_prob = 0.0` and made the PATH shim a
+                // passthrough no-op for worktrees/jj arms (the 2026-05-27
+                // chaos smoke surfaced empty `manifest.chaos_env`). The same
+                // `chaos_prob` injected into the scenario generator above
+                // (line ~231) is also what the shim must roll against, so
+                // there's a single source of truth.
+                let prob = cell
+                    .condition
+                    .to_profile_with_chaos(chaos_prob)
+                    .mid_op_kill_prob;
                 if prob > 0.0 {
                     config
                         .chaos_env

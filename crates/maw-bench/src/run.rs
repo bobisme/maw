@@ -297,6 +297,25 @@ pub struct RunManifest {
     pub start_ts_unix_ms: u64,
     /// Run end in Unix milliseconds (UTC).
     pub end_ts_unix_ms: u64,
+    /// bn-18mv: the per-run chaos overlay env vars actually injected into
+    /// the agent subprocess. Mirrors `BenchConfig::chaos_env`. Empty when
+    /// `--chaos=off` (the SG2 default) and serialized as missing so the
+    /// pre-bn-18mv manifest layout is unchanged for non-chaos sweeps.
+    ///
+    /// Verification path: the 2026-05-27 chaos smoke surfaced empty
+    /// `manifest.chaos_env` because the field was missing from the
+    /// manifest entirely — chaos `_was_` armed at the harness env level
+    /// but nothing got persisted into the per-run JSON for the analyst
+    /// to confirm. Adding the field here closes that loop: post-bn-18mv
+    /// runs at `--chaos=on` carry `MAW_FP=<spec>` (and, for the
+    /// PATH-shim arms, `MAW_BENCH_CHAOS_KILL_PROB` /
+    /// `MAW_BENCH_CHAOS_KILL_MS`) so downstream readers can grep the
+    /// manifest to assert chaos actually fired.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub chaos_env: std::collections::BTreeMap<String, String>,
 }
 
 /// The complete per-run record. One JSON file per run; the schema T2.4
