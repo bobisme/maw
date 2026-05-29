@@ -660,6 +660,39 @@ mod tests {
         assert!(err.contains("--into"), "error should mention --into: {err}");
     }
 
+    /// bn-2to8: `maw ws recover --to`, `--into`, and `--restore-as` must all
+    /// resolve to the same `WorkspaceCommands::Recover { to, .. }` field. The
+    /// SG3 R6 friction was agents reaching for `--into` (merge's verb) on
+    /// recover and hitting an unrecognized-flag error; the aliases make every
+    /// spelling work. Parse-tree equivalence is the strongest static proof.
+    #[test]
+    fn ws_recover_to_into_restore_as_all_route_to_same_field() {
+        use maw_cli::workspace::WorkspaceCommands;
+
+        fn recover_to(flag: &str) -> Option<String> {
+            let parsed = Cli::try_parse_from(["maw", "ws", "recover", "alice", flag, "restored"])
+                .unwrap_or_else(|e| {
+                    panic!("`maw ws recover alice {flag} restored` must parse: {e}")
+                });
+            let Commands::Workspace(WorkspaceCommands::Recover { to, .. }) = parsed.command else {
+                panic!("`{flag}` must route to Commands::Workspace(Recover)");
+            };
+            to
+        }
+
+        assert_eq!(recover_to("--to").as_deref(), Some("restored"));
+        assert_eq!(
+            recover_to("--into").as_deref(),
+            Some("restored"),
+            "--into must alias --to"
+        );
+        assert_eq!(
+            recover_to("--restore-as").as_deref(),
+            Some("restored"),
+            "--restore-as must alias --to"
+        );
+    }
+
     #[test]
     fn ws_create_parsing_defers_source_validation_to_runtime() {
         let result = Cli::try_parse_from(["maw", "ws", "create", "alice"]);

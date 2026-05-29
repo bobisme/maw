@@ -490,6 +490,7 @@ pub enum WorkspaceCommands {
     ///   maw ws recover --ref <recovery-ref> --show src/main.rs
     ///   maw ws recover alice --restore-file src/main.rs   # restore one file into ws/default/
     ///   maw ws recover alice --to alice-restored   # restore latest destroy snapshot
+    ///   maw ws recover alice --into alice-restored # same; --into aliases --to
     ///   maw ws recover --ref <recovery-ref> --to scratch
     #[command(verbatim_doc_comment)]
     Recover {
@@ -547,7 +548,11 @@ pub enum WorkspaceCommands {
         /// Restore the snapshot into a new workspace with this name.
         ///
         /// Requires either <name> (latest destroy snapshot) or --ref.
-        #[arg(long)]
+        ///
+        /// `--into` is a visible alias (matches `maw ws merge --into`'s verb so
+        /// the recover muscle-memory doesn't misfire); `--restore-as` is a
+        /// hidden alias for the same.
+        #[arg(long, visible_alias = "into", alias = "restore-as")]
         to: Option<String>,
 
         /// Copy a single file from the snapshot into the default workspace's worktree.
