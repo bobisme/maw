@@ -1313,3 +1313,15 @@
 1780071812386898	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyjRI		item.move	bn-zg7c	{"state":"doing"}	blake3:1xf-yLsd8RjzTvZbekFk-srzIsdhl7aTOedffI--lQA
 1780071812405286	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyjhI		item.assign	bn-zg7c	{"action":"assign","agent":"maw-dev"}	blake3:iYzeS9xmuYOgBbqTkPqs_YwlefHH7WXHSsp-HLBTRHQ
 1780072386141448	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyjxI		item.move	bn-zg7c	{"state":"done"}	blake3:BBautrjuSBB6Puw_PZQS2okpQT-5gtvHHxRv-oOO14c
+1780072940349057	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEykBI		item.move	bn-1r0r	{"state":"doing"}	blake3:A0-m1Y0VfQhdMAdj5n4NXpfyWUG9TnaBsBKuN5K0mNA
+1780072940368886	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEykRI		item.assign	bn-1r0r	{"action":"assign","agent":"maw-dev"}	blake3:mIMqmOfZomhs5J8_QUtuCGEnxx4L3esvhx0WjUXRYm8
+1780073013337897	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEykhI		item.move	bn-1r0r	{"state":"done"}	blake3:ye7tXDytGLMjbYHLgsJqe7Jk4zCQ7Dfmsu63uLCV0Is
+1780073076888722	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEykxI		item.move	bn-2b9h	{"state":"doing"}	blake3:5JqQAVoPqN_ezpocCh51WiWFBKQapPOPjjxdLpepklE
+1780073076908876	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEylBI		item.assign	bn-2b9h	{"action":"assign","agent":"maw-dev"}	blake3:eVs0BZ3As9gSYSnCQN6XHi4DSPeq2yg3QhUBBO_VjOc
+1780073403287316	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEylRI		item.move	bn-2b9h	{"state":"done"}	blake3:xhuGkaLsAYUvDJcZej8LGGhM2-GPv8CoAjgTy-ckLIQ
+1780073411651425	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEylhI		item.move	bn-29x0	{"state":"doing"}	blake3:K5iBnUzXMheb1HZ6Jmtqf6uWBbyL9oSbuG-E4ugnJA4
+1780073411666844	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEylxI		item.assign	bn-29x0	{"action":"assign","agent":"maw-dev"}	blake3:aQFeElitWNWPpdYdWNhexZCCxR9JnWkd9ZAzZCav1kA
+1780074209255217	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymBI		item.move	bn-29x0	{"state":"done"}	blake3:giKjcmGrrK1DBNQ-zo03rFqRRJmxBwgTgrkwFMbLq04
+1780074376686180	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymRI		item.move	bn-3uj4	{"state":"doing"}	blake3:PwYniI5kAQfLOBro01yysI-_evbSvk9FsaCgKca9siY
+1780074376696352	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymhI		item.assign	bn-3uj4	{"action":"assign","agent":"maw-dev"}	blake3:Uwbq4VkLgrnKqLgFPKzokpSsYQL7XGaBelp1mjWXlHs
+1780074735068464	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEymxI		item.move	bn-3uj4	{"state":"done"}	blake3:xI7uyxSHLDXAyfocb5d-7hdDnBwDsycn8i3i3MPje-Q
