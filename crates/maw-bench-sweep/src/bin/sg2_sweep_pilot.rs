@@ -86,7 +86,9 @@ impl GridChoice {
         match s {
             "pilot" => Ok(Self::Pilot),
             "spectrum" => Ok(Self::Spectrum),
-            other => Err(format!("--grid: unknown value `{other}` (want pilot|spectrum)")),
+            other => Err(format!(
+                "--grid: unknown value `{other}` (want pilot|spectrum)"
+            )),
         }
     }
 
@@ -188,10 +190,9 @@ fn main() -> ExitCode {
         let _ = maw_bench_sweep::check_maw_failpoints_advisory();
     }
 
-    let dir: PathBuf = args
-        .dir
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("sg2-sweep-pilot-{}", std::process::id())));
+    let dir: PathBuf = args.dir.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("sg2-sweep-pilot-{}", std::process::id()))
+    });
 
     let start = Instant::now();
     eprintln!("sg2-sweep-pilot: artifact_dir = {}", dir.display());
@@ -225,11 +226,9 @@ fn main() -> ExitCode {
     //    For the real-LLM path, the arm list is collapsed to ONE arm
     //    matching the chosen substrate (otherwise we'd burn 3-4× the
     //    spend running every baseline arm).
-    let agent_cfg_override = args.model.as_ref().map(|m| {
-        maw_bench::agent::AgentConfig {
-            model: m.clone(),
-            ..maw_bench::agent::AgentConfig::default()
-        }
+    let agent_cfg_override = args.model.as_ref().map(|m| maw_bench::agent::AgentConfig {
+        model: m.clone(),
+        ..maw_bench::agent::AgentConfig::default()
     });
     let driver = match SweepDriver::new(&dir) {
         Ok(d) => d
@@ -313,10 +312,7 @@ fn main() -> ExitCode {
     // Aggregate total cost (sum across runs). Mock runs report None
     // (skipped); Claude runs report a per-run `total_cost_usd` from
     // the §6.4 envelope, bubbled through BenchRun.cost_usd.
-    let total_cost: f64 = runs
-        .iter()
-        .filter_map(|r| r.cost_usd)
-        .sum();
+    let total_cost: f64 = runs.iter().filter_map(|r| r.cost_usd).sum();
     if total_cost > 0.0 {
         eprintln!("  total_cost_usd = {total_cost:.4}");
     }
@@ -344,10 +340,7 @@ mod tests {
     #[test]
     fn grid_choice_parse_accepts_pilot_and_spectrum() {
         assert_eq!(GridChoice::parse("pilot").unwrap(), GridChoice::Pilot);
-        assert_eq!(
-            GridChoice::parse("spectrum").unwrap(),
-            GridChoice::Spectrum
-        );
+        assert_eq!(GridChoice::parse("spectrum").unwrap(), GridChoice::Spectrum);
     }
 
     #[test]

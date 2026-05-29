@@ -386,12 +386,11 @@ pub struct FailpointsAdvisory {
 /// Writes one `WARN:` line to stderr. Never errors. Never panics.
 #[must_use]
 pub fn check_maw_failpoints_advisory() -> FailpointsAdvisory {
-    let warning_line =
-        "WARN: --chaos=on requires the installed `maw` binary to be built with \
+    let warning_line = "WARN: --chaos=on requires the installed `maw` binary to be built with \
          --features failpoints (otherwise MAW_FP is silently a no-op and chaos \
          produces zero crashes). Install with: cargo install --path crates/maw-cli \
          --features failpoints --force"
-            .to_string();
+        .to_string();
     eprintln!("{warning_line}");
     FailpointsAdvisory { warning_line }
 }

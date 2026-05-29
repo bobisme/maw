@@ -123,9 +123,7 @@ impl MawAdapter {
     fn maw_fp_spec_for(fault: &FaultSpec) -> Option<String> {
         match fault {
             FaultSpec::None => None,
-            FaultSpec::Failpoint { name, .. } => {
-                Some(format!("{name}=error:bn-3hzt-sg2-chaos"))
-            }
+            FaultSpec::Failpoint { name, .. } => Some(format!("{name}=error:bn-3hzt-sg2-chaos")),
         }
     }
 
@@ -242,12 +240,7 @@ impl Substrate for MawAdapter {
         let chaos_note = fp_spec.clone().unwrap_or_else(|| "<none>".to_string());
 
         let result = if let Some(spec) = fp_spec.as_deref() {
-            proc_util::run_envs(
-                &self.maw_bin,
-                &arg_refs,
-                &self.root,
-                &[("MAW_FP", spec)],
-            )
+            proc_util::run_envs(&self.maw_bin, &arg_refs, &self.root, &[("MAW_FP", spec)])
         } else {
             proc_util::run(&self.maw_bin, &arg_refs, &self.root)
         };

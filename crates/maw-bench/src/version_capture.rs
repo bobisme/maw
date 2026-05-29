@@ -83,12 +83,7 @@ pub fn capture_tool_version(tool: &str) -> ToolVersion {
             // Exited non-zero. Treat as captured-with-error; surface
             // the first line of stderr (or the exit code) as context.
             let stderr = String::from_utf8_lossy(&o.stderr);
-            let snippet = stderr
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let snippet = stderr.lines().next().unwrap_or("").trim().to_string();
             let err = if snippet.is_empty() {
                 format!("exit {:?}", o.status.code())
             } else {

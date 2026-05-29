@@ -91,17 +91,17 @@ pub use aggregate::{
     AggregateError, AggregateExtras, CellAggregate, CellKey, SweepSummary, WilsonCi,
     aggregate_artifacts, load_runs,
 };
+pub use crossover::{CrossoverPoint, CrossoverRegime, MetricName, find_crossover};
+pub use driver::{SweepDriver, SweepDriverError, SweepPlan};
+pub use grid::{
+    ARMS_PUBLICATION, ConditionPoint, SweepCell, SweepGrid, TClass, pilot_grid, spectrum_grid,
+};
 pub use preflight::{
     FailpointsAdvisory, PreflightOutcome, check_maw_failpoints_advisory, check_maw_version_skew,
     check_maw_version_skew_with,
 };
-pub use crossover::{CrossoverPoint, CrossoverRegime, MetricName, find_crossover};
-pub use driver::{SweepDriver, SweepDriverError, SweepPlan};
 pub use real_runtime::{
     AnyAgent, BackendChoice, RealSubstrate, SubstrateChoice, make_any_agent, validate_pairing,
-};
-pub use grid::{
-    ARMS_PUBLICATION, ConditionPoint, SweepCell, SweepGrid, TClass, pilot_grid, spectrum_grid,
 };
 pub use render::{SpectrumReportOptions, render_crossover_doc, render_spectrum_table};
 pub use sg3_decision::{

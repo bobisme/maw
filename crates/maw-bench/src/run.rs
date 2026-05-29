@@ -311,10 +311,7 @@ pub struct RunManifest {
     /// PATH-shim arms, `MAW_BENCH_CHAOS_KILL_PROB` /
     /// `MAW_BENCH_CHAOS_KILL_MS`) so downstream readers can grep the
     /// manifest to assert chaos actually fired.
-    #[serde(
-        default,
-        skip_serializing_if = "std::collections::BTreeMap::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub chaos_env: std::collections::BTreeMap<String, String>,
 }
 

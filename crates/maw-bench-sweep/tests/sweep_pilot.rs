@@ -140,21 +140,15 @@ fn spectrum_grid_drives_ten_cells_end_to_end() {
     // 10 cells × 4 arms × 1 seed = 40 runs (vs. pilot's 18).
     assert_eq!(runs.len(), 40);
     // 5 unique conditions: C0..C4.
-    let conditions: std::collections::BTreeSet<_> =
-        runs.iter().map(|r| r.manifest.condition_id.clone()).collect();
-    assert_eq!(
-        conditions.len(),
-        5,
-        "expected C0..C4, got {conditions:?}"
-    );
+    let conditions: std::collections::BTreeSet<_> = runs
+        .iter()
+        .map(|r| r.manifest.condition_id.clone())
+        .collect();
+    assert_eq!(conditions.len(), 5, "expected C0..C4, got {conditions:?}");
     // 6 unique T-classes: T0..T5.
     let t_classes: std::collections::BTreeSet<_> =
         runs.iter().map(|r| r.manifest.t_class.clone()).collect();
-    assert_eq!(
-        t_classes.len(),
-        6,
-        "expected T0..T5, got {t_classes:?}"
-    );
+    assert_eq!(t_classes.len(), 6, "expected T0..T5, got {t_classes:?}");
     // C2 is the chaos pivot: T0 + T1..T5 = 6 distinct (cond, t)
     // combinations all sitting on C2.
     let c2_combos: std::collections::BTreeSet<_> = runs

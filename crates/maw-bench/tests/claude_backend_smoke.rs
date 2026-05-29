@@ -143,10 +143,7 @@ fn smoke_lists_files_and_finishes() {
         "expected at least one turn; got empty transcript"
     );
     assert!(
-        reply
-            .turns
-            .iter()
-            .any(|t| !t.tool_calls.is_empty()),
+        reply.turns.iter().any(|t| !t.tool_calls.is_empty()),
         "expected at least one turn with a tool call (Bash); \
          the agent should have used Bash to ls. \
          If this fires, check the --allowed-tools flag in build_argv."

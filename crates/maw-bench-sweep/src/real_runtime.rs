@@ -163,18 +163,15 @@ impl SubstrateChoice {
 /// # Errors
 ///
 /// Returns a human-readable string on misconfig.
-pub fn validate_pairing(
-    backend: BackendChoice,
-    substrate: SubstrateChoice,
-) -> Result<(), String> {
+pub fn validate_pairing(backend: BackendChoice, substrate: SubstrateChoice) -> Result<(), String> {
     match (backend, substrate) {
-        (BackendChoice::Claude, SubstrateChoice::Noop) => Err(
-            "misconfig: --real-llm with --substrate=noop. \
+        (BackendChoice::Claude, SubstrateChoice::Noop) => {
+            Err("misconfig: --real-llm with --substrate=noop. \
              ClaudeBackend on NoopSubstrate has nothing to exercise — the agent has no \
              substrate-native verbs and the run is wasted spend. \
              Pass --substrate=maw|maw-consolidated|worktrees|jj."
-                .to_string(),
-        ),
+                .to_string())
+        }
         (
             BackendChoice::Mock,
             SubstrateChoice::MawWsLayout
@@ -247,13 +244,11 @@ pub fn make_any_agent(backend: BackendChoice, _seed: u64) -> Result<AnyAgent, St
             }
             #[cfg(not(feature = "claude-backend"))]
             {
-                Err(
-                    "--real-llm requested but the binary was not built with \
+                Err("--real-llm requested but the binary was not built with \
                      --features claude-backend. Rebuild with \
                      `cargo build -p maw-bench-sweep --features bench,claude-backend` \
                      (and remember to export MAW_BENCH_ALLOW_REAL_LLM=1 at runtime)."
-                        .to_string(),
-                )
+                    .to_string())
             }
         }
     }
@@ -287,8 +282,7 @@ pub mod cribs {
     /// (§8.1). The convention text the agent reads to coordinate
     /// across worktrees lives in `notes/sg2-worktrees-convention.md`;
     /// this crib instructs the agent to read it.
-    pub const WORKTREES_CONVENTION_CRIB: &str =
-        include_str!("cribs/worktrees_convention.md");
+    pub const WORKTREES_CONVENTION_CRIB: &str = include_str!("cribs/worktrees_convention.md");
     /// jj workspaces arm crib (§8.1). Covers `jj workspace add /
     /// list / update-stale`, divergence detection + resolution, op-log
     /// inspection + recovery, and when to AVOID op-integration.
@@ -364,11 +358,7 @@ fn setup_err<E: std::fmt::Display>(arm: &str, e: E) -> SubstrateError {
 /// The adapter's `root()` is the natural cwd for the agent — for maw
 /// it's the v2 root (so `maw ws create` works); for worktrees it's
 /// the integration worktree; for jj it's the jj-init'd repo.
-fn handle_at(
-    label: SubstrateLabel,
-    root: PathBuf,
-    convention: &'static str,
-) -> SubstrateHandle {
+fn handle_at(label: SubstrateLabel, root: PathBuf, convention: &'static str) -> SubstrateHandle {
     SubstrateHandle {
         label,
         workspace_root: root.clone(),
@@ -443,7 +433,11 @@ impl Substrate for RealSubstrate {
                     .map_err(|e| setup_err("MawAdapter::new", e))?;
                 let root = adapter.root().clone();
                 state.inner = Some(adapter);
-                Ok(handle_at(SubstrateLabel::Maw, root, cribs::MAW_WS_LAYOUT_CRIB))
+                Ok(handle_at(
+                    SubstrateLabel::Maw,
+                    root,
+                    cribs::MAW_WS_LAYOUT_CRIB,
+                ))
             }
             Self::MawConsolidatedLayout(state) => {
                 let adapter =
@@ -538,7 +532,11 @@ mod tests {
             ("jj", SubstrateChoice::Jj),
             ("jj-workspaces", SubstrateChoice::Jj),
         ] {
-            assert_eq!(SubstrateChoice::parse(input).unwrap(), want, "input={input}");
+            assert_eq!(
+                SubstrateChoice::parse(input).unwrap(),
+                want,
+                "input={input}"
+            );
         }
     }
 
@@ -572,7 +570,11 @@ mod tests {
     fn validate_accepts_canonical_pairings() {
         validate_pairing(BackendChoice::Mock, SubstrateChoice::Noop).unwrap();
         validate_pairing(BackendChoice::Claude, SubstrateChoice::MawWsLayout).unwrap();
-        validate_pairing(BackendChoice::Claude, SubstrateChoice::MawConsolidatedLayout).unwrap();
+        validate_pairing(
+            BackendChoice::Claude,
+            SubstrateChoice::MawConsolidatedLayout,
+        )
+        .unwrap();
         validate_pairing(BackendChoice::Claude, SubstrateChoice::Worktrees).unwrap();
         validate_pairing(BackendChoice::Claude, SubstrateChoice::Jj).unwrap();
     }
@@ -596,7 +598,10 @@ mod tests {
         // The §8.1 cribs are binding inputs to `prompt_sha256`;
         // accidentally shipping an empty file would silently change
         // every prompt hash. Smoke check that each is non-trivial.
-        assert!(cribs::MAW_WS_LAYOUT_CRIB.len() > 100, "maw ws-layout crib too short");
+        assert!(
+            cribs::MAW_WS_LAYOUT_CRIB.len() > 100,
+            "maw ws-layout crib too short"
+        );
         assert!(
             cribs::MAW_CONSOLIDATED_LAYOUT_CRIB.len() > 100,
             "maw consolidated-layout crib too short"
@@ -605,6 +610,9 @@ mod tests {
             cribs::WORKTREES_CONVENTION_CRIB.len() > 100,
             "worktrees-convention crib too short"
         );
-        assert!(cribs::JJ_WORKSPACES_CRIB.len() > 100, "jj-workspaces crib too short");
+        assert!(
+            cribs::JJ_WORKSPACES_CRIB.len() > 100,
+            "jj-workspaces crib too short"
+        );
     }
 }

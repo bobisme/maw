@@ -321,7 +321,17 @@ fn main() -> ExitCode {
             PlantedRegression::None
         };
         let substrate_for_arm = resolve_substrate_for_arm(&args, arm);
-        match run_arm(arm, args.n_a, args.n_b, &dir, plant_for_arm, args.backend, substrate_for_arm, args.chaos, args.model.as_deref()) {
+        match run_arm(
+            arm,
+            args.n_a,
+            args.n_b,
+            &dir,
+            plant_for_arm,
+            args.backend,
+            substrate_for_arm,
+            args.chaos,
+            args.model.as_deref(),
+        ) {
             Ok(cost) => total_cost += cost,
             Err(e) => {
                 eprintln!("run_arm({arm}): {e}");

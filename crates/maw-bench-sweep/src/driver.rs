@@ -257,10 +257,7 @@ impl SweepDriver {
             // manifest's `claude_model_id`). Cloned per run because
             // the harness takes ownership; one driver pass can drive
             // many runs.
-            let agent_config = self
-                .agent_config_override
-                .clone()
-                .unwrap_or_default();
+            let agent_config = self.agent_config_override.clone().unwrap_or_default();
 
             let mut harness = BenchHarness::new(substrate, agent, agent_config);
 
@@ -409,9 +406,7 @@ fn skip_reason_for(arm: &str) -> String {
 /// agent's recovery path is supposed to heal.
 fn first_failpoint_spec(plan: &ScenarioPlan) -> Option<String> {
     plan.steps.iter().find_map(|s| match &s.fault {
-        FaultSpec::Failpoint { name, .. } => {
-            Some(format!("{name}=error:bn-3hzt-sg2-chaos"))
-        }
+        FaultSpec::Failpoint { name, .. } => Some(format!("{name}=error:bn-3hzt-sg2-chaos")),
         FaultSpec::None => None,
     })
 }

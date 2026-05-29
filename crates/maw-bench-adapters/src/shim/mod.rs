@@ -117,9 +117,8 @@ impl ShimSet {
     ///
     /// Returns [`SubstrateError::Io`] on any fs failure.
     pub fn materialize_in(dir: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&dir).map_err(|e| {
-            SubstrateError::Io(format!("shim dir {}: {e}", dir.display()))
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| SubstrateError::Io(format!("shim dir {}: {e}", dir.display())))?;
         write_shims(&dir)?;
         Ok(Self { dir, _tmp: None })
     }
@@ -187,9 +186,8 @@ fn write_shims(dir: &Path) -> Result<()> {
 
 fn write_one(dir: &Path, name: &str, contents: &str) -> Result<()> {
     let path = dir.join(name);
-    fs::write(&path, contents).map_err(|e| {
-        SubstrateError::Io(format!("write {}: {e}", path.display()))
-    })?;
+    fs::write(&path, contents)
+        .map_err(|e| SubstrateError::Io(format!("write {}: {e}", path.display())))?;
     set_executable(&path)?;
     Ok(())
 }
@@ -261,12 +259,24 @@ mod tests {
         let shim = ShimSet::materialize_temp().expect("materialize");
         let out = shim.chaos_env_overlay("", 5.0, 0);
         let map: std::collections::HashMap<_, _> = out.into_iter().collect();
-        assert_eq!(map.get("MAW_BENCH_CHAOS_KILL_PROB").map(String::as_str), Some("1"));
-        assert_eq!(map.get("MAW_BENCH_CHAOS_KILL_MS").map(String::as_str), Some("1"));
+        assert_eq!(
+            map.get("MAW_BENCH_CHAOS_KILL_PROB").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            map.get("MAW_BENCH_CHAOS_KILL_MS").map(String::as_str),
+            Some("1")
+        );
         let out = shim.chaos_env_overlay("", -0.5, 1_000_000);
         let map: std::collections::HashMap<_, _> = out.into_iter().collect();
-        assert_eq!(map.get("MAW_BENCH_CHAOS_KILL_PROB").map(String::as_str), Some("0"));
-        assert_eq!(map.get("MAW_BENCH_CHAOS_KILL_MS").map(String::as_str), Some("1000000"));
+        assert_eq!(
+            map.get("MAW_BENCH_CHAOS_KILL_PROB").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            map.get("MAW_BENCH_CHAOS_KILL_MS").map(String::as_str),
+            Some("1000000")
+        );
     }
 
     /// Default passthrough: with no chaos env, invoking the git shim
@@ -289,7 +299,11 @@ mod tests {
             .env_remove("MAW_BENCH_CHAOS_KILL_PROB")
             .output()
             .expect("spawn shim");
-        assert!(out.status.success(), "shim passthrough exit: {:?}", out.status);
+        assert!(
+            out.status.success(),
+            "shim passthrough exit: {:?}",
+            out.status
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             stdout.starts_with("git version"),

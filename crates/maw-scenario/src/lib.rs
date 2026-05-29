@@ -972,7 +972,7 @@ fn apply_to_model(model: &mut AbstractModel, op: &Op) {
 /// for the longer plans that contain Merge steps).
 fn choose_fault(rng: &mut StdRng, profile: &ConditionProfile, op: &Op) -> FaultSpec {
     let phase_filter: Option<&str> = match op {
-        Op::Merge { .. } => None,           // any phase (preserves pre-bn-18mv behaviour)
+        Op::Merge { .. } => None, // any phase (preserves pre-bn-18mv behaviour)
         Op::Commit { .. } => Some("commit"), // commit-phase failpoints only
         _ => return FaultSpec::None,
     };

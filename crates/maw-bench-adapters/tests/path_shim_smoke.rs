@@ -48,7 +48,11 @@ fn shim_passthrough_is_byte_identical_when_chaos_unset() {
         .env_remove(env_keys::CHAOS_KILL_PROB)
         .output()
         .expect("shim spawn");
-    assert!(via_shim.status.success(), "shim status: {:?}", via_shim.status);
+    assert!(
+        via_shim.status.success(),
+        "shim status: {:?}",
+        via_shim.status
+    );
     assert_eq!(
         String::from_utf8_lossy(&real.stdout),
         String::from_utf8_lossy(&via_shim.stdout),
