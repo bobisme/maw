@@ -2,6 +2,11 @@
 
 All notable changes to maw.
 
+## Unreleased
+
+- **`maw tldr` replaces `maw crib`.** Adopts the `<tool> tldr` convention: a short, affirmative quick-reference of the common commands grouped by task (no essays, no anti-pattern tables). The same cheat-sheet is now appended to `maw --help`. `crib` remains as a hidden alias. (bn-zg7c)
+- **`maw ws recover --into` / `--restore-as` alias `--to`.** Agents reaching for `--into` (merge's verb) on recover no longer hit an unrecognized-flag error. (bn-2to8)
+
 ## v0.61.0 — gix migration: maw no longer shells out to `git` (2026-05-17)
 
 Minor release completing the migration off the `git` CLI. maw's git access now goes through the `gix` library via a single `GitRepo` trait (`GixRepo` implementation), with the codebase split into focused crates (`maw-git`, `maw-core`, `maw-cli`, `maw-tui`, `maw-assurance`, `maw-lfs`). No public CLI surface changed; this is an internal architecture release plus the correctness fixes the migration and a fresh-eyes/chaos pass surfaced.

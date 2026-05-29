@@ -12,19 +12,15 @@
 //! "common training-data verbs an agent might reach for" and emits a
 //! ONE-LINE recovery hint pointing at the right maw verb (or telling
 //! the agent it's reaching for plain-git territory, which lives inside
-//! `maw exec`). The hint is the same single source of truth used by
-//! `maw crib` (see `crib.rs::VocabularyPitfall`), so the
-//! tool's error-recovery story is symmetrical with its briefing story.
+//! `maw exec`). This complements `maw tldr` (the affirmative
+//! quick-reference): tldr briefs the agent up front, the hint recovers
+//! it after a wrong guess.
 //!
 //! # Why a separate module (not inline in main.rs)
 //!
 //! The hint table is data, not control flow. Keeping it in its own
-//! module lets us:
-//!   - unit-test the classifier without parsing real CLI input;
-//!   - share the table with `maw crib` if we ever want to derive one
-//!     from the other (today they are intentionally two flat tables —
-//!     duplication is cheap, drift is loud because the unit tests
-//!     here pin the hint surface).
+//! module lets us unit-test the classifier without parsing real CLI
+//! input, and pins the hint surface against silent drift.
 //!
 //! # Layout-agnostic
 //!
@@ -157,7 +153,7 @@ fn is_quarantine_subverb(token: &str) -> bool {
 /// Tail-line appended to every rejected-verb error so even unknown
 /// tokens learn the universal discoverability backstops.
 pub const UNIVERSAL_DISCOVERY_TAIL: &str =
-    "  tip: `maw --help` lists all verbs; `maw crib <agent>` emits a cheat sheet.";
+    "  tip: `maw --help` lists all verbs; `maw tldr` is a quick command cheat sheet.";
 
 #[cfg(test)]
 mod tests {
@@ -275,7 +271,7 @@ mod tests {
     #[test]
     fn universal_tail_is_short_and_actionable() {
         assert!(UNIVERSAL_DISCOVERY_TAIL.contains("maw --help"));
-        assert!(UNIVERSAL_DISCOVERY_TAIL.contains("maw crib"));
+        assert!(UNIVERSAL_DISCOVERY_TAIL.contains("maw tldr"));
         assert!(
             !UNIVERSAL_DISCOVERY_TAIL.contains('\n'),
             "tail must be a single line",

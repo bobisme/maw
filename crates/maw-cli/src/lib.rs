@@ -6,7 +6,6 @@
 pub mod agents;
 pub mod audit;
 pub mod changes;
-pub mod crib;
 pub mod doctor;
 pub mod epoch;
 pub mod epoch_gc;
@@ -24,6 +23,7 @@ pub mod ref_gc;
 pub mod release;
 pub mod status;
 pub mod telemetry;
+pub mod tldr;
 pub mod transport;
 #[cfg(feature = "tui")]
 pub mod tui;

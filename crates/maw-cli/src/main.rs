@@ -1,11 +1,10 @@
 use std::path::Path;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 
 use maw_cli::agents;
 use maw_cli::changes;
-use maw_cli::crib;
 use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
@@ -19,6 +18,7 @@ use maw_cli::ref_gc;
 use maw_cli::release;
 use maw_cli::status;
 use maw_cli::telemetry;
+use maw_cli::tldr;
 use maw_cli::transport;
 #[cfg(feature = "tui")]
 use maw_cli::tui;
@@ -60,7 +60,8 @@ use maw_cli::workspace;
 #[command(name = "maw")]
 #[command(version, about)]
 #[command(propagate_version = true)]
-#[command(after_help = "See 'maw <command> --help' for more information on a specific command.")]
+// `after_help` is attached at runtime in `parse_cli_with_vocab_hints` so
+// `maw --help` shows the same `maw tldr` quick-reference from one source.
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -348,23 +349,14 @@ enum Commands {
     #[command(subcommand, verbatim_doc_comment)]
     Merge(merge_cmd::MergeCommands),
 
-    /// Print an agent crib sheet — per-agent verb protocol (machine-friendly).
+    /// Quick reference: the common maw commands, grouped by task.
     ///
-    /// Designed to be the FIRST call an agent (or its coordinator) makes
-    /// at session start: emits the full maw verb surface in a copy-pasteable
-    /// form (markdown by default; `--format json` for parseable consumption),
-    /// the common vocabulary pitfalls, and the affirmative `When to use maw`
-    /// framing (maw IS the workspace tool — it replaces the
-    /// git-worktrees + convention pattern, it is not an alternative to it).
-    /// This is the verb-discoverability mitigation for the
-    /// `vocabulary_scarcity` friction cluster (see SG4 / bn-1t17, realigned
-    /// in bn-232g).
-    ///
-    /// Examples:
-    ///   maw crib claude                  # markdown cheat sheet for Claude
-    ///   maw crib codex --format json     # JSON for programmatic ingest
-    #[command(verbatim_doc_comment)]
-    Crib(crib::CribArgs),
+    /// A short, copy-pasteable cheat-sheet of affirmative usage — the
+    /// verb-discoverability mitigation for the `vocabulary_scarcity`
+    /// friction cluster (SG4 / bn-1t17). The same text is appended to
+    /// `maw --help`. `crib` is a hidden alias (the former name).
+    #[command(alias = "crib")]
+    Tldr,
 }
 
 #[derive(Subcommand)]
@@ -413,8 +405,11 @@ fn emit_migration_notice_if_needed() {
 /// untouched and there is zero overhead on the hot path.
 fn parse_cli_with_vocab_hints() -> Cli {
     let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    match Cli::try_parse_from(&raw_args) {
-        Ok(cli) => cli,
+    // Attach the `maw tldr` quick-reference as the top-level after-help so
+    // `maw --help` ends with the same cheat-sheet, sourced from one place.
+    let command = Cli::command().after_help(tldr::quick_reference());
+    match command.try_get_matches_from(&raw_args) {
+        Ok(matches) => Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit()),
         Err(err) => {
             // Reproduce clap's own rendering (with colour/exit semantics)
             // first so the user still gets the canonical error.
@@ -510,7 +505,7 @@ fn main() {
             Ok(())
         }
         Commands::Merge(ref cmd) => merge_cmd::run(cmd),
-        Commands::Crib(ref args) => crib::run(args),
+        Commands::Tldr => tldr::run(),
     };
 
     if let Err(e) = result {
@@ -712,62 +707,60 @@ mod tests {
     // SG4 / bn-1t17 — verb-discoverability mitigation surface.
     // -----------------------------------------------------------------
 
-    /// `maw crib` is the headline verb-discoverability surface and must be
+    /// `maw tldr` is the headline verb-discoverability surface and must be
     /// registered as a top-level subcommand (parity with `maw doctor`,
     /// `maw status`). Regression guard: if a future refactor drops the
     /// wiring, agents lose their cheat-sheet entry point and the
     /// `vocabulary_scarcity` cluster cannot drop to 0.
     #[test]
-    fn crib_subcommand_is_registered() {
+    fn tldr_subcommand_is_registered() {
         let cmd = Cli::command();
-        let has_crib = cmd
+        let has_tldr = cmd
             .get_subcommands()
-            .any(|subcommand| subcommand.get_name() == "crib");
+            .any(|subcommand| subcommand.get_name() == "tldr");
         assert!(
-            has_crib,
-            "expected 'crib' subcommand to be registered (SG4 / bn-1t17)"
+            has_tldr,
+            "expected 'tldr' subcommand to be registered (SG4 / bn-1t17)"
         );
     }
 
-    /// `maw crib` parses without arguments (default agent + default format).
-    /// This is the "agent reaches for it without knowing the args" case —
-    /// it MUST succeed so the agent gets a useful response, not a clap
-    /// error.
+    /// `maw tldr` parses without arguments — agents reach for it cold and
+    /// it MUST succeed so they get a usable response, not a clap error.
     #[test]
-    fn crib_parses_with_no_args() {
-        let err = Cli::try_parse_from(["maw", "crib"]).err();
+    fn tldr_parses_with_no_args() {
+        let err = Cli::try_parse_from(["maw", "tldr"]).err();
         assert!(
             err.is_none(),
-            "`maw crib` (no args) must parse so agents get a usable response: {}",
+            "`maw tldr` (no args) must parse so agents get a usable response: {}",
             err.map_or_else(String::new, |e| e.to_string()),
         );
     }
 
-    /// `maw crib claude --format json` is the canonical "machine-friendly
-    /// per-agent protocol" invocation; pin its parseability so the
-    /// integration shape doesn't quietly regress.
+    /// `crib` is the former name, kept as a hidden alias so agents (and
+    /// the prior `UNIVERSAL_DISCOVERY_TAIL` muscle-memory) don't break.
+    /// It must route to the same `Tldr` command.
     #[test]
-    fn crib_with_agent_and_json_format_parses() {
-        let err = Cli::try_parse_from(["maw", "crib", "claude", "--format", "json"]).err();
+    fn crib_alias_routes_to_tldr() {
+        let parsed =
+            Cli::try_parse_from(["maw", "crib"]).expect("`maw crib` alias must still parse");
         assert!(
-            err.is_none(),
-            "`maw crib claude --format json` must parse: {}",
-            err.map_or_else(String::new, |e| e.to_string()),
+            matches!(parsed.command, Commands::Tldr),
+            "`maw crib` must route to Commands::Tldr"
         );
     }
 
-    /// Realignment guard (bn-232g, 2026-05-27): the `--overkill-line` flag
-    /// has been retired. Its body printed the retracted "use plain
-    /// Claude/Codex worktrees for one-off..." framing — exactly the wording
-    /// the bn-232g realignment dropped. This test asserts the flag is
-    /// rejected by the parser so a future refactor cannot silently
-    /// reintroduce it without an explicit decision.
+    /// `maw --help` must end with the `maw tldr` quick-reference — they are
+    /// sourced from one place (attached as after-help at runtime). Pin that
+    /// the cheat-sheet actually reaches the top-level help text.
     #[test]
-    fn crib_overkill_line_flag_is_retired() {
-        let err = Cli::try_parse_from(["maw", "crib", "--overkill-line"]).err();
+    fn top_level_help_includes_tldr_quick_reference() {
+        let mut cmd = Cli::command().after_help(maw_cli::tldr::quick_reference());
+        let mut buf = Vec::new();
+        let _ = cmd.write_long_help(&mut buf);
+        let help = String::from_utf8_lossy(&buf);
         assert!(
-            err.is_some(),
-            "`maw crib --overkill-line` must be rejected — the flag was retired in bn-232g",
+            help.contains("QUICK REFERENCE") && help.contains("maw ws create"),
+            "maw --help must append the tldr quick-reference"
         );
     }
 
@@ -786,13 +779,13 @@ mod tests {
     }
 
     /// Universal-discovery tail names BOTH backstops (`--help` and
-    /// `maw crib`) so even unclassified verbs learn where to look. This
+    /// `maw tldr`) so even unclassified verbs learn where to look. This
     /// is the "self-describing output" promise from the bn-1t17 brief.
     #[test]
     fn universal_discovery_tail_advertises_both_backstops() {
         let tail = maw_cli::vocab_hints::UNIVERSAL_DISCOVERY_TAIL;
         assert!(tail.contains("maw --help"));
-        assert!(tail.contains("maw crib"));
+        assert!(tail.contains("maw tldr"));
     }
 
     // -----------------------------------------------------------------
