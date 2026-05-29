@@ -527,6 +527,11 @@ pub enum WorkspaceCommands {
         max_hits: usize,
 
         /// Treat --search as a regex (default: fixed string).
+        ///
+        /// Uses Rust `regex` crate syntax, NOT POSIX basic-regex (BRE) like
+        /// `git grep`. In particular `+ ? | ( ) { }` are operators *unescaped*
+        /// (the reverse of BRE): write `a+`, not `a\+`. A pattern carrying
+        /// BRE-style escapes is flagged with a warning before searching.
         #[arg(long)]
         regex: bool,
 

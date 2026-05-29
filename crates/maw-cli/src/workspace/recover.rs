@@ -298,6 +298,16 @@ pub fn search(
     if max_hits == 0 {
         bail!("--max-hits must be >= 1");
     }
+    // Recovery search is a last line of defense — loudly flag a pattern that
+    // looks like POSIX BRE (`git grep` dialect) but will match differently
+    // under Rust regex, rather than silently returning wrong/zero hits.
+    if regex && let Some(esc) = bre_escape_hint(pattern) {
+        eprintln!(
+            "WARNING: pattern contains `{esc}` — --regex uses Rust regex syntax, not POSIX BRE.\n  \
+             In Rust regex `{esc}` is a literal; for the BRE operator drop the backslash \
+             (e.g. `a+` not `a\\+`). Results may differ from `git grep`."
+        );
+    }
 
     let git_cwd = super::git_cwd()?;
     let mut refs = list_recovery_refs(&git_cwd)?;
@@ -481,6 +491,41 @@ fn looks_binary(content: &[u8]) -> bool {
     content[..probe_len].contains(&0)
 }
 
+/// Push a [`GrepHit`] for every matching line in `text`.
+///
+/// `split('\n')` yields a spurious trailing empty segment when the blob ends
+/// in `\n` (e.g. `"a\n"` → `["a", ""]`); `git grep` does not count that as a
+/// line, so we drop it. CRLF is stripped from each line for the match and the
+/// reported text, matching git grep.
+fn match_lines(text: &str, matcher: &Matcher, path: &str, hits: &mut Vec<GrepHit>) {
+    let ends_with_nl = text.ends_with('\n');
+    let mut iter = text.split('\n').enumerate().peekable();
+    while let Some((idx, line)) = iter.next() {
+        // Skip the phantom final empty segment produced by a trailing newline.
+        if ends_with_nl && iter.peek().is_none() {
+            break;
+        }
+        let stripped = line.strip_suffix('\r').unwrap_or(line);
+        if matcher.matches(stripped) {
+            hits.push(GrepHit {
+                path: path.to_string(),
+                line: idx + 1,
+                line_text: stripped.to_string(),
+            });
+        }
+    }
+}
+
+/// Detect POSIX BRE-style escapes that mean something *different* in Rust
+/// regex (the dialect `--regex` actually uses). In BRE/`git grep`, `\+ \? \|
+/// \( \) \{ \}` are operators; in Rust regex they are literals, so a pattern
+/// carrying them matches differently — silently — which is dangerous for a
+/// recovery search. Returns the first offending escape so the caller can warn.
+fn bre_escape_hint(pattern: &str) -> Option<&'static str> {
+    const BRE_ESCAPES: [&str; 7] = ["\\+", "\\?", "\\|", "\\(", "\\)", "\\{", "\\}"];
+    BRE_ESCAPES.into_iter().find(|esc| pattern.contains(esc))
+}
+
 /// Walk all blobs in the snapshot at `oid` and return one [`GrepHit`] per
 /// matching line. Mirrors the semantics of
 /// `git grep -z -n [-I|-a] [-i] [-F] -e <pattern> <oid>`.
@@ -503,9 +548,13 @@ fn grep_snapshot(
     let matcher = if regex {
         let mut builder = regex::RegexBuilder::new(pattern);
         builder.case_insensitive(ignore_case);
-        let re = builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("invalid regex pattern: {e}"))?;
+        let re = builder.build().map_err(|e| {
+            anyhow::anyhow!(
+                "invalid regex pattern: {e}\n  \
+                 Note: --regex uses Rust regex syntax, not POSIX BRE like `git grep`. \
+                 Write `a+`/`(x|y)`/`a{{2,3}}`, not `a\\+`/`\\(x\\|y\\)`/`a\\{{2,3\\}}`."
+            )
+        })?;
         Matcher::Regex(re)
     } else if ignore_case {
         Matcher::FixedFold(pattern.to_lowercase())
@@ -533,17 +582,7 @@ fn grep_snapshot(
             // because invalid bytes never form `\n`.
             Err(_) if text => {
                 let lossy = String::from_utf8_lossy(content);
-                for (idx, line) in lossy.split('\n').enumerate() {
-                    let line_no = idx + 1;
-                    let stripped = line.strip_suffix('\r').unwrap_or(line);
-                    if matcher.matches(stripped) {
-                        hits.push(GrepHit {
-                            path: entry.path.clone(),
-                            line: line_no,
-                            line_text: stripped.to_string(),
-                        });
-                    }
-                }
+                match_lines(&lossy, &matcher, &entry.path, &mut hits);
                 return Ok(());
             }
             // Non-UTF8 and not in -a mode: skip (matches `-I` "treat as binary"
@@ -551,17 +590,7 @@ fn grep_snapshot(
             Err(_) => return Ok(()),
         };
 
-        for (idx, line) in text_str.split('\n').enumerate() {
-            let line_no = idx + 1;
-            let stripped = line.strip_suffix('\r').unwrap_or(line);
-            if matcher.matches(stripped) {
-                hits.push(GrepHit {
-                    path: entry.path.clone(),
-                    line: line_no,
-                    line_text: stripped.to_string(),
-                });
-            }
-        }
+        match_lines(text_str, &matcher, &entry.path, &mut hits);
         Ok(())
     })
     .map_err(|e| anyhow::anyhow!("snapshot blob walk failed: {e}"))?;
@@ -1829,6 +1858,47 @@ three
         assert_eq!(hits[0].path, "with:colon.txt");
         assert_eq!(hits[0].line, 2);
         assert_eq!(hits[0].line_text, "colon-needle");
+    }
+
+    /// bn-2b9h: `split('\n')` yields a phantom trailing empty segment when a
+    /// blob ends in `\n`; `git grep` does not count it. `Fixed("")` matches
+    /// every line, so the hit count is a clean probe for the off-by-one.
+    #[test]
+    fn match_lines_skips_phantom_trailing_newline() {
+        let empty = Matcher::Fixed(String::new());
+
+        // "a\n": one real line ("a"); the trailing "" must NOT be counted.
+        let mut hits = Vec::new();
+        match_lines("a\n", &empty, "f", &mut hits);
+        assert_eq!(hits.len(), 1, "trailing-newline blob has 1 line, not 2");
+        assert_eq!(hits[0].line, 1);
+
+        // "a\nb": no trailing newline → both lines counted, no phantom.
+        let mut hits = Vec::new();
+        match_lines("a\nb", &empty, "f", &mut hits);
+        assert_eq!(hits.len(), 2);
+
+        // "a\n\n": a real empty line 2, then the phantom 3rd is dropped.
+        let mut hits = Vec::new();
+        match_lines("a\n\n", &empty, "f", &mut hits);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[1].line, 2);
+    }
+
+    /// bn-2b9h: BRE-style escapes that silently mean something else under Rust
+    /// regex must be detected so the user gets a warning, not wrong/zero hits.
+    #[test]
+    fn bre_escape_hint_flags_posix_bre_patterns() {
+        assert_eq!(bre_escape_hint("a\\+"), Some("\\+"));
+        // Reports the first escape in scan order that is present (here `\|`
+        // precedes `\(`/`\)`); any hit is enough to trigger the warning.
+        assert_eq!(bre_escape_hint("\\(x\\|y\\)"), Some("\\|"));
+        assert_eq!(bre_escape_hint("a\\{2,3\\}"), Some("\\{"));
+        // Idiomatic Rust regex (and fixed strings / plain escapes) are clean.
+        assert_eq!(bre_escape_hint("a+"), None);
+        assert_eq!(bre_escape_hint("(x|y)"), None);
+        assert_eq!(bre_escape_hint("foo\\.bar"), None);
+        assert_eq!(bre_escape_hint("\\d+"), None);
     }
 
     // -----------------------------------------------------------------------
