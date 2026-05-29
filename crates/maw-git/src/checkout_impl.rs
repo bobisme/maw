@@ -65,6 +65,28 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
         })
         .collect();
 
+    // Capture the paths tracked by the CURRENT (pre-checkout) on-disk index.
+    // `git checkout --force` removes only TRACKED files absent from the target
+    // tree; untracked files are preserved. We read the old index now, before
+    // it is overwritten with the target index below. If no index is readable,
+    // the tracked set is empty → we never delete a file we can't prove was
+    // tracked, which is the safe (no-data-loss) default. (bn-29x0)
+    let old_tracked: HashSet<String> = repo.repo.open_index().map_or_else(
+        |_| HashSet::new(),
+        |idx| {
+            idx.entries()
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .path(&idx)
+                        .to_str()
+                        .ok()
+                        .map(std::borrow::ToOwned::to_owned)
+                })
+                .collect()
+        },
+    );
+
     // Get checkout options from the repository configuration.
     let mut opts = repo
         .repo
@@ -168,10 +190,10 @@ pub fn checkout_tree(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), 
             })?;
     }
 
-    // Remove working-tree files not present in the target tree.
-    // This fulfills the trait contract: "Existing working-tree files not in
-    // the tree are removed."
-    remove_stale_files(workdir, workdir, &tree_paths)?;
+    // Remove tracked working-tree files no longer present in the target tree
+    // (matches `git checkout --force`). Untracked files are preserved — see
+    // `remove_stale_files` and bn-29x0.
+    remove_stale_files(workdir, workdir, &tree_paths, &old_tracked)?;
 
     Ok(())
 }
@@ -494,12 +516,18 @@ fn smudge_lfs_pointers(
     Ok(smudged)
 }
 
-/// Walk `dir` and remove any files whose path relative to `workdir` is not in `tree_paths`.
-/// Skips `.git` directories/files. Removes empty directories after file cleanup.
+/// Walk `dir` and remove files that were **tracked** (`tracked_paths`) but are
+/// absent from the target tree (`tree_paths`), relative to `workdir`. This
+/// mirrors `git checkout --force`: untracked files (not in `tracked_paths`)
+/// are preserved, never deleted. Skips `.git`; removes directories that become
+/// empty after cleanup. (bn-29x0: the prior version deleted every path not in
+/// the target tree, destroying untracked files on the snapshot-failed fallback
+/// path where there is no recovery ref.)
 fn remove_stale_files(
     workdir: &Path,
     dir: &Path,
     tree_paths: &HashSet<String>,
+    tracked_paths: &HashSet<String>,
 ) -> Result<(), GitError> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(());
@@ -518,7 +546,7 @@ fn remove_stale_files(
         }
 
         if path.is_dir() {
-            remove_stale_files(workdir, &path, tree_paths)?;
+            remove_stale_files(workdir, &path, tree_paths, tracked_paths)?;
             // Remove directory if it became empty (ignore errors — may not be empty).
             let _ = std::fs::remove_dir(&path);
         } else {
@@ -526,7 +554,9 @@ fn remove_stale_files(
                 .strip_prefix(workdir)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
-            if !rel.is_empty() && !tree_paths.contains(&rel) {
+            // Only remove a file that was tracked AND is gone from the target
+            // tree. Untracked files (absent from `tracked_paths`) are preserved.
+            if !rel.is_empty() && tracked_paths.contains(&rel) && !tree_paths.contains(&rel) {
                 std::fs::remove_file(&path).map_err(|e| GitError::BackendError {
                     message: format!("failed to remove stale file '{rel}': {e}"),
                 })?;

@@ -429,6 +429,63 @@ fn checkout_tree_removes_stale_files() {
     );
 }
 
+/// bn-29x0: `checkout_tree` must preserve UNTRACKED files, matching
+/// `git checkout --force`. The prior implementation deleted every worktree
+/// path absent from the target tree, so on the merge force-checkout fallback
+/// (where the failed-snapshot branch has no recovery ref) it was a silent
+/// data-loss surface. Regression guard: a tracked file gone from the target
+/// is removed, but an untracked file survives.
+#[test]
+fn checkout_tree_preserves_untracked_files() {
+    let (dir, repo, _, _) = setup_repo_with_commit();
+    let workdir = dir.path();
+
+    // tree1: tracks hello.txt.
+    let blob1 = repo.write_blob(b"hello world\n").expect("blob");
+    let tree1 = repo
+        .write_tree(&[TreeEntry {
+            name: "hello.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob1,
+        }])
+        .expect("tree1");
+    repo.checkout_tree(tree1, workdir).expect("checkout tree1");
+    assert!(workdir.join("hello.txt").exists());
+
+    // An untracked file appears in the worktree (never added to the index).
+    std::fs::write(workdir.join("untracked.txt"), b"precious user data\n")
+        .expect("write untracked");
+
+    // tree2: tracks only goodbye.txt — hello.txt is now stale.
+    let blob2 = repo.write_blob(b"goodbye\n").expect("blob2");
+    let tree2 = repo
+        .write_tree(&[TreeEntry {
+            name: "goodbye.txt".to_string(),
+            mode: EntryMode::Blob,
+            oid: blob2,
+        }])
+        .expect("tree2");
+    repo.checkout_tree(tree2, workdir).expect("checkout tree2");
+
+    assert!(
+        workdir.join("goodbye.txt").exists(),
+        "target-tree file should be present"
+    );
+    assert!(
+        !workdir.join("hello.txt").exists(),
+        "tracked file absent from target tree should be removed"
+    );
+    assert!(
+        workdir.join("untracked.txt").exists(),
+        "UNTRACKED file must be preserved (matches `git checkout --force`)"
+    );
+    assert_eq!(
+        std::fs::read(workdir.join("untracked.txt")).expect("read untracked"),
+        b"precious user data\n",
+        "untracked file content must be intact"
+    );
+}
+
 // ===========================================================================
 // 5. Status and diff
 // ===========================================================================
