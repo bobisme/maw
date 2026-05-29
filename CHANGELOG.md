@@ -2,10 +2,28 @@
 
 All notable changes to maw.
 
-## Unreleased
+## v1.0.0-pre.1 — v1.0 dogfood pre-release (2026-05-29)
 
-- **`maw tldr` replaces `maw crib`.** Adopts the `<tool> tldr` convention: a short, affirmative quick-reference of the common commands grouped by task (no essays, no anti-pattern tables). The same cheat-sheet is now appended to `maw --help`. `crib` remains as a hidden alias. (bn-zg7c)
+Pre-release tag bundling everything on `main` since v0.61.0. Installed locally and dogfooded for a few weeks before v1.0 final; **not** v1.0 itself. The v1.0 program is about *trust* — proving the Prime Invariant under stress — not speed.
+
+**v1.0 milestones since v0.61.0:**
+
+- **SG1 — Prime-Invariant DST instrument.** Deterministic-simulation harness that asserts "no committed work is ever lost" under fault injection; long-horizon accrual tracking (bn-2yzz). The hard release gate for v1.0 final.
+- **SG2 — agent-ergonomics benchmark.** Pre-registered benchmark instrument with three substrate adapters (maw / git-worktrees / jj), metrics, a sweep harness, and a published friction list. Establishes that the benchmark measures *coordination ergonomics*, not raw speed.
+- **SG3 — consolidated `.maw/` layout.** New default layout (root is a normal checkout; agent worktrees under `.maw/workspaces/<name>/`), `maw migrate` for v2→consolidated, `worktree`/`wt` aliases, and a layout go/no-go eval gate. A cross-workspace-contamination forensic (0/0 both layouts) confirmed the layout does not increase wrong-target edits.
+- **SG4 — verb-discoverability & ergonomics fixes.** Self-describing error hints for unknown verbs plus the cheat-sheet surface; further wire-up tracked as a follow-up (bn-voy5).
+- **The bn-cm63 scar leads the safety claim.** A destroy-vs-merge race that leaked a dangling head ref — found by maw's own chaos harness, fixed, and called out rather than buried. It is the canonical example of the trust work v1.0 is about.
+
+**CLI ergonomics (this cycle):**
+
+- **`maw tldr` replaces `maw crib`.** Adopts the `<tool> tldr` convention: a short, affirmative quick-reference of common commands grouped by task (no essays, no anti-pattern tables), also appended to `maw --help`. `crib` remains a hidden alias. (bn-zg7c)
 - **`maw ws recover --into` / `--restore-as` alias `--to`.** Agents reaching for `--into` (merge's verb) on recover no longer hit an unrecognized-flag error. (bn-2to8)
+
+**Correctness / safety fixes (gix-migration fresh-eyes follow-ups):**
+
+- **`checkout_tree` preserves untracked files** like `git checkout --force`. The prior gix path deleted every worktree file absent from the target tree — including untracked ones — a silent data-loss surface on the merge force-checkout fallback (failed-snapshot branch has no recovery ref). Now only tracked-and-stale files are removed. (bn-29x0)
+- **`maw ws recover --search --regex` dialect made loud.** The gix migration moved from POSIX BRE (`git grep`) to Rust regex; saved BRE patterns could silently match differently. Help and errors now name the dialect, and a warning fires on BRE-style escapes. Also fixes a phantom trailing-empty-line in snapshot search. (bn-2b9h)
+- Cleared pre-existing rustfmt drift in the benchmark crates so `just check` is green. (bn-1r0r)
 
 ## v0.61.0 — gix migration: maw no longer shells out to `git` (2026-05-17)
 
