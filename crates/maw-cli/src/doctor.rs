@@ -583,6 +583,20 @@ fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
 
 #[must_use]
 pub fn stray_root_entries(root: &Path) -> Vec<String> {
+    // Layout-aware: in the consolidated `.maw/` layout the repo root IS the
+    // live default checkout, so every project file there is expected — nothing
+    // is "stray". Only the bare/v2 layout keeps root metadata-only, where this
+    // check applies. Without this guard `maw status` (which calls this directly)
+    // reports every source file as a "Root extra" after `maw migrate` (bn-2h3g).
+    // `maw doctor`'s repo-root check guards separately; this makes the guard
+    // hold for every caller.
+    if matches!(
+        maw_core::model::layout::LayoutFlavor::detect_with_env(root),
+        maw_core::model::layout::LayoutFlavor::ConsolidatedMawDir
+    ) {
+        return Vec::new();
+    }
+
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -1245,6 +1259,27 @@ mod tests {
         stray.sort();
 
         assert_eq!(stray, [".bones", "notes"]);
+    }
+
+    /// bn-2h3g: in the consolidated `.maw/` layout the root is the live
+    /// default checkout, so project files there are NOT stray. `maw status`
+    /// calls `stray_root_entries` directly; without the layout guard it
+    /// reported every source file as a "Root extra" after `maw migrate`.
+    #[test]
+    fn stray_root_entries_empty_in_consolidated_layout() {
+        let tmp = tempfile::tempdir().expect("operation should succeed");
+        let root = tmp.path();
+        // `.maw/manifold/` presence => ConsolidatedMawDir per detect_with_env.
+        std::fs::create_dir_all(root.join(".maw").join("manifold"))
+            .expect("operation should succeed");
+        std::fs::create_dir_all(root.join("crates")).expect("operation should succeed");
+        std::fs::write(root.join("Cargo.toml"), "").expect("operation should succeed");
+        std::fs::write(root.join("AGENTS.md"), "").expect("operation should succeed");
+
+        assert!(
+            stray_root_entries(root).is_empty(),
+            "consolidated layout root is a live checkout — nothing is stray"
+        );
     }
 
     #[test]

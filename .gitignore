@@ -2,3 +2,9 @@
 /target
 opencode.json
 .claude/worktrees/
+
+# maw consolidated `.maw/` layout: admin dir + legacy bare common-dir are
+# not part of the tracked tree (root is the live default checkout).
+/.maw/
+/repo.git/
+/ws/
