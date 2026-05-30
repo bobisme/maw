@@ -201,6 +201,12 @@ enum Commands {
         /// Print the planned actions and exit without mutating the repo.
         #[arg(long)]
         dry_run: bool,
+        /// Migrate even if the default workspace has uncommitted changes.
+        /// By default migration refuses on a dirty tree (the working copy is
+        /// rematerialized at root, so edits would only survive as a recovery
+        /// snapshot). With this flag, changes are captured to a recovery ref.
+        #[arg(long)]
+        allow_dirty: bool,
     },
 
     /// Run a command inside a workspace directory
@@ -465,9 +471,15 @@ fn main() {
             legacy_ws_layout: legacy_ws,
         }),
         Commands::Upgrade => upgrade::run(),
-        Commands::Migrate { resume, dry_run } => {
-            migrate::run(&migrate::MigrateOptions { resume, dry_run })
-        }
+        Commands::Migrate {
+            resume,
+            dry_run,
+            allow_dirty,
+        } => migrate::run(&migrate::MigrateOptions {
+            resume,
+            dry_run,
+            allow_dirty,
+        }),
         Commands::Doctor {
             format,
             json,

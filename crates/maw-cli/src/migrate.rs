@@ -62,6 +62,11 @@ pub struct MigrateOptions {
     pub resume: bool,
     /// Print the planned actions and exit without mutating the repo.
     pub dry_run: bool,
+    /// Proceed even if the default workspace has uncommitted changes.
+    /// Without this, migration refuses on a dirty tree (bn-2ksp): the
+    /// pre-migration working copy is not carried in place, so unstaged/staged/
+    /// untracked edits would only survive as a recovery snapshot.
+    pub allow_dirty: bool,
 }
 
 /// Entry point: dispatch to fresh / resume / no-op based on layout & journal.
@@ -116,7 +121,7 @@ pub fn run(opts: &MigrateOptions) -> Result<()> {
 
     // Each phase is idempotent: resume re-enters the same function and
     // its first action is to check the journal phase + skip-or-advance.
-    phase_a(&root, &mut journal)?;
+    phase_a(&root, &mut journal, opts.allow_dirty)?;
     phase_b(&root, &mut journal)?;
     phase_c(&root, &mut journal)?;
     phase_d(&root, &mut journal)?;
@@ -142,7 +147,40 @@ pub fn run(opts: &MigrateOptions) -> Result<()> {
 // Phase A: preflight & freeze (steps 1–3)
 // ---------------------------------------------------------------------------
 
-fn phase_a(root: &Path, journal: &mut Journal) -> Result<()> {
+/// Refuse migration if the default workspace has uncommitted changes (bn-2ksp).
+///
+/// The default workspace (`ws/default`) becomes the root checkout, which is
+/// rematerialized from the branch tree — unstaged/staged/untracked edits are
+/// NOT carried in place (they'd only survive as a recovery snapshot). Refusing
+/// by default keeps the working copy intact and predictable; `--allow-dirty`
+/// bypasses this. Mirrors the dirty-guard on `ws sync` / `ws destroy`.
+fn refuse_if_default_dirty(entries: &[JournalWorktree], default_name: &str) -> Result<()> {
+    let Some(default_entry) = entries.iter().find(|e| e.name == default_name) else {
+        return Ok(());
+    };
+    let Ok(ws_repo) = maw_git::GixRepo::open(&default_entry.old_path) else {
+        return Ok(());
+    };
+    let Ok(status) = ws_repo.status_head_to_worktree() else {
+        return Ok(());
+    };
+    if status.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "default workspace has uncommitted changes ({} path(s)); \
+         migration refuses to run so they are not lost.\n  \
+         Commit or stash them first:\n    \
+         maw exec default -- git add -A && maw exec default -- git commit -m \"wip\"\n    \
+         (or: maw exec default -- git stash)\n  \
+         Then re-run: maw migrate\n  \
+         To migrate anyway (changes captured to a recovery ref, not kept in place):\n    \
+         maw migrate --allow-dirty",
+        status.len()
+    )
+}
+
+fn phase_a(root: &Path, journal: &mut Journal, allow_dirty: bool) -> Result<()> {
     if journal.phase as u8 > JournalPhase::PreflightDone as u8 {
         return Ok(());
     }
@@ -231,6 +269,11 @@ fn phase_a(root: &Path, journal: &mut Journal) -> Result<()> {
                 recovery_ref: None,
             });
         }
+    }
+
+    // Step 3b: refuse on a dirty default workspace unless --allow-dirty (bn-2ksp).
+    if !allow_dirty {
+        refuse_if_default_dirty(&entries, default_name)?;
     }
 
     let manifold_refs = list_all_manifold_refs(&repo)?;
@@ -535,7 +578,11 @@ fn phase_d(root: &Path, journal: &mut Journal) -> Result<()> {
         && let Some(ref recovery) = default_entry.recovery_ref
     {
         println!("[INFO] ws/default had uncommitted edits, pinned at: {recovery}");
-        println!("       Recover with: maw ws recover default --to default-prev");
+        // Use the `--ref` form: `maw ws recover <name> --to` only consults
+        // destroy records, not migration recovery refs, so it would fail with
+        // "No destroy records found" (bn-2ksp). The `--ref` form restores the
+        // pinned snapshot directly.
+        println!("       Recover with: maw ws recover --ref {recovery} --to default-prev");
     }
 
     // Step 11: decommission ws/default. Its admin dir under
