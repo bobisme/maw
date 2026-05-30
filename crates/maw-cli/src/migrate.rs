@@ -816,21 +816,13 @@ fn copy_dir_merge(src: &Path, dst: &Path) -> Result<()> {
 
 fn update_root_gitignore_working_copy(root: &Path) -> Result<()> {
     let path = root.join(".gitignore");
-    let mut content = fs::read_to_string(&path).unwrap_or_default();
-    let has_maw_ignore = content.lines().any(|l| {
-        let t = l.trim();
-        t == "/.maw/" || t == "/.maw" || t == ".maw/" || t == ".maw"
-    });
-    if !has_maw_ignore {
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        if !content.contains("# maw runtime") {
-            content.push_str("\n# maw runtime/admin state — never tracked\n");
-        }
-        content.push_str("/.maw/\n");
-        fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
-    }
+
+    // Use init's canonical writer so migrate and greenfield init never drift.
+    // It ignores ALL admin dirs (`/.maw/`, `/.manifold/`, `/repo.git/`) — bn-3bkn:
+    // omitting `/repo.git/` left the git dir unignored, so the first `ws merge`'s
+    // `git add -A` staged it and `git reset --hard HEAD` deleted the repository.
+    crate::init::ensure_consolidated_root_gitignore(root)
+        .map_err(|e| anyhow::anyhow!("failed to write consolidated .gitignore: {e}"))?;
 
     // Remove a stale `ws/` line (legacy v2 ignore) if present and no
     // ws/ directory exists anymore. Keep otherwise — never delete what

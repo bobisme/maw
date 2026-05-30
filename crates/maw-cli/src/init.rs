@@ -508,10 +508,15 @@ fn set_epoch_ref(root: &Path, epoch: &EpochId) -> Result<(), InitError> {
 /// For the consolidated layout, ensure the root has a `.gitignore` that
 /// excludes the maw admin tree from the working tree status.
 ///
-/// If `.gitignore` doesn't exist, create it with the `/.maw/` rule.
-/// If it already exists, append `/.maw/` only if absent (and preserve any
+/// If `.gitignore` doesn't exist, create it with the consolidated rules.
+/// If it already exists, append any missing rules (and preserve any
 /// other rules the user has). Per sg3-layout-design §5.1.
-fn ensure_consolidated_root_gitignore(root: &Path) -> Result<(), InitError> {
+///
+/// Canonical writer for the consolidated-layout admin ignores — shared with
+/// `maw migrate` (bn-3bkn: migrate previously wrote only `/.maw/`, leaving
+/// `/repo.git/` unignored, so the first `ws merge`'s `git add -A` staged the
+/// git dir and `git reset --hard` deleted it).
+pub(crate) fn ensure_consolidated_root_gitignore(root: &Path) -> Result<(), InitError> {
     let path = root.join(".gitignore");
     let header = "# maw admin tree (consolidated layout) — runtime/admin only";
     let rules = ["/.maw/", "/.manifold/", "/repo.git/"];

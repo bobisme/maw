@@ -503,7 +503,18 @@ pub fn snapshot_working_copy(
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
 
+    // Admin/git paths that must NEVER be staged, reset, or cleaned by the
+    // snapshot. In the consolidated layout the DEFAULT workspace IS the repo
+    // root, so these live *inside* `ws_path`: `repo.git/` is the shared common
+    // git dir, `.maw/`/`.manifold/` are admin trees, `.git` is the gitfile/dir.
+    // Without protecting them, `git add -A` stages `repo.git/` and the
+    // subsequent `git reset --hard` / `git clean -fd` DELETE the git directory,
+    // destroying the repository (bn-3bkn). For non-default workspaces these
+    // paths don't exist at the worktree root, so the protection is a no-op.
+    const ADMIN_EXCLUDES: [&str; 4] = [".maw", "repo.git", ".manifold", ".git"];
+
     // Step 2: Stage all files (including untracked) so stash captures them.
+    // (Plain `git add -A` skips gitignored paths without erroring.)
     let add_output = Command::new("git")
         .args(["add", "-A"])
         .current_dir(ws_path)
@@ -514,6 +525,20 @@ pub fn snapshot_working_copy(
         let stderr = String::from_utf8_lossy(&add_output.stderr);
         bail!("git add -A failed during snapshot: {}", stderr.trim());
     }
+
+    // Step 2b: Unstage the admin/git paths so they are NEITHER captured in the
+    // snapshot NOR deleted by the `git reset --hard HEAD` below (which removes
+    // staged-but-not-in-HEAD paths from the worktree). `git reset HEAD -- <p>`
+    // is a no-op for paths that weren't staged. This is the load-bearing guard
+    // that keeps `repo.git/` alive even when the `.gitignore` is missing or
+    // uncommitted (bn-3bkn).
+    let mut unstage_args: Vec<String> =
+        vec!["reset".into(), "-q".into(), "HEAD".into(), "--".into()];
+    unstage_args.extend(ADMIN_EXCLUDES.iter().map(|s| (*s).to_string()));
+    let _ = Command::new("git")
+        .args(&unstage_args)
+        .current_dir(ws_path)
+        .output();
 
     // Step 3: Create a stash commit (does NOT modify HEAD or stash list).
     let stash_result = repo.stash_create().map_err(|e| {
@@ -551,8 +576,17 @@ pub fn snapshot_working_copy(
         .args(["reset", "--hard", "HEAD"])
         .current_dir(ws_path)
         .output();
+    // `git clean -fd` removes untracked files captured in the stash. Exclude
+    // the admin/git dirs so it can never delete the repository (bn-3bkn): in
+    // the consolidated layout the root checkout contains the untracked
+    // `repo.git/` common git dir, which clean would otherwise wipe.
+    let mut clean_args: Vec<String> = vec!["clean".into(), "-fd".into()];
+    for p in ADMIN_EXCLUDES {
+        clean_args.push("-e".into());
+        clean_args.push(p.into());
+    }
     let _ = Command::new("git")
-        .args(["clean", "-fd"])
+        .args(&clean_args)
         .current_dir(ws_path)
         .output();
 
@@ -1828,6 +1862,39 @@ mod tests {
             status_str.trim().is_empty(),
             "working tree should be clean after snapshot, got: {status_str}"
         );
+    }
+
+    /// bn-3bkn: in the consolidated layout the default workspace IS the repo
+    /// root, which contains the untracked admin/git dirs (`repo.git/`, `.maw/`,
+    /// `.manifold/`). The snapshot's `git add -A` + `git reset --hard` +
+    /// `git clean -fd` must NEVER delete them — doing so destroyed the whole
+    /// repository. Simulate those dirs at the worktree root and assert they
+    /// survive a snapshot of a dirty workspace.
+    #[test]
+    fn snapshot_does_not_delete_admin_or_git_dirs() {
+        let (_dir, root, _base_oid) = setup_repo();
+
+        // Untracked admin/git dirs that live inside the consolidated root.
+        for d in [".maw", "repo.git", ".manifold"] {
+            fs::create_dir_all(root.join(d).join("inner")).expect("mkdir admin");
+            fs::write(root.join(d).join("inner").join("f"), "admin state\n").expect("write admin");
+        }
+        // Genuine user dirt so the snapshot path actually runs.
+        fs::write(root.join("README.md"), "# user edit\n").expect("write user");
+        fs::write(root.join("user-untracked.txt"), "keep me\n").expect("write user2");
+
+        let result = snapshot_working_copy(&root, &root, "test-ws")
+            .expect("snapshot should succeed")
+            .expect("dirty workspace should return Some");
+        assert!(!result.oid.is_empty());
+
+        // The admin/git dirs MUST still exist after the snapshot's reset+clean.
+        for d in [".maw", "repo.git", ".manifold"] {
+            assert!(
+                root.join(d).join("inner").join("f").is_file(),
+                "snapshot must not delete admin/git dir `{d}` (bn-3bkn)"
+            );
+        }
     }
 
     #[test]
