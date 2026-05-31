@@ -249,11 +249,14 @@ pub fn greenfield_init(root: &Path, opts: &InitOptions) -> Result<InitResult, In
     // 3. Create initial empty commit
     let epoch0_oid = create_initial_commit(&root, &opts.branch)?;
 
-    // 4. Normalize to repo.git common-dir topology
-    normalize_common_dir_to_repo_git(&root)?;
-
     match opts.layout {
         layout::LayoutFlavor::V2WsRoot => {
+            // 4. Normalize to repo.git common-dir topology (bare v2 model:
+            //    `.git` gitfile -> bare `repo.git/`, with ws/default + ws/<name>
+            //    as worktrees). The consolidated layout skips this and keeps a
+            //    normal `.git/` directory (bn-34ve).
+            normalize_common_dir_to_repo_git(&root)?;
+
             // 5. Set core.bare = true
             set_bare_mode(&root)?;
 
@@ -807,6 +810,39 @@ mod tests {
         assert_eq!(
             git_common_dir(&result.repo_root),
             result.repo_root.join(REPO_GIT_DIR)
+        );
+    }
+
+    /// bn-34ve: the consolidated layout is a NORMAL non-bare repo — `.git/` is
+    /// the real git directory, no `repo.git/`, no gitfile. (The v2 bare model
+    /// keeps `repo.git` + gitfile; consolidated does not.)
+    #[test]
+    fn greenfield_consolidated_uses_normal_dot_git() {
+        let dir = tempdir().expect("operation should succeed");
+        let root = dir.path().join("myrepo");
+        std::fs::create_dir_all(&root).expect("operation should succeed");
+
+        // Default layout is consolidated.
+        let result =
+            greenfield_init(&root, &InitOptions::default()).expect("operation should succeed");
+
+        assert!(
+            result.repo_root.join(".git").is_dir(),
+            ".git must be a real directory"
+        );
+        assert!(
+            !result.repo_root.join(REPO_GIT_DIR).exists(),
+            "no repo.git/ in consolidated"
+        );
+        let bare = Command::new("git")
+            .args(["config", "core.bare"])
+            .current_dir(&result.repo_root)
+            .output()
+            .expect("operation should succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&bare.stdout).trim(),
+            "false",
+            "consolidated layout is non-bare"
         );
     }
 
