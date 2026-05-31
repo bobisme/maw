@@ -1,22 +1,22 @@
-//! Manifold v2 greenfield initialization — git-native.
+//! Manifold greenfield initialization — git-native.
 //!
 //! Creates a new Manifold-managed repository from scratch when no `.git`
-//! exists. Sets up a bare common-dir git repo (`repo.git`), `.manifold/`
-//! metadata, epoch₀,
-//! and the `ws/default/` workspace via `git worktree`.
+//! exists. The default (consolidated) layout is a **normal non-bare repo**
+//! (bn-34ve): the root is the live checkout, `.git/` is an ordinary git
+//! directory, agent workspaces are linked worktrees under
+//! `.maw/workspaces/<name>/`. The legacy v2 layout (`--legacy-ws`) instead
+//! uses a bare `repo.git` common-dir + `.git` gitfile with `ws/default/`.
 //!
 //! # Architecture
 //!
 //! ```text
-//! repo-root/
-//! ├── .git               ← gitfile: gitdir: repo.git
-//! ├── repo.git/          ← git common-dir (bare)
-//! ├── .manifold/         ← manifold metadata
-//! │   ├── config.toml
-//! │   ├── epochs/
-//! │   └── artifacts/
-//! └── ws/
-//!     └── default/       ← main worktree (git worktree)
+//! Consolidated (default):           Legacy v2 (--legacy-ws):
+//! repo-root/                        repo-root/
+//! ├── .git/        ← normal git dir ├── .git          ← gitfile: gitdir: repo.git
+//! ├── .maw/        ← admin tree     ├── repo.git/     ← bare common-dir
+//! │   ├── manifold/                 ├── .manifold/
+//! │   └── workspaces/<name>/        └── ws/
+//! └── <source files at root>            └── default/  ← main worktree
 //! ```
 
 use std::fmt;

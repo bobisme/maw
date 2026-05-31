@@ -42,9 +42,10 @@
 //!
 //! # Independent-verifier carveout
 //!
-//! All git access in this module uses the `git` CLI on the bare
-//! `repo.git` (resolved via the gitfile at the repo root, the same way
-//! the existing `oracle.rs` does). This is deliberate — the oracle is the
+//! All git access in this module uses the `git` CLI, run with cwd = repo root
+//! so git resolves the git dir for either layout (a normal `.git/` in the
+//! consolidated layout, or the bare `repo.git` in legacy v2), the same way
+//! the existing `oracle.rs` does. This is deliberate — the oracle is the
 //! independent verifier, and using `gix` here would couple the verifier
 //! to the same code paths that are under test (a gix bug could mask a
 //! genuine invariant violation). See `oracle.rs::read_all_refs` for the

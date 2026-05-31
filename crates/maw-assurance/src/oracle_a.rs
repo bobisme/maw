@@ -42,8 +42,10 @@
 //!
 //! ## Independent verifier carveout
 //!
-//! Oracle A shells out to `git` against the bare `repo.git`, **deliberately
-//! not gix**. The oracle must not share gix code paths with the system
+//! Oracle A shells out to `git` (run with cwd = repo root, so it resolves the
+//! git dir for either layout: a normal `.git/` in the consolidated layout, or
+//! the bare `repo.git` in legacy v2), **deliberately not gix**. The oracle
+//! must not share gix code paths with the system
 //! under test, or a gix bug could mask a genuine invariant violation. See
 //! the `TODO(gix): assurance carveout` markers throughout.
 
