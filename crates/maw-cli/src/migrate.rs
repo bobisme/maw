@@ -686,10 +686,76 @@ fn phase_d(root: &Path, journal: &mut Journal) -> Result<()> {
 // Phase E: finalize & verify (steps 12–14)
 // ---------------------------------------------------------------------------
 
+/// Convert the v2-holdover `repo.git` common-dir (+ root `.git` gitfile) into a
+/// normal `.git/` directory, so a migrated consolidated repo looks like an
+/// ordinary git repo (bn-34ve). Idempotent: a no-op once `.git` is a directory.
+///
+/// Plumbing (verified): `repo.git/config` has `bare=false` and no
+/// `core.worktree` (the root main-worktree is auto-detected as the parent of
+/// `.git`); each `repo.git/worktrees/<name>/commondir` is the relative `../..`
+/// (survives the rename) and its `gitdir` points at the unmoved workspace
+/// `.git`. The only absolute pointers that need fixing are the per-workspace
+/// `.git` gitfiles, which point into `repo.git/worktrees/<name>`.
+fn convert_repo_git_to_normal_dot_git(root: &Path, journal: &Journal) -> Result<()> {
+    let repo_git = root.join("repo.git");
+    let dot_git = root.join(".git");
+
+    // Idempotent / not-applicable cases.
+    if dot_git.is_dir() && !repo_git.exists() {
+        return Ok(()); // already a normal .git/ (e.g. resumed past this step)
+    }
+    if !repo_git.is_dir() {
+        return Ok(()); // nothing to convert
+    }
+
+    // 1. Drop the root `.git` gitfile (it points at repo.git).
+    if dot_git.is_file() {
+        fs::remove_file(&dot_git)
+            .with_context(|| format!("failed to remove gitfile {}", dot_git.display()))?;
+    }
+    // 2. Rename the common dir: repo.git -> .git.
+    fs::rename(&repo_git, &dot_git).with_context(|| {
+        format!(
+            "failed to rename {} -> {}",
+            repo_git.display(),
+            dot_git.display()
+        )
+    })?;
+
+    // 3. Re-point each agent workspace's `.git` gitfile from
+    //    <root>/repo.git/worktrees/<name> to <root>/.git/worktrees/<name>.
+    let old_prefix = repo_git.join("worktrees");
+    let new_prefix = dot_git.join("worktrees");
+    let (old_s, new_s) = (old_prefix.to_string_lossy(), new_prefix.to_string_lossy());
+    for wt in &journal.worktrees {
+        if wt.name == "default" {
+            continue; // default is the root main worktree, no gitfile to fix
+        }
+        let ws_git = wt.new_path.join(".git");
+        let Ok(content) = fs::read_to_string(&ws_git) else {
+            continue;
+        };
+        let fixed = content.replace(old_s.as_ref(), new_s.as_ref());
+        if fixed != content {
+            fs::write(&ws_git, fixed).with_context(|| {
+                format!("failed to re-point worktree gitfile {}", ws_git.display())
+            })?;
+        }
+    }
+    tracing::info!("phase E: converted repo.git common-dir to normal .git/");
+    Ok(())
+}
+
 fn phase_e(root: &Path, journal: &mut Journal) -> Result<()> {
     if journal.phase as u8 > JournalPhase::FinalizeDone as u8 {
         return Ok(());
     }
+
+    // Step 11b: convert the bare `repo.git` common-dir + root `.git` gitfile
+    // into a normal `.git/` directory (bn-34ve). The consolidated layout is a
+    // normal non-bare repo; the `repo.git` holdover is what put an untracked
+    // git dir inside the worktree (the bn-3bkn hazard). Idempotent.
+    convert_repo_git_to_normal_dot_git(root, journal)?;
 
     // Step 12: rewrite root .gitignore to reference /.maw/ (working-tree
     // change only — do NOT commit). If the branch already encodes the
