@@ -1,0 +1,5 @@
+# bones event log v1
+# fields: wall_ts_us	agent	itc	parents	type	item_id	data	event_hash
+1780348332718907	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEypxI		item.move	bn-3bkn	{"state":"done"}	blake3:F-GPkGLDWwE7jU62P8TkzKOf3Opql1Vos_tBA4cv7SY
+1780348332784409	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqBI		item.move	bn-2ksp	{"state":"done"}	blake3:21aCJEsN2bam_F-z7r0aQ1fUsSgPFycTt20OgO8bmfo
+1780348332850759	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyqRI		item.move	bn-34ve	{"state":"done"}	blake3:nQgwsEsjMTnZECQdo_3nrgj8ASMKV08qkXpRD4Wpcc4

@@ -29,7 +29,7 @@ gix = { version = "0.72", default-features = false, features = [
     "tree-editor",
     "merge",
 ] }
-maw-lfs = { path = "../maw-lfs", version = "1.0.0-pre.1", optional = true }
+maw-lfs = { path = "../maw-lfs", version = "1.0.0-pre.2", optional = true }
 # Used by `test_support` when the `test-support` feature is enabled.
 # Also pulled in via [dev-dependencies] for the crate's own tests.
 tempfile = { version = "3", optional = true }

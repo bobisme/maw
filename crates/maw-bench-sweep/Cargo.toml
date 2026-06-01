@@ -65,10 +65,10 @@ bench = [
 claude-backend = ["bench", "maw-bench/claude-backend"]
 
 [dependencies]
-maw-bench = { path = "../maw-bench", version = "1.0.0-pre.1", optional = true }
-maw-bench-adapters = { path = "../maw-bench-adapters", version = "1.0.0-pre.1", optional = true }
-maw-bench-metrics = { path = "../maw-bench-metrics", version = "1.0.0-pre.1", optional = true }
-maw-scenario = { path = "../maw-scenario", version = "1.0.0-pre.1", optional = true }
+maw-bench = { path = "../maw-bench", version = "1.0.0-pre.2", optional = true }
+maw-bench-adapters = { path = "../maw-bench-adapters", version = "1.0.0-pre.2", optional = true }
+maw-bench-metrics = { path = "../maw-bench-metrics", version = "1.0.0-pre.2", optional = true }
+maw-scenario = { path = "../maw-scenario", version = "1.0.0-pre.2", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = "2"

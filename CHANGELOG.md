@@ -2,6 +2,15 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.2 — consolidated-layout hardening (2026-06-01)
+
+Second dogfood pre-release. Real-world use of the consolidated `.maw/` layout (via `maw migrate`) surfaced — and this release fixes — a cluster of layout/migrate bugs, including a critical data-loss one. The flagship consolidated layout is now a normal git repo and safe to use; bn-3bkn's gating condition ("not the default until fixed and proven") is satisfied.
+
+- **Consolidated layout is now a normal `.git/` repo (bn-34ve).** Both `maw init` (greenfield) and `maw migrate` (v2→consolidated) produce an ordinary non-bare repo: `.git/` is a real directory, agent workspaces are linked worktrees under `.maw/workspaces/<name>/`. The old `repo.git/` + `.git` gitfile holdover is gone. This removes the untracked-git-dir-in-the-worktree that caused bn-3bkn — structurally.
+- **CRITICAL fix: `maw ws merge --destroy` no longer destroys the git directory (bn-3bkn).** On the consolidated layout the default-workspace snapshot (`git add -A` → `git reset --hard` → `git clean -fd`) ran over the repo root and deleted the untracked `repo.git/` (the shared git dir). The snapshot now unstages/excludes the admin+git paths (`.maw`, `repo.git`, `.manifold`, `.git`) so it can never delete the repository, regardless of `.gitignore` state. Found by dogfooding; deterministic repro + DST candidate added.
+- **`maw migrate` refuses on a dirty default workspace (bn-2ksp).** Uncommitted/staged/untracked edits were cleared from the working tree during migration (recoverable, but the printed recovery command was broken). Migration now refuses unless `--allow-dirty`, and the recovery hint prints a working `maw ws recover --ref … --to …` command.
+- **`maw status` is layout-aware (bn-2h3g).** It no longer reports every checked-out source file as a "Root extra" in the consolidated layout.
+
 ## v1.0.0-pre.1 — v1.0 dogfood pre-release (2026-05-29)
 
 Pre-release tag bundling everything on `main` since v0.61.0. Installed locally and dogfooded for a few weeks before v1.0 final; **not** v1.0 itself. The v1.0 program is about *trust* — proving the Prime Invariant under stress — not speed.
