@@ -13,7 +13,16 @@ fmt-check:
 clippy:
   cargo clippy --workspace --all-targets -- -D warnings
 
-test:
+# build-bin: build the maw-cli DEBUG binary that maw_bin()-based integration
+# tests exec (target/debug/maw). MUST run before `cargo test`: `cargo clippy`
+# (run earlier in `check`) updates cargo's fingerprint for maw-cli WITHOUT
+# relinking the binary, so a bare `cargo test` can exec a STALE target/debug/maw
+# and silently MASK behavior regressions (bn-8nm6). `cargo build -p maw-cli`
+# reliably relinks it.
+build-bin:
+  cargo build -p maw-cli
+
+test: build-bin
   cargo test
 
 install:

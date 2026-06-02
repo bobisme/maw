@@ -44,9 +44,14 @@ pub fn maw_bin() -> PathBuf {
     let deps_dir = test_exe.parent().expect("no parent for test exe");
     let profile_dir = deps_dir.parent().expect("no parent for deps dir");
     let maw = profile_dir.join("maw");
+    // bn-8nm6: this execs a PRE-BUILT binary; `cargo test` does not reliably
+    // relink it (and `cargo clippy` updates the fingerprint without relinking),
+    // so a stale binary here can mask behavior regressions. `just test` depends
+    // on `build-bin` to guarantee a fresh binary; if invoking `cargo test`
+    // directly, run `cargo build -p maw-cli` first.
     assert!(
         maw.exists(),
-        "maw binary not found at {}; run `cargo build -p maw-cli` first",
+        "maw binary not found at {}; run `cargo build -p maw-cli` first (or use `just test`)",
         maw.display()
     );
     maw
