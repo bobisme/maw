@@ -209,7 +209,8 @@ fn advance_branch(root: &std::path::Path, branch: &str) -> Result<()> {
     // Guard: refuse to advance if a merge is in progress (non-terminal phase).
     // A concurrent merge COMMIT could be updating the same ref, so --advance
     // would race with the merge's own CAS ref update.
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root);
     let merge_state_path = MergeStateFile::default_path(&manifold_dir);
     match MergeStateFile::read(&merge_state_path) {
         Ok(state) if !state.phase.is_terminal() => {

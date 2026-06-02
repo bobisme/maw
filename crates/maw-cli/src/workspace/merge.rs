@@ -1338,8 +1338,10 @@ pub fn check_merge(
     // bn-yyx: anchor the event log even on dry-run checks so the agent can
     // bound `maw merge events --since` to the latest attempt.
     if let Ok(root) = repo_root() {
+        let manifold_dir =
+            maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
         let into_display = target_change_id.unwrap_or(target_workspace).to_string();
-        emit_integration_started(&root.join(".manifold"), workspaces, &into_display, true);
+        emit_integration_started(&manifold_dir, workspaces, &into_display, true);
     }
 
     let result = match check_merge_result_for_target(
@@ -1364,7 +1366,8 @@ pub fn check_merge(
         && !result.stale
         && let Ok(root) = repo_root()
     {
-        let manifold_dir = root.join(".manifold");
+        let manifold_dir =
+            maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
         let into_display = target_change_id.unwrap_or(target_workspace).to_string();
         // Derive the same `cf-<hash>` terseid `assign_conflict_ids` uses for
         // full merges — so a `--check` snapshot and a follow-up real merge
@@ -3643,13 +3646,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
     textln!();
 
-    // bn-yyx: record the integration start so the event log carries an
-    // anchoring entry the agent can use to bound `maw merge events --since`.
-    emit_integration_started(&root.join(".manifold"), &ws_to_merge, into_target, false);
-
     // Set up paths (layout-aware: v2 → `<root>/ws/default`, consolidated → root).
     let layout_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
     let manifold_dir = layout_flavor.manifold_dir(&root);
+
+    // bn-yyx: record the integration start so the event log carries an
+    // anchoring entry the agent can use to bound `maw merge events --since`.
+    // bn-1lj2: route through the layout-aware manifold dir (the same one
+    // `emit_integration_completed` uses below) so started+completed land in
+    // the same oplog under the consolidated `.maw/manifold/`.
+    emit_integration_started(&manifold_dir, &ws_to_merge, into_target, false);
     let default_ws_path = layout_flavor.default_target_path(&root, default_ws);
     // In the consolidated layout the privileged target IS the root checkout —
     // there's no `.maw/workspaces/default/` for the backend to inspect, so

@@ -53,7 +53,9 @@ pub fn run_cli(root: &Path, dry_run: bool) -> Result<()> {
 /// - `refs/manifold/epoch/current`
 #[allow(clippy::missing_errors_doc)]
 pub fn gc_unreferenced_epochs(root: &Path, dry_run: bool) -> Result<EpochGcReport> {
-    let epochs_dir = root.join(".manifold").join("epochs");
+    let epochs_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+        .manifold_dir(root)
+        .join("epochs");
     if !epochs_dir.exists() {
         return Ok(EpochGcReport::default());
     }

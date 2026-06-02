@@ -461,8 +461,10 @@ fn write_template_artifact(
     workspace_path: &std::path::Path,
     profile: &super::templates::TemplateProfile,
 ) -> Result<()> {
-    let artifact_path = workspace_path
-        .join(".manifold")
+    // bn-1lj2: layout-aware so the artifact lands in the same manifold dir the
+    // rest of the codebase resolves (consolidated → `.maw/manifold/`).
+    let artifact_path = maw_core::model::layout::LayoutFlavor::detect_with_env(workspace_path)
+        .manifold_dir(workspace_path)
         .join("workspace-template.json");
     if let Some(parent) = artifact_path.parent() {
         std::fs::create_dir_all(parent)

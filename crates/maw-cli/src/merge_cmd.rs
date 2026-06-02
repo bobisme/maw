@@ -404,7 +404,8 @@ fn events_cmd(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let all = merge_events::read_events(&manifold_dir).context("read merge event log")?;
 
     let cutoff = if since_last_attempt {
@@ -501,7 +502,8 @@ fn print_event_line(ev: &MergeEvent) {
 /// `maw merge last-conflict` — print the persisted last-conflict surface.
 fn last_conflict_cmd(format: Option<OutputFormat>) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let snapshot = merge_last_conflict_read(&manifold_dir)?;
     let fmt = OutputFormat::resolve(format);
     let Some(snapshot) = snapshot else {
@@ -567,7 +569,8 @@ fn merge_last_conflict_read(
 /// persisted last-conflict and run it (or print it under `--dry-run`).
 fn resume_cmd(resolve: &[String], resolve_all: Option<&str>, dry_run: bool) -> Result<()> {
     let root = repo_root()?;
-    let manifold_dir = root.join(".manifold");
+    let manifold_dir =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).manifold_dir(&root);
     let snapshot = merge_last_conflict_read(&manifold_dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "No persisted last-conflict to resume from.\n  \
