@@ -123,7 +123,9 @@ enum Commands {
     /// a normal checkout, `.maw/workspaces/<name>/` for agents). Pass
     /// `--legacy-ws` (or set `MAW_LAYOUT=v2`) to use the legacy v2 layout
     /// (bare root + `ws/default/` + `ws/<name>/`). Brownfield init on an
-    /// existing repo preserves whichever layout is already on disk — use
+    /// existing repo preserves whichever layout is already on disk; an
+    /// existing git repo with NO maw layout yet produces the legacy v2 bare
+    /// layout (it will not silently restructure your repo). Run
     /// `maw migrate` (T3.3) to move a v2 repo to the consolidated layout.
     ///
     /// Safe to run multiple times.

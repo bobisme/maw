@@ -50,7 +50,7 @@ maw ws recover <name> --to <new-name>
 maw ws create <your-name>
 
 # Work in your workspace
-# ... edit files in ws/<your-name>/ ...
+# ... edit files in .maw/workspaces/<your-name>/ ...
 maw exec <your-name> -- git add -A && maw exec <your-name> -- git commit -m "feat: what you're implementing"
 
 # Check status (see all agent work, conflicts, stale warnings)
@@ -269,13 +269,12 @@ maw is frequently invoked by agents with **no prior context**. Every piece of to
 
 ## Architecture
 
-- **Bare repo model**: Workspaces live in `ws/<name>/` as git worktrees
-- `ws/default/` is the default workspace (merge target, push source)
-- Repo root is metadata only (`.git/`, `.manifold/`, `ws/`, config files) — no source files at root
-- `ws/` is gitignored
+- **Consolidated layout**: the repo root is a normal git checkout — a normal `.git/` and the source files live at the root
+- Agent workspaces live under `.maw/workspaces/<name>/` as git worktrees; the repo root itself is the default workspace (merge target, push source)
 - Each workspace is an isolated git worktree with its own working copy
-- Manifold metadata lives in `.manifold/` and `refs/manifold/*`
+- Manifold metadata lives in `.maw/manifold/` and `refs/manifold/*`
 - Agents never block each other - conflicts are detected at merge time
+- The legacy v2 **bare** layout (bare root + `ws/default/` + `ws/<name>/`) is still selectable via `maw init --legacy-ws`; `maw init` on an existing git repo also produces v2. Run `maw migrate` to move a v2 repo to the consolidated layout.
 
 ## Operating Model: Conflicts Are Data, Not Errors
 
@@ -299,8 +298,8 @@ Concretely:
 ### How to Make Changes
 
 1. **Create a bone** to track your work: `maw exec default -- bn create --title "..." --description "..."`
-2. **Create a workspace** for your changes: `maw ws create <bone-id> --from main --description "<bone-title>"` — use the bone ID as workspace name; this gives you `ws/<bone-id>/`
-3. **Edit files in your workspace** (`ws/<name>/`), never in `ws/default/`
+2. **Create a workspace** for your changes: `maw ws create <bone-id> --from main --description "<bone-title>"` — use the bone ID as workspace name; this gives you `.maw/workspaces/<bone-id>/`
+3. **Edit files in your workspace** (`.maw/workspaces/<name>/`), never in the repo root / default workspace
 4. **Merge when done**: `maw ws merge <name> --into default --destroy --message "feat: <bone-title>"` (use conventional commit prefix: `feat:`, `fix:`, `chore:`, etc.; swap `default` for a change id when merging back into a tracked change)
 5. **Close the bone**: `maw exec default -- bn done <id>`
 
@@ -308,25 +307,27 @@ Do not create git branches manually — `maw ws create` handles branching for yo
 
 **All tools have `--help`** with usage examples. When unsure, run `<tool> --help` or `<tool> <command> --help`.
 
-### Directory Structure (maw v2)
+### Directory Structure (consolidated layout)
 
-This project uses a **bare repo** layout. Source files live in workspaces under `ws/`, not at the project root.
+This project uses the **consolidated** layout. The repo root is a normal git checkout — source files live at the root and the root is the default workspace. Agent workspaces live under `.maw/workspaces/`.
 
 ```
-project-root/          ← bare repo (no source files here)
-├── ws/
-│   ├── default/       ← main working copy (AGENTS.md, .bones/, src/, etc.)
-│   ├── bn-1abc/       ← agent workspace (named after bone ID)
-│   └── bn-2def/       ← another agent workspace
-├── .manifold/         ← maw metadata/artifacts
-├── .git/              ← git data (core.bare=true)
-└── AGENTS.md          ← stub redirecting to ws/default/AGENTS.md
+project-root/          ← normal git checkout = default workspace (AGENTS.md, src/, etc.)
+├── .git/              ← normal git data
+├── .maw/
+│   ├── manifold/      ← maw metadata/artifacts
+│   └── workspaces/
+│       ├── bn-1abc/   ← agent workspace (named after bone ID)
+│       └── bn-2def/   ← another agent workspace
+└── src/, Cargo.toml, … ← project source files at the root
 ```
+
+(The legacy v2 **bare** layout — bare root + `ws/default/` + `ws/<name>/` — is still selectable via `maw init --legacy-ws`; `maw init` on an existing repo also produces v2. Run `maw migrate` to move a v2 repo to consolidated.)
 
 **Key rules:**
-- `ws/default/` is the main workspace — bones, config, and project files live here
+- The repo root is the main / default workspace — bones, config, and project files live here
 - **Never merge or destroy the default workspace.** It is where other branches merge INTO, not something you merge.
-- Agent workspaces (`ws/<name>/`) are isolated Git worktrees managed by maw
+- Agent workspaces (`.maw/workspaces/<name>/`) are isolated Git worktrees managed by maw
 - Use `maw exec <ws> -- <command>` to run commands in a workspace context
 - Use `maw exec default -- bn ...` for bones commands (always in default workspace)
 - Use `maw exec <ws> -- seal ...` for review commands (always in the review's workspace)
