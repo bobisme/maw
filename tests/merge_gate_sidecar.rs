@@ -711,3 +711,135 @@ fn merge_check_with_force_bypasses_sidecar_gate_like_real_merge() {
          diagnostic); got: {with_force_combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-16x2: STATUS / LIFECYCLE / RESOLVE path must agree with the gate
+// ---------------------------------------------------------------------------
+//
+// The merge GATE was fixed (bn-m6ad/3pgl/3oau, tests above) to read conflict
+// state from the sidecar, never from a content scan. But `ws list`,
+// `ws status`, `lifecycle:conflicted`, and `ws resolve --list` regressed —
+// they still scanned tracked-file CONTENT for `<<<<<<<` lines via
+// `find_conflicted_files`, so a brand-new workspace born from a repo whose
+// committed history legitimately contains marker literals (this very test
+// file, merge-tool source, git tutorials, diff docs, conflict fixtures) was
+// mislabeled "conflicted: N — resolve before merge / lifecycle:conflicted"
+// while `merge --check` said "[OK] Ready to merge". The two DISAGREED.
+//
+// These tests assert all four surfaces key off the recorded-conflict sidecar
+// (matching the gate): a fresh workspace with marker-literal content is NOT
+// conflicted, and a genuine RECORDED rebase conflict still IS.
+
+/// A fresh workspace whose default-branch history contains a file with
+/// literal diff3 markers must NOT be reported conflicted by `ws list`,
+/// `lifecycle`, or `ws resolve --list` — and must agree with `merge --check`.
+#[test]
+fn status_list_resolve_ignore_marker_literal_content() {
+    let repo = TestRepo::new();
+    // Commit a file whose bytes legitimately contain a full diff3 marker
+    // block into the DEFAULT branch (epoch), then advance the epoch — so the
+    // markers are part of the base history every fresh workspace inherits.
+    let marker_doc = "# conflict tutorial\n\
+        <<<<<<< ours\n\
+        a\n\
+        =======\n\
+        b\n\
+        >>>>>>> theirs\n";
+    repo.seed_files(&[("conflicts_doc.md", marker_doc)]);
+
+    repo.maw_ok(&["ws", "create", "solo"]);
+
+    // Precondition: no structured sidecar (nothing rebased).
+    let sidecar = repo
+        .root()
+        .join(".manifold/artifacts/ws/solo/conflict-tree.json");
+    assert!(
+        !sidecar.exists(),
+        "precondition: a fresh workspace has no conflict sidecar"
+    );
+
+    // 1. `ws list` must NOT classify it conflicted.
+    let list = repo.maw_ok(&["ws", "list"]);
+    assert!(
+        !list.contains("conflicted") && !list.contains("lifecycle:conflicted"),
+        "fresh workspace with marker-literal history must not be 'conflicted' in \
+         `ws list`; got:\n{list}"
+    );
+
+    // 2. `merge --check` must say ready (the gate already agreed) — confirm
+    //    the status path now matches it.
+    let check = repo.maw_ok(&["ws", "merge", "solo", "--into", "default", "--check"]);
+    assert!(
+        check.contains("Ready to merge"),
+        "merge --check must report ready; got:\n{check}"
+    );
+
+    // 3. `ws resolve solo --list` must report no conflicts — NOT offer to
+    //    --keep a side (which would mangle the legitimate file).
+    let resolve = repo.maw_ok(&["ws", "resolve", "solo", "--list"]);
+    assert!(
+        resolve.contains("No conflicted files"),
+        "resolve --list must report no conflicts for a fresh workspace; got:\n{resolve}"
+    );
+}
+
+/// A genuine RECORDED rebase conflict must still be detected and shown by
+/// `ws list` / `ws resolve --list` (do not weaken real detection — bn-16x2
+/// caution: 3 prior fixes regressed this class).
+#[test]
+fn status_list_resolve_still_flag_genuine_recorded_conflict() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("f.txt", "line1\nshared\nline3\n")]);
+
+    // Two workspaces edit the SAME line.
+    repo.maw_ok(&["ws", "create", "a"]);
+    repo.maw_ok(&["ws", "create", "b"]);
+    repo.add_file("a", "f.txt", "line1\nFROM_A\nline3\n");
+    repo.git_in_workspace("a", &["commit", "-aqm", "a-change"]);
+    repo.add_file("b", "f.txt", "line1\nFROM_B\nline3\n");
+    repo.git_in_workspace("b", &["commit", "-aqm", "b-change"]);
+
+    // Merge `a` — advances the epoch and auto-rebases sibling `b` into a
+    // REAL recorded conflict (sidecar written).
+    repo.maw_ok(&[
+        "ws", "merge", "a", "--into", "default", "--message", "merge a",
+    ]);
+
+    // Sidecar must now exist for `b`.
+    let sidecar = repo
+        .root()
+        .join(".manifold/artifacts/ws/b/conflict-tree.json");
+    assert!(
+        sidecar.exists(),
+        "a real auto-rebase conflict must record a structured sidecar for 'b'"
+    );
+
+    // `ws list` must classify `b` conflicted.
+    let list = repo.maw_ok(&["ws", "list"]);
+    assert!(
+        list.contains("conflicted") || list.contains("lifecycle:conflicted"),
+        "genuine recorded conflict must still show 'conflicted' in `ws list`; got:\n{list}"
+    );
+
+    // `merge b --check` must refuse.
+    let check = repo.maw_raw(&["ws", "merge", "b", "--into", "default", "--check"]);
+    assert!(
+        !check.status.success(),
+        "merge --check must refuse a workspace with a recorded conflict"
+    );
+
+    // `resolve b --list` must surface the conflicted file and offer --keep.
+    let resolve = repo.maw_ok(&["ws", "resolve", "b", "--list"]);
+    assert!(
+        resolve.contains("f.txt") && resolve.contains("--keep"),
+        "resolve --list must surface the real conflict and offer --keep; got:\n{resolve}"
+    );
+
+    // And `--keep` must actually clear it.
+    repo.maw_ok(&["ws", "resolve", "b", "--keep", "b"]);
+    let after = repo.maw_ok(&["ws", "merge", "b", "--into", "default", "--check"]);
+    assert!(
+        after.contains("Ready to merge"),
+        "after `resolve --keep`, the workspace must be mergeable; got:\n{after}"
+    );
+}

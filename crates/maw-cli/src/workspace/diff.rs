@@ -431,11 +431,12 @@ where
     let workspaces = backend.list().ok()?;
     let ws = workspaces.into_iter().find(|w| &w.id == ws_id)?;
     let missing = !ws.path.exists();
+    // bn-16x2: recorded-conflict sidecar signal (matches `merge --check`),
+    // not a tracked-content marker scan.
     let rebase_conflicts = if missing {
         0
     } else {
-        super::resolve::find_conflicted_files(&ws.path)
-            .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
+        super::resolve::recorded_conflict_count(root, ws_id.as_str())
     };
     let has_uncommitted = if missing {
         false

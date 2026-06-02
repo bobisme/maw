@@ -154,6 +154,24 @@ pub fn run(
         }
     }
 
+    // bn-16x2: with no structured sidecar present, the only legitimate source
+    // of "this workspace is conflicted" is the legacy rebase-conflicts sidecar
+    // — exactly what the merge gate falls back to. If neither sidecar recorded
+    // a conflict, scanning tracked-file *content* for `<<<<<<<` markers would
+    // false-positive on legit marker literals (docs/fixtures/merge-tool source)
+    // and tempt the user into `--keep`, mangling a non-conflicted file. Report
+    // "no conflicts" instead so `--list` agrees with `merge --check`.
+    if recorded_conflict_count(&root, workspace) == 0 {
+        if list {
+            return list_conflicts_empty(workspace, format);
+        }
+        bail!(
+            "Workspace '{workspace}' has no recorded rebase conflicts to resolve.\n  \
+             (`maw ws merge {workspace} --check` agrees it is ready to merge.)\n  \
+             If you expected conflicts, run `maw ws sync --rebase {workspace}` first."
+        );
+    }
+
     if list {
         return list_conflicts(&ws_path, workspace, paths, format);
     }
@@ -370,6 +388,17 @@ pub fn run(
     clippy::too_many_lines,
     reason = "conflict listing renders legacy chunks and structured metadata together"
 )]
+/// Render an empty `--list` result (no recorded conflicts) in the same shape
+/// as [`list_conflicts`] for both text and JSON. bn-16x2.
+fn list_conflicts_empty(workspace: &str, format: OutputFormat) -> Result<()> {
+    if format == OutputFormat::Json {
+        println!(r#"{{"workspace":"{workspace}","conflict_count":0,"files":[]}}"#);
+    } else {
+        println!("No conflicted files in '{workspace}'.");
+    }
+    Ok(())
+}
+
 fn list_conflicts(
     ws_path: &Path,
     workspace: &str,
@@ -528,6 +557,39 @@ fn collect_block_info(chunks: &[FileChunk]) -> Vec<BlockInfo> {
         }
     }
     blocks
+}
+
+// ---------------------------------------------------------------------------
+// Recorded-conflict signal (sidecar-driven — the source of truth)
+// ---------------------------------------------------------------------------
+
+/// Number of conflicts a *rebase actually recorded* for `ws_name`, read from
+/// the structured/legacy conflict sidecars — the SAME signal the merge gate
+/// (`assert_sources_clean_for_merge`) uses to decide "ready to merge".
+///
+/// bn-16x2: `ws list`, `ws status`, `lifecycle:conflicted`, and
+/// `ws resolve --list` previously derived "conflicted" by scanning
+/// tracked-file *content* for `<<<<<<<` marker lines via
+/// [`find_conflicted_files`]. That false-positives on legitimate content
+/// (merge-tool source, git tutorials, diff docs, conflict test fixtures) and
+/// — critically — DISAGREED with `maw ws merge --check`, which never scans
+/// content. A workspace is conflicted iff a rebase recorded a structured
+/// conflict for it (sidecar present and non-empty), NOT merely because a
+/// committed file contains marker-like text.
+///
+/// Priority mirrors the gate exactly:
+///   1. structured sidecar (`conflict-tree.json`) → `tree.conflicts.len()`
+///   2. legacy sidecar (`rebase-conflicts.json`) → `conflicts.len()`
+///   3. neither present → 0 (no recorded conflict)
+#[must_use]
+pub fn recorded_conflict_count(root: &Path, ws_name: &str) -> u32 {
+    if let Some(tree) = super::resolve_structured::read_conflict_tree_sidecar(root, ws_name) {
+        return u32::try_from(tree.conflicts.len()).unwrap_or(u32::MAX);
+    }
+    if let Some(legacy) = super::sync::read_rebase_conflicts(root, ws_name) {
+        return u32::try_from(legacy.conflicts.len()).unwrap_or(u32::MAX);
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------

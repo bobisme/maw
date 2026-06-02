@@ -214,13 +214,15 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             // dir is gone from disk. Detect that here so we don't claim "ready
             // to merge" when the merge would error with "does not exist".
             let missing = !is_default && !ws.path.exists();
+            // bn-16x2: conflicted-ness comes from the recorded rebase-conflict
+            // sidecar (the same signal `maw ws merge --check` uses), NOT from
+            // scanning tracked-file content for `<<<<<<<` markers. Scanning
+            // content false-positived on legit marker literals (docs/fixtures)
+            // and disagreed with the merge gate.
             let rebase_conflicts = if missing {
                 0
             } else {
-                let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
-                let ws_path = flavor.workspace_path(&root, ws.id.as_str());
-                super::resolve::find_conflicted_files(&ws_path)
-                    .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX))
+                super::resolve::recorded_conflict_count(&root, ws.id.as_str())
             };
             // bn-242l: classify lifecycle state and compute the
             // exact fix command. Use the same signals/priority order

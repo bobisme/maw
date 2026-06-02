@@ -219,8 +219,9 @@ fn build_present_preview(
 
     let signals = LifecycleSignals {
         missing: false,
-        rebase_conflicts: super::resolve::find_conflicted_files(path)
-            .map_or(0, |files| u32::try_from(files.len()).unwrap_or(u32::MAX)),
+        // bn-16x2: recorded-conflict sidecar signal (matches `merge --check`),
+        // not a tracked-content marker scan.
+        rebase_conflicts: super::resolve::recorded_conflict_count(&root, name),
         is_stale: false,  // not relevant for destroy-action prediction
         commits_ahead: 0, // approximated by touched_count for preview
         has_uncommitted: touched_count > 0,

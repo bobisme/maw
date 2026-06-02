@@ -920,11 +920,13 @@ fn collect_lifecycle_signals(
     ws: &maw_core::model::types::WorkspaceInfo,
 ) -> LifecycleSignals {
     let missing = !ws.path.exists();
+    // bn-16x2: derive conflicted-ness from the recorded rebase-conflict
+    // sidecar (matching `maw ws merge --check`), not a tracked-content
+    // marker scan that false-positives on legit `<<<<<<<` literals.
     let rebase_conflicts = if missing {
         0
     } else {
-        workspace::resolve::find_conflicted_files(&ws.path)
-            .map_or(0, |files| u32::try_from(files.len()).unwrap_or(u32::MAX))
+        workspace::resolve::recorded_conflict_count(root, ws.id.as_str())
     };
     let has_uncommitted = if missing {
         false
