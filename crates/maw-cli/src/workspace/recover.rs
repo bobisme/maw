@@ -42,6 +42,73 @@ struct DestroyedWorkspaceSummary {
     capture_mode: String,
     snapshot_oid: Option<String>,
     dirty_file_count: usize,
+    /// Where this row came from: a destroy record, or a pinned recovery ref
+    /// (e.g. produced by `maw migrate --allow-dirty`).
+    source: RecoverySource,
+    /// The full recovery ref backing this row, when it originated from a
+    /// pinned ref rather than a destroy record. Lets the user feed it straight
+    /// to `maw ws recover --ref <ref> ...`.
+    recovery_ref: Option<String>,
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+enum RecoverySource {
+    /// Backed by a destroy record under `.manifold/artifacts/ws/<ws>/destroy/`.
+    Destroy,
+    /// Backed only by a pinned recovery ref (migration / explicit pin) with no
+    /// destroy record.
+    PinnedRef,
+}
+
+impl RecoverySource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Destroy => "destroy",
+            Self::PinnedRef => "pinned",
+        }
+    }
+}
+
+/// Build summaries for workspaces that have a pinned recovery ref but NO
+/// destroy record. These are the migration (`maw migrate --allow-dirty`) and
+/// other explicitly-pinned snapshots that `list_destroyed_workspaces` (which
+/// only scans destroy records) cannot see. Without this the Prime-Invariant
+/// discoverability guarantee is broken: the work is recoverable but invisible
+/// to the advertised `maw ws recover` path.
+///
+/// `destroyed` is the set of workspace names already covered by destroy
+/// records, so we don't double-list them.
+fn pinned_only_summaries(
+    git_cwd: &Path,
+    destroyed: &HashSet<String>,
+) -> Result<Vec<DestroyedWorkspaceSummary>> {
+    let mut refs = list_recovery_refs(git_cwd)?;
+    // Latest ref per workspace (timestamp-sorted, last wins).
+    refs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    let mut latest: HashMap<String, RecoveryRef> = HashMap::new();
+    for r in refs {
+        if destroyed.contains(&r.workspace) {
+            continue;
+        }
+        latest.insert(r.workspace.clone(), r);
+    }
+
+    let mut summaries: Vec<DestroyedWorkspaceSummary> = latest
+        .into_values()
+        .map(|r| DestroyedWorkspaceSummary {
+            name: r.workspace.clone(),
+            destroyed_at: r.timestamp.clone(),
+            capture_mode: "pinned".to_string(),
+            snapshot_oid: Some(r.oid[..r.oid.len().min(12)].to_string()),
+            dirty_file_count: 0,
+            source: RecoverySource::PinnedRef,
+            recovery_ref: Some(r.ref_name),
+        })
+        .collect();
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(summaries)
 }
 
 #[derive(Serialize)]
@@ -54,7 +121,34 @@ pub fn list_destroyed(format: OutputFormat) -> Result<()> {
     let root = repo_root()?;
     let names = destroy_record::list_destroyed_workspaces(&root)?;
 
-    if names.is_empty() {
+    let mut summaries = Vec::new();
+    for name in &names {
+        if let Ok(Some(record)) = destroy_record::read_latest_record(&root, name) {
+            summaries.push(DestroyedWorkspaceSummary {
+                name: name.clone(),
+                destroyed_at: record.destroyed_at.clone(),
+                capture_mode: record.capture_mode.to_string(),
+                snapshot_oid: record.snapshot_oid.as_ref().map(|o| o[..12].to_string()),
+                dirty_file_count: record.dirty_files.len(),
+                source: RecoverySource::Destroy,
+                recovery_ref: record.snapshot_ref.clone(),
+            });
+        }
+    }
+
+    // Also surface pinned recovery refs (migration / explicit pins) that have
+    // no destroy record — otherwise `maw migrate --allow-dirty` work is
+    // recoverable but invisible here (bn-sdv4). Best-effort: a missing/foreign
+    // repo just yields no extra rows.
+    let destroyed_names: HashSet<String> = names.iter().cloned().collect();
+    if let Ok(git_cwd) = super::git_cwd()
+        && let Ok(pinned) = pinned_only_summaries(&git_cwd, &destroyed_names)
+    {
+        summaries.extend(pinned);
+    }
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if summaries.is_empty() {
         match format {
             OutputFormat::Json => {
                 let envelope = RecoverListEnvelope {
@@ -68,19 +162,6 @@ pub fn list_destroyed(format: OutputFormat) -> Result<()> {
             }
         }
         return Ok(());
-    }
-
-    let mut summaries = Vec::new();
-    for name in &names {
-        if let Ok(Some(record)) = destroy_record::read_latest_record(&root, name) {
-            summaries.push(DestroyedWorkspaceSummary {
-                name: name.clone(),
-                destroyed_at: record.destroyed_at.clone(),
-                capture_mode: record.capture_mode.to_string(),
-                snapshot_oid: record.snapshot_oid.as_ref().map(|o| o[..12].to_string()),
-                dirty_file_count: record.dirty_files.len(),
-            });
-        }
     }
 
     match format {
@@ -125,15 +206,16 @@ fn snapshot_display_for(s: &DestroyedWorkspaceSummary) -> &str {
 }
 
 fn print_list_text(summaries: &[DestroyedWorkspaceSummary]) {
-    println!("NAME\tDESTROYED_AT\tCAPTURE\tSNAPSHOT\tDIRTY_FILES");
+    println!("NAME\tWHEN\tCAPTURE\tSNAPSHOT\tDIRTY_FILES\tSOURCE");
     for s in summaries {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             s.name,
             s.destroyed_at,
             s.capture_mode,
             snapshot_display_for(s),
             s.dirty_file_count,
+            s.source.label(),
         );
     }
     println!();
@@ -144,9 +226,9 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
     let use_color = format.should_use_color();
 
     if use_color {
-        println!("\x1b[1mDestroyed workspaces with snapshots:\x1b[0m");
+        println!("\x1b[1mRecoverable workspace snapshots:\x1b[0m");
     } else {
-        println!("Destroyed workspaces with snapshots:");
+        println!("Recoverable workspace snapshots:");
     }
     println!();
 
@@ -162,6 +244,8 @@ fn print_list_pretty(summaries: &[DestroyedWorkspaceSummary], format: OutputForm
         let snapshot_display = snapshot_display_for(s);
         let dirty_suffix = if s.dirty_file_count > 0 {
             format!(" ({} dirty files)", s.dirty_file_count)
+        } else if s.source == RecoverySource::PinnedRef {
+            " [pinned recovery ref]".to_string()
         } else {
             String::new()
         };
@@ -215,6 +299,24 @@ fn print_list_footer(summaries: &[DestroyedWorkspaceSummary], use_color: bool) {
             println!("\x1b[90m{note}\x1b[0m");
         } else {
             println!("{note}");
+        }
+    }
+
+    if summaries.iter().any(|s| s.source == RecoverySource::PinnedRef) {
+        println!();
+        let note = "\"pinned\" rows are recovery refs (e.g. from `maw migrate --allow-dirty`):";
+        let inspect =
+            "  maw ws recover <name>                       # show its pinned recovery ref(s)";
+        let restore =
+            "  maw ws recover <name> --to <new-workspace>  # restore the latest pinned snapshot";
+        if use_color {
+            println!("\x1b[90m{note}\x1b[0m");
+            println!("\x1b[90m{inspect}\x1b[0m");
+            println!("\x1b[90m{restore}\x1b[0m");
+        } else {
+            println!("{note}");
+            println!("{inspect}");
+            println!("{restore}");
         }
     }
 }
@@ -797,9 +899,20 @@ pub fn show_workspace(name: &str, format: OutputFormat) -> Result<()> {
 
     let record_files = destroy_record::list_record_files(&root, name)?;
     if record_files.is_empty() {
+        // No destroy record — but there may be pinned recovery refs for this
+        // workspace (migration / explicit pins). Surface those instead of
+        // claiming there's nothing to recover (bn-sdv4).
+        if let Ok(git_cwd) = super::git_cwd() {
+            let mut refs = list_recovery_refs(&git_cwd).unwrap_or_default();
+            refs.retain(|r| r.workspace == name);
+            if !refs.is_empty() {
+                refs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                return show_pinned_refs(name, &refs, format);
+            }
+        }
         bail!(
-            "No destroy records found for workspace '{name}'.\n  \
-             List destroyed workspaces: maw ws recover"
+            "No destroy records or recovery refs found for workspace '{name}'.\n  \
+             List recoverable snapshots: maw ws recover"
         );
     }
 
@@ -823,6 +936,81 @@ pub fn show_workspace(name: &str, format: OutputFormat) -> Result<()> {
         }
         OutputFormat::Text => print_show_text(name, &records),
         OutputFormat::Pretty => print_show_pretty(name, &records, format),
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PinnedRefSummary {
+    ref_name: String,
+    timestamp: String,
+    oid: String,
+}
+
+#[derive(Serialize)]
+struct RecoverPinnedEnvelope {
+    workspace: String,
+    pinned_refs: Vec<PinnedRefSummary>,
+    advice: Vec<String>,
+}
+
+/// Render the pinned recovery refs for a workspace that has no destroy record
+/// (e.g. snapshots pinned by `maw migrate --allow-dirty`). Mirrors the
+/// destroy-history view so the discoverability story is uniform (bn-sdv4).
+fn show_pinned_refs(name: &str, refs: &[RecoveryRef], format: OutputFormat) -> Result<()> {
+    let pinned: Vec<PinnedRefSummary> = refs
+        .iter()
+        .map(|r| PinnedRefSummary {
+            ref_name: r.ref_name.clone(),
+            timestamp: r.timestamp.clone(),
+            oid: r.oid.clone(),
+        })
+        .collect();
+
+    match format {
+        OutputFormat::Json => {
+            let envelope = RecoverPinnedEnvelope {
+                workspace: name.to_string(),
+                pinned_refs: pinned,
+                advice: vec![
+                    "Show file: maw ws recover --ref <ref> --show <path>".to_string(),
+                    format!("Restore latest: maw ws recover {name} --to <new-name>"),
+                    "Restore specific: maw ws recover --ref <ref> --to <new-name>".to_string(),
+                ],
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        _ => {
+            let use_color = format.should_use_color();
+            if use_color {
+                println!(
+                    "\x1b[1mPinned recovery refs for '{name}' ({} ref(s)):\x1b[0m",
+                    pinned.len()
+                );
+            } else {
+                println!(
+                    "Pinned recovery refs for '{name}' ({} ref(s)):",
+                    pinned.len()
+                );
+            }
+            println!();
+            println!("(no destroy record — these are pinned snapshots, e.g. from `maw migrate --allow-dirty`)");
+            println!();
+            for p in &pinned {
+                println!("  {}", p.timestamp);
+                println!("    Snapshot: {}...", &p.oid[..p.oid.len().min(12)]);
+                println!("    Ref:      {}", p.ref_name);
+            }
+            println!();
+            println!("Next: maw ws recover {name} --to <new-name>          # restore the latest pinned snapshot");
+            println!(
+                "      maw ws recover --ref <ref> --to <new-name>     # restore a specific one"
+            );
+            println!(
+                "      maw ws recover --ref <ref> --show <path>       # show one file from a snapshot"
+            );
+        }
     }
 
     Ok(())
@@ -1329,10 +1517,29 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     // (it's fine if a destroyed workspace has the same name as a live one —
     // the user asked to restore it to a *different* name)
 
-    let record = destroy_record::read_latest_record(&root, name)?
-        .with_context(|| format!("No destroy records found for workspace '{name}'"))?;
-
-    let oid = resolve_recoverable_oid(&record)?;
+    // Prefer a destroy record (richer metadata). If there is none, fall back
+    // to the latest pinned recovery ref for this workspace — that's how
+    // `maw migrate --allow-dirty` snapshots are reachable via the friendly
+    // path (bn-sdv4) rather than the undocumented `--ref` form.
+    let (oid, dirty_count) = match destroy_record::read_latest_record(&root, name)? {
+        Some(record) => {
+            let oid = resolve_recoverable_oid(&record)?;
+            (oid, record.dirty_files.len())
+        }
+        None => {
+            let git_cwd = super::git_cwd()?;
+            let mut refs = list_recovery_refs(&git_cwd)?;
+            refs.retain(|r| r.workspace == name);
+            refs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            let Some(latest) = refs.pop() else {
+                bail!(
+                    "No destroy records or recovery refs found for workspace '{name}'.\n  \
+                     List recoverable snapshots: maw ws recover"
+                );
+            };
+            (latest.oid, 0)
+        }
+    };
 
     // Step 1: Create the new workspace via the standard create path
     println!("Creating workspace '{new_name}' from snapshot of '{name}'...");
@@ -1356,8 +1563,8 @@ pub fn restore_to(name: &str, new_name: &str) -> Result<()> {
     println!();
     println!("  Snapshot:  {}...", &oid[..oid.len().min(12)]);
     println!("  Path:      {}/", new_ws_path.display());
-    if !record.dirty_files.is_empty() {
-        println!("  Recovered: {} dirty file(s)", record.dirty_files.len());
+    if dirty_count > 0 {
+        println!("  Recovered: {dirty_count} dirty file(s)");
     }
     println!();
     println!("Next: maw exec {new_name} -- git status");
@@ -1842,6 +2049,71 @@ three
         assert_eq!(snippet.len(), 3);
         assert_eq!(snippet[1].line, 2);
         assert!(snippet[1].is_match);
+    }
+
+    /// bn-sdv4: a pinned recovery ref with no destroy record (e.g. from
+    /// `maw migrate --allow-dirty`) must surface in the recover list so the
+    /// Prime-Invariant discoverability guarantee holds.
+    #[test]
+    fn pinned_only_summaries_surfaces_migration_ref() {
+        let (_dir, root) = maw_git::test_support::init_test_repo();
+        fs::write(root.join("a.txt"), "work\n").expect("operation should succeed");
+        let oid = maw_git::test_support::commit_all(&root, "init");
+
+        let ref_name = "refs/manifold/recovery/default/2026-06-02T00-00-00Z";
+        let upd = Command::new("git")
+            .args(["update-ref", ref_name, &oid])
+            .current_dir(&root)
+            .output()
+            .expect("operation should succeed");
+        assert!(upd.status.success());
+
+        // No destroy records exist → destroyed set is empty.
+        let destroyed = HashSet::new();
+        let summaries =
+            pinned_only_summaries(&root, &destroyed).expect("operation should succeed");
+        assert_eq!(summaries.len(), 1, "migration ref must be listed");
+        assert_eq!(summaries[0].name, "default");
+        assert_eq!(summaries[0].source, RecoverySource::PinnedRef);
+        assert_eq!(summaries[0].recovery_ref.as_deref(), Some(ref_name));
+
+        // If the workspace already has a destroy record, don't double-list it.
+        let mut destroyed = HashSet::new();
+        destroyed.insert("default".to_string());
+        let summaries =
+            pinned_only_summaries(&root, &destroyed).expect("operation should succeed");
+        assert!(
+            summaries.is_empty(),
+            "destroy-record workspaces must not be double-listed"
+        );
+    }
+
+    /// bn-sdv4: when multiple pinned refs exist for one workspace, only the
+    /// latest (by timestamp) is summarized, with the right ref attached.
+    #[test]
+    fn pinned_only_summaries_picks_latest_per_workspace() {
+        let (_dir, root) = maw_git::test_support::init_test_repo();
+        fs::write(root.join("a.txt"), "work\n").expect("operation should succeed");
+        let oid = maw_git::test_support::commit_all(&root, "init");
+
+        for ts in ["2026-06-01T00-00-00Z", "2026-06-02T00-00-00Z"] {
+            let ref_name = format!("refs/manifold/recovery/default/{ts}");
+            let upd = Command::new("git")
+                .args(["update-ref", &ref_name, &oid])
+                .current_dir(&root)
+                .output()
+                .expect("operation should succeed");
+            assert!(upd.status.success());
+        }
+
+        let summaries =
+            pinned_only_summaries(&root, &HashSet::new()).expect("operation should succeed");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].destroyed_at, "2026-06-02T00-00-00Z");
+        assert_eq!(
+            summaries[0].recovery_ref.as_deref(),
+            Some("refs/manifold/recovery/default/2026-06-02T00-00-00Z")
+        );
     }
 
     #[test]

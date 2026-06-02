@@ -279,14 +279,15 @@ scn_migrate() {
   # The dropped uncommitted default change must be captured to a recovery ref.
   assert_recovery_ref "$sb" default \
     "migrate: dirty default captured to recovery ref (Prime Invariant)"
-  # bn-2ksp follow-up: migrate's own output says "list via maw ws recover", but
-  # `maw ws recover` only reads destroy records and misses migration refs. Until
-  # that's fixed, the advertised discovery path lies. Soft-warn, not a failure —
-  # the work IS preserved (asserted above); only discoverability is broken.
+  # bn-sdv4 (split from bn-2ksp): migrate's own output says "list via maw ws
+  # recover" — so `maw ws recover` MUST surface migration recovery refs, not
+  # just destroy records. This is the Prime-Invariant discoverability
+  # guarantee: if the advertised path can't find preserved work, the tool
+  # lies. Now a hard assertion.
   if ( cd "$sb" && "$MAW" ws recover 2>&1 | grep -qi 'default' ); then
     ok "migrate: maw ws recover surfaces the migration recovery ref"
   else
-    warn "migrate: maw ws recover does NOT surface migration recovery ref (bn-2ksp follow-up) — recoverable only via git for-each-ref refs/manifold/recovery/ + maw ws recover --ref"
+    bad "migrate: maw ws recover does NOT surface migration recovery ref (bn-sdv4) — recoverable only via git for-each-ref refs/manifold/recovery/ + maw ws recover --ref"
   fi
 }
 
