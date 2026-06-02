@@ -384,10 +384,6 @@ pub fn run(
 // List conflicts
 // ---------------------------------------------------------------------------
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "conflict listing renders legacy chunks and structured metadata together"
-)]
 /// Render an empty `--list` result (no recorded conflicts) in the same shape
 /// as [`list_conflicts`] for both text and JSON. bn-16x2.
 fn list_conflicts_empty(workspace: &str, format: OutputFormat) -> Result<()> {
@@ -399,6 +395,10 @@ fn list_conflicts_empty(workspace: &str, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "conflict listing renders legacy chunks and structured metadata together"
+)]
 fn list_conflicts(
     ws_path: &Path,
     workspace: &str,

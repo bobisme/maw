@@ -802,7 +802,13 @@ fn status_list_resolve_still_flag_genuine_recorded_conflict() {
     // Merge `a` — advances the epoch and auto-rebases sibling `b` into a
     // REAL recorded conflict (sidecar written).
     repo.maw_ok(&[
-        "ws", "merge", "a", "--into", "default", "--message", "merge a",
+        "ws",
+        "merge",
+        "a",
+        "--into",
+        "default",
+        "--message",
+        "merge a",
     ]);
 
     // Sidecar must now exist for `b`.
