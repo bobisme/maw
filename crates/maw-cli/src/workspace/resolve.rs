@@ -154,14 +154,31 @@ pub fn run(
         }
     }
 
-    // bn-16x2: with no structured sidecar present, the only legitimate source
-    // of "this workspace is conflicted" is the legacy rebase-conflicts sidecar
-    // — exactly what the merge gate falls back to. If neither sidecar recorded
-    // a conflict, scanning tracked-file *content* for `<<<<<<<` markers would
-    // false-positive on legit marker literals (docs/fixtures/merge-tool source)
-    // and tempt the user into `--keep`, mangling a non-conflicted file. Report
-    // "no conflicts" instead so `--list` agrees with `merge --check`.
-    if recorded_conflict_count(&root, workspace) == 0 {
+    // bn-16x2 / bn-lm3i: with no structured sidecar present, a workspace is
+    // legitimately conflicted in EITHER of two ways:
+    //
+    //   1. a legacy rebase-conflicts sidecar recorded a conflict
+    //      (`recorded_conflict_count > 0`) — the signal the merge gate uses; or
+    //   2. an operation INTRODUCED conflict markers into the WORKING COPY with
+    //      no sidecar — the dirty-default merge-overlap case. `maw ws merge`
+    //      can leave `<<<<<<<` markers as uncommitted edits in the default
+    //      workspace; `maw ws resolve default --keep <path>=both` must clear
+    //      them even though nothing wrote a sidecar.
+    //
+    // bn-16x2's caution still holds: a file whose marker literals are COMMITTED
+    // (clean working tree — docs, tutorials, this file's own fixtures) must NOT
+    // be flagged. `find_genuine_working_copy_conflicts` keys off the
+    // diff-vs-base scan (operation-introduced markers only) and additionally
+    // gates on the file being dirty-vs-HEAD, so committed fixtures never trip
+    // it. Only bail when BOTH signals are empty — then `--list` still agrees
+    // with `merge --check`.
+    let recorded = recorded_conflict_count(&root, workspace);
+    let working_copy_conflicts = if recorded == 0 {
+        find_genuine_working_copy_conflicts(&ws_path)?
+    } else {
+        Vec::new()
+    };
+    if recorded == 0 && working_copy_conflicts.is_empty() {
         if list {
             return list_conflicts_empty(workspace, format);
         }
@@ -598,6 +615,69 @@ pub fn recorded_conflict_count(root: &Path, ws_name: &str) -> u32 {
 
 pub fn find_conflicted_files(ws_path: &Path) -> Result<Vec<PathBuf>> {
     find_conflicted_files_filtered(ws_path, None)
+}
+
+/// Find conflict markers that an OPERATION introduced into the WORKING COPY
+/// and that are still UNCOMMITTED (dirty vs HEAD) — the no-sidecar
+/// dirty-default merge-overlap case (bn-lm3i).
+///
+/// This is the fallback signal used by [`run`] when no conflict sidecar
+/// exists. It must restore the genuine dirty-default path that bn-16x2 broke
+/// WITHOUT reintroducing the committed-marker-literal false positive:
+///
+/// * The diff-based scan in [`find_conflicted_files`] already returns only
+///   files where a `<<<<<<<` line is NEW relative to the workspace base, so a
+///   file whose marker literals predate the workspace (committed fixtures,
+///   tutorials, docs) is not returned at all.
+/// * As a belt-and-suspenders guard against the FULL-CONTENT-WALK fallback in
+///   [`find_conflicted_files_filtered`] (taken only when the base ref can't be
+///   resolved, which would otherwise flag committed fixtures), we additionally
+///   intersect with the set of files that are DIRTY vs HEAD. Committed marker
+///   literals are clean and thus excluded; dirty-default markers are
+///   uncommitted and thus retained.
+fn find_genuine_working_copy_conflicts(ws_path: &Path) -> Result<Vec<PathBuf>> {
+    let candidates = find_conflicted_files(ws_path)?;
+    if candidates.is_empty() {
+        return Ok(candidates);
+    }
+
+    // Files that differ from HEAD (uncommitted edits / untracked additions).
+    // If we can't compute the dirty set, fall back to the diff-based
+    // candidates unchanged — the diff scan is already operation-scoped and the
+    // common dirty-default path resolves a base ref, so this is rare.
+    let Some(dirty) = dirty_paths_vs_head(ws_path) else {
+        return Ok(candidates);
+    };
+
+    Ok(candidates
+        .into_iter()
+        .filter(|p| dirty.contains(p))
+        .collect())
+}
+
+/// Set of paths in `ws_path` that differ from HEAD (modified/added/untracked),
+/// i.e. uncommitted working-copy changes. Returns `None` if the repo can't be
+/// opened or status can't be computed.
+fn dirty_paths_vs_head(ws_path: &Path) -> Option<std::collections::BTreeSet<PathBuf>> {
+    let repo = maw_git::GixRepo::open(ws_path).ok()?;
+    let mut dirty: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+
+    // HEAD→worktree: catches files whose committed content differs from the
+    // working copy (the dirty-default merge-overlap writes markers here).
+    // Must use status_head_to_worktree, not plain status() (bn-pfh7).
+    let entries = repo.status_head_to_worktree().ok()?;
+    for e in entries {
+        dirty.insert(PathBuf::from(e.path));
+    }
+    // Untracked files have no HEAD entry but are still uncommitted.
+    if let Ok(untracked) = repo.list_untracked() {
+        for p in untracked {
+            if !p.is_empty() {
+                dirty.insert(PathBuf::from(p));
+            }
+        }
+    }
+    Some(dirty)
 }
 
 /// Like [`find_conflicted_files`], but with an optional structured-sidecar
