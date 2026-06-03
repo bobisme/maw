@@ -2,6 +2,16 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.3 — consolidated-layout dogfood round 2 (2026-06-03)
+
+Third dogfood pre-release. Continued real-world use of the consolidated `.maw/` layout surfaced a cluster of conflict-detection, recovery-discoverability, and oplog-integrity bugs — all fixed here. A new deterministic invariant harness (`notes/consolidated-sim.sh`) now guards the full consolidated lifecycle (including the bn-3bkn git-dir-gutting class) on every run.
+
+- **Fresh workspaces no longer falsely report conflicts (bn-16x2).** `maw ws list` / `ws status` / `ws resolve --list` and the `lifecycle:conflicted` classification were scanning tracked-file *content* for `<<<<<<<` markers, so any repo containing legitimate marker literals (a merge tool's own source, git tutorials, diff docs, conflict test fixtures — including the maw repo itself) had **every** agent workspace born `conflicted: N — resolve before merge`, tempting a destructive `maw ws resolve --keep`. The conflict signal now comes from the structured rebase-conflict sidecar (matching what `maw ws merge --check` already did). Genuine dirty-working-copy conflicts (e.g. dirty-default merge overlap, which has no sidecar) are still detected and resolvable (bn-lm3i).
+- **`maw ws recover` surfaces migration recovery refs (bn-sdv4).** `maw migrate --allow-dirty` pins dropped uncommitted work to `refs/manifold/recovery/<name>/<ts>`, and migrate's output says to "list via `maw ws recover`" — but recover only consulted destroy records, so it reported "No destroyed workspaces with snapshots found." It now enumerates pinned recovery refs in the list/inspect/restore paths, closing a Prime-Invariant discoverability gap.
+- **Merge oplog, push, and epoch-gc are layout-aware (bn-1lj2).** Several real code paths hardcoded `root.join(".manifold")` instead of the layout-aware manifold dir, so in the consolidated layout the merge `integration_started` events (and the `maw merge events` reader, `maw push --advance` merge-state, and epoch GC) used the wrong directory — splitting the merge audit trail between a stray root `.manifold/` and `.maw/manifold/`. All routed through the layout-aware path; the oplog is unified again.
+- **Docs updated for the consolidated layout (bn-3ej6).** `AGENTS.md` and `maw init --help` described the legacy v2 bare layout; they now describe consolidated (root checkout, `.maw/workspaces/<name>/`), and `init --help` is explicit that an existing repo's `maw init` produces v2 and `maw migrate` converts it.
+- **`just check` no longer masks regressions (bn-8nm6).** `cargo clippy` updates cargo's fingerprint without relinking `target/debug/maw`, so a bare `cargo test` could exec a stale binary and hide a behavior regression (it briefly masked bn-lm3i). `just test` now builds the debug binary first via a `build-bin` prerequisite.
+
 ## v1.0.0-pre.2 — consolidated-layout hardening (2026-06-01)
 
 Second dogfood pre-release. Real-world use of the consolidated `.maw/` layout (via `maw migrate`) surfaced — and this release fixes — a cluster of layout/migrate bugs, including a critical data-loss one. The flagship consolidated layout is now a normal git repo and safe to use; bn-3bkn's gating condition ("not the default until fixed and proven") is satisfied.
