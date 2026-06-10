@@ -15,14 +15,14 @@ stateright = { version = "0.30", optional = true }
 # bn-263u + bn-1f53: only pulled in by `fault-injection` and/or `scenario`.
 # maw-core gives the failpoint registry + MAW_FP parser; rand gives seeded
 # plan selection (reused by both features).
-maw-core = { path = "../maw-core", version = "1.0.0-pre.3", optional = true }
+maw-core = { path = "../maw-core", version = "1.0.0-pre.4", optional = true }
 # bn-4qwp (T2.1): the deterministic scenario+condition generator was factored
 # out of this crate into a sibling `maw-scenario` so the SG2 real-agent driver
 # (T2.2 bn-1sqo) and substrate adapters (T2.3 bn-mit2) can consume the same
 # plan-stream without dragging in maw-core / failpoints / tempfile / oracles.
 # This crate keeps the `scenario` feature flag as a thin re-export so the
 # pre-factor import path `maw_assurance::scenario::*` still resolves.
-maw-scenario = { path = "../maw-scenario", version = "1.0.0-pre.3", optional = true }
+maw-scenario = { path = "../maw-scenario", version = "1.0.0-pre.4", optional = true }
 rand = { version = "0.9", optional = true }
 # T1.6 (bn-32k3): the in-proc driver (oracles feature) owns a tempdir-
 # backed git repo per replay so the shrinker can run thousands of cheap

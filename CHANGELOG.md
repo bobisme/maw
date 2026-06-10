@@ -2,6 +2,30 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.4 — conflict-engine hardening (bug-loop sweep) (2026-06-10)
+
+Fourth dogfood pre-release. An intensive multi-round bug-loop on the conflict / merge / resolve / sync engine — driven by real multi-workspace ("sigil") dogfooding — found and fixed **18 bugs** before converging on a clean pass (round 6 found zero). The work concentrates on making conflict rendering, resolution, and reporting honest and lossless.
+
+**Conflict rendering & resolution engine**
+- **Structured content conflicts render as hunk-level diff3 merges (bn-36zz).** Two-side conflicts are merged hunk-by-hunk via gix instead of inlining whole files three times; the conflict header now embeds base/side blob OIDs for mechanical reconstruction.
+- **`--keep epoch` / `--keep both` resolve per conflicted hunk (bn-1nwn)**, preserving cleanly-merged edits instead of discarding them to a whole-blob choice (`--keep <ws>` was already per-hunk).
+- **Binary blobs never go through the text 3-way merge (bn-1hmz, HIGH).** A binary file could be run through gix's text diff3 and emerge as a fabricated "clean" merge; binary/N-side/no-base cases now fall back to whole-blob handling.
+- **Per-hunk resolutions run the post-merge sanity check (size + AST) before auto-commit (bn-c5ui)**, suppressing the commit on failure — caught from a real incident where a union resolution split a statement mid-hunk.
+- **Conflict records list only region-overlapping participants (bn-ztu6)**; reconstructed sidecars carry `base_content` with unified keep-path base guards (bn-1mn0); rename-aware `modify_delete` hints + a discarded-edit note on `--keep epoch` (bn-heb8); placeholder headers can reconstruct conflict metadata, fixing circular resolve guidance (bn-39i8).
+
+**Conflict-state truth & honest reporting**
+- **Single source of truth for conflict state (bn-21cj, bn-8zqz):** merge gate, `ws conflicts`, `resolve --list`, and lifecycle/list/status/diff all agree, verified against reality (markers on recorded paths). Sync summaries now verify the FINAL post-replay HEAD, so "replayed cleanly" can no longer print (nor a sidecar be deleted) while conflict content rides in HEAD.
+- **Sync up-to-date / fast-forward paths report residual committed conflicts (bn-6xpz).**
+- **Epoch-deleted vs workspace-modified paths raise a `modify_delete` conflict instead of silently resurrecting the file (bn-566k).**
+
+**Prime Invariant**
+- **Directory/file path clashes surface a structured conflict instead of silently dropping a side (bn-2dy1, HIGH).** Promotion installs a `ModifyDelete` + `df_hint` with a tree-validity invariant; `--keep epoch` restores from the epoch tree.
+
+**Workspace UX & safety**
+- **`ws clean` is layout-aware in the consolidated layout (bn-1s8d)**, and the reserved name `default` is refused on `ws create` (bn-21qy) — no more undestroyable zombie-impostor workspace.
+- **Stale workspaces diff against their own base epoch, not the current one (bn-1olb, bn-1abp)**; sibling auto-rebase emits a one-time notice, the stale-epoch warning is de-duplicated per invocation, and `create --from` divergence is called out loudly (bn-1abp).
+- **Sanity-suppression remediation commands are single-line copy-pasteable (bn-2qbk).**
+
 ## v1.0.0-pre.3 — consolidated-layout dogfood round 2 (2026-06-03)
 
 Third dogfood pre-release. Continued real-world use of the consolidated `.maw/` layout surfaced a cluster of conflict-detection, recovery-discoverability, and oplog-integrity bugs — all fixed here. A new deterministic invariant harness (`notes/consolidated-sim.sh`) now guards the full consolidated lifecycle (including the bn-3bkn git-dir-gutting class) on every run.
