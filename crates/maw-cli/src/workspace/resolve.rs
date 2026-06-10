@@ -168,7 +168,17 @@ fn try_reconstruct_sidecar_from_placeholders(
                         let oid_str = oid_part.trim();
                         match verify_oid_exists(oid_str, &repo, rel_path) {
                             Ok(oid) => {
-                                sides.push(ConflictSide::new(ws_name, oid, dummy_ordering()));
+                                // bn-1mn0: thread base_content into each side so
+                                // the per-hunk keep paths (--keep epoch / --keep <ws>
+                                // / --keep both) in resolve_structured.rs can run a
+                                // 3-way merge after reconstruction rather than
+                                // silently degrading to whole-blob replace.
+                                sides.push(ConflictSide::with_base(
+                                    ws_name,
+                                    oid,
+                                    dummy_ordering(),
+                                    base_oid.clone(),
+                                ));
                             }
                             Err(msg) => return ReconstructionResult::ParseFailure(msg),
                         }

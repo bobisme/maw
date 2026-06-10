@@ -527,6 +527,29 @@ fn pick_single_side_mode(conflict: &Conflict, target: &str) -> Option<ConflictSi
     }
 }
 
+/// bn-1mn0: resolve the effective merge-base OID for a per-hunk keep path.
+///
+/// The base OID may live in two places depending on how the sidecar was
+/// produced:
+///
+/// * **Normal sidecars** (written by `sync::rebase`): each `ConflictSide`
+///   carries `base_content = Some(ref_old)` (set by `ConflictSide::with_base`).
+/// * **Reconstructed sidecars** (from placeholder headers, bn-39i8 / bn-1mn0):
+///   after the fix the sides also carry `base_content`, but we fall back to
+///   `Conflict::Content.base` for pre-fix reconstructed sidecars and for any
+///   legacy sidecar where only the top-level field was populated.
+/// * **Keep-both path** already reads `Conflict::Content.base` directly; this
+///   helper is used by `--keep epoch` and `--keep <ws>` to get the same reach.
+///
+/// Returns `None` when neither source has a base OID (add/add, binary with no
+/// base, or a legacy sidecar from before bn-3mbj).
+fn effective_base_oid<'a>(
+    conflict_base: Option<&'a GitOid>,
+    side: &'a ConflictSide,
+) -> Option<&'a GitOid> {
+    side.base_content.as_ref().or(conflict_base)
+}
+
 /// Apply a resolution for a single `(path, conflict)` and produce the output.
 ///
 /// `sanity_cfg` is used to run the bn-c5ui post-merge sanity check on
@@ -577,13 +600,21 @@ fn apply_decision(
         // from each side are preserved and conflicting hunks include both
         // sides' lines (no markers). Fall back to the legacy blob-concat for
         // N>2 sides, binary content, AddAdd (no base OID), or missing base.
-        if let Conflict::Content { sides, base, .. } = conflict
+        //
+        // bn-1mn0: use effective_base_oid so reconstructed sidecars (where
+        // only the side-level base_content was populated, or only the
+        // top-level base field) are treated identically to normal sidecars.
+        if let Conflict::Content {
+            sides,
+            base: conflict_base,
+            ..
+        } = conflict
             && sides.len() == 2
-            && let Some(base_oid) = base.as_ref()
             && let (Some(epoch_side), Some(ws_side)) = (
                 sides.iter().find(|s| s.workspace == EPOCH_LABEL),
                 sides.iter().find(|s| s.workspace != EPOCH_LABEL),
             )
+            && let Some(base_oid) = effective_base_oid(conflict_base.as_ref(), epoch_side)
         {
             let base_oid_git: git::GitOid = base_oid
                 .as_str()
@@ -664,6 +695,32 @@ fn apply_decision(
             // Binary or mixed text/binary — fall through to legacy concat.
         }
 
+        // bn-1mn0: if this is a 2-sided text Content conflict with no base
+        // available anywhere, emit a warning before the blob-concat so the
+        // user knows the resolution may drop non-overlapping workspace edits.
+        if let Conflict::Content {
+            sides,
+            base: conflict_base,
+            ..
+        } = conflict
+            && sides.len() == 2
+            && {
+                let epoch_fallback_side = sides
+                    .iter()
+                    .find(|s| s.workspace == EPOCH_LABEL)
+                    .unwrap_or(&sides[0]);
+                effective_base_oid(conflict_base.as_ref(), epoch_fallback_side).is_none()
+            }
+        {
+            eprintln!(
+                "warning: --keep both is using legacy blob-concat semantics for {}; \
+                 no merge-base OID is available so non-overlapping edits may be \
+                 duplicated or dropped. Verify with: maw exec {workspace} -- git diff HEAD~1 -- {}",
+                rel_path.display(),
+                rel_path.display(),
+            );
+        }
+
         // Legacy blob-concat fallback: N>2 sides, AddAdd (no base), binary.
         let oids = all_sides(conflict);
         if oids.is_empty() {
@@ -708,17 +765,24 @@ fn apply_decision(
     //
     // Conditions for the per-hunk path (same guard as the ws path):
     //   • `Conflict::Content` with exactly 2 sides (epoch + one ws side)
-    //   • the epoch side has a `base_content` OID
+    //   • a base OID is available via effective_base_oid (epoch side's
+    //     base_content, or the top-level Conflict::Content.base as fallback)
     //   • all three blobs are text (no NUL / valid UTF-8)
     //
-    // If any condition fails we fall through to the existing blob-replace path
-    // which is correct (though lossy) for the degenerate cases.
+    // bn-1mn0: use effective_base_oid so that reconstructed sidecars (whose
+    // sides may only have base_content set after the fix, or that fall back to
+    // the top-level base field) get the same per-hunk treatment as normal
+    // sidecars. If no base is available anywhere, fall through with a warning.
     if target == EPOCH_LABEL
-        && let Conflict::Content { sides, .. } = conflict
+        && let Conflict::Content {
+            sides,
+            base: conflict_base,
+            ..
+        } = conflict
         && sides.len() == 2
         && let Some(epoch_side) = sides.iter().find(|s| s.workspace == EPOCH_LABEL)
         && let Some(ws_side) = sides.iter().find(|s| s.workspace != EPOCH_LABEL)
-        && let Some(base_oid) = epoch_side.base_content.as_ref()
+        && let Some(base_oid) = effective_base_oid(conflict_base.as_ref(), epoch_side)
     {
         let base_oid_git: git::GitOid = base_oid
             .as_str()
@@ -787,22 +851,61 @@ fn apply_decision(
     }
     // No matching per-hunk conditions (AddAdd, ModifyDelete, missing base,
     // binary, N>2) for --keep epoch — fall through to pick_single_side_oid.
+    //
+    // bn-1mn0: if the conflict is Content with 2 sides but NO base available
+    // (neither side.base_content nor Conflict::Content.base), emit a warning
+    // before the blob-replace so the user knows the resolution is lossy.
+    if target == EPOCH_LABEL
+        && let Conflict::Content {
+            sides,
+            base: conflict_base,
+            ..
+        } = conflict
+        && sides.len() == 2
+        && sides.iter().any(|s| s.workspace == EPOCH_LABEL)
+        && effective_base_oid(
+            conflict_base.as_ref(),
+            sides
+                .iter()
+                .find(|s| s.workspace == EPOCH_LABEL)
+                .unwrap_or(&sides[0]),
+        )
+        .is_none()
+    {
+        eprintln!(
+            "warning: --keep epoch is using legacy blob-replace semantics for {}; \
+             no merge-base OID is available so non-overlapping workspace edits may be \
+             dropped. Verify with: maw exec {workspace} -- git diff HEAD~1 -- {}",
+            rel_path.display(),
+            rel_path.display(),
+        );
+    }
 
     // bn-3mbj: `--keep <ws-name>` (anything that isn't the literal `epoch`
     // label) should re-apply the workspace's intent on top of the new epoch
     // rather than wholesale replacing the file with the workspace's
     // pre-rebase blob. We only attempt the 3-way merge for `Conflict::Content`
     // (where there's a meaningful epoch side and merge base) and only when
-    // both the picked side carries `base_content` AND the conflict has a
+    // a base OID is available (via effective_base_oid) AND the conflict has a
     // matching `epoch` side. If either is missing we fall back to the legacy
     // blob-replace path with a one-line stderr warning so old in-flight
     // sidecars keep resolving.
     if target != EPOCH_LABEL
-        && let Conflict::Content { sides, .. } = conflict
+        && let Conflict::Content {
+            sides,
+            base: conflict_base,
+            ..
+        } = conflict
         && let SideMatch::One(ws_side) = match_sides(sides, target)
     {
         let epoch_side = sides.iter().find(|s| s.workspace == EPOCH_LABEL);
-        if let (Some(base_oid), Some(epoch_side)) = (ws_side.base_content.as_ref(), epoch_side) {
+        // bn-1mn0: use effective_base_oid so reconstructed sidecars (and any
+        // legacy sidecar where only Conflict::Content.base was populated) also
+        // get the 3-way path.
+        if let (Some(base_oid), Some(epoch_side)) = (
+            effective_base_oid(conflict_base.as_ref(), ws_side),
+            epoch_side,
+        ) {
             // Three-way path: read all three blobs and run merge_text. The
             // primary call uses `Diff3` so a clean merge stays clean. On
             // an internal conflict, retry with `Theirs` (workspace wins) —
@@ -933,10 +1036,14 @@ fn apply_decision(
             }
         }
 
-        // Legacy sidecar (no `base_content` on the picked side) — fall
-        // through to blob-replace, but emit a one-line warning so the user
-        // knows to verify and so future debugging has a paper trail.
-        if ws_side.base_content.is_none() {
+        // Legacy sidecar (no base OID available on the picked side or at the
+        // top-level Conflict::Content.base) — fall through to blob-replace,
+        // but emit a one-line warning so the user knows to verify and so
+        // future debugging has a paper trail.
+        // bn-1mn0: use effective_base_oid for the guard so pre-fix
+        // reconstructed sidecars (sides have no base_content but the top-level
+        // base field may be set) are not incorrectly emitting a warning.
+        if effective_base_oid(conflict_base.as_ref(), ws_side).is_none() {
             eprintln!(
                 "warning: --keep {target} is using legacy blob-replace semantics for {}; \
                  sibling content from the target branch may be dropped. Verify with: \
