@@ -377,3 +377,96 @@ fn placeholder_blob_with_deleted_sidecar_blocks_and_readers_agree() {
          got:\n{resolve}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (d) bn-6xpz: up-to-date-but-conflicted workspace — sync must surface it
+// ---------------------------------------------------------------------------
+
+/// After a quiet sibling auto-rebase commits a structured conflict into
+/// workspace `b`, `maw ws sync b` on an already-current workspace must NOT
+/// silently print "up to date" — it must mention the unresolved conflict(s)
+/// and the resolve command.
+#[test]
+fn sync_up_to_date_but_conflicted_workspace_reports_conflict() {
+    let repo = TestRepo::new();
+    setup_committed_conflict_via_auto_rebase(&repo);
+    // At this point `b` is already at the current epoch (the auto-rebase
+    // advanced its refs).  A second `maw ws sync b` hits the no-op path.
+
+    let sync = repo.maw_raw(&["ws", "sync", "b"]);
+    assert!(
+        sync.status.success(),
+        "sync should succeed even with a residual conflict\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&sync.stdout),
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&sync.stdout);
+
+    // Must NOT claim unconditional "up to date".
+    assert!(
+        !stdout.contains("Workspace 'b' is up to date.\n")
+            || stdout.contains("unresolved conflict"),
+        "sync must not claim 'up to date' without mentioning the conflict; got:\n{stdout}"
+    );
+
+    // Must mention the unresolved count.
+    assert!(
+        stdout.contains("unresolved conflict"),
+        "sync output must mention unresolved conflict(s); got:\n{stdout}"
+    );
+
+    // Must name the resolve command.
+    assert!(
+        stdout.contains("maw ws resolve b"),
+        "sync output must tell the user how to resolve; got:\n{stdout}"
+    );
+
+    // The sidecar must not be deleted — it's still needed.
+    assert!(
+        repo.read_conflict_tree_sidecar("b").is_some(),
+        "conflict-tree sidecar must survive the up-to-date sync"
+    );
+
+    // The summary must agree with `resolve --list`.
+    let resolve = repo.maw_ok(&["ws", "resolve", "b", "--list"]);
+    assert!(
+        resolve.contains("shared.txt"),
+        "resolve --list must still show the conflict after up-to-date sync; got:\n{resolve}"
+    );
+
+    // And the merge gate must still block.
+    let check = repo.maw_raw(&["ws", "merge", "b", "--into", "default", "--check"]);
+    assert!(
+        !check.status.success(),
+        "merge --check must still block after a no-op sync with residual conflict"
+    );
+}
+
+/// When the workspace IS up-to-date AND genuinely clean (no residual
+/// conflicts), sync must still print the plain "is up to date" message with
+/// no spurious conflict mention.
+#[test]
+fn sync_up_to_date_clean_workspace_prints_up_to_date() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("file.txt", "initial\n")]);
+    repo.maw_ok(&["ws", "create", "clean"]);
+
+    // Workspace is current and clean — sync should be a plain no-op.
+    let sync = repo.maw_raw(&["ws", "sync", "clean"]);
+    assert!(
+        sync.status.success(),
+        "sync on a clean current workspace should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&sync.stdout),
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&sync.stdout);
+
+    assert!(
+        stdout.contains("is up to date"),
+        "clean up-to-date workspace must print 'is up to date'; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("conflict"),
+        "clean up-to-date workspace must not mention conflicts; got:\n{stdout}"
+    );
+}

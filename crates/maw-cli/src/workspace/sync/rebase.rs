@@ -449,10 +449,49 @@ pub(super) fn rebase_workspace_run(
             }
         }
         say!();
-        say!("Workspace synced successfully.");
+        // bn-6xpz: the fast-forward advanced HEAD but may land on a target
+        // epoch that carries committed conflict content from an earlier
+        // auto-rebase. Check before claiming success.
+        let effective_conflicts = match crate::workspace::conflict_state::effective_conflict_state(
+            root, ws_name, ws_path,
+        ) {
+            Ok(residual) if residual.is_conflicted() => {
+                let n = residual.conflict_count();
+                say!(
+                    "Workspace synced, but has {n} unresolved conflict(s) from an earlier \
+                         rebase still committed in this workspace:"
+                );
+                if opts.print {
+                    for path in residual.unresolved_paths() {
+                        println!("  - {}", path.display());
+                    }
+                    print_conflict_guidance(ws_name);
+                }
+                n
+            }
+            Ok(_) => {
+                say!("Workspace synced successfully.");
+                0
+            }
+            Err(e) => {
+                // Could not verify — do NOT claim success; warn and let
+                // the caller inspect manually. Keep conservative: 0 so
+                // the caller can still proceed if it ignores warnings.
+                tracing::warn!(
+                    workspace = %ws_name,
+                    error = %e,
+                    "fast-forward: could not verify conflict state after sync"
+                );
+                say!(
+                    "Workspace synced, but could not verify conflict state ({e}); \
+                         run `maw ws resolve {ws_name} --list` to confirm."
+                );
+                0
+            }
+        };
         return Ok(RebaseOutcome {
             replayed: 0,
-            conflicts: 0,
+            conflicts: effective_conflicts,
             conflicted_steps: 0,
             sanity_flagged_steps: 0,
             fast_forwarded: true,
@@ -885,11 +924,16 @@ fn print_conflict_guidance(ws_name: &str) {
     println!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
     println!("  maw ws resolve {ws_name} --keep both             # keep both sides");
     println!();
-    println!("After resolving, commit and clear conflict state:");
+    // bn-6xpz: since bn-8zqz, any reader (merge --check, resolve --list,
+    // ws conflicts) auto-clears stale conflict metadata after a manual
+    // resolution commit. The trailing `maw ws sync` step that the old
+    // guidance required is no longer necessary — conflict state clears
+    // automatically on the next maw command.
+    println!("After resolving, commit your changes:");
     println!(
         "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\""
     );
-    println!("  maw ws sync {ws_name}");
+    println!("  (Conflict state clears automatically on the next maw command.)");
 }
 
 // ---------------------------------------------------------------------------

@@ -32,19 +32,29 @@ pub use rebase::{
 /// stale sidecar (manual resolution committed) was cleared. Verification
 /// failures are non-fatal — sync proceeds and just logs a warning.
 ///
+/// Returns the effective conflict state so the caller can surface residual
+/// conflicts without re-computing it.
+///
 /// [`STALE_CLEAR_NOTICE`]: super::conflict_state::STALE_CLEAR_NOTICE
-fn report_cleared_stale_sidecar(root: &Path, ws_name: &str, ws_path: &Path) {
+fn report_cleared_stale_sidecar(
+    root: &Path,
+    ws_name: &str,
+    ws_path: &Path,
+) -> Option<super::conflict_state::EffectiveConflictState> {
     match super::conflict_state::effective_conflict_state(root, ws_name, ws_path) {
-        Ok(state) if state.cleared_stale_sidecar => {
-            println!("{}", super::conflict_state::STALE_CLEAR_NOTICE);
+        Ok(state) => {
+            if state.cleared_stale_sidecar {
+                println!("{}", super::conflict_state::STALE_CLEAR_NOTICE);
+            }
+            Some(state)
         }
-        Ok(_) => {}
         Err(e) => {
             tracing::warn!(
                 workspace = %ws_name,
                 error = %e,
                 "sync: could not verify effective conflict state"
             );
+            None
         }
     }
 }
@@ -53,6 +63,10 @@ fn report_cleared_stale_sidecar(root: &Path, ws_name: &str, ws_path: &Path) {
 /// # Errors
 ///
 /// Returns an error if workspace synchronization fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sync handles multiple staleness/conflict paths; factoring them out would obscure the control flow"
+)]
 pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     if all {
         return sync_all(no_rebase);
@@ -103,9 +117,28 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     // still clear its stale sidecar (the old `!is_stale` guard blocked
     // legitimate clearing). Uses the same shared helper as the merge gate,
     // `ws conflicts`, and `resolve --list`, so all surfaces agree.
-    report_cleared_stale_sidecar(&root, &workspace_name, &ws_path);
+    //
+    // bn-6xpz: reuse the returned state on the no-op path to surface any
+    // residual committed conflicts instead of silently claiming "up to date".
+    let conflict_state = report_cleared_stale_sidecar(&root, &workspace_name, &ws_path);
 
     if !ws_status.is_stale {
+        // bn-6xpz: if the workspace is current but carries unresolved
+        // committed conflicts (e.g. a quiet sibling auto-rebase just recorded
+        // a conflict into it), report them so the caller isn't misled.
+        if let Some(ref state) = conflict_state
+            && state.is_conflicted()
+        {
+            let n = state.conflict_count();
+            println!(
+                "Workspace '{workspace_name}' is up to date, but has {n} unresolved conflict(s):"
+            );
+            for path in state.unresolved_paths() {
+                println!("  - {}", path.display());
+            }
+            println!("  Resolve: maw ws resolve {workspace_name} --list");
+            return Ok(());
+        }
         println!("Workspace '{workspace_name}' is up to date.");
         return Ok(());
     }
