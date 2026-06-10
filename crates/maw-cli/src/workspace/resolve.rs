@@ -30,6 +30,362 @@ use crate::format::OutputFormat;
 use super::repo_root;
 
 // ---------------------------------------------------------------------------
+// Placeholder header reconstruction (bn-39i8)
+// ---------------------------------------------------------------------------
+
+/// Result of attempting to reconstruct a conflict sidecar from placeholder headers.
+enum ReconstructionResult {
+    /// Successfully reconstructed N conflicts from headers; sidecar written.
+    Ok(usize),
+    /// One or more placeholders had headers that could not be parsed (e.g. OID
+    /// lines removed). Returns a description of the first failure so the caller
+    /// can emit the graceful-refusal message.
+    ParseFailure(String),
+}
+
+/// Try to reconstruct the structured conflict sidecar by parsing the header
+/// lines embedded in each placeholder blob (bn-36zz / bn-39i8).
+///
+/// # Supported header formats
+///
+/// **Text conflict** (first line: `# structured conflict at <path>`):
+/// ```text
+/// # structured conflict at src/foo.rs
+/// # base blob: <oid>          ← optional (absent for add/add)
+/// # side epoch blob: <oid>
+/// # side <ws> blob: <oid>
+/// ```
+///
+/// **Binary conflict** (first line: `# BINARY CONFLICT at <path>`):
+/// ```text
+/// # BINARY CONFLICT at src/img.png — inlined markers would corrupt the file.
+/// # Pick a side with: maw ws resolve <workspace> --keep <side-name>
+/// # side: <ws>  @  <oid>
+/// ```
+///
+/// **Modify/delete** (first line: `# modify/delete conflict at <path>`):
+/// ```text
+/// # modify/delete conflict at src/old.rs
+/// # modifier: <name> @ <oid>
+/// # deleter:  <name> @ <oid>
+/// ```
+///
+/// # Safety
+///
+/// Reconstruction ONLY writes sidecars that match reality: every OID extracted
+/// from a header is verified against the object store before being accepted.
+/// Placeholders that cannot be parsed or whose OIDs are absent from the store
+/// are refused and the function returns `ParseFailure` for those paths, leaving
+/// the caller to emit the graceful-refusal guidance instead.
+///
+/// Reconstruction does NOT happen inside the merge gate — it is only triggered
+/// through `maw ws resolve`, preserving the bn-28d1 tripwire.
+#[expect(
+    clippy::too_many_lines,
+    reason = "placeholder parsing covers 4 conflict formats with per-format error handling"
+)]
+fn try_reconstruct_sidecar_from_placeholders(
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    placeholder_paths: &[PathBuf],
+) -> ReconstructionResult {
+    use maw_core::merge::types::ConflictTree;
+    use maw_core::model::conflict::{Conflict, ConflictSide};
+    use maw_core::model::ordering::OrderingKey;
+    use maw_core::model::patch::FileId;
+    use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
+
+    // Open the repo at the workspace path for OID verification.
+    let repo = match maw_git::GixRepo::open(ws_path) {
+        Ok(r) => r,
+        Err(e) => {
+            return ReconstructionResult::ParseFailure(format!(
+                "could not open workspace git repo for OID verification: {e}"
+            ));
+        }
+    };
+
+    // Build a synthetic OrderingKey using a dummy epoch/workspace — these
+    // fields are display-only; correctness is in the OIDs, not timestamps.
+    // We use the all-zeros OID as a placeholder epoch ID (40 zeros is a valid
+    // 40-char hex OID string) and the workspace name as the workspace ID.
+    let dummy_epoch_str = "0".repeat(40);
+    let dummy_epoch = match EpochId::new(&dummy_epoch_str) {
+        Ok(e) => e,
+        Err(e) => {
+            return ReconstructionResult::ParseFailure(format!(
+                "internal: could not construct dummy epoch ID: {e}"
+            ));
+        }
+    };
+    let dummy_ws_id = match WorkspaceId::new(workspace) {
+        Ok(w) => w,
+        Err(e) => {
+            return ReconstructionResult::ParseFailure(format!(
+                "internal: could not construct workspace ID from '{workspace}': {e}"
+            ));
+        }
+    };
+    let dummy_ordering = || OrderingKey::new(dummy_epoch.clone(), dummy_ws_id.clone(), 0, 0);
+
+    let mut tree = ConflictTree::new(dummy_epoch.clone());
+    let mut file_id_counter: u128 = 1;
+
+    for rel_path in placeholder_paths {
+        let full_path = ws_path.join(rel_path);
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ReconstructionResult::ParseFailure(format!(
+                    "could not read placeholder at {}: {e}",
+                    rel_path.display()
+                ));
+            }
+        };
+
+        // Parse the first line to determine conflict kind.
+        let first_line = content.lines().next().unwrap_or("");
+
+        if first_line.starts_with("# structured conflict at ")
+            || first_line.starts_with("# add/add conflict at ")
+        {
+            // Text conflict or add/add: parse base blob and side blobs.
+            let mut base_oid: Option<GitOid> = None;
+            let mut sides: Vec<ConflictSide> = Vec::new();
+
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("# base blob: ") {
+                    let oid_str = rest.trim();
+                    match verify_oid_exists(oid_str, &repo, rel_path) {
+                        Ok(oid) => base_oid = Some(oid),
+                        Err(msg) => return ReconstructionResult::ParseFailure(msg),
+                    }
+                } else if let Some(rest) = line.strip_prefix("# side ") {
+                    // Format: `# side <ws-name> blob: <oid>`
+                    if let Some((ws_part, oid_part)) = rest.split_once(" blob: ") {
+                        let ws_name = ws_part.trim().to_owned();
+                        let oid_str = oid_part.trim();
+                        match verify_oid_exists(oid_str, &repo, rel_path) {
+                            Ok(oid) => {
+                                sides.push(ConflictSide::new(ws_name, oid, dummy_ordering()));
+                            }
+                            Err(msg) => return ReconstructionResult::ParseFailure(msg),
+                        }
+                    }
+                    // Lines like `# side: <ws>  @  <oid>` are binary format — handled below.
+                }
+                // Stop reading past the blank separator line.
+                if line.is_empty() {
+                    break;
+                }
+            }
+
+            if sides.len() < 2 {
+                return ReconstructionResult::ParseFailure(format!(
+                    "placeholder at {} has fewer than 2 parseable side OIDs \
+                     (found {}). The header may have been truncated or corrupted.",
+                    rel_path.display(),
+                    sides.len()
+                ));
+            }
+
+            let conflict = if first_line.starts_with("# add/add conflict at ") {
+                Conflict::AddAdd {
+                    path: rel_path.clone(),
+                    sides,
+                }
+            } else {
+                Conflict::Content {
+                    path: rel_path.clone(),
+                    file_id: FileId::new(file_id_counter),
+                    base: base_oid,
+                    sides,
+                    atoms: vec![],
+                }
+            };
+            tree.conflicts.insert(rel_path.clone(), conflict);
+            file_id_counter += 1;
+        } else if first_line.starts_with("# BINARY CONFLICT at ") {
+            // Binary conflict: parse `# side: <ws>  @  <oid>` lines.
+            let mut sides: Vec<ConflictSide> = Vec::new();
+
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("# side: ") {
+                    // Format: `# side: <ws-name>  @  <oid>`
+                    if let Some((ws_part, oid_part)) = rest.split_once("  @  ") {
+                        let ws_name = ws_part.trim().to_owned();
+                        let oid_str = oid_part.trim();
+                        match verify_oid_exists(oid_str, &repo, rel_path) {
+                            Ok(oid) => {
+                                sides.push(ConflictSide::new(ws_name, oid, dummy_ordering()));
+                            }
+                            Err(msg) => return ReconstructionResult::ParseFailure(msg),
+                        }
+                    }
+                }
+                if line.is_empty() {
+                    break;
+                }
+            }
+
+            if sides.len() < 2 {
+                return ReconstructionResult::ParseFailure(format!(
+                    "binary placeholder at {} has fewer than 2 parseable side OIDs \
+                     (found {}). The header may have been truncated or corrupted.",
+                    rel_path.display(),
+                    sides.len()
+                ));
+            }
+
+            tree.conflicts.insert(
+                rel_path.clone(),
+                Conflict::Content {
+                    path: rel_path.clone(),
+                    file_id: FileId::new(file_id_counter),
+                    base: None,
+                    sides,
+                    atoms: vec![],
+                },
+            );
+            file_id_counter += 1;
+        } else if first_line.starts_with("# modify/delete conflict at ") {
+            // Modify/delete: parse `# modifier: <name> @ <oid>` and
+            // `# deleter:  <name> @ <oid>` lines.
+            let mut modifier: Option<ConflictSide> = None;
+            let mut deleter: Option<ConflictSide> = None;
+
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("# modifier: ") {
+                    if let Some((ws_part, oid_part)) = rest.split_once(" @ ") {
+                        let ws_name = ws_part.trim().to_owned();
+                        let oid_str = oid_part.trim();
+                        match verify_oid_exists(oid_str, &repo, rel_path) {
+                            Ok(oid) => {
+                                modifier = Some(ConflictSide::new(ws_name, oid, dummy_ordering()));
+                            }
+                            Err(msg) => return ReconstructionResult::ParseFailure(msg),
+                        }
+                    }
+                } else if let Some(rest) = line.strip_prefix("# deleter:  ")
+                    && let Some((ws_part, oid_part)) = rest.split_once(" @ ")
+                {
+                    let ws_name = ws_part.trim().to_owned();
+                    let oid_str = oid_part.trim();
+                    match verify_oid_exists(oid_str, &repo, rel_path) {
+                        Ok(oid) => {
+                            deleter = Some(ConflictSide::new(ws_name, oid, dummy_ordering()));
+                        }
+                        Err(msg) => return ReconstructionResult::ParseFailure(msg),
+                    }
+                }
+                if line.is_empty() {
+                    break;
+                }
+            }
+
+            let (Some(modifier), Some(deleter)) = (modifier, deleter) else {
+                return ReconstructionResult::ParseFailure(format!(
+                    "modify/delete placeholder at {} is missing modifier and/or \
+                     deleter OID lines. The header may have been corrupted.",
+                    rel_path.display()
+                ));
+            };
+
+            let modified_content = modifier.content.clone();
+            tree.conflicts.insert(
+                rel_path.clone(),
+                Conflict::ModifyDelete {
+                    path: rel_path.clone(),
+                    file_id: FileId::new(file_id_counter),
+                    modifier,
+                    deleter,
+                    modified_content,
+                },
+            );
+            file_id_counter += 1;
+        } else {
+            return ReconstructionResult::ParseFailure(format!(
+                "placeholder at {} has an unrecognized header: {:?}\n  \
+                 (expected '# structured conflict at', '# BINARY CONFLICT at', \
+                 or '# modify/delete conflict at')",
+                rel_path.display(),
+                first_line
+            ));
+        }
+    }
+
+    // Write the reconstructed sidecar.
+    let sidecar_path = super::resolve_structured::structured_sidecar_path(root, workspace);
+    if let Some(dir) = sidecar_path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        return ReconstructionResult::ParseFailure(format!(
+            "could not create sidecar directory {}: {e}",
+            dir.display()
+        ));
+    }
+    let json = match serde_json::to_string_pretty(&tree) {
+        Ok(j) => j,
+        Err(e) => {
+            return ReconstructionResult::ParseFailure(format!(
+                "could not serialize reconstructed conflict tree: {e}"
+            ));
+        }
+    };
+    if let Err(e) = std::fs::write(&sidecar_path, &json) {
+        return ReconstructionResult::ParseFailure(format!(
+            "could not write reconstructed sidecar to {}: {e}",
+            sidecar_path.display()
+        ));
+    }
+
+    ReconstructionResult::Ok(tree.conflicts.len())
+}
+
+/// Verify that `oid_str` is a valid hex OID that exists in the object store.
+///
+/// Returns the parsed `GitOid` on success, or an error message string on
+/// failure (invalid hex format or object not found in the store).
+fn verify_oid_exists(
+    oid_str: &str,
+    repo: &maw_git::GixRepo,
+    rel_path: &Path,
+) -> Result<maw_core::model::types::GitOid, String> {
+    use maw_core::model::types::GitOid;
+    use maw_git::GitRepo as _;
+
+    let Ok(oid) = GitOid::new(oid_str) else {
+        return Err(format!(
+            "placeholder at {} contains an invalid OID: {:?}",
+            rel_path.display(),
+            oid_str
+        ));
+    };
+
+    // Verify the OID exists in the object store by attempting to read it.
+    let git_oid: maw_git::GitOid = match oid_str.parse() {
+        Ok(o) => o,
+        Err(_) => {
+            return Err(format!(
+                "placeholder at {} contains an unparseable OID: {:?}",
+                rel_path.display(),
+                oid_str
+            ));
+        }
+    };
+    if let Err(e) = repo.read_blob(git_oid) {
+        return Err(format!(
+            "placeholder at {} references OID {oid_str} that is not in the object store: {e}\n  \
+             The blob may have been garbage-collected or the OID line may be corrupted.",
+            rel_path.display()
+        ));
+    }
+
+    Ok(oid)
+}
+
+// ---------------------------------------------------------------------------
 // Parsed conflict block
 // ---------------------------------------------------------------------------
 
@@ -202,24 +558,70 @@ pub fn run(
         // refuses those, so `--list` must surface them rather than claim
         // "no conflicts" — the readers have to agree.
         if !effective.placeholder_paths.is_empty() {
-            if list {
-                return list_placeholder_conflicts(workspace, &effective.placeholder_paths, format);
+            // bn-39i8: attempt to reconstruct the missing sidecar from the
+            // placeholder blob headers before falling back to the refusal
+            // guidance. Since bn-36zz, every placeholder embeds the blob OIDs
+            // needed to rebuild a valid ConflictTree entry — verify those OIDs
+            // exist in the object store and write the sidecar so the normal
+            // structured-resolve path can take over.
+            match try_reconstruct_sidecar_from_placeholders(
+                &root,
+                workspace,
+                &ws_path,
+                &effective.placeholder_paths,
+            ) {
+                ReconstructionResult::Ok(n) => {
+                    // Sidecar written — tell the user and re-enter via the
+                    // structured path so `--list` / `--keep` work immediately.
+                    if format != OutputFormat::Json {
+                        println!(
+                            "Reconstructed conflict metadata for {n} file(s) from \
+                             placeholder headers."
+                        );
+                    }
+                    // Re-read the sidecar we just wrote and dispatch into the
+                    // structured resolver.
+                    if let Some(tree) =
+                        super::resolve_structured::read_conflict_tree_sidecar(&root, workspace)
+                    {
+                        return super::resolve_structured::run_structured(
+                            &root, workspace, &ws_path, paths, keep, list, format, tree,
+                        )
+                        .map(|_| ());
+                    }
+                    // If the re-read fails (shouldn't happen), fall through to
+                    // the list/bail below as a safety net.
+                }
+                ReconstructionResult::ParseFailure(reason) => {
+                    // Header parsing failed — emit the graceful refusal with
+                    // corrected guidance (no deprecated --rebase, no sync
+                    // suggestion that can't regenerate the sidecar).
+                    if list {
+                        return list_placeholder_conflicts(
+                            workspace,
+                            &effective.placeholder_paths,
+                            format,
+                            Some(&reason),
+                        );
+                    }
+                    let file_list = effective
+                        .placeholder_paths
+                        .iter()
+                        .map(|p| format!("  - {}", p.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bail!(
+                        "Workspace '{workspace}' has {} file(s) whose HEAD blob is a \
+                         tool-authored conflict placeholder, but the conflict metadata \
+                         sidecar is missing and could not be reconstructed:\n{file_list}\n  \
+                         Reconstruction failed: {reason}\n  \
+                         `maw ws merge` will refuse this workspace.\n  \
+                         To fix: run `maw ws resolve {workspace} --list` to attempt \
+                         reconstruction, or restore each file's real content and commit.",
+                        effective.placeholder_paths.len()
+                    );
+                }
             }
-            let file_list = effective
-                .placeholder_paths
-                .iter()
-                .map(|p| format!("  - {}", p.display()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!(
-                "Workspace '{workspace}' has {} file(s) whose HEAD blob is a \
-                 tool-authored conflict placeholder, but no conflict metadata \
-                 sidecar (it may have been deleted):\n{file_list}\n  \
-                 `maw ws merge` will refuse this workspace.\n  \
-                 To fix: regenerate the metadata with `maw ws sync --rebase {workspace}`, \
-                 or restore each file's real content and commit.",
-                effective.placeholder_paths.len()
-            );
         }
         if list {
             return list_conflicts_empty(workspace, format);
@@ -443,15 +845,24 @@ pub fn run(
 // List conflicts
 // ---------------------------------------------------------------------------
 
-/// Render a `--list` result for tool-authored placeholder blobs in HEAD with
-/// no conflict metadata sidecar (bn-28d1 / bn-8zqz). Same output shape as
-/// [`list_conflicts`] so agents can parse it uniformly.
+/// Render a `--list` result for tool-authored placeholder blobs in HEAD whose
+/// sidecar could not be reconstructed (bn-28d1 / bn-8zqz / bn-39i8).
+///
+/// `parse_failure` carries the reason reconstruction failed, if any.
+/// Same output shape as [`list_conflicts`] so agents can parse it uniformly.
 fn list_placeholder_conflicts(
     workspace: &str,
     placeholder_paths: &[PathBuf],
     format: OutputFormat,
+    parse_failure: Option<&str>,
 ) -> Result<()> {
     if format == OutputFormat::Json {
+        let reason_field = parse_failure.map_or_else(String::new, |r| {
+            format!(
+                r#","reconstruction_failed":"{}""#,
+                r.replace('"', "\\\"").replace('\n', "\\n")
+            )
+        });
         let files: Vec<String> = placeholder_paths
             .iter()
             .map(|p| {
@@ -462,7 +873,7 @@ fn list_placeholder_conflicts(
             })
             .collect();
         println!(
-            r#"{{"workspace":"{workspace}","conflict_count":{},"files":[{}]}}"#,
+            r#"{{"workspace":"{workspace}","conflict_count":{},"files":[{}]{reason_field}}}"#,
             placeholder_paths.len(),
             files.join(",")
         );
@@ -470,16 +881,19 @@ fn list_placeholder_conflicts(
     }
     println!(
         "{} conflicted file(s) in '{workspace}' (tool-authored placeholder blobs in HEAD; \
-         conflict metadata sidecar is missing):",
+         conflict metadata sidecar is missing and could not be reconstructed):",
         placeholder_paths.len()
     );
     for p in placeholder_paths {
         println!("  {}", p.display());
     }
     println!();
+    if let Some(reason) = parse_failure {
+        println!("Reconstruction failed: {reason}");
+        println!();
+    }
     println!("`maw ws merge` will refuse this workspace.");
-    println!("To fix: regenerate the metadata with `maw ws sync --rebase {workspace}`,");
-    println!("or restore each file's real content and commit.");
+    println!("To fix: restore each file's real content and commit.");
     Ok(())
 }
 
