@@ -312,6 +312,7 @@ fn try_reconstruct_sidecar_from_placeholders(
                     deleter,
                     modified_content,
                     rename_hint: None, // legacy reconstruction path; no rename context available
+                    df_hint: None,
                 },
             );
             file_id_counter += 1;

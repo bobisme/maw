@@ -782,66 +782,91 @@ fn conflict_record_to_json(record: &ConflictRecord) -> ConflictJson {
     conflict_record_to_json_with_id(record, None, &[])
 }
 
+/// Map a `ConflictReason` to its JSON output fields:
+/// `(conflict_type, reason_key, resolution_strategies, suggested_resolution)`.
+fn conflict_reason_json_fields(
+    reason: &ConflictReason,
+) -> (&'static str, &'static str, Vec<String>, String) {
+    match reason {
+        ConflictReason::AddAddDifferent => (
+            "add_add",
+            "add_add",
+            vec![
+                "keep_one_side".to_string(),
+                "merge_content_manually".to_string(),
+            ],
+            "Review both versions and choose one, or manually combine them into the file. \
+             Both workspaces independently created this file — pick the canonical version \
+             or merge both contributions."
+                .to_string(),
+        ),
+        ConflictReason::ModifyDelete => (
+            "modify_delete",
+            "modify_delete",
+            vec!["keep_modified".to_string(), "accept_deletion".to_string()],
+            "Decide whether to keep the modified version or accept the deletion. \
+             One workspace modified this file while another deleted it — \
+             choose which intent should win."
+                .to_string(),
+        ),
+        ConflictReason::Diff3Conflict => (
+            "content",
+            "content",
+            vec![
+                "edit_file_manually".to_string(),
+                "keep_one_side".to_string(),
+                "combine_changes".to_string(),
+            ],
+            "Edit the file to resolve overlapping changes from each workspace. \
+             The `atoms` field identifies the exact lines/regions that conflict — \
+             review each atom and decide how to combine the edits."
+                .to_string(),
+        ),
+        ConflictReason::MissingBase => (
+            "content",
+            "missing_base",
+            vec!["manual_resolution".to_string(), "keep_one_side".to_string()],
+            "Base content is unavailable — inspect each workspace's version and \
+             manually combine them into the desired result."
+                .to_string(),
+        ),
+        ConflictReason::MissingContent => (
+            "content",
+            "missing_content",
+            vec!["manual_resolution".to_string()],
+            "File content is missing from one or more sides — inspect each \
+             workspace's version and manually produce the correct result."
+                .to_string(),
+        ),
+        ConflictReason::FileDirectory {
+            file_side,
+            dir_child_example,
+        } => (
+            "file_directory",
+            "file_directory",
+            vec![
+                "rename_file".to_string(),
+                "rename_directory".to_string(),
+                "keep_one_side".to_string(),
+            ],
+            format!(
+                "D/F clash: workspace '{file_side}' has a FILE at this path while another \
+                 workspace has files under it as a directory (e.g. '{}'). \
+                 Rename either the file or the directory-side files to resolve.",
+                dir_child_example.display()
+            ),
+        ),
+    }
+}
+
 /// Convert with optional conflict ID and atom IDs.
 fn conflict_record_to_json_with_id(
     record: &ConflictRecord,
     id: Option<&str>,
     atom_ids: &[String],
 ) -> ConflictJson {
-    // Map reason to type tag and description
     let (conflict_type, reason_key, resolution_strategies, suggested_resolution) =
-        match &record.reason {
-            ConflictReason::AddAddDifferent => (
-                "add_add",
-                "add_add",
-                vec![
-                    "keep_one_side".to_string(),
-                    "merge_content_manually".to_string(),
-                ],
-                "Review both versions and choose one, or manually combine them into the file. \
-                 Both workspaces independently created this file — pick the canonical version \
-                 or merge both contributions."
-                    .to_string(),
-            ),
-            ConflictReason::ModifyDelete => (
-                "modify_delete",
-                "modify_delete",
-                vec!["keep_modified".to_string(), "accept_deletion".to_string()],
-                "Decide whether to keep the modified version or accept the deletion. \
-                 One workspace modified this file while another deleted it — \
-                 choose which intent should win."
-                    .to_string(),
-            ),
-            ConflictReason::Diff3Conflict => (
-                "content",
-                "content",
-                vec![
-                    "edit_file_manually".to_string(),
-                    "keep_one_side".to_string(),
-                    "combine_changes".to_string(),
-                ],
-                "Edit the file to resolve overlapping changes from each workspace. \
-                 The `atoms` field identifies the exact lines/regions that conflict — \
-                 review each atom and decide how to combine the edits."
-                    .to_string(),
-            ),
-            ConflictReason::MissingBase => (
-                "content",
-                "missing_base",
-                vec!["manual_resolution".to_string(), "keep_one_side".to_string()],
-                "Base content is unavailable — inspect each workspace's version and \
-                 manually combine them into the desired result."
-                    .to_string(),
-            ),
-            ConflictReason::MissingContent => (
-                "content",
-                "missing_content",
-                vec!["manual_resolution".to_string()],
-                "File content is missing from one or more sides — inspect each \
-                 workspace's version and manually produce the correct result."
-                    .to_string(),
-            ),
-        };
+        conflict_reason_json_fields(&record.reason);
 
     // Extract workspace names from sides (with epoch-delta display name)
     let workspaces: Vec<String> = record

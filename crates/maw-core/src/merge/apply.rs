@@ -353,6 +353,7 @@ fn apply_one_to_conflict(
             deleter,
             modified_content,
             rename_hint,
+            df_hint,
         } => handle_modify_delete(
             tree,
             path,
@@ -361,6 +362,7 @@ fn apply_one_to_conflict(
             deleter,
             modified_content,
             rename_hint,
+            df_hint,
             &change,
             workspace,
         ),
@@ -511,6 +513,7 @@ fn handle_modify_delete(
     deleter: ConflictSide,
     modified_content: GitOid,
     rename_hint: Option<std::path::PathBuf>,
+    df_hint: Option<std::path::PathBuf>,
     change: &FileChange,
     _workspace: &str,
 ) -> Result<(), ApplyError> {
@@ -527,8 +530,8 @@ fn handle_modify_delete(
 
             // V1 SIMPLIFICATION: replace the modify side's content with the
             // unilateral blob. The deleter side is untouched — still a
-            // ModifyDelete conflict. The rename_hint (if any) is preserved
-            // through the update.
+            // ModifyDelete conflict. The rename_hint / df_hint (if any) are
+            // preserved through the update.
             modifier.content = blob.clone();
             tree.conflicts.insert(
                 path.clone(),
@@ -539,6 +542,7 @@ fn handle_modify_delete(
                     deleter,
                     modified_content: blob,
                     rename_hint,
+                    df_hint,
                 },
             );
             Ok(())
@@ -553,6 +557,7 @@ fn handle_modify_delete(
                 deleter,
                 modified_content,
                 rename_hint,
+                df_hint,
             );
             Ok(())
         }
@@ -688,6 +693,7 @@ mod tests {
             deleter: side("bob", del_content),
             modified_content: mod_content,
             rename_hint: None,
+            df_hint: None,
         }
     }
 

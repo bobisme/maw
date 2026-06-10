@@ -2071,3 +2071,562 @@ fn bn_heb8_old_sidecar_without_rename_hint_parses() {
         panic!("expected ModifyDelete, got {conflict:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// bn-2dy1 — D/F (Directory/File) path clash detection
+//
+// When path P is a FILE on one side while files exist under P/ on the other,
+// a git tree cannot hold both. The rebase must surface a structured
+// ModifyDelete conflict (with a df_hint), NOT silently drop a side and NOT
+// abort on the write_blobs_and_build_tree backstop (which wedges the
+// workspace: every sync fails, merge blocks on staleness forever).
+//
+// These tests use the LIVE shape that originally escaped detection: two
+// sibling workspaces; merging one triggers the AUTO-REBASE of the other
+// (no --no-auto-rebase, no explicit `ws sync --rebase`).
+//
+// Direction 1: sibling commits FILE `deep`; merged ws commits deep/a/leaf.txt.
+// Direction 2: sibling commits clash/sub.txt; merged ws commits FILE `clash`.
+// Clean cases: `deep.txt` vs `deep/`, `deep` vs `deeper` — no spurious conflict.
+// ---------------------------------------------------------------------------
+
+/// Direction 1, live auto-rebase shape: sibling `feat` holds FILE `deep`;
+/// merging `dirws` (which adds `deep/a/leaf.txt`) auto-rebases `feat`.
+///
+/// Required end state: the auto-rebase SUCCEEDS with a structured
+/// `modify_delete` conflict at `deep`; resolve --list shows it; the merge gate
+/// blocks until resolved.
+#[test]
+fn auto_rebase_df_clash_direction1_surfaces_structured_conflict() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "deep", "ws file content\n");
+    commit_all(&repo, "feat", "feat: FILE deep");
+
+    repo.maw_ok(&["ws", "create", "dirws"]);
+    repo.add_file("dirws", "deep/a/leaf.txt", "leaf content\n");
+    commit_all(&repo, "dirws", "dirws: deep/a/leaf.txt");
+
+    // Merge dirws WITHOUT --no-auto-rebase: feat gets auto-rebased.
+    let merge_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "dirws",
+        "--destroy",
+        "--message",
+        "merge dirws",
+    ]);
+    let merge_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&merge_out.stdout),
+        String::from_utf8_lossy(&merge_out.stderr)
+    );
+    assert!(
+        merge_out.status.success(),
+        "merge of dirws must succeed:\n{merge_text}"
+    );
+
+    // The auto-rebase must NOT hit the backstop ("D/F clash in rebase output
+    // tree ... this is a bug") — that error means the structured-conflict
+    // path failed and the workspace is wedged.
+    assert!(
+        !merge_text.contains("D/F clash in rebase output tree"),
+        "bn-2dy1: auto-rebase hit the layer-B backstop instead of producing a \
+         structured conflict:\n{merge_text}"
+    );
+
+    // Structured sidecar must record the conflict at `deep`.
+    let sidecar = repo
+        .read_conflict_tree_sidecar("feat")
+        .expect("bn-2dy1 direction 1: conflict-tree.json must exist after the auto-rebase");
+    let entry = find_conflict_entry(&sidecar, "deep").unwrap_or_else(|| {
+        panic!(
+            "bn-2dy1 direction 1: sidecar must list 'deep'; got:\n{}",
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+        )
+    });
+    assert_eq!(
+        entry.get("type").and_then(|v| v.as_str()),
+        Some("modify_delete"),
+        "conflict at 'deep' should be modify_delete; got: {entry}"
+    );
+    assert_eq!(
+        entry.get("df_hint").and_then(|v| v.as_str()),
+        Some("deep"),
+        "conflict at 'deep' should carry df_hint=deep; got: {entry}"
+    );
+
+    // resolve --list must show it.
+    let list_out = repo.maw_raw(&["ws", "resolve", "feat", "--list"]);
+    let list_text = String::from_utf8_lossy(&list_out.stdout).to_string();
+    assert!(
+        list_text.contains("deep") && list_text.contains("modify_delete"),
+        "resolve --list must show the D/F conflict at 'deep'; got:\n{list_text}"
+    );
+
+    // Merge gate must BLOCK while unresolved.
+    let check = repo.maw_raw(&["ws", "merge", "feat", "--check"]);
+    assert!(
+        !check.status.success(),
+        "merge --check must block while the D/F conflict is unresolved:\n{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+
+    // The ws's file content must be present in the rendered stub (no drop).
+    let stub = repo
+        .read_file("feat", "deep")
+        .expect("marker stub at 'deep' should exist in the worktree");
+    assert!(
+        stub.contains("ws file content"),
+        "the workspace's file content must be visible in the conflict stub:\n{stub}"
+    );
+}
+
+/// Direction 1 resolution, `--keep epoch`: the stub is deleted and the
+/// epoch's directory subtree is restored from the epoch commit.
+#[test]
+fn auto_rebase_df_clash_direction1_keep_epoch_restores_directory() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "deep", "ws file content\n");
+    commit_all(&repo, "feat", "feat: FILE deep");
+
+    repo.maw_ok(&["ws", "create", "dirws"]);
+    repo.add_file("dirws", "deep/a/leaf.txt", "leaf content\n");
+    commit_all(&repo, "dirws", "dirws: deep/a/leaf.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "dirws",
+        "--destroy",
+        "--message",
+        "merge dirws",
+    ]);
+
+    repo.maw_ok(&["ws", "resolve", "feat", "--keep", "epoch"]);
+
+    assert_eq!(
+        repo.read_file("feat", "deep/a/leaf.txt").as_deref(),
+        Some("leaf content\n"),
+        "--keep epoch must restore the epoch's directory content"
+    );
+    assert!(
+        !repo.workspace_path("feat").join("deep").is_file(),
+        "--keep epoch must remove the workspace's FILE at 'deep'"
+    );
+
+    // Merge gate must now pass.
+    let check = repo.maw_raw(&["ws", "merge", "feat", "--check"]);
+    assert!(
+        check.status.success(),
+        "merge --check must pass after --keep epoch:\n{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    // Merging feat must NOT delete the epoch's directory from main.
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "feat",
+        "--destroy",
+        "--message",
+        "merge feat",
+    ]);
+    let epoch = repo.current_epoch();
+    let files = repo.git_ls_tree("default", &epoch);
+    assert!(
+        files.iter().any(|(_, p)| p == "deep/a/leaf.txt"),
+        "epoch's deep/a/leaf.txt must survive in main after --keep epoch; got: {files:?}"
+    );
+}
+
+/// Direction 1 resolution, `--keep <ws>`: the workspace's FILE content is
+/// written at the collision root and the merge replaces the directory.
+#[test]
+fn auto_rebase_df_clash_direction1_keep_ws_file_wins() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "deep", "ws file content\n");
+    commit_all(&repo, "feat", "feat: FILE deep");
+
+    repo.maw_ok(&["ws", "create", "dirws"]);
+    repo.add_file("dirws", "deep/a/leaf.txt", "leaf content\n");
+    commit_all(&repo, "dirws", "dirws: deep/a/leaf.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "dirws",
+        "--destroy",
+        "--message",
+        "merge dirws",
+    ]);
+
+    repo.maw_ok(&["ws", "resolve", "feat", "--keep", "feat"]);
+
+    assert_eq!(
+        repo.read_file("feat", "deep").as_deref(),
+        Some("ws file content\n"),
+        "--keep feat must write the workspace's file content at 'deep'"
+    );
+
+    // The user explicitly chose the FILE side: merging replaces the epoch's
+    // directory with the file. The merge gate must allow it (the ws patch's
+    // internal `Deleted deep/a/leaf.txt` + `Added deep` restructure is
+    // consistent, not a D/F clash).
+    let check = repo.maw_raw(&["ws", "merge", "feat", "--check"]);
+    assert!(
+        check.status.success(),
+        "merge --check must pass after --keep feat:\n{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "feat",
+        "--destroy",
+        "--message",
+        "merge feat",
+    ]);
+    let epoch = repo.current_epoch();
+    let files = repo.git_ls_tree("default", &epoch);
+    assert!(
+        files.iter().any(|(_, p)| p == "deep"),
+        "FILE 'deep' must be in main after --keep feat; got: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|(_, p)| p == "deep/a/leaf.txt"),
+        "the directory side must be gone after the user chose the file; got: {files:?}"
+    );
+}
+
+/// Direction 2, live auto-rebase shape: sibling `feat` holds `clash/sub.txt`;
+/// merging `filews` (which adds FILE `clash`) auto-rebases `feat`.
+///
+/// The conflict is keyed at the WS child path (`clash/sub.txt`) with
+/// `df_hint` = `clash`.
+#[test]
+fn auto_rebase_df_clash_direction2_surfaces_structured_conflict() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "clash/sub.txt", "ws sub content\n");
+    commit_all(&repo, "feat", "feat: clash/sub.txt");
+
+    repo.maw_ok(&["ws", "create", "filews"]);
+    repo.add_file("filews", "clash", "epoch file content\n");
+    commit_all(&repo, "filews", "filews: FILE clash");
+
+    let merge_out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "filews",
+        "--destroy",
+        "--message",
+        "merge filews",
+    ]);
+    let merge_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&merge_out.stdout),
+        String::from_utf8_lossy(&merge_out.stderr)
+    );
+    assert!(
+        merge_out.status.success(),
+        "merge of filews must succeed:\n{merge_text}"
+    );
+    assert!(
+        !merge_text.contains("D/F clash in rebase output tree"),
+        "bn-2dy1: auto-rebase hit the layer-B backstop:\n{merge_text}"
+    );
+
+    let sidecar = repo
+        .read_conflict_tree_sidecar("feat")
+        .expect("bn-2dy1 direction 2: conflict-tree.json must exist after the auto-rebase");
+    let entry = find_conflict_entry(&sidecar, "clash/sub.txt").unwrap_or_else(|| {
+        panic!(
+            "bn-2dy1 direction 2: sidecar must list 'clash/sub.txt'; got:\n{}",
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+        )
+    });
+    assert_eq!(
+        entry.get("type").and_then(|v| v.as_str()),
+        Some("modify_delete"),
+        "conflict should be modify_delete; got: {entry}"
+    );
+    assert_eq!(
+        entry.get("df_hint").and_then(|v| v.as_str()),
+        Some("clash"),
+        "conflict should carry df_hint=clash; got: {entry}"
+    );
+
+    // Merge gate must block.
+    let check = repo.maw_raw(&["ws", "merge", "feat", "--check"]);
+    assert!(
+        !check.status.success(),
+        "merge --check must block while the D/F conflict is unresolved"
+    );
+
+    // The ws's content must be visible in the stub (no drop).
+    let stub = repo
+        .read_file("feat", "clash/sub.txt")
+        .expect("marker stub at clash/sub.txt should exist");
+    assert!(
+        stub.contains("ws sub content"),
+        "ws content must be visible in the conflict stub:\n{stub}"
+    );
+}
+
+/// Direction 2 resolution, `--keep epoch`: the ws child stub is deleted and
+/// the epoch's FILE at the collision root is restored.
+#[test]
+fn auto_rebase_df_clash_direction2_keep_epoch_restores_file() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "clash/sub.txt", "ws sub content\n");
+    commit_all(&repo, "feat", "feat: clash/sub.txt");
+
+    repo.maw_ok(&["ws", "create", "filews"]);
+    repo.add_file("filews", "clash", "epoch file content\n");
+    commit_all(&repo, "filews", "filews: FILE clash");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "filews",
+        "--destroy",
+        "--message",
+        "merge filews",
+    ]);
+
+    repo.maw_ok(&["ws", "resolve", "feat", "--keep", "epoch"]);
+
+    assert_eq!(
+        repo.read_file("feat", "clash").as_deref(),
+        Some("epoch file content\n"),
+        "--keep epoch must restore the epoch's FILE at 'clash'"
+    );
+    assert!(
+        !repo.workspace_path("feat").join("clash").is_dir(),
+        "--keep epoch must remove the workspace's directory at 'clash'"
+    );
+
+    let check = repo.maw_raw(&["ws", "merge", "feat", "--check"]);
+    assert!(
+        check.status.success(),
+        "merge --check must pass after --keep epoch:\n{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+/// Direction 2 resolution, `--keep <ws>`: the ws child content is written and
+/// the epoch's FILE stays out; merging replaces the file with the directory.
+#[test]
+fn auto_rebase_df_clash_direction2_keep_ws_dir_wins() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "clash/sub.txt", "ws sub content\n");
+    commit_all(&repo, "feat", "feat: clash/sub.txt");
+
+    repo.maw_ok(&["ws", "create", "filews"]);
+    repo.add_file("filews", "clash", "epoch file content\n");
+    commit_all(&repo, "filews", "filews: FILE clash");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "filews",
+        "--destroy",
+        "--message",
+        "merge filews",
+    ]);
+
+    repo.maw_ok(&["ws", "resolve", "feat", "--keep", "feat"]);
+
+    assert_eq!(
+        repo.read_file("feat", "clash/sub.txt").as_deref(),
+        Some("ws sub content\n"),
+        "--keep feat must write the ws child's content"
+    );
+
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "feat",
+        "--destroy",
+        "--message",
+        "merge feat",
+    ]);
+    let epoch = repo.current_epoch();
+    let files = repo.git_ls_tree("default", &epoch);
+    assert!(
+        files.iter().any(|(_, p)| p == "clash/sub.txt"),
+        "clash/sub.txt must be in main after --keep feat; got: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|(_, p)| p == "clash"),
+        "epoch's FILE 'clash' must be gone after the user chose the directory; got: {files:?}"
+    );
+}
+
+/// Explicit-sync shape (the original test shape): `ws sync feat --rebase`
+/// after a `--no-auto-rebase` merge must surface the same structured
+/// conflict — the rebase must SUCCEED (no backstop abort).
+#[test]
+fn sync_rebase_df_clash_direction1_explicit_sync() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "clash", "ws file content\n");
+    commit_all(&repo, "feat", "feat: add file 'clash'");
+
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "clash/sub.txt", "epoch dir content\n");
+    commit_all(&repo, "advancer", "epoch: add clash/sub.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let rebase_out = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rebase_out.stdout),
+        String::from_utf8_lossy(&rebase_out.stderr)
+    );
+    assert!(
+        rebase_out.status.success(),
+        "explicit sync --rebase must SUCCEED with a structured conflict, not abort:\n{text}"
+    );
+    assert!(
+        !text.contains("D/F clash in rebase output tree"),
+        "bn-2dy1: explicit rebase hit the layer-B backstop:\n{text}"
+    );
+
+    let sidecar = repo
+        .read_conflict_tree_sidecar("feat")
+        .expect("conflict-tree.json must exist after the D/F rebase");
+    assert!(
+        find_conflict_entry(&sidecar, "clash").is_some(),
+        "sidecar must list 'clash'; got:\n{}",
+        serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+    );
+}
+
+/// Clean case: `deep.txt` vs `deep/sub.txt` — different names, no clash.
+#[test]
+fn sync_rebase_no_false_positive_for_name_with_extension() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "deep.txt", "file content\n");
+    commit_all(&repo, "feat", "feat: add deep.txt");
+
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "deep/sub.txt", "dir content\n");
+    commit_all(&repo, "advancer", "epoch: add deep/sub.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let rebase_out = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    assert!(
+        rebase_out.status.success(),
+        "clean case: deep.txt vs deep/sub.txt must not conflict (false positive)\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&rebase_out.stdout),
+        String::from_utf8_lossy(&rebase_out.stderr),
+    );
+
+    let sidecar = repo.read_conflict_tree_sidecar("feat");
+    assert!(
+        sidecar.is_none(),
+        "bn-2dy1 false positive: deep.txt vs deep/sub.txt must NOT produce a \
+         conflict sidecar; got: {sidecar:?}"
+    );
+
+    assert_eq!(
+        repo.read_file("feat", "deep.txt").as_deref(),
+        Some("file content\n"),
+        "deep.txt must survive the rebase"
+    );
+    assert_eq!(
+        repo.read_file("feat", "deep/sub.txt").as_deref(),
+        Some("dir content\n"),
+        "deep/sub.txt must survive the rebase"
+    );
+}
+
+/// Clean case: `deep` vs `deeper` — `deep` is NOT a component-wise prefix.
+#[test]
+fn sync_rebase_no_false_positive_for_similar_named_files() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "feat"]);
+    repo.add_file("feat", "deep", "deep content\n");
+    commit_all(&repo, "feat", "feat: add deep");
+
+    repo.maw_ok(&["ws", "create", "advancer"]);
+    repo.add_file("advancer", "deeper", "deeper content\n");
+    commit_all(&repo, "advancer", "epoch: add deeper");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "advancer",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge advancer",
+    ]);
+
+    let rebase_out = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    assert!(
+        rebase_out.status.success(),
+        "clean case: 'deep' vs 'deeper' must not conflict\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&rebase_out.stdout),
+        String::from_utf8_lossy(&rebase_out.stderr),
+    );
+
+    let sidecar = repo.read_conflict_tree_sidecar("feat");
+    assert!(
+        sidecar.is_none(),
+        "bn-2dy1 false positive: 'deep' vs 'deeper' must NOT produce a \
+         conflict sidecar; got: {sidecar:?}"
+    );
+
+    assert_eq!(
+        repo.read_file("feat", "deep").as_deref(),
+        Some("deep content\n"),
+        "'deep' must survive the rebase"
+    );
+    assert_eq!(
+        repo.read_file("feat", "deeper").as_deref(),
+        Some("deeper content\n"),
+        "'deeper' must survive the rebase"
+    );
+}

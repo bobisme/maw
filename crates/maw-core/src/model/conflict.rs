@@ -828,6 +828,31 @@ pub enum Conflict {
         /// sidecars written by older versions deserialize cleanly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rename_hint: Option<PathBuf>,
+
+        /// D/F (Directory/File) clash marker (bn-2dy1).
+        ///
+        /// When set, this `ModifyDelete` represents a structural clash: one
+        /// side has a FILE at the carried path (the "collision root") while
+        /// the other side has files under it as a directory. The value is
+        /// the collision-root path P:
+        ///
+        /// * Direction 1 (ws FILE P vs epoch dir P/): the conflict is keyed
+        ///   at P and `df_hint == P`. The epoch's children under P/ are kept
+        ///   OUT of the rebased tree (a git tree cannot hold both); they are
+        ///   restorable from the epoch commit.
+        /// * Direction 2 (ws dir P/sub vs epoch FILE P): the conflict is
+        ///   keyed at the workspace child path (P/sub) and `df_hint == P`.
+        ///   The epoch's FILE at P is kept out of the rebased tree.
+        ///
+        /// Resolution: keeping the modifier (workspace) side writes the
+        /// workspace content; keeping the deleter (epoch) side deletes the
+        /// workspace path(s) and restores the epoch's version of the region
+        /// at `df_hint` from the epoch tree.
+        ///
+        /// Defaults to `None` (plain modify/delete) and is omitted from
+        /// sidecar JSON when unset so older sidecars deserialize cleanly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        df_hint: Option<PathBuf>,
     },
 
     /// The same file was renamed to different destinations by different
@@ -1496,6 +1521,7 @@ mod tests {
             deleter: test_side("bob", 'b', 6),
             modified_content: test_oid('a'),
             rename_hint: None,
+            df_hint: None,
         };
 
         assert_eq!(conflict.path(), &PathBuf::from("src/old.rs"));
@@ -1513,6 +1539,7 @@ mod tests {
             deleter: test_side("dev-2", 'b', 11),
             modified_content: test_oid('a'),
             rename_hint: None,
+            df_hint: None,
         };
 
         let json = serde_json::to_string_pretty(&conflict).expect("operation should succeed");
@@ -1623,6 +1650,7 @@ mod tests {
             deleter: test_side("bob", 'b', 2),
             modified_content: test_oid('a'),
             rename_hint: None,
+            df_hint: None,
         };
         let display = format!("{conflict}");
         assert!(display.contains("modify/delete"));
@@ -1671,6 +1699,7 @@ mod tests {
                 deleter: test_side("ws-2", 'b', 1),
                 modified_content: test_oid('a'),
                 rename_hint: None,
+                df_hint: None,
             },
             Conflict::DivergentRename {
                 file_id: test_file_id(3),
@@ -1698,6 +1727,7 @@ mod tests {
             deleter: test_side("ws-2", 'b', 1),
             modified_content: test_oid('a'),
             rename_hint: None,
+            df_hint: None,
         };
         let json = serde_json::to_string(&conflict).expect("operation should succeed");
         assert!(json.contains("\"modified_content\""));
@@ -1733,6 +1763,7 @@ mod tests {
                     deleter: test_side("ws-2", 'b', 1),
                     modified_content: test_oid('a'),
                     rename_hint: None,
+                    df_hint: None,
                 },
                 "modify_delete",
             ),

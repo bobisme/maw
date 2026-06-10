@@ -466,6 +466,7 @@ pub fn apply_rename_awareness(partition: PartitionResult) -> RenameAwareResult {
         partition: PartitionResult {
             unique: new_unique,
             shared: truly_shared,
+            df_clashes: vec![],
         },
         rename_conflicts,
     }
@@ -527,6 +528,7 @@ mod tests {
                     entry_with_fid("ws-b", ChangeKind::Modified, Some(b"b"), fid(1)),
                 ],
             )],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -551,6 +553,7 @@ mod tests {
                     entry_no_fid("ws-b", ChangeKind::Modified, Some(b"y")),
                 ],
             )],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -585,6 +588,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -623,6 +627,7 @@ mod tests {
                     entry_with_fid("ws-b", ChangeKind::Modified, Some(b"edited"), fid(1)),
                 ],
             )],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -663,6 +668,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -709,6 +715,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -761,6 +768,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -806,6 +814,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -827,6 +836,7 @@ mod tests {
         let partition = PartitionResult {
             unique: vec![],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -853,6 +863,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -883,6 +894,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let result = apply_rename_awareness(partition);
@@ -952,6 +964,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         // Order 2: ws-b first, ws-a second (different unique order).
@@ -967,6 +980,7 @@ mod tests {
                 ),
             ],
             shared: vec![],
+            df_clashes: vec![],
         };
 
         let r1 = apply_rename_awareness(part1);

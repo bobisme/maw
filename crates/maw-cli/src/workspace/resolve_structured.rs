@@ -203,6 +203,19 @@ pub fn list_conflicts(
                     );
                 }
             }
+            // bn-2dy1: a ModifyDelete carrying a df_hint is a D/F path
+            // clash — name the collision root so the user understands why.
+            Conflict::ModifyDelete {
+                df_hint: Some(region),
+                ..
+            } => {
+                println!(
+                    "  {}  [{shape}] sides=[{sides_desc}] (D/F clash: '{}' is a file on one \
+                     side, a directory on the other)",
+                    path.display(),
+                    region.display()
+                );
+            }
             // bn-heb8: when a ModifyDelete was caused by an epoch rename,
             // append the rename target so the user knows where the content went.
             Conflict::ModifyDelete {
@@ -1203,6 +1216,176 @@ fn apply_outcome(
     }
 }
 
+/// bn-2dy1: restore the epoch's version of a D/F-clash region into the
+/// worktree after `--keep epoch` removed the workspace side.
+///
+/// A D/F clash keeps exactly one side's paths in the rebased tree (a git
+/// tree cannot hold a path that is both a file and a directory). The
+/// workspace side is materialized as marker stub(s); the epoch's clashing
+/// entries (a FILE at the region root, or a subtree under it) are left out —
+/// but remain fully intact in the immutable epoch commit. When the user
+/// resolves with `--keep epoch`, this function copies the epoch's version of
+/// the region back into the worktree.
+///
+/// Returns the list of workspace-relative paths written (for staging by the
+/// auto-commit).
+fn restore_epoch_region(
+    repo: &dyn GitRepo,
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    region: &Path,
+) -> Result<Vec<PathBuf>> {
+    use maw_core::refs as manifold_refs;
+
+    // The workspace's epoch ref points at the epoch this workspace is based
+    // on (the rebase that recorded the D/F conflict advanced it). Fall back
+    // to the repo-wide current epoch.
+    let epoch_oid = manifold_refs::read_ref(root, &manifold_refs::workspace_epoch_ref(workspace))
+        .ok()
+        .flatten()
+        .or_else(|| {
+            manifold_refs::read_ref(root, "refs/manifold/epoch/current")
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot restore epoch side of D/F clash at '{}': no epoch ref found \
+                 (looked at refs/manifold/epoch/ws/{workspace} and refs/manifold/epoch/current)",
+                region.display()
+            )
+        })?;
+    let epoch_git: git::GitOid = epoch_oid
+        .as_str()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid epoch oid {epoch_oid}: {e}"))?;
+    let commit = repo
+        .read_commit(epoch_git)
+        .map_err(|e| anyhow::anyhow!("read_commit({epoch_git}) failed: {e}"))?;
+
+    // Walk the epoch tree down to `region`.
+    let mut tree_oid = commit.tree_oid;
+    let mut entry_at_region: Option<git::TreeEntry> = None;
+    let components: Vec<String> = region
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    for (i, comp) in components.iter().enumerate() {
+        let entries = repo
+            .read_tree(tree_oid)
+            .map_err(|e| anyhow::anyhow!("read_tree({tree_oid}) failed: {e}"))?;
+        let Some(entry) = entries.into_iter().find(|e| &e.name == comp) else {
+            // Region not in the epoch — nothing to restore (the conflict may
+            // be stale). Not an error; report nothing restored.
+            return Ok(vec![]);
+        };
+        if i + 1 == components.len() {
+            entry_at_region = Some(entry);
+        } else if entry.mode == git::EntryMode::Tree {
+            tree_oid = entry.oid;
+        } else {
+            // Intermediate component is not a tree — nothing to restore.
+            return Ok(vec![]);
+        }
+    }
+    let Some(entry) = entry_at_region else {
+        return Ok(vec![]);
+    };
+
+    // Collect (rel_path, blob_oid, mode) for everything at/under the region.
+    let mut files: Vec<(PathBuf, git::GitOid, git::EntryMode)> = Vec::new();
+    collect_epoch_files(repo, &entry, region, &mut files)?;
+
+    // If the region root currently exists as a directory in the worktree
+    // (e.g. leftover empty dir after stub deletion, or untracked files), we
+    // can only proceed when removing it is safe.
+    let region_abs = ws_path.join(region);
+    if entry.mode != git::EntryMode::Tree && region_abs.is_dir() {
+        // Restoring a FILE where a directory sits. Only remove if empty.
+        if std::fs::remove_dir(&region_abs).is_err() {
+            bail!(
+                "cannot restore epoch file at '{}': a non-empty directory exists there. \
+                 Move or remove its contents, then re-run the resolve.",
+                region.display()
+            );
+        }
+    }
+
+    let mut written: Vec<PathBuf> = Vec::new();
+    for (rel, blob_oid, mode) in files {
+        let bytes = repo
+            .read_blob(blob_oid)
+            .map_err(|e| anyhow::anyhow!("read_blob({blob_oid}) failed: {e}"))?;
+        write_restored_entry(&ws_path.join(&rel), &bytes, mode)?;
+        written.push(rel);
+    }
+    Ok(written)
+}
+
+/// Write one epoch-restored entry to `abs` honoring its tree-entry mode
+/// (symlink / executable bit / regular blob).
+fn write_restored_entry(abs: &Path, bytes: &[u8], mode: git::EntryMode) -> Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("create_dir_all({}): {e}", parent.display()))?;
+    }
+    if mode == git::EntryMode::Link {
+        #[cfg(unix)]
+        {
+            let target = String::from_utf8_lossy(bytes).into_owned();
+            if abs.is_file() || abs.is_symlink() {
+                std::fs::remove_file(abs)
+                    .map_err(|e| anyhow::anyhow!("remove {}: {e}", abs.display()))?;
+            }
+            std::os::unix::fs::symlink(&target, abs)
+                .map_err(|e| anyhow::anyhow!("symlink {}: {e}", abs.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(abs, bytes)
+                .map_err(|e| anyhow::anyhow!("write {}: {e}", abs.display()))?;
+        }
+        return Ok(());
+    }
+
+    std::fs::write(abs, bytes).map_err(|e| anyhow::anyhow!("write {}: {e}", abs.display()))?;
+    #[cfg(unix)]
+    if mode == git::EntryMode::BlobExecutable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(abs, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| anyhow::anyhow!("chmod +x {}: {e}", abs.display()))?;
+    }
+    Ok(())
+}
+
+/// Recursively collect all blob entries at/under `entry` (rooted at `rel`).
+fn collect_epoch_files(
+    repo: &dyn GitRepo,
+    entry: &git::TreeEntry,
+    rel: &Path,
+    out: &mut Vec<(PathBuf, git::GitOid, git::EntryMode)>,
+) -> Result<()> {
+    match entry.mode {
+        git::EntryMode::Tree => {
+            let entries = repo
+                .read_tree(entry.oid)
+                .map_err(|e| anyhow::anyhow!("read_tree({}) failed: {e}", entry.oid))?;
+            for child in entries {
+                let child_rel = rel.join(&child.name);
+                collect_epoch_files(repo, &child, &child_rel, out)?;
+            }
+        }
+        git::EntryMode::Commit => {
+            // Submodule gitlink — cannot be restored as file content; skip.
+        }
+        _ => {
+            out.push((rel.to_path_buf(), entry.oid, entry.mode));
+        }
+    }
+    Ok(())
+}
+
 /// Main entry point. Called by `super::resolve::run` when the structured
 /// sidecar is present.
 ///
@@ -1306,6 +1489,14 @@ pub fn run_structured(
     // every flagged file before committing).
     let mut sanity_warnings: Vec<(PathBuf, SanityFailure)> = Vec::new();
 
+    // bn-2dy1: D/F-clash regions whose workspace side was deleted via
+    // `--keep epoch` in this invocation. The epoch's version of each region
+    // is restored after the loop (once no unresolved conflict still shares
+    // the region — mixed per-path resolutions of one D/F clash would
+    // otherwise recreate the file/directory collision).
+    let mut df_regions_to_restore: std::collections::BTreeSet<PathBuf> =
+        std::collections::BTreeSet::new();
+
     // Iterate over a snapshot of target paths; mutate `tree` as we go.
     for rel in &target_paths {
         let Some(conflict) = tree.conflicts.get(rel).cloned() else {
@@ -1316,28 +1507,85 @@ pub fn run_structured(
             skipped.push((rel.clone(), "no --keep side chosen for path".into()));
             continue;
         };
+        let df_region = match &conflict {
+            Conflict::ModifyDelete {
+                df_hint: Some(region),
+                ..
+            } => Some(region.clone()),
+            _ => None,
+        };
         match apply_decision(repo_dyn, &conflict, &target, rel, workspace, sanity_cfg) {
-            Ok(outcome) => match apply_outcome(ws_path, rel, outcome)? {
-                (true, kind, maybe_failure) => {
-                    tree.conflicts.remove(rel);
-                    resolved.push(rel.clone());
-                    if let Some(failure) = maybe_failure {
-                        sanity_warnings.push((rel.clone(), failure));
+            Ok(outcome) => {
+                // A Deleted outcome on a D/F conflict means the user kept the
+                // epoch side — schedule the epoch region restore.
+                if matches!(outcome, PathOutcome::Deleted)
+                    && let Some(region) = df_region
+                {
+                    df_regions_to_restore.insert(region);
+                }
+                match apply_outcome(ws_path, rel, outcome)? {
+                    (true, kind, maybe_failure) => {
+                        tree.conflicts.remove(rel);
+                        resolved.push(rel.clone());
+                        if let Some(failure) = maybe_failure {
+                            sanity_warnings.push((rel.clone(), failure));
+                        }
+                        match kind {
+                            ResolveKind::ThreeWayClean => three_way_clean.push(rel.clone()),
+                            ResolveKind::ThreeWayWsWins => three_way_ws_wins.push(rel.clone()),
+                            ResolveKind::ThreeWayEpochWins => {
+                                three_way_epoch_wins.push(rel.clone());
+                            }
+                            ResolveKind::ThreeWayUnion => three_way_union.push(rel.clone()),
+                            ResolveKind::BlobReplace | ResolveKind::LegacyBlobReplaceWarned => {}
+                        }
                     }
-                    match kind {
-                        ResolveKind::ThreeWayClean => three_way_clean.push(rel.clone()),
-                        ResolveKind::ThreeWayWsWins => three_way_ws_wins.push(rel.clone()),
-                        ResolveKind::ThreeWayEpochWins => three_way_epoch_wins.push(rel.clone()),
-                        ResolveKind::ThreeWayUnion => three_way_union.push(rel.clone()),
-                        ResolveKind::BlobReplace | ResolveKind::LegacyBlobReplaceWarned => {}
+                    (false, _, _) => {
+                        skipped.push((rel.clone(), "decision produced no output".into()));
                     }
                 }
-                (false, _, _) => {
-                    skipped.push((rel.clone(), "decision produced no output".into()));
-                }
-            },
+            }
             Err(e) => {
                 skipped.push((rel.clone(), e.to_string()));
+            }
+        }
+    }
+
+    // bn-2dy1: restore the epoch side of resolved D/F clashes. Deferred to
+    // after the loop so a multi-child clash (several conflicts sharing one
+    // region) restores exactly once — and only when NO unresolved conflict
+    // still shares the region (a partial resolution would otherwise recreate
+    // the file/directory collision).
+    for region in &df_regions_to_restore {
+        let region_still_contested = tree.conflicts.values().any(|c| {
+            matches!(
+                c,
+                Conflict::ModifyDelete { df_hint: Some(r), .. } if r == region
+            )
+        });
+        if region_still_contested {
+            eprintln!(
+                "note: epoch side of D/F clash at '{}' NOT restored yet — other conflicts \
+                 under this region are still unresolved. It will be restored when the last \
+                 one is resolved with --keep epoch.",
+                region.display()
+            );
+            continue;
+        }
+        match restore_epoch_region(repo_dyn, root, workspace, ws_path, region) {
+            Ok(restored) => {
+                for rel in restored {
+                    println!("  restored from epoch: {}", rel.display());
+                    resolved.push(rel);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "WARNING: failed to restore epoch side of D/F clash at '{}': {e}\n  \
+                     Restore manually: maw exec {workspace} -- git checkout <epoch> -- {}",
+                    region.display(),
+                    region.display()
+                );
             }
         }
     }
@@ -1796,6 +2044,7 @@ mod tests {
             deleter: side("bob", 'b'),
             modified_content: oid('a'),
             rename_hint: None,
+            df_hint: None,
         };
         let mod_side = pick_single_side_oid(&c, "alice").expect("operation should succeed");
         assert_eq!(mod_side, Some(oid('a')));
@@ -2368,6 +2617,7 @@ mod tests {
             ),
             modified_content: modifier_oid,
             rename_hint: None,
+            df_hint: None,
         };
         std::fs::create_dir_all(ws_path.join("dir")).expect("operation should succeed");
         std::fs::write(ws_path.join(&rel), b"placeholder").expect("operation should succeed");

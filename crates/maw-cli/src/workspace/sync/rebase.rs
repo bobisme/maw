@@ -1146,9 +1146,195 @@ fn promote_overlaps_to_conflicts(
         apply_rename_resolution(tree, &mut patch.changes, res);
     }
 
+    // bn-2dy1: D/F prefix-clash detection.
+    //
+    // The epoch_delta map is keyed by exact paths (files that changed). But a
+    // D/F clash is a structural mismatch where:
+    //
+    //   Direction 1: ws commits FILE `P`; epoch gained paths under `P/` (epoch
+    //   turned P into a directory). The exact-path lookup
+    //   `epoch_delta.get(&change.path)` for path `P` returns None because only
+    //   `P/a`, `P/b`, etc. appear in the map — the clash is silently missed.
+    //
+    //   Direction 2: ws commits FILE `P/sub`; epoch gained FILE `P` (epoch
+    //   turned P/ into a file). Again, the lookup for `P/sub` returns None,
+    //   and `P`'s entry in the epoch tree now collides.
+    //
+    // Detection is COMPONENT-WISE (`deep` clashes with `deep/leaf` but NOT
+    // with `deeper` or `deep.txt`).
+    //
+    // Representation: `Conflict::ModifyDelete` with `df_hint = Some(P)` where
+    // P is the collision root. UNIFORMLY: modifier = the WORKSPACE side (its
+    // blob is renderable + restorable), deleter = "epoch".
+    //
+    // CRITICAL TREE-VALIDITY INVARIANT: a git tree cannot hold a path that is
+    // both a file and a directory, so exactly ONE side's paths may exist in
+    // the materialized output. We keep the WORKSPACE side's path(s) (rendered
+    // as marker stubs at the conflict key) and remove the EPOCH side's
+    // clashing entries from `tree.clean`. The epoch side is always restorable
+    // from the (immutable) epoch commit — `maw ws resolve --keep epoch` does
+    // exactly that. Without this, the rendered stub plus the other side's
+    // clean entries produce an invalid tree and `write_blobs_and_build_tree`'s
+    // backstop aborts the whole rebase (the wedged-workspace failure this
+    // block exists to prevent).
+    //
+    //   Direction 1: conflict keyed at P (stub = ws file content + markers);
+    //   epoch's clean entries under P/ removed.
+    //   Direction 2: conflict keyed at the ws child path P/sub (stub = ws
+    //   child content + markers); epoch's clean FILE entry at P removed.
+    //
+    // The ws changes involved are REMOVED from the patch so
+    // `apply_unilateral_patchset` cannot collapse the conflict back to a
+    // clean entry (V1 replace-and-collapse semantics).
+    let mut df_clash_paths: Vec<std::path::PathBuf> = Vec::new();
+    {
+        for change in &patch.changes {
+            if !matches!(change.kind, ChangeKind::Added | ChangeKind::Modified) {
+                continue;
+            }
+            // Skip paths already handled by rename resolution.
+            if rename_pairs.modified_to_source.contains_key(&change.path) {
+                continue;
+            }
+            let Some(ws_blob) = change.blob.clone() else {
+                continue;
+            };
+
+            // Direction 1: ws path P is a FILE; epoch ADDED paths under P/
+            // (entries whose new side is Some — a deleted child is not a
+            // structural clash).
+            let dir_prefix = format!("{}/", change.path.to_string_lossy());
+            let epoch_dir_child = epoch_delta.iter().find(|(ep, (_, new))| {
+                new.is_some() && ep.to_string_lossy().starts_with(&dir_prefix)
+            });
+            // Only treat P as D/F when the epoch did NOT also keep a FILE at
+            // P (exact-path entry with a live new side is the normal overlap
+            // case, handled by the main loop below). An epoch entry at P
+            // whose new side is None (epoch deleted file P while adding
+            // P/children) IS part of the D/F restructure and is claimed here.
+            let epoch_has_live_file_at_p =
+                matches!(epoch_delta.get(&change.path), Some((_, Some(_))));
+            if epoch_dir_child.is_some() && !epoch_has_live_file_at_p {
+                let ord = OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
+                let file_id = FileId::new(merge_file_id_seed(
+                    &GitOid::new(&"d".repeat(40)).expect("operation should succeed"),
+                    &change.path,
+                ));
+                // modifier = workspace (has FILE content at P); deleter =
+                // epoch (turned P into a directory). The deleter's blob is
+                // the representative child's blob so the conflict record
+                // points at real epoch content.
+                let modifier = ConflictSide::new(ws_name.to_owned(), ws_blob.clone(), ord.clone());
+                let deleter_blob = epoch_dir_child
+                    .and_then(|(_, (_, new))| new.clone())
+                    .unwrap_or_else(|| ws_blob.clone());
+                let deleter = ConflictSide::new("epoch".to_owned(), deleter_blob, ord);
+
+                // Tree-validity: the stub will live at P, so the epoch's
+                // children under P/ must leave the clean map (restorable
+                // from the epoch; `--keep epoch` restores them).
+                let children: Vec<std::path::PathBuf> = tree
+                    .clean
+                    .keys()
+                    .filter(|p| p.to_string_lossy().starts_with(&dir_prefix))
+                    .cloned()
+                    .collect();
+                for child in children {
+                    tree.clean.remove(&child);
+                }
+                tree.clean.remove(&change.path);
+
+                tree.conflicts.insert(
+                    change.path.clone(),
+                    Conflict::ModifyDelete {
+                        path: change.path.clone(),
+                        file_id,
+                        modifier,
+                        deleter,
+                        modified_content: ws_blob.clone(),
+                        // rename_hint deliberately None: it triggers the
+                        // bn-heb8 "deleted by rename" note, which would be
+                        // misleading here. The D/F note keys off df_hint.
+                        rename_hint: None,
+                        df_hint: Some(change.path.clone()),
+                    },
+                );
+                df_clash_paths.push(change.path.clone());
+                continue;
+            }
+
+            // Direction 2: ws path P/sub is a FILE; epoch has FILE `P` (epoch
+            // turned the directory prefix into a file). Check every
+            // component-wise ancestor of change.path against epoch_delta.
+            let mut dir_ancestor = change.path.parent();
+            while let Some(ancestor) = dir_ancestor {
+                if ancestor == std::path::Path::new("") {
+                    break;
+                }
+                if let Some((_, Some(ep_file_blob))) = epoch_delta.get(ancestor)
+                    && !epoch_delta.contains_key(&change.path)
+                {
+                    let ep_file_blob = ep_file_blob.clone();
+                    let ord =
+                        OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
+                    let file_id = FileId::new(merge_file_id_seed(
+                        &GitOid::new(&"d".repeat(40)).expect("operation should succeed"),
+                        &change.path,
+                    ));
+                    // modifier = workspace (the child FILE under P/);
+                    // deleter = epoch (whose FILE at P clashes with the
+                    // ws's directory P/). The conflict is keyed at the WS
+                    // child path so the stub renders inside the directory —
+                    // a valid tree shape.
+                    let modifier =
+                        ConflictSide::new(ws_name.to_owned(), ws_blob.clone(), ord.clone());
+                    let deleter = ConflictSide::new("epoch".to_owned(), ep_file_blob, ord);
+
+                    // Tree-validity: the epoch's FILE at the ancestor must
+                    // leave the clean map (it clashes with the ws's
+                    // directory). Restorable from the epoch via
+                    // `--keep epoch`.
+                    let ancestor_path = ancestor.to_path_buf();
+                    tree.clean.remove(&ancestor_path);
+
+                    tree.conflicts.insert(
+                        change.path.clone(),
+                        Conflict::ModifyDelete {
+                            path: change.path.clone(),
+                            file_id,
+                            modifier,
+                            deleter,
+                            modified_content: ws_blob.clone(),
+                            rename_hint: None,
+                            df_hint: Some(ancestor_path),
+                        },
+                    );
+                    df_clash_paths.push(change.path.clone());
+                    break;
+                }
+                dir_ancestor = ancestor.parent();
+            }
+        }
+    }
+
+    // Remove D/F-claimed changes from the patch entirely: the conflict stub
+    // is rendered from the conflict record, and leaving the change in the
+    // patch would let `apply_unilateral_patchset`'s V1 collapse semantics
+    // replace the conflict with a clean entry — re-creating the invalid
+    // file+directory tree shape.
+    if !df_clash_paths.is_empty() {
+        patch
+            .changes
+            .retain(|change| !df_clash_paths.contains(&change.path));
+    }
+
     let mut auto_resolved_paths: Vec<std::path::PathBuf> = Vec::new();
 
     for change in &patch.changes {
+        // Skip paths that were already handled by D/F clash detection.
+        if df_clash_paths.contains(&change.path) {
+            continue;
+        }
         match change.kind {
             ChangeKind::Added | ChangeKind::Modified => {
                 let Some(ws_blob) = change.blob.clone() else {
@@ -1271,6 +1457,7 @@ fn promote_overlaps_to_conflicts(
                             deleter,
                             modified_content: ws_blob,
                             rename_hint,
+                            df_hint: None,
                         },
                     );
                     continue;
@@ -1404,6 +1591,7 @@ fn promote_overlaps_to_conflicts(
                         deleter,
                         modified_content: epoch_new,
                         rename_hint: None,
+                        df_hint: None,
                     },
                 );
             }
@@ -2101,11 +2289,51 @@ fn write_blobs_and_build_tree(
     }
 
     // Any base-tree path not in final_paths must be removed.
+    //
+    // bn-2dy1 EXCEPTION: when a base-tree FILE became a DIRECTORY in the
+    // output (some final path lives under "<base_path>/"), the upsert of the
+    // deeper path already replaced the blob with a subtree. Emitting a
+    // `Remove(base_path)` here would delete that whole subtree — silently
+    // dropping the just-written entries (this is how the D/F direction-2
+    // conflict stub vanished from the rebased tree). Skip the removal; the
+    // file→directory replacement is complete without it.
     for base_path in &base_paths {
         if !final_paths.contains(base_path) {
+            let dir_prefix = format!("{base_path}/");
+            let became_directory = final_paths
+                .range(dir_prefix.clone()..)
+                .next()
+                .is_some_and(|p| p.starts_with(&dir_prefix));
+            if became_directory {
+                continue;
+            }
             edits.push(TreeEdit::Remove {
                 path: base_path.clone(),
             });
+        }
+    }
+
+    // bn-2dy1 defense-in-depth: detect D/F clashes in the output tree before
+    // handing them to `edit_tree`. If path P is in `final_paths` AND any path
+    // under P/ is also in `final_paths`, the tree construction is structurally
+    // ambiguous — git cannot represent both a file at P and files under P/ in
+    // the same tree. This should have been caught by `promote_df_clashes`
+    // earlier; if we still reach here it means a D/F clash slipped through the
+    // conflict machinery (e.g. a test fixture bypassing the pipeline). Error
+    // loudly rather than silently drop one side.
+    //
+    // The check is O(N * log N) via sorted-set prefix scan.
+    for path_str in &final_paths {
+        let dir_prefix = format!("{path_str}/");
+        // BTreeSet::range gives us paths that start with the prefix in O(log N).
+        if let Some(child) = final_paths.range(dir_prefix.clone()..).next()
+            && child.starts_with(&dir_prefix)
+        {
+            anyhow::bail!(
+                "D/F clash in rebase output tree: path '{path_str}' is both a file and a \
+                 directory (first child: '{child}') — this is a bug; D/F clashes should have \
+                 been surfaced as structured conflicts by promote_overlaps_to_conflicts"
+            );
         }
     }
 

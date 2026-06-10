@@ -712,6 +712,11 @@ fn render_add_add_conflict(
 /// by [`super::super::workspace::sync::rebase::detect_epoch_rename_target`]),
 /// this carries the destination path so the stub can tell the user/agent where
 /// their edit needs to land (bn-heb8).
+///
+/// `df_hint` — when set, this conflict is a D/F (Directory/File) path clash
+/// (bn-2dy1): one side has a FILE at the carried collision-root path while the
+/// other has files under it as a directory. The note explains the clash and
+/// the resolution semantics.
 fn render_modify_delete_conflict(
     repo: &dyn GitRepo,
     path: &Path,
@@ -719,6 +724,7 @@ fn render_modify_delete_conflict(
     deleter: &ConflictSide,
     modified_content: &GitOid,
     rename_hint: Option<&Path>,
+    df_hint: Option<&Path>,
 ) -> Result<Vec<u8>, MaterializeError> {
     let modifier_bytes = read_side_blob(repo, path, modified_content)?;
 
@@ -748,6 +754,27 @@ fn render_modify_delete_conflict(
             format!(
                 "# to carry your edit: apply your changes at {} instead\n",
                 new_path.display()
+            )
+            .as_bytes(),
+        );
+    }
+    // bn-2dy1: D/F clash note — one side has a FILE at the collision root,
+    // the other has files under it as a directory. Spell out what each
+    // resolution choice does.
+    if let Some(region) = df_hint {
+        out.extend_from_slice(
+            format!(
+                "# note: D/F path clash — '{}' is a FILE on one side and a directory on the other\n",
+                region.display()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(
+            format!(
+                "# to resolve: --keep {}  keeps this workspace content\n\
+                 #             --keep epoch  removes it and restores the epoch's version of '{}'\n",
+                modifier.workspace,
+                region.display()
             )
             .as_bytes(),
         );
@@ -839,6 +866,7 @@ pub fn materialize(
                 deleter,
                 modified_content,
                 rename_hint,
+                df_hint,
                 ..
             } => render_modify_delete_conflict(
                 repo,
@@ -847,6 +875,7 @@ pub fn materialize(
                 deleter,
                 modified_content,
                 rename_hint.as_deref(),
+                df_hint.as_deref(),
             )?,
             Conflict::DivergentRename { .. } => {
                 return Err(MaterializeError::UnsupportedDivergentRename { path: path.clone() });
@@ -1557,6 +1586,7 @@ mod tests {
                 deleter: side("bob", oid('b')),
                 modified_content: modifier_oid,
                 rename_hint: None,
+                df_hint: None,
             },
         );
         let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
@@ -1957,6 +1987,7 @@ mod tests {
                 deleter: side("bob", oid('f')),
                 modified_content: oid('e'),
                 rename_hint: None,
+                df_hint: None,
             },
         );
 

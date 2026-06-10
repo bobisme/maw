@@ -47,7 +47,7 @@ use crate::model::types::WorkspaceId;
 use super::ast_merge::{AstMergeConfig, AstMergeResult, try_ast_merge_with_config};
 
 use super::build::ResolvedChange;
-use super::partition::{PartitionResult, PathEntry};
+use super::partition::{DfClash, PartitionResult, PathEntry};
 use super::types::ChangeKind;
 
 /// Why a shared path could not be auto-resolved.
@@ -64,6 +64,19 @@ pub enum ConflictReason {
     MissingBase,
     /// A non-deletion entry was missing file content.
     MissingContent,
+    /// Directory/File (D/F) path clash (bn-2dy1): one side has a FILE at path P
+    /// while another side has files under P/ (treating P as a directory).
+    ///
+    /// The `dir_child` field carries an example path under the directory side
+    /// so the user knows what would be lost. The workspace that has the FILE
+    /// is in `file_side` (workspace name); the directory-introducing workspace
+    /// is in `dir_side`.
+    FileDirectory {
+        /// Workspace that contributed the FILE at this path.
+        file_side: String,
+        /// An example path under the directory side (for diagnostics).
+        dir_child_example: PathBuf,
+    },
 }
 
 impl std::fmt::Display for ConflictReason {
@@ -74,6 +87,15 @@ impl std::fmt::Display for ConflictReason {
             Self::Diff3Conflict => write!(f, "overlapping edits (diff3 conflict)"),
             Self::MissingBase => write!(f, "base content missing"),
             Self::MissingContent => write!(f, "entry missing file content"),
+            Self::FileDirectory {
+                file_side,
+                dir_child_example,
+            } => write!(
+                f,
+                "D/F clash: '{}' has this path as a FILE; another workspace has files under it (e.g. '{}')",
+                file_side,
+                dir_child_example.display()
+            ),
         }
     }
 }
@@ -407,6 +429,55 @@ impl From<std::io::Error> for ResolveError {
     }
 }
 
+/// Emit `FileDirectory` conflict records for each D/F clash in `clashes`.
+///
+/// Each clash produces one `ConflictRecord` keyed on the FILE-side path
+/// (`clash.file_path`). The directory-child paths that are structurally
+/// incompatible are captured in `ConflictReason::FileDirectory::dir_child_example`.
+///
+/// All paths that participate in at least one D/F clash (both `file_path` and
+/// `dir_child_example`) are in `skip_set` and should be excluded from normal
+/// unique/shared resolution.
+///
+/// Clashes with the same `file_path` are merged into a single record so the
+/// user sees one conflict per FILE-side path rather than one per dir child.
+fn emit_df_clash_conflicts(
+    clashes: &[DfClash],
+    _skip_set: &std::collections::HashSet<PathBuf>,
+    conflicts: &mut Vec<ConflictRecord>,
+) {
+    // Group by file_path (may have multiple dir children).
+    use std::collections::BTreeMap as SortedMap;
+    let mut by_file: SortedMap<&PathBuf, &DfClash> = SortedMap::new();
+    for clash in clashes {
+        by_file.entry(&clash.file_path).or_insert(clash);
+    }
+
+    for clash in by_file.values() {
+        conflicts.push(ConflictRecord {
+            path: clash.file_path.clone(),
+            base: None,
+            sides: vec![
+                ConflictSide {
+                    workspace_id: clash.file_ws.clone(),
+                    kind: ChangeKind::Added,
+                    content: None, // file content not available at partition stage
+                },
+                ConflictSide {
+                    workspace_id: clash.dir_ws.clone(),
+                    kind: ChangeKind::Added,
+                    content: None,
+                },
+            ],
+            reason: ConflictReason::FileDirectory {
+                file_side: clash.file_ws.as_str().to_owned(),
+                dir_child_example: clash.dir_child_example.clone(),
+            },
+            atoms: vec![],
+        });
+    }
+}
+
 /// Resolve all paths in a partition result.
 ///
 /// `base_contents` maps file paths to epoch-base content for files that existed
@@ -437,8 +508,20 @@ pub fn resolve_partition_with_attrs(
     let mut resolved: Vec<ResolvedChange> = Vec::new();
     let mut conflicts: Vec<ConflictRecord> = Vec::new();
 
+    // bn-2dy1: D/F clash paths must be emitted as FileDirectory conflicts
+    // rather than resolved normally. Build a skip-set of all participating paths.
+    let df_clash_skip = partition.df_clash_paths();
+    if !partition.df_clashes.is_empty() {
+        emit_df_clash_conflicts(&partition.df_clashes, &df_clash_skip, &mut conflicts);
+    }
+
     // Unique paths: direct passthrough to BUILD changes.
     for (path, entry) in &partition.unique {
+        // Skip paths involved in a D/F clash — they were emitted above.
+        if df_clash_skip.contains(path) {
+            continue;
+        }
+
         if entry.is_deletion() {
             resolved.push(ResolvedChange::Delete { path: path.clone() });
             continue;
@@ -465,6 +548,11 @@ pub fn resolve_partition_with_attrs(
 
     // Shared paths: apply hash-equality / diff3 / gitattr-driver strategy.
     for (path, entries) in &partition.shared {
+        // Skip paths involved in a D/F clash — they were emitted above.
+        if df_clash_skip.contains(path) {
+            continue;
+        }
+
         let base = base_contents.get(path).cloned();
         match resolve_shared_path(path, entries, base.as_deref(), attrs)? {
             SharedOutcome::Resolved(change) => resolved.push(change),
@@ -514,8 +602,18 @@ pub fn resolve_partition_with_ast_and_attrs(
     let mut resolved: Vec<ResolvedChange> = Vec::new();
     let mut conflicts: Vec<ConflictRecord> = Vec::new();
 
+    // bn-2dy1: D/F clash paths must be emitted as FileDirectory conflicts.
+    let df_clash_skip = partition.df_clash_paths();
+    if !partition.df_clashes.is_empty() {
+        emit_df_clash_conflicts(&partition.df_clashes, &df_clash_skip, &mut conflicts);
+    }
+
     // Unique paths: same as resolve_partition.
     for (path, entry) in &partition.unique {
+        if df_clash_skip.contains(path) {
+            continue;
+        }
+
         if entry.is_deletion() {
             resolved.push(ResolvedChange::Delete { path: path.clone() });
             continue;
@@ -542,6 +640,10 @@ pub fn resolve_partition_with_ast_and_attrs(
 
     // Shared paths: apply hash-equality / gitattr-driver / diff3 / AST merge.
     for (path, entries) in &partition.shared {
+        if df_clash_skip.contains(path) {
+            continue;
+        }
+
         let base = base_contents.get(path).cloned();
         match resolve_shared_path_with_ast(path, entries, base.as_deref(), ast_config, attrs)? {
             SharedOutcome::Resolved(change) => resolved.push(change),
@@ -1648,6 +1750,7 @@ mod tests {
         PartitionResult {
             unique: vec![],
             shared: vec![(PathBuf::from(path), entries)],
+            df_clashes: vec![],
         }
     }
 
@@ -1984,6 +2087,7 @@ mod tests {
                     entry("ws-b", ChangeKind::Modified, Some(b"A\n")),
                 ],
             )],
+            df_clashes: vec![],
         };
 
         let mut base = BTreeMap::new();
@@ -2541,6 +2645,7 @@ mod tests {
             PartitionResult {
                 unique: vec![],
                 shared: vec![(PathBuf::from(path), entries)],
+                df_clashes: vec![],
             }
         }
 
@@ -3015,5 +3120,135 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2dy1: D/F clash resolution
+    // -----------------------------------------------------------------------
+
+    use crate::merge::partition::DfClash;
+
+    fn make_df_partition(
+        file_path: &str,
+        file_ws: &str,
+        dir_child: &str,
+        dir_ws: &str,
+    ) -> PartitionResult {
+        PartitionResult {
+            unique: vec![
+                (
+                    PathBuf::from(file_path),
+                    entry(file_ws, ChangeKind::Added, Some(b"file content")),
+                ),
+                (
+                    PathBuf::from(dir_child),
+                    entry(dir_ws, ChangeKind::Added, Some(b"dir content")),
+                ),
+            ],
+            shared: vec![],
+            df_clashes: vec![DfClash {
+                file_path: PathBuf::from(file_path),
+                file_ws: ws(file_ws),
+                dir_child_example: PathBuf::from(dir_child),
+                dir_ws: ws(dir_ws),
+            }],
+        }
+    }
+
+    /// D/F clash at path P: resolve must emit a FileDirectory conflict at P,
+    /// not silently apply either side.
+    #[test]
+    fn df_clash_direction1_emits_file_directory_conflict() {
+        let partition = make_df_partition("clash", "ws-a", "clash/sub.txt", "ws-b");
+        let base = BTreeMap::new();
+        let result = resolve_partition(&partition, &base).expect("resolve should succeed");
+
+        // No clean resolutions for the clashing paths.
+        assert!(
+            result
+                .resolved
+                .iter()
+                .all(|r| r.path() != PathBuf::from("clash").as_path()),
+            "clash must NOT be in resolved (it's a D/F conflict)"
+        );
+        assert!(
+            result
+                .resolved
+                .iter()
+                .all(|r| r.path() != PathBuf::from("clash/sub.txt").as_path()),
+            "clash/sub.txt must NOT be in resolved (it's part of a D/F clash)"
+        );
+
+        // Exactly one conflict at path `clash`.
+        let clash_conflict = result
+            .conflicts
+            .iter()
+            .find(|c| c.path == PathBuf::from("clash"));
+        assert!(
+            clash_conflict.is_some(),
+            "expected a conflict record at 'clash'; got conflicts: {:?}",
+            result.conflicts.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+
+        let record = clash_conflict.expect("checked above");
+        assert!(
+            matches!(&record.reason, ConflictReason::FileDirectory { file_side, .. } if file_side == "ws-a"),
+            "conflict reason must be FileDirectory with file_side=ws-a; got: {:?}",
+            record.reason
+        );
+    }
+
+    /// D/F clash resolved: the dir-child path (P/sub.txt) must NOT appear as
+    /// a separate clean resolved change.
+    #[test]
+    fn df_clash_dir_child_not_silently_applied() {
+        let partition = make_df_partition("clash", "ws-a", "clash/sub.txt", "ws-b");
+        let base = BTreeMap::new();
+        let result = resolve_partition(&partition, &base).expect("resolve should succeed");
+
+        // clash/sub.txt must not be in resolved — it's part of the D/F clash.
+        let sub_resolved = result
+            .resolved
+            .iter()
+            .any(|r| r.path() == PathBuf::from("clash/sub.txt").as_path());
+        assert!(
+            !sub_resolved,
+            "clash/sub.txt must not be silently applied when there's a D/F clash at 'clash'"
+        );
+    }
+
+    /// No false positive for `deep.txt` vs `deep/sub.txt`: both should resolve
+    /// cleanly since they don't have a component-wise prefix relationship.
+    #[test]
+    fn df_no_false_positive_extension_distinguishes_names() {
+        let partition = PartitionResult {
+            unique: vec![
+                (
+                    PathBuf::from("deep.txt"),
+                    entry("ws-a", ChangeKind::Added, Some(b"file")),
+                ),
+                (
+                    PathBuf::from("deep/sub.txt"),
+                    entry("ws-b", ChangeKind::Added, Some(b"dir")),
+                ),
+            ],
+            shared: vec![],
+            df_clashes: vec![], // no clash
+        };
+        let base = BTreeMap::new();
+        let result = resolve_partition(&partition, &base).expect("resolve should succeed");
+
+        // Both should resolve cleanly.
+        assert_eq!(
+            result.conflicts.len(),
+            0,
+            "no conflicts expected; got: {:?}",
+            result.conflicts
+        );
+        assert_eq!(
+            result.resolved.len(),
+            2,
+            "both paths should resolve cleanly"
+        );
     }
 }
