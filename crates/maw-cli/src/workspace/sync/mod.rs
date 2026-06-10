@@ -4,6 +4,7 @@ mod cross_target;
 mod lock;
 pub(crate) mod notice;
 pub(crate) mod rebase;
+pub(crate) mod sanity;
 
 use std::path::Path;
 

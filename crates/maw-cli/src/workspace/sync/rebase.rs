@@ -1449,159 +1449,20 @@ impl PostRebaseSanityConfig {
     }
 }
 
-/// Why a clean merge was flagged as suspicious by the post-rebase sanity
-/// check (bn-2upt).
-#[derive(Clone, Debug)]
-pub enum SanityFailure {
-    /// The merged blob's byte length exceeded
-    /// `size_ratio_max * expected_size`, where `expected_size` is the
-    /// upper bound for a legitimate clean merge:
-    /// `max(ours, theirs) + (ours - base) + (theirs - base)` (saturating).
-    SizeDelta {
-        merged_len: usize,
-        /// `max(base, ours, theirs)` — surfaced as informational context;
-        /// the threshold check itself is against `expected_size`.
-        max_input: usize,
-        /// `max(ours, theirs) + (ours-base) + (theirs-base)`, the upper
-        /// bound used as the threshold's divisor. `ratio = merged_len /
-        /// expected_size`.
-        expected_size: usize,
-        ratio: f64,
-    },
-    /// Both inputs parsed cleanly under the file's tree-sitter grammar
-    /// but the merged output did not. Strong signal of structured-merge
-    /// corruption.
-    AstParse { reason: &'static str },
-}
-
-impl std::fmt::Display for SanityFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SizeDelta {
-                merged_len,
-                max_input,
-                expected_size,
-                ratio,
-            } => write!(
-                f,
-                "merged output is {merged_len} bytes; \
-                 {ratio:.2}x larger than the expected upper bound \
-                 ({expected_size} bytes; largest input was {max_input} bytes)"
-            ),
-            Self::AstParse { reason } => write!(
-                f,
-                "tree-sitter parse of the merged output reported {reason} \
-                 even though both inputs parsed cleanly"
-            ),
-        }
-    }
-}
-
-/// Pure-function size-delta check (bn-2upt).
-///
-/// Compares `merged.len()` against `max(ours.len(), theirs.len(), base.len())`
-/// and returns `Err(SanityFailure::SizeDelta { .. })` if the ratio exceeds
-/// `size_ratio_max`. Otherwise returns `Ok(())`.
-///
-/// Pure: no I/O, no allocation beyond the failure-payload struct itself.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "blob sizes far below f64 mantissa headroom; ratio is for thresholding only"
-)]
-pub fn check_size_delta(
-    base: &[u8],
-    ours: &[u8],
-    theirs: &[u8],
-    merged: &[u8],
-    size_ratio_max: f64,
-) -> Result<(), SanityFailure> {
-    // Expected upper bound for a legitimate clean merge: the larger of the
-    // two sides, plus the sum of additions each side made over the base.
-    // Two agents independently adding K bytes apiece to the same file
-    // should land near max(o,t) + (o-base) + (t-base), not 1.5x max input.
-    // Without accounting for side-additions, the simpler `max(o,t,b)`
-    // ratio false-flags the most common "two disjoint adds" pattern.
-    let max_input = ours.len().max(theirs.len()).max(base.len());
-    let ours_added = ours.len().saturating_sub(base.len());
-    let theirs_added = theirs.len().saturating_sub(base.len());
-    let expected = ours.len().max(theirs.len()) + ours_added + theirs_added;
-    if expected == 0 {
-        if merged.is_empty() {
-            return Ok(());
-        }
-        return Err(SanityFailure::SizeDelta {
-            merged_len: merged.len(),
-            max_input,
-            expected_size: expected,
-            ratio: f64::INFINITY,
-        });
-    }
-    let ratio = (merged.len() as f64) / (expected as f64);
-    if ratio > size_ratio_max {
-        return Err(SanityFailure::SizeDelta {
-            merged_len: merged.len(),
-            max_input,
-            expected_size: expected,
-            ratio,
-        });
-    }
-    Ok(())
-}
-
-/// AST-parse sanity check (bn-2upt).
-///
-/// Returns `Err(SanityFailure::AstParse { .. })` only when:
-///   * The path matches a supported tree-sitter language; AND
-///   * Both `ours` and `theirs` parsed without errors; AND
-///   * The merged blob did NOT parse without errors.
-///
-/// In every other case (unsupported language, an input already had parse
-/// errors, the merge also parses cleanly) we return `Ok(())` and let the
-/// merge proceed. This avoids false positives on languages we don't have
-/// a grammar for and on inputs that were already broken.
+// bn-c5ui: canonical implementations live in `sync::sanity`; re-exported here
+// so that callers in `working_copy.rs` and existing tests are unaffected.
+pub use super::sanity::{SanityFailure, check_size_delta};
+// `check_ast_parse` is only exercised from tests compiled under the
+// `ast-merge` feature; re-export it under the same gate to avoid a dead-import
+// warning in the default (no-ast-merge) build.
 #[cfg(feature = "ast-merge")]
-fn check_ast_parse(
-    path: &std::path::Path,
-    ours: &[u8],
-    theirs: &[u8],
-    merged: &[u8],
-) -> Result<(), SanityFailure> {
-    use maw::merge::ast_merge::{AstLanguage, AstParseStatus, parse_status};
-
-    let Some(lang) = AstLanguage::from_path(path) else {
-        return Ok(());
-    };
-
-    let ours_status = parse_status(ours, lang);
-    let theirs_status = parse_status(theirs, lang);
-    if ours_status != AstParseStatus::Clean || theirs_status != AstParseStatus::Clean {
-        // Inputs were already broken — the merge can't be blamed.
-        return Ok(());
-    }
-
-    match parse_status(merged, lang) {
-        AstParseStatus::Clean => Ok(()),
-        AstParseStatus::HasErrors => Err(SanityFailure::AstParse {
-            reason: "syntax errors",
-        }),
-        AstParseStatus::Unparseable => Err(SanityFailure::AstParse {
-            reason: "an unrecoverable parse failure",
-        }),
-    }
-}
-
-/// Stub for builds without the `ast-merge` feature: skip the AST check.
-#[cfg(not(feature = "ast-merge"))]
-fn check_ast_parse(
-    _path: &std::path::Path,
-    _ours: &[u8],
-    _theirs: &[u8],
-    _merged: &[u8],
-) -> Result<(), SanityFailure> {
-    Ok(())
-}
+#[allow(unused_imports)]
+pub use super::sanity::check_ast_parse;
 
 /// Compose the size-delta and AST-parse checks. Order: cheapest first.
+///
+/// Delegates to [`super::sanity::run_post_merge_sanity`]; the rebase-specific
+/// wrapper forwards `cfg.size_ratio_max` so the shared logic is consistent.
 fn run_post_merge_sanity(
     path: &std::path::Path,
     base: &[u8],
@@ -1610,9 +1471,16 @@ fn run_post_merge_sanity(
     merged: &[u8],
     cfg: PostRebaseSanityConfig,
 ) -> Result<(), SanityFailure> {
-    check_size_delta(base, ours, theirs, merged, cfg.size_ratio_max)?;
-    check_ast_parse(path, ours, theirs, merged)?;
-    Ok(())
+    super::sanity::run_post_merge_sanity(
+        path,
+        base,
+        ours,
+        theirs,
+        merged,
+        super::sanity::PostMergeSanityConfig {
+            size_ratio_max: cfg.size_ratio_max,
+        },
+    )
 }
 
 #[expect(

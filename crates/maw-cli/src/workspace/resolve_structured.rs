@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use maw_core::config::ManifoldConfig;
 use maw_core::merge::materialize::looks_text;
 use maw_core::merge::types::ConflictTree;
 use maw_core::model::conflict::{Conflict, ConflictSide, ConflictSideMode};
@@ -42,6 +43,7 @@ use maw_core::model::types::GitOid;
 use maw_git::{self as git, GitRepo};
 
 use crate::format::OutputFormat;
+use crate::workspace::sync::sanity::{PostMergeSanityConfig, SanityFailure, run_post_merge_sanity};
 
 /// Literal workspace label used by rebase's epoch-delta seed side (see
 /// `sync::rebase::promote_overlaps_to_conflicts` — the "ours" side is
@@ -419,6 +421,11 @@ enum PathOutcome {
         /// print a human-readable "non-trivial resolve" note when a 3-way
         /// merge ran.
         kind: ResolveKind,
+        /// bn-c5ui: populated when a driver-produced three-way merge output
+        /// failed the post-merge sanity check. The file is still written (the
+        /// user asked for it; non-code files legitimately trip AST checks) but
+        /// the auto-commit is suppressed so nothing lands in HEAD silently.
+        sanity_failure: Option<SanityFailure>,
     },
     /// Removed the file from the worktree (modify/delete → accept delete).
     Deleted,
@@ -509,6 +516,11 @@ fn pick_single_side_mode(conflict: &Conflict, target: &str) -> Option<ConflictSi
 }
 
 /// Apply a resolution for a single `(path, conflict)` and produce the output.
+///
+/// `sanity_cfg` is used to run the bn-c5ui post-merge sanity check on
+/// driver-produced three-way merge outputs before returning. When the check
+/// trips the returned `PathOutcome::Wrote.sanity_failure` is populated; the
+/// caller decides whether to suppress auto-commit.
 #[expect(
     clippy::too_many_lines,
     reason = "single decision dispatch covers --keep both, --keep epoch, 3-way (bn-3mbj/bn-1nwn), \
@@ -520,6 +532,7 @@ fn apply_decision(
     target: &str,
     rel_path: &Path,
     workspace: &str,
+    sanity_cfg: PostMergeSanityConfig,
 ) -> Result<PathOutcome> {
     if target == "both" {
         // bn-2pry: ModifyDelete has no meaningful "both" — the deleter side
@@ -543,6 +556,7 @@ fn apply_decision(
                 bytes,
                 mode: modifier.mode,
                 kind: ResolveKind::BlobReplace,
+                sanity_failure: None,
             });
         }
 
@@ -603,11 +617,36 @@ fn apply_decision(
                     maw_git::merge::MergeResult::Clean(b)
                     | maw_git::merge::MergeResult::Conflict(b) => b,
                 };
+                // bn-c5ui: run post-merge sanity check before surfacing the
+                // result. The file is still written (the user asked for it;
+                // non-code files legitimately trip AST checks) but the caller
+                // suppresses auto-commit when sanity_failure is Some(_).
+                //
+                // For `--keep both` (union mode) the size-delta check is
+                // suppressed: the union intentionally includes content from
+                // BOTH sides, so the output is by design larger than either
+                // input alone — triggering the size-ratio formula even for
+                // legitimate union merges. Only the AST check (language-aware,
+                // only fires when both inputs parse cleanly but merged does
+                // not) is meaningful for union outputs.
+                let union_cfg = PostMergeSanityConfig {
+                    size_ratio_max: f64::INFINITY,
+                };
+                let sanity_failure = run_post_merge_sanity(
+                    rel_path,
+                    &base_bytes,
+                    &epoch_bytes,
+                    &ws_bytes,
+                    &bytes,
+                    union_cfg,
+                )
+                .err();
                 return Ok(PathOutcome::Wrote {
                     bytes,
                     // Union of multiple sides is never a valid symlink target.
                     mode: None,
                     kind: ResolveKind::ThreeWayUnion,
+                    sanity_failure,
                 });
             }
             // Binary or mixed text/binary — fall through to legacy concat.
@@ -640,6 +679,7 @@ fn apply_decision(
             bytes: buf,
             mode: None,
             kind: ResolveKind::BlobReplace,
+            sanity_failure: None,
         });
     }
 
@@ -714,10 +754,21 @@ fn apply_decision(
                 maw_git::merge::MergeResult::Clean(b)
                 | maw_git::merge::MergeResult::Conflict(b) => b,
             };
+            // bn-c5ui: run post-merge sanity check on driver-produced output.
+            let sanity_failure = run_post_merge_sanity(
+                rel_path,
+                &base_bytes,
+                &epoch_bytes,
+                &ws_bytes,
+                &bytes,
+                sanity_cfg,
+            )
+            .err();
             return Ok(PathOutcome::Wrote {
                 bytes,
                 mode: mode_hint,
                 kind: ResolveKind::ThreeWayEpochWins,
+                sanity_failure,
             });
         }
         // Binary: fall through to blob-replace below.
@@ -782,6 +833,7 @@ fn apply_decision(
                     bytes,
                     mode: mode_hint,
                     kind: ResolveKind::BlobReplace,
+                    sanity_failure: None,
                 });
             }
 
@@ -802,10 +854,22 @@ fn apply_decision(
 
             match clean_attempt {
                 maw_git::merge::MergeResult::Clean(bytes) => {
+                    // bn-c5ui: run post-merge sanity check on driver-produced
+                    // output.
+                    let sanity_failure = run_post_merge_sanity(
+                        rel_path,
+                        &base_bytes,
+                        &epoch_bytes,
+                        &ws_bytes,
+                        &bytes,
+                        sanity_cfg,
+                    )
+                    .err();
                     return Ok(PathOutcome::Wrote {
                         bytes,
                         mode: mode_hint,
                         kind: ResolveKind::ThreeWayClean,
+                        sanity_failure,
                     });
                 }
                 maw_git::merge::MergeResult::Conflict(_) => {
@@ -836,10 +900,22 @@ fn apply_decision(
                         maw_git::merge::MergeResult::Clean(b)
                         | maw_git::merge::MergeResult::Conflict(b) => b,
                     };
+                    // bn-c5ui: run post-merge sanity check on driver-produced
+                    // output.
+                    let sanity_failure = run_post_merge_sanity(
+                        rel_path,
+                        &base_bytes,
+                        &epoch_bytes,
+                        &ws_bytes,
+                        &bytes,
+                        sanity_cfg,
+                    )
+                    .err();
                     return Ok(PathOutcome::Wrote {
                         bytes,
                         mode: mode_hint,
                         kind: ResolveKind::ThreeWayWsWins,
+                        sanity_failure,
                     });
                 }
             }
@@ -868,6 +944,7 @@ fn apply_decision(
                 bytes,
                 mode: mode_hint,
                 kind: ResolveKind::LegacyBlobReplaceWarned,
+                sanity_failure: None,
             });
         }
     }
@@ -885,6 +962,7 @@ fn apply_decision(
                 bytes,
                 mode: mode_hint,
                 kind: ResolveKind::BlobReplace,
+                sanity_failure: None,
             })
         }
         None => Ok(PathOutcome::Deleted),
@@ -893,12 +971,23 @@ fn apply_decision(
 
 /// Apply `PathOutcome` to the worktree at `ws_path.join(rel)`.
 ///
-/// Returns `Ok((true, kind))` when the worktree was updated, or `Ok((false,
-/// _))` when the outcome was `Skipped`. The `kind` only carries meaning when
-/// `bool` is `true`; callers use it to print a "non-trivial resolve" note.
-fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<(bool, ResolveKind)> {
+/// Returns `Ok((true, kind, sanity_failure))` when the worktree was updated,
+/// or `Ok((false, _, None))` when the outcome was `Skipped`. The `kind` and
+/// `sanity_failure` only carry meaning when `bool` is `true`; callers use
+/// them to print a "non-trivial resolve" note and to suppress auto-commit when
+/// a sanity failure is present (bn-c5ui).
+fn apply_outcome(
+    ws_path: &Path,
+    rel: &Path,
+    outcome: PathOutcome,
+) -> Result<(bool, ResolveKind, Option<SanityFailure>)> {
     match outcome {
-        PathOutcome::Wrote { bytes, mode, kind } => {
+        PathOutcome::Wrote {
+            bytes,
+            mode,
+            kind,
+            sanity_failure,
+        } => {
             let full = ws_path.join(rel);
             if let Some(dir) = full.parent() {
                 std::fs::create_dir_all(dir)?;
@@ -940,7 +1029,7 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<(bo
                     std::fs::write(&full, &bytes)
                         .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
                 }
-                return Ok((true, kind));
+                return Ok((true, kind, sanity_failure));
             }
 
             std::fs::write(&full, &bytes)
@@ -955,7 +1044,7 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<(bo
                     .map_err(|e| anyhow::anyhow!("chmod +x {}: {e}", full.display()))?;
             }
 
-            Ok((true, kind))
+            Ok((true, kind, sanity_failure))
         }
         PathOutcome::Deleted => {
             let full = ws_path.join(rel);
@@ -963,9 +1052,9 @@ fn apply_outcome(ws_path: &Path, rel: &Path, outcome: PathOutcome) -> Result<(bo
                 std::fs::remove_file(&full)
                     .map_err(|e| anyhow::anyhow!("remove {}: {e}", full.display()))?;
             }
-            Ok((true, ResolveKind::BlobReplace))
+            Ok((true, ResolveKind::BlobReplace, None))
         }
-        PathOutcome::Skipped(_) => Ok((false, ResolveKind::BlobReplace)),
+        PathOutcome::Skipped(_) => Ok((false, ResolveKind::BlobReplace, None)),
     }
 }
 
@@ -1030,6 +1119,15 @@ pub fn run_structured(
         .map_err(|e| anyhow::anyhow!("Failed to open git repo at {}: {e}", ws_path.display()))?;
     let repo_dyn: &dyn GitRepo = &repo;
 
+    // bn-c5ui: load the sanity config the same way rebase does — fail closed
+    // (defaults = strict ON, ratio 1.5x) when the config file is absent or
+    // unparseable. A missing config is not a licence to skip the check.
+    let manifold_config = ManifoldConfig::load(
+        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).bootstrap_config_path(root),
+    )
+    .unwrap_or_default();
+    let sanity_cfg = PostMergeSanityConfig::from_merge(&manifold_config.merge);
+
     // Determine the set of paths to process.
     let target_paths: Vec<PathBuf> = if !file_sides.is_empty() && all_side.is_none() {
         file_sides.keys().cloned().collect()
@@ -1057,6 +1155,11 @@ pub fn run_structured(
     let mut three_way_epoch_wins = Vec::<PathBuf>::new();
     let mut three_way_union = Vec::<PathBuf>::new();
     let mut skipped = Vec::<(PathBuf, String)>::new();
+    // bn-c5ui: paths whose driver-produced output failed the post-merge sanity
+    // check. The file is still written but auto-commit is suppressed for the
+    // entire invocation (partial commits are confusing; the user must review
+    // every flagged file before committing).
+    let mut sanity_warnings: Vec<(PathBuf, SanityFailure)> = Vec::new();
 
     // Iterate over a snapshot of target paths; mutate `tree` as we go.
     for rel in &target_paths {
@@ -1068,11 +1171,14 @@ pub fn run_structured(
             skipped.push((rel.clone(), "no --keep side chosen for path".into()));
             continue;
         };
-        match apply_decision(repo_dyn, &conflict, &target, rel, workspace) {
+        match apply_decision(repo_dyn, &conflict, &target, rel, workspace, sanity_cfg) {
             Ok(outcome) => match apply_outcome(ws_path, rel, outcome)? {
-                (true, kind) => {
+                (true, kind, maybe_failure) => {
                     tree.conflicts.remove(rel);
                     resolved.push(rel.clone());
+                    if let Some(failure) = maybe_failure {
+                        sanity_warnings.push((rel.clone(), failure));
+                    }
                     match kind {
                         ResolveKind::ThreeWayClean => three_way_clean.push(rel.clone()),
                         ResolveKind::ThreeWayWsWins => three_way_ws_wins.push(rel.clone()),
@@ -1081,7 +1187,7 @@ pub fn run_structured(
                         ResolveKind::BlobReplace | ResolveKind::LegacyBlobReplaceWarned => {}
                     }
                 }
-                (false, _) => {
+                (false, _, _) => {
                     skipped.push((rel.clone(), "decision produced no output".into()));
                 }
             },
@@ -1103,6 +1209,18 @@ pub fn run_structured(
         }
     }
 
+    // bn-c5ui: emit loud warnings for any sanity-flagged paths BEFORE the
+    // auto-commit decision so agents and users see them on every non-JSON
+    // invocation. The file is already written (user asked for it; non-code
+    // files legitimately trip AST checks). We just refuse to auto-commit.
+    for (path, failure) in &sanity_warnings {
+        eprintln!(
+            "WARNING: resolved file failed the post-merge sanity check ({failure}); \
+             review before merging: {}",
+            path.display()
+        );
+    }
+
     // bn-2cc1: when the sidecar is now empty AND the invocation actually
     // resolved something, auto-commit the resolution so that the workspace
     // is *truly* ready for merge. Previously the resolver wrote bytes to
@@ -1114,11 +1232,16 @@ pub fn run_structured(
     // --list or a no-op re-run) and when there are still remaining
     // conflicts — partial resolution should not silently create commits
     // while more work is pending.
-    let auto_committed = if tree.conflicts.is_empty() && !resolved.is_empty() {
-        auto_commit_resolution(ws_path, workspace, &resolved)
-    } else {
-        Ok(None)
-    };
+    //
+    // bn-c5ui: also skip auto-commit when ANY resolved path tripped the
+    // post-merge sanity check (the user must review flagged files first; a
+    // partial commit of the "clean" subset would be confusing).
+    let auto_committed =
+        if tree.conflicts.is_empty() && !resolved.is_empty() && sanity_warnings.is_empty() {
+            auto_commit_resolution(ws_path, workspace, &resolved)
+        } else {
+            Ok(None)
+        };
     let auto_commit_msg: Option<String> = match auto_committed {
         Ok(m) => m,
         Err(e) => {
@@ -1149,12 +1272,29 @@ pub fn run_structured(
         let committed_field = auto_commit_msg
             .as_ref()
             .map_or_else(String::new, |sha| format!(r#","auto_committed":"{sha}""#));
+        // bn-c5ui: include sanity_warnings in JSON output.
+        let sanity_warnings_json: Vec<String> = sanity_warnings
+            .iter()
+            .map(|(p, f)| {
+                format!(
+                    r#"{{"path":"{}","reason":"{}"}}"#,
+                    p.display(),
+                    f.to_string().replace('"', "\\\"")
+                )
+            })
+            .collect();
+        let sanity_field = if sanity_warnings_json.is_empty() {
+            String::new()
+        } else {
+            format!(r#","sanity_warnings":[{}]"#, sanity_warnings_json.join(","))
+        };
         println!(
-            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]{}}}"#,
+            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]{}{}}}"#,
             resolved_json.join(","),
             tree.conflicts.len(),
             skipped_json.join(","),
             committed_field,
+            sanity_field,
         );
     } else {
         for p in &resolved {
@@ -1190,19 +1330,42 @@ pub fn run_structured(
         if resolved.is_empty() && skipped.is_empty() {
             println!("Nothing to resolve.");
         } else if tree.conflicts.is_empty() {
-            match &auto_commit_msg {
-                Some(sha) => println!(
-                    "\nAll structured conflicts resolved and committed ({}). \
-                     Workspace is ready for merge.",
-                    &sha[..sha.len().min(12)]
-                ),
-                None if !resolved.is_empty() => println!(
-                    "\nAll structured conflicts resolved — workspace is ready for merge. \
-                     (auto-commit skipped: run `maw exec {workspace} -- git commit` if needed)"
-                ),
-                None => {
-                    println!("\nAll structured conflicts resolved — workspace is ready for merge.");
+            if sanity_warnings.is_empty() {
+                match &auto_commit_msg {
+                    Some(sha) => println!(
+                        "\nAll structured conflicts resolved and committed ({}). \
+                         Workspace is ready for merge.",
+                        &sha[..sha.len().min(12)]
+                    ),
+                    None if !resolved.is_empty() => println!(
+                        "\nAll structured conflicts resolved — workspace is ready for merge. \
+                         (auto-commit skipped: run `maw exec {workspace} -- git commit` if needed)"
+                    ),
+                    None => {
+                        println!(
+                            "\nAll structured conflicts resolved — workspace is ready for merge."
+                        );
+                    }
                 }
+            } else {
+                // bn-c5ui: at least one resolved path failed the sanity check;
+                // suppress the auto-commit and tell the user exactly what to
+                // run after they have reviewed the flagged files.
+                let n = sanity_warnings.len();
+                let noun = if n == 1 { "path" } else { "paths" };
+                eprintln!(
+                    "\nAuto-commit suppressed: {n} resolved {noun} failed the post-merge \
+                     sanity check (see WARNING(s) above). Review the flagged file(s), then:"
+                );
+                eprintln!("  maw exec {workspace} -- git add --");
+                for (p, _) in &sanity_warnings {
+                    eprintln!("    {}", p.display());
+                }
+                eprintln!(
+                    "  maw exec {workspace} -- git commit -m \"resolve: apply --keep decisions \
+                     for {} path(s) in '{workspace}'\"",
+                    resolved.len()
+                );
             }
         } else {
             let total_original = tree.conflicts.len() + resolved.len();
@@ -2716,5 +2879,333 @@ mod tests {
             has_ws_region,
             "bn-1hmz: ws's binary region must appear in --keep <ws> result"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-c5ui — post-merge sanity check before auto-commit
+    //
+    // The incident: `maw ws resolve --keep both` (gix Union) produced a merged
+    // .rs file that failed to parse (unclosed delimiter), but the resolver
+    // auto-committed it and printed success anyway. The fix: run
+    // `run_post_merge_sanity` on driver-produced merge outputs before
+    // auto-committing; suppress the commit and print a loud WARNING when the
+    // check fires.
+    //
+    // Tests:
+    //   (a) incident shape: union merge trips the sanity check → file IS
+    //       written, auto-commit is SKIPPED, warning is emitted
+    //   (b) clean per-hunk resolution still auto-commits (no regression)
+    //   (c) non-.rs file (.txt) union resolution does NOT warn (language-aware
+    //       check skips unsupported extensions; size check passes for
+    //       reasonable content)
+    // -----------------------------------------------------------------------
+
+    /// Write a `ManifoldConfig` file at the V2 bootstrap path
+    /// (`root/.manifold/config.toml`) with a near-zero `size_ratio_max` so the
+    /// size-delta sanity check fires for ANY non-trivial merge output. Used to
+    /// simulate the "sanity check fires" condition reliably without needing to
+    /// find exact content that breaks the merge algorithm.
+    fn write_tight_sanity_config(root: &std::path::Path) {
+        let config_dir = root.join(".manifold");
+        std::fs::create_dir_all(&config_dir).expect("create .manifold dir");
+        // 0.0001 ratio: any merged output > 0.01% of expected size trips it.
+        std::fs::write(
+            config_dir.join("config.toml"),
+            b"[merge]\npost_rebase_size_ratio_max = 0.0001\n",
+        )
+        .expect("write tight sanity config");
+    }
+
+    /// (a) Incident-shape test: a per-hunk 3-way resolve of two .rs EOF
+    /// appends trips the post-merge sanity check → the resolved file IS written
+    /// (bytes on disk), the auto-commit is SKIPPED (HEAD unchanged), and a
+    /// WARNING message is printed.
+    ///
+    /// We simulate the "check fires" condition by writing a near-zero
+    /// `post_rebase_size_ratio_max` to the bootstrap config and using
+    /// `--keep ws-c5ui-sanity` (`ThreeWayWsWins` path) so the loaded config is
+    /// respected. The artificially tight threshold (0.0001x) ensures the
+    /// size-delta check trips for any non-trivial merge output — exercising the
+    /// same auto-commit-suppression code path that fires when the AST check
+    /// catches a genuinely broken union output.
+    ///
+    /// Note: `--keep both` (the original incident command) disables the
+    /// size-delta check for union outputs because a union is intentionally
+    /// larger than either input alone. The AST check still guards union; this
+    /// test exercises the full `sanity_cfg` path via `--keep <ws>`.
+    #[test]
+    fn c5ui_sanity_failure_skips_autocommit_and_writes_file() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-c5ui-sanity");
+        seed_initial_commit(&ws_path);
+
+        // Write a tight sanity config so the size-delta check fires for any
+        // non-trivial merge output on the --keep <ws> path.
+        write_tight_sanity_config(&root);
+
+        // Seed a conflict: both sides append different test functions at EOF
+        // of a .rs file (the incident shape).
+        let base = b"fn existing() {}\n";
+        let epoch_content = b"fn existing() {}\n\nfn test_epoch() {\n    assert!(1 == 1);\n}\n";
+        let ws_content = b"fn existing() {}\n\nfn test_ws() {\n    assert!(2 == 2);\n}\n";
+
+        let rel = PathBuf::from("tests/scenario.rs");
+        std::fs::create_dir_all(ws_path.join("tests")).expect("create tests dir");
+        // Write marker-content placeholder (what the workspace HEAD would contain
+        // after rebase with conflicts).
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch\nfn existing() {}\n=======\nfn existing() {}\n>>>>>>> ws-c5ui-sanity\n",
+        )
+        .expect("write placeholder");
+
+        // Stage + commit the placeholder so HEAD exists with the marker content
+        // (mirrors real post-rebase state).
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("git add placeholder");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "post-rebase markers"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("git commit placeholder");
+
+        let head_before = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("rev-parse HEAD before");
+        let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
+            .trim()
+            .to_owned();
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "tests/scenario.rs",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-c5ui-sanity",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        // Run resolve --keep <ws> so the loaded sanity_cfg (tight 0.0001 ratio)
+        // is applied to the ThreeWayWsWins output, tripping the size check.
+        run_structured(
+            &root,
+            "ws-c5ui-sanity",
+            &ws_path,
+            &[],
+            &["ws-c5ui-sanity".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("resolve should not error (sanity failure is non-fatal)");
+
+        // (i) The resolved file MUST be on disk (user asked for it).
+        let after_bytes = std::fs::read(ws_path.join(&rel))
+            .expect("resolved file must be written even when sanity check fires");
+        assert!(
+            !after_bytes.is_empty(),
+            "resolved file must be non-empty; sanity failure should not delete output"
+        );
+        // The ws side's content should be present (ws wins on conflicts).
+        let after_str = String::from_utf8_lossy(&after_bytes);
+        assert!(
+            after_str.contains("existing"),
+            "resolved file must contain content from the inputs; got:\n{after_str}"
+        );
+
+        // (ii) HEAD must NOT have advanced — auto-commit is suppressed.
+        let head_after = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("rev-parse HEAD after");
+        let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
+            .trim()
+            .to_owned();
+        assert_eq!(
+            head_before_sha, head_after_sha,
+            "bn-c5ui: auto-commit must be SKIPPED when sanity check fires; \
+             HEAD must not advance"
+        );
+    }
+
+    /// (b) Clean per-hunk union resolution (no sanity failure under the default
+    /// config) still auto-commits. Verifies that the sanity machinery does not
+    /// regress the happy path.
+    #[test]
+    fn c5ui_clean_union_still_autocommits() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-c5ui-clean");
+        seed_initial_commit(&ws_path);
+        // No tight config — use defaults (size_ratio_max = 1.5).
+
+        // Simple disjoint content: epoch and ws add different lines to a
+        // two-line base. The union merge is clean and well within size bounds.
+        let base = b"line_base\n";
+        let epoch_content = b"line_base\nline_epoch\n";
+        let ws_content = b"line_base\nline_ws\n";
+
+        let rel = PathBuf::from("changes.txt");
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch\nline_base\n=======\nline_base\n>>>>>>> ws-c5ui-clean\n",
+        )
+        .expect("write placeholder");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "markers"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("git commit");
+
+        let head_before = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("rev-parse HEAD before");
+        let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
+            .trim()
+            .to_owned();
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "changes.txt",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-c5ui-clean",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-c5ui-clean",
+            &ws_path,
+            &[],
+            &["both".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("clean resolve should succeed");
+
+        // HEAD must have ADVANCED — the resolution was committed.
+        let head_after = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("rev-parse HEAD after");
+        let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
+            .trim()
+            .to_owned();
+        assert_ne!(
+            head_before_sha, head_after_sha,
+            "bn-c5ui: clean union resolve must still auto-commit; HEAD should advance"
+        );
+
+        // The resolved file must contain content from both sides.
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("read resolved file");
+        assert!(after.contains("line_epoch"), "epoch side missing: {after}");
+        assert!(after.contains("line_ws"), "ws side missing: {after}");
+        assert!(!after.contains("<<<<<<<"), "unexpected markers: {after}");
+    }
+
+    /// (c) Non-.rs file (.txt) union resolution does not warn. The
+    /// language-aware AST check returns `Ok(())` immediately for `.txt` (no
+    /// tree-sitter grammar), and the size-delta check passes for reasonable
+    /// content under the default 1.5x ratio. Verifies that the sanity
+    /// machinery respects the "lenient on unsupported file types" contract.
+    #[test]
+    fn c5ui_non_rs_txt_union_no_sanity_warning() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-c5ui-txt");
+        seed_initial_commit(&ws_path);
+        // Default config — no tight threshold.
+
+        // .txt file: both sides append a log line.
+        let base = b"header\n";
+        let epoch_content = b"header\nepoch_entry\n";
+        let ws_content = b"header\nws_entry\n";
+
+        let rel = PathBuf::from("log.txt");
+        std::fs::write(ws_path.join(&rel), b"<<<<<<\nheader\n>>>>>>>\n")
+            .expect("write placeholder");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "markers"])
+            .current_dir(&ws_path)
+            .status()
+            .expect("git commit");
+
+        let head_before = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("rev-parse HEAD before");
+        let head_before_sha = String::from_utf8_lossy(&head_before.stdout)
+            .trim()
+            .to_owned();
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "log.txt",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-c5ui-txt",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-c5ui-txt",
+            &ws_path,
+            &[],
+            &["both".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("txt union resolve should succeed without warnings");
+
+        // HEAD must have advanced — no sanity warning, so auto-commit fires.
+        let head_after = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_path)
+            .output()
+            .expect("rev-parse HEAD after");
+        let head_after_sha = String::from_utf8_lossy(&head_after.stdout)
+            .trim()
+            .to_owned();
+        assert_ne!(
+            head_before_sha, head_after_sha,
+            "bn-c5ui: .txt union resolve should auto-commit (no AST check for .txt; \
+             size check passes under default 1.5x ratio)"
+        );
+
+        // The file must contain content from both sides.
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("read resolved file");
+        assert!(after.contains("epoch_entry"), "epoch missing: {after}");
+        assert!(after.contains("ws_entry"), "ws missing: {after}");
     }
 }
