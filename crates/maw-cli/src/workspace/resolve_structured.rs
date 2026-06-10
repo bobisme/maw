@@ -1750,9 +1750,49 @@ pub fn run_structured(
                     "\nAuto-commit suppressed: {n} resolved {noun} failed the post-merge \
                      sanity check (see WARNING(s) above). Review the flagged file(s), then:"
                 );
-                eprintln!("  maw exec {workspace} -- git add --");
-                for (p, _) in &sanity_warnings {
-                    eprintln!("    {}", p.display());
+                // bn-2qbk: emit copy-pasteable `git add` commands — one complete
+                // command per line (paths space-joined on the same line, or one
+                // `git add -- <path>` per path when the joined form would exceed
+                // 200 chars). Shell-quote paths that contain spaces or shell
+                // metacharacters so the line is safe to paste verbatim.
+                {
+                    fn shell_quote(s: &str) -> String {
+                        // If the string is non-empty and consists only of
+                        // alphanumerics plus safe punctuation, no quoting needed.
+                        let needs_quoting = s.is_empty()
+                            || s.chars().any(|c| {
+                                !matches!(c,
+                                    'a'..='z' | 'A'..='Z' | '0'..='9'
+                                    | '.' | '/' | '-' | '_' | '+' | ',' | '@' | '%'
+                                    | ':' | '=' | '^' | '~'
+                                )
+                            });
+                        if needs_quoting {
+                            // Single-quote the path; escape any embedded single
+                            // quotes by ending the quote, inserting \', resuming.
+                            format!("'{}'", s.replace('\'', "'\\''"))
+                        } else {
+                            s.to_owned()
+                        }
+                    }
+
+                    let quoted_paths: Vec<String> = sanity_warnings
+                        .iter()
+                        .map(|(p, _)| shell_quote(&p.display().to_string()))
+                        .collect();
+
+                    // Build the single-line form and check its length.
+                    let prefix = format!("  maw exec {workspace} -- git add --");
+                    let joined = format!("{prefix} {}", quoted_paths.join(" "));
+
+                    if joined.len() <= 200 {
+                        eprintln!("{joined}");
+                    } else {
+                        // Line too long — one command per path.
+                        for qp in &quoted_paths {
+                            eprintln!("{prefix} {qp}");
+                        }
+                    }
                 }
                 eprintln!(
                     "  maw exec {workspace} -- git commit -m \"resolve: apply --keep decisions \
