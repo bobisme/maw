@@ -26,6 +26,11 @@ pub enum DiffFormat {
 #[derive(Debug)]
 enum AgainstMode {
     Default,
+    /// The default (no explicit --against).  Resolves to the workspace's own
+    /// recorded base epoch when the workspace is stale, or the current epoch
+    /// when it is up to date.  (Explicit `--against epoch` always means the
+    /// current epoch — see `AgainstMode::Epoch`.)
+    StaleAwareEpoch,
     Epoch,
     Branch(String),
     Oid(String),
@@ -553,6 +558,21 @@ where
             }
             materialize_workspace_state(backend, root, &default_id)
         }
+        // bn-1olb: the no-explicit-flag default.  For stale workspaces we
+        // use the workspace's own recorded base epoch so the diff shows only
+        // "what THIS workspace changed", not the epoch's advance inverted.
+        // Precedence:
+        //   1. If workspace is stale AND refs/manifold/epoch/ws/<name> exists
+        //      → use that ref as the base (workspace's own creation epoch).
+        //   2. If workspace is stale but the per-ws epoch ref is missing
+        //      → fall back to git merge-base of workspace HEAD and the
+        //        current epoch (gives the true common ancestor).
+        //   3. Workspace is not stale (or any error resolving staleness)
+        //      → current epoch (same behaviour as before bn-1olb).
+        //
+        // Explicit `--against epoch` always means the current epoch (see
+        // AgainstMode::Epoch below).
+        AgainstMode::StaleAwareEpoch => resolve_stale_aware_epoch(backend, root, workspace),
         AgainstMode::Epoch => {
             let rev = manifold_refs::EPOCH_CURRENT.to_string();
             let oid = resolve_rev_oid(root, &rev).with_context(
@@ -598,6 +618,120 @@ where
     }
 }
 
+/// bn-1olb: resolve the diff base for the no-explicit-`--against` default.
+///
+/// For an up-to-date workspace this is identical to the current epoch.
+/// For a stale workspace (epoch advanced past the workspace's own base,
+/// e.g. via a sibling merge with `--no-auto-rebase`) we diff against the
+/// workspace's OWN creation epoch, not the current epoch, so the diff
+/// shows only "what THIS workspace changed" and does not invert the
+/// epoch's advance as phantom workspace deletions / additions.
+///
+/// Staleness precedence:
+///
+/// 1. Workspace is stale AND `refs/manifold/epoch/ws/<name>` resolves
+///    → use that ref (workspace's recorded creation epoch).
+/// 2. Workspace is stale but per-ws epoch ref is missing (old workspace)
+///    → compute `git merge-base <ws-HEAD> <epoch-current>`.
+/// 3. Workspace is not stale, or any error reading state
+///    → current epoch (same as before bn-1olb).
+///
+/// A one-line note is printed to stderr when the stale path is taken so the
+/// caller can see which base was used.
+fn resolve_stale_aware_epoch<B: WorkspaceBackend>(
+    backend: &B,
+    root: &Path,
+    workspace: &WorkspaceId,
+) -> Result<ResolvedRev>
+where
+    B::Error: std::fmt::Display,
+{
+    // Current epoch — the non-stale fallback.
+    let epoch_rev = manifold_refs::EPOCH_CURRENT.to_string();
+    let epoch_oid = resolve_rev_oid(root, &epoch_rev)
+        .with_context(|| "Current epoch ref is missing\n  Fix: maw init\n  Check: maw doctor")?;
+
+    // Skip stale-detection for the default workspace (it IS the epoch).
+    if workspace.as_str() == DEFAULT_WORKSPACE {
+        return Ok(ResolvedRev {
+            label: "epoch".to_string(),
+            rev: epoch_rev,
+            oid: epoch_oid,
+        });
+    }
+
+    // Check whether this workspace is stale by consulting the backend.
+    let is_stale = backend
+        .list()
+        .ok()
+        .and_then(|ws_list| ws_list.into_iter().find(|w| &w.id == workspace))
+        .is_some_and(|ws| ws.state.is_stale());
+
+    if !is_stale {
+        return Ok(ResolvedRev {
+            label: "epoch".to_string(),
+            rev: epoch_rev,
+            oid: epoch_oid,
+        });
+    }
+
+    // Workspace is stale.  Try the per-workspace epoch ref first.
+    let ws_epoch_ref = manifold_refs::workspace_epoch_ref(workspace.as_str());
+    if let Ok(ws_epoch_oid) = resolve_rev_oid(root, &ws_epoch_ref) {
+        let short = ws_epoch_oid.get(..12).unwrap_or(&ws_epoch_oid);
+        eprintln!(
+            "NOTE: workspace '{}' is behind the current epoch; \
+             diffing against its own base epoch {short} \
+             (run `maw ws sync {}` to update).",
+            workspace.as_str(),
+            workspace.as_str()
+        );
+        return Ok(ResolvedRev {
+            label: "epoch".to_string(),
+            rev: ws_epoch_ref,
+            oid: ws_epoch_oid,
+        });
+    }
+
+    // Per-ws epoch ref is missing (workspace predates the ref): fall back
+    // to the git merge-base of workspace HEAD and current epoch.
+    let ws_path = backend.workspace_path(workspace);
+    let ws_head = resolve_rev_oid(&ws_path, "HEAD")
+        .or_else(|_| resolve_rev_oid(root, &manifold_refs::workspace_head_ref(workspace.as_str())));
+
+    if let Ok(ws_head_oid) = ws_head {
+        let merge_base = git_stdout(
+            root,
+            &["merge-base".to_string(), ws_head_oid, epoch_oid.clone()],
+        );
+        if let Ok(mb_str) = merge_base {
+            let mb_oid = mb_str.trim().to_owned();
+            if !mb_oid.is_empty() {
+                let short = mb_oid.get(..12).unwrap_or(&mb_oid);
+                eprintln!(
+                    "NOTE: workspace '{}' is behind the current epoch; \
+                     diffing against merge-base {short} \
+                     (run `maw ws sync {}` to update).",
+                    workspace.as_str(),
+                    workspace.as_str()
+                );
+                return Ok(ResolvedRev {
+                    label: "epoch".to_string(),
+                    rev: mb_oid.clone(),
+                    oid: mb_oid,
+                });
+            }
+        }
+    }
+
+    // Last resort: current epoch (same as before bn-1olb).
+    Ok(ResolvedRev {
+        label: "epoch".to_string(),
+        rev: epoch_rev,
+        oid: epoch_oid,
+    })
+}
+
 fn materialize_workspace_state<B: WorkspaceBackend>(
     backend: &B,
     root: &Path,
@@ -639,7 +773,15 @@ fn parse_against(raw: Option<&str>) -> AgainstMode {
         // the epoch and silently mis-attribute other workspaces' merged work
         // to the diff target — and made committed-but-unmerged work appear
         // empty when that ref happened to already contain it.
-        return AgainstMode::Epoch;
+        //
+        // bn-1olb: for STALE workspaces (epoch advanced past the workspace's
+        // base via a merge with --no-auto-rebase), the current epoch is
+        // AHEAD of the workspace's base, so diffing worktree-vs-current-epoch
+        // inverts the epoch's advance as phantom workspace changes. Use
+        // StaleAwareEpoch so resolve_against can pick the right base at
+        // resolution time.  Explicit `--against epoch` still always means
+        // the current epoch.
+        return AgainstMode::StaleAwareEpoch;
     };
 
     let value = raw.trim();
@@ -791,11 +933,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_against_defaults_to_epoch() {
+    fn parse_against_defaults_to_stale_aware_epoch() {
         // bn-1abp: no --against means "diff vs epoch" (the documented
         // semantics); the default-workspace comparison stays available
         // via an explicit `--against default`.
-        assert!(matches!(parse_against(None), AgainstMode::Epoch));
+        // bn-1olb: the default resolves to StaleAwareEpoch so that stale
+        // workspaces diff against their own base epoch.  Explicit
+        // `--against epoch` still maps to Epoch (current epoch always).
+        assert!(matches!(parse_against(None), AgainstMode::StaleAwareEpoch));
         assert!(matches!(
             parse_against(Some("default")),
             AgainstMode::Default

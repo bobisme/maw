@@ -193,6 +193,147 @@ fn ws_diff_default_does_not_attribute_sibling_merged_work() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// bn-1olb: stale workspace diffs against its own base epoch, not current epoch
+// ---------------------------------------------------------------------------
+
+/// A stale workspace (epoch advanced by a sibling merge with --no-auto-rebase)
+/// must diff against its OWN creation epoch, not the current epoch.
+///
+/// Without the fix: `maw ws diff dave` shows "erin.txt deleted" even though
+/// dave never touched erin.txt — the phantom deletion is the epoch's advance
+/// inverted.  With the fix: only dave's real edit appears.
+#[test]
+fn ws_diff_stale_workspace_shows_only_own_changes_not_phantom_deletions() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("other.txt", "base content\n")]);
+
+    // dave commits a real 1-line edit to other.txt
+    repo.create_workspace("dave");
+    repo.modify_file("dave", "other.txt", "dave's edit\n");
+    repo.git_in_workspace("dave", &["add", "-A"]);
+    repo.git_in_workspace("dave", &["commit", "-m", "dave: edit other.txt"]);
+
+    // erin adds a new file and merges it.  We use --no-auto-rebase so dave
+    // stays stale (its epoch ref is NOT advanced to the new epoch).
+    repo.create_workspace("erin");
+    repo.add_file("erin", "erin.txt", "erin was here\n");
+    repo.git_in_workspace("erin", &["add", "-A"]);
+    repo.git_in_workspace("erin", &["commit", "-m", "erin: add erin.txt"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "erin",
+        "--no-auto-rebase",
+        "--message",
+        "merge erin",
+    ]);
+
+    // dave is now stale (epoch advanced past dave's base).
+    // `maw ws diff dave` must show ONLY dave's real edit, NOT erin.txt as deleted.
+    let out = Command::new(manifold_common::maw_bin())
+        .args(["ws", "diff", "dave"])
+        .current_dir(repo.root())
+        .output()
+        .expect("failed to run maw");
+    assert!(
+        out.status.success(),
+        "maw ws diff dave failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // dave's real edit must appear
+    assert!(
+        stdout.contains("-base content") || stdout.contains("+dave's edit"),
+        "dave's real edit must appear in diff, got: {stdout}"
+    );
+    // erin.txt must NOT appear as deleted (phantom)
+    assert!(
+        !stdout.contains("erin.txt"),
+        "erin.txt must not appear in dave's diff (dave never touched it), got: {stdout}"
+    );
+    // stderr NOTE must mention the stale situation
+    assert!(
+        stderr.contains("NOTE") && stderr.contains("dave"),
+        "expected stale-workspace NOTE on stderr, got: {stderr}"
+    );
+}
+
+/// Explicit `--against epoch` on a stale workspace always uses the CURRENT
+/// epoch (not the workspace's own base), as documented.  This means the
+/// sibling's merged file shows up in the diff — the caller opted in explicitly.
+#[test]
+fn ws_diff_stale_workspace_explicit_against_epoch_uses_current_epoch() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("other.txt", "base content\n")]);
+
+    repo.create_workspace("dave");
+    repo.modify_file("dave", "other.txt", "dave's edit\n");
+    repo.git_in_workspace("dave", &["add", "-A"]);
+    repo.git_in_workspace("dave", &["commit", "-m", "dave: edit other.txt"]);
+
+    repo.create_workspace("erin");
+    repo.add_file("erin", "erin.txt", "erin was here\n");
+    repo.git_in_workspace("erin", &["add", "-A"]);
+    repo.git_in_workspace("erin", &["commit", "-m", "erin: add erin.txt"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "erin",
+        "--no-auto-rebase",
+        "--message",
+        "merge erin no-ar",
+    ]);
+
+    // With explicit --against epoch, current epoch is used → erin.txt appears as deleted
+    let out = repo.maw_ok(&["ws", "diff", "dave", "--against", "epoch", "--name-only"]);
+    assert!(
+        out.contains("erin.txt"),
+        "explicit --against epoch on a stale workspace must use current epoch (erin.txt deleted), got: {out}"
+    );
+}
+
+/// JSON format of stale workspace diff uses the same resolved base (workspace
+/// base epoch) as the patch format — the `against.label` is still "epoch".
+#[test]
+fn ws_diff_stale_workspace_json_uses_own_base_epoch() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("thing.txt", "original\n")]);
+
+    repo.create_workspace("worker");
+    repo.modify_file("worker", "thing.txt", "worker's change\n");
+    repo.git_in_workspace("worker", &["add", "-A"]);
+    repo.git_in_workspace("worker", &["commit", "-m", "worker: edit thing.txt"]);
+
+    repo.create_workspace("sidekick");
+    repo.add_file("sidekick", "new_file.txt", "hello\n");
+    repo.git_in_workspace("sidekick", &["add", "-A"]);
+    repo.git_in_workspace("sidekick", &["commit", "-m", "sidekick: add file"]);
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "sidekick",
+        "--no-auto-rebase",
+        "--message",
+        "merge sidekick no-ar",
+    ]);
+
+    let out = repo.maw_ok(&["ws", "diff", "worker", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+
+    // against.label is always "epoch"
+    assert_eq!(json["against"]["label"].as_str(), Some("epoch"));
+    // only worker's real edit shows — new_file.txt must not appear as deleted
+    let files = json["files"].as_array().expect("files array");
+    let paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+    assert!(
+        !paths.contains(&"new_file.txt"),
+        "new_file.txt (sidekick's file) must not appear in worker's diff, got: {paths:?}"
+    );
+}
+
 /// An empty diff prints an explicit one-liner (stderr) saying what was
 /// compared, so "no output" is never ambiguous.
 #[test]
