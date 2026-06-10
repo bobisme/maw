@@ -426,20 +426,43 @@ enum PathOutcome {
     Skipped(#[allow(dead_code)] String),
 }
 
-/// bn-3mbj: how a single-side `--keep <ws>` resolution was produced.
+/// bn-3mbj / bn-1nwn: how a single-side `--keep <ws>` resolution was produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolveKind {
-    /// Plain blob-replace — either `--keep epoch`, `--keep both`, or a
-    /// legacy sidecar that didn't carry `base_content`.
+    /// Plain blob-replace — legacy sidecar (no `base_content`), binary
+    /// content, or N>2 sides where per-hunk merge is not applicable.
     BlobReplace,
-    /// 3-way merge of (base, epoch, ws) succeeded cleanly.
+    /// 3-way merge of (base, epoch, ws) succeeded cleanly — all hunks
+    /// merged without conflicts.
     ThreeWayClean,
     /// 3-way merge had internal conflicts; we resolved them with the
     /// workspace winning (`ConflictResolution::Theirs` against epoch=ours).
     ThreeWayWsWins,
+    /// bn-1nwn: `--keep epoch` via per-hunk 3-way merge — epoch wins
+    /// conflicted hunks, workspace's non-overlapping edits are preserved.
+    ThreeWayEpochWins,
+    /// bn-1nwn: `--keep both` via per-hunk 3-way union merge — both sides'
+    /// conflicting lines are included (no markers), clean regions merged.
+    ThreeWayUnion,
     /// Sidecar lacked `base_content` for the picked side — fell back to
     /// blob-replace and emitted a warning.
     LegacyBlobReplaceWarned,
+}
+
+// ---------------------------------------------------------------------------
+// Binary-detection heuristic (mirrors maw-core materialize::looks_text)
+// ---------------------------------------------------------------------------
+
+/// Best-effort "is this blob text?" heuristic.
+///
+/// Mirrors `maw_core::merge::materialize::looks_text`: a NUL byte is a strong
+/// binary signal; invalid UTF-8 is also treated as binary so we don't splice
+/// arbitrary bytes into marker-based output.
+fn looks_text(bytes: &[u8]) -> bool {
+    if bytes.contains(&0u8) {
+        return false;
+    }
+    std::str::from_utf8(bytes).is_ok()
 }
 
 /// Scan all sides of a conflict and return the first mode hint found.
@@ -494,8 +517,8 @@ fn pick_single_side_mode(conflict: &Conflict, target: &str) -> Option<ConflictSi
 /// Apply a resolution for a single `(path, conflict)` and produce the output.
 #[expect(
     clippy::too_many_lines,
-    reason = "single decision dispatch covers --keep both, 3-way (bn-3mbj), legacy fallback, \
-              and single-side blob-replace; splitting fragments the control flow"
+    reason = "single decision dispatch covers --keep both, --keep epoch, 3-way (bn-3mbj/bn-1nwn), \
+              legacy fallback, and single-side blob-replace; splitting fragments the control flow"
 )]
 fn apply_decision(
     repo: &dyn GitRepo,
@@ -529,6 +552,74 @@ fn apply_decision(
             });
         }
 
+        // bn-1nwn: `--keep both` on a 2-sided Content conflict with a base
+        // OID uses a per-hunk 3-way union merge so that non-overlapping edits
+        // from each side are preserved and conflicting hunks include both
+        // sides' lines (no markers). Fall back to the legacy blob-concat for
+        // N>2 sides, binary content, AddAdd (no base OID), or missing base.
+        if let Conflict::Content { sides, base, .. } = conflict
+            && sides.len() == 2
+            && let Some(base_oid) = base.as_ref()
+            && let (Some(epoch_side), Some(ws_side)) = (
+                sides.iter().find(|s| s.workspace == EPOCH_LABEL),
+                sides.iter().find(|s| s.workspace != EPOCH_LABEL),
+            )
+        {
+            let base_oid_git: git::GitOid = base_oid
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid base blob oid {base_oid}: {e}"))?;
+            let epoch_oid_git: git::GitOid = epoch_side.content.as_str().parse().map_err(|e| {
+                anyhow::anyhow!("invalid epoch blob oid {}: {e}", epoch_side.content)
+            })?;
+            let ws_oid_git: git::GitOid = ws_side
+                .content
+                .as_str()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid ws blob oid {}: {e}", ws_side.content))?;
+
+            let base_bytes = repo
+                .read_blob(base_oid_git)
+                .map_err(|e| anyhow::anyhow!("read_blob({base_oid}) failed: {e}"))?;
+            let epoch_bytes = repo
+                .read_blob(epoch_oid_git)
+                .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", epoch_side.content))?;
+            let ws_bytes = repo
+                .read_blob(ws_oid_git)
+                .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", ws_side.content))?;
+
+            // Per-hunk union only makes sense for text files.
+            if looks_text(&base_bytes) && looks_text(&epoch_bytes) && looks_text(&ws_bytes) {
+                let resolved = maw_git::merge::merge_text_with_style(
+                    &base_bytes,
+                    &epoch_bytes,
+                    &ws_bytes,
+                    EPOCH_LABEL,
+                    "base",
+                    ws_side.workspace.as_str(),
+                    maw_git::merge::ConflictResolution::Union,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "--keep both union merge failed for {}: {e}",
+                        rel_path.display()
+                    )
+                })?;
+                let bytes = match resolved {
+                    maw_git::merge::MergeResult::Clean(b)
+                    | maw_git::merge::MergeResult::Conflict(b) => b,
+                };
+                return Ok(PathOutcome::Wrote {
+                    bytes,
+                    // Union of multiple sides is never a valid symlink target.
+                    mode: None,
+                    kind: ResolveKind::ThreeWayUnion,
+                });
+            }
+            // Binary or mixed text/binary — fall through to legacy concat.
+        }
+
+        // Legacy blob-concat fallback: N>2 sides, AddAdd (no base), binary.
         let oids = all_sides(conflict);
         if oids.is_empty() {
             return Ok(PathOutcome::Skipped("no sides to concatenate".into()));
@@ -547,15 +638,12 @@ fn apply_decision(
             }
             buf.extend_from_slice(&bytes);
         }
-        // For `both`, write the concatenation as a regular file unless every
-        // side was a symlink to the same target (degenerate case we don't
-        // special-case in V1). `any_side_mode` returns the first hint for
-        // diagnostics.
+        // For the concat fallback, write as a regular file (concat of multiple
+        // sides is never a valid symlink target). `any_side_mode` returns the
+        // first hint for diagnostics but we don't apply it here.
         let _hint = any_side_mode(conflict);
         return Ok(PathOutcome::Wrote {
             bytes: buf,
-            // Concat of multiple sides is never a valid symlink target. Fall
-            // back to a regular file write.
             mode: None,
             kind: ResolveKind::BlobReplace,
         });
@@ -565,6 +653,83 @@ fn apply_decision(
     // The sidecar seeds the epoch side with `workspace == "epoch"` (see
     // `sync::rebase::promote_overlaps_to_conflicts`), so no aliasing required.
     let mode_hint = pick_single_side_mode(conflict, target);
+
+    // bn-1nwn: `--keep epoch` should also perform a per-hunk 3-way merge
+    // (epoch wins conflicted hunks) rather than a whole-blob replacement, so
+    // the workspace's non-overlapping edits are preserved. We use the same
+    // plumbing as the bn-3mbj `--keep <ws>` path below: base vs epoch vs ws,
+    // with `ConflictResolution::Ours` (epoch=ours wins conflicts).
+    //
+    // Conditions for the per-hunk path (same guard as the ws path):
+    //   • `Conflict::Content` with exactly 2 sides (epoch + one ws side)
+    //   • the epoch side has a `base_content` OID
+    //   • all three blobs are text (no NUL / valid UTF-8)
+    //
+    // If any condition fails we fall through to the existing blob-replace path
+    // which is correct (though lossy) for the degenerate cases.
+    if target == EPOCH_LABEL
+        && let Conflict::Content { sides, .. } = conflict
+        && sides.len() == 2
+        && let Some(epoch_side) = sides.iter().find(|s| s.workspace == EPOCH_LABEL)
+        && let Some(ws_side) = sides.iter().find(|s| s.workspace != EPOCH_LABEL)
+        && let Some(base_oid) = epoch_side.base_content.as_ref()
+    {
+        let base_oid_git: git::GitOid = base_oid
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid base blob oid {base_oid}: {e}"))?;
+        let epoch_oid_git: git::GitOid =
+            epoch_side.content.as_str().parse().map_err(|e| {
+                anyhow::anyhow!("invalid epoch blob oid {}: {e}", epoch_side.content)
+            })?;
+        let ws_oid_git: git::GitOid = ws_side
+            .content
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid ws blob oid {}: {e}", ws_side.content))?;
+
+        let base_bytes = repo
+            .read_blob(base_oid_git)
+            .map_err(|e| anyhow::anyhow!("read_blob({base_oid}) failed: {e}"))?;
+        let epoch_bytes = repo
+            .read_blob(epoch_oid_git)
+            .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", epoch_side.content))?;
+        let ws_bytes = repo
+            .read_blob(ws_oid_git)
+            .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", ws_side.content))?;
+
+        if looks_text(&base_bytes) && looks_text(&epoch_bytes) && looks_text(&ws_bytes) {
+            // epoch=ours wins conflicted hunks; ws's non-overlapping edits
+            // survive as clean merged body content.
+            let resolved = maw_git::merge::merge_text_with_style(
+                &base_bytes,
+                &epoch_bytes,
+                &ws_bytes,
+                EPOCH_LABEL,
+                "base",
+                ws_side.workspace.as_str(),
+                maw_git::merge::ConflictResolution::Ours,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "--keep epoch 3-way merge failed for {}: {e}",
+                    rel_path.display()
+                )
+            })?;
+            let bytes = match resolved {
+                maw_git::merge::MergeResult::Clean(b)
+                | maw_git::merge::MergeResult::Conflict(b) => b,
+            };
+            return Ok(PathOutcome::Wrote {
+                bytes,
+                mode: mode_hint,
+                kind: ResolveKind::ThreeWayEpochWins,
+            });
+        }
+        // Binary: fall through to blob-replace below.
+    }
+    // No matching per-hunk conditions (AddAdd, ModifyDelete, missing base,
+    // binary, N>2) for --keep epoch — fall through to pick_single_side_oid.
 
     // bn-3mbj: `--keep <ws-name>` (anything that isn't the literal `epoch`
     // label) should re-apply the workspace's intent on top of the new epoch
@@ -877,6 +1042,9 @@ pub fn run_structured(
     let mut resolved = Vec::<PathBuf>::new();
     let mut three_way_clean = Vec::<PathBuf>::new();
     let mut three_way_ws_wins = Vec::<PathBuf>::new();
+    // bn-1nwn: track paths resolved via per-hunk epoch-wins or union merge.
+    let mut three_way_epoch_wins = Vec::<PathBuf>::new();
+    let mut three_way_union = Vec::<PathBuf>::new();
     let mut skipped = Vec::<(PathBuf, String)>::new();
 
     // Iterate over a snapshot of target paths; mutate `tree` as we go.
@@ -897,6 +1065,8 @@ pub fn run_structured(
                     match kind {
                         ResolveKind::ThreeWayClean => three_way_clean.push(rel.clone()),
                         ResolveKind::ThreeWayWsWins => three_way_ws_wins.push(rel.clone()),
+                        ResolveKind::ThreeWayEpochWins => three_way_epoch_wins.push(rel.clone()),
+                        ResolveKind::ThreeWayUnion => three_way_union.push(rel.clone()),
                         ResolveKind::BlobReplace | ResolveKind::LegacyBlobReplaceWarned => {}
                     }
                 }
@@ -977,10 +1147,8 @@ pub fn run_structured(
         );
     } else {
         for p in &resolved {
-            // bn-3mbj: when the resolution went through a 3-way merge,
-            // surface that to the user so they know the result is
-            // workspace-intent-on-top-of-epoch rather than a wholesale
-            // blob replacement.
+            // bn-3mbj / bn-1nwn: surface how each resolution was produced so
+            // agents and users know whether per-hunk semantics were applied.
             if three_way_clean.contains(p) {
                 println!(
                     "  resolved: {} (3-way merge: ws intent on top of epoch)",
@@ -989,6 +1157,16 @@ pub fn run_structured(
             } else if three_way_ws_wins.contains(p) {
                 println!(
                     "  resolved: {} (3-way merge: ws intent on top of epoch, ws wins on overlap)",
+                    p.display()
+                );
+            } else if three_way_epoch_wins.contains(p) {
+                println!(
+                    "  resolved: {} (kept epoch in conflicted hunk(s); preserved cleanly-merged changes from both sides)",
+                    p.display()
+                );
+            } else if three_way_union.contains(p) {
+                println!(
+                    "  resolved: {} (kept both sides in conflicted hunk(s); preserved cleanly-merged changes from both sides)",
                     p.display()
                 );
             } else {
@@ -2018,5 +2196,428 @@ mod tests {
         // "cannot resolve — regenerate" bail instead of silently
         // falling through to the legacy stripper.
         assert!(read_conflict_tree_sidecar(&root, "ws-corrupt").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1nwn — per-hunk resolution for --keep epoch / --keep <ws> / --keep both
+    //
+    // The bug: `--keep epoch` was doing a whole-blob replacement (losing the
+    // workspace's non-overlapping edits); `--keep both` was doing a naive
+    // blob-concat (losing the per-hunk merge). Both should use the 3-way
+    // text merge plumbing that bn-3mbj already uses for `--keep <ws>`.
+    //
+    // Setup for all three tests:
+    //   base.txt  = "line1\nshared\nline3\n"
+    //   epoch.txt = "LINE1\nshared\nline3\n"    (epoch changed line1)
+    //   ws.txt    = "line1\nshared\nLINE3\n"    (ws changed line3 — disjoint)
+    //
+    // Conflict: epoch and ws both changed different lines — the 3-way merge
+    // of (base, epoch, ws) is clean (no overlap), so all three resolution
+    // modes should produce a marker-free result that combines both edits.
+    // -----------------------------------------------------------------------
+
+    /// Build an epoch-vs-workspace `Content` conflict whose sides carry
+    /// `base_content` (so the per-hunk 3-way path is available).
+    fn make_content_conflict_with_base(
+        path: &str,
+        base_bytes: &[u8],
+        epoch_bytes: &[u8],
+        ws_bytes: &[u8],
+        ws_name: &str,
+        repo: &maw_git::GixRepo,
+    ) -> (PathBuf, Conflict) {
+        let base_oid = write_blob(repo, base_bytes);
+        let epoch_oid = write_blob(repo, epoch_bytes);
+        let ws_oid = write_blob(repo, ws_bytes);
+        let p = PathBuf::from(path);
+        (
+            p.clone(),
+            Conflict::Content {
+                path: p,
+                file_id: FileId::new(1),
+                base: Some(base_oid.clone()),
+                sides: vec![
+                    ConflictSide::with_base(
+                        EPOCH_LABEL.to_owned(),
+                        epoch_oid,
+                        ord("epoch"),
+                        Some(base_oid.clone()),
+                    ),
+                    ConflictSide::with_base(
+                        ws_name.to_owned(),
+                        ws_oid,
+                        ord(ws_name),
+                        Some(base_oid),
+                    ),
+                ],
+                atoms: vec![],
+            },
+        )
+    }
+
+    /// Helper: seed an initial commit in `ws_path` so `auto_commit_resolution`
+    /// can call `git commit` without "no commits yet" failures.
+    fn seed_initial_commit(ws_path: &std::path::Path) {
+        std::fs::write(ws_path.join("seed"), b"seed").expect("seed write");
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(ws_path)
+            .status()
+            .expect("git add seed");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(ws_path)
+            .status()
+            .expect("git commit seed");
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1nwn test 1: --keep epoch preserves workspace's disjoint edit
+    // -----------------------------------------------------------------------
+
+    /// `--keep epoch` on a conflict where epoch changed line A and the ws
+    /// changed (non-overlapping) line B: after resolution the file should
+    /// contain epoch's version of A AND the workspace's version of B.
+    ///
+    /// Without the fix the resolver wrote the epoch's whole blob (line B
+    /// silently reverted to base).
+    #[test]
+    fn resolve_keep_epoch_preserves_disjoint_ws_edit() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-1nwn-epoch");
+        seed_initial_commit(&ws_path);
+
+        // base: line1 + line3 both at "original"
+        // epoch: changed line1 to "EPOCH_LINE1"
+        // ws: changed line3 to "WS_LINE3" (disjoint)
+        let base = b"original_line1\nshared\noriginal_line3\n";
+        let epoch_content = b"EPOCH_LINE1\nshared\noriginal_line3\n";
+        let ws_content = b"original_line1\nshared\nWS_LINE3\n";
+
+        // Write the conflict-state placeholder (the rendered marker file that
+        // `maw ws sync` would have written).
+        let rel = PathBuf::from("f.txt");
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch (current)\nEPOCH_LINE1\nshared\noriginal_line3\n\
+              ======= base\noriginal_line1\nshared\noriginal_line3\n\
+              >>>>>>> ws-1nwn-epoch\noriginal_line1\nshared\nWS_LINE3\n",
+        )
+        .expect("write placeholder");
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "f.txt",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-1nwn-epoch",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-1nwn-epoch",
+            &ws_path,
+            &[],
+            &["epoch".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("resolve should succeed");
+
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("read resolved file");
+
+        // Epoch's version of line1 must be present.
+        assert!(
+            after.contains("EPOCH_LINE1"),
+            "epoch side of conflict must be present, got:\n{after}"
+        );
+        // Workspace's disjoint edit (line3) must be preserved.
+        assert!(
+            after.contains("WS_LINE3"),
+            "workspace's disjoint edit must be preserved after --keep epoch, got:\n{after}"
+        );
+        // No conflict markers.
+        assert!(
+            !after.contains("<<<<<<<"),
+            "resolved file must not contain conflict markers, got:\n{after}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1nwn test 2: --keep <ws> preserves epoch's disjoint edit
+    // -----------------------------------------------------------------------
+
+    /// `--keep <ws>` on a conflict where the workspace changed line A and
+    /// epoch changed (non-overlapping) line B: after resolution the file
+    /// should contain the workspace's version of A AND epoch's version of B.
+    ///
+    /// This is what bn-3mbj already fixed; the test locks the behavior in
+    /// alongside the new bn-1nwn tests so any regression is immediately
+    /// visible.
+    #[test]
+    fn resolve_keep_ws_preserves_disjoint_epoch_edit() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-1nwn-ws");
+        seed_initial_commit(&ws_path);
+
+        // base: both lines at "original"
+        // epoch: changed line3 to "EPOCH_LINE3" (disjoint from ws conflict)
+        // ws: changed line1 to "WS_LINE1"
+        let base = b"original_line1\nshared\noriginal_line3\n";
+        let epoch_content = b"original_line1\nshared\nEPOCH_LINE3\n";
+        let ws_content = b"WS_LINE1\nshared\noriginal_line3\n";
+
+        let rel = PathBuf::from("g.txt");
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch\noriginal_line1\nshared\nEPOCH_LINE3\n\
+              =======\nWS_LINE1\nshared\noriginal_line3\n>>>>>>> ws-1nwn-ws\n",
+        )
+        .expect("write placeholder");
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "g.txt",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-1nwn-ws",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-1nwn-ws",
+            &ws_path,
+            &[],
+            &["ws-1nwn-ws".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("resolve should succeed");
+
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("read resolved file");
+
+        // Workspace's version of line1 must be present.
+        assert!(
+            after.contains("WS_LINE1"),
+            "ws side of conflict must be present, got:\n{after}"
+        );
+        // Epoch's disjoint edit (line3) must be preserved.
+        assert!(
+            after.contains("EPOCH_LINE3"),
+            "epoch's disjoint edit must be preserved after --keep ws, got:\n{after}"
+        );
+        // No conflict markers.
+        assert!(
+            !after.contains("<<<<<<<"),
+            "resolved file must not contain conflict markers, got:\n{after}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1nwn test 3: --keep both preserves both sides in conflict region
+    //                  AND preserves each side's clean edits
+    // -----------------------------------------------------------------------
+
+    /// `--keep both` on a conflict with disjoint edits: after resolution the
+    /// file should contain both sides' edits everywhere.
+    ///
+    /// Without the fix `--keep both` did a blob-concat (epoch-blob + ws-blob),
+    /// losing the merged clean regions and producing duplicated context.
+    #[test]
+    fn resolve_keep_both_preserves_both_sides() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-1nwn-both");
+        seed_initial_commit(&ws_path);
+
+        // base: original on both lines
+        // epoch: changed line1 to "EPOCH_LINE1"
+        // ws: changed line3 to "WS_LINE3" — disjoint
+        // Expected (union merge, all clean): EPOCH_LINE1 + shared + WS_LINE3
+        let base = b"original_line1\nshared\noriginal_line3\n";
+        let epoch_content = b"EPOCH_LINE1\nshared\noriginal_line3\n";
+        let ws_content = b"original_line1\nshared\nWS_LINE3\n";
+
+        let rel = PathBuf::from("h.txt");
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch\nEPOCH_LINE1\nshared\noriginal_line3\n\
+              =======\noriginal_line1\nshared\nWS_LINE3\n>>>>>>> ws-1nwn-both\n",
+        )
+        .expect("write placeholder");
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "h.txt",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-1nwn-both",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-1nwn-both",
+            &ws_path,
+            &[],
+            &["both".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("resolve should succeed");
+
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("read resolved file");
+
+        // Both edits must appear (union merge preserves both sides of clean
+        // hunks; with disjoint edits neither side conflicts so the result
+        // is the same as a clean merge).
+        assert!(
+            after.contains("EPOCH_LINE1"),
+            "--keep both must include epoch's edit, got:\n{after}"
+        );
+        assert!(
+            after.contains("WS_LINE3"),
+            "--keep both must include ws's edit, got:\n{after}"
+        );
+        // No conflict markers.
+        assert!(
+            !after.contains("<<<<<<<"),
+            "resolved file must not contain conflict markers, got:\n{after}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1nwn test 4: --keep epoch with overlapping conflict, epoch wins
+    // -----------------------------------------------------------------------
+
+    /// `--keep epoch` where both sides changed the same line (true conflict):
+    /// after resolution the file contains epoch's version of the conflicted
+    /// line and no markers.
+    #[test]
+    fn resolve_keep_epoch_wins_true_conflict() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-1nwn-true-conflict");
+        seed_initial_commit(&ws_path);
+
+        // base: shared line
+        // epoch + ws: both changed the same line (true conflict)
+        let base = b"contested_line\n";
+        let epoch_content = b"EPOCH_VERSION\n";
+        let ws_content = b"WS_VERSION\n";
+
+        let rel = PathBuf::from("conflict.txt");
+        std::fs::write(
+            ws_path.join(&rel),
+            b"<<<<<<< epoch\nEPOCH_VERSION\n=======\nWS_VERSION\n>>>>>>> ws-1nwn-true-conflict\n",
+        )
+        .expect("write placeholder");
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "conflict.txt",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-1nwn-true-conflict",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-1nwn-true-conflict",
+            &ws_path,
+            &[],
+            &["epoch".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("resolve should succeed");
+
+        let after = std::fs::read_to_string(ws_path.join(&rel)).expect("read resolved file");
+
+        // Epoch wins the conflict.
+        assert!(
+            after.contains("EPOCH_VERSION"),
+            "epoch must win the conflict, got:\n{after}"
+        );
+        assert!(
+            !after.contains("WS_VERSION"),
+            "ws version must not appear when epoch wins, got:\n{after}"
+        );
+        // No conflict markers.
+        assert!(
+            !after.contains("<<<<<<<"),
+            "resolved file must not contain conflict markers, got:\n{after}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1nwn test 5: --keep epoch falls back to blob-replace for binary
+    // -----------------------------------------------------------------------
+
+    /// When any side is binary (NUL byte), `--keep epoch` falls back to the
+    /// whole-blob replacement path (per-hunk text merge is meaningless for
+    /// binary files).
+    #[test]
+    fn resolve_keep_epoch_binary_falls_back_to_blob_replace() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-1nwn-binary");
+        seed_initial_commit(&ws_path);
+
+        // Epoch side contains a NUL → binary.
+        let base = b"normal text\n";
+        let epoch_content = b"binary\x00content\n";
+        let ws_content = b"workspace version\n";
+
+        let rel = PathBuf::from("bin.dat");
+        std::fs::write(ws_path.join(&rel), b"placeholder\n").expect("write placeholder");
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "bin.dat",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-1nwn-binary",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-1nwn-binary",
+            &ws_path,
+            &[],
+            &["epoch".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("binary fallback should not fail");
+
+        let after = std::fs::read(ws_path.join(&rel)).expect("read resolved file");
+
+        // Binary fallback: epoch's whole blob is written.
+        assert_eq!(
+            after, b"binary\x00content\n",
+            "binary fallback should write epoch's whole blob"
+        );
     }
 }
