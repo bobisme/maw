@@ -2,8 +2,9 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use crate::workspace::{DEFAULT_WORKSPACE, get_backend, validate_workspace_name};
+use crate::workspace::{DEFAULT_WORKSPACE, get_backend, repo_root, validate_workspace_name};
 use maw_core::backend::WorkspaceBackend;
+use maw_core::model::layout::LayoutFlavor;
 use maw_core::model::types::WorkspaceId;
 
 /// Remove `target/` directories from workspace build contexts.
@@ -13,14 +14,26 @@ pub fn clean(name: Option<String>, all: bool) -> Result<()> {
     }
 
     let target = name.unwrap_or_else(|| DEFAULT_WORKSPACE.to_string());
+
+    // bn-1s8d: In a consolidated-layout repo the default workspace IS the repo
+    // root — it is not tracked in the worktrees-dir backend, so the
+    // `backend.exists()` check would always return false and the old code
+    // produced a misleading "does not exist / Fix: maw ws create 'default'".
+    // Resolve the path layout-aware (same as `git_cwd` / `resolve_workspace_path_for_cd`).
+    if target == DEFAULT_WORKSPACE {
+        let root = repo_root()?;
+        let flavor = LayoutFlavor::detect_with_env(&root);
+        let default_path = flavor.default_target_path(&root, DEFAULT_WORKSPACE);
+        let _ = clean_workspace_path(&target, &default_path)?;
+        return Ok(());
+    }
+
     let workspace_id = WorkspaceId::new(&target)
         .map_err(|e| anyhow::anyhow!("Invalid workspace name '{target}': {e}"))?;
 
     let backend = get_backend()?;
     if !backend.exists(&workspace_id) {
-        bail!(
-            "Workspace '{target}' does not exist\n  Check: maw ws list\n  Fix: maw ws create '{target}'"
-        );
+        bail!("Workspace '{target}' does not exist\n  Check: maw ws list");
     }
 
     let path = backend.workspace_path(&workspace_id);
@@ -29,18 +42,39 @@ pub fn clean(name: Option<String>, all: bool) -> Result<()> {
 }
 
 fn clean_all() -> Result<()> {
+    // bn-1s8d: In the consolidated layout the default workspace is the repo
+    // root — not tracked in the worktrees-dir backend. Include it first.
+    let root = repo_root()?;
+    let flavor = LayoutFlavor::detect_with_env(&root);
+
+    let mut cleaned = 0usize;
+    let mut missing = 0usize;
+
+    if flavor == LayoutFlavor::ConsolidatedMawDir {
+        let default_path = flavor.default_target_path(&root, DEFAULT_WORKSPACE);
+        match clean_workspace_path(DEFAULT_WORKSPACE, &default_path) {
+            Ok(CleanOutcome::Cleaned) => cleaned += 1,
+            Ok(CleanOutcome::Missing) => missing += 1,
+            Err(err) => {
+                bail!(
+                    "Failed cleaning default workspace at {}: {}\n  Fix: remove manually or run maw ws clean",
+                    default_path.display(),
+                    err
+                );
+            }
+        }
+    }
+
     let backend = get_backend()?;
     let workspaces = backend
         .list()
         .map_err(|e| anyhow::anyhow!("Failed to list workspaces: {e}"))?;
 
-    if workspaces.is_empty() {
+    if workspaces.is_empty() && cleaned == 0 && missing == 0 {
         println!("No workspaces to clean.");
         return Ok(());
     }
 
-    let mut cleaned = 0usize;
-    let mut missing = 0usize;
     for workspace in &workspaces {
         let name = workspace.id.as_str();
         let path = backend.workspace_path(&workspace.id);

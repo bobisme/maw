@@ -1313,11 +1313,39 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             template,
             description,
         } => {
+            // bn-21qy: resolve the name early so we can validate it before
+            // anything else (including the source-required check whose hint
+            // must not suggest "maw ws create --from main default").
+            let resolved_name = if random {
+                None // generated later, after source check
+            } else {
+                name
+            };
+
+            // bn-21qy: refuse the reserved name 'default' at the CLI layer.
+            // In the consolidated layout the default workspace IS the repo
+            // root; creating .maw/workspaces/default produces an impostor
+            // that can't be used, merged, or (before this fix) destroyed.
+            // v2-bare is naturally protected (ws/default already exists), but
+            // we add the explicit check for both layouts to be consistent and
+            // to surface a clear, actionable error instead of a collision
+            // error deep in the backend.
+            // This check is here (not in create_with_output) so that internal
+            // callers (restore, recover, changes) that legitimately do NOT
+            // pass "default" are unaffected.
+            if resolved_name.as_deref() == Some(DEFAULT_WORKSPACE) {
+                bail!(
+                    "'default' is reserved for the default workspace (the repo root in consolidated layout).\n  \
+                     To work in the default workspace: maw exec default -- <command>\n  \
+                     To create an agent workspace: maw ws create --from main <name>"
+                );
+            }
+
             if from.is_none() && change.is_none() {
                 let name_hint = if random {
                     "<name>".to_string()
                 } else {
-                    name.unwrap_or_else(|| "<name>".to_string())
+                    resolved_name.unwrap_or_else(|| "<name>".to_string())
                 };
                 bail!(
                     "Workspace create requires an explicit source.\n  Use one of:\n    maw ws create --from main {name_hint}\n    maw ws create --change <change-id> {name_hint}"
@@ -1326,7 +1354,7 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             let name = if random {
                 names::generate_workspace_name()
             } else {
-                name.expect("name is required unless --random is set")
+                resolved_name.expect("name is required unless --random is set")
             };
             create::create(
                 &name,

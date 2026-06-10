@@ -688,6 +688,36 @@ fn guard_destroy_against_inflight_merge(root: &std::path::Path, name: &str) -> R
 )]
 pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputFormat>) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
+        // bn-21qy: In consolidated layout an impostor .maw/workspaces/default
+        // can exist if someone bypassed the create guard (e.g. via a pre-fix
+        // binary or git worktree add directly). Detect that case and allow
+        // destroying the impostor while never touching the real default (repo
+        // root). The path must be strictly under workspaces_dir to prevent any
+        // ambiguity.
+        if let Ok(root) = repo_root() {
+            let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
+            if flavor == maw_core::model::layout::LayoutFlavor::ConsolidatedMawDir {
+                let impostor_path = flavor.workspaces_dir(&root).join(DEFAULT_WORKSPACE);
+                if impostor_path.exists() {
+                    // Verify it really IS under the workspaces dir (safety).
+                    let ws_dir = flavor.workspaces_dir(&root);
+                    if impostor_path.starts_with(&ws_dir) {
+                        println!(
+                            "Note: destroying impostor workspace at {} \
+                             (this is NOT the real default workspace — that is the repo root).",
+                            impostor_path.display()
+                        );
+                        return destroy_consolidated_impostor_default(
+                            &root,
+                            &impostor_path,
+                            confirm,
+                            force,
+                            format,
+                        );
+                    }
+                }
+            }
+        }
         bail!("Cannot destroy the default workspace");
     }
     // Also check config in case default_workspace is customized
@@ -1100,6 +1130,81 @@ fn restore_backup_overwrite(backup: &std::path::Path, workspace: &std::path::Pat
             )
         })?;
     }
+    Ok(())
+}
+
+/// Destroy the impostor `.maw/workspaces/default` that can be created in a
+/// consolidated-layout repo when the reserved-name guard was absent (bn-21qy).
+///
+/// The REAL default workspace is the repo root; this function only touches
+/// the impostor directory which is strictly under `.maw/workspaces/`.
+///
+/// Safety invariant: caller must have verified `impostor_path` is under
+/// `workspaces_dir` before calling this.
+fn destroy_consolidated_impostor_default(
+    root: &std::path::Path,
+    impostor_path: &std::path::Path,
+    confirm: bool,
+    _force: bool,
+    _format: Option<OutputFormat>,
+) -> Result<()> {
+    if confirm {
+        use std::io::Write as _;
+        println!(
+            "About to remove the impostor workspace at {}",
+            impostor_path.display()
+        );
+        println!("This will NOT touch the repo root (the real default workspace).");
+        println!();
+        print!("Continue? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Remove the worktree registration via git worktree remove --force so git's
+    // own worktree book-keeping is cleaned up properly.
+    let remove_result = Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(impostor_path)
+        .current_dir(root)
+        .output();
+
+    match remove_result {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            // If git worktree remove fails (e.g. the worktree wasn't properly
+            // registered), fall back to a filesystem removal + prune.
+            if impostor_path.exists() {
+                std::fs::remove_dir_all(impostor_path).with_context(|| {
+                    format!(
+                        "Failed to remove impostor directory {}",
+                        impostor_path.display()
+                    )
+                })?;
+            }
+            let _ = Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(root)
+                .output();
+        }
+    }
+
+    // Clean up workspace metadata (best-effort).
+    let _ = metadata::delete(root, DEFAULT_WORKSPACE);
+
+    println!(
+        "Removed impostor workspace 'default' at {}.",
+        impostor_path.display()
+    );
+    println!(
+        "The real default workspace (repo root at {}) is untouched.",
+        root.display()
+    );
     Ok(())
 }
 
