@@ -116,6 +116,23 @@ pub fn run(
         );
     }
 
+    // bn-8zqz: verify recorded conflict metadata against reality before
+    // consuming it. A sidecar whose every conflict was manually resolved and
+    // committed is stale — the shared helper clears it here, so this command
+    // immediately agrees with `maw ws merge --check` and `maw ws conflicts`
+    // (no follow-up `maw ws sync` required). The helper also reports
+    // tool-authored placeholder blobs in HEAD (bn-28d1) so a deleted sidecar
+    // can't make `--list` claim "clean" while the merge gate refuses.
+    let effective = super::conflict_state::effective_conflict_state(&root, workspace, &ws_path)
+        .unwrap_or_default();
+    if effective.cleared_stale_sidecar {
+        if format == OutputFormat::Json {
+            eprintln!("{}", super::conflict_state::STALE_CLEAR_NOTICE);
+        } else {
+            println!("{}", super::conflict_state::STALE_CLEAR_NOTICE);
+        }
+    }
+
     // bn-3rah: prefer the structured sidecar when present. Falls back to the
     // legacy marker-scan below only when the sidecar file does not exist.
     // This keeps pre-gjm8 workspaces working unchanged.
@@ -179,6 +196,31 @@ pub fn run(
         Vec::new()
     };
     if recorded == 0 && working_copy_conflicts.is_empty() {
+        // bn-8zqz: no sidecar and no genuine working-copy markers, but the
+        // HEAD tree may still carry tool-authored placeholder blobs whose
+        // sidecar was deleted (the bn-28d1 tamper case). The merge gate
+        // refuses those, so `--list` must surface them rather than claim
+        // "no conflicts" — the readers have to agree.
+        if !effective.placeholder_paths.is_empty() {
+            if list {
+                return list_placeholder_conflicts(workspace, &effective.placeholder_paths, format);
+            }
+            let file_list = effective
+                .placeholder_paths
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Workspace '{workspace}' has {} file(s) whose HEAD blob is a \
+                 tool-authored conflict placeholder, but no conflict metadata \
+                 sidecar (it may have been deleted):\n{file_list}\n  \
+                 `maw ws merge` will refuse this workspace.\n  \
+                 To fix: regenerate the metadata with `maw ws sync --rebase {workspace}`, \
+                 or restore each file's real content and commit.",
+                effective.placeholder_paths.len()
+            );
+        }
         if list {
             return list_conflicts_empty(workspace, format);
         }
@@ -400,6 +442,46 @@ pub fn run(
 // ---------------------------------------------------------------------------
 // List conflicts
 // ---------------------------------------------------------------------------
+
+/// Render a `--list` result for tool-authored placeholder blobs in HEAD with
+/// no conflict metadata sidecar (bn-28d1 / bn-8zqz). Same output shape as
+/// [`list_conflicts`] so agents can parse it uniformly.
+fn list_placeholder_conflicts(
+    workspace: &str,
+    placeholder_paths: &[PathBuf],
+    format: OutputFormat,
+) -> Result<()> {
+    if format == OutputFormat::Json {
+        let files: Vec<String> = placeholder_paths
+            .iter()
+            .map(|p| {
+                format!(
+                    r#"{{"path":"{}","block_count":0,"blocks":[]}}"#,
+                    p.display()
+                )
+            })
+            .collect();
+        println!(
+            r#"{{"workspace":"{workspace}","conflict_count":{},"files":[{}]}}"#,
+            placeholder_paths.len(),
+            files.join(",")
+        );
+        return Ok(());
+    }
+    println!(
+        "{} conflicted file(s) in '{workspace}' (tool-authored placeholder blobs in HEAD; \
+         conflict metadata sidecar is missing):",
+        placeholder_paths.len()
+    );
+    for p in placeholder_paths {
+        println!("  {}", p.display());
+    }
+    println!();
+    println!("`maw ws merge` will refuse this workspace.");
+    println!("To fix: regenerate the metadata with `maw ws sync --rebase {workspace}`,");
+    println!("or restore each file's real content and commit.");
+    Ok(())
+}
 
 /// Render an empty `--list` result (no recorded conflicts) in the same shape
 /// as [`list_conflicts`] for both text and JSON. bn-16x2.

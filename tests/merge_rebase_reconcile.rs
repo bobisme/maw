@@ -363,11 +363,11 @@ fn ws_merge_allows_embedded_markers_when_no_conflict_sidecar() {
     //
     // The authoritative "workspace has unresolved conflicts" signal is the
     // sidecar written by `sync --rebase`. If that file is absent, the
-    // workspace is considered resolved regardless of byte content. Other
-    // tools (`ws conflicts`, `ws resolve --list`) still surface embedded
-    // markers for the operator's awareness — see
-    // `ws_conflicts_reports_embedded_markers_when_engine_is_clean` below —
-    // but the merge gate does not block on them.
+    // workspace is considered resolved regardless of byte content (the
+    // bn-28d1 placeholder tripwire still catches tool-authored conflict
+    // blobs). bn-8zqz: `ws conflicts` and `ws resolve --list` read the SAME
+    // effective conflict state as the gate, so they agree — see
+    // `ws_conflicts_agrees_with_merge_gate_on_marker_literals` below.
     let repo = TestRepo::new();
     repo.seed_files(&[("shared.txt", "line1\nline2\n")]);
 
@@ -420,32 +420,46 @@ fn ws_merge_allows_embedded_markers_when_no_conflict_sidecar() {
 }
 
 #[test]
-fn ws_conflicts_reports_embedded_markers_when_engine_is_clean() {
+fn ws_conflicts_agrees_with_merge_gate_on_marker_literals() {
+    // bn-8zqz: `ws conflicts` previously ran an UNFILTERED worktree marker
+    // scan, so a workspace that legitimately committed raw `<<<<<<<` marker
+    // literals (tutorials, fixtures) with NO conflict sidecar was reported
+    // conflicted — while `ws merge` (per the test above) proceeded. The two
+    // readers DISAGREED. All readers now consult the same effective conflict
+    // state: no sidecar + no tool-authored placeholder blob in HEAD = clean.
+    //
+    // Genuine committed conflicts are still caught: real rebase conflicts
+    // materialize placeholder-prefixed blobs (`# structured conflict at `)
+    // which the bn-28d1 tripwire flags even without a sidecar — covered by
+    // `tests/conflict_state_truth.rs`.
     let repo = TestRepo::new();
     repo.seed_files(&[("file.txt", "base\n")]);
 
     repo.maw_ok(&["ws", "create", "a"]);
 
-    // Commit a file with embedded markers but don't modify the "tracked" file.
-    // The merge engine will see a clean 1-side modification; our embedded-
-    // marker scan should still catch it.
+    // Commit a file with embedded marker literals. No rebase ever ran, so
+    // there is no sidecar and no placeholder blob.
     let ws_path = repo.root().join("ws").join("a");
     let marker_content = "head\n<<<<<<< alice\nx\n=======\ny\n>>>>>>> bob\ntail\n";
     std::fs::write(ws_path.join("dirty.txt"), marker_content).expect("operation should succeed");
     repo.git_in_workspace("a", &["add", "-A"]);
-    repo.git_in_workspace("a", &["commit", "-m", "simulated rebase conflict"]);
+    repo.git_in_workspace("a", &["commit", "-m", "marker literals as content"]);
 
     let out = repo.maw_raw(&["ws", "conflicts", "a"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("embedded conflict markers") || combined.contains("dirty.txt"),
-        "ws conflicts should surface embedded markers. Got:\nstdout: {stdout}\nstderr: {stderr}"
+        out.status.success() && combined.contains("No conflicts found"),
+        "ws conflicts must agree with the merge gate: marker literals with \
+         no sidecar are clean. Got:\nstdout: {stdout}\nstderr: {stderr}"
     );
+
+    // And the merge gate agrees, so there is no disagreement window.
+    let check = repo.maw_ok(&["ws", "merge", "a", "--into", "default", "--check"]);
     assert!(
-        !combined.contains("No conflicts found"),
-        "ws conflicts should NOT report clean. Got: {combined}"
+        check.contains("Ready to merge"),
+        "merge --check must agree; got:\n{check}"
     );
 }
 

@@ -756,6 +756,7 @@ pub(super) fn rebase_workspace_run(
     // consumes; the structured one is for future tooling (bn-3rah).
     let conflict_count = state.conflicts.len();
     let has_conflicts = state.has_conflicts();
+    let mut effective_conflicts = if has_conflicts { conflict_count } else { 0 };
     if has_conflicts {
         write_legacy_sidecar(ws_path, &state, &old_core, &new_core)
             .map_err(|e| anyhow::anyhow!("failed to write legacy sidecar: {e}"))?;
@@ -775,41 +776,77 @@ pub(super) fn rebase_workspace_run(
             );
         }
         say!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
-        say!();
-        say!("Conflict markers use labeled sides:");
-        say!("  <<<<<<< epoch   — current epoch version");
-        say!("  ||||||| base");
-        say!("  =======");
-        say!("  >>>>>>> {ws_name}   — workspace changes");
-        say!();
-        say!("To resolve:");
-        say!("  maw ws resolve {ws_name} --list                  # list conflicts");
-        say!("  maw ws resolve {ws_name} --keep epoch            # keep epoch version");
-        say!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
-        say!("  maw ws resolve {ws_name} --keep both             # keep both sides");
-        say!();
-        say!("After resolving, commit and clear conflict state:");
-        say!(
-            "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\""
-        );
-        say!("  maw ws sync {ws_name}");
-    } else {
-        // Clean run — clear any stale sidecar from a previous attempt.
-        let _ = delete_rebase_conflicts(root, ws_name);
-        say!();
-        if sanity_flagged_steps > 0 {
-            // Reachable only with strict_post_rebase_check = false: the
-            // check tripped but we accepted the merge anyway. Surface
-            // the flag count alongside the clean count so it's visible.
-            say!(
-                "Rebase complete: {replayed} commit(s) replayed cleanly \
-                 ({sanity_flagged_steps} sanity-flagged but accepted; \
-                 set merge.strict_post_rebase_check = true to refuse)."
-            );
-        } else {
-            say!("Rebase complete: {replayed} commit(s) replayed cleanly.");
+        if opts.print {
+            print_conflict_guidance(ws_name);
         }
-        say!("Workspace '{ws_name}' is now up to date.");
+    } else {
+        // bn-21cj: this replay run introduced no NEW conflicts, but the
+        // replayed commits may carry committed conflict content from an
+        // earlier rebase (e.g. a quiet sibling auto-rebase committed marker
+        // blobs + sidecars during another workspace's merge, and this sync
+        // replayed those marker-laden commits onto a newer epoch as ordinary
+        // content). "Replayed cleanly" must never print — and the sidecar
+        // must never be deleted — while unresolved conflict evidence still
+        // sits in HEAD. Inspect the FINAL workspace state with the same
+        // helper `maw ws resolve --list` and the merge gate use, so this
+        // summary always matches what they report (bn-8zqz).
+        match crate::workspace::conflict_state::effective_conflict_state(root, ws_name, ws_path) {
+            Ok(residual) if residual.is_conflicted() => {
+                effective_conflicts = residual.conflict_count();
+                say!();
+                say!(
+                    "Rebase complete: {replayed} commit(s) replayed, but \
+                     {effective_conflicts} unresolved conflict(s) from an earlier \
+                     rebase are still committed in this workspace:"
+                );
+                if opts.print {
+                    for path in residual.unresolved_paths() {
+                        println!("  - {}", path.display());
+                    }
+                    print_conflict_guidance(ws_name);
+                }
+            }
+            Ok(residual) => {
+                // Truly clean — clear any stale sidecars from a previous
+                // attempt (both flavors; this used to delete only the legacy
+                // one). `effective_conflict_state` may already have cleared
+                // them when it proved the metadata stale.
+                if !residual.cleared_stale_sidecar {
+                    let _ =
+                        super::super::resolve_structured::clear_conflict_sidecars(root, ws_name);
+                }
+                say!();
+                if sanity_flagged_steps > 0 {
+                    // Reachable only with strict_post_rebase_check = false:
+                    // the check tripped but we accepted the merge anyway.
+                    // Surface the flag count alongside the clean count so
+                    // it's visible.
+                    say!(
+                        "Rebase complete: {replayed} commit(s) replayed cleanly \
+                         ({sanity_flagged_steps} sanity-flagged but accepted; \
+                         set merge.strict_post_rebase_check = true to refuse)."
+                    );
+                } else {
+                    say!("Rebase complete: {replayed} commit(s) replayed cleanly.");
+                }
+                say!("Workspace '{ws_name}' is now up to date.");
+            }
+            Err(e) => {
+                // Could not verify the final state: do NOT claim "cleanly"
+                // and do NOT delete any sidecar.
+                tracing::warn!(
+                    workspace = %ws_name,
+                    error = %e,
+                    "post-rebase conflict-state verification failed"
+                );
+                say!();
+                say!("Rebase complete: {replayed} commit(s) replayed.");
+                say!(
+                    "WARNING: could not verify conflict state ({e}); \
+                     run `maw ws resolve {ws_name} --list` to confirm."
+                );
+            }
+        }
     }
     if !sanity_flagged_paths_total.is_empty() {
         tracing::warn!(
@@ -822,13 +859,37 @@ pub(super) fn rebase_workspace_run(
 
     Ok(RebaseOutcome {
         replayed,
-        conflicts: if has_conflicts { conflict_count } else { 0 },
+        conflicts: effective_conflicts,
         conflicted_steps,
         sanity_flagged_steps,
         fast_forwarded: false,
         worktree_updated,
         worktree_skip_reason,
     })
+}
+
+/// Print the conflict-resolution guidance block shared by the "new conflicts
+/// this run" and the bn-21cj "residual committed conflicts" summaries, so
+/// agents get identical, copy-pastable next steps either way.
+fn print_conflict_guidance(ws_name: &str) {
+    println!();
+    println!("Conflict markers use labeled sides:");
+    println!("  <<<<<<< epoch   — current epoch version");
+    println!("  ||||||| base");
+    println!("  =======");
+    println!("  >>>>>>> {ws_name}   — workspace changes");
+    println!();
+    println!("To resolve:");
+    println!("  maw ws resolve {ws_name} --list                  # list conflicts");
+    println!("  maw ws resolve {ws_name} --keep epoch            # keep epoch version");
+    println!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
+    println!("  maw ws resolve {ws_name} --keep both             # keep both sides");
+    println!();
+    println!("After resolving, commit and clear conflict state:");
+    println!(
+        "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m \"fix: resolve rebase conflicts\""
+    );
+    println!("  maw ws sync {ws_name}");
 }
 
 // ---------------------------------------------------------------------------

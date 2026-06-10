@@ -18,6 +18,7 @@ mod advance;
 mod annotate;
 pub(crate) mod capture;
 mod clean;
+pub(crate) mod conflict_state;
 pub(crate) mod create;
 mod create_lock;
 mod describe;

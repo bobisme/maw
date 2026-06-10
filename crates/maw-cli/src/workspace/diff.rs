@@ -432,11 +432,12 @@ where
     let ws = workspaces.into_iter().find(|w| &w.id == ws_id)?;
     let missing = !ws.path.exists();
     // bn-16x2: recorded-conflict sidecar signal (matches `merge --check`),
-    // not a tracked-content marker scan.
+    // not a tracked-content marker scan. bn-8zqz: verified against reality;
+    // stale metadata is auto-cleared.
     let rebase_conflicts = if missing {
         0
     } else {
-        super::resolve::recorded_conflict_count(root, ws_id.as_str())
+        super::conflict_state::effective_recorded_conflict_count(root, ws_id.as_str(), &ws.path)
     };
     let has_uncommitted = if missing {
         false

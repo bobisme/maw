@@ -7,7 +7,6 @@ pub(crate) mod rebase;
 use std::path::Path;
 
 use anyhow::Result;
-use maw_git::GitRepo;
 use tracing::instrument;
 
 use maw_core::backend::WorkspaceBackend;
@@ -27,53 +26,26 @@ pub use rebase::{
     RebaseConflict, RebaseConflicts, RebaseOutcome, delete_rebase_conflicts, read_rebase_conflicts,
 };
 
-fn maybe_clear_stale_conflict_sidecars(root: &Path, ws_name: &str, ws_path: &Path) -> Result<bool> {
-    let mut tracked_paths = std::collections::BTreeSet::new();
-
-    if let Some(tree) = super::resolve_structured::read_conflict_tree_sidecar(root, ws_name) {
-        tracked_paths.extend(tree.conflicts.into_keys());
+/// Verify recorded conflict metadata against reality via the shared
+/// effective-conflict-state helper and print [`STALE_CLEAR_NOTICE`] when a
+/// stale sidecar (manual resolution committed) was cleared. Verification
+/// failures are non-fatal — sync proceeds and just logs a warning.
+///
+/// [`STALE_CLEAR_NOTICE`]: super::conflict_state::STALE_CLEAR_NOTICE
+fn report_cleared_stale_sidecar(root: &Path, ws_name: &str, ws_path: &Path) {
+    match super::conflict_state::effective_conflict_state(root, ws_name, ws_path) {
+        Ok(state) if state.cleared_stale_sidecar => {
+            println!("{}", super::conflict_state::STALE_CLEAR_NOTICE);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                workspace = %ws_name,
+                error = %e,
+                "sync: could not verify effective conflict state"
+            );
+        }
     }
-
-    if tracked_paths.is_empty()
-        && let Some(legacy) = read_rebase_conflicts(root, ws_name)
-    {
-        tracked_paths.extend(
-            legacy
-                .conflicts
-                .into_iter()
-                .map(|conflict| std::path::PathBuf::from(conflict.path)),
-        );
-    }
-
-    if tracked_paths.is_empty() {
-        return Ok(false);
-    }
-
-    let marker_paths =
-        super::resolve::find_conflicted_files_filtered(ws_path, Some(&tracked_paths))?;
-    if !marker_paths.is_empty() {
-        return Ok(false);
-    }
-
-    let Ok(head_oid_str) = super::merge::resolve_workspace_head_oid(ws_path) else {
-        return Ok(false);
-    };
-    let head_oid: maw_git::GitOid = head_oid_str
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid workspace HEAD OID '{head_oid_str}': {e}"))?;
-
-    let repo = maw_git::GixRepo::open(root)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
-    let commit = repo
-        .read_commit(head_oid)
-        .map_err(|e| anyhow::anyhow!("read_commit({head_oid}) failed: {e}"))?;
-    let tainted = super::merge::find_tool_placeholder_blobs(&repo, commit.tree_oid)?;
-    if !tainted.is_empty() {
-        return Ok(false);
-    }
-
-    super::resolve_structured::clear_conflict_sidecars(root, ws_name)?;
-    Ok(true)
 }
 
 #[instrument]
@@ -125,11 +97,15 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
         .workspace_path(&root, &workspace_name);
 
+    // bn-8zqz: verify recorded conflict metadata against reality REGARDLESS
+    // of staleness — a manual resolution commit on a stale workspace must
+    // still clear its stale sidecar (the old `!is_stale` guard blocked
+    // legitimate clearing). Uses the same shared helper as the merge gate,
+    // `ws conflicts`, and `resolve --list`, so all surfaces agree.
+    report_cleared_stale_sidecar(&root, &workspace_name, &ws_path);
+
     if !ws_status.is_stale {
         println!("Workspace '{workspace_name}' is up to date.");
-        if maybe_clear_stale_conflict_sidecars(&root, &workspace_name, &ws_path)? {
-            println!("Cleared stale conflict metadata after a manual resolution commit.");
-        }
         return Ok(());
     }
 

@@ -2278,17 +2278,44 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
     let has_conflicts = !build_output.conflicts.is_empty();
 
     // bn-3h90 follow-up: Even when the merge engine reports no conflicts,
-    // a source workspace may have embedded conflict markers committed into
+    // a source workspace may have embedded conflict content committed into
     // its HEAD from a prior `sync --rebase` that the user hasn't finished
     // resolving. The merge engine treats marker text as ordinary content,
-    // so it wouldn't flag these. Scan each workspace's worktree explicitly.
+    // so it wouldn't flag these.
+    //
+    // bn-8zqz: this used to be an UNFILTERED worktree marker scan, which
+    // both false-positived on legitimately-committed marker literals and
+    // disagreed with the merge gate / `resolve --list` (different sources
+    // of truth). It now reads the same effective conflict state the gate
+    // reads — sidecar verified against reality, plus the bn-28d1
+    // placeholder tripwire. A stale sidecar (manual resolution committed)
+    // is cleared here as a side effect, so this command, `merge --check`,
+    // and `resolve --list` immediately agree.
     let mut workspaces_with_markers: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
     let conflict_flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(&root);
     for ws_name in workspaces {
         let ws_path = conflict_flavor.workspace_path(&root, ws_name);
-        let marker_files = super::resolve::find_conflicted_files(&ws_path).unwrap_or_default();
-        if !marker_files.is_empty() {
-            workspaces_with_markers.push((ws_name.clone(), marker_files));
+        let state = match super::conflict_state::effective_conflict_state(&root, ws_name, &ws_path)
+        {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    error = %e,
+                    "ws conflicts: could not verify effective conflict state"
+                );
+                continue;
+            }
+        };
+        if state.cleared_stale_sidecar {
+            eprintln!(
+                "Workspace '{ws_name}': {}",
+                super::conflict_state::STALE_CLEAR_NOTICE
+            );
+        }
+        let unresolved = state.unresolved_paths();
+        if !unresolved.is_empty() {
+            workspaces_with_markers.push((ws_name.clone(), unresolved));
         }
     }
 
@@ -2672,73 +2699,57 @@ pub struct MergeOptions<'a> {
 /// Both `merge::merge` (the real merge) and
 /// `merge::check_merge_result_for_target` (the `--check` dry-run) call this
 /// helper so the two paths agree on what "ready to merge" means (bn-qw4i).
+///
+/// bn-8zqz: both gates now read from the shared effective-conflict-state
+/// helper (`super::conflict_state`), which verifies the sidecars against
+/// reality. A sidecar whose every recorded conflict was manually resolved
+/// and COMMITTED (no markers on the recorded paths, no placeholder blobs in
+/// HEAD) is stale metadata: it is auto-cleared on the spot and the gate
+/// proceeds — no follow-up `maw ws sync` required.
 fn assert_sources_clean_for_merge(
     root: &Path,
-    sources: &[String],
+    _sources: &[String],
     workspace_dirs: &BTreeMap<WorkspaceId, PathBuf>,
     force: bool,
     into_target: &str,
 ) -> Result<()> {
-    if !force {
-        for ws_name in sources {
-            let sidecar = super::resolve_structured::read_conflict_tree_sidecar(root, ws_name);
-
-            if let Some(tree) = sidecar.as_ref() {
-                if !tree.conflicts.is_empty() {
-                    let paths: Vec<&PathBuf> = tree.conflicts.keys().collect();
-                    let file_list = paths
-                        .iter()
-                        .map(|p| format!("  - {}", p.display()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    bail!(
-                        "Workspace '{ws_name}' has {} unresolved conflict(s):\n\
-                         {file_list}\n  \
-                         Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                         To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                        paths.len()
-                    );
-                }
-            } else if let Some(legacy) = super::sync::read_rebase_conflicts(root, ws_name)
-                && !legacy.conflicts.is_empty()
-            {
-                let file_list = legacy
-                    .conflicts
-                    .iter()
-                    .map(|c| format!("  - {}", c.path))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                bail!(
-                    "Workspace '{ws_name}' has {} unresolved rebase conflict(s) \
-                     (legacy sidecar):\n\
-                     {file_list}\n  \
-                     Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                     To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                    legacy.conflicts.len()
-                );
-            }
-        }
-    }
-
-    let repo = maw_git::GixRepo::open(root)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", root.display()))?;
     for (ws_id, ws_path) in workspace_dirs {
         let ws_name = ws_id.as_str();
-        if !ws_path.exists() {
-            continue;
+        let state = super::conflict_state::effective_conflict_state(root, ws_name, ws_path)?;
+
+        if state.cleared_stale_sidecar {
+            // stderr: the gate also runs under JSON-emitting flows whose
+            // stdout must stay parseable.
+            eprintln!(
+                "Workspace '{ws_name}': {}",
+                super::conflict_state::STALE_CLEAR_NOTICE
+            );
         }
-        let Ok(head_oid_str) = resolve_workspace_head_oid(ws_path) else {
-            continue;
-        };
-        let head_oid: maw_git::GitOid = head_oid_str
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid workspace HEAD OID '{head_oid_str}': {e}"))?;
-        let commit = repo
-            .read_commit(head_oid)
-            .map_err(|e| anyhow::anyhow!("read_commit({head_oid}) failed: {e}"))?;
-        let tainted = find_tool_placeholder_blobs(&repo, commit.tree_oid)?;
-        if !tainted.is_empty() {
-            let file_list = tainted
+
+        // Gate 1 (bn-m6ad/bn-3pgl/bn-3oau): recorded sidecar conflicts with
+        // remaining evidence. Bypassable by --force.
+        if !force && !state.recorded_paths.is_empty() {
+            let file_list = state
+                .recorded_paths
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Workspace '{ws_name}' has {} unresolved conflict(s):\n\
+                 {file_list}\n  \
+                 Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                 To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
+                state.recorded_paths.len()
+            );
+        }
+
+        // Gate 2 (bn-28d1): tool-authored placeholder blobs in HEAD. Not
+        // bypassable by --force — committing such a blob into the target
+        // branch would corrupt it.
+        if !state.placeholder_paths.is_empty() {
+            let file_list = state
+                .placeholder_paths
                 .iter()
                 .map(|p| format!("  - {}", p.display()))
                 .collect::<Vec<_>>()
@@ -2751,7 +2762,7 @@ fn assert_sources_clean_for_merge(
                  Possible cause: the conflict sidecar was deleted or corrupted. \
                  This check cannot be bypassed by --force because merging placeholder \
                  blobs would corrupt the target branch.",
-                tainted.len()
+                state.placeholder_paths.len()
             );
         }
     }

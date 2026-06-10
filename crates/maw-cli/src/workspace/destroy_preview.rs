@@ -220,8 +220,11 @@ fn build_present_preview(
     let signals = LifecycleSignals {
         missing: false,
         // bn-16x2: recorded-conflict sidecar signal (matches `merge --check`),
-        // not a tracked-content marker scan.
-        rebase_conflicts: super::resolve::recorded_conflict_count(&root, name),
+        // not a tracked-content marker scan. bn-8zqz: verified against
+        // reality; stale metadata is auto-cleared.
+        rebase_conflicts: super::conflict_state::effective_recorded_conflict_count(
+            &root, name, path,
+        ),
         is_stale: false,  // not relevant for destroy-action prediction
         commits_ahead: 0, // approximated by touched_count for preview
         has_uncommitted: touched_count > 0,

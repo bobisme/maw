@@ -207,8 +207,17 @@ pub fn status(format: OutputFormat) -> Result<()> {
             // re-joining `root/ws/<id>` so this stays layout-agnostic
             // (T3.2 / bn-2sw3 flips the on-disk root via the layout
             // flavor enum; the backend already returns the resolved path).
-            let rebase_conflicts = super::resolve::find_conflicted_files(&ws.path)
-                .map_or(0, |f| u32::try_from(f.len()).unwrap_or(u32::MAX));
+            // bn-8zqz: derive conflicted-ness from the verified recorded
+            // sidecar (the same source the merge gate, `ws list`, and
+            // `resolve --list` use) — NOT an unfiltered content scan, which
+            // false-positives on committed marker literals (bn-16x2 class)
+            // and disagrees with the gate. Stale sidecars (manual resolution
+            // committed) are auto-cleared by the helper.
+            let rebase_conflicts = super::conflict_state::effective_recorded_conflict_count(
+                &root,
+                ws.id.as_str(),
+                &ws.path,
+            );
             // bn-242l: classify the workspace using the same signals
             // and priority order as `maw status --json` so the two
             // outputs cannot disagree. Skip classification for the

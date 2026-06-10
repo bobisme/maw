@@ -923,10 +923,12 @@ fn collect_lifecycle_signals(
     // bn-16x2: derive conflicted-ness from the recorded rebase-conflict
     // sidecar (matching `maw ws merge --check`), not a tracked-content
     // marker scan that false-positives on legit `<<<<<<<` literals.
+    // bn-8zqz: the sidecar is verified against reality; stale metadata
+    // (manual resolution committed) is auto-cleared.
     let rebase_conflicts = if missing {
         0
     } else {
-        workspace::resolve::recorded_conflict_count(root, ws.id.as_str())
+        workspace::conflict_state::effective_recorded_conflict_count(root, ws.id.as_str(), &ws.path)
     };
     let has_uncommitted = if missing {
         false

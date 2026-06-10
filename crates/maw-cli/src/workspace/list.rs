@@ -219,10 +219,17 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
             // scanning tracked-file content for `<<<<<<<` markers. Scanning
             // content false-positived on legit marker literals (docs/fixtures)
             // and disagreed with the merge gate.
+            // bn-8zqz: the sidecar is additionally VERIFIED against reality —
+            // a stale sidecar (manual resolution committed) is auto-cleared
+            // so `ws list` agrees with the gate without an extra `ws sync`.
             let rebase_conflicts = if missing {
                 0
             } else {
-                super::resolve::recorded_conflict_count(&root, ws.id.as_str())
+                super::conflict_state::effective_recorded_conflict_count(
+                    &root,
+                    ws.id.as_str(),
+                    &ws.path,
+                )
             };
             // bn-242l: classify lifecycle state and compute the
             // exact fix command. Use the same signals/priority order
