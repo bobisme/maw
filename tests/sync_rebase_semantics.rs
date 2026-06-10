@@ -1388,5 +1388,381 @@ fn sync_rebase_binary_blob_not_clean_merged() {
         !(has_epoch_marker && has_ws_marker),
         "bn-1hmz: data.bin contains distinguishing bytes from BOTH sides — text merge \
          ran on binary data and fabricated a frankenstein blob"
+// bn-566k — epoch-delete vs workspace-modify must conflict
+//
+// When the epoch DELETES a file (via another workspace's merged deletion) and
+// a sibling workspace MODIFIES (or re-adds) that same file, the rebase replay
+// must surface a structured modify/delete conflict.  Pre-fix the workspace
+// content sailed through clean, and a subsequent merge silently resurrected
+// the deleted file on main.
+// ---------------------------------------------------------------------------
+
+/// Exact repro from the bone: epoch deletes big.txt (via merged workspace v),
+/// workspace w modifies big.txt.  After rebase, w must be in a
+/// `modify_delete` conflict state; `maw ws merge w` must be blocked; and
+/// `--keep epoch` deletes the file while `--keep w` restores it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "three resolution sub-scenarios (conflict detection, --keep epoch, --keep ws) \
+              share the same setup and are clearest as one coherent narrative test"
+)]
+#[test]
+fn bn566k_epoch_delete_vs_ws_modify_produces_modify_delete_conflict() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[
+        ("big.txt", "line1\nline2\nline3\n"),
+        ("other.txt", "untouched\n"),
+    ]);
+
+    // ws_w: modify big.txt (adds content to line 2).
+    repo.maw_ok(&["ws", "create", "ws-w"]);
+    repo.modify_file("ws-w", "big.txt", "line1\nLINE2-MODIFIED\nline3\n");
+    commit_all(&repo, "ws-w", "feat: modify big.txt in ws-w");
+
+    // ws_v: delete big.txt entirely.
+    repo.maw_ok(&["ws", "create", "ws-v"]);
+    repo.delete_file("ws-v", "big.txt");
+    commit_all(&repo, "ws-v", "chore: delete big.txt in ws-v");
+
+    // Merge ws-v (no auto-rebase so ws-w doesn't get rebased just yet).
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-v",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-v: delete big.txt",
+    ]);
+
+    // big.txt must be gone from the default branch now.
+    assert!(
+        !repo.file_exists("default", "big.txt"),
+        "big.txt should be absent from default after merging ws-v's deletion"
+    );
+
+    // Now rebase ws-w onto the new epoch.
+    let _rebase_out = repo.maw_raw(&["ws", "sync", "ws-w", "--rebase"]);
+
+    // The structured sidecar must exist and describe big.txt as a
+    // modify/delete conflict (modifier = ws-w, deleter = epoch).
+    let sidecar = repo
+        .read_conflict_tree_sidecar("ws-w")
+        .expect("conflict-tree.json must exist after bn-566k epoch-delete vs ws-modify");
+
+    let entry = find_conflict_entry(&sidecar, "big.txt").unwrap_or_else(|| {
+        panic!(
+            "sidecar should list big.txt as conflicted (bn-566k); got:\n{}",
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+        )
+    });
+
+    let ty = entry
+        .get("type")
+        .and_then(|v| v.as_str())
+        .expect("conflict entry should be tagged");
+    assert_eq!(
+        ty, "modify_delete",
+        "expected modify_delete shape for epoch-delete vs ws-modify, got {ty}: {entry}"
+    );
+
+    // modifier must be ws-w, deleter must be epoch.
+    let modifier_ws = entry
+        .get("modifier")
+        .and_then(|m| m.get("workspace"))
+        .and_then(|w| w.as_str())
+        .expect("modify_delete entry should have a modifier.workspace field");
+    assert_eq!(
+        modifier_ws, "ws-w",
+        "modifier should be ws-w (the workspace that modified big.txt), got {modifier_ws}"
+    );
+
+    let deleter_ws = entry
+        .get("deleter")
+        .and_then(|d| d.get("workspace"))
+        .and_then(|w| w.as_str())
+        .expect("modify_delete entry should have a deleter.workspace field");
+    assert_eq!(
+        deleter_ws, "epoch",
+        "deleter should be epoch (the side that deleted big.txt), got {deleter_ws}"
+    );
+
+    // The merge gate must refuse to merge ws-w while the conflict is live.
+    let merge_attempt = repo.maw_raw(&["ws", "merge", "ws-w", "--message", "try-merge"]);
+    assert!(
+        !merge_attempt.status.success(),
+        "maw ws merge must be blocked while ws-w has an unresolved conflict (bn-566k)"
+    );
+
+    // --- Resolution: --keep epoch → big.txt must be deleted from ws-w tree ---
+    //
+    // Run on a fresh TestRepo to avoid state contamination between the two
+    // resolution paths.
+    let repo2 = TestRepo::new();
+    repo2.seed_files(&[
+        ("big.txt", "line1\nline2\nline3\n"),
+        ("other.txt", "untouched\n"),
+    ]);
+
+    repo2.maw_ok(&["ws", "create", "ws-w"]);
+    repo2.modify_file("ws-w", "big.txt", "line1\nLINE2-MODIFIED\nline3\n");
+    commit_all(&repo2, "ws-w", "feat: modify big.txt in ws-w");
+
+    repo2.maw_ok(&["ws", "create", "ws-v"]);
+    repo2.delete_file("ws-v", "big.txt");
+    commit_all(&repo2, "ws-v", "chore: delete big.txt in ws-v");
+    repo2.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-v",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-v: delete big.txt",
+    ]);
+
+    let _ = repo2.maw_raw(&["ws", "sync", "ws-w", "--rebase"]);
+
+    // `--keep epoch` on modify/delete where epoch is the deleter → accept
+    // the deletion.  big.txt must disappear from ws-w's worktree.
+    repo2.maw_ok(&["ws", "resolve", "ws-w", "--keep", "epoch"]);
+    assert!(
+        !repo2.file_exists("ws-w", "big.txt"),
+        "`--keep epoch` on a modify/delete (epoch=deleter) must remove big.txt from ws-w"
+    );
+
+    // The resolver auto-commits after all conflicts are cleared (bn-2cc1), so
+    // no manual `commit_all` is needed.  Merge must now succeed.
+    repo2.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-w",
+        "--destroy",
+        "--message",
+        "merge ws-w post-resolve",
+    ]);
+    // big.txt must remain absent from main (epoch deletion stands).
+    assert!(
+        !repo2.file_exists("default", "big.txt"),
+        "big.txt must stay deleted on main after --keep epoch resolve + merge"
+    );
+
+    // --- Resolution: --keep ws-w → big.txt survives with ws-w's content ---
+    let repo3 = TestRepo::new();
+    repo3.seed_files(&[
+        ("big.txt", "line1\nline2\nline3\n"),
+        ("other.txt", "untouched\n"),
+    ]);
+
+    repo3.maw_ok(&["ws", "create", "ws-w"]);
+    repo3.modify_file("ws-w", "big.txt", "line1\nLINE2-MODIFIED\nline3\n");
+    commit_all(&repo3, "ws-w", "feat: modify big.txt in ws-w");
+
+    repo3.maw_ok(&["ws", "create", "ws-v"]);
+    repo3.delete_file("ws-v", "big.txt");
+    commit_all(&repo3, "ws-v", "chore: delete big.txt in ws-v");
+    repo3.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-v",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-v: delete big.txt",
+    ]);
+
+    let _ = repo3.maw_raw(&["ws", "sync", "ws-w", "--rebase"]);
+
+    // `--keep ws-w` on modify/delete → modifier wins, file kept with ws
+    // content.
+    repo3.maw_ok(&["ws", "resolve", "ws-w", "--keep", "ws-w"]);
+    assert_eq!(
+        repo3.read_file("ws-w", "big.txt").as_deref(),
+        Some("line1\nLINE2-MODIFIED\nline3\n"),
+        "`--keep ws-w` must restore big.txt with the workspace's modified content"
+    );
+
+    // The resolver auto-commits (bn-2cc1) — no manual commit needed.
+    repo3.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-w",
+        "--destroy",
+        "--message",
+        "merge ws-w post-resolve keep-ws",
+    ]);
+    assert_eq!(
+        repo3.read_file("default", "big.txt").as_deref(),
+        Some("line1\nLINE2-MODIFIED\nline3\n"),
+        "big.txt must appear on main with ws-w's content after --keep ws-w resolve + merge"
+    );
+}
+
+/// Edge case: workspace ADDS a file at a path the epoch deleted.
+///
+/// Decision rationale: conflict too (same shape).  The workspace is attempting
+/// to introduce content at a path the epoch explicitly removed.  Silent pass-
+/// through would resurrect the file just as badly as the modify case.  We
+/// surface a modify/delete (modifier = ws, deleter = epoch) so the resolver
+/// can decide whether the re-add should win.
+#[test]
+fn bn566k_epoch_delete_vs_ws_add_produces_conflict() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("existing.txt", "base content\n"), ("anchor.txt", "x\n")]);
+
+    // Workspace `adder` explicitly adds a file at a path that the epoch will
+    // soon delete.  We simulate this by: first seeding existing.txt, having
+    // adder delete-then-re-add it (so git sees an Add in the patchset), but
+    // that's awkward.  Instead we use a fresh path that the epoch deletes via
+    // a parallel workspace.
+    //
+    // Simpler path: workspace `adder` creates `new-then-gone.txt`, epoch also
+    // gets `new-then-gone.txt` (added by another ws and merged), then epoch
+    // deletes it via yet another workspace.  But the simplest repro is:
+    //
+    //  1. Seed repo with `target.txt`.
+    //  2. `ws-adder`: delete target.txt then re-add it with different content
+    //     (producing an Add in the delta from the workspace's perspective on
+    //     the re-add commit, or a Modify — either exercises the bn-566k path).
+    //  3. `ws-deleter`: delete target.txt, merge.
+    //  4. Rebase ws-adder → conflict.
+    //
+    // For maximal clarity use Modified (workspace edits the file) rather than
+    // a full delete+re-add cycle inside the workspace.  The delete+re-add
+    // edge specifically is exercised by confirming an Added ChangeKind can
+    // also reach the ModifyDelete install path.
+
+    repo.maw_ok(&["ws", "create", "ws-adder"]);
+    // Delete the file then re-add it so git produces an Add in the patchset.
+    repo.delete_file("ws-adder", "existing.txt");
+    commit_all(&repo, "ws-adder", "chore: remove existing.txt first");
+    repo.add_file("ws-adder", "existing.txt", "re-added content\n");
+    commit_all(
+        &repo,
+        "ws-adder",
+        "feat: re-add existing.txt with new content",
+    );
+
+    // Epoch deletes existing.txt via a separate workspace.
+    repo.maw_ok(&["ws", "create", "ws-deleter"]);
+    repo.delete_file("ws-deleter", "existing.txt");
+    commit_all(&repo, "ws-deleter", "chore: delete existing.txt in epoch");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-deleter",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-deleter: epoch deletes existing.txt",
+    ]);
+
+    // Rebase ws-adder (which still has existing.txt re-added).
+    let _out = repo.maw_raw(&["ws", "sync", "ws-adder", "--rebase"]);
+
+    // The workspace must be conflicted — NOT clean. The specific commit that
+    // re-adds existing.txt should have triggered the modify/delete path.
+    let sidecar = repo.read_conflict_tree_sidecar("ws-adder");
+    assert!(
+        sidecar.is_some(),
+        "conflict-tree.json must exist: epoch-delete vs ws-re-add must not silently pass through (bn-566k)"
+    );
+
+    let sidecar = sidecar.expect("just checked");
+    let entry = find_conflict_entry(&sidecar, "existing.txt").unwrap_or_else(|| {
+        panic!(
+            "sidecar should list existing.txt as conflicted; got:\n{}",
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+        )
+    });
+
+    let ty = entry
+        .get("type")
+        .and_then(|v| v.as_str())
+        .expect("conflict entry should be tagged");
+    assert_eq!(
+        ty, "modify_delete",
+        "epoch-delete vs ws-re-add should produce modify_delete, got {ty}: {entry}"
+    );
+
+    let deleter_ws = entry
+        .get("deleter")
+        .and_then(|d| d.get("workspace"))
+        .and_then(|w| w.as_str())
+        .expect("modify_delete must have deleter.workspace");
+    assert_eq!(
+        deleter_ws, "epoch",
+        "deleter must be epoch, got {deleter_ws}"
+    );
+}
+
+/// Regression guard: the original direction (ws deletes, epoch modifies) must
+/// still produce a modify/delete conflict unaffected by the bn-566k fix.
+#[test]
+fn bn566k_ws_delete_vs_epoch_modify_still_conflicts() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "original content\n")]);
+
+    // ws-deleter deletes shared.txt.
+    repo.maw_ok(&["ws", "create", "ws-deleter"]);
+    repo.delete_file("ws-deleter", "shared.txt");
+    commit_all(&repo, "ws-deleter", "chore: delete shared.txt");
+
+    // Epoch modifies shared.txt via another workspace.
+    repo.maw_ok(&["ws", "create", "ws-epoch"]);
+    repo.modify_file("ws-epoch", "shared.txt", "epoch modified content\n");
+    commit_all(&repo, "ws-epoch", "feat: epoch modifies shared.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-epoch",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-epoch: epoch modifies shared.txt",
+    ]);
+
+    // Rebase ws-deleter — must still surface a modify/delete conflict.
+    let _out = repo.maw_raw(&["ws", "sync", "ws-deleter", "--rebase"]);
+
+    let sidecar = repo
+        .read_conflict_tree_sidecar("ws-deleter")
+        .expect("conflict-tree.json must exist for ws-delete vs epoch-modify");
+
+    let entry = find_conflict_entry(&sidecar, "shared.txt").unwrap_or_else(|| {
+        panic!(
+            "sidecar should list shared.txt as conflicted (regression guard); got:\n{}",
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+        )
+    });
+
+    let ty = entry
+        .get("type")
+        .and_then(|v| v.as_str())
+        .expect("conflict entry should be tagged");
+    assert_eq!(
+        ty, "modify_delete",
+        "ws-delete vs epoch-modify must still produce modify_delete (regression guard), got {ty}: {entry}"
+    );
+
+    // modifier = epoch, deleter = ws-deleter (existing direction, unchanged).
+    let modifier_ws = entry
+        .get("modifier")
+        .and_then(|m| m.get("workspace"))
+        .and_then(|w| w.as_str())
+        .expect("modify_delete must have modifier.workspace");
+    assert_eq!(
+        modifier_ws, "epoch",
+        "modifier must be epoch (regression guard), got {modifier_ws}"
+    );
+
+    let deleter_ws = entry
+        .get("deleter")
+        .and_then(|d| d.get("workspace"))
+        .and_then(|w| w.as_str())
+        .expect("modify_delete must have deleter.workspace");
+    assert_eq!(
+        deleter_ws, "ws-deleter",
+        "deleter must be ws-deleter (regression guard), got {deleter_ws}"
     );
 }

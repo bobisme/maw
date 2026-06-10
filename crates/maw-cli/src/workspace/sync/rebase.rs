@@ -1201,9 +1201,68 @@ fn promote_overlaps_to_conflicts(
                     );
                 }
 
-                let epoch_side_blob = match ref_new {
-                    Some(new) => new.clone(),
-                    None => continue, // epoch deleted; workspace-re-added → AddAdd-ish, skip for V1
+                let Some(epoch_side_blob) = ref_new.clone() else {
+                    // bn-566k: epoch DELETED this path while the workspace
+                    // ADDED or MODIFIED it.  Both change.kind == Added (the
+                    // workspace re-introduced the file at a path the epoch
+                    // removed) and change.kind == Modified (the workspace
+                    // edited a file that the epoch subsequently deleted) fall
+                    // here.  We must surface a ModifyDelete conflict (modifier
+                    // = ws, deleter = epoch) rather than letting the workspace
+                    // content sail through clean — that silent pass-through
+                    // causes the merged deletion to be silently resurrected on
+                    // main (the "silent overwrite" class bn-7phd/epoch-delta
+                    // injection exists to prevent, for the delete direction).
+                    //
+                    // Resolution flows (mirror the existing ws-deletes
+                    // direction, sides swapped):
+                    //   --keep epoch   → deleter.workspace == "epoch" → None
+                    //                    → file stays deleted   ✓
+                    //   --keep <ws>    → modifier.workspace == ws_name
+                    //                    → Ok(Some(ws_blob))  ✓
+                    //   --keep both    → bn-2pry alias → keeps modifier (ws)  ✓
+                    //
+                    // Submodule guard: the existing Commit-mode check above
+                    // (bn-3hqg) already bails before we reach here, so no
+                    // special case needed.
+                    let ord =
+                        OrderingKey::new(base_epoch_id.clone(), patch.workspace_id.clone(), 0, 0);
+                    let ws_mode: Option<maw_core::model::conflict::ConflictSideMode> =
+                        change.mode.and_then(std::convert::Into::into);
+                    // modifier = workspace (has content), deleter = epoch
+                    let modifier = ConflictSide::with_mode_and_base(
+                        ws_name.to_owned(),
+                        ws_blob.clone(),
+                        ord.clone(),
+                        ws_mode,
+                        ref_old.clone(),
+                    );
+                    // deleter = epoch; `content` holds the last known blob OID
+                    // (the old-epoch blob, or the ws blob as a fallback when
+                    // there was no pre-existing file — Added case).
+                    let deleter = ConflictSide::new(
+                        "epoch".to_owned(),
+                        ref_old.clone().unwrap_or_else(|| ws_blob.clone()),
+                        ord,
+                    );
+                    let file_id = change.file_id.unwrap_or_else(|| {
+                        FileId::new(merge_file_id_seed(
+                            &GitOid::new(&"d".repeat(40)).expect("operation should succeed"),
+                            &change.path,
+                        ))
+                    });
+                    tree.clean.remove(&change.path);
+                    tree.conflicts.insert(
+                        change.path.clone(),
+                        Conflict::ModifyDelete {
+                            path: change.path.clone(),
+                            file_id,
+                            modifier,
+                            deleter,
+                            modified_content: ws_blob,
+                        },
+                    );
+                    continue;
                 };
 
                 if let Some(resolved) = try_clean_three_way_overlap(
