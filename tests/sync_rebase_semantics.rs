@@ -1388,6 +1388,10 @@ fn sync_rebase_binary_blob_not_clean_merged() {
         !(has_epoch_marker && has_ws_marker),
         "bn-1hmz: data.bin contains distinguishing bytes from BOTH sides — text merge \
          ran on binary data and fabricated a frankenstein blob"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // bn-566k — epoch-delete vs workspace-modify must conflict
 //
 // When the epoch DELETES a file (via another workspace's merged deletion) and
