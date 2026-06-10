@@ -219,29 +219,41 @@ impl From<serde_json::Error> for SidecarError {
 // Marker rendering
 // ---------------------------------------------------------------------------
 
-/// Build the opening marker line for a given side, e.g.
-/// `"<<<<<<< epoch (current)"` for the first (epoch) side, or
-/// `"<<<<<<< alice"` for an arbitrary side name. We preserve the legacy
-/// "(current)" suffix when the side is named `"epoch"` so that downstream
-/// consumers that special-case that label (the marker gate, `maw ws resolve`,
-/// the stdout banner in `sync/rebase.rs`) keep seeing what they expect.
-fn marker_open(ws_name: &str) -> String {
+/// Label used after `<<<<<<<` for a given side, e.g. `"epoch (current)"` for
+/// the epoch side or `"alice"` for an arbitrary side name. We preserve the
+/// legacy "(current)" suffix when the side is named `"epoch"` so that
+/// downstream consumers that special-case that label (the marker gate,
+/// `maw ws resolve`, the stdout banner in `sync/rebase.rs`) keep seeing what
+/// they expect.
+fn open_label(ws_name: &str) -> String {
     if ws_name == "epoch" {
-        "<<<<<<< epoch (current)".to_owned()
+        "epoch (current)".to_owned()
     } else {
-        format!("<<<<<<< {ws_name}")
+        ws_name.to_owned()
     }
 }
 
-/// Build the trailing marker line for a given side. The `"(workspace changes)"`
+/// Label used after `>>>>>>>` for a given side. The `"(workspace changes)"`
 /// suffix matches the banner printed by `sync/rebase.rs` and is recognised by
 /// the resolver's label parser (which strips the parenthesised tail).
-fn marker_close(ws_name: &str) -> String {
+fn close_label(ws_name: &str) -> String {
     if ws_name == "epoch" {
-        ">>>>>>> epoch".to_owned()
+        "epoch".to_owned()
     } else {
-        format!(">>>>>>> {ws_name} (workspace changes)")
+        format!("{ws_name} (workspace changes)")
     }
+}
+
+/// Build the opening marker line for a given side, e.g.
+/// `"<<<<<<< epoch (current)"` or `"<<<<<<< alice"`.
+fn marker_open(ws_name: &str) -> String {
+    format!("<<<<<<< {}", open_label(ws_name))
+}
+
+/// Build the trailing marker line for a given side, e.g.
+/// `">>>>>>> alice (workspace changes)"` or `">>>>>>> epoch"`.
+fn marker_close(ws_name: &str) -> String {
+    format!(">>>>>>> {}", close_label(ws_name))
 }
 
 const MARKER_BASE: &str = "||||||| base";
@@ -340,7 +352,45 @@ fn read_side_blob(
 /// Render a [`Conflict::Content`] atom collection as a diff3-style markers
 /// blob, reading each side's blob bytes via `repo.read_blob`.
 ///
-/// Marker block shape (N-side, N ≥ 2):
+/// # Two-side fast path (bn-36zz): hunk-level merge
+///
+/// For the common case of exactly two text sides, we run a real hunk-level
+/// 3-way merge (the same `gix` text driver `git merge-file --diff3` uses)
+/// of `base` vs `sides[0]` vs `sides[1]`. Non-overlapping edits merge
+/// cleanly into the body and only genuinely overlapping regions get a
+/// minimal diff3 marker block:
+///
+/// ```text
+/// # structured conflict at <path>
+/// # base blob: <oid>
+/// # side epoch blob: <oid>
+/// # side <ws> blob: <oid>
+///
+/// <merged-clean-content>
+/// <<<<<<< epoch (current)
+/// <epoch hunk>
+/// ||||||| base
+/// <base hunk>
+/// =======
+/// <workspace hunk>
+/// >>>>>>> <ws> (workspace changes)
+/// <more merged-clean-content>
+/// ```
+///
+/// Pre-bn-36zz, the whole file was inlined three times (epoch/base/ws) as
+/// ONE giant marker block — an 11k-line monster for what `git merge-file`
+/// resolves as a handful of small hunks. The header now also carries the
+/// blob OIDs so a resolver can mechanically reconstruct the merge via
+/// `git cat-file blob <oid>` + `git merge-file` without parsing markers.
+///
+/// When `base` is `None` (pure add/add-shaped content conflict) the merge
+/// runs against an empty base.
+///
+/// # Whole-file fallback
+///
+/// Marker block shape (used for N > 2 sides, or if the text driver fails /
+/// reports a clean merge — a marker-free render would desync the `<<<<<<<`
+/// gate from the conflict sidecar, so the conflict must stay visible):
 ///
 /// ```text
 /// <<<<<<< <first-side-ws>
@@ -390,6 +440,9 @@ fn render_content_conflict(
 
     // Informational header — `<<<<<<<` scanner and marker-gate only look at
     // marker lines, so comment lines here are ignored by both.
+    //
+    // The first line is a TOOL_PLACEHOLDER_PREFIXES tripwire (bn-28d1) the
+    // merge gate depends on — keep it byte-exact.
     out.extend_from_slice(format!("# structured conflict at {}\n", path.display()).as_bytes());
     if !atoms.is_empty() {
         out.extend_from_slice(b"# atoms:\n");
@@ -397,17 +450,86 @@ fn render_content_conflict(
             out.extend_from_slice(format!("#   - {}\n", atom.summary()).as_bytes());
         }
     }
+    // Mechanical-reconstruction info (bn-36zz): with these OIDs a resolver
+    // can redo the merge without parsing markers, e.g.
+    //   git cat-file blob <oid> > base/ours/theirs && git merge-file ...
+    if let Some(b) = base {
+        out.extend_from_slice(format!("# base blob: {b}\n").as_bytes());
+    }
+    for s in sides {
+        out.extend_from_slice(format!("# side {} blob: {}\n", s.workspace, s.content).as_bytes());
+    }
     out.push(b'\n');
 
+    // Hunk-level fast path: exactly two sides (the overwhelmingly common
+    // shape coming out of `maw ws sync` — epoch vs workspace).
+    if let [ours, theirs] = sides
+        && let Some(merged) = hunk_level_merge(
+            base_bytes.as_deref(),
+            &side_bytes[0],
+            &ours.workspace,
+            &side_bytes[1],
+            &theirs.workspace,
+        )
+    {
+        out.extend_from_slice(&merged);
+        return Ok(out);
+    }
+
+    // Whole-file fallback (see doc comment above).
+    render_whole_file_marker_blocks(&mut out, base_bytes.as_deref(), sides, &side_bytes);
+    Ok(out)
+}
+
+/// Run a hunk-level 3-way text merge of `ours` and `theirs` against `base`
+/// (empty when `None`), labelling marker lines exactly as the whole-file
+/// renderer would (`epoch (current)` / `base` / `<ws> (workspace changes)`).
+///
+/// Returns `Some(bytes)` only when the driver produced conflict hunks. A
+/// clean result returns `None` so the caller falls back to whole-file
+/// markers: the structured tree still records this path as conflicted and
+/// the marker gate / `maw ws resolve` key off `<<<<<<<` lines being present
+/// — emitting marker-free content would desync them from the sidecar.
+fn hunk_level_merge(
+    base: Option<&[u8]>,
+    ours: &[u8],
+    ours_ws: &str,
+    theirs: &[u8],
+    theirs_ws: &str,
+) -> Option<Vec<u8>> {
+    let result = maw_git::merge::merge_text(
+        base.unwrap_or(b""),
+        ours,
+        theirs,
+        &open_label(ours_ws),
+        "base",
+        &close_label(theirs_ws),
+    )
+    .ok()?;
+    match result {
+        maw_git::merge::MergeResult::Conflict(bytes) => Some(bytes),
+        maw_git::merge::MergeResult::Clean(_) => None,
+    }
+}
+
+/// Append the legacy whole-file marker block(s) for a content conflict to
+/// `out`. Each side's full blob is inlined between marker lines; with more
+/// than two sides, intermediate sides get their own labelled block.
+fn render_whole_file_marker_blocks(
+    out: &mut Vec<u8>,
+    base_bytes: Option<&[u8]>,
+    sides: &[ConflictSide],
+    side_bytes: &[Vec<u8>],
+) {
     // First side — always carries the full header-to-base triplet.
     let first = &sides[0];
     out.extend_from_slice(marker_open(&first.workspace).as_bytes());
     out.push(b'\n');
-    push_with_trailing_newline(&mut out, &side_bytes[0]);
+    push_with_trailing_newline(out, &side_bytes[0]);
     out.extend_from_slice(MARKER_BASE.as_bytes());
     out.push(b'\n');
-    if let Some(b) = &base_bytes {
-        push_with_trailing_newline(&mut out, b);
+    if let Some(b) = base_bytes {
+        push_with_trailing_newline(out, b);
     }
     // (no base: emit nothing between the `|||||||` and `=======` lines)
 
@@ -421,18 +543,18 @@ fn render_content_conflict(
     {
         out.extend_from_slice(MARKER_SEP.as_bytes());
         out.push(b'\n');
-        push_with_trailing_newline(&mut out, &side_bytes[i]);
+        push_with_trailing_newline(out, &side_bytes[i]);
         out.extend_from_slice(marker_close(&side.workspace).as_bytes());
         out.push(b'\n');
         // Re-open a new block for the subsequent side so the structure stays
         // `<<<<<<< / ||||||| base / (empty) / ======= / ... / >>>>>>>`.
         out.extend_from_slice(marker_open(&first.workspace).as_bytes());
         out.push(b'\n');
-        push_with_trailing_newline(&mut out, &side_bytes[0]);
+        push_with_trailing_newline(out, &side_bytes[0]);
         out.extend_from_slice(MARKER_BASE.as_bytes());
         out.push(b'\n');
-        if let Some(b) = &base_bytes {
-            push_with_trailing_newline(&mut out, b);
+        if let Some(b) = base_bytes {
+            push_with_trailing_newline(out, b);
         }
     }
 
@@ -443,11 +565,9 @@ fn render_content_conflict(
     let last = &sides[last_idx];
     out.extend_from_slice(MARKER_SEP.as_bytes());
     out.push(b'\n');
-    push_with_trailing_newline(&mut out, &side_bytes[last_idx]);
+    push_with_trailing_newline(out, &side_bytes[last_idx]);
     out.extend_from_slice(marker_close(&last.workspace).as_bytes());
     out.push(b'\n');
-
-    Ok(out)
 }
 
 /// Binary-safe rendering for [`Conflict::Content`] when at least one side is
@@ -1522,6 +1642,223 @@ mod tests {
         assert!(
             text.contains(">>>>>>> beta-ws (workspace changes)"),
             "closing marker must be labelled with the second side; got:\n{text}"
+        );
+    }
+
+    /// bn-36zz: two sides editing DIFFERENT regions plus ONE overlapping
+    /// region must render as a hunk-level merge — non-overlapping edits
+    /// merged cleanly into the body, exactly one small diff3 conflict hunk,
+    /// correct labels, tripwire header line, and blob OIDs in the header.
+    /// Pre-fix, the whole file appeared three times in one giant block.
+    #[test]
+    fn materialize_content_conflict_renders_hunk_level_merge() {
+        let fx = Fx::new();
+        let base_src = "fn top() {}\nmid line\nshared = 0\ntail line\nfn bottom() {}\n";
+        // Epoch edits the TOP region + the shared line.
+        let epoch_src =
+            "fn top() { epoch_edit(); }\nmid line\nshared = 1\ntail line\nfn bottom() {}\n";
+        // Workspace edits the BOTTOM region + the shared line (overlap).
+        let ws_src = "fn top() {}\nmid line\nshared = 2\ntail line\nfn bottom() { ws_edit(); }\n";
+
+        let base_oid = fx.blob(base_src.as_bytes());
+        let epoch_oid = fx.blob(epoch_src.as_bytes());
+        let ws_oid = fx.blob(ws_src.as_bytes());
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(
+            PathBuf::from("src/big.rs"),
+            Conflict::Content {
+                path: PathBuf::from("src/big.rs"),
+                file_id: FileId::new(1),
+                base: Some(base_oid.clone()),
+                sides: vec![
+                    side("epoch", epoch_oid.clone()),
+                    side("feature", ws_oid.clone()),
+                ],
+                atoms: vec![ConflictAtom::line_overlap(3, 3, vec![], "overlap")],
+            },
+        );
+
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("src/big.rs"))
+            .expect("operation should succeed")
+        {
+            FinalEntry::Rendered { content, .. } => content.clone(),
+            FinalEntry::Clean { .. } => panic!("expected rendered"),
+        };
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
+
+        // Tripwire header line (bn-28d1) must stay byte-exact and first.
+        assert!(
+            text.starts_with("# structured conflict at src/big.rs\n"),
+            "tripwire header must be the first line; got:\n{text}"
+        );
+        // Atoms lines kept.
+        assert!(text.contains("# atoms:\n"), "atoms header missing:\n{text}");
+        // Blob OIDs for mechanical reconstruction.
+        assert!(
+            text.contains(&format!("# base blob: {base_oid}\n")),
+            "base blob OID missing from header; got:\n{text}"
+        );
+        assert!(
+            text.contains(&format!("# side epoch blob: {epoch_oid}\n")),
+            "epoch side blob OID missing from header; got:\n{text}"
+        );
+        assert!(
+            text.contains(&format!("# side feature blob: {ws_oid}\n")),
+            "feature side blob OID missing from header; got:\n{text}"
+        );
+
+        // Exactly ONE conflict hunk — the shared line. Non-overlapping edits
+        // merged cleanly.
+        let open_count = text.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+        assert_eq!(
+            open_count, 1,
+            "expected exactly one hunk-level conflict block; got:\n{text}"
+        );
+        // Labels match the legacy contract exactly.
+        assert!(
+            text.contains("<<<<<<< epoch (current)\n"),
+            "epoch open label missing; got:\n{text}"
+        );
+        assert!(
+            text.contains("||||||| base\n"),
+            "diff3 base label missing; got:\n{text}"
+        );
+        assert!(
+            text.contains(">>>>>>> feature (workspace changes)\n"),
+            "workspace close label missing; got:\n{text}"
+        );
+
+        // Non-overlapping edits from BOTH sides are merged into the body —
+        // outside any marker block.
+        let i_open = text.find("<<<<<<<").expect("open marker");
+        let i_close = text.find(">>>>>>>").expect("close marker");
+        let body_outside: String = format!("{}{}", &text[..i_open], &text[i_close..]);
+        assert!(
+            body_outside.contains("fn top() { epoch_edit(); }"),
+            "epoch's non-overlapping edit must merge cleanly outside markers; got:\n{text}"
+        );
+        assert!(
+            body_outside.contains("fn bottom() { ws_edit(); }"),
+            "workspace's non-overlapping edit must merge cleanly outside markers; got:\n{text}"
+        );
+        // Unchanged context appears exactly once (not three times as in the
+        // old whole-file render).
+        assert_eq!(
+            text.matches("mid line").count(),
+            1,
+            "context must not be duplicated; got:\n{text}"
+        );
+
+        // The conflict hunk carries all three versions of the shared line.
+        let hunk = &text[i_open..i_close];
+        assert!(hunk.contains("shared = 1"), "epoch hunk content:\n{text}");
+        assert!(hunk.contains("shared = 0"), "base hunk content:\n{text}");
+        assert!(hunk.contains("shared = 2"), "ws hunk content:\n{text}");
+    }
+
+    /// bn-36zz: when base is None, the two-side fast path merges against an
+    /// empty base — both sides' content still appears, labels intact.
+    #[test]
+    fn materialize_content_conflict_hunk_level_merge_without_base() {
+        let fx = Fx::new();
+        let epoch_oid = fx.blob(b"epoch only line\n");
+        let ws_oid = fx.blob(b"workspace only line\n");
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(
+            PathBuf::from("new.txt"),
+            Conflict::Content {
+                path: PathBuf::from("new.txt"),
+                file_id: FileId::new(2),
+                base: None,
+                sides: vec![side("epoch", epoch_oid), side("feature", ws_oid)],
+                atoms: vec![],
+            },
+        );
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("new.txt"))
+            .expect("operation should succeed")
+        {
+            FinalEntry::Rendered { content, .. } => content.clone(),
+            FinalEntry::Clean { .. } => panic!("expected rendered"),
+        };
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
+        assert!(text.starts_with("# structured conflict at new.txt\n"));
+        // No base → no `# base blob:` header line.
+        assert!(
+            !text.contains("# base blob:"),
+            "no base blob line expected when base is None; got:\n{text}"
+        );
+        assert!(text.contains("epoch only line"), "got:\n{text}");
+        assert!(text.contains("workspace only line"), "got:\n{text}");
+        assert!(text.contains("<<<<<<< epoch (current)"), "got:\n{text}");
+        assert!(
+            text.contains(">>>>>>> feature (workspace changes)"),
+            "got:\n{text}"
+        );
+    }
+
+    /// bn-36zz: three or more sides keep the whole-file fallback rendering
+    /// (one labelled block per workspace) — and now also carry blob OIDs in
+    /// the header.
+    #[test]
+    fn materialize_content_conflict_three_sides_uses_whole_file_fallback() {
+        let fx = Fx::new();
+        let a_oid = fx.blob(b"alice version\n");
+        let b_oid = fx.blob(b"bob version\n");
+        let c_oid = fx.blob(b"carol version\n");
+        let base_oid = fx.blob(b"base version\n");
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(
+            PathBuf::from("three.txt"),
+            Conflict::Content {
+                path: PathBuf::from("three.txt"),
+                file_id: FileId::new(3),
+                base: Some(base_oid.clone()),
+                sides: vec![
+                    side("alice", a_oid),
+                    side("bob", b_oid),
+                    side("carol", c_oid),
+                ],
+                atoms: vec![],
+            },
+        );
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("three.txt"))
+            .expect("operation should succeed")
+        {
+            FinalEntry::Rendered { content, .. } => content.clone(),
+            FinalEntry::Clean { .. } => panic!("expected rendered"),
+        };
+        let text = std::str::from_utf8(&content).expect("operation should succeed");
+        assert!(text.contains("# side alice blob:"), "got:\n{text}");
+        assert!(text.contains("# side bob blob:"), "got:\n{text}");
+        assert!(text.contains("# side carol blob:"), "got:\n{text}");
+        assert!(
+            text.contains(&format!("# base blob: {base_oid}")),
+            "got:\n{text}"
+        );
+        // All three side contents inlined (whole-file fallback).
+        assert!(text.contains("alice version"), "got:\n{text}");
+        assert!(text.contains("bob version"), "got:\n{text}");
+        assert!(text.contains("carol version"), "got:\n{text}");
+        // Intermediate side gets its own labelled close marker.
+        assert!(
+            text.contains(">>>>>>> bob (workspace changes)"),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains(">>>>>>> carol (workspace changes)"),
+            "got:\n{text}"
         );
     }
 
