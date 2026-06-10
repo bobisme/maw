@@ -1281,3 +1281,112 @@ fn concurrent_rebase_races_are_serialized() {
         String::from_utf8_lossy(&third.stderr),
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-1hmz — binary blobs must NOT be passed through the text merge driver
+//
+// A binary file (containing NUL bytes) edited by both epoch and workspace in
+// DIFFERENT byte regions would previously produce a "clean" frankenstein
+// merge (fabricating bytes neither side had) because merge_text is byte-level
+// and 0x0A inside binary data looks like a line boundary to the diff engine.
+// The fix: `try_clean_three_way_overlap` must return Ok(None) when any blob
+// fails looks_text, routing through the conflict-tree path whose materialize
+// stage renders a safe binary-conflict stub.
+// ---------------------------------------------------------------------------
+
+/// Binary file (with embedded NUL bytes and embedded 0x0A) edited by epoch
+/// (one region) and workspace (a different region): the rebase MUST NOT
+/// produce a clean merge.  The workspace must end up conflicted, and the
+/// rebased blob must be byte-identical to the binary-conflict stub emitted
+/// by materialize (starts with `# BINARY CONFLICT at`) — never a mix of the
+/// two sides' binary content.
+#[test]
+fn sync_rebase_binary_blob_not_clean_merged() {
+    let repo = TestRepo::new();
+
+    // Base binary: three "sections" separated by 0x0A so the text driver
+    // would see "lines".  Each section contains a NUL byte, which is the
+    // canonical signal for binary content.
+    //   HDR\x00aaaa\n  ←  epoch will change this
+    //   MID\x00bbbb\n  ←  neither side touches this
+    //   END\x00cccc\n  ←  workspace will change this
+    let base_content: &[u8] = b"HDR\x00aaaa\nMID\x00bbbb\nEND\x00cccc\n";
+    repo.seed_binary_files(&[("data.bin", base_content)]);
+
+    // Create two workspaces from the same epoch.
+    repo.maw_ok(&["ws", "create", "epoch-ws"]);
+    repo.maw_ok(&["ws", "create", "feat"]);
+
+    // epoch-ws changes the HDR section.
+    let epoch_content: &[u8] = b"HDR\x00XXXX\nMID\x00bbbb\nEND\x00cccc\n";
+    repo.modify_file_bytes("epoch-ws", "data.bin", epoch_content);
+    commit_all(&repo, "epoch-ws", "epoch: change HDR section");
+
+    // Advance the epoch by merging epoch-ws.
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "epoch-ws",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge epoch-ws",
+    ]);
+
+    // feat workspace changes the END section (disjoint from epoch's change).
+    let ws_content: &[u8] = b"HDR\x00aaaa\nMID\x00bbbb\nEND\x00ZZZZ\n";
+    repo.modify_file_bytes("feat", "data.bin", ws_content);
+    commit_all(&repo, "feat", "feat: change END section");
+
+    // Rebase feat onto the new epoch.
+    let out = repo.maw_raw(&["ws", "sync", "feat", "--rebase"]);
+    // The rebase command may succeed (conflict recorded) or indicate conflict
+    // via non-zero; either is fine — what matters is the file content.
+    let _ = out.status; // we don't assert success/failure on the command itself
+
+    // The structured conflict sidecar MUST exist — the binary file touched by
+    // both sides must route through the conflict-tree path.
+    let sidecar = repo.read_conflict_tree_sidecar("feat").expect(
+        "bn-1hmz: conflict-tree.json must exist — binary disjoint edit must not be clean-merged",
+    );
+    assert!(
+        find_conflict_entry(&sidecar, "data.bin").is_some(),
+        "bn-1hmz: data.bin must appear in conflict-tree.json; got:\n{}",
+        serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+    );
+
+    // The on-disk bytes must be byte-identical to ONE consistent state — the
+    // binary-conflict stub (starts with b"# BINARY CONFLICT at"), or the epoch
+    // blob, or the workspace blob — never a mixture of both sides' binary data.
+    let on_disk = repo
+        .read_file_bytes("feat", "data.bin")
+        .expect("data.bin must exist in worktree");
+
+    let is_binary_stub = on_disk.starts_with(b"# BINARY CONFLICT at");
+    let is_epoch_side = on_disk == epoch_content;
+    let is_ws_side = on_disk == ws_content;
+    let is_base = on_disk == base_content;
+
+    assert!(
+        is_binary_stub || is_epoch_side || is_ws_side || is_base,
+        "bn-1hmz: data.bin bytes must be the binary-conflict stub, epoch side, ws side, \
+         or base — never a frankenstein mix; got (hex):\n{}",
+        on_disk
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    // Specifically it must NOT contain bytes from BOTH sides' distinguishing
+    // regions simultaneously (HDR\x00XXXX AND END\x00ZZZZ in the same blob
+    // would prove the text driver ran across binary data and fabricated a merge).
+    // b"HDR\x00XXXX" and b"END\x00ZZZZ" are each 8 bytes.
+    let has_epoch_marker = on_disk.windows(8).any(|w| w == b"HDR\x00XXXX");
+    let has_ws_marker = on_disk.windows(8).any(|w| w == b"END\x00ZZZZ");
+    assert!(
+        !(has_epoch_marker && has_ws_marker),
+        "bn-1hmz: data.bin contains distinguishing bytes from BOTH sides — text merge \
+         ran on binary data and fabricated a frankenstein blob"
+    );
+}

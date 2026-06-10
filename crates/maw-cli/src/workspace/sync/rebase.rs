@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use maw_core::config::ManifoldConfig;
 use maw_core::merge::apply::apply_unilateral_patchset;
 use maw_core::merge::diff_extract::diff_patchset;
-use maw_core::merge::materialize::{materialize, write_legacy_sidecar, write_structured_sidecar};
+use maw_core::merge::materialize::{
+    looks_text, materialize, write_legacy_sidecar, write_structured_sidecar,
+};
 use maw_core::merge::types::{ConflictTree, EntryMode, MaterializedEntry};
 use maw_core::model::conflict::{Conflict, ConflictSide};
 use maw_core::model::ordering::OrderingKey;
@@ -1584,6 +1586,20 @@ fn try_clean_three_way_overlap(
             path.display()
         )
     })?;
+
+    // bn-1hmz: binary guard — if any blob is binary (NUL byte or invalid
+    // UTF-8), the text merge driver must not run. A binary file edited by
+    // both epoch and workspace is ALWAYS a conflict; the safe rendering in
+    // materialize (bn-ad5z) will emit a binary-conflict stub when the path
+    // reaches the conflict-tree path. Without this guard, `merge_text`
+    // produces a "clean" frankenstein result on binary files that happen to
+    // contain 0x0A bytes (common: executables, images, archives), silently
+    // committing corrupted bytes as a "rebased clean" merge — exactly what
+    // git's own merge driver refuses to do. The bn-2upt sanity check does
+    // NOT catch this (size-plausible, .bin not AST-parsed).
+    if !looks_text(&base) || !looks_text(&epoch) || !looks_text(&workspace) {
+        return Ok(None);
+    }
 
     let merged =
         match merge_text(&base, &epoch, &workspace, "epoch", "base", ws_name).map_err(|e| {

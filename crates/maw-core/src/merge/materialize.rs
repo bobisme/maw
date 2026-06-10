@@ -303,12 +303,18 @@ pub fn is_tool_placeholder_blob(content: &[u8]) -> bool {
         .any(|p| content.starts_with(p))
 }
 
-/// Best-effort "is this blob text?" heuristic. Used to decide whether we can
-/// safely inline content inside conflict markers. Mirrors git's approach
-/// (presence of a NUL byte is a strong binary signal); we additionally treat
-/// invalid UTF-8 as binary because our marker template is UTF-8 text and
-/// we don't want to splice arbitrary bytes into a supposedly textual file.
-fn looks_text(bytes: &[u8]) -> bool {
+/// Best-effort "is this blob text?" heuristic.
+///
+/// Used to decide whether we can safely inline content inside conflict
+/// markers. Mirrors git's approach (presence of a NUL byte is a strong
+/// binary signal); we additionally treat invalid UTF-8 as binary because our
+/// marker template is UTF-8 text and we don't want to splice arbitrary bytes
+/// into a supposedly textual file.
+///
+/// Public so that maw-cli merge sites can share the same guard without
+/// duplicating the heuristic (bn-1hmz).
+#[must_use]
+pub fn looks_text(bytes: &[u8]) -> bool {
     if bytes.contains(&0u8) {
         return false;
     }

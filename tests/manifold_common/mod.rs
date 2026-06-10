@@ -512,6 +512,65 @@ impl TestRepo {
         std::fs::read_to_string(&file_path).ok()
     }
 
+    /// Read raw bytes from a workspace file. Returns `None` if the file doesn't exist.
+    #[must_use]
+    pub fn read_file_bytes(&self, workspace: &str, rel_path: &str) -> Option<Vec<u8>> {
+        let file_path = self.workspace_path(workspace).join(rel_path);
+        std::fs::read(&file_path).ok()
+    }
+
+    /// Add a new file with arbitrary byte content to a workspace.
+    ///
+    /// Creates parent directories as needed.
+    ///
+    /// # Panics
+    /// Panics if the workspace doesn't exist or the write fails.
+    pub fn add_file_bytes(&self, workspace: &str, rel_path: &str, content: &[u8]) {
+        let ws_path = self.workspace_path(workspace);
+        assert!(
+            ws_path.exists(),
+            "workspace '{}' does not exist at {}",
+            workspace,
+            ws_path.display()
+        );
+        let file_path = ws_path.join(rel_path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!("failed to create dirs for {}: {e}", file_path.display())
+            });
+        }
+        std::fs::write(&file_path, content)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", file_path.display()));
+    }
+
+    /// Overwrite an existing file with arbitrary byte content in a workspace.
+    ///
+    /// # Panics
+    /// Panics if the file doesn't exist, the workspace doesn't exist, or the write fails.
+    pub fn modify_file_bytes(&self, workspace: &str, rel_path: &str, content: &[u8]) {
+        let ws_path = self.workspace_path(workspace);
+        let file_path = ws_path.join(rel_path);
+        assert!(
+            file_path.exists(),
+            "file '{rel_path}' does not exist in workspace '{workspace}' — use add_file_bytes for new files"
+        );
+        std::fs::write(&file_path, content)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", file_path.display()));
+    }
+
+    /// Seed the default workspace with binary files and advance the epoch.
+    ///
+    /// Like `seed_files` but accepts raw bytes so NUL-containing binary blobs
+    /// can be committed.
+    ///
+    /// Returns the new epoch OID.
+    pub fn seed_binary_files(&self, files: &[(&str, &[u8])]) -> String {
+        for (path, content) in files {
+            self.add_file_bytes("default", path, content);
+        }
+        self.advance_epoch("chore: seed initial binary files")
+    }
+
     /// Check if a file exists in a workspace.
     #[must_use]
     pub fn file_exists(&self, workspace: &str, rel_path: &str) -> bool {

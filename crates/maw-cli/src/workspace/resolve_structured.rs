@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use maw_core::merge::materialize::looks_text;
 use maw_core::merge::types::ConflictTree;
 use maw_core::model::conflict::{Conflict, ConflictSide, ConflictSideMode};
 use maw_core::model::types::GitOid;
@@ -450,20 +451,13 @@ enum ResolveKind {
 }
 
 // ---------------------------------------------------------------------------
-// Binary-detection heuristic (mirrors maw-core materialize::looks_text)
+// Binary-detection heuristic — imported from maw-core (bn-1hmz)
 // ---------------------------------------------------------------------------
-
-/// Best-effort "is this blob text?" heuristic.
-///
-/// Mirrors `maw_core::merge::materialize::looks_text`: a NUL byte is a strong
-/// binary signal; invalid UTF-8 is also treated as binary so we don't splice
-/// arbitrary bytes into marker-based output.
-fn looks_text(bytes: &[u8]) -> bool {
-    if bytes.contains(&0u8) {
-        return false;
-    }
-    std::str::from_utf8(bytes).is_ok()
-}
+// `looks_text` is imported from `maw_core::merge::materialize` via the
+// `use` at the top of this file. A NUL byte is a strong binary signal;
+// invalid UTF-8 is also treated as binary so we don't splice arbitrary bytes
+// into marker-based output. Keeping the definition in one place prevents the
+// multi-copy drift that was the root cause of bn-1hmz.
 
 /// Scan all sides of a conflict and return the first mode hint found.
 ///
@@ -773,6 +767,23 @@ fn apply_decision(
             let ws_bytes = repo
                 .read_blob(ws_oid_git)
                 .map_err(|e| anyhow::anyhow!("read_blob({}) failed: {e}", ws_side.content))?;
+
+            // bn-1hmz: binary guard — if any blob fails the looks_text
+            // heuristic, skip the 3-way text merge entirely and fall
+            // through to the blob-replace path below (ws blob wins
+            // wholesale, which is the correct semantics for --keep <ws>
+            // on a binary file).  Without this guard, merge_text produces
+            // a "clean" frankenstein result on binary files that happen
+            // to contain 0x0A bytes, silently corrupting the file.
+            if !looks_text(&base_bytes) || !looks_text(&epoch_bytes) || !looks_text(&ws_bytes) {
+                // Fall through to blob-replace — the ws side wins wholesale.
+                let bytes = ws_bytes;
+                return Ok(PathOutcome::Wrote {
+                    bytes,
+                    mode: mode_hint,
+                    kind: ResolveKind::BlobReplace,
+                });
+            }
 
             // Try the diff3 merge first — this is the same primitive
             // `try_clean_three_way_overlap` uses during rebase. We use
@@ -2618,6 +2629,92 @@ mod tests {
         assert_eq!(
             after, b"binary\x00content\n",
             "binary fallback should write epoch's whole blob"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-1hmz test: --keep <ws> falls back to blob-replace for binary
+    // -----------------------------------------------------------------------
+
+    /// When any side is binary (NUL byte), `--keep <ws>` must fall back to the
+    /// whole-blob replacement path (the ws side wins wholesale), exactly like
+    /// `--keep epoch` and `--keep both` do.
+    ///
+    /// Before bn-1hmz the `--keep <ws>` Theirs path had NO `looks_text` guard,
+    /// so a binary file with embedded 0x0A bytes would get a frankenstein
+    /// result from `merge_text`, and the output line would incorrectly claim
+    /// "(3-way merge: ws intent on top of epoch, ws wins on overlap)".
+    ///
+    /// After the fix: result bytes must be byte-identical to the ws side blob,
+    /// and the resolve kind must be `BlobReplace` (not `ThreeWayClean` /
+    /// `ThreeWayWsWins`).
+    #[test]
+    fn resolve_keep_ws_binary_falls_back_to_blob_replace() {
+        let (_td, root, ws_path, repo) = setup_ws_repo("ws-1hmz-binary");
+        seed_initial_commit(&ws_path);
+
+        // Three binary blobs — each side changes a different "section"
+        // separated by 0x0A (so the text driver would see "disjoint lines"
+        // and produce a "clean" merge if not guarded).
+        let base: &[u8] = b"HDR\x00aaaa\nMID\x00bbbb\nEND\x00cccc\n";
+        let epoch_content: &[u8] = b"HDR\x00XXXX\nMID\x00bbbb\nEND\x00cccc\n";
+        let ws_content: &[u8] = b"HDR\x00aaaa\nMID\x00bbbb\nEND\x00ZZZZ\n";
+
+        let rel = PathBuf::from("data.bin");
+        std::fs::write(ws_path.join(&rel), b"placeholder\n").expect("write placeholder");
+
+        let (rel2, conflict) = make_content_conflict_with_base(
+            "data.bin",
+            base,
+            epoch_content,
+            ws_content,
+            "ws-1hmz-binary",
+            &repo,
+        );
+        assert_eq!(rel, rel2);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(rel.clone(), conflict);
+
+        run_structured(
+            &root,
+            "ws-1hmz-binary",
+            &ws_path,
+            &[],
+            &["ws-1hmz-binary".into()],
+            false,
+            OutputFormat::Text,
+            tree,
+        )
+        .expect("binary blob-replace for --keep <ws> should not fail");
+
+        let after = std::fs::read(ws_path.join(&rel)).expect("read resolved file");
+
+        // Binary fallback: ws's whole blob is written — byte-identical,
+        // never a frankenstein mix of epoch + ws bytes.
+        assert_eq!(
+            after,
+            ws_content,
+            "bn-1hmz: --keep <ws> on a binary conflict must write the ws blob wholesale; \
+             got (hex): {}",
+            after
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        // Specifically must NOT contain both sides' distinguishing bytes.
+        // b"HDR\x00XXXX" and b"END\x00ZZZZ" are each 8 bytes.
+        let has_epoch_region = after.windows(8).any(|w| w == b"HDR\x00XXXX");
+        let has_ws_region = after.windows(8).any(|w| w == b"END\x00ZZZZ");
+        assert!(
+            !has_epoch_region,
+            "bn-1hmz: epoch's binary region must not appear in --keep <ws> result"
+        );
+        assert!(
+            has_ws_region,
+            "bn-1hmz: ws's binary region must appear in --keep <ws> result"
         );
     }
 }
