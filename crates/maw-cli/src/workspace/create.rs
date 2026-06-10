@@ -138,6 +138,30 @@ fn create_with_output(
     // Determine base epoch from resolved source revision.
     let epoch = resolve_epoch(&root, source_revision.as_deref())?;
 
+    // bn-1abp: an explicit --from/--change IS honored as the workspace base,
+    // but maw's merge model is epoch-based: a workspace whose base differs
+    // from the current epoch is treated as stale, and the next `maw ws
+    // merge` (sibling auto-rebase) or `maw ws sync` will rebase it onto the
+    // epoch. Say so LOUDLY at create time instead of letting the agent
+    // discover it when files move underneath them.
+    if emit_output
+        && from.is_some()
+        && let Ok(Some(current)) = manifold_refs::read_epoch_current(&root)
+        && current.as_str() != epoch.as_str()
+    {
+        eprintln!(
+            "NOTE: --from {} resolves to {}, which differs from the current epoch {}.",
+            from.unwrap_or_default(),
+            &epoch.as_str()[..12],
+            &current.as_str()[..12],
+        );
+        eprintln!(
+            "  maw workspaces are epoch-based: the workspace starts at {}, but later merges \
+             auto-rebase it onto the new epoch (skip per-merge with `maw ws merge --no-auto-rebase`).",
+            &epoch.as_str()[..12],
+        );
+    }
+
     // Create workspace ID
     let ws_id =
         WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;

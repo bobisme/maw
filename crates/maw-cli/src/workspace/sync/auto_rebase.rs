@@ -176,7 +176,7 @@ pub fn auto_rebase_siblings<B: WorkspaceBackend>(
             continue;
         }
 
-        let result = rebase_one_sibling(root, backend, name, new_epoch);
+        let result = rebase_one_sibling(root, backend, name, new_epoch, merge_sources);
         reports.push(SiblingReport {
             name: name.to_string(),
             result,
@@ -191,6 +191,7 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
     backend: &B,
     name: &str,
     new_epoch: &str,
+    merge_sources: &[String],
 ) -> SiblingResult {
     // Skip rule 4 (cheap): if the workspace's recorded base epoch already
     // equals the new epoch, there's nothing to do. Re-checked under the lock
@@ -306,7 +307,62 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
 
     drop(lock);
 
-    classify_outcome(name, outcome_res)
+    let result = classify_outcome(name, outcome_res);
+    record_rebase_notice(
+        root,
+        name,
+        status.base_epoch.as_str(),
+        new_epoch,
+        merge_sources,
+        &result,
+    );
+    result
+}
+
+/// bn-1abp: an agent may be actively working in a rebased sibling and has
+/// no idea its refs/worktree just moved. Record a one-time notice that the
+/// next `maw exec <name> -- ...` prints and consumes. Advisory only —
+/// write failures are logged inside `write_notice` and never abort.
+fn record_rebase_notice(
+    root: &Path,
+    name: &str,
+    old_epoch: &str,
+    new_epoch: &str,
+    merge_sources: &[String],
+    result: &SiblingResult,
+) {
+    let Some((replayed, conflicts, worktree_updated)) = (match result {
+        SiblingResult::RebasedClean { replayed } => Some((*replayed, 0, true)),
+        SiblingResult::RebasedCleanRefsOnly { replayed, .. } => Some((*replayed, 0, false)),
+        SiblingResult::RebasedWithConflicts {
+            replayed,
+            conflicts,
+        } => Some((*replayed, *conflicts, true)),
+        SiblingResult::RebasedWithConflictsRefsOnly {
+            replayed,
+            conflicts,
+            ..
+        } => Some((*replayed, *conflicts, false)),
+        SiblingResult::UpToDate
+        | SiblingResult::SkippedInUse
+        | SiblingResult::SkippedDirty
+        | SiblingResult::SkippedInProgress
+        | SiblingResult::Failed { .. } => None,
+    }) else {
+        return;
+    };
+    super::notice::write_notice(
+        root,
+        name,
+        &super::notice::AutoRebaseNotice {
+            old_epoch: old_epoch.to_string(),
+            new_epoch: new_epoch.to_string(),
+            merge_sources: merge_sources.to_vec(),
+            replayed,
+            conflicts,
+            worktree_updated,
+        },
+    );
 }
 
 /// Map a [`RebaseOutcome`] (or rebase error) into the [`SiblingResult`]

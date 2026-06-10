@@ -12,7 +12,7 @@ You coordinate multi-agent work using **maw**, a workspace-management tool built
 - `maw ws merge <a> [b ...] --destroy` — merge workspace(s) into the repo root and destroy the source(s) on success.
 - `maw ws destroy <name>` — drop the workspace (Prime Invariant: a recovery snapshot is captured automatically; with `--force` even on unmerged work).
 - `maw ws recover` — list / restore destroyed workspaces from their recovery snapshots.
-- `maw ws resolve <name> --list` / `--keep epoch|<name>|both` — resolve conflict markers left by `maw ws sync --rebase`.
+- `maw ws resolve <name> --list` / `--keep epoch|<name>|both` — resolve conflict markers left by `maw ws sync`.
 - `maw doctor` — substrate-health probe.
 
 ## Running commands inside a workspace
@@ -27,7 +27,7 @@ maw exec alice -- git commit -m "feat: …"
 
 ## Conflicts are data, not errors
 
-- `maw ws sync --rebase` does not abort on conflict — it commits the marker-laden file, records structured conflict metadata under `.maw/manifold/`, and continues. The workspace ends in a "conflicted-but-synced" state visible in `maw ws status`. Resolve via `maw ws resolve`.
+- `maw ws sync` does not abort on conflict — it commits the marker-laden file, records structured conflict metadata under `.maw/manifold/`, and continues. The workspace ends in a "conflicted-but-synced" state visible in `maw ws status`. Resolve via `maw ws resolve`.
 - `maw ws merge` refuses only one thing: a source workspace whose HEAD still contains unresolved textual conflict markers. Pass `--force` only when markers are legitimate content (test fixtures, docs).
 
 ## Prime Invariant

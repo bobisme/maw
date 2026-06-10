@@ -97,6 +97,15 @@ If you see "workspace is stale" (epoch advanced while you were working):
 maw ws sync
 ```
 
+### Auto-Rebase on Merge
+
+Every `maw ws merge` automatically rebases all OTHER (sibling) workspaces onto
+the new epoch — files on disk in an active workspace may change while its agent
+is still working. maw prints a one-time NOTE in the affected workspace on its
+next `maw exec`; when you see it, re-read any files you had open before editing
+them again. The merging agent can pass `maw ws merge --no-auto-rebase` to skip
+sibling rebases entirely (siblings then stay stale until they run `maw ws sync`).
+
 ### Conflicts
 
 If merge reports conflicts, resolve them in workspace files, then commit the resolution:

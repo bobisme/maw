@@ -160,7 +160,7 @@ pub fn run(
                      rendered by the structured engine, so it has been suppressed \
                      to avoid leaving half-stripped placeholder markers on disk.\n  \
                      To fix: regenerate the sidecar by re-running\n    \
-                         maw ws sync --rebase {workspace}\n  \
+                         maw ws sync {workspace}\n  \
                      or remove the sidecar manually (files will then be treated \
                      as legacy marker conflicts):\n    \
                          rm {}",
@@ -227,7 +227,7 @@ pub fn run(
         bail!(
             "Workspace '{workspace}' has no recorded rebase conflicts to resolve.\n  \
              (`maw ws merge {workspace} --check` agrees it is ready to merge.)\n  \
-             If you expected conflicts, run `maw ws sync --rebase {workspace}` first."
+             If you expected conflicts, run `maw ws sync {workspace}` first."
         );
     }
 

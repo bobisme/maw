@@ -51,6 +51,16 @@ pub(crate) mod working_copy;
 // Re-export public API used by other modules
 pub use sync::auto_sync_if_stale;
 
+/// Print (and consume) a pending one-time auto-rebase notice for a
+/// workspace (bn-1abp). No-op for the default workspace — the sibling
+/// auto-rebase orchestrator never touches it.
+pub fn print_auto_rebase_notice_if_any(root: &std::path::Path, ws_name: &str) {
+    if ws_name == DEFAULT_WORKSPACE {
+        return;
+    }
+    sync::notice::print_notice_if_any(root, ws_name);
+}
+
 /// Default workspace name -- the persistent workspace used for merging,
 /// pushing, and coordination. Lives at ws/default/ in the bare repo model.
 const DEFAULT_WORKSPACE: &str = "default";
@@ -694,12 +704,14 @@ pub enum WorkspaceCommands {
         json: bool,
     },
 
-    /// Show differences for a workspace against default/epoch/branch/revision
+    /// Show differences for a workspace against epoch/default/branch/revision
     ///
     /// Shows a content diff (patch) by default, like git diff.
+    /// Without --against, compares the workspace worktree (committed-but-
+    /// unmerged AND uncommitted work) against the current epoch.
     /// Use `--against` to compare against:
-    /// - `default` (default behavior)
-    /// - `epoch` (refs/manifold/epoch/current)
+    /// - `epoch` (refs/manifold/epoch/current — the default)
+    /// - `default` (the default workspace's recorded state)
     /// - `branch:<name>` (e.g., branch:main)
     /// - `oid:<sha>` (or bare sha)
     ///
@@ -719,7 +731,7 @@ pub enum WorkspaceCommands {
         #[arg(trailing_var_arg = true)]
         path_args: Vec<String>,
 
-        /// Compare target: default, epoch, branch:<name>, oid:<sha>, or bare <sha>
+        /// Compare target: epoch (default), default, branch:<name>, oid:<sha>, or bare <sha>
         #[arg(long)]
         against: Option<String>,
 
@@ -1183,7 +1195,7 @@ pub enum WorkspaceCommands {
         /// and are reconciled the next time the owning agent runs a
         /// workspace command. Pass `--no-auto-rebase` to skip that step
         /// entirely; siblings remain stale and the user must run
-        /// `maw ws sync --rebase <ws>` per sibling to catch up.
+        /// `maw ws sync <ws>` per sibling to catch up.
         ///
         /// Equivalent to `merge.auto_rebase_siblings = false` in
         /// `.manifold/config.toml`, but scoped to one invocation.
@@ -1788,8 +1800,11 @@ pub fn repo_root() -> Result<PathBuf> {
     }
 
     bail!(
-        "Not in a Manifold repository. Run `maw init` to initialize one.\n  \
-         Current directory: {}",
+        "Not in a Manifold repository (searched upward from the current directory).\n  \
+         Current directory: {}\n  \
+         maw commands must run from inside the repo \u{2014} cd to the repo first, e.g.:\n    \
+         cd /path/to/repo && maw exec <workspace> -- <command>\n  \
+         If this directory SHOULD be a Manifold repo, run `maw init`.",
         cwd.display()
     )
 }

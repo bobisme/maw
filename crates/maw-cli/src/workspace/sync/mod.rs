@@ -2,6 +2,7 @@ pub(crate) mod auto_rebase;
 mod checks;
 mod cross_target;
 mod lock;
+pub(crate) mod notice;
 pub(crate) mod rebase;
 
 use std::path::Path;
@@ -79,12 +80,7 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if is_default_workspace(&workspace_name) {
-        let branch = MawConfig::load(&root)
-            .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
-        println!(
-            "Workspace '{workspace_name}' is the default branch workspace (tracks '{branch}')."
-        );
-        println!("Skipping detached-epoch sync for default workspace.");
+        print_default_sync_skip(&root, &workspace_name);
         return Ok(());
     }
 
@@ -92,6 +88,11 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
         println!("Workspace '{workspace_name}' not found.");
         return Ok(());
     }
+
+    // bn-1abp: a user-initiated sync supersedes any pending auto-rebase
+    // notice — print it now (still informative) and consume it so it can't
+    // pop up, stale, after this sync re-points the workspace.
+    notice::print_notice_if_any(&root, &workspace_name);
 
     let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
     let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
@@ -356,9 +357,35 @@ fn sync_all(no_rebase: bool) -> Result<()> {
     Ok(())
 }
 
+/// The default workspace tracks the configured branch and never does a
+/// detached-epoch sync — explain why instead of silently no-oping.
+fn print_default_sync_skip(root: &Path, workspace_name: &str) {
+    let branch =
+        MawConfig::load(root).map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+    println!("Workspace '{workspace_name}' is the default branch workspace (tracks '{branch}').");
+    println!("Skipping detached-epoch sync for default workspace.");
+}
+
+/// bn-1abp: the stale-epoch warning is useful exactly once per maw
+/// invocation. Agents reported it printing repeatedly — including while
+/// running the exact `git add` / `git commit` remediation it recommends —
+/// which turns a useful signal into noise. This process-local latch
+/// guarantees AT MOST ONE stale-workspace warning block per maw process,
+/// no matter how many code paths consult [`auto_sync_if_stale`].
+static STALE_WARNING_EMITTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Returns `true` exactly once per process; afterwards always `false`.
+fn claim_stale_warning_slot() -> bool {
+    !STALE_WARNING_EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Auto-sync a stale workspace before running a command.
 /// In the git worktree model, this updates the worktree HEAD to the current epoch.
 /// Returns Ok(()) whether or not it was stale (idempotent).
+///
+/// The stale-workspace WARNING blocks are emitted at most once per maw
+/// process (bn-1abp) — repeated calls stay silent but still skip the sync.
 ///
 /// # Errors
 ///
@@ -401,24 +428,28 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
     match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
         None => {
-            eprintln!(
-                "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state), \
-                 but git could not determine commit count. Skipping auto-sync to preserve committed work."
-            );
-            eprintln!(
-                "  The lead agent should merge this workspace: maw ws merge {name} --into default"
-            );
+            if claim_stale_warning_slot() {
+                eprintln!(
+                    "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state), \
+                     but git could not determine commit count. Skipping auto-sync to preserve committed work."
+                );
+                eprintln!(
+                    "  The lead agent should merge this workspace: maw ws merge {name} --into default"
+                );
+            }
             return Ok(());
         }
         Some(ahead) if ahead > 0 => {
-            eprintln!(
-                "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state since \
-                 this one was created), and has {ahead} committed commit(s) not yet merged."
-            );
-            eprintln!("  Skipping auto-sync to preserve committed work.");
-            eprintln!(
-                "  The lead agent should merge or rebase this workspace: maw ws merge {name} --into default  or  maw ws sync {name} --rebase"
-            );
+            if claim_stale_warning_slot() {
+                eprintln!(
+                    "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state since \
+                     this one was created), and has {ahead} committed commit(s) not yet merged."
+                );
+                eprintln!("  Skipping auto-sync to preserve committed work.");
+                eprintln!(
+                    "  The lead agent should merge or rebase this workspace: maw ws merge {name} --into default  or  maw ws sync {name}"
+                );
+            }
             return Ok(());
         }
         Some(_) => {}
@@ -430,20 +461,22 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         ws_status.base_epoch.as_str(),
         current_epoch.as_str(),
     )? {
-        eprintln!(
-            "WARNING: Workspace '{name}' is behind current epoch, but epoch tracks active change '{}' ({}) not yet on trunk.",
-            active_change.change_id, active_change.change_branch
-        );
-        eprintln!(
-            "  Skipping auto-sync for this unbound workspace to avoid pulling change-only commits into trunk-targeted work."
-        );
-        eprintln!(
-            "  Use a change-bound workspace instead: maw ws create --change {} <name>",
-            active_change.change_id
-        );
-        eprintln!(
-            "  If this workspace should stay trunk-only, continue without syncing and merge with --into default."
-        );
+        if claim_stale_warning_slot() {
+            eprintln!(
+                "WARNING: Workspace '{name}' is behind current epoch, but epoch tracks active change '{}' ({}) not yet on trunk.",
+                active_change.change_id, active_change.change_branch
+            );
+            eprintln!(
+                "  Skipping auto-sync for this unbound workspace to avoid pulling change-only commits into trunk-targeted work."
+            );
+            eprintln!(
+                "  Use a change-bound workspace instead: maw ws create --change {} <name>",
+                active_change.change_id
+            );
+            eprintln!(
+                "  If this workspace should stay trunk-only, continue without syncing and merge with --into default."
+            );
+        }
         return Ok(());
     }
 
@@ -453,11 +486,13 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
     let is_dirty = workspace_has_uncommitted_changes(&ws_path).unwrap_or(false);
     if is_dirty {
-        eprintln!(
-            "WARNING: Workspace '{name}' is behind the current epoch, but has uncommitted changes. \
-             Skipping auto-sync to preserve uncommitted work."
-        );
-        eprintln!("  Commit or stash changes, then run: maw ws sync {name}");
+        if claim_stale_warning_slot() {
+            eprintln!(
+                "WARNING: Workspace '{name}' is behind the current epoch, but has uncommitted changes. \
+                 Skipping auto-sync to preserve uncommitted work."
+            );
+            eprintln!("  Commit or stash changes, then run: maw ws sync {name}");
+        }
         return Ok(());
     }
 
@@ -471,4 +506,24 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     eprintln!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// bn-1abp: the stale-warning latch fires exactly once per process.
+    /// (No other unit test in this binary touches the latch; the
+    /// integration-level guarantee — one warning per `maw` invocation —
+    /// is covered in tests/sync.rs.)
+    #[test]
+    fn stale_warning_slot_claims_exactly_once() {
+        assert!(
+            super::claim_stale_warning_slot(),
+            "first claim should win the slot"
+        );
+        assert!(
+            !super::claim_stale_warning_slot(),
+            "second claim must lose the slot"
+        );
+        assert!(!super::claim_stale_warning_slot());
+    }
 }

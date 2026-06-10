@@ -137,7 +137,7 @@ pub fn diff(
     let diff_dir = if ws_path.exists() { &ws_path } else { &root };
 
     match format {
-        DiffFormat::Patch => print_patch_worktree(diff_dir, &base.rev, &pathspecs)?,
+        DiffFormat::Patch => print_patch_worktree(diff_dir, &base, workspace, &pathspecs)?,
         DiffFormat::Stat => print_stat_worktree(diff_dir, &base.rev, &pathspecs)?,
         DiffFormat::NameOnly | DiffFormat::NameStatus => {
             let mut entries = collect_diff_entries_worktree(diff_dir, &base.rev, &pathspecs)?;
@@ -219,8 +219,18 @@ fn print_stat_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> R
     Ok(())
 }
 
-/// Like `print_patch` but compares `base_rev` against the working tree.
-fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> Result<()> {
+/// Like `print_patch` but compares the base revision against the working tree.
+///
+/// When the diff is empty (and there are no untracked files), prints an
+/// explicit one-liner to stderr saying what was compared, so "no output"
+/// is never ambiguous (bn-1abp).
+fn print_patch_worktree(
+    ws_dir: &Path,
+    base: &ResolvedRev,
+    workspace: &str,
+    pathspecs: &[String],
+) -> Result<()> {
+    let base_rev = base.rev.as_str();
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     let mut diff_args = vec![
@@ -233,6 +243,7 @@ fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> 
         diff_args.extend(pathspecs.iter().cloned());
     }
 
+    let mut patch_was_empty = false;
     if is_tty {
         let status = Command::new("git")
             .args(&diff_args)
@@ -248,6 +259,7 @@ fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> 
     } else {
         diff_args.insert(1, "--color=never".to_string());
         let patch = git_stdout(ws_dir, &diff_args)?;
+        patch_was_empty = patch.trim().is_empty();
         print!("{patch}");
     }
 
@@ -266,6 +278,17 @@ fn print_patch_worktree(ws_dir: &Path, base_rev: &str, pathspecs: &[String]) -> 
                 println!("+{line}");
             }
         }
+    }
+
+    // bn-1abp: empty output is ambiguous ("nothing changed" vs "compared
+    // against the wrong thing"). Say what was compared, on stderr so the
+    // (empty) patch stream stays machine-clean.
+    if !is_tty && patch_was_empty && untracked.is_empty() {
+        let short_oid = base.oid.get(..12).unwrap_or(&base.oid);
+        eprintln!(
+            "No differences: workspace '{workspace}' worktree matches {} ({short_oid}).",
+            base.label
+        );
     }
 
     Ok(())
@@ -610,7 +633,13 @@ where
 
 fn parse_against(raw: Option<&str>) -> AgainstMode {
     let Some(raw) = raw else {
-        return AgainstMode::Default;
+        // bn-1abp: the documented semantics ("a workspace's changes vs the
+        // epoch", maw tldr) is the epoch. The old implicit default compared
+        // against the default workspace's recorded state ref, which can lag
+        // the epoch and silently mis-attribute other workspaces' merged work
+        // to the diff target — and made committed-but-unmerged work appear
+        // empty when that ref happened to already contain it.
+        return AgainstMode::Epoch;
     };
 
     let value = raw.trim();
@@ -762,8 +791,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_against_defaults_to_default() {
-        assert!(matches!(parse_against(None), AgainstMode::Default));
+    fn parse_against_defaults_to_epoch() {
+        // bn-1abp: no --against means "diff vs epoch" (the documented
+        // semantics); the default-workspace comparison stays available
+        // via an explicit `--against default`.
+        assert!(matches!(parse_against(None), AgainstMode::Epoch));
         assert!(matches!(
             parse_against(Some("default")),
             AgainstMode::Default

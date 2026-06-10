@@ -80,6 +80,13 @@ pub fn run(args: &ExecArgs) -> Result<()> {
         );
     }
 
+    // bn-1abp: if a `maw ws merge` auto-rebased this workspace since the
+    // last command ran here, surface the one-time notice (then consume it)
+    // so the agent knows files on disk may have changed underneath them.
+    if let Ok(root) = workspace::repo_root() {
+        workspace::print_auto_rebase_notice_if_any(&root, &args.workspace);
+    }
+
     if should_auto_sync(&args.cmd[0]) {
         workspace::auto_sync_if_stale(&args.workspace, &path)?;
     }

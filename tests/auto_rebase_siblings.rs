@@ -524,3 +524,148 @@ fn sibling_can_run_ws_sync_immediately_after_auto_rebase() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-1abp: one-time auto-rebase notice
+// ---------------------------------------------------------------------------
+
+fn notice_path(repo: &TestRepo, ws: &str) -> std::path::PathBuf {
+    repo.root()
+        .join(".manifold")
+        .join("artifacts")
+        .join("ws")
+        .join(ws)
+        .join("auto-rebase-notice.json")
+}
+
+/// A clean sibling rebase records a notice JSON; the next `maw exec` in
+/// that workspace prints it ONCE (then consumes it).
+#[test]
+fn auto_rebase_writes_notice_and_exec_prints_it_once() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "merger"]);
+    make_commit(
+        &repo,
+        "merger",
+        "shared.txt",
+        "merger update\n",
+        "merger: edit shared",
+    );
+    repo.maw_ok(&["ws", "create", "sib"]);
+    make_commit(
+        &repo,
+        "sib",
+        "sib_file.txt",
+        "sib change\n",
+        "sib: add file",
+    );
+
+    let epoch_before = epoch_current(&repo);
+    repo.maw_ok(&["ws", "merge", "merger", "--message", "feat: merge merger"]);
+    let epoch_after = epoch_current(&repo);
+
+    // (a) the notice artifact exists and carries the epochs + sources.
+    let path = notice_path(&repo, "sib");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("notice file missing at {}: {e}", path.display()));
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("notice is valid JSON");
+    assert_eq!(json["old_epoch"].as_str(), Some(epoch_before.as_str()));
+    assert_eq!(json["new_epoch"].as_str(), Some(epoch_after.as_str()));
+    assert_eq!(json["merge_sources"][0].as_str(), Some("merger"));
+    assert_eq!(json["replayed"].as_u64(), Some(1));
+    assert_eq!(json["conflicts"].as_u64(), Some(0));
+    assert_eq!(json["worktree_updated"].as_bool(), Some(true));
+
+    // (b) the next workspace-scoped command prints the note once...
+    let out = repo.maw_raw_exact(&["exec", "sib", "--", "git", "status", "--short"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("auto-rebased") && stderr.contains("merger"),
+        "first exec should print the auto-rebase notice, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Re-read") || stderr.contains("re-read"),
+        "notice should tell the agent to re-read open files: {stderr}"
+    );
+    assert!(!path.exists(), "notice must be consumed after printing");
+
+    // ...and only once.
+    let out2 = repo.maw_raw_exact(&["exec", "sib", "--", "git", "status", "--short"]);
+    assert!(out2.status.success());
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        !stderr2.contains("auto-rebased"),
+        "second exec must not repeat the notice, stderr: {stderr2}"
+    );
+}
+
+/// Skipped siblings (dirty) must NOT get a notice — their worktree was not
+/// touched.
+#[test]
+fn auto_rebase_skipped_dirty_sibling_gets_no_notice() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "merger"]);
+    make_commit(
+        &repo,
+        "merger",
+        "shared.txt",
+        "merger update\n",
+        "merger: edit shared",
+    );
+    repo.maw_ok(&["ws", "create", "sib-dirty"]);
+    repo.add_file("sib-dirty", "dirty.txt", "uncommitted\n");
+
+    repo.maw_ok(&["ws", "merge", "merger", "--message", "feat: merge merger"]);
+
+    assert!(
+        !notice_path(&repo, "sib-dirty").exists(),
+        "dirty sibling was skipped; no notice should exist"
+    );
+}
+
+/// A conflicted sibling rebase records conflicts > 0 in the notice and the
+/// printed note points at `maw ws resolve`.
+#[test]
+fn auto_rebase_conflict_notice_mentions_conflicts() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("shared.txt", "base\n")]);
+
+    repo.maw_ok(&["ws", "create", "merger"]);
+    make_commit(
+        &repo,
+        "merger",
+        "shared.txt",
+        "merger update\n",
+        "merger: edit shared",
+    );
+    repo.maw_ok(&["ws", "create", "sib-conflict"]);
+    make_commit(
+        &repo,
+        "sib-conflict",
+        "shared.txt",
+        "sib-conflict update\n",
+        "sib-conflict: edit shared",
+    );
+
+    repo.maw_ok(&["ws", "merge", "merger", "--message", "feat: merge merger"]);
+
+    let raw =
+        std::fs::read_to_string(notice_path(&repo, "sib-conflict")).expect("notice should exist");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert!(
+        json["conflicts"].as_u64().unwrap_or(0) > 0,
+        "conflict count should be recorded, got: {json}"
+    );
+
+    let out = repo.maw_raw_exact(&["exec", "sib-conflict", "--", "git", "status", "--short"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("conflict") && stderr.contains("maw ws resolve sib-conflict"),
+        "conflict notice should point at resolve, stderr: {stderr}"
+    );
+}

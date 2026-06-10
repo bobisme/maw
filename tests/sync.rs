@@ -938,3 +938,124 @@ fn sync_refuses_cross_target_update_for_unbound_workspace() {
         "expected explicit sync refusal message, got stdout: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-1abp: stale-epoch warning prints at most once per maw invocation
+// ---------------------------------------------------------------------------
+
+/// A stale workspace with committed work triggers the "behind the current
+/// epoch ... Skipping auto-sync" warning. It must appear EXACTLY once per
+/// maw invocation — including while running the remediation the warning
+/// itself recommends (`git add` / `git commit`).
+#[test]
+fn stale_warning_prints_at_most_once_per_invocation() {
+    let repo = TestRepo::new();
+
+    repo.maw_ok(&["ws", "create", "feature"]);
+    repo.add_file("feature", "work.txt", "committed work\n");
+    repo.git_in_workspace("feature", &["add", "-A"]);
+    repo.git_in_workspace("feature", &["commit", "-m", "feature: work"]);
+
+    // Advance the epoch so 'feature' is stale with commits ahead.
+    repo.add_file("default", "advance.txt", "epoch advance\n");
+    repo.advance_epoch("chore: advance epoch");
+
+    // Run the exact remediation sequence; count warnings per invocation.
+    for cmd in [
+        vec!["exec", "feature", "--", "git", "status", "--short"],
+        vec!["exec", "feature", "--", "git", "add", "-A"],
+        vec![
+            "exec",
+            "feature",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "wip",
+        ],
+    ] {
+        let out = repo.maw_raw_exact(&cmd);
+        assert!(
+            out.status.success(),
+            "maw {cmd:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let warning_count = stderr
+            .matches("WARNING: Workspace 'feature' is behind the current epoch")
+            .count();
+        assert!(
+            warning_count <= 1,
+            "stale warning must print at most once per invocation, got {warning_count} in:\n{stderr}"
+        );
+    }
+
+    // And the warning still fires (it is useful once): a fresh invocation
+    // on the still-stale workspace warns exactly once.
+    let out = repo.maw_raw_exact(&["exec", "feature", "--", "git", "status", "--short"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr
+            .matches("WARNING: Workspace 'feature' is behind the current epoch")
+            .count(),
+        1,
+        "warning should still fire once per fresh invocation:\n{stderr}"
+    );
+}
+
+/// bn-1abp: `maw ws create --from <rev>` honors the explicit source, but
+/// when that source differs from the current epoch the command must say so
+/// LOUDLY — later merges/syncs will rebase the workspace onto the epoch.
+#[test]
+fn create_from_diverged_source_prints_epoch_note() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base\n")]);
+
+    // Diverge refs/heads/main from the epoch: direct commit in default,
+    // advance main only (epoch ref stays behind).
+    repo.add_file("default", "direct.txt", "direct commit\n");
+    let ws_default = repo.workspace_path("default");
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&ws_default)
+        .status()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "direct: advance main"])
+        .current_dir(&ws_default)
+        .status()
+        .expect("git commit");
+    let new_main = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ws_default)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    std::process::Command::new("git")
+        .args(["update-ref", "refs/heads/main", &new_main])
+        .current_dir(repo.root())
+        .status()
+        .expect("update-ref");
+
+    let out = repo.maw_raw_exact(&["ws", "create", "gamma", "--from", "main"]);
+    assert!(
+        out.status.success(),
+        "create should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("differs from the current epoch") && stderr.contains("epoch-based"),
+        "expected loud epoch-divergence NOTE, stderr: {stderr}"
+    );
+
+    // The explicit source is still honored.
+    let gamma_head = repo.workspace_head("gamma");
+    assert_eq!(gamma_head, new_main, "--from main must be honored");
+}

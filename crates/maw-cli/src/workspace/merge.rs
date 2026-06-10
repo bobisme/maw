@@ -2380,7 +2380,7 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
             println!(
                 "WARNING: No merge conflicts detected, BUT the following workspace(s) \
                  have unresolved conflict markers committed into HEAD (probably from \
-                 a prior `maw ws sync --rebase`):"
+                 a prior `maw ws sync`):"
             );
             for (ws_name, marker_files) in &workspaces_with_markers {
                 println!("  {ws_name}:");
