@@ -1251,6 +1251,16 @@ fn promote_overlaps_to_conflicts(
                             &change.path,
                         ))
                     });
+                    // bn-heb8: detect whether the epoch's "deletion" was
+                    // actually a rename. A rename in the epoch appears as:
+                    //   old path → (Some(old_blob), None)   [deleted here]
+                    //   new path → (Some(old_blob), Some(new_blob))  [added there]
+                    // We perform exact-blob-match only (v1 scope): the new
+                    // path's OLD side must equal this path's ref_old (same
+                    // content before the rename). Content changed DURING the
+                    // rename is NOT matched.
+                    let rename_hint =
+                        detect_epoch_rename_target(epoch_delta, &change.path, ref_old.as_ref());
                     tree.clean.remove(&change.path);
                     tree.conflicts.insert(
                         change.path.clone(),
@@ -1260,6 +1270,7 @@ fn promote_overlaps_to_conflicts(
                             modifier,
                             deleter,
                             modified_content: ws_blob,
+                            rename_hint,
                         },
                     );
                     continue;
@@ -1392,6 +1403,7 @@ fn promote_overlaps_to_conflicts(
                         modifier,
                         deleter,
                         modified_content: epoch_new,
+                        rename_hint: None,
                     },
                 );
             }
@@ -1971,6 +1983,42 @@ fn sides_all_same(sides: &[ConflictSide]) -> bool {
     sides
         .first()
         .is_some_and(|first| sides.iter().all(|s| s.content == first.content))
+}
+
+/// Scan the epoch delta for a rename whose source had the same blob OID as
+/// `deleted_path`. If the epoch deleted `deleted_path` (`ref_old_blob`) and
+/// added another path with an OLD side equal to `ref_old_blob`, the deletion
+/// was actually a rename and this function returns the destination path.
+///
+/// Exact blob-match only (bn-heb8 v1 scope). A rename where the content also
+/// changed (`old_blob` ≠ `new_blob`) will not match; in that case `None` is
+/// returned so we do not annotate with a false rename hint.
+fn detect_epoch_rename_target(
+    epoch_delta: &EpochDelta,
+    deleted_path: &std::path::Path,
+    ref_old_blob: Option<&GitOid>,
+) -> Option<std::path::PathBuf> {
+    let old_blob = ref_old_blob?;
+    // A rename in the epoch delta produces two entries:
+    //   deleted_path → (Some(old_blob), None)    — the source was removed
+    //   new_path     → (Some(old_blob), Some(…)) — the content appeared here
+    // We're looking for a NEW path (ref_new is Some) whose OLD side matches
+    // the deleted path's old blob.
+    epoch_delta
+        .iter()
+        .find_map(|(candidate, (cand_old, cand_new))| {
+            if candidate == deleted_path {
+                return None; // same path, not a rename target
+            }
+            if cand_new.is_none() {
+                return None; // target was also deleted — not a rename destination
+            }
+            if cand_old.as_ref() == Some(old_blob) {
+                Some(candidate.clone())
+            } else {
+                None
+            }
+        })
 }
 
 /// Deterministic `FileId` seed used for merge-commit-induced conflicts.

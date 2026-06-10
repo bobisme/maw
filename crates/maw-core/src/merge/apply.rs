@@ -352,6 +352,7 @@ fn apply_one_to_conflict(
             modifier,
             deleter,
             modified_content,
+            rename_hint,
         } => handle_modify_delete(
             tree,
             path,
@@ -359,6 +360,7 @@ fn apply_one_to_conflict(
             modifier,
             deleter,
             modified_content,
+            rename_hint,
             &change,
             workspace,
         ),
@@ -508,6 +510,7 @@ fn handle_modify_delete(
     mut modifier: ConflictSide,
     deleter: ConflictSide,
     modified_content: GitOid,
+    rename_hint: Option<std::path::PathBuf>,
     change: &FileChange,
     _workspace: &str,
 ) -> Result<(), ApplyError> {
@@ -524,7 +527,8 @@ fn handle_modify_delete(
 
             // V1 SIMPLIFICATION: replace the modify side's content with the
             // unilateral blob. The deleter side is untouched — still a
-            // ModifyDelete conflict.
+            // ModifyDelete conflict. The rename_hint (if any) is preserved
+            // through the update.
             modifier.content = blob.clone();
             tree.conflicts.insert(
                 path.clone(),
@@ -534,6 +538,7 @@ fn handle_modify_delete(
                     modifier,
                     deleter,
                     modified_content: blob,
+                    rename_hint,
                 },
             );
             Ok(())
@@ -541,7 +546,14 @@ fn handle_modify_delete(
         ChangeKind::Deleted => {
             // V1 SEMANTICS: both sides now want the file gone — collapse
             // to clean absence.
-            let _ = (path, file_id, modifier, deleter, modified_content);
+            let _ = (
+                path,
+                file_id,
+                modifier,
+                deleter,
+                modified_content,
+                rename_hint,
+            );
             Ok(())
         }
     }
@@ -675,6 +687,7 @@ mod tests {
             modifier: side("alice", mod_content.clone()),
             deleter: side("bob", del_content),
             modified_content: mod_content,
+            rename_hint: None,
         }
     }
 

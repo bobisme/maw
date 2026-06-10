@@ -707,12 +707,18 @@ fn render_add_add_conflict(
 /// explicit `(deleted)` sentinel. Binary modifier content falls through to
 /// a binary-safe variant that keeps the marker structure but refuses to
 /// inline the bytes.
+///
+/// `rename_hint` — when the epoch's deletion was actually a rename (detected
+/// by [`super::super::workspace::sync::rebase::detect_epoch_rename_target`]),
+/// this carries the destination path so the stub can tell the user/agent where
+/// their edit needs to land (bn-heb8).
 fn render_modify_delete_conflict(
     repo: &dyn GitRepo,
     path: &Path,
     modifier: &ConflictSide,
     deleter: &ConflictSide,
     modified_content: &GitOid,
+    rename_hint: Option<&Path>,
 ) -> Result<Vec<u8>, MaterializeError> {
     let modifier_bytes = read_side_blob(repo, path, modified_content)?;
 
@@ -728,6 +734,24 @@ fn render_modify_delete_conflict(
     out.extend_from_slice(
         format!("# deleter:  {} @ {}\n", deleter.workspace, deleter.content).as_bytes(),
     );
+    // bn-heb8: when the epoch renamed the file, tell the user where to find
+    // the content and how to carry their edit forward.
+    if let Some(new_path) = rename_hint {
+        out.extend_from_slice(
+            format!(
+                "# note: deleted by rename — content now lives at {}\n",
+                new_path.display()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(
+            format!(
+                "# to carry your edit: apply your changes at {} instead\n",
+                new_path.display()
+            )
+            .as_bytes(),
+        );
+    }
     out.push(b'\n');
 
     out.extend_from_slice(marker_open(&modifier.workspace).as_bytes());
@@ -814,8 +838,16 @@ pub fn materialize(
                 modifier,
                 deleter,
                 modified_content,
+                rename_hint,
                 ..
-            } => render_modify_delete_conflict(repo, path, modifier, deleter, modified_content)?,
+            } => render_modify_delete_conflict(
+                repo,
+                path,
+                modifier,
+                deleter,
+                modified_content,
+                rename_hint.as_deref(),
+            )?,
             Conflict::DivergentRename { .. } => {
                 return Err(MaterializeError::UnsupportedDivergentRename { path: path.clone() });
             }
@@ -1524,6 +1556,7 @@ mod tests {
                 modifier: side("alice", modifier_oid.clone()),
                 deleter: side("bob", oid('b')),
                 modified_content: modifier_oid,
+                rename_hint: None,
             },
         );
         let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
@@ -1923,6 +1956,7 @@ mod tests {
                 modifier: side("alice", oid('e')),
                 deleter: side("bob", oid('f')),
                 modified_content: oid('e'),
+                rename_hint: None,
             },
         );
 

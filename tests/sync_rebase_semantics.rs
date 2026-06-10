@@ -1770,3 +1770,304 @@ fn bn566k_ws_delete_vs_epoch_modify_still_conflicts() {
         "deleter must be ws-deleter (regression guard), got {deleter_ws}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-heb8 — rename-aware modify_delete hints
+//
+// When the epoch RENAMES a file (git mv old → new via a merged sibling) and a
+// workspace edits the OLD path, the bn-566k fix surfaces a modify_delete
+// conflict.  bn-heb8 improves this by:
+//   (a) detecting the rename (epoch deleted old + added new with same blob)
+//   (b) recording rename_hint in the sidecar so the stub + resolve --list
+//       tell the user where the content went
+//   (c) printing a discarded-blob note when --keep epoch silently drops the ws edit
+// ---------------------------------------------------------------------------
+
+/// (a) + (b): epoch renames file (identical blob), ws edits old path.
+/// After rebase the sidecar must have `rename_hint` pointing at the new path,
+/// resolve --list must include "(renamed to ...)", and the stub must contain
+/// the rename note.
+#[test]
+fn bn_heb8_epoch_rename_produces_rename_hint_in_sidecar_and_list() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[
+        ("old.txt", "original content\n"),
+        ("anchor.txt", "unchanged\n"),
+    ]);
+
+    // ws-edit: modify old.txt (workspace edits the OLD path).
+    repo.maw_ok(&["ws", "create", "ws-edit"]);
+    repo.modify_file("ws-edit", "old.txt", "EDITED content\n");
+    commit_all(&repo, "ws-edit", "feat: edit old.txt");
+
+    // ws-rename: rename old.txt → new.txt via git mv (same blob, no content
+    // change), then merge into epoch.
+    repo.maw_ok(&["ws", "create", "ws-rename"]);
+    repo.git_in_workspace("ws-rename", &["mv", "old.txt", "new.txt"]);
+    commit_all(&repo, "ws-rename", "chore: rename old.txt to new.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-rename",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-rename: rename old.txt -> new.txt",
+    ]);
+
+    // old.txt must be absent from default, new.txt must be present.
+    assert!(
+        !repo.file_exists("default", "old.txt"),
+        "old.txt should be absent from default after epoch rename"
+    );
+    assert!(
+        repo.file_exists("default", "new.txt"),
+        "new.txt should be present in default after epoch rename"
+    );
+
+    // Rebase ws-edit onto the new epoch.
+    let _out = repo.maw_raw(&["ws", "sync", "ws-edit", "--rebase"]);
+
+    // The sidecar must exist and list old.txt as a modify_delete.
+    let sidecar = repo
+        .read_conflict_tree_sidecar("ws-edit")
+        .expect("conflict-tree.json must exist after epoch-rename vs ws-edit (bn-heb8)");
+
+    let entry = find_conflict_entry(&sidecar, "old.txt").unwrap_or_else(|| {
+        panic!(
+            "sidecar should list old.txt as conflicted (bn-heb8); got:\n{}",
+            serde_json::to_string_pretty(&sidecar).expect("operation should succeed")
+        )
+    });
+
+    let ty = entry
+        .get("type")
+        .and_then(|v| v.as_str())
+        .expect("conflict entry should be tagged");
+    assert_eq!(
+        ty, "modify_delete",
+        "epoch-rename vs ws-edit should produce modify_delete, got {ty}: {entry}"
+    );
+
+    // (a) rename_hint must be present and point at new.txt.
+    let hint = entry
+        .get("rename_hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "sidecar should carry rename_hint for epoch-rename case (bn-heb8); entry: {entry}"
+            )
+        });
+    assert_eq!(
+        hint, "new.txt",
+        "rename_hint should point at new.txt, got {hint}"
+    );
+
+    // (b) resolve --list output must include "(renamed to new.txt)".
+    let list_out = repo.maw_ok(&["ws", "resolve", "ws-edit", "--list"]);
+    assert!(
+        list_out.contains("renamed to new.txt") || list_out.contains("renamed to"),
+        "`maw ws resolve ws-edit --list` should mention the rename target (bn-heb8); got:\n{list_out}"
+    );
+
+    // The marker stub in the worktree must also contain the rename note.
+    let stub = repo.read_file("ws-edit", "old.txt").unwrap_or_else(|| {
+        panic!("old.txt stub should exist in ws-edit worktree after rebase (bn-heb8)")
+    });
+    assert!(
+        stub.contains("deleted by rename") || stub.contains("now lives at new.txt"),
+        "stub should contain rename note (bn-heb8); got:\n{stub}"
+    );
+}
+
+/// (c) --keep epoch on a `modify_delete` (rename case) must print the
+/// discarded-blob note naming the OID and suggest git cat-file.
+#[test]
+fn bn_heb8_keep_epoch_on_rename_prints_discarded_blob_note() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("old.txt", "original\n"), ("anchor.txt", "x\n")]);
+
+    repo.maw_ok(&["ws", "create", "ws-edit"]);
+    repo.modify_file("ws-edit", "old.txt", "EDITED\n");
+    commit_all(&repo, "ws-edit", "feat: edit old.txt");
+
+    repo.maw_ok(&["ws", "create", "ws-rename"]);
+    repo.git_in_workspace("ws-rename", &["mv", "old.txt", "new.txt"]);
+    commit_all(&repo, "ws-rename", "chore: rename old.txt to new.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-rename",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-rename: rename",
+    ]);
+
+    let _ = repo.maw_raw(&["ws", "sync", "ws-edit", "--rebase"]);
+
+    // --keep epoch: run and capture stderr.
+    let resolve_out = repo.maw_raw(&["ws", "resolve", "ws-edit", "--keep", "epoch"]);
+    let stderr = String::from_utf8_lossy(&resolve_out.stderr);
+    assert!(
+        resolve_out.status.success(),
+        "--keep epoch should succeed; stderr: {stderr}"
+    );
+    // Must print a note about the discarded edit.
+    assert!(
+        stderr.contains("discarded workspace edit") || stderr.contains("blob"),
+        "--keep epoch should print discarded-blob note (bn-heb8); stderr:\n{stderr}"
+    );
+    // Note should also mention the rename target.
+    assert!(
+        stderr.contains("new.txt"),
+        "--keep epoch discarded-blob note should mention rename target new.txt (bn-heb8); stderr:\n{stderr}"
+    );
+}
+
+/// (c) --keep epoch on a PLAIN delete (no rename) must also print the
+/// discarded-blob note (both rename and non-rename cases).
+#[test]
+fn bn_heb8_keep_epoch_on_plain_delete_prints_discarded_blob_note() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("gone.txt", "deleteme\n"), ("anchor.txt", "x\n")]);
+
+    // ws-edit modifies gone.txt.
+    repo.maw_ok(&["ws", "create", "ws-edit"]);
+    repo.modify_file("ws-edit", "gone.txt", "EDITED BEFORE DELETE\n");
+    commit_all(&repo, "ws-edit", "feat: edit gone.txt");
+
+    // Epoch deletes gone.txt via a plain deletion (no rename).
+    repo.maw_ok(&["ws", "create", "ws-deleter"]);
+    repo.delete_file("ws-deleter", "gone.txt");
+    commit_all(&repo, "ws-deleter", "chore: delete gone.txt");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-deleter",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-deleter: delete gone.txt",
+    ]);
+
+    let _ = repo.maw_raw(&["ws", "sync", "ws-edit", "--rebase"]);
+
+    let resolve_out = repo.maw_raw(&["ws", "resolve", "ws-edit", "--keep", "epoch"]);
+    let stderr = String::from_utf8_lossy(&resolve_out.stderr);
+    assert!(
+        resolve_out.status.success(),
+        "--keep epoch should succeed on plain delete; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("discarded workspace edit") || stderr.contains("blob"),
+        "--keep epoch should print discarded-blob note for plain delete (bn-heb8); stderr:\n{stderr}"
+    );
+    // Must NOT mention a rename target (it was a plain delete).
+    assert!(
+        !stderr.contains("renamed to") && !stderr.contains("epoch renamed"),
+        "--keep epoch on plain delete must NOT print rename note (bn-heb8 no-false-positives); stderr:\n{stderr}"
+    );
+}
+
+/// No false positives: epoch deletes one file and adds a DIFFERENT file with
+/// different content — must NOT produce a `rename_hint`.
+#[test]
+fn bn_heb8_no_rename_hint_when_blobs_differ() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("old.txt", "original content\n"), ("anchor.txt", "x\n")]);
+
+    // ws-edit modifies old.txt.
+    repo.maw_ok(&["ws", "create", "ws-edit"]);
+    repo.modify_file("ws-edit", "old.txt", "EDITED\n");
+    commit_all(&repo, "ws-edit", "feat: edit old.txt");
+
+    // Epoch deletes old.txt and adds new.txt with DIFFERENT content (not a
+    // pure rename — blob changed too).
+    repo.maw_ok(&["ws", "create", "ws-restructure"]);
+    repo.delete_file("ws-restructure", "old.txt");
+    // Add new.txt with different content (not old.txt's blob).
+    repo.add_file("ws-restructure", "new.txt", "totally different content\n");
+    commit_all(&repo, "ws-restructure", "chore: restructure files");
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "ws-restructure",
+        "--destroy",
+        "--no-auto-rebase",
+        "--message",
+        "merge ws-restructure",
+    ]);
+
+    let _ = repo.maw_raw(&["ws", "sync", "ws-edit", "--rebase"]);
+
+    let sidecar = repo
+        .read_conflict_tree_sidecar("ws-edit")
+        .expect("sidecar must exist");
+    let entry = find_conflict_entry(&sidecar, "old.txt")
+        .unwrap_or_else(|| panic!("old.txt should be conflicted; sidecar: {sidecar:?}"));
+
+    // rename_hint must be absent (blobs differ → not a pure rename).
+    let has_hint = entry.get("rename_hint").is_some();
+    assert!(
+        !has_hint,
+        "rename_hint must NOT be set when delete+add have different blobs (bn-heb8 no-false-positives); entry: {entry}"
+    );
+}
+
+/// Sidecar backward compat: old sidecars without `rename_hint` deserialize cleanly.
+#[test]
+fn bn_heb8_old_sidecar_without_rename_hint_parses() {
+    // Construct a minimal conflict-tree.json that looks like it was written by
+    // an older maw version (no rename_hint field in the modify_delete entry).
+    // serde(default) must fill it in as None.
+    let old_json = r#"{
+        "base_epoch": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "clean": {},
+        "conflicts": {
+            "src/old.rs": {
+                "type": "modify_delete",
+                "path": "src/old.rs",
+                "file_id": "00000000000000000000000000000042",
+                "modifier": {
+                    "workspace": "ws-edit",
+                    "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "timestamp": {
+                        "epoch_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        "workspace_id": "ws-edit",
+                        "seq": 1,
+                        "wall_clock_ms": 1700000000000
+                    }
+                },
+                "deleter": {
+                    "workspace": "epoch",
+                    "content": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "timestamp": {
+                        "epoch_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        "workspace_id": "ws-edit",
+                        "seq": 1,
+                        "wall_clock_ms": 1700000000000
+                    }
+                },
+                "modified_content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+        }
+    }"#;
+
+    let tree: maw_core::merge::types::ConflictTree =
+        serde_json::from_str(old_json).expect("old sidecar without rename_hint must parse cleanly");
+
+    // The conflict must have loaded with rename_hint == None.
+    let conflict = tree
+        .conflicts
+        .get(std::path::Path::new("src/old.rs"))
+        .expect("conflict should be present");
+    if let maw_core::model::conflict::Conflict::ModifyDelete { rename_hint, .. } = conflict {
+        assert!(
+            rename_hint.is_none(),
+            "rename_hint should be None for old sidecars; got {rename_hint:?}"
+        );
+    } else {
+        panic!("expected ModifyDelete, got {conflict:?}");
+    }
+}

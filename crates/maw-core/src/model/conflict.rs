@@ -817,6 +817,17 @@ pub enum Conflict {
         /// for convenience so resolvers can inspect it without dereferencing
         /// the side's content OID.
         modified_content: GitOid,
+
+        /// When the epoch's "deletion" was actually a rename (delete old path
+        /// and add new path with the same blob OID), this field carries the
+        /// destination path so the user/agent knows where their edit needs
+        /// to be applied. (bn-heb8)
+        ///
+        /// `None` for genuine deletions and for rename-detection misses.
+        /// Defaults to `None` and is omitted from sidecar JSON when unset so
+        /// sidecars written by older versions deserialize cleanly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rename_hint: Option<PathBuf>,
     },
 
     /// The same file was renamed to different destinations by different
@@ -1484,6 +1495,7 @@ mod tests {
             modifier: test_side("alice", 'a', 5),
             deleter: test_side("bob", 'b', 6),
             modified_content: test_oid('a'),
+            rename_hint: None,
         };
 
         assert_eq!(conflict.path(), &PathBuf::from("src/old.rs"));
@@ -1500,6 +1512,7 @@ mod tests {
             modifier: test_side("dev-1", 'a', 10),
             deleter: test_side("dev-2", 'b', 11),
             modified_content: test_oid('a'),
+            rename_hint: None,
         };
 
         let json = serde_json::to_string_pretty(&conflict).expect("operation should succeed");
@@ -1609,6 +1622,7 @@ mod tests {
             modifier: test_side("alice", 'a', 1),
             deleter: test_side("bob", 'b', 2),
             modified_content: test_oid('a'),
+            rename_hint: None,
         };
         let display = format!("{conflict}");
         assert!(display.contains("modify/delete"));
@@ -1656,6 +1670,7 @@ mod tests {
                 modifier: test_side("ws-1", 'a', 1),
                 deleter: test_side("ws-2", 'b', 1),
                 modified_content: test_oid('a'),
+                rename_hint: None,
             },
             Conflict::DivergentRename {
                 file_id: test_file_id(3),
@@ -1682,6 +1697,7 @@ mod tests {
             modifier: test_side("ws-1", 'a', 1),
             deleter: test_side("ws-2", 'b', 1),
             modified_content: test_oid('a'),
+            rename_hint: None,
         };
         let json = serde_json::to_string(&conflict).expect("operation should succeed");
         assert!(json.contains("\"modified_content\""));
@@ -1716,6 +1732,7 @@ mod tests {
                     modifier: test_side("ws-1", 'a', 1),
                     deleter: test_side("ws-2", 'b', 1),
                     modified_content: test_oid('a'),
+                    rename_hint: None,
                 },
                 "modify_delete",
             ),

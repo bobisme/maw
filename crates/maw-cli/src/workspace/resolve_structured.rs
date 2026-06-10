@@ -203,6 +203,18 @@ pub fn list_conflicts(
                     );
                 }
             }
+            // bn-heb8: when a ModifyDelete was caused by an epoch rename,
+            // append the rename target so the user knows where the content went.
+            Conflict::ModifyDelete {
+                rename_hint: Some(new_path),
+                ..
+            } => {
+                println!(
+                    "  {}  [{shape}] sides=[{sides_desc}] (renamed to {})",
+                    path.display(),
+                    new_path.display()
+                );
+            }
             _ => {
                 println!("  {}  [{shape}] sides=[{sides_desc}]", path.display());
             }
@@ -949,23 +961,49 @@ fn apply_decision(
         }
     }
 
-    match pick_single_side_oid(conflict, target)? {
-        Some(oid) => {
-            let git_oid: git::GitOid = oid
-                .as_str()
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid blob oid {oid}: {e}"))?;
-            let bytes = repo
-                .read_blob(git_oid)
-                .map_err(|e| anyhow::anyhow!("read_blob({oid}) failed: {e}"))?;
-            Ok(PathOutcome::Wrote {
-                bytes,
-                mode: mode_hint,
-                kind: ResolveKind::BlobReplace,
-                sanity_failure: None,
-            })
+    if let Some(oid) = pick_single_side_oid(conflict, target)? {
+        let git_oid: git::GitOid = oid
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid blob oid {oid}: {e}"))?;
+        let bytes = repo
+            .read_blob(git_oid)
+            .map_err(|e| anyhow::anyhow!("read_blob({oid}) failed: {e}"))?;
+        Ok(PathOutcome::Wrote {
+            bytes,
+            mode: mode_hint,
+            kind: ResolveKind::BlobReplace,
+            sanity_failure: None,
+        })
+    } else {
+        // bn-heb8: when --keep epoch on a modify/delete discards the
+        // workspace's edit, print a one-liner so the edit is recoverable
+        // without git archaeology. This fires for both rename and plain
+        // delete cases.
+        if let Conflict::ModifyDelete {
+            modifier,
+            rename_hint,
+            ..
+        } = conflict
+        {
+            let oid = &modifier.content;
+            if let Some(new_path) = rename_hint {
+                eprintln!(
+                    "note: discarded workspace edit at {} \
+                     (blob {oid} — recover with: git cat-file blob {oid})\n\
+                     note: epoch renamed this file to {}; apply your edit there",
+                    rel_path.display(),
+                    new_path.display(),
+                );
+            } else {
+                eprintln!(
+                    "note: discarded workspace edit at {} \
+                     (blob {oid} — recover with: git cat-file blob {oid})",
+                    rel_path.display(),
+                );
+            }
         }
-        None => Ok(PathOutcome::Deleted),
+        Ok(PathOutcome::Deleted)
     }
 }
 
@@ -1650,6 +1688,7 @@ mod tests {
             modifier: side("alice", 'a'),
             deleter: side("bob", 'b'),
             modified_content: oid('a'),
+            rename_hint: None,
         };
         let mod_side = pick_single_side_oid(&c, "alice").expect("operation should succeed");
         assert_eq!(mod_side, Some(oid('a')));
@@ -2221,6 +2260,7 @@ mod tests {
                 ord("ws-mod-del"),
             ),
             modified_content: modifier_oid,
+            rename_hint: None,
         };
         std::fs::create_dir_all(ws_path.join("dir")).expect("operation should succeed");
         std::fs::write(ws_path.join(&rel), b"placeholder").expect("operation should succeed");

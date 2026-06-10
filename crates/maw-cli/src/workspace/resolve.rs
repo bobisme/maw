@@ -301,6 +301,7 @@ fn try_reconstruct_sidecar_from_placeholders(
                     modifier,
                     deleter,
                     modified_content,
+                    rename_hint: None, // legacy reconstruction path; no rename context available
                 },
             );
             file_id_counter += 1;
