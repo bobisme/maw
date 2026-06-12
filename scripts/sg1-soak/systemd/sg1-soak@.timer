@@ -1,0 +1,11 @@
+[Unit]
+Description=SG1 DST soak worker %i — refire 2 min after each slot finishes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=30
+Unit=sg1-soak@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=SG1 DST soak accrual slot (worker %i)
+# Local replacement for the GitHub Actions dst-soak.yml cron (bn-2yzz).
+# Install: copy to ~/.config/systemd/user/ — see scripts/sg1-soak/README.md.
+
+[Service]
+Type=oneshot
+ExecStart=%h/src/maw/scripts/sg1-soak/slot.sh
+# Yield CPU and disk to foreground compiles (slot.sh also self-applies these):
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=3600

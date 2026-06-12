@@ -17,9 +17,14 @@ name: SG1 DST Nightly Soak
 # Cron: 02:00 UTC daily. Manual dispatch supported.
 
 on:
-  schedule:
-    # Daily at 02:00 UTC. Adjust if it collides with other long-running CI.
-    - cron: "0 2 * * *"
+  # DISABLED 2026-06-12 (bn-2yzz): on GitHub-hosted ubuntu-latest this job hit
+  # the 180-min timeout every night, was CANCELLED, uploaded nothing, and
+  # accrued ZERO op-steps — while burning free Actions minutes. SG1 accrual now
+  # runs as a local systemd-timer "cron" on the dev box; see
+  # scripts/sg1-soak/README.md. Re-enable here only if moved to a self-hosted
+  # runner with a proper internal wall cap + a persistent cumulative ledger.
+  #   schedule:
+  #     - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       seeds:
