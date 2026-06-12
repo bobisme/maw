@@ -129,6 +129,7 @@ pub fn check(name: &str) -> Result<(), String> {
 #[cfg(feature = "failpoints")]
 pub const KNOWN_FAILPOINTS: &[&str] = &[
     "FP_AUTO_REBASE_BEFORE_REPLAY",
+    "FP_AUTO_SYNC_BEFORE_CHECKOUT",
     "FP_BUILD_AFTER_MERGE_COMPUTE",
     "FP_BUILD_AFTER_WORKTREE_ADD",
     "FP_BUILD_BEFORE_MERGE_COMPUTE",

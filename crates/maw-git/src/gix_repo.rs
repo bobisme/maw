@@ -469,6 +469,13 @@ impl GitRepo for GixRepo {
     }
 
     // === HEAD ===
+    fn head_is_detached(&self) -> Result<bool, GitError> {
+        let head = self.repo.head().map_err(|e| GitError::BackendError {
+            message: format!("read HEAD: {e}"),
+        })?;
+        Ok(head.is_detached())
+    }
+
     fn set_head(&self, oid: GitOid) -> Result<(), GitError> {
         crate::checkout_impl::set_head(self, oid)
     }

@@ -635,6 +635,19 @@ pub trait GitRepo {
     // HEAD manipulation
     // -----------------------------------------------------------------------
 
+    /// Returns `true` if HEAD is in detached state (not pointing at a named
+    /// branch reference).
+    ///
+    /// In normal maw operation all workspaces run in detached-HEAD mode.
+    /// Change-branch workspaces (created with `--change`) may have a branch
+    /// ref for HEAD; the ancestor-refusal pre-flight in `sync_worktree_to_epoch`
+    /// skips non-detached workspaces because the branch ref protects the
+    /// commits from being orphaned by `git checkout --detach <epoch>`.
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the HEAD reference cannot be read.
+    fn head_is_detached(&self) -> Result<bool, GitError>;
+
     /// Set HEAD to point directly at `oid` (detached HEAD).
     ///
     /// Writes a detached-HEAD reference to the current working repository

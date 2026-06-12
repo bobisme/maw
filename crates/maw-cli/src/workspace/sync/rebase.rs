@@ -383,13 +383,17 @@ pub(super) fn rebase_workspace_run(
                         // chatty `  ✓ <ws> - synced ...` line doesn't leak
                         // into the merge summary (regression from bn-103k
                         // flipping mutate_worktree to true).
+                        // No CAS guard (None): we already hold the workspace
+                        // lock and re-checked dirty state above (bn-103k). The
+                        // lock prevents concurrent maw processes; the dirty
+                        // re-check is the guard we need here.
                         let sync_res = if opts.print {
-                            sync_worktree_to_epoch(root, ws_name, new_epoch)
+                            sync_worktree_to_epoch(root, ws_name, new_epoch, None)
                         } else {
                             sync_worktree_to_epoch_quiet(root, ws_name, new_epoch)
                         };
                         match sync_res {
-                            Ok(()) => worktree_updated = true,
+                            Ok(_) => worktree_updated = true,
                             Err(e) => {
                                 tracing::warn!(
                                     workspace = %ws_name,
@@ -428,8 +432,11 @@ pub(super) fn rebase_workspace_run(
                     }
                 }
             } else {
+                // No CAS guard (None): caller holds the lock; this is a
+                // direct `maw ws sync --rebase` invocation, not an exec
+                // pre-hook racing against concurrent commits.
                 if opts.print {
-                    sync_worktree_to_epoch(root, ws_name, new_epoch)?;
+                    sync_worktree_to_epoch(root, ws_name, new_epoch, None)?;
                 } else {
                     sync_worktree_to_epoch_quiet(root, ws_name, new_epoch)?;
                 }

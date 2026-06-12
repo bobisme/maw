@@ -18,7 +18,7 @@ use maw_core::refs as manifold_refs;
 use super::{MawConfig, get_backend, repo_root};
 
 use checks::{
-    committed_ahead_of_epoch, is_default_workspace, sync_worktree_to_epoch,
+    SyncOutcome, committed_ahead_of_epoch, is_default_workspace, sync_worktree_to_epoch,
     workspace_has_uncommitted_changes, workspace_name_from_cwd,
 };
 use cross_target::cross_target_sync_risk;
@@ -212,7 +212,10 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
 
     // In the git worktree model, "syncing" means updating the worktree's
     // HEAD to point to the current epoch via detached checkout.
-    sync_worktree_to_epoch(&root, &workspace_name, current_epoch.as_str())?;
+    // No CAS guard needed here: `maw ws sync` is user-initiated and the
+    // ancestor-refusal pre-flight in sync_worktree_to_epoch_inner is the
+    // relevant safety check for this path.
+    sync_worktree_to_epoch(&root, &workspace_name, current_epoch.as_str(), None)?;
 
     println!();
     println!("Workspace synced successfully.");
@@ -326,8 +329,8 @@ fn sync_all(no_rebase: bool) -> Result<()> {
                 Err(e) => errors.push(format!("{name}: {e}")),
             }
         } else {
-            match sync_worktree_to_epoch(&root, name, current_epoch.as_str()) {
-                Ok(()) => synced += 1,
+            match sync_worktree_to_epoch(&root, name, current_epoch.as_str(), None) {
+                Ok(_) => synced += 1,
                 Err(e) => errors.push(format!("{name}: {e}")),
             }
         }
@@ -416,14 +419,44 @@ fn claim_stale_warning_slot() -> bool {
 
 /// Auto-sync a stale workspace before running a command.
 /// In the git worktree model, this updates the worktree HEAD to the current epoch.
-/// Returns Ok(()) whether or not it was stale (idempotent).
+/// Returns `Ok(())` whether or not it was stale (idempotent).
 ///
 /// The stale-workspace WARNING blocks are emitted at most once per maw
 /// process (bn-1abp) — repeated calls stay silent but still skip the sync.
 ///
+/// # Concurrency (bn-29z8 Defect B)
+///
+/// This function runs as a pre-hook for every `maw exec <ws> -- git ...`
+/// invocation. Worker agents batch parallel tool calls, so multiple `git add` /
+/// `git commit` commands can be in-flight concurrently. The TOCTOU hazard:
+///
+/// - `is_stale` → true
+/// - `committed_ahead_of_epoch` → 0  (captures HEAD = A)
+/// - concurrent `git commit` lands; HEAD moves to B
+/// - dirty check → clean  (HEAD = B, index = B)
+/// - `sync_worktree_to_epoch` → checkout epoch  (B orphaned)
+///
+/// Fix: acquire the workspace rebase lock (try-lock only — never block the
+/// user's command) BEFORE the ahead-check, capture HEAD under the lock, and
+/// pass it as `expected_head_hex` to `sync_worktree_to_epoch`. The CAS check
+/// inside that function re-reads HEAD immediately before the checkout and aborts
+/// the sync if it moved, preserving the concurrent commit.
+///
+/// If the lock is already held (another maw process is rebasing this workspace),
+/// skip the auto-sync — running the command against a stale workspace is safe.
+///
+/// Defect C (design): exec auto-sync continues to MUTATE (move HEAD). It
+/// already prints what it does ("auto-syncing..."). The alternative — demoting
+/// it to a notice — would break the common agent pattern of committing in a
+/// stale workspace, so we keep mutation but make it race-safe with the lock+CAS.
+///
 /// # Errors
 ///
 /// Returns an error if stale workspace synchronization fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "bn-29z8: the lock+CAS guard adds necessary sequential steps; splitting would obscure the invariant"
+)]
 pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
     if is_default_workspace(name) {
         return Ok(());
@@ -453,15 +486,45 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         return Ok(());
     };
 
+    // bn-29z8 Defect B: acquire the per-workspace rebase lock BEFORE reading
+    // HEAD and performing the ahead-check. Try-lock only — if another process
+    // holds the lock, skip the auto-sync rather than blocking the user's command.
+    let ws_path =
+        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
+
+    let lock = match lock::WorkspaceRebaseLock::try_acquire(&root, name) {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            // Another maw process is rebasing this workspace. Skip auto-sync
+            // — the command runs against the current (possibly stale) HEAD.
+            // This is safe: the rebase will complete and the next invocation
+            // will see the updated state.
+            eprintln!(
+                "note: auto-sync for workspace '{name}' skipped (workspace lock held by another process)"
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            // Lock infrastructure failure — skip auto-sync rather than fail
+            // the user's command.
+            tracing::warn!(
+                workspace = %name,
+                error = %e,
+                "auto_sync_if_stale: failed to acquire workspace lock; skipping auto-sync"
+            );
+            return Ok(());
+        }
+    };
+
+    // Under the lock: perform all checks and capture HEAD atomically.
     // Safety: never auto-sync over committed work. When epoch advances laterally
     // (another workspace merged while this one has commits), the workspace is
     // stale AND has diverged commits. Syncing would wipe those commits.
     // The lead agent must merge this workspace first.
     // NOTE: Compare against base epoch, not current — see bn-18dj.
-    let ws_path =
-        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
     match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
         None => {
+            drop(lock);
             if claim_stale_warning_slot() {
                 eprintln!(
                     "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state), \
@@ -474,6 +537,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
             return Ok(());
         }
         Some(ahead) if ahead > 0 => {
+            drop(lock);
             if claim_stale_warning_slot() {
                 eprintln!(
                     "WARNING: Workspace '{name}' is behind the current epoch (another merge advanced repository state since \
@@ -495,6 +559,7 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         ws_status.base_epoch.as_str(),
         current_epoch.as_str(),
     )? {
+        drop(lock);
         if claim_stale_warning_slot() {
             eprintln!(
                 "WARNING: Workspace '{name}' is behind current epoch, but epoch tracks active change '{}' ({}) not yet on trunk.",
@@ -516,10 +581,9 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
 
     // Safety: don't auto-sync over uncommitted changes — warn and let the
     // command run against the stale workspace instead of blocking it entirely.
-    let ws_path =
-        maw_core::model::layout::LayoutFlavor::detect_with_env(&root).workspace_path(&root, name);
     let is_dirty = workspace_has_uncommitted_changes(&ws_path).unwrap_or(false);
     if is_dirty {
+        drop(lock);
         if claim_stale_warning_slot() {
             eprintln!(
                 "WARNING: Workspace '{name}' is behind the current epoch, but has uncommitted changes. \
@@ -530,14 +594,49 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    // bn-29z8 Defect B (CAS): capture HEAD OID NOW, under the lock, AFTER all
+    // the skip checks passed. This is the "expected" value for the CAS in
+    // sync_worktree_to_epoch_inner. If a concurrent git commit lands between
+    // here and the checkout (i.e. after we release the lock), the CAS detects
+    // the move and skips the sync.
+    //
+    // Note: the lock guards against concurrent MAW processes; we cannot hold
+    // the lock across the git subprocess (that would deadlock sibling auto-
+    // rebase). The CAS provides the final safety net for the small window
+    // between lock release and the actual checkout syscall.
+    let expected_head_hex: Option<String> = {
+        use maw_git::GitRepo as _;
+        maw_git::GixRepo::open(&ws_path)
+            .ok()
+            .and_then(|repo| repo.rev_parse_opt("HEAD").ok().flatten())
+            .map(|oid| format!("{oid}"))
+    };
+
+    // Release the lock before the checkout. The CAS guard in
+    // sync_worktree_to_epoch_inner provides the remaining safety.
+    drop(lock);
+
     eprintln!(
         "Workspace '{name}' is behind the current epoch \u{2014} auto-syncing before running command..."
     );
 
-    sync_worktree_to_epoch(&root, name, current_epoch.as_str())?;
+    let outcome = sync_worktree_to_epoch(
+        &root,
+        name,
+        current_epoch.as_str(),
+        expected_head_hex.as_deref(),
+    )?;
 
-    eprintln!("Workspace '{name}' synced. Proceeding with command.");
-    eprintln!();
+    match outcome {
+        SyncOutcome::Synced => {
+            eprintln!("Workspace '{name}' synced. Proceeding with command.");
+            eprintln!();
+        }
+        SyncOutcome::SkippedHeadMoved => {
+            // Already printed a "note: skipped" line inside sync_worktree_to_epoch.
+            // The command proceeds against the now-current HEAD.
+        }
+    }
 
     Ok(())
 }
