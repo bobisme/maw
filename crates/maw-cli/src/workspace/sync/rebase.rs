@@ -225,7 +225,7 @@ impl Default for RebaseRunOptions {
 ///
 /// Thin wrapper preserving the `pub ws sync --rebase` user-visible output;
 /// real work happens in [`rebase_workspace_run`].
-pub(super) fn rebase_workspace(
+pub fn rebase_workspace(
     root: &Path,
     ws_name: &str,
     old_epoch: &str,

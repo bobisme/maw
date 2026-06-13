@@ -1,9 +1,9 @@
 pub(crate) mod auto_rebase;
-mod checks;
+pub(crate) mod checks; // pub(crate): advance.rs uses committed_ahead_of_epoch (bn-8flz)
 mod cross_target;
 mod lock;
 pub(crate) mod notice;
-pub(crate) mod rebase;
+pub(crate) mod rebase; // pub(crate): advance.rs uses rebase_workspace (bn-8flz)
 pub(crate) mod sanity;
 
 use std::path::Path;
@@ -27,6 +27,12 @@ use rebase::rebase_workspace;
 pub use rebase::{
     RebaseConflict, RebaseConflicts, RebaseOutcome, delete_rebase_conflicts, read_rebase_conflicts,
 };
+
+// bn-8flz: rebase_workspace and committed_ahead_of_epoch are now pub(crate)
+// (promoted from pub(super)) so advance.rs can access them via
+// super::sync::rebase::rebase_workspace and super::sync::checks::committed_ahead_of_epoch
+// respectively, without needing re-exports here.
+// See crates/maw-cli/src/workspace/advance.rs.
 
 /// Verify recorded conflict metadata against reality via the shared
 /// effective-conflict-state helper and print [`STALE_CLEAR_NOTICE`] when a

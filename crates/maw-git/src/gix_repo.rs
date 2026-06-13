@@ -480,3 +480,57 @@ impl GitRepo for GixRepo {
         crate::checkout_impl::set_head(self, oid)
     }
 }
+
+impl GixRepo {
+    // --- Convenience compound operations ---
+
+    /// Detach HEAD at `oid` and update the worktree to match.
+    ///
+    /// Equivalent to `git checkout --detach <oid>` but fully native:
+    /// `checkout_tree` materialises the commit's tree into `workdir`, then
+    /// `set_head` writes the detached HEAD (+ reflog entry, bn-20sa).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if either step fails. If `checkout_tree` fails,
+    /// `set_head` is NOT called — HEAD and worktree are left unchanged.
+    pub fn checkout_detach(&self, oid: GitOid, workdir: &Path) -> Result<(), GitError> {
+        crate::checkout_impl::checkout_detach(self, oid, workdir)
+    }
+
+    /// Point HEAD at `<branch>` and update the worktree to match.
+    ///
+    /// Equivalent to `git checkout <branch>` but fully native:
+    /// `checkout_tree` materialises `oid`'s tree into `workdir`, then
+    /// `set_head_to_branch` writes `ref: refs/heads/<branch>` to HEAD
+    /// atomically (+ reflog entry, bn-20sa).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if either step fails. If `checkout_tree` fails,
+    /// HEAD is NOT written — it stays at its previous value.
+    pub fn checkout_to_branch(
+        &self,
+        oid: GitOid,
+        workdir: &Path,
+        branch: &str,
+    ) -> Result<(), GitError> {
+        crate::checkout_impl::checkout_to_branch(self, oid, workdir, branch)
+    }
+
+    /// Force-checkout: materialize `oid`'s tree, clobbering tracked
+    /// modifications, then set detached HEAD.
+    ///
+    /// Equivalent to `git checkout --force <oid>`. The worktree is ALWAYS
+    /// updated — use only on rollback / force-restore paths where the intent
+    /// is to discard the current working tree. Tracked modifications are
+    /// overwritten; untracked files are preserved (bn-29x0 semantics of
+    /// `checkout_tree`).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if either `checkout_tree` or `set_head` fails.
+    pub fn checkout_force(&self, oid: GitOid, workdir: &Path) -> Result<(), GitError> {
+        // checkout_tree uses overwrite_existing = true, matching --force semantics.
+        crate::checkout_impl::checkout_tree(self, oid, workdir)?;
+        crate::checkout_impl::set_head(self, oid)?;
+        Ok(())
+    }
+}

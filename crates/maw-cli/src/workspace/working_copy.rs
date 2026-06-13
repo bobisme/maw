@@ -2,9 +2,10 @@
 //!
 //! Three layers:
 //!
-//! 1. **Legacy stash-based helpers** (`stash_changes`, `checkout_epoch`,
+//! 1. **Legacy stash-based helpers** (`stash_changes`,
 //!    `pop_stash_and_detect_conflicts`, `detect_conflicts_in_worktree`) — kept
 //!    for backward compatibility but deprecated in favor of the snapshot layer.
+//!    (`checkout_epoch` was removed in bn-8flz — it was dead/unreferenced code.)
 //!
 //! 2. **Snapshot-based composable helpers** (`snapshot_working_copy`,
 //!    `checkout_to`, `replay_snapshot`, `cleanup_snapshot`) — the preferred
@@ -21,7 +22,8 @@
 //! 1. CHECK — `git status --porcelain`. If clean, skip snapshot (fast path).
 //! 2. SNAPSHOT — `git add -A`, `git stash create`, pin to
 //!    `refs/manifold/snapshot/<workspace>`, `git reset`.
-//! 3. CHECKOUT — `git checkout <branch>` (clean tree, no --force needed).
+//! 3. CHECKOUT — native `checkout_to()` (clean tree; uses `checkout_tree +
+//!    set_head/set_head_to_branch`, no shell-out). (bn-8flz)
 //! 4. REPLAY — `git stash apply <oid>`. Conflicts become markers (working-copy-preserving).
 //! 5. CLEANUP — delete snapshot ref (only if replay was clean).
 //!
@@ -334,26 +336,9 @@ pub fn stash_changes(ws_path: &Path) -> Result<bool> {
     Ok(had_changes)
 }
 
-/// Checkout the workspace HEAD to a specific epoch OID (detached).
-#[allow(dead_code)]
-// TODO(gix): checkout_tree() does not update HEAD, and write_ref("HEAD")
-// doesn't reliably create a detached HEAD in linked worktrees. Keep
-// `git checkout --detach` until gix gains proper worktree HEAD support.
-pub fn checkout_epoch(ws_path: &Path, epoch_oid: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["checkout", "--detach", epoch_oid])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git checkout --detach")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git checkout --detach {epoch_oid} failed: {}",
-            stderr.trim()
-        );
-    }
-    Ok(())
-}
+// checkout_epoch was removed (bn-8flz): it was a dead function (only
+// referenced in the module doc comment above, never called from live code).
+// Replaced by the native checkout_detach primitive in maw-git.
 
 /// Pop the stash and return a list of conflict entries (if any).
 ///
@@ -602,37 +587,37 @@ pub fn snapshot_working_copy(
     }))
 }
 
-/// Checkout a workspace to a target commit or branch.
+/// Checkout a workspace to a target commit or branch (native, no shell-out).
 ///
-/// If `branch_name` is `Some`, checks out the named branch (attaching HEAD).
-/// If `branch_name` is `None`, performs a detached checkout to the target OID.
+/// If `branch_name` is `Some`, attaches HEAD to the named branch.
+/// If `branch_name` is `None`, performs a detached checkout to `target`.
+///
+/// Uses `maw_git::GixRepo::checkout_to_branch` (branch attachment) or
+/// `checkout_detach` (detached) — both compose `checkout_tree + set_head*`
+/// natively, writing a reflog entry (bn-20sa).
 ///
 /// # Precondition
 ///
 /// The working tree MUST be clean before calling this function — either
 /// because there were no changes, or because [`snapshot_working_copy()`]
-/// already captured and cleaned the dirty state. This function does NOT
-/// use `--force`; a dirty tree will cause `git checkout` to fail, which is
-/// the correct behavior (it means the snapshot step was skipped or broken).
-// TODO(gix): replace with GitRepo trait method when `git checkout` is supported.
+/// already captured and cleaned the dirty state.
 pub fn checkout_to(ws_path: &Path, target: &str, branch_name: Option<&str>) -> Result<()> {
-    let checkout_target = branch_name.unwrap_or(target);
-    let output = Command::new("git")
-        .args(if branch_name.is_some() {
-            vec!["checkout", checkout_target]
-        } else {
-            vec!["checkout", "--detach", checkout_target]
-        })
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git checkout")?;
+    let repo = maw_git::GixRepo::open(ws_path)
+        .with_context(|| format!("failed to open repo at {}", ws_path.display()))?;
+    let oid = repo
+        .rev_parse(target)
+        .with_context(|| format!("failed to resolve '{target}'"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout {} failed: {}", checkout_target, stderr.trim());
-    }
-
-    Ok(())
+    branch_name.map_or_else(
+        || {
+            repo.checkout_detach(oid, ws_path)
+                .with_context(|| format!("detached checkout to '{target}' failed"))
+        },
+        |branch| {
+            repo.checkout_to_branch(oid, ws_path, branch)
+                .with_context(|| format!("checkout to branch '{branch}' failed"))
+        },
+    )
 }
 
 /// Replay a snapshot onto the current working tree.
@@ -1512,21 +1497,29 @@ fn resolve_head_str(ws_path: &Path) -> Result<String> {
     Ok(oid.to_string())
 }
 
-/// Run `git checkout --force <ref>`.
-// TODO(gix): replace with GitRepo trait method when `git checkout --force` is supported.
+/// Force-checkout a workspace to `target` OID, clobbering tracked modifications.
+///
+/// Native replacement for `git checkout --force <target>` (bn-8flz).
+/// Uses `GixRepo::checkout_force` (`checkout_tree` with `overwrite_existing=true`)
+/// plus `set_head` (detached, reflog entry).
+///
+/// Tracked modifications are overwritten;
+/// untracked files are preserved (bn-29x0 semantics).
+///
+/// Only used on rollback / force-restore paths where discarding the current
+/// working tree is intentional.
 fn git_checkout_force(ws_path: &Path, target: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["checkout", "--force", target])
-        .current_dir(ws_path)
-        .output()
-        .context("failed to run git checkout --force")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout --force failed: {}", stderr.trim());
-    }
-
-    Ok(())
+    let repo = maw_git::GixRepo::open(ws_path).with_context(|| {
+        format!(
+            "failed to open repo for force-checkout at {}",
+            ws_path.display()
+        )
+    })?;
+    let oid = repo
+        .rev_parse(target)
+        .with_context(|| format!("failed to resolve '{target}' for force-checkout"))?;
+    repo.checkout_force(oid, ws_path)
+        .with_context(|| format!("force-checkout to '{target}' failed"))
 }
 
 /// Apply a patch file via `git apply --3way`.

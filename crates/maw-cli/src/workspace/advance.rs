@@ -2,17 +2,26 @@
 //!
 //! Persistent workspaces can survive across epoch advances. When the mainline
 //! epoch advances, a persistent workspace becomes stale. `maw ws advance` rebases
-//! the workspace's uncommitted changes onto the new epoch:
+//! the workspace's changes (BOTH committed AND uncommitted) onto the new epoch.
+//!
+//! ## Algorithm (bn-8flz — orphan-safe choke-point)
 //!
 //! 1. Check that the workspace is persistent (mode = persistent).
-//! 2. Get the workspace's current HEAD (its base epoch).
+//! 2. Get the workspace's current base epoch from `refs/manifold/epoch/ws/<name>`.
 //! 3. Get the current epoch from `refs/manifold/epoch/current`.
 //! 4. If already up-to-date, exit early.
-//! 5. Snapshot uncommitted changes (stash create + pinned ref).
-//! 6. Checkout the new epoch (detached, tree is clean after snapshot).
-//! 7. Replay the snapshot onto the new epoch.
-//! 8. Clean up the snapshot ref (if replay was clean).
-//! 9. Report conflicts if any (working-copy-preserving — left as markers).
+//! 5. Detect committed-ahead work: count commits in `base_epoch..HEAD`.
+//!    - If N > 0: route through `rebase_workspace_run` (the guarded sync replay
+//!      path that also handles uncommitted changes via snapshot/replay). This is
+//!      the same path `maw ws sync` uses and is guarded by the bn-20sa
+//!      never-abandon guard + oplog.
+//!    - If N == 0: snapshot uncommitted changes, native `checkout_detach` to
+//!      the new epoch (fast-forward), replay snapshot. No orphan risk here.
+//! 6. Update the per-workspace epoch ref.
+//! 7. Report conflicts if any (working-copy-preserving — left as markers).
+//!
+//! The fix closes the bn-8flz orphan bug: previously, step 5 was missing
+//! entirely — `checkout_to(new_epoch)` ran unconditionally over committed work.
 
 use std::path::Path;
 
@@ -21,11 +30,12 @@ use maw_git::GitRepo as _;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
-use maw_core::model::types::WorkspaceMode;
+use maw_core::model::types::{BaseEpoch, WorkspaceMode};
 use maw_core::refs as manifold_refs;
 
+use super::sync::rebase::rebase_workspace as rebase_workspace_for_advance;
 use super::working_copy::{
-    SnapshotReplayResult, WorkingCopyConflict, checkout_to, cleanup_snapshot, replay_snapshot,
+    SnapshotReplayResult, WorkingCopyConflict, cleanup_snapshot, replay_snapshot,
     snapshot_working_copy,
 };
 use super::{DEFAULT_WORKSPACE, metadata, repo_root, workspace_path};
@@ -60,8 +70,12 @@ pub struct AdvanceResult {
 
 /// Run `maw ws advance <name>`.
 ///
-/// Rebases the workspace's uncommitted changes onto the latest epoch.
+/// Rebases committed AND uncommitted changes onto the latest epoch.
 /// Reports conflicts as structured data if they occur.
+///
+/// bn-8flz: the orphan bug was that committed-ahead commits were silently
+/// overwritten by `checkout_to(new_epoch)`. Fixed by detecting committed work
+/// and routing through `rebase_workspace_run` (the guarded sync path).
 #[allow(clippy::too_many_lines)]
 pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
     if name == DEFAULT_WORKSPACE {
@@ -95,9 +109,23 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         );
     }
 
-    // Get the workspace's current base epoch (HEAD of the worktree).
-    let old_epoch = get_worktree_head(&ws_path)
-        .with_context(|| format!("Failed to get HEAD of workspace '{name}'"))?;
+    // Read the workspace's *base* epoch from the epoch ref (not HEAD, which may
+    // be ahead due to committed-ahead commits). This is the same ref that `sync`
+    // uses for committed_ahead_of_epoch: see bn-18dj for why HEAD is wrong here.
+    let old_epoch = {
+        let epoch_ref = manifold_refs::workspace_epoch_ref(name);
+        match manifold_refs::read_ref(&root, &epoch_ref)
+            .with_context(|| format!("Failed to read epoch ref for workspace '{name}'"))?
+        {
+            Some(oid) => oid.as_str().to_owned(),
+            None => {
+                // No per-workspace epoch ref (pre-migration workspace or first
+                // advance). Fall back to HEAD so advance still works.
+                get_worktree_head(&ws_path)
+                    .with_context(|| format!("Failed to get HEAD of workspace '{name}'"))?
+            }
+        }
+    };
 
     // Get the current epoch from refs/manifold/epoch/current.
     let current_epoch =
@@ -142,31 +170,99 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         println!();
     }
 
+    // bn-8flz: detect committed-ahead work BEFORE any HEAD movement.
+    //
+    // If the workspace has commits beyond its base epoch, route through
+    // `rebase_workspace_run` — the same guarded path used by `maw ws sync`.
+    // This path: (a) replays committed commits onto new_epoch, (b) handles
+    // uncommitted changes via snapshot/replay internally, (c) writes
+    // oplog + epoch ref, (d) applies the bn-20sa never-abandon guard.
+    //
+    // Previously this check did not exist, so `checkout_to(new_epoch)` ran
+    // unconditionally, orphaning committed commits while printing "successfully."
+    let base_epoch_typed =
+        BaseEpoch::new(&old_epoch).map_err(|e| anyhow::anyhow!("invalid base epoch: {e}"))?;
+    let committed_ahead =
+        super::sync::checks::committed_ahead_of_epoch(&ws_path, &base_epoch_typed)
+            .unwrap_or(u32::MAX); // treat "can't determine" as "has work" → rebase path
+
+    if committed_ahead > 0 {
+        // Committed-ahead path: route through rebase_workspace_run.
+        // This replays committed commits ONTO new_epoch using the structured
+        // merge engine, and also handles uncommitted changes via the rebase
+        // path's snapshot. No separate snapshot step needed here.
+        if !matches!(format, OutputFormat::Json) {
+            println!("  Workspace has {committed_ahead} committed commit(s) ahead of base epoch.");
+            println!("  Replaying commits onto new epoch via rebase...");
+            println!();
+        }
+
+        rebase_workspace_for_advance(
+            &root,
+            name,
+            &old_epoch,
+            &new_epoch,
+            &ws_path,
+            committed_ahead,
+            "advance",
+        )
+        .with_context(|| format!("Failed to rebase workspace '{name}' onto new epoch"))?;
+
+        // Epoch ref is updated by rebase_workspace_run. Emit a success result.
+        let message = format!(
+            "Workspace '{name}' advanced (with rebase) from epoch {old_short}... to {new_short}... successfully."
+        );
+        let result = AdvanceResult {
+            workspace: name.to_owned(),
+            old_epoch: old_epoch.clone(),
+            new_epoch: new_epoch.clone(),
+            success: true,
+            conflicts: vec![],
+            message,
+        };
+        match format {
+            OutputFormat::Json => println!("{}", format.serialize(&result)?),
+            OutputFormat::Text => print_advance_text(&result),
+            OutputFormat::Pretty => print_advance_pretty(&result),
+        }
+        return Ok(());
+    }
+
+    // Fast-forward path (0 committed-ahead): snapshot uncommitted changes, then
+    // native checkout_detach to the new epoch, then replay snapshot.
+    // This is safe: with 0 committed-ahead, moving HEAD to new_epoch cannot
+    // orphan anything.
+
     // Step 1: Snapshot uncommitted changes (stash create + pinned ref).
     let snapshot = snapshot_working_copy(&ws_path, &root, name)
         .with_context(|| format!("Failed to snapshot workspace '{name}' before advance"))?;
 
-    // Step 2: Checkout the new epoch (detached — tree is clean after snapshot).
-    if let Err(e) = checkout_to(&ws_path, &new_epoch, None) {
-        // Checkout failed. The snapshot ref is preserved for recovery.
-        if let Some(ref snap) = snapshot {
-            eprintln!(
-                "  Snapshot preserved at: {}\n  \
-                 To recover: git -C {} stash apply {}",
-                snap.ref_name,
-                ws_path.display(),
-                snap.oid,
-            );
+    // Step 2: Native checkout_detach to the new epoch (no shell-out, bn-8flz).
+    {
+        let repo = maw_git::GixRepo::open(&ws_path)
+            .with_context(|| format!("Failed to open repo for advance of workspace '{name}'"))?;
+        let epoch_oid = repo
+            .rev_parse(&new_epoch)
+            .with_context(|| format!("Failed to resolve new epoch '{new_epoch}'"))?;
+        if let Err(e) = repo.checkout_detach(epoch_oid, &ws_path) {
+            // Checkout failed. The snapshot ref is preserved for recovery.
+            if let Some(ref snap) = snapshot {
+                eprintln!(
+                    "  Snapshot preserved at: {}\n  \
+                     To recover: git -C {} stash apply {}",
+                    snap.ref_name,
+                    ws_path.display(),
+                    snap.oid,
+                );
+            }
+            return Err(anyhow::anyhow!(e).context(format!(
+                "Failed to checkout new epoch in workspace '{name}'"
+            )));
         }
-        return Err(e.context(format!(
-            "Failed to checkout new epoch in workspace '{name}'"
-        )));
     }
 
-    // Update the per-workspace epoch ref to the new epoch. After advance,
-    // HEAD points to the new epoch, so status() must know the new base.
-    // Silent failure here leaves a stale ref → downstream misreports state
-    // (bn-3pkx). Warn and continue; the worktree is already at the new epoch.
+    // Update the per-workspace epoch ref to the new epoch.
+    // Silent failure leaves a stale ref → downstream misreports state (bn-3pkx).
     if let Ok(oid) = maw_core::model::types::GitOid::new(&new_epoch) {
         let epoch_ref = manifold_refs::workspace_epoch_ref(name);
         if let Err(e) = manifold_refs::write_ref(&root, &epoch_ref, &oid) {

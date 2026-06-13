@@ -5201,8 +5201,9 @@ fn guard_unbound_sources_against_active_change_ancestry(
 /// Algorithm:
 /// 1. SNAPSHOT — if dirty, capture via `snapshot_working_copy()` (stash create
 ///    + pinned ref, no stash-stack pollution).
-/// 2. CHECKOUT — `checkout_to()` with branch attachment (tree is clean after
-///    snapshot, no --force needed).
+/// 2. CHECKOUT — native `checkout_to()` with branch attachment (tree is clean
+///    after snapshot; uses `checkout_tree + set_head_to_branch`, no shell-out).
+///    (bn-8flz)
 /// 3. REPLAY — `replay_snapshot()` applies the snapshot. Conflicts become
 ///    markers in the working tree (working-copy-preserving — conflicts are data, not errors).
 /// 4. CLEANUP — if replay was clean, delete the snapshot ref. If conflicts,
@@ -5377,14 +5378,12 @@ fn update_default_workspace(
         force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
     }
 
-    // LFS post-checkout pass: `checkout_to` uses `git checkout` CLI which
-    // invokes git-lfs smudge. If git-lfs can't find an object (missing from
-    // local store, no remote), the file may silently vanish. Run our native
-    // smudge post-pass to ensure every LFS-tracked file has SOMETHING on
-    // disk (real content if object exists, pointer text if not).
-    //
-    // Pass the target commit (epoch_after) because HEAD may still be at the
-    // old epoch if checkout failed due to git-lfs errors.
+    // LFS post-checkout pass: `checkout_to` now uses the native `checkout_tree`
+    // (bn-8flz — no more git checkout CLI). Run our native smudge post-pass to
+    // ensure every LFS-tracked file has SOMETHING on disk (real content if
+    // object exists, pointer text if not). Pass epoch_after because HEAD may
+    // still be at the old epoch if checkout_to failed and we fell through to
+    // force_checkout_fallback.
     lfs_post_checkout(default_ws_path, epoch_after);
 
     // Step 3: REPLAY — if there was a snapshot, replay it.
@@ -5525,28 +5524,18 @@ fn update_default_workspace(
 /// This is the nuclear option — it destroys any uncommitted changes.
 /// Only used when the snapshot-based path itself has errored.
 fn force_checkout_fallback(ws_path: &Path, ws_name: &str, branch: &str, text_mode: bool) {
-    // Pure-gix equivalent of `git checkout --force <branch>`:
-    //   1. Resolve `<branch>` to a commit OID.
-    //   2. `checkout_tree` materialises the branch tree onto the worktree
-    //      (overwrite_existing = true; removes stale files).
-    //   3. Write HEAD as a symbolic ref to `refs/heads/<branch>` so the
-    //      worktree tracks the branch (not detached).
+    // Native: checkout_to_branch = checkout_tree + set_head_to_branch (atomic,
+    // with reflog). Previously used checkout_tree + raw HEAD file write; now
+    // uses the unified primitive so HEAD is written atomically with a reflog
+    // entry. (bn-8flz)
     let try_fallback = || -> Result<()> {
         let repo = maw_git::GixRepo::open(ws_path)
             .with_context(|| format!("failed to open workspace repo at {}", ws_path.display()))?;
         let commit = repo
             .rev_parse(branch)
             .with_context(|| format!("rev-parse '{branch}' failed"))?;
-        repo.checkout_tree(commit, ws_path)
-            .with_context(|| format!("checkout_tree to {branch} failed"))?;
-        let head_path = repo.git_dir().join("HEAD");
-        let head_target = if branch.starts_with("refs/") {
-            format!("ref: {branch}\n")
-        } else {
-            format!("ref: refs/heads/{branch}\n")
-        };
-        std::fs::write(&head_path, head_target)
-            .with_context(|| format!("failed to write HEAD at {}", head_path.display()))?;
+        repo.checkout_to_branch(commit, ws_path, branch)
+            .with_context(|| format!("checkout_to_branch '{branch}' failed"))?;
         Ok(())
     };
 

@@ -670,6 +670,109 @@ fn append_head_reflog(git_dir: &std::path::Path, old_oid: Option<&str>, new_oid:
     }
 }
 
+/// Detach HEAD at `oid` and update the worktree to match.
+///
+/// Equivalent to `git checkout --detach <oid>` but fully native:
+/// - `checkout_tree` materialises the commit's tree into `workdir`.
+/// - `set_head` writes the detached HEAD (and a reflog entry, bn-20sa).
+///
+/// Both steps must succeed; if `checkout_tree` fails, `set_head` is NOT
+/// called — the working tree and HEAD are left in their pre-call state.
+///
+/// Used by `sync_worktree_to_epoch_inner` (the fast-forward sync path) and
+/// `advance` (zero-ahead fast-forward). Callers MUST pre-verify that no
+/// committed work would be orphaned (the ancestor-refusal guard sits in
+/// `sync_worktree_to_epoch_inner`; advance uses `committed_ahead_of_epoch`).
+pub fn checkout_detach(repo: &GixRepo, oid: GitOid, workdir: &Path) -> Result<(), GitError> {
+    checkout_tree(repo, oid, workdir)?;
+    set_head(repo, oid)?;
+    Ok(())
+}
+
+/// Point HEAD symbolically at `refs/heads/<branch>` and update the worktree.
+///
+/// Equivalent to `git checkout <branch>` (branch attachment) but fully native:
+/// - `checkout_tree` materialises `oid`'s tree into `workdir`.
+/// - `set_head_to_branch` writes `ref: refs/heads/<branch>` to HEAD atomically
+///   (temp file + rename) and appends a reflog entry.
+///
+/// Both steps must succeed; if `checkout_tree` fails, HEAD is left unchanged.
+///
+/// Used by the default-workspace reattach step in `merge.rs`. The branch ref
+/// protects commits from orphaning, so no ahead-check is required here.
+pub fn checkout_to_branch(
+    repo: &GixRepo,
+    oid: GitOid,
+    workdir: &Path,
+    branch: &str,
+) -> Result<(), GitError> {
+    checkout_tree(repo, oid, workdir)?;
+    set_head_to_branch(repo, branch)?;
+    Ok(())
+}
+
+/// Point HEAD symbolically at `refs/heads/<branch>` (no worktree update).
+///
+/// Writes `ref: refs/heads/<branch>\n` to the worktree's HEAD file atomically
+/// (temp file + rename). Appends a reflog entry so HEAD moves are traceable
+/// (matches the bn-20sa convention used by [`set_head`]).
+///
+/// For a linked worktree, writes to `.git/worktrees/<name>/HEAD`; for a
+/// non-worktree repo writes to `.git/HEAD`.
+///
+/// # Errors
+/// Returns a `GitError` if the HEAD file cannot be written.
+pub fn set_head_to_branch(repo: &GixRepo, branch: &str) -> Result<(), GitError> {
+    use std::io::Write as _;
+
+    let git_dir = repo.repo.git_dir();
+    let head_path = git_dir.join("HEAD");
+    let tmp_path = git_dir.join("HEAD.maw-tmp");
+
+    // Read old HEAD *before* overwriting — used for the reflog entry.
+    let old_oid_str = std::fs::read_to_string(&head_path)
+        .ok()
+        .map(|s| s.trim().to_owned());
+
+    let full_ref = if branch.starts_with("refs/") {
+        branch.to_owned()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+
+    let contents = format!("ref: {full_ref}\n");
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).map_err(|e| GitError::BackendError {
+            message: format!("failed to create temp HEAD at {}: {e}", tmp_path.display()),
+        })?;
+        f.write_all(contents.as_bytes())
+            .map_err(|e| GitError::BackendError {
+                message: format!("failed to write temp HEAD: {e}"),
+            })?;
+        f.sync_all().map_err(|e| GitError::BackendError {
+            message: format!("failed to fsync temp HEAD: {e}"),
+        })?;
+    }
+    std::fs::rename(&tmp_path, &head_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        GitError::BackendError {
+            message: format!(
+                "failed to rename temp HEAD into place at {}: {e}",
+                head_path.display()
+            ),
+        }
+    })?;
+
+    // Best-effort reflog entry — same convention as set_head (bn-20sa).
+    // For a symbolic-ref HEAD the "old OID" is whatever string was previously
+    // in HEAD (may be a symbolic ref line itself if transitioning from another
+    // branch, or a raw OID if transitioning from detached HEAD).
+    append_head_reflog(git_dir, old_oid_str.as_deref(), &format!("ref: {full_ref}"));
+
+    Ok(())
+}
+
 pub fn read_index(repo: &GixRepo) -> Result<Vec<IndexEntry>, GitError> {
     let index = repo.repo.open_index().map_err(|e| GitError::BackendError {
         message: format!("failed to open index: {e}"),
@@ -732,5 +835,273 @@ const fn entry_mode_to_gix_mode(mode: EntryMode) -> gix::index::entry::Mode {
         EntryMode::Link => gix::index::entry::Mode::SYMLINK,
         EntryMode::Tree => gix::index::entry::Mode::DIR,
         EntryMode::Commit => gix::index::entry::Mode::COMMIT,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for checkout_detach, checkout_to_branch, set_head_to_branch
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use crate::GixRepo;
+    use crate::types::GitOid;
+
+    /// Run a git command in `dir`, panic on failure, return stdout trimmed.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {}: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "git {} failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Initialise a bare-style repo + a linked worktree for tests.
+    ///
+    /// Returns `(TempDir, root, worktree_path, commit1_oid, commit2_oid)`.
+    ///
+    /// Layout:
+    ///   root/              ← main repo (non-bare, main branch)
+    ///   root/wt/           ← linked worktree detached at commit1
+    ///
+    /// Both commits have one file each so `checkout_tree` has something to
+    /// materialise / remove (exercises stale-file cleanup).
+    fn setup_repo_with_linked_worktree() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+        String,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        git(&root, &["config", "user.email", "t@t.com"]);
+        git(&root, &["config", "user.name", "T"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+
+        // Commit 1: file1.txt
+        fs::write(root.join("file1.txt"), "content1\n").unwrap();
+        git(&root, &["add", "file1.txt"]);
+        git(&root, &["commit", "-qm", "commit1"]);
+        let c1 = git(&root, &["rev-parse", "HEAD"]);
+
+        // Commit 2: add file2.txt (file1.txt still present)
+        fs::write(root.join("file2.txt"), "content2\n").unwrap();
+        git(&root, &["add", "file2.txt"]);
+        git(&root, &["commit", "-qm", "commit2"]);
+        let c2 = git(&root, &["rev-parse", "HEAD"]);
+
+        // Create a linked worktree detached at c1.
+        let wt = root.join("wt");
+        git(
+            &root,
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), &c1],
+        );
+
+        (dir, root, wt, c1, c2)
+    }
+
+    /// Read the raw HEAD file content from a worktree.
+    fn read_head(wt: &Path) -> String {
+        // The worktree's HEAD lives at <wt>/.git (which is a gitfile pointing
+        // to the per-worktree admin dir). Parse it to find the actual HEAD.
+        let gitfile = wt.join(".git");
+        let gitfile_content = fs::read_to_string(&gitfile).unwrap();
+        // Content: "gitdir: /repo/.git/worktrees/wt\n"
+        let admin_dir = gitfile_content
+            .strip_prefix("gitdir: ")
+            .unwrap()
+            .trim()
+            .to_owned();
+        let head_path = std::path::PathBuf::from(admin_dir).join("HEAD");
+        fs::read_to_string(head_path).unwrap().trim().to_owned()
+    }
+
+    /// Assert that a reflog entry was written for the worktree HEAD.
+    fn reflog_has_entry(wt: &Path) -> bool {
+        let gitfile = wt.join(".git");
+        let gitfile_content = fs::read_to_string(&gitfile).unwrap();
+        let admin_dir = gitfile_content
+            .strip_prefix("gitdir: ")
+            .unwrap()
+            .trim()
+            .to_owned();
+        let log_path = std::path::PathBuf::from(admin_dir)
+            .join("logs")
+            .join("HEAD");
+        if !log_path.exists() {
+            return false;
+        }
+        let content = fs::read_to_string(log_path).unwrap();
+        !content.trim().is_empty()
+    }
+
+    // -----------------------------------------------------------------------
+    // checkout_detach tests
+    // -----------------------------------------------------------------------
+
+    /// `checkout_detach` moves HEAD to the target OID (detached) and materialises
+    /// the commit's tree into the worktree. File from the old commit absent in
+    /// the new one is removed (stale-file cleanup); untracked files are preserved.
+    #[test]
+    fn checkout_detach_moves_head_and_updates_worktree() {
+        let (_dir, _root, wt, _c1, c2) = setup_repo_with_linked_worktree();
+        // Worktree starts at c1 (file1.txt present, file2.txt absent).
+        assert!(wt.join("file1.txt").exists());
+        assert!(!wt.join("file2.txt").exists());
+
+        // Place an untracked file — must survive checkout_detach (bn-29x0).
+        fs::write(wt.join("untracked.txt"), "precious\n").unwrap();
+
+        let repo = GixRepo::open(&wt).expect("open worktree repo");
+        let oid: GitOid = c2.parse().expect("parse oid");
+        super::checkout_detach(&repo, oid, &wt).expect("checkout_detach");
+
+        // HEAD is now the raw OID (detached), not a symbolic ref.
+        let head = read_head(&wt);
+        assert_eq!(head, c2, "HEAD should be the raw OID after detach");
+
+        // file2.txt from c2 is now present; file1.txt from c1 should still be
+        // present (both commits have it, since we only added file2 in commit2).
+        assert!(wt.join("file1.txt").exists(), "file1.txt should remain");
+        assert!(wt.join("file2.txt").exists(), "file2.txt should appear");
+
+        // Untracked file must survive.
+        assert!(
+            wt.join("untracked.txt").exists(),
+            "untracked file must survive checkout"
+        );
+        let content = fs::read_to_string(wt.join("untracked.txt")).unwrap();
+        assert_eq!(content, "precious\n");
+
+        // Reflog entry must exist.
+        assert!(reflog_has_entry(&wt), "reflog entry must be written");
+    }
+
+    /// `checkout_detach` back from c2 to c1 removes the file added in c2.
+    #[test]
+    fn checkout_detach_removes_stale_tracked_files() {
+        let (_dir, root, wt, c1, c2) = setup_repo_with_linked_worktree();
+        // Move worktree forward to c2 first (so file2.txt is tracked and present).
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--force",
+                "--detach",
+                wt.to_str().unwrap(),
+                &c2,
+            ],
+        );
+        let repo = GixRepo::open(&wt).expect("open");
+        let oid_c1: GitOid = c1.parse().expect("parse");
+        super::checkout_detach(&repo, oid_c1, &wt).expect("checkout_detach back to c1");
+        // file2.txt was tracked in c2 but absent from c1 — must be removed.
+        assert!(
+            !wt.join("file2.txt").exists(),
+            "stale tracked file must be removed"
+        );
+        assert!(
+            wt.join("file1.txt").exists(),
+            "file from c1 must be present"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // checkout_to_branch tests
+    // -----------------------------------------------------------------------
+
+    /// `checkout_to_branch` sets HEAD to a symbolic ref and updates the worktree.
+    #[test]
+    fn checkout_to_branch_attaches_head_and_updates_worktree() {
+        let (_dir, _root, wt, _c1, c2) = setup_repo_with_linked_worktree();
+        // Worktree is at c1 detached.
+        let repo = GixRepo::open(&wt).expect("open");
+        let oid: GitOid = c2.parse().expect("parse");
+
+        // Attach to the 'main' branch (which is at c2 in root).
+        super::checkout_to_branch(&repo, oid, &wt, "main").expect("checkout_to_branch");
+
+        // HEAD should be a symbolic ref, not a raw OID.
+        let head = read_head(&wt);
+        assert_eq!(
+            head, "ref: refs/heads/main",
+            "HEAD should be symbolic ref after checkout_to_branch"
+        );
+
+        // Worktree should be at c2's tree.
+        assert!(
+            wt.join("file2.txt").exists(),
+            "file2.txt from c2 should be present"
+        );
+
+        // Reflog entry must exist.
+        assert!(reflog_has_entry(&wt), "reflog entry must be written");
+    }
+
+    /// `checkout_to_branch` with a full ref path.
+    #[test]
+    fn checkout_to_branch_full_ref_path() {
+        let (_dir, _root, wt, _c1, c2) = setup_repo_with_linked_worktree();
+        let repo = GixRepo::open(&wt).expect("open");
+        let oid: GitOid = c2.parse().expect("parse");
+
+        super::checkout_to_branch(&repo, oid, &wt, "refs/heads/main")
+            .expect("checkout_to_branch full ref");
+
+        let head = read_head(&wt);
+        assert_eq!(head, "ref: refs/heads/main");
+    }
+
+    // -----------------------------------------------------------------------
+    // checkout_force tests (used by git_checkout_force replacement)
+    // -----------------------------------------------------------------------
+
+    /// `checkout_force` overwrites tracked modifications (clobbers) and leaves
+    /// untracked files alone — equivalent to git checkout --force.
+    #[test]
+    fn checkout_force_clobbers_tracked_modifications() {
+        let (_dir, _root, wt, c1, _c2) = setup_repo_with_linked_worktree();
+
+        // Modify a tracked file.
+        fs::write(wt.join("file1.txt"), "modified content\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(wt.join("file1.txt")).unwrap(),
+            "modified content\n"
+        );
+
+        // Place an untracked file.
+        fs::write(wt.join("untracked2.txt"), "keep me\n").unwrap();
+
+        let repo = GixRepo::open(&wt).expect("open");
+        let oid: GitOid = c1.parse().expect("parse");
+
+        // checkout_force should clobber file1.txt back to c1 content.
+        super::checkout_tree(&repo, oid, &wt).expect("checkout_tree");
+        super::set_head(&repo, oid).expect("set_head");
+
+        let restored = fs::read_to_string(wt.join("file1.txt")).unwrap();
+        assert_eq!(restored, "content1\n", "tracked file should be restored");
+
+        // Untracked file preserved.
+        assert!(
+            wt.join("untracked2.txt").exists(),
+            "untracked file must survive"
+        );
     }
 }

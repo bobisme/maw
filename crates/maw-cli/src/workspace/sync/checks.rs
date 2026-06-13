@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Result, bail};
 
@@ -65,7 +64,7 @@ pub(super) fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
 // that the compiler catches accidental swaps. See bn-18dj for the bug this
 // newtype is meant to prevent: passing the current epoch here would silently
 // return 0 on stale workspaces and wipe their local commits on sync.
-pub(super) fn committed_ahead_of_epoch(ws_path: &Path, base: &BaseEpoch) -> Option<u32> {
+pub fn committed_ahead_of_epoch(ws_path: &Path, base: &BaseEpoch) -> Option<u32> {
     let repo = maw_git::GixRepo::open(ws_path).ok()?;
     let base_oid = repo.rev_parse_opt(base.as_str()).ok().flatten()?;
     let head_oid = repo.rev_parse_opt("HEAD").ok().flatten()?;
@@ -322,42 +321,30 @@ fn sync_worktree_to_epoch_inner(
     }
 
     // Detach HEAD at the new epoch to sync the workspace.
-    // TODO(gix): checkout_tree() does not update HEAD, and write_ref("HEAD")
-    // doesn't reliably create a detached HEAD in linked worktrees. Keep
-    // `git checkout --detach` until gix gains proper worktree HEAD support.
-    let output = Command::new("git")
-        .args(["checkout", "--detach", epoch_oid])
-        .current_dir(&ws_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run git checkout in workspace '{ws_name}': {e}"))?;
+    // Native gix path: checkout_detach = checkout_tree + set_head (+ reflog).
+    // The ancestor-refusal guard above (bn-29z8 Defect A) guarantees HEAD is
+    // an ancestor of epoch_oid, so no commits are at risk of orphaning here.
+    let epoch_oid_typed = {
+        let repo2 = maw_git::GixRepo::open(&ws_path).map_err(|e| {
+            anyhow::anyhow!("Failed to re-open repo for checkout in workspace '{ws_name}': {e}")
+        })?;
+        repo2
+            .rev_parse(epoch_oid)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve epoch '{epoch_oid}': {e}"))?
+    };
 
-    // bn-29z8 Defect A (belt+braces): always capture stderr and check for
-    // git's "leaving N commit(s) behind" warning. If git emits this despite
-    // our pre-flight check (e.g. due to a race or an unresolvable epoch OID),
-    // surface it loudly on our stderr instead of discarding it.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_lower = stderr.to_lowercase();
-    if output.status.success()
-        && (stderr_lower.contains("leaving") || stderr_lower.contains("commit(s) behind"))
-    {
-        eprintln!(
-            "WARNING: workspace '{ws_name}' checkout emitted a 'leaving commits behind' \
-             warning from git — commits may have been orphaned:\n  {}\n  \
-             Run: git -C {} reflog\n  \
-             Then recover with: maw ws sync {ws_name}",
-            stderr.trim(),
-            ws_path.display(),
-        );
-    }
-
-    if !output.status.success() {
-        bail!(
-            "Failed to sync workspace '{ws_name}': {}\n  \
-             Manual fix: git -C {} checkout --detach {epoch_oid}",
-            stderr.trim(),
-            ws_path.display()
-        );
-    }
+    let ws_repo_for_checkout = maw_git::GixRepo::open(&ws_path).map_err(|e| {
+        anyhow::anyhow!("Failed to open repo for checkout in workspace '{ws_name}': {e}")
+    })?;
+    ws_repo_for_checkout
+        .checkout_detach(epoch_oid_typed, &ws_path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to sync workspace '{ws_name}': {e}\n  \
+                 Manual fix: git -C {} checkout --detach {epoch_oid}",
+                ws_path.display()
+            )
+        })?;
 
     // Update the per-workspace creation epoch ref to the new epoch.
     // After sync, the workspace is rebased onto the new epoch, so
