@@ -153,6 +153,19 @@ artifact reviewable):
   30% overlapping edits, 20% stale workspaces), but a published claim
   about, e.g., concurrency_degree=8 would require a profile-spectrum
   sweep (§9).
+- **It does NOT exercise maw's production HEAD-movement code, so it does
+  NOT cover the orphaned-commit class (bn-13g1).** The in-proc volume
+  tier drives a *model* of maw's git-object effects: there is no
+  `Advance` op in the generator, `do_merge`/`do_sync` synthesize ref
+  movement with raw git plumbing rather than calling production
+  `maw_git::set_head` / sibling auto-rebase, and steps run sequentially
+  in one process. The orphaned-commit bugs (bn-29z8/1qtj/20sa/8flz) lived
+  in exactly that production code, so a clean campaign says nothing about
+  them. That class is covered instead by
+  `tests/advance_orphan_regression_bn_8flz.rs`,
+  `tests/rebase_never_abandon_bn_20sa.rs`, the always-loud guards, and the
+  field dogfooding that found it — **not** by this soak. See
+  `sg1-dst-architecture.md` §7.1 for the full trace.
 
 ---
 
@@ -456,6 +469,15 @@ SG1 published soak — v1.0 release-gate evidence (1e8 floor)
   Headline (release-gate phrasing):
     "0 violations observed across ≥ 1e8 fault-injected op-steps;
      Wilson 95% CI on per-step Oracle A/B violation rate = [0.0, <U>]."
+
+  Scope (MUST publish alongside the headline — bn-13g1):
+    in-proc tier drives a MODEL of maw's git-object effects, not maw's
+    production HEAD-movement code (no Advance op; do_merge/do_sync are
+    plumbing models; single-process). This evidence does NOT cover the
+    orphaned-commit class (bn-29z8/1qtj/20sa/8flz); that class is covered
+    by tests/{advance_orphan_regression_bn_8flz,rebase_never_abandon_bn_20sa}.rs
+    + always-loud guards + field dogfooding. See §1.3 and
+    sg1-dst-architecture.md §7.1.
 ```
 
 ### 7.2 Asymptotic stretch row (amends §7.1 if/when reached)

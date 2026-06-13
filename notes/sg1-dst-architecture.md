@@ -29,6 +29,13 @@ coherence — must catch the bn-cm63 *class*). It is seed-deterministic, and
 the first failing seed is automatically shrunk to a minimal repro. v1.0 does
 not ship until this gate is green over a published soak campaign (bn-6308).
 
+**Scope caveat (bn-13g1):** the volume tier drives a *model* of maw's
+git-object effects, not maw's production HEAD-movement code, so a green
+campaign certifies the ref/content invariants of the modeled operations
+under fault injection — not "the Prime Invariant holds in maw's actual
+code." See **§7.1** before quoting the soak as evidence for any
+HEAD-movement / orphaned-commit guarantee.
+
 This document fixes the seams so the eight remaining SG1 tasks can be
 implemented in parallel against stable interfaces.
 
@@ -370,6 +377,85 @@ only the hand-written crash-simulation core with the real fault layer).
 
 ---
 
+## 7.1 Coverage boundary — what the in-proc soak does and does NOT exercise (bn-13g1)
+
+**Read this before quoting the soak campaign as evidence.** The in-proc
+tier is the *volume* tier, and it earns that volume by driving a **model of
+maw's git-object effects**, not maw's production workspace/HEAD-management
+code. That trade is deliberate (it is what makes 1e8 op-steps tractable),
+but it bounds what a green campaign certifies. Established 2026-06-13 by
+tracing the harness end to end while asking "would the soak have caught the
+orphaned-commit class we fixed in bn-29z8/1qtj/20sa/8flz?" The answer is
+**no, and not narrowly** — for three structural reasons:
+
+1. **The action vocabulary cannot express the main vector.** The generator
+   `Op` enum (`crates/maw-scenario/src/lib.rs`) is exactly `WsCreate`,
+   `EditFiles`, `Commit`, `Merge`, `Sync`, `Destroy`, `Recover`. There is
+   **no `Advance` op**, so `maw ws advance` — the bn-8flz orphan vector (an
+   unguarded HEAD-mover that overwrote committed-ahead work while printing
+   "advanced successfully") — is ungenerable at any seed or step count.
+
+2. **The in-proc driver reimplements ops with raw git plumbing.** It does
+   not call production `maw-core` / `maw-git`:
+   - `do_merge` (`crates/maw-assurance/src/in_proc.rs`) synthesizes a merge
+     with `git commit-tree` + `update-ref` (the commit message is literally
+     `-> default (in-proc-driver)`); it bumps `refs/heads/main` and
+     `refs/manifold/epoch/current` to the last source's tip and optionally
+     destroys sources. It **never replays siblings and never calls
+     `set_head`.**
+   - `do_sync` is a literal no-op ("Sync is a no-op at this modelling level
+     (no per-ws epoch staleness representation)").
+
+   The orphaned-commit class lived precisely in the code these stubs stand
+   in for: `maw_git::set_head` after the empty-replay walk, the
+   merge-triggered sibling auto-rebase, and the checkout fast-forward path.
+   Because the model never moves a *committed* sibling's HEAD, it cannot
+   orphan one — Oracle A/B run against an object graph the buggy code never
+   produced. **Re-pinning the soak binary at a post-fix SHA does not change
+   this: the gap is the harness, not the pin.**
+
+3. **Sequential, single-process.** `drive()`/`drive_fast()` apply plan
+   steps one at a time in one process. The live incidents were
+   multi-process races (a concurrent agent merging while a worker's commit
+   sat in a sibling). No inter-process `set_head` race is modeled.
+
+**So scope the published claim precisely.** A clean 1e8-op-step campaign
+certifies the **ref/content invariants of the modeled operations under
+fault injection** — which is real and valuable: Oracle B catches the
+bn-cm63 dangling-ref class (the class the instrument was built for) and
+Oracle A catches irreversibly lost committed *content*. It does **not**
+certify "the Prime Invariant holds in maw's actual HEAD-movement code."
+Do not let SG5 (bn-3ctu) or the bn-2yzz gate row imply the soak covers
+HEAD-movement or concurrent-agent orphaning.
+
+**Where the orphaned-commit class actually is covered** (cite these, not
+the soak, for that class):
+
+- **Production-code regression tests** that drive the real `maw` binary:
+  - `tests/advance_orphan_regression_bn_8flz.rs` — `ws advance` preserves
+    committed-ahead work; sync routes committed-ahead through the guarded
+    rebase path; a source-scan guard asserts no raw `git checkout --detach`
+    HEAD-mover shell-outs survive in production.
+  - `tests/rebase_never_abandon_bn_20sa.rs` — the `set_head` never-abandon
+    guard (uses failpoints to force the empty-walk while HEAD is ahead),
+    the `set_head` reflog trail, and `rebase` oplog visibility for both
+    explicit and sibling auto-rebase.
+- **Field dogfooding** (the sigil bn-3d4a investigation + the live maw-repo
+  reproduction) that originally surfaced the class, and the **always-loud
+  guards** (bn-20sa never-abandon CAS + reflog; bn-8flz single native
+  guarded HEAD-mover choke-point). These — not the volume soak — are the
+  primary evidence for the orphaned-commit class.
+
+**Closing the gap in the soak itself** (optional, real T-work, tracked
+separately — would force a fresh campaign): add an `Advance` op; make
+`do_merge`/`do_sync` invoke production `maw-core` merge/sync (real
+`set_head` + sibling auto-rebase) instead of the plumbing model; and ideally
+model an interleaved multi-process `set_head` race. This is **not** a v1.0
+blocker given the regression-test + guard coverage above; it is the path to
+a *higher-confidence* soak. Tracked as **bn-2byw** (follow-up to bn-13g1).
+
+---
+
 ## 8. Enumerated remaining SG1 tasks + proposed order
 
 SG1 children (parent bn-3nw1). SP1 (bn-imw8) and SP2 (bn-3qxi) are **done**;
@@ -438,5 +524,6 @@ tasks fan out in parallel; everything reconverges at the shrinker.
 | Defines the shrinker | **MET** | §6, built on bit-exact in-proc replay + existing `FailureBundle`. |
 | Defines CI wiring | **MET** | §7, built on existing `dst.yml` / `just sim-*` / `tests/dst_support`. |
 | Enumerates remaining SG1 tasks + order | **MET** | §8 table + critical path. |
+| Coverage boundary scoped honestly (bn-13g1) | **MET** | §7.1 + §0 scope caveat: the in-proc volume tier drives a model, not production HEAD-movement code (no `Advance` op; `do_merge`/`do_sync` are plumbing models; single-process). Orphaned-commit class covered by `tests/advance_orphan_regression_bn_8flz.rs` + `tests/rebase_never_abandon_bn_20sa.rs` + field/guards, not the soak. |
 
 **Overall: PASS** (pending lead review/merge).
