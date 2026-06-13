@@ -283,6 +283,11 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
     // decide.
     let ahead_count = committed_ahead_of_epoch(&ws_path, &status.base_epoch).unwrap_or(0);
 
+    // Build the trigger string for the oplog entry. It names the merge
+    // sources that caused the epoch to advance, making `maw ws history <ws>`
+    // useful for tracing which merge triggered a sibling rebase.
+    let trigger_str = format!("auto-rebase:merge({})", merge_sources.join(","));
+
     // bn-103k: pass `mutate_worktree: true` so the sibling's worktree files
     // also advance to the rebased HEAD. The under-lock dirty re-check above
     // proved the worktree is clean, and `continue_past_worktree_failure`
@@ -303,6 +308,7 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
             acquire_lock: false,
             continue_past_worktree_failure: true,
         },
+        &trigger_str,
     );
 
     drop(lock);

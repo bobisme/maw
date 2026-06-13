@@ -576,12 +576,21 @@ fn remove_stale_files(
 /// Writes the canonical detached-HEAD format: 40 hex bytes followed by a
 /// single `\n`. Uses an atomic write (create temp file + rename) so a
 /// concurrent reader never sees a partial HEAD.
+///
+/// Also appends a reflog entry (bn-20sa): the live incident (bn-1qtj) was
+/// forensically blind because `set_head` left no trail. The reflog entry is
+/// best-effort — failure to write it does NOT fail the operation.
 pub fn set_head(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
     use std::io::Write as _;
 
     let git_dir = repo.repo.git_dir();
     let head_path = git_dir.join("HEAD");
     let tmp_path = git_dir.join("HEAD.maw-tmp");
+
+    // Read old HEAD *before* we overwrite it — used for the reflog entry.
+    let old_oid_str = std::fs::read_to_string(&head_path)
+        .ok()
+        .map(|s| s.trim().to_owned());
 
     let contents = format!("{oid}\n");
 
@@ -609,7 +618,56 @@ pub fn set_head(repo: &GixRepo, oid: GitOid) -> Result<(), GitError> {
         }
     })?;
 
+    // bn-20sa: append a reflog entry so future incidents are forensically
+    // traceable. Both the sigil bn-3d4a and maw bn-1qtj incidents were
+    // unfindable because set_head left no reflog entry. Best-effort: a write
+    // failure here must not fail the operation — the HEAD update already
+    // succeeded at this point.
+    append_head_reflog(git_dir, old_oid_str.as_deref(), &oid.to_string());
+
     Ok(())
+}
+
+/// Append a reflog entry for the worktree HEAD file.
+///
+/// Format (git files-backend): `<old> <new> <ident> <ts> <tz>\t<message>\n`
+///
+/// Called best-effort from [`set_head`] — any I/O failure is silently swallowed
+/// so the caller (which has already succeeded in updating HEAD) is not
+/// interrupted.
+fn append_head_reflog(git_dir: &std::path::Path, old_oid: Option<&str>, new_oid: &str) {
+    use std::io::Write as _;
+
+    let zero = "0".repeat(40);
+    let old = old_oid.unwrap_or(&zero);
+
+    // Use seconds since epoch for the timestamp; best-effort (fall back to 0).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+
+    // git reflog entry: "old new ident ts tz\tmessage\n"
+    // Ident: "maw <maw@localhost>" — the identity that wrote the HEAD.
+    let entry = format!("{old} {new_oid} maw <maw@localhost> {ts} +0000\tmaw: set_head (rebase)\n");
+
+    let logs_dir = git_dir.join("logs");
+    let log_path = logs_dir.join("HEAD");
+
+    // Create the logs/ directory if it does not exist yet (fresh worktrees
+    // may not have one until git itself writes the first reflog entry).
+    if !logs_dir.exists() && std::fs::create_dir_all(&logs_dir).is_err() {
+        return; // best-effort: give up silently
+    }
+
+    // Append mode: create or append.
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = f.write_all(entry.as_bytes());
+        // flush but don't fsync — best-effort
+    }
 }
 
 pub fn read_index(repo: &GixRepo) -> Result<Vec<IndexEntry>, GitError> {

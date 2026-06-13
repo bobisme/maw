@@ -179,6 +179,7 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
                 current_epoch.as_str(),
                 &ws_path,
                 ahead,
+                "sync",
             );
         }
         Some(_) => {}
@@ -324,6 +325,7 @@ fn sync_all(no_rebase: bool) -> Result<()> {
                 current_epoch.as_str(),
                 &ws_path,
                 ahead,
+                "sync-all",
             ) {
                 Ok(()) => rebased += 1,
                 Err(e) => errors.push(format!("{name}: {e}")),

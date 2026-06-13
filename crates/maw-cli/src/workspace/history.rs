@@ -161,6 +161,7 @@ const fn op_type(payload: &OpPayload) -> &'static str {
         OpPayload::RebaseReplay { .. } => "rebase-replay",
         OpPayload::ConflictDetected { .. } => "conflict-detected",
         OpPayload::ConflictResolved { .. } => "conflict-resolved",
+        OpPayload::Rebase { .. } => "rebase",
     }
 }
 
@@ -218,6 +219,24 @@ fn summarize_payload(payload: &OpPayload) -> String {
         }
         OpPayload::ConflictDetected { path, .. } => format!("conflict detected: {path}"),
         OpPayload::ConflictResolved { path, .. } => format!("conflict resolved: {path}"),
+        OpPayload::Rebase {
+            old_epoch,
+            new_epoch,
+            replayed,
+            conflicts,
+            trigger,
+            ..
+        } => {
+            let old = &old_epoch.as_str()[..old_epoch.as_str().len().min(8)];
+            let new = &new_epoch.as_str()[..new_epoch.as_str().len().min(8)];
+            if *conflicts > 0 {
+                format!(
+                    "rebase {old}→{new} ({replayed} commit(s), {conflicts} conflict(s)) [{trigger}]"
+                )
+            } else {
+                format!("rebase {old}→{new} ({replayed} commit(s)) [{trigger}]")
+            }
+        }
     }
 }
 

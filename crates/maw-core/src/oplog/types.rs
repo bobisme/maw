@@ -139,6 +139,34 @@ pub enum OpPayload {
         /// Uses `BTreeMap` for deterministic key ordering in canonical JSON.
         data: BTreeMap<String, serde_json::Value>,
     },
+
+    /// A workspace was rebased onto a new epoch (either by `maw ws sync
+    /// --rebase` or by the sibling auto-rebase orchestrator after a merge).
+    ///
+    /// This variant makes rebase operations visible in `maw ws history`
+    /// (bn-20sa: sibling auto-rebases and sync rebases were invisible, so
+    /// `maw ws history` showed only [create] for a workspace that had been
+    /// rebased multiple times by other agents' merges).
+    Rebase {
+        /// The old epoch that was the workspace's base before the rebase.
+        old_epoch: EpochId,
+        /// The new epoch the workspace was rebased onto.
+        new_epoch: EpochId,
+        /// HEAD OID before the rebase.
+        old_head: GitOid,
+        /// HEAD OID after the rebase (the new chain tip; equals `new_epoch`
+        /// when there were no commits to replay — fast-forward path).
+        new_head: GitOid,
+        /// Number of commits replayed onto the new epoch. Zero means the
+        /// workspace was at its epoch base and only HEAD was fast-forwarded.
+        replayed: usize,
+        /// Number of unresolved conflicts in the rebased state.
+        conflicts: usize,
+        /// Trigger context: one of `"sync"`, `"sync-all"`, or a string of
+        /// the form `"auto-rebase:merge(<sources>)"` when triggered by a
+        /// sibling merge.
+        trigger: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

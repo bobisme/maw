@@ -53,6 +53,8 @@ use maw_core::model::conflict::{Conflict, ConflictSide};
 use maw_core::model::ordering::OrderingKey;
 use maw_core::model::patch::FileId;
 use maw_core::model::types::{EpochId, GitOid, WorkspaceId};
+use maw_core::oplog::read::read_head;
+use maw_core::oplog::types::{OpPayload, Operation};
 use maw_core::refs as manifold_refs;
 use maw_git::merge::{MergeResult, merge_text};
 use maw_git::{self as git, GitRepo, TreeEdit};
@@ -230,6 +232,7 @@ pub(super) fn rebase_workspace(
     new_epoch: &str,
     ws_path: &Path,
     ahead_count: u32,
+    trigger: &str,
 ) -> Result<()> {
     rebase_workspace_run(
         root,
@@ -239,6 +242,7 @@ pub(super) fn rebase_workspace(
         ws_path,
         ahead_count,
         RebaseRunOptions::default(),
+        trigger,
     )
     .map(|_| ())
 }
@@ -250,6 +254,11 @@ pub(super) fn rebase_workspace(
     clippy::too_many_lines,
     reason = "rebase command follows the structured merge pipeline in order"
 )]
+// `trigger`: short context string for the oplog Rebase entry. Use `"sync"` for
+// a direct `maw ws sync --rebase` invocation, `"sync-all"` for a
+// `maw ws sync --all` batch, or `"auto-rebase:merge(<sources>)"` for a
+// sibling auto-rebase triggered by another workspace's merge.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn rebase_workspace_run(
     root: &Path,
     ws_name: &str,
@@ -258,6 +267,7 @@ pub(super) fn rebase_workspace_run(
     ws_path: &Path,
     ahead_count: u32,
     opts: RebaseRunOptions,
+    trigger: &str,
 ) -> Result<RebaseOutcome> {
     macro_rules! say {
         ($($arg:tt)*) => {
@@ -498,6 +508,21 @@ pub(super) fn rebase_workspace_run(
                 0
             }
         };
+        // bn-20sa (Part 4): record a Rebase oplog entry for the fast-forward
+        // path too so `maw ws history <ws>` shows ff operations.
+        record_rebase_op(
+            root,
+            ws_name,
+            &ws_id,
+            old_epoch,
+            new_epoch,
+            &head_git.to_string(),
+            new_epoch, // new_head == new_epoch for a fast-forward
+            0,         // replayed = 0
+            0,         // conflicts = 0 (effective_conflicts may be > 0 from a prior rebase)
+            trigger,
+        );
+
         return Ok(RebaseOutcome {
             replayed: 0,
             conflicts: effective_conflicts,
@@ -760,6 +785,77 @@ pub(super) fn rebase_workspace_run(
         }
     }
 
+    // bn-20sa: NEVER-ABANDON GUARD — verify that set_head will not silently
+    // orphan commits. Two conditions trigger a refusal:
+    //
+    // (a) CAS check: HEAD must not have moved since we did the walk. If it
+    //     did, a concurrent commit landed between the walk and now and we
+    //     would orphan it. The caller must re-run `maw ws sync <ws>`.
+    //
+    // (b) Non-consumed-work check: if HEAD carried commits exclusive to it
+    //     (i.e. it is ahead of old_epoch) but this run replayed ZERO of them,
+    //     something is wrong — the walk silently returned empty against a
+    //     non-empty range. This is the exact failure mode of the bn-1qtj /
+    //     bn-3d4a incidents: base=d8542518, head=4be34a20 (1 commit), yet
+    //     the rebase replayed 0 and called set_head(new_epoch), orphaning the
+    //     commit. We refuse unless old HEAD == old epoch (i.e. no exclusive
+    //     work existed — pure fast-forward).
+    //
+    // Legitimate fast-forward case: head_git == old_git (workspace was at
+    // its epoch base; commits is empty and replayed==0 correctly). This is
+    // already handled by the `commits.is_empty()` early return above, so we
+    // should never reach this point with replayed==0 unless the commit walk
+    // failed silently. We still check explicitly as belt-and-suspenders.
+    {
+        let current_head = repo_dyn
+            .rev_parse("HEAD")
+            .map_err(|e| anyhow::anyhow!("never-abandon guard: failed to re-read HEAD: {e}"))?;
+
+        // (a) CAS: HEAD must not have moved since the walk.
+        if current_head != head_git {
+            bail!(
+                "SAFETY ABORT: workspace '{ws_name}' HEAD moved between rebase walk and \
+                 set_head — a concurrent commit landed and would be orphaned.\n  \
+                 HEAD at walk-start: {head_git}\n  \
+                 HEAD now:          {current_head}\n  \
+                 Remediation: maw ws sync {ws_name}",
+            );
+        }
+
+        // (b) Non-consumed-work: replayed==0 yet workspace had exclusive commits.
+        // head_git != old_git means there were commits in old_epoch..HEAD;
+        // we already returned early if commits.is_empty(), so this branch is
+        // only reachable if the walk returned a non-empty list but ALL commits
+        // were skipped (e.g., every commit was a root-commit and we `continue`d
+        // past it). Refuse loudly rather than silently orphaning them.
+        if replayed == 0 && head_git != old_git {
+            // Check that head_git is truly not an ancestor of parent_git
+            // (i.e. not already contained in the new chain). If head_git IS
+            // an ancestor of the new tip, the commits were already incorporated
+            // and we can proceed safely. This handles the pathological case
+            // where the workspace's HEAD happens to be the new epoch (all
+            // commits absorbed via epoch advancement).
+            let already_contained = repo_dyn.is_ancestor(head_git, parent_git).unwrap_or(false);
+            if !already_contained {
+                bail!(
+                    "SAFETY ABORT: workspace '{ws_name}' walk-start HEAD ({head_git_short}) is \
+                     ahead of old epoch ({old_epoch_short}) but this rebase replayed 0 commits — \
+                     the commit walk returned no workable entries even though exclusive work exists. \
+                     Moving HEAD would silently orphan that work.\n  \
+                     Walk-start HEAD: {head_git}\n  \
+                     Old epoch:       {old_epoch}\n  \
+                     New epoch tip:   {parent_git}\n  \
+                     Remediation: maw ws sync {ws_name}",
+                    head_git_short = &head_git.to_string()[..12.min(head_git.to_string().len())],
+                    old_epoch_short = &old_epoch[..12.min(old_epoch.len())],
+                    head_git = head_git,
+                    old_epoch = old_epoch,
+                    parent_git = parent_git,
+                );
+            }
+        }
+    }
+
     // Advance HEAD to the new chain tip. This is a refs-only step, always
     // performed even if we're going to skip the worktree checkout below.
     repo_dyn
@@ -799,6 +895,30 @@ pub(super) fn rebase_workspace_run(
             );
         }
     }
+
+    // bn-20sa (Part 4): Record a Rebase oplog entry so `maw ws history`
+    // shows that the workspace was rebased. Before this, sibling auto-rebases
+    // and sync rebases were invisible — `maw ws history <ws>` showed only
+    // [create] even after a workspace had been rebased multiple times by other
+    // agents' merges.
+    //
+    // Best-effort: oplog failures must not abort a successful rebase.
+    record_rebase_op(
+        root,
+        ws_name,
+        &ws_id,
+        old_epoch,
+        new_epoch,
+        &head_git.to_string(),
+        &parent_git.to_string(),
+        replayed,
+        // effective_conflicts not yet computed; use conflict_count (raw).
+        // We'll update this below once effective_conflicts is known, but that
+        // requires the sidecar pass. Use state.conflicts.len() here, which is
+        // the same value used for `effective_conflicts` in the conflicts branch.
+        state.conflicts.len(),
+        trigger,
+    );
 
     // Write both sidecars. The legacy one is what `maw ws resolve` still
     // consumes; the structured one is for future tooling (bn-3rah).
@@ -2374,6 +2494,99 @@ fn collect_blob_paths(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Oplog helpers (bn-20sa Part 4)
+// ---------------------------------------------------------------------------
+
+/// Append a `OpPayload::Rebase` entry to the workspace oplog so that
+/// `maw ws history <ws>` shows rebase / fast-forward events.
+///
+/// Best-effort: any failure is logged as a warning and does NOT abort the
+/// rebase that already succeeded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "oplog Rebase records require all these fields; a struct would be more ceremony than the single call-site justifies"
+)]
+fn record_rebase_op(
+    root: &Path,
+    ws_name: &str,
+    ws_id: &WorkspaceId,
+    old_epoch: &str,
+    new_epoch: &str,
+    old_head: &str,
+    new_head: &str,
+    replayed: usize,
+    conflicts: usize,
+    trigger: &str,
+) {
+    use super::super::oplog_runtime::append_operation_with_runtime_checkpoint;
+    use maw_core::model::types::EpochId;
+
+    let old_epoch_id = match EpochId::new(old_epoch) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(workspace = %ws_name, error = %e, "record_rebase_op: invalid old_epoch");
+            return;
+        }
+    };
+    let new_epoch_id = match EpochId::new(new_epoch) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(workspace = %ws_name, error = %e, "record_rebase_op: invalid new_epoch");
+            return;
+        }
+    };
+    let old_head_oid = match GitOid::new(old_head) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(workspace = %ws_name, error = %e, "record_rebase_op: invalid old_head");
+            return;
+        }
+    };
+    let new_head_oid = match GitOid::new(new_head) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(workspace = %ws_name, error = %e, "record_rebase_op: invalid new_head");
+            return;
+        }
+    };
+
+    // Read the current oplog head so we can CAS-append.
+    let previous_head = match read_head(root, ws_id) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(workspace = %ws_name, error = %e, "record_rebase_op: failed to read oplog head");
+            return;
+        }
+    };
+    let parent_ids: Vec<GitOid> = previous_head.iter().cloned().collect();
+
+    let op = Operation {
+        parent_ids,
+        workspace_id: ws_id.clone(),
+        timestamp: crate::workspace::now_timestamp_iso8601(),
+        payload: OpPayload::Rebase {
+            old_epoch: old_epoch_id,
+            new_epoch: new_epoch_id,
+            old_head: old_head_oid,
+            new_head: new_head_oid,
+            replayed,
+            conflicts,
+            trigger: trigger.to_owned(),
+        },
+    };
+
+    if let Err(e) =
+        append_operation_with_runtime_checkpoint(root, ws_id, &op, previous_head.as_ref())
+    {
+        tracing::warn!(
+            workspace = %ws_name,
+            error = %e,
+            "record_rebase_op: failed to append rebase oplog entry (non-fatal)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
