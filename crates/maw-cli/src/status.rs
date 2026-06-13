@@ -17,6 +17,7 @@ use crate::push::{SyncStatus, main_sync_status_inner};
 use crate::workspace::lifecycle::{LifecycleSignals, LifecycleState};
 use crate::workspace::{self, MawConfig, get_backend};
 use maw_core::backend::WorkspaceBackend;
+use maw_core::model::layout::LayoutFlavor;
 use maw_core::model::types::WorkspaceState;
 use serde::Serialize;
 
@@ -994,8 +995,12 @@ fn collect_status_fast() -> Result<StatusSummary> {
     let branch = config.branch();
     let default_ws_name = config.default_workspace();
 
-    // Count non-default workspaces by reading ws/ directory entries.
-    let ws_dir = root.join("ws");
+    // Count non-default workspaces by reading the workspaces directory.
+    // Layout-aware (bn-3k38): V2 → `<root>/ws/`, consolidated →
+    // `<root>/.maw/workspaces/`. Hardcoding `ws/` made the status bar report
+    // zero workspaces in the consolidated `.maw/` layout.
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    let ws_dir = flavor.workspaces_dir(&root);
     let workspace_names = if ws_dir.is_dir() {
         std::fs::read_dir(&ws_dir)
             .ok()
@@ -1021,7 +1026,10 @@ fn collect_status_fast() -> Result<StatusSummary> {
     // not file names. We read the git index and stat each entry, comparing
     // mtime/size against the index cache. This is O(n) stat calls with no
     // hashing and no gix overhead.
-    let default_ws_path = root.join("ws").join(default_ws_name);
+    //
+    // Layout-aware (bn-3k38): the default workspace is `<root>/ws/<default>`
+    // in V2 but the repo root itself in the consolidated layout.
+    let default_ws_path = flavor.default_target_path(&root, default_ws_name);
     let changed_count = if default_ws_path.exists() {
         count_dirty_tracked_files(&default_ws_path)
     } else {

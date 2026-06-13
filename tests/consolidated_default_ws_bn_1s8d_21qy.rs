@@ -368,3 +368,39 @@ fn maw_init_legacy_ws_creates_default_workspace() {
         "maw init --legacy-ws must produce v2, not consolidated"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-3k38: `maw status --status-bar` enumerates workspaces layout-awarely
+// ---------------------------------------------------------------------------
+
+/// `maw status --status-bar` must count non-default workspaces from the
+/// layout's workspaces dir (`.maw/workspaces/` in consolidated), not the
+/// hardcoded legacy `ws/`. Pre-fix it read `root.join("ws")`, which does not
+/// exist in a consolidated repo, so the status bar reported zero workspaces
+/// even with several active (observed in ~/src/wraith after migration).
+#[test]
+fn status_bar_counts_workspaces_in_consolidated_layout() {
+    let dir = init_consolidated();
+    let root = dir.path();
+
+    // Two agent workspaces under `.maw/workspaces/`.
+    maw_ok(root, &["ws", "create", "alice", "--from", "main"]);
+    maw_ok(root, &["ws", "create", "bob", "--from", "main"]);
+    assert!(
+        root.join(".maw").join("workspaces").join("alice").is_dir(),
+        "workspaces must live under .maw/workspaces/ in consolidated layout"
+    );
+
+    let bar = maw_ok(root, &["status", "--status-bar"]);
+
+    // The workspace marker glyph (\u{f0645}) is emitted only when the count
+    // is > 0; the count itself must read 2. Pre-fix the marker was absent.
+    assert!(
+        bar.contains('\u{f0645}'),
+        "status bar should show the workspace marker when workspaces exist; got: {bar:?}"
+    );
+    assert!(
+        bar.contains('2'),
+        "status bar should count the 2 non-default workspaces; got: {bar:?}"
+    );
+}
