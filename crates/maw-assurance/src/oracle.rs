@@ -298,7 +298,7 @@ fn discover_workspaces(
                 continue;
             }
 
-            let head_oid = read_workspace_head(root, &ws_path);
+            let head_oid = read_workspace_head(&ws_path);
             let is_dirty = check_workspace_dirty(&ws_path);
 
             workspaces.insert(
@@ -330,11 +330,22 @@ fn discover_workspaces(
 
 /// Read the HEAD OID for a workspace directory.
 // TODO(gix): assurance carveout — see read_all_refs above. CLI kept on purpose.
-fn read_workspace_head(repo_root: &Path, ws_path: &Path) -> Option<String> {
+//
+// IMPORTANT: do NOT force `GIT_DIR=<repo_root>/.git` here. For a real linked
+// worktree (the production layout this oracle verifies — and the only layout
+// the dst_production_tier drives), forcing GIT_DIR makes `git rev-parse HEAD`
+// read the COMMON/bare HEAD (= epoch) instead of the worktree's OWN HEAD, so
+// every workspace looks like it is sitting at the epoch (zero delta → zero
+// witness blobs → the no-work-lost oracle is silently never exercised). By
+// running plain `git -C <ws_path> rev-parse HEAD`, git discovers the
+// worktree's own gitdir (via its `.git` file) and returns the true HEAD. For
+// the in-proc driver's plain-directory case, git still discovers the bare repo
+// by walking upward — same result as before — and that driver overrides
+// `state.workspaces` regardless, so it is unaffected.
+fn read_workspace_head(ws_path: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(ws_path)
-        .env("GIT_DIR", repo_root.join(".git"))
         .output()
         .ok()?;
 

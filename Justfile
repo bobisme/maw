@@ -113,6 +113,14 @@ sim-open-latest-harness harness:
 # `dst-fast`/`dst-nightly`/`incident-replay` recipes that belong to the
 # legacy `tests/dst_harness.rs` harness.
 
+# sg1-production-tier: production-code DST tier (bn-2byw step 2, incr 1).
+# Drives the REAL `maw` binary over a seed-generated op stream and runs the
+# SG1 oracles (Oracle A no-work-lost + Oracle B state-coherence) after every
+# op — statistical coverage of PRODUCTION code, complementing the in-proc soak.
+# Knobs: DST_TRACES (seeds, default 16), DST_STEPS (steps/seed, default 12).
+sg1-production-tier:
+  cargo test --features assurance --test dst_production_tier -- --nocapture
+
 # sg1-per-commit: bounded SG1 sweep — corpus replay + small random
 # budget (default 64 seeds × 32 steps). Hard wall-clock cap 8 min.
 # Hard-fails on ANY oracle violation (release-blocking).
