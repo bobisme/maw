@@ -483,6 +483,54 @@ impl WorkspaceBackend for GitWorktreeBackend {
             //
             // Note: staleness is checked against `epoch` (creation epoch), not
             // HEAD, because HEAD may have advanced via agent commits.
+            //
+            // bn-1qtj: before the normal stale/active decision, check for a
+            // lagging epoch ref. The ref can be stale (pointing to an older OID
+            // than `current`) while HEAD is already AT or PAST the current epoch
+            // — this happens when a previous `sync_worktree_to_epoch_inner`
+            // successfully checked out HEAD but then failed to write the epoch
+            // ref. In that state ALL THREE conditions hold:
+            //   (1) epoch (from the ref) is an ancestor of current (ref LAGS)
+            //   (2) head_epoch == current OR is_ancestor(current, head_epoch)
+            //       (HEAD is already at/past the current epoch)
+            //   (3) epoch != current (so there's something to repair)
+            //
+            // Condition (1) is the critical gate. Without it the self-heal would
+            // also fire for the legitimate "workspace baseline is ahead of the
+            // global epoch" case (e.g. branch-attached workspaces created from a
+            // commit beyond the current epoch), silently rewriting that forward
+            // baseline back to `current` and breaking committed-deletion capture.
+            //
+            // Do NOT self-heal when HEAD is genuinely below the current epoch
+            // (the normal stale+ahead case) — that requires a real sync.
+            let epoch = if let Some(current) = &current_epoch {
+                if epoch != *current
+                    // (1) Epoch ref points to an ancestor of current → ref lags.
+                    && self.is_ancestor(epoch.as_str(), current.as_str())
+                    // (2) HEAD is already at or past the current epoch.
+                    && (head_epoch == *current
+                        || self.is_ancestor(current.as_str(), head_epoch.as_str()))
+                {
+                    // Epoch ref lags but HEAD is at/past the current epoch.
+                    // Repair the ref best-effort and use `current` as the base.
+                    tracing::debug!(
+                        workspace = %name_str,
+                        stale_ref = %epoch,
+                        current = %current,
+                        head = %head_epoch,
+                        "self-healing lagging epoch ref"
+                    );
+                    if let Ok(repair_oid) = GitOid::new(current.as_str()) {
+                        let _ = manifold_refs::write_ref(&self.root, &epoch_ref, &repair_oid);
+                    }
+                    current.clone()
+                } else {
+                    epoch
+                }
+            } else {
+                epoch
+            };
+
             let (state, commits_ahead) = match &current_epoch {
                 Some(current) if epoch == *current => {
                     // Workspace is at the current epoch; count agent commits.
@@ -552,27 +600,31 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // inside a workspace, advancing HEAD beyond the creation epoch. Using
         // HEAD as base_epoch would hide those committed changes from both the
         // patchset guard and the pre-destroy capture.
-        let base_epoch = {
-            let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
-            if let Ok(Some(oid)) = manifold_refs::read_ref(&self.root, &epoch_ref) {
-                EpochId::new(oid.as_str()).map_err(|e| GitBackendError::GitCommand {
-                    command: format!("read {epoch_ref}"),
-                    stderr: format!("invalid OID from workspace epoch ref: {e}"),
-                    exit_code: None,
-                })?
-            } else {
-                // Fallback: use HEAD (correct for workspaces without commits).
-                let ws_repo = open_repo_at(&ws_path)?;
-                let head_oid = ws_repo
-                    .rev_parse("HEAD")
-                    .map_err(|e| map_git_error("rev-parse HEAD", &e))?;
-                let head_str = head_oid.to_string();
-                EpochId::new(&head_str).map_err(|e| GitBackendError::GitCommand {
-                    command: "rev-parse HEAD".to_owned(),
-                    stderr: format!("invalid OID from HEAD: {e}"),
-                    exit_code: None,
-                })?
-            }
+        //
+        // bn-1qtj: also read HEAD here so the self-heal path can repair a
+        // lagging epoch ref when the workspace already sits at/past the
+        // current epoch.
+        let ws_repo_for_head = open_repo_at(&ws_path)?;
+        let head_oid = ws_repo_for_head
+            .rev_parse("HEAD")
+            .map_err(|e| map_git_error("rev-parse HEAD", &e))?;
+        let head_str = head_oid.to_string();
+
+        let epoch_ref = manifold_refs::workspace_epoch_ref(name.as_str());
+        let recorded = manifold_refs::read_ref(&self.root, &epoch_ref)
+            .ok()
+            .flatten()
+            .and_then(|oid| EpochId::new(oid.as_str()).ok());
+
+        let base_epoch = if let Some(rec) = recorded {
+            rec
+        } else {
+            // Fallback: use HEAD (correct for workspaces without commits).
+            EpochId::new(&head_str).map_err(|e| GitBackendError::GitCommand {
+                command: "rev-parse HEAD".to_owned(),
+                stderr: format!("invalid OID from HEAD: {e}"),
+                exit_code: None,
+            })?
         };
 
         // Collect dirty files: staged + tracked modifications + untracked.
@@ -598,7 +650,48 @@ impl WorkspaceBackend for GitWorktreeBackend {
         // Using HEAD here can disagree with `list()` state computation and
         // produce contradictory UX (`status` says stale but `sync` says up to date,
         // or vice versa).
-        let is_stale = self.current_epoch_opt().is_some_and(|current| {
+        //
+        // bn-1qtj: self-heal a lagging epoch ref. If the recorded base epoch
+        // differs from the current epoch BUT HEAD is already at or past the
+        // current epoch (i.e., the ref failed to be written during a previous
+        // sync), repair the ref and report the workspace as NOT stale.
+        //
+        // Three conditions must ALL hold (same logic as `list()`):
+        //   (1) base_epoch is an ancestor of current → the ref LAGS (not ahead)
+        //   (2) HEAD is at or past the current epoch
+        //   (3) base_epoch != current (there's something to repair)
+        //
+        // Without (1), the heal would also fire for workspaces whose baseline
+        // is legitimately ahead of the global epoch (branch-attached targets),
+        // corrupting their per-workspace baseline ref.
+        let current_opt = self.current_epoch_opt();
+        let base_epoch = if let Some(ref current) = current_opt {
+            if base_epoch != *current
+                // (1) base_epoch is strictly older than current.
+                && self.is_ancestor(base_epoch.as_str(), current.as_str())
+                // (2) HEAD is already at or past current.
+                && (head_str == current.as_str() || self.is_ancestor(current.as_str(), &head_str))
+            {
+                // Ref lags but workspace HEAD is at/past current epoch — self-heal.
+                tracing::debug!(
+                    workspace = %name.as_str(),
+                    stale_ref = %base_epoch,
+                    current = %current,
+                    head = %head_str,
+                    "status: self-healing lagging epoch ref"
+                );
+                if let Ok(repair_oid) = GitOid::new(current.as_str()) {
+                    let _ = manifold_refs::write_ref(&self.root, &epoch_ref, &repair_oid);
+                }
+                current.clone()
+            } else {
+                base_epoch
+            }
+        } else {
+            base_epoch
+        };
+
+        let is_stale = current_opt.is_some_and(|current| {
             if base_epoch == current {
                 return false;
             }

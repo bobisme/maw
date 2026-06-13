@@ -48,6 +48,18 @@ pub(super) fn workspace_name_from_cwd(root: &Path, cwd: &Path) -> String {
 /// Returns `None` if git fails for any reason (invalid repo, unknown OID, etc.).
 /// Callers MUST treat `None` as "has committed work" (i.e. refuse to sync) to
 /// prevent data loss when the workspace state cannot be determined.
+///
+/// # Ahead-count correctness and epoch-ref desync (bn-1qtj)
+///
+/// The `base` argument **must** be the workspace's recorded creation/sync epoch
+/// ref (`refs/manifold/epoch/ws/<name>`), not the current epoch. The staleness
+/// logic in [`maw_core::backend::git::GitWorktreeBackend::list`] self-heals a
+/// lagging epoch ref when the workspace HEAD already equals or descends from
+/// the current epoch — so by the time this function is called on an `is_stale`
+/// workspace, the ref is either genuine (HEAD is below the current epoch and
+/// the count is real workspace work) or it has already been corrected and
+/// staleness was cleared. There is therefore no false-ahead path after the
+/// self-heal runs.
 //
 // Takes a [`BaseEpoch`] explicitly (not a bare `&str` or `CurrentEpoch`) so
 // that the compiler catches accidental swaps. See bn-18dj for the bug this
@@ -350,17 +362,39 @@ fn sync_worktree_to_epoch_inner(
     // Update the per-workspace creation epoch ref to the new epoch.
     // After sync, the workspace is rebased onto the new epoch, so
     // the epoch ref should reflect the new base.
-    // Silent failure here leaves a stale ref → downstream misreports state
-    // (bn-3pkx). Warn and continue; the worktree is already at the new epoch.
+    //
+    // bn-1qtj: A failed write leaves the workspace permanently stale-by-ref
+    // (every subsequent `maw exec` prints a stale warning, and
+    // `committed_ahead_of_epoch` counts epoch commits as workspace work).
+    // Retry once; if the second attempt still fails, emit a loud stderr
+    // WARNING with the exact ref, the OID it should hold, and a copy-pasteable
+    // fix command so the operator can repair it manually.
     if let Ok(oid) = maw_core::model::types::GitOid::new(epoch_oid) {
         let epoch_ref = manifold_refs::workspace_epoch_ref(ws_name);
-        if let Err(e) = manifold_refs::write_ref(root, &epoch_ref, &oid) {
+        let write_result = manifold_refs::write_ref(root, &epoch_ref, &oid).or_else(|_first_err| {
+            // Retry once before escalating to a loud warning.
+            manifold_refs::write_ref(root, &epoch_ref, &oid)
+        });
+        if let Err(e) = write_result {
             tracing::warn!(
                 workspace = %ws_name,
                 epoch_ref = %epoch_ref,
                 oid = %oid,
                 error = %e,
                 "failed to update workspace epoch ref after sync — downstream commands may see a stale epoch"
+            );
+            eprintln!(
+                "WARNING: failed to update epoch ref for workspace '{ws_name}' (retried once): {e}"
+            );
+            eprintln!("  Ref '{epoch_ref}' should hold OID {oid} but could not be written.");
+            eprintln!(
+                "  Without this ref the workspace will appear stale on every subsequent `maw exec`."
+            );
+            eprintln!(
+                "  Manual fix: git -C {} update-ref {} {}",
+                root.display(),
+                epoch_ref,
+                oid
             );
         }
     }
