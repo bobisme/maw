@@ -2,6 +2,22 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.5 — orphaned-commit class closed at the source (2026-06-13)
+
+Fifth dogfood pre-release. A field report from real multi-workspace dogfooding ("sigil") — a worker reported committing, but the commit had vanished, work left uncommitted on disk — turned out to be a **Prime-Invariant violation**: maw could silently abandon a committed workspace commit during a concurrent epoch advance, with zero diagnostics. Forensics proved the commit was real and orphaned by maw (and the incident then reproduced live in maw's own repo mid-investigation). The fix closes the whole class.
+
+**Prime Invariant — no committed work is silently abandoned**
+- **Sync fast-forward refuses to abandon committed work, and exec auto-sync is race-safe (bn-29z8, HIGH).** The detached-HEAD fast-forward now refuses (naming the SHAs) rather than checking out over commits not in the epoch, git's swallowed "leaving commits behind" warning is surfaced, and `maw exec`'s auto-sync takes the per-workspace lock with an expected-HEAD compare-and-swap so a commit landing mid-check can't be orphaned.
+- **`set_head` never-abandon guard + forensic trail (bn-20sa, HIGH).** The rebase HEAD move now CAS-checks the walk-start HEAD and refuses a zero-replay move over exclusive commits; `set_head` writes a reflog entry, and sibling rebases/syncs now appear in `maw ws history` (both prior incidents were forensically blind).
+- **`maw ws advance` no longer orphans committed work (bn-8flz, HIGH).** It was stash-only — it snapshotted the working copy, checked out the new epoch, and silently dropped any committed-ahead commit while printing "advanced successfully." It now routes committed-ahead work through the same guarded rebase path as `maw ws sync` (replaying it onto the new epoch — its documented purpose).
+- **Workspace epoch-ref desync self-heals (bn-1qtj).** A lagging `refs/manifold/epoch/ws/<name>` (failed/raced write) left a workspace permanently "stale" — endless warnings and false "committed ahead" counts; the ref write now retries loudly and read paths self-heal when HEAD already matches the epoch.
+
+**Native HEAD movement — the structural fix**
+- **All workspace-HEAD movement consolidated onto one native gix choke-point.** The orphan class kept reappearing because HEAD was moved by blind `git checkout --detach`/`--force` shell-outs (kept behind a stale `TODO(gix)` whose blocker — detached HEAD in linked worktrees — was already solved by `set_head`). New native `checkout_detach` / `checkout_to_branch` / `checkout_force` primitives (all reflog-writing) replace the shell-outs across sync, advance, working-copy, and merge reattach; the dead `checkout_epoch` is removed. With one guarded path instead of four, a fifth site can't silently reintroduce the bug.
+
+**Release-gate infrastructure**
+- **SG1 soak runs on a local systemd-timer cron (bn-2yzz)**, replacing the dead GitHub Actions soak, accruing op-step evidence toward the v1.0 DST gate.
+
 ## v1.0.0-pre.4 — conflict-engine hardening (bug-loop sweep) (2026-06-10)
 
 Fourth dogfood pre-release. An intensive multi-round bug-loop on the conflict / merge / resolve / sync engine — driven by real multi-workspace ("sigil") dogfooding — found and fixed **18 bugs** before converging on a clean pass (round 6 found zero). The work concentrates on making conflict rendering, resolution, and reporting honest and lossless.
