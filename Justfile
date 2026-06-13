@@ -190,6 +190,16 @@ sg1-faithful-clippy:
 sg1-faithful-build:
   cargo build -p maw-cli --features failpoints --release
 
+# sg1-faithful-test: run the deterministic-interleaving tests that need the
+# `failpoints` feature live — e.g. the FP_REBASE_BEFORE_SETHEAD never-abandon
+# CAS guard test (bn-2byw / bn-20sa). These exercise production HEAD-movement
+# code with a callback failpoint injecting a concurrent mutation at a precise
+# point (spike outcome C). The default `just test` build compiles the FP sites
+# out, so these tests only run here.
+sg1-faithful-test:
+  cargo test -p maw-cli --features failpoints --test '*' -- --nocapture
+  cargo test -p maw-cli --features failpoints --lib -- --nocapture
+
 # ----------------------------------------------------------------------------
 # SG2 — agent-ergonomics benchmark recipes (bn-2jwi). T2.4 / bn-oko4.
 # ----------------------------------------------------------------------------

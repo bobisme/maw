@@ -806,6 +806,18 @@ pub(super) fn rebase_workspace_run(
     // already handled by the `commits.is_empty()` early return above, so we
     // should never reach this point with replayed==0 unless the commit walk
     // failed silently. We still check explicitly as belt-and-suspenders.
+    //
+    // bn-2byw: deterministic interleaving point. A test can arm a callback
+    // failpoint here (via `failpoints::set_callback`) that moves the
+    // workspace HEAD — simulating a concurrent commit landing between the
+    // walk and the CAS re-read below — and assert the never-abandon CAS
+    // guard catches it. No real threads; fully replayable. This is the
+    // production-code home for the spike's outcome-C interleaving (see
+    // notes/sg1-race-feasibility-spike-bn-3ny7.md). Without the `failpoints`
+    // feature this expands to nothing (zero overhead).
+    if let Err(e) = maw::fp!("FP_REBASE_BEFORE_SETHEAD") {
+        return Err(anyhow::anyhow!("failpoint FP_REBASE_BEFORE_SETHEAD: {e}"));
+    }
     {
         let current_head = repo_dyn
             .rev_parse("HEAD")
@@ -2940,5 +2952,164 @@ mod tests {
             (cfg.size_ratio_max - 1.5).abs() < 1e-9,
             "size ratio defaults to 1.5"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-2byw / bn-20sa: deterministic test of the never-abandon CAS guard at
+    // the rebase set_head boundary (rebase.rs branch (a)). It was previously
+    // UNEXERCISED — the bn-20sa regression test reproduces only via the happy
+    // path. Here we arm the FP_REBASE_BEFORE_SETHEAD callback failpoint to land
+    // a concurrent commit between the commit walk and the guard's HEAD re-read,
+    // with NO real threads — a fully deterministic, replayable interleaving
+    // (spike outcome C: notes/sg1-race-feasibility-spike-bn-3ny7.md). Gated on
+    // `failpoints` because the FP site is compiled out otherwise; run via
+    // `just sg1-faithful-test` / `cargo test -p maw-cli --features failpoints`.
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "failpoints")]
+    mod never_abandon_cas {
+        use super::super::{RebaseRunOptions, rebase_workspace_run};
+        use std::path::Path;
+        use std::process::Command;
+
+        fn git_t(dir: &Path, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap_or_else(|e| panic!("git {}: {e}", args.join(" ")));
+            assert!(
+                out.status.success(),
+                "git {} failed:\n{}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        /// Build a minimal bare maw repo; return the epoch₀ OID.
+        fn init_repo(dir: &Path) -> String {
+            git_t(dir, &["init", "-q"]);
+            git_t(dir, &["config", "user.name", "Test"]);
+            git_t(dir, &["config", "user.email", "test@localhost"]);
+            git_t(dir, &["config", "commit.gpgsign", "false"]);
+            git_t(dir, &["checkout", "-q", "-B", "main"]);
+            std::fs::write(dir.join(".gitignore"), "ws/\n.manifold/\n").expect("write .gitignore");
+            git_t(dir, &["add", ".gitignore"]);
+            git_t(dir, &["commit", "-q", "-m", "epoch0"]);
+            let epoch0 = git_t(dir, &["rev-parse", "HEAD"]);
+            git_t(dir, &["config", "core.bare", "true"]);
+            let idx = dir.join(".git").join("index");
+            if idx.exists() {
+                std::fs::remove_file(&idx).ok();
+            }
+            let manifold = dir.join(".manifold");
+            std::fs::create_dir_all(manifold.join("artifacts").join("ws"))
+                .expect("create .manifold/artifacts/ws");
+            std::fs::write(manifold.join("config.toml"), "[repo]\nbranch = \"main\"\n")
+                .expect("write config.toml");
+            git_t(dir, &["update-ref", "refs/manifold/epoch/current", &epoch0]);
+            epoch0
+        }
+
+        #[test]
+        fn rebase_aborts_when_head_moves_between_walk_and_set_head() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path();
+            let epoch0 = init_repo(root);
+
+            // Workspace "feat" at epoch0, then 1 commit ahead (disjoint file so
+            // the replay onto the new epoch is clean and we reach the guard).
+            let feat = root.join("ws").join("feat");
+            git_t(
+                root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    feat.to_str().expect("path"),
+                    &epoch0,
+                ],
+            );
+            std::fs::write(feat.join("feat.txt"), "precious\n").expect("write feat.txt");
+            git_t(&feat, &["add", "feat.txt"]);
+            git_t(&feat, &["commit", "-q", "-m", "feat: C1"]);
+            let c1 = git_t(&feat, &["rev-parse", "HEAD"]);
+
+            // Advance the epoch with a disjoint commit (in a default worktree).
+            let def = root.join("ws").join("default");
+            git_t(
+                root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    def.to_str().expect("path"),
+                    &epoch0,
+                ],
+            );
+            std::fs::write(def.join("epoch.txt"), "advance\n").expect("write epoch.txt");
+            git_t(&def, &["add", "epoch.txt"]);
+            git_t(&def, &["commit", "-q", "-m", "epoch: advance"]);
+            let new_epoch = git_t(&def, &["rev-parse", "HEAD"]);
+            git_t(
+                root,
+                &["update-ref", "refs/manifold/epoch/current", &new_epoch],
+            );
+            git_t(root, &["update-ref", "refs/heads/main", &new_epoch]);
+
+            // The interleaving: when the rebase hits FP_REBASE_BEFORE_SETHEAD
+            // (after the walk, before the CAS re-read), land a concurrent
+            // commit in feat so HEAD moves off C1. Deterministic, no threads.
+            let feat_cb = feat.clone();
+            maw_core::failpoints::set_callback("FP_REBASE_BEFORE_SETHEAD", move || {
+                let _ = Command::new("git")
+                    .args(["commit", "-q", "--allow-empty", "-m", "concurrent C2"])
+                    .current_dir(&feat_cb)
+                    .output();
+            });
+
+            let opts = RebaseRunOptions {
+                print: false,
+                mutate_worktree: false,
+                acquire_lock: true,
+                continue_past_worktree_failure: false,
+            };
+            let res = rebase_workspace_run(
+                root,
+                "feat",
+                &epoch0,
+                &new_epoch,
+                &feat,
+                1,
+                opts,
+                "test:bn-2byw",
+            );
+            maw_core::failpoints::clear("FP_REBASE_BEFORE_SETHEAD");
+
+            let err = res.expect_err("rebase must abort when HEAD moved mid-operation");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("SAFETY ABORT"),
+                "expected SAFETY ABORT, got: {msg}"
+            );
+            assert!(
+                msg.contains("HEAD moved"),
+                "expected 'HEAD moved', got: {msg}"
+            );
+
+            // The concurrent commit must survive: HEAD moved off C1 and was NOT
+            // clobbered to the new epoch.
+            let head_after = git_t(&feat, &["rev-parse", "HEAD"]);
+            assert_ne!(
+                head_after, c1,
+                "HEAD should have moved to the concurrent commit"
+            );
+            assert_ne!(
+                head_after, new_epoch,
+                "never-abandon guard must NOT have moved HEAD to the new epoch"
+            );
+        }
     }
 }

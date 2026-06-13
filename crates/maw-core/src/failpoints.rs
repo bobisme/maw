@@ -4,11 +4,21 @@
 //! Without the feature, the `fp!()` macro expands to nothing.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+/// A deterministic interleaving hook (bn-2byw): a closure run when hit.
+///
+/// Unlike the env-expressible actions, a callback can only be armed
+/// **in-process** (via [`set_callback`]) — it is the primitive that lets a
+/// single-threaded test drive a concurrent-mutation interleaving (e.g. move
+/// HEAD between a rebase walk and the `set_head` CAS re-read) deterministically,
+/// with no real threads. See `notes/sg1-race-feasibility-spike-bn-3ny7.md`
+/// (outcome C).
+pub type FailpointCallback = Arc<dyn Fn() + Send + Sync>;
+
 /// Actions a failpoint can take when triggered.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum FailpointAction {
     /// No-op (default).
     Off,
@@ -20,6 +30,24 @@ pub enum FailpointAction {
     Abort,
     /// Sleep for the given duration.
     Sleep(Duration),
+    /// Run a registered callback, then continue (returns `Ok`). In-process
+    /// only — not expressible via `MAW_FP`. The deterministic interleaving
+    /// primitive (bn-2byw); arm it with [`set_callback`].
+    Callback(FailpointCallback),
+}
+
+// Manual `Debug` (the `Callback` closure is not `Debug`).
+impl std::fmt::Debug for FailpointAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => write!(f, "Off"),
+            Self::Error(m) => f.debug_tuple("Error").field(m).finish(),
+            Self::Panic(m) => f.debug_tuple("Panic").field(m).finish(),
+            Self::Abort => write!(f, "Abort"),
+            Self::Sleep(d) => f.debug_tuple("Sleep").field(d).finish(),
+            Self::Callback(_) => write!(f, "Callback(<fn>)"),
+        }
+    }
 }
 
 /// Thread-safe global registry of active failpoints.
@@ -36,6 +64,22 @@ pub fn set(name: &'static str, action: FailpointAction) {
         .lock()
         .expect("operation should succeed")
         .insert(name, action);
+}
+
+/// Arm a [`FailpointAction::Callback`] from any closure.
+///
+/// Convenience over `set(name, FailpointAction::Callback(Arc::new(f)))`. The
+/// callback runs (in-process) every time `check(name)` is hit until cleared.
+/// This is the deterministic interleaving primitive (bn-2byw): a test arms a
+/// closure that mutates state (e.g. moves HEAD) at a precise point inside
+/// production code, with no real threads — so the resulting "race" is fully
+/// replayable. See `notes/sg1-race-feasibility-spike-bn-3ny7.md`.
+///
+/// # Panics
+///
+/// Panics if the internal registry mutex is poisoned.
+pub fn set_callback<F: Fn() + Send + Sync + 'static>(name: &'static str, f: F) {
+    set(name, FailpointAction::Callback(Arc::new(f)));
 }
 
 /// Clear a specific failpoint.
@@ -81,6 +125,12 @@ pub fn check(name: &str) -> Result<(), String> {
             let d = *d;
             drop(registry); // release lock before sleeping
             std::thread::sleep(d);
+            Ok(())
+        }
+        Some(FailpointAction::Callback(cb)) => {
+            let cb = cb.clone();
+            drop(registry); // release lock before running the callback (it may re-enter)
+            cb();
             Ok(())
         }
     }
@@ -150,6 +200,7 @@ pub const KNOWN_FAILPOINTS: &[&str] = &[
     "FP_MIGRATE_PHASE_D_AFTER_UNBARE",
     "FP_PREPARE_AFTER_STATE_WRITE",
     "FP_PREPARE_BEFORE_STATE_WRITE",
+    "FP_REBASE_BEFORE_SETHEAD",
     "FP_RECOVER_BEFORE_RESTORE",
     "FP_RECOVER_BEFORE_SEARCH",
     "FP_VALIDATE_AFTER_CHECK",
@@ -315,6 +366,46 @@ mod tests {
         let _g = lock_registry();
         clear_all();
         assert!(check("FP_TEST_NOOP").is_ok());
+    }
+
+    /// bn-2byw: a `Callback` action runs the registered closure (in-process)
+    /// and returns Ok, so execution continues past the failpoint. This is the
+    /// deterministic interleaving primitive — the closure can mutate external
+    /// state captured by the test. Verify it (a) runs, (b) can mutate captured
+    /// state, and (c) runs again on a second hit until cleared.
+    #[test]
+    fn callback_runs_and_mutates_captured_state() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _g = lock_registry();
+        clear_all();
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_in_cb = Arc::clone(&hits);
+        set_callback("FP_TEST_CALLBACK", move || {
+            hits_in_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert!(
+            check("FP_TEST_CALLBACK").is_ok(),
+            "callback action returns Ok so production code continues"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "callback must have run once"
+        );
+
+        // Fires every hit until cleared.
+        assert!(check("FP_TEST_CALLBACK").is_ok());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        clear("FP_TEST_CALLBACK");
+        assert!(check("FP_TEST_CALLBACK").is_ok());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "cleared callback must not run again"
+        );
     }
 
     /// check returns error when failpoint is set to Error.
