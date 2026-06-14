@@ -310,6 +310,15 @@ pub enum Op {
         /// New workspace name to materialize into.
         to: WsId,
     },
+    /// Advance a workspace onto the current epoch (`maw ws advance <ws>`).
+    /// Routes committed-ahead work through the guarded rebase path (bn-8flz).
+    /// Only generated when a profile sets `advance_weight > 0`; the default
+    /// soak profile keeps it 0 so the in-proc campaign's seed→plan stream
+    /// stays byte-identical.
+    Advance {
+        /// Target workspace.
+        ws: WsId,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -333,10 +342,21 @@ pub struct ConditionProfile {
     /// Per-step probability of leaving a workspace un-synced across an
     /// epoch bump (the bn-7phd "stale source" class).
     pub stale_workspace_rate: f64,
+    /// Selection weight for the `Advance` op (`maw ws advance`). **0 by
+    /// default**, which keeps the op out of the chooser entirely so the
+    /// default-profile seed→plan byte stream (the bn-2yzz in-proc campaign)
+    /// is unchanged. Set `> 0` (via [`ConditionProfile::with_advance_weight`])
+    /// only on drivers that want production-code advance coverage, e.g. the
+    /// `dst_production_tier`. Comparable in magnitude to the other op weights
+    /// in `choose_op` (WsCreate=6 … EditFiles=18).
+    #[serde(default)]
+    pub advance_weight: u32,
 }
 
 impl ConditionProfile {
-    /// Construct a profile with clamped fields.
+    /// Construct a profile with clamped fields. `advance_weight` defaults to 0
+    /// (see the field doc); use [`with_advance_weight`](Self::with_advance_weight)
+    /// to enable it.
     #[must_use]
     pub fn new(
         concurrency_degree: u8,
@@ -349,7 +369,17 @@ impl ConditionProfile {
             mid_op_kill_prob: mid_op_kill_prob.clamp(0.0, 1.0),
             overlapping_edit_rate: overlapping_edit_rate.clamp(0.0, 1.0),
             stale_workspace_rate: stale_workspace_rate.clamp(0.0, 1.0),
+            advance_weight: 0,
         }
+    }
+
+    /// Return a copy of this profile with the `Advance`-op selection weight
+    /// set to `w`. `w = 0` leaves the chooser's op set (and therefore the
+    /// seed→plan byte stream) identical to a profile without advance.
+    #[must_use]
+    pub const fn with_advance_weight(mut self, w: u32) -> Self {
+        self.advance_weight = w;
+        self
     }
 }
 
@@ -684,6 +714,9 @@ enum OpKind {
     Sync,
     Destroy,
     Recover,
+    /// Advance a workspace onto the current epoch (gated on
+    /// `profile.advance_weight > 0`; never ranked otherwise).
+    Advance,
     /// Special: emit a destroy of a live merge source (bn-cm63 class).
     DestroyLiveMergeSource,
 }
@@ -702,7 +735,13 @@ fn choose_op(rng: &mut StdRng, model: &mut AbstractModel, profile: &ConditionPro
 
     // Roll a desired op kind, then narrow to a valid one. The dice are tuned
     // to keep an interesting steady-state mix without starving any kind.
-    let kinds: &[(OpKind, u32)] = &[
+    //
+    // DETERMINISM (bn-2byw): the base 8-entry array below is IDENTICAL to its
+    // historical form. `Advance` is appended ONLY when `advance_weight > 0`, so
+    // for the default soak profile (weight 0) the slice — and therefore the
+    // `weighted_choice` draw, `kinds.len()`, and the whole seed→plan byte
+    // stream — is unchanged. The bn-2yzz campaign is the default profile.
+    let mut kinds: Vec<(OpKind, u32)> = vec![
         (OpKind::WsCreate, 6),
         (OpKind::EditFiles, 18),
         (OpKind::Commit, 14),
@@ -714,7 +753,10 @@ fn choose_op(rng: &mut StdRng, model: &mut AbstractModel, profile: &ConditionPro
         // reliably gets at least one bn-cm63 attempt.
         (OpKind::DestroyLiveMergeSource, 4),
     ];
-    let mut desired = weighted_choice(rng, kinds);
+    if profile.advance_weight > 0 {
+        kinds.push((OpKind::Advance, profile.advance_weight));
+    }
+    let mut desired = weighted_choice(rng, &kinds);
 
     // Validity narrowing: if the desired op isn't legal right now, fall back
     // along a stable priority list (deterministic, no Hash iteration).
@@ -747,7 +789,12 @@ const fn next_kind_fallback(k: OpKind) -> OpKind {
         OpKind::Commit => OpKind::Sync,
         OpKind::Sync => OpKind::Destroy,
         OpKind::Destroy => OpKind::Recover,
-        OpKind::Recover => OpKind::WsCreate,
+        // `Advance` shares `Recover`'s fallback target (WsCreate). It is a spur
+        // INTO the cycle, not part of it: no existing kind falls back to it, so
+        // the historical 8-kind fallback chains are byte-identical. Advance is
+        // reachable only when directly desired (`advance_weight > 0`); from
+        // there it joins the normal cycle at WsCreate.
+        OpKind::Recover | OpKind::Advance => OpKind::WsCreate,
         OpKind::WsCreate => OpKind::EditFiles,
         OpKind::EditFiles => OpKind::DestroyLiveMergeSource,
     }
@@ -856,6 +903,20 @@ fn try_emit(
             let force = st.has_uncommitted || rng.random_bool(0.25);
             Some(Op::Destroy { ws, force })
         }
+        OpKind::Advance => {
+            // Advance a workspace that has committed work and is clean — the
+            // committed-ahead case routes through the guarded rebase path
+            // (bn-8flz), which is the production code worth exercising. Falls
+            // through (None) if no such workspace exists.
+            let candidates: Vec<WsId> = model
+                .workspaces
+                .iter()
+                .filter(|(_, s)| s.has_commit && !s.has_uncommitted)
+                .map(|(k, _)| k.clone())
+                .collect();
+            let ws = pick_from(rng, &candidates)?;
+            Some(Op::Advance { ws })
+        }
         OpKind::Recover => {
             let candidates: Vec<WsId> = model.destroyed.iter().cloned().collect();
             let src = pick_from(rng, &candidates)?;
@@ -934,6 +995,14 @@ fn apply_to_model(model: &mut AbstractModel, op: &Op) {
             model.create_ws(to.clone(), false);
             // Bump slot counter to match the `to` id we emitted.
             model.alloc_slot();
+        }
+        Op::Advance { ws } => {
+            // Advance brings the workspace onto the current epoch (like sync,
+            // but also replays committed-ahead work). Abstractly it clears
+            // staleness; the commit stays (it is replayed, not dropped).
+            if let Some(st) = model.workspaces.get_mut(ws) {
+                st.is_stale = false;
+            }
         }
     }
 }
@@ -1438,6 +1507,15 @@ mod tests {
                 assert!(
                     !model.workspaces.contains_key(to),
                     "seed {seed} step {index}: Recover overwriting extant {to:?}",
+                );
+            }
+            Op::Advance { ws } => {
+                let st = model.workspaces.get(ws).unwrap_or_else(|| {
+                    panic!("seed {seed} step {index}: Advance on nonexistent {ws:?}")
+                });
+                assert!(
+                    st.has_commit && !st.has_uncommitted,
+                    "seed {seed} step {index}: Advance on {ws:?} without clean committed work",
                 );
             }
         }

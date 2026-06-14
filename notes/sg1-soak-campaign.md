@@ -170,11 +170,14 @@ artifact reviewable):
     (`tests/dst_production_tier.rs`, `just sg1-production-tier`) that DOES
     drive the real `maw` binary over the same op-stream and runs the
     authoritative `oracle_a`/`oracle_b` after every op. So the production
-    code path now has authoritative-oracle coverage — but at a *bounded*
-    op-step count, with **no fault injection and no `Advance`/concurrency
-    yet** (so this campaign's 1e8 figure remains in-proc-*model* evidence;
-    the production tier is complementary, not a substitute). See
-    `sg1-dst-architecture.md` §7.1.1.
+    code path now has authoritative-oracle coverage — including the real
+    `ws advance` committed-ahead path (bn-8flz, via a gated `Advance` op that
+    leaves the default soak profile byte-identical) — but at a *bounded*
+    op-step count, with **no fault injection yet and no multi-process race**
+    (the latter is covered separately by a two-process flock test). So this
+    campaign's 1e8 figure remains in-proc-*model* evidence; the production
+    tier is complementary, not a substitute. See `sg1-dst-architecture.md`
+    §7.1.1.
 
 ---
 
@@ -481,8 +484,9 @@ SG1 published soak — v1.0 release-gate evidence (1e8 floor)
 
   Scope (MUST publish alongside the headline — bn-13g1):
     in-proc tier drives a MODEL of maw's git-object effects, not maw's
-    production HEAD-movement code (no Advance op; do_merge/do_sync are
-    plumbing models; single-process). This evidence does NOT cover the
+    production HEAD-movement code (default profile emits no Advance op —
+    advance_weight=0; do_merge/do_sync are plumbing models; single-process).
+    This evidence does NOT cover the
     orphaned-commit class (bn-29z8/1qtj/20sa/8flz); that class is covered
     by tests/{advance_orphan_regression_bn_8flz,rebase_never_abandon_bn_20sa}.rs
     + always-loud guards + field dogfooding. See §1.3 and

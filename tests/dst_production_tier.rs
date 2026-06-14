@@ -35,9 +35,15 @@
 //! # Determinism / scope
 //!
 //! - Uses the SAME `maw-scenario` generator and `ScenarioPlan` as the in-proc
-//!   soak (`maw::assurance::scenario`). **No change** is made to that crate.
-//! - Increment 1 does NOT inject faults: each `PlannedStep.fault` / `.git_time`
-//!   is ignored. We replay only the op stream.
+//!   soak (`maw::assurance::scenario`). The generator carries a **gated**
+//!   `Advance` op (`maw ws advance`): `ConditionProfile::advance_weight`
+//!   defaults to 0, so the default-profile seed→plan byte stream — the bn-2yzz
+//!   in-proc campaign — is UNCHANGED (verified by the maw-scenario determinism
+//!   and corpus tests). This tier opts in via `with_advance_weight`, so it
+//!   exercises the production `ws advance` HEAD-movement path (bn-8flz) that
+//!   the in-proc model cannot reach.
+//! - This tier does NOT inject faults yet: each `PlannedStep.fault` /
+//!   `.git_time` is ignored. We replay only the op stream.
 //! - The oracle is the judge of correctness, NOT the maw exit code: we use
 //!   `maw_raw_exact` (which does not panic on non-zero) and let the oracles
 //!   decide whether an op broke an invariant. Many ops legitimately exit
@@ -99,6 +105,9 @@ struct Liveness {
     /// committed content (e.g. `capture_state` failed to enumerate the real
     /// worktrees), so a green result would be meaningless.
     oracle_a_witnesses: u64,
+    /// `ws advance` invocations that exited 0 — proves the production
+    /// HEAD-movement advance path (bn-8flz) was actually exercised.
+    advances_run: u64,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -112,6 +121,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Sync { .. } => "sync",
         Op::Destroy { .. } => "destroy",
         Op::Recover { .. } => "recover",
+        Op::Advance { .. } => "advance",
     }
 }
 
@@ -138,7 +148,19 @@ const fn base_ref_arg(base: &BaseRef) -> &'static str {
 fn execute_op(repo: &TestRepo, op: &Op) -> bool {
     match op {
         Op::WsCreate { ws, from } => {
-            let out = repo.maw_raw_exact(&["ws", "create", &ws.0, "--from", base_ref_arg(from)]);
+            // Create as --persistent so the `Advance` op (maw ws advance) has a
+            // valid target: advance refuses non-persistent workspaces
+            // (advance.rs "Only persistent workspaces can be advanced"). All
+            // other ops (edit/commit/merge/sync/destroy/recover) work
+            // identically on a persistent workspace.
+            let out = repo.maw_raw_exact(&[
+                "ws",
+                "create",
+                &ws.0,
+                "--from",
+                base_ref_arg(from),
+                "--persistent",
+            ]);
             out.status.success()
         }
         Op::EditFiles { ws, files } => {
@@ -202,6 +224,13 @@ fn execute_op(repo: &TestRepo, op: &Op) -> bool {
             let out = repo.maw_raw_exact(&["ws", "recover", &ws.0, "--to", &to.0]);
             out.status.success()
         }
+        Op::Advance { ws } => {
+            // `maw ws advance <ws>` — routes committed-ahead work through the
+            // guarded rebase path (bn-8flz). This is the production
+            // HEAD-movement code the in-proc model can't reach.
+            let out = repo.maw_raw_exact(&["ws", "advance", &ws.0]);
+            out.status.success()
+        }
     }
 }
 
@@ -240,7 +269,17 @@ fn run_seed(seed: u64, n_steps: usize, live: &mut Liveness) -> Vec<String> {
     let repo = TestRepo::new();
     repo.seed_files(&[("base.txt", "base content\n")]);
 
-    let plan = generate_plan(seed, &ConditionProfile::default(), n_steps);
+    // Enable the Advance op (weight 8, comparable to the other op weights) so
+    // this tier exercises the production `ws advance` HEAD-movement path. The
+    // DEFAULT profile keeps advance_weight=0, so the bn-2yzz in-proc campaign's
+    // seed→plan stream is unaffected (proven by the maw-scenario determinism +
+    // corpus tests). This tier regenerates plans each run, so a different
+    // byte stream here is fine.
+    let plan = generate_plan(
+        seed,
+        &ConditionProfile::default().with_advance_weight(8),
+        n_steps,
+    );
 
     // Oracle A is incremental: ONE instance per seed/repo, fed every step.
     let mut oracle_a = OracleA::new(repo.root());
@@ -257,6 +296,9 @@ fn run_seed(seed: u64, n_steps: usize, live: &mut Liveness) -> Vec<String> {
         }
         if matches!(op, Op::WsCreate { .. }) && succeeded {
             live.ws_created += 1;
+        }
+        if matches!(op, Op::Advance { .. }) && succeeded {
+            live.advances_run += 1;
         }
 
         // Detect epoch advance (a merge committing into default).
@@ -357,7 +399,7 @@ fn dst_production_tier_no_work_lost() {
     eprintln!(
         "dst-production-tier: ran {} op-steps across {count} seeds ({} steps/seed); \
          {} ops succeeded, {} workspaces created, {} epoch advances, \
-         {} Oracle-A witness blobs; 0 violations over N={} trials \
+         {} Oracle-A witness blobs, {} ws-advances; 0 violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
         n_steps,
@@ -365,6 +407,7 @@ fn dst_production_tier_no_work_lost() {
         live.ws_created,
         live.epoch_advances,
         live.oracle_a_witnesses,
+        live.advances_run,
         n_trials,
         wilson_ub,
     );
@@ -404,6 +447,19 @@ fn dst_production_tier_no_work_lost() {
         live.ops_succeeded,
         live.ws_created,
         live.epoch_advances,
+    );
+
+    // Non-vacuity for the Advance path: with advance_weight>0 enabled, the
+    // production `ws advance` HEAD-movement code (bn-8flz) must actually have
+    // run at least once — otherwise this tier silently stops covering it.
+    assert!(
+        live.advances_run > 0,
+        "LIVENESS FAILURE: zero successful `ws advance` ops across {count} seeds \
+         ({} steps/seed). The Advance op was enabled (advance_weight>0) but never \
+         executed against a persistent committed-ahead workspace — the production \
+         advance/rebase path was not exercised. Raise DST_STEPS or check the \
+         WsCreate --persistent mapping.",
+        n_steps,
     );
 
     assert!(

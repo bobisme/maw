@@ -457,7 +457,10 @@ impl InProcDriver {
                 into,
                 destroy,
             } => self.do_merge(&root, srcs, into, *destroy, &step.fault, &env),
-            Op::Sync { ws } => self.do_sync(&root, ws),
+            // Advance is modelled like Sync at the in-proc level (no per-ws
+            // epoch-staleness representation). Only generated when a profile
+            // sets advance_weight > 0; the default soak profile never emits it.
+            Op::Sync { ws } | Op::Advance { ws } => self.do_sync(&root, ws),
             Op::Destroy { ws, force: _ } => self.do_destroy(&root, ws, &env),
             Op::Recover { ws, to } => self.do_recover(&root, ws, to, &env),
         }

@@ -388,12 +388,14 @@ tracing the harness end to end while asking "would the soak have caught the
 orphaned-commit class we fixed in bn-29z8/1qtj/20sa/8flz?" The answer is
 **no, and not narrowly** — for three structural reasons:
 
-1. **The action vocabulary cannot express the main vector.** The generator
-   `Op` enum (`crates/maw-scenario/src/lib.rs`) is exactly `WsCreate`,
-   `EditFiles`, `Commit`, `Merge`, `Sync`, `Destroy`, `Recover`. There is
-   **no `Advance` op**, so `maw ws advance` — the bn-8flz orphan vector (an
-   unguarded HEAD-mover that overwrote committed-ahead work while printing
-   "advanced successfully") — is ungenerable at any seed or step count.
+1. **The default soak profile never emits the main vector.** The generator
+   `Op` enum originally lacked any advance op; a **gated** `Advance` op was
+   later added (bn-2byw) but `ConditionProfile::advance_weight` defaults to
+   **0**, so the default soak profile this campaign runs still never emits
+   `maw ws advance` — the bn-8flz orphan vector (an unguarded HEAD-mover that
+   overwrote committed-ahead work while printing "advanced successfully") — at
+   any seed or step count. (The production-code tier, §7.1.1, sets
+   `advance_weight > 0` and DOES exercise it against the real binary.)
 
 2. **The in-proc driver reimplements ops with raw git plumbing.** It does
    not call production `maw-core` / `maw-git`:
@@ -468,22 +470,24 @@ state-coherence — NOT the demoted `oracle::check_all` proxies). So unlike the
 in-proc volume tier, this one executes maw's real CLI / merge-engine /
 workspace HEAD-movement code.
 
-What it **does** cover now (increment 1 + 2): real `ws create` / edit / commit
+What it **does** cover now (increments 1–3): real `ws create` / edit / commit
 / merge (with real sibling auto-rebase on epoch advance) / sync / destroy /
-recover, oracle-checked per op; a non-vacuity guard (Oracle A must witness
-`>0` committed blobs — added after this tier caught a real
-`capture_state` worktree-HEAD-blindness bug that had made it silently
-vacuous); and Wilson-95%-UB accrual reporting (the same `≈3.8416/N` rule
-§7.1's campaign uses), so it is a production-code analog of the volume floor.
+recover **and `ws advance`** (the production committed-ahead rebase path,
+bn-8flz — enabled via a **gated** `Advance` op in the generator,
+`advance_weight > 0` for this tier; the default soak profile keeps it 0 so
+bn-2yzz is byte-identical, proven by the determinism/corpus tests). All
+oracle-checked per op. Carries non-vacuity guards: Oracle A must witness `>0`
+committed blobs (added after this tier caught a real `capture_state`
+worktree-HEAD-blindness bug that had made it silently vacuous) AND `>0`
+successful `ws advance` ops. Plus Wilson-95%-UB accrual reporting (the same
+`≈3.8416/N` rule §7.1's campaign uses), so it is a production-code analog of
+the volume floor.
 
 What it does **not** yet cover (honest scope): no fault injection on this tier
-yet (op-stream only — `PlannedStep.fault` is ignored); no `Advance` op in the
-shared generator (kept out to avoid perturbing the bn-2yzz seed→plan stream;
-the `ws advance` orphan vector retains its dedicated regression coverage,
-`tests/advance_orphan_regression_bn_8flz.rs`, plus the
-`FP_REBASE_BEFORE_SETHEAD` interleaving site advance routes through); no
-multi-process `set_head` race (single sequential driver); and it accrues a
-*bounded* op-step budget, not yet a published 1e8-class floor. So the §0 / §7.1
+yet (op-stream only — `PlannedStep.fault` is ignored); no multi-process
+`set_head` race (single sequential driver — that OS guarantee is covered by a
+separate two-process flock test, step 3); and it accrues a *bounded* op-step
+budget, not yet a published 1e8-class floor. So the §0 / §7.1
 caveat is **relaxed but not retired**: the soak *campaign's* 1e8 number is
 still in-proc-model evidence, but the Prime Invariant now ALSO has
 authoritative-oracle coverage of the real code path, just at a smaller op-step

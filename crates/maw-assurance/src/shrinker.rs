@@ -348,6 +348,7 @@ impl ShrinkerCorpusEntry {
                 | crate::scenario::Op::EditFiles { ws, .. }
                 | crate::scenario::Op::Commit { ws, .. }
                 | crate::scenario::Op::Sync { ws }
+                | crate::scenario::Op::Advance { ws }
                 | crate::scenario::Op::Destroy { ws, .. } => {
                     workspaces.insert(ws.0.clone());
                 }
