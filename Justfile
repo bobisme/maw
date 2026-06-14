@@ -218,6 +218,20 @@ sg1-faithful-test:
   cargo test -p maw-cli --features failpoints --test '*' -- --nocapture
   cargo test -p maw-cli --features failpoints --lib -- --nocapture
 
+# sg1-flock-test: the REAL two-`maw`-process flock mutual-exclusion test
+# (bn-2byw step 3). Spawns two real `maw ws sync --rebase` processes on the
+# same workspace; process 1 holds the per-workspace rebase flock open with
+# `MAW_FP=FP_REBASE_BEFORE_SETHEAD=sleep:<ms>` and process 2 must be REFUSED
+# with "Another rebase is in progress" — the one cross-process OS-level mutual
+# exclusion guarantee the single-process DST model and in-proc soak can't cover.
+#
+# The test is `#[ignore]`d so the default gate (`just check`) does NOT pay its
+# ~3min cold failpoints-binary build; it runs only here via `--ignored`. The
+# test builds + locates its own failpoints-enabled `maw` (separate target dir)
+# internally, so the recipe does not need `--features failpoints`.
+sg1-flock-test:
+  cargo test --test flock_mutual_exclusion_bn_2byw -- --ignored --nocapture
+
 # ----------------------------------------------------------------------------
 # SG2 — agent-ergonomics benchmark recipes (bn-2jwi). T2.4 / bn-oko4.
 # ----------------------------------------------------------------------------
