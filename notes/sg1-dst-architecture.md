@@ -483,15 +483,30 @@ successful `ws advance` ops. Plus Wilson-95%-UB accrual reporting (the same
 `≈3.8416/N` rule §7.1's campaign uses), so it is a production-code analog of
 the volume floor.
 
-What it does **not** yet cover (honest scope): no fault injection on this tier
-yet (op-stream only — `PlannedStep.fault` is ignored); no multi-process
-`set_head` race (single sequential driver — that OS guarantee is covered by a
-separate two-process flock test, step 3); and it accrues a *bounded* op-step
-budget, not yet a published 1e8-class floor. So the §0 / §7.1
-caveat is **relaxed but not retired**: the soak *campaign's* 1e8 number is
-still in-proc-model evidence, but the Prime Invariant now ALSO has
-authoritative-oracle coverage of the real code path, just at a smaller op-step
-count and without faults/concurrency yet.
+**Fault injection** is now wired as a separate `#[ignore]`d variant
+(`dst_production_tier_survives_faults`, `just sg1-production-tier-faults`): it
+arms `PlannedStep.fault` → `MAW_FP=<site>=abort` on a `--features failpoints`
+binary, crashing ops mid-flight, and runs the oracles on the post-crash state.
+It already earned its keep — it found **bn-38vw**: a crash between the merge
+epoch-CAS and the `epoch_after` journal leaves a dangling merge-state that
+Oracle B flags and that has no on-demand self-heal (recoverable, no work lost —
+Oracle A stays green). That reproducer is intentionally RED until bn-38vw is
+resolved. **Multi-process `set_head` race** is covered by the two-process flock
+test (step 3).
+
+What it does **not** yet cover (honest scope): a **deep** published op-step
+floor is blocked on **bn-3g6o** — an Oracle A *frontier gap* (it doesn't
+recognize content preserved inside conflict-marker rewrites when an
+epoch-bumping merge auto-rebases a committed sibling into a conflict), which
+false-positives a G1 at ~≥27 steps/seed. This is an oracle-completeness gap,
+NOT a maw work-loss bug (content is resolvable; `maw ws recover` confirms the
+ws is live-with-conflicts). The default 16×24 budget is clean; a meaningful
+deep floor awaits bn-3g6o. So the §0 / §7.1 caveat is **relaxed but not
+retired**: the soak *campaign's* 1e8 number is still in-proc-model evidence,
+but the Prime Invariant now ALSO has authoritative-oracle coverage of the real
+code path — including real `set_head`/auto-rebase/advance and (separately)
+mid-op crashes — just at a smaller op-step count, and with the two oracle/maw
+follow-ups above tracked.
 
 ---
 

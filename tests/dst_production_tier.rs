@@ -42,8 +42,16 @@
 //!   and corpus tests). This tier opts in via `with_advance_weight`, so it
 //!   exercises the production `ws advance` HEAD-movement path (bn-8flz) that
 //!   the in-proc model cannot reach.
-//! - This tier does NOT inject faults yet: each `PlannedStep.fault` /
-//!   `.git_time` is ignored. We replay only the op stream.
+//! - The default test (`dst_production_tier_no_work_lost`) replays only the op
+//!   stream — each `PlannedStep.fault` / `.git_time` is ignored — and stays
+//!   fast for the default gate. A SEPARATE `#[ignore]` variant
+//!   (`dst_production_tier_survives_faults`, run via
+//!   `just sg1-production-tier-faults`) DOES honor `PlannedStep.fault`: every
+//!   step the generator marks with a `FaultSpec::Failpoint` is executed via a
+//!   `--features failpoints` `maw` binary with `MAW_FP=<name>=abort`, crashing
+//!   the op mid-flight, and the oracles must still hold on the post-crash repo
+//!   (maw's merge-state recovery is what makes this true). A violation under
+//!   faults is a candidate REAL maw recovery/work-loss bug.
 //! - The oracle is the judge of correctness, NOT the maw exit code: we use
 //!   `maw_raw_exact` (which does not panic on non-zero) and let the oracles
 //!   decide whether an op broke an invariant. Many ops legitimately exit
@@ -60,6 +68,16 @@
 //!
 //! Knobs: `DST_TRACES` (seed count, default 16), `DST_STEPS` (steps per seed,
 //! default 24).
+//!
+//! KNOWN DEPTH CEILING (bn-3g6o): at higher `DST_STEPS` (~≥27) the run can hit
+//! a current Oracle A frontier GAP — when an epoch-bumping merge auto-rebases a
+//! committed sibling into a *conflict*, maw rewrites the blob into a
+//! conflict-marker blob (content preserved verbatim in the markers + sidecars,
+//! Prime Invariant intact), but Oracle A only scans tree-reachable blob OIDs
+//! and reports a false G1 "work-loss". This is an oracle-completeness gap, NOT
+//! a maw bug (proven: `maw ws recover` shows the ws live-with-conflicts and the
+//! content is resolvable). A **deep** published production-code floor is blocked
+//! on bn-3g6o; the default 16×24 budget stays clean.
 
 mod manifold_common;
 
@@ -72,7 +90,7 @@ use maw::assurance::oracle_a::OracleA;
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle_b;
 #[cfg(feature = "assurance")]
-use maw::assurance::scenario::{BaseRef, ConditionProfile, Op, Target, generate_plan};
+use maw::assurance::scenario::{BaseRef, ConditionProfile, FaultSpec, Op, Target, generate_plan};
 
 /// Read a `u64` count from `var`, defaulting to `default`.
 #[cfg_attr(not(feature = "assurance"), allow(dead_code))]
@@ -81,6 +99,60 @@ fn env_count(var: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Build (once per test process) and locate a `--features failpoints` `maw`
+/// binary, returning its absolute path.
+///
+/// The default `manifold_common::maw_bin()` returns the plain binary, which has
+/// no failpoint machinery (`MAW_FP` and every `fp!()` site are gated behind
+/// `--features failpoints`). The faulted DST variant needs a binary that
+/// actually honors `MAW_FP=<name>=abort` to crash mid-op, so we build the
+/// failpoints variant into a *separate* target dir — we never clobber the plain
+/// `target/<profile>/maw` the rest of the suite (and `just check`) rely on.
+/// Memoized so repeated calls in one test process build at most once.
+///
+/// Mirrors `tests/flock_mutual_exclusion_bn_2byw.rs::failpoints_maw_bin`.
+#[cfg(feature = "assurance")]
+fn failpoints_maw_bin() -> &'static std::path::Path {
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // Dedicated target dir so the failpoints build does not overwrite the
+        // plain binary used by the rest of the suite.
+        let target_dir = manifest_dir.join("target").join("dst-prod-fp-bn-2byw");
+
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "maw-cli",
+                "--features",
+                "failpoints",
+                "--target-dir",
+            ])
+            .arg(&target_dir)
+            .current_dir(&manifest_dir)
+            .status()
+            .expect("failed to spawn `cargo build` for the failpoints binary");
+        assert!(
+            status.success(),
+            "`cargo build -p maw-cli --features failpoints` failed; cannot run \
+             the faulted production-tier DST"
+        );
+
+        let bin = target_dir.join("debug").join("maw");
+        assert!(
+            bin.exists(),
+            "failpoints maw binary not found at {} after build",
+            bin.display()
+        );
+        bin
+    })
+    .as_path()
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +180,12 @@ struct Liveness {
     /// `ws advance` invocations that exited 0 — proves the production
     /// HEAD-movement advance path (bn-8flz) was actually exercised.
     advances_run: u64,
+    /// Ops where a `FaultSpec::Failpoint` was armed and executed via the
+    /// failpoints binary with `MAW_FP=<name>=abort`. The decisive non-vacuity
+    /// signal for the faulted variant: if 0, no mid-op crash was ever injected,
+    /// so the oracle never judged a post-crash repo and a green run is
+    /// meaningless.
+    faults_injected: u64,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -234,6 +312,79 @@ fn execute_op(repo: &TestRepo, op: &Op) -> bool {
     }
 }
 
+/// Execute one planned op while ARMING a `FaultSpec::Failpoint` as
+/// `MAW_FP=<name>=abort` on the **failpoints** binary, so the op can crash
+/// mid-flight. The generator only attaches faults to `Op::Merge` (any phase)
+/// and `Op::Commit` (commit-phase sites), so only those two arms route through
+/// the failpoints binary here; any other op (defensively) falls back to the
+/// plain unfaulted path.
+///
+/// Returns `(succeeded, crashed)`:
+/// - `succeeded` is `true` iff the maw invocation exited 0 (for liveness),
+/// - `crashed` is `true` iff the process did not exit cleanly (non-zero or
+///   killed by a signal — the realistic "mid-op kill"). A crash is EXPECTED,
+///   not a failure: the post-crash repo state is what the oracle must judge.
+///
+/// The `FP_COMMIT_*` / `FP_BUILD_*_MERGE_COMPUTE` sites fire inside maw's
+/// real merge engine (`maw::merge::commit` / `maw::merge::build_phase`, called
+/// from `maw ws merge`), so a Merge op armed with any of them aborts mid-merge.
+/// A commit-phase fault attached to an `Op::Commit` arms the same env on the
+/// `git commit` shell-out; the `FP_COMMIT_*` sites are not on the `git commit`
+/// path, so it typically will not crash there — that is fine (no crash, oracle
+/// still runs), and matches the bn-18mv model where the armed env trips a later
+/// merge.
+#[cfg(feature = "assurance")]
+fn execute_op_faulted(repo: &TestRepo, op: &Op, fp_name: &str) -> (bool, bool) {
+    use std::process::Command;
+
+    let bin = failpoints_maw_bin();
+    let maw_fp = format!("{fp_name}=abort");
+
+    // Build the argv for the op, matching `execute_op`'s mapping exactly.
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(bin)
+            .args(args)
+            .current_dir(repo.root())
+            .env("MAW_FP", &maw_fp)
+            .output()
+            .expect("failed to execute failpoints maw binary")
+    };
+
+    let out = match op {
+        Op::Merge {
+            srcs,
+            into,
+            destroy,
+        } => {
+            let mut args: Vec<&str> = vec!["ws", "merge"];
+            for src in srcs {
+                args.push(&src.0);
+            }
+            args.push("--into");
+            args.push(merge_target(into));
+            args.push("--message");
+            args.push("dst: production-tier merge");
+            if *destroy {
+                args.push("--destroy");
+            }
+            run(&args)
+        }
+        Op::Commit { ws, msg } => {
+            // `git add -A` is benign; only the commit carries the armed env.
+            let _ = run(&["exec", &ws.0, "--", "git", "add", "-A"]);
+            run(&["exec", &ws.0, "--", "git", "commit", "-m", &msg.0])
+        }
+        // The generator never attaches a fault to any other op; if that ever
+        // changes, fall back to the unfaulted plain-binary path rather than
+        // silently dropping the op.
+        _ => return (execute_op(repo, op), false),
+    };
+
+    let succeeded = out.status.success();
+    let crashed = !out.status.success();
+    (succeeded, crashed)
+}
+
 /// Merge target name. Increment 1 always merges into `default`.
 #[cfg(feature = "assurance")]
 const fn merge_target(into: &Target) -> &'static str {
@@ -262,8 +413,15 @@ const fn merge_target(into: &Target) -> &'static str {
 /// - Oracle B is STATELESS — `oracle_b::check(root)` returns a `Vec` of
 ///   state-coherence violations (dangling head/owned refs, merge-state orphans
 ///   — the bn-cm63 class). Non-empty == violation.
+///
+/// `inject_faults`: when `true`, any step carrying a `FaultSpec::Failpoint` is
+/// executed via the **failpoints** binary with `MAW_FP=<name>=abort`, crashing
+/// the op mid-flight (the realistic "mid-op kill"). The oracle then judges the
+/// post-crash repo: maw's merge-state recovery is what must keep it coherent
+/// and lose no committed work. Unfaulted ops always take the plain-binary path,
+/// so the failpoints binary is never paid for ops that carry no fault.
 #[cfg(feature = "assurance")]
-fn run_seed(seed: u64, n_steps: usize, live: &mut Liveness) -> Vec<String> {
+fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness) -> Vec<String> {
     let mut violations = Vec::new();
 
     let repo = TestRepo::new();
@@ -290,7 +448,27 @@ fn run_seed(seed: u64, n_steps: usize, live: &mut Liveness) -> Vec<String> {
         let name = op_name(op);
 
         live.ops_attempted += 1;
-        let succeeded = execute_op(&repo, op);
+        // Decide whether this step is faulted. Faults only attach to Merge/Commit
+        // ops (generator invariant), and only when fault injection is enabled.
+        let fault_name = if inject_faults {
+            match &step.fault {
+                FaultSpec::Failpoint { name, .. } => Some(name.as_str()),
+                FaultSpec::None => None,
+            }
+        } else {
+            None
+        };
+
+        let succeeded = if let Some(fp_name) = fault_name {
+            // Arm MAW_FP=<name>=abort on the failpoints binary; the op will
+            // likely crash mid-flight. That is EXPECTED — the oracle judges the
+            // post-crash state below.
+            live.faults_injected += 1;
+            let (ok, _crashed) = execute_op_faulted(&repo, op, fp_name);
+            ok
+        } else {
+            execute_op(&repo, op)
+        };
         if succeeded {
             live.ops_succeeded += 1;
         }
@@ -354,25 +532,28 @@ fn run_seed(seed: u64, n_steps: usize, live: &mut Liveness) -> Vec<String> {
 // Test
 // ---------------------------------------------------------------------------
 
-/// Production-code DST tier: drive real `maw` over seed-generated op streams
-/// and assert the SG1 oracles hold after every op.
+/// Drive the production-code DST tier over `count` seeds × `n_steps` steps,
+/// running both authoritative oracles after every op. Shared by the fast
+/// unfaulted default test and the heavyweight faulted variant; `inject_faults`
+/// selects whether `FaultSpec::Failpoint` steps are armed with
+/// `MAW_FP=<name>=abort` on the failpoints binary.
+///
+/// Returns the accumulated `(Liveness, all_violations, failing_seeds)` so the
+/// caller can apply variant-specific guards (e.g. `faults_injected > 0`) and
+/// the final violation assertion.
 #[cfg(feature = "assurance")]
-#[test]
-fn dst_production_tier_no_work_lost() {
-    let count = env_count("DST_TRACES", 16);
-    // Default 24 steps/seed: long enough that a healthy fraction of seeds reach
-    // Edit -> Commit -> Merge and actually advance the epoch (so the
-    // epoch-advance liveness guard is comfortably satisfied, not marginal),
-    // while keeping the default run well under a minute. Soak campaigns raise
-    // both knobs via DST_TRACES / DST_STEPS.
-    let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
-
+fn drive_tier(
+    label: &str,
+    count: u64,
+    n_steps: usize,
+    inject_faults: bool,
+) -> (Liveness, Vec<String>, Vec<u64>) {
     let mut live = Liveness::default();
     let mut all_violations: Vec<String> = Vec::new();
     let mut failing_seeds: Vec<u64> = Vec::new();
 
     for seed in 0..count {
-        let v = run_seed(seed, n_steps, &mut live);
+        let v = run_seed(seed, n_steps, inject_faults, &mut live);
         if !v.is_empty() {
             failing_seeds.push(seed);
             for line in &v {
@@ -401,9 +582,10 @@ fn dst_production_tier_no_work_lost() {
         1.0
     };
     eprintln!(
-        "dst-production-tier: ran {} op-steps across {count} seeds ({} steps/seed); \
+        "{label}: ran {} op-steps across {count} seeds ({} steps/seed); \
          {} ops succeeded, {} workspaces created, {} epoch advances, \
-         {} Oracle-A witness blobs, {} ws-advances; 0 violations over N={} trials \
+         {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
+         {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
         n_steps,
@@ -412,10 +594,19 @@ fn dst_production_tier_no_work_lost() {
         live.epoch_advances,
         live.oracle_a_witnesses,
         live.advances_run,
+        live.faults_injected,
+        all_violations.len(),
         n_trials,
         wilson_ub,
     );
 
+    (live, all_violations, failing_seeds)
+}
+
+/// Apply the liveness guards shared by both variants (workspaces created, epoch
+/// advanced, Oracle A witnessed content, advance path exercised).
+#[cfg(feature = "assurance")]
+fn assert_shared_liveness(live: &Liveness, count: u64, n_steps: usize) {
     // ----- Liveness guard: the test must not be vacuously green. -----
     // If essentially nothing happened, the Op→CLI mapping is broken and this
     // would be a false pass — fail loudly so it gets fixed, not papered over.
@@ -459,16 +650,105 @@ fn dst_production_tier_no_work_lost() {
     assert!(
         live.advances_run > 0,
         "LIVENESS FAILURE: zero successful `ws advance` ops across {count} seeds \
-         ({} steps/seed). The Advance op was enabled (advance_weight>0) but never \
+         ({n_steps} steps/seed). The Advance op was enabled (advance_weight>0) but never \
          executed against a persistent committed-ahead workspace — the production \
          advance/rebase path was not exercised. Raise DST_STEPS or check the \
          WsCreate --persistent mapping.",
-        n_steps,
     );
+}
+
+/// Production-code DST tier: drive real `maw` over seed-generated op streams
+/// and assert the SG1 oracles hold after every op.
+#[cfg(feature = "assurance")]
+#[test]
+fn dst_production_tier_no_work_lost() {
+    let count = env_count("DST_TRACES", 16);
+    // Default 24 steps/seed: long enough that a healthy fraction of seeds reach
+    // Edit -> Commit -> Merge and actually advance the epoch (so the
+    // epoch-advance liveness guard is comfortably satisfied, not marginal),
+    // while keeping the default run well under a minute. Soak campaigns raise
+    // both knobs via DST_TRACES / DST_STEPS.
+    let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
+
+    let (live, all_violations, failing_seeds) =
+        drive_tier("dst-production-tier", count, n_steps, false);
+
+    assert_shared_liveness(&live, count, n_steps);
 
     assert!(
         all_violations.is_empty(),
         "Oracle violations across {} failing seed(s) {:?}:\n{}",
+        failing_seeds.len(),
+        failing_seeds,
+        all_violations.join("\n"),
+    );
+}
+
+/// FAULTED production-code DST tier: same op streams, but every step the
+/// generator marks with a `FaultSpec::Failpoint` is executed via the
+/// **failpoints** binary with `MAW_FP=<name>=abort`, crashing the op mid-flight
+/// (the realistic "mid-op kill"). After EVERY op — crashed or not — both
+/// authoritative oracles judge the on-disk repo. The load-bearing assertion:
+/// even after an abort mid-merge/mid-commit, maw's merge-state recovery keeps
+/// the repo coherent and loses no committed work (the oracle is the judge).
+///
+/// `#[ignore]` because it builds a `--features failpoints` `maw` binary
+/// (~minutes cold) and runs every faulted op as a separate crashing process —
+/// far heavier than the default tier. The fast unfaulted
+/// `dst_production_tier_no_work_lost` stays the default-gate test; this variant
+/// runs on demand via `just sg1-production-tier-faults` (`--ignored`).
+///
+/// A real oracle violation here is a candidate REAL maw recovery/work-loss bug:
+/// the test is left RED with the seed + op + fault + violation, never suppressed.
+///
+/// KNOWN RED (bn-38vw): this test currently FAILS by design — it reproduces a
+/// real finding. Under `FP_COMMIT_BETWEEN_CAS_OPS=abort` mid-merge, Oracle A
+/// (no-work-lost) stays GREEN, but Oracle B fires `MergeStateBadEpoch`
+/// (epoch advanced past the point-of-no-return before `epoch_after` was
+/// journaled) and nothing self-heals it on demand. It is a recoverable
+/// coherence transient, not work loss. The test stays RED — NOT suppressed —
+/// until bn-38vw is resolved (maw self-heal / atomic journal), at which point
+/// it goes green.
+#[cfg(feature = "assurance")]
+#[test]
+#[ignore = "KNOWN-RED reproducer for bn-38vw (Oracle B post-crash epoch_after); also heavyweight (builds a --features failpoints maw binary). Run via just sg1-production-tier-faults"]
+fn dst_production_tier_survives_faults() {
+    let count = env_count("DST_TRACES", 16);
+    // Same 24-step window as the unfaulted `dst_production_tier_no_work_lost`
+    // test, which is GREEN at this budget. Pinning the same window means any
+    // violation this variant surfaces is attributable to the INJECTED FAULTS,
+    // not to a fault-independent issue that only appears at deeper step counts.
+    // (At 16 seeds × 24 steps the default profile arms ~10 Merge/Commit faults —
+    // comfortably above the `faults_injected > 0` non-vacuity guard.) Soak
+    // campaigns raise both knobs via DST_TRACES / DST_STEPS.
+    let n_steps = usize::try_from(env_count("DST_STEPS", 24)).expect("DST_STEPS fits usize");
+
+    let (live, all_violations, failing_seeds) =
+        drive_tier("dst-production-tier-faults", count, n_steps, true);
+
+    assert_shared_liveness(&live, count, n_steps);
+
+    // Non-vacuity for the WHOLE POINT of this variant: faults must actually have
+    // been injected. With the default profile's mid_op_kill_prob=0.15, faults
+    // attach to a healthy fraction of Merge/Commit ops over enough steps; if
+    // none fired, this variant degenerates into the unfaulted tier and "no
+    // violations" says nothing about recovery under crashes.
+    assert!(
+        live.faults_injected > 0,
+        "LIVENESS FAILURE: ZERO faults were injected across {count} seeds \
+         ({n_steps} steps/seed). The default profile arms faults on Merge/Commit \
+         ops at mid_op_kill_prob=0.15, so over enough steps at least one should \
+         fire. Raise DST_STEPS / DST_TRACES (more Merge/Commit ops) — a faulted \
+         tier that injects no faults is vacuously green.",
+    );
+
+    // A violation here under faults = a candidate REAL maw recovery/work-loss
+    // bug. Leave it RED with full detail; do NOT suppress.
+    assert!(
+        all_violations.is_empty(),
+        "ORACLE VIOLATION UNDER FAULT INJECTION across {} failing seed(s) {:?} \
+         — candidate REAL maw recovery/work-loss bug (post-crash state failed \
+         the oracle). DO NOT suppress; investigate the seed + op + fault:\n{}",
         failing_seeds.len(),
         failing_seeds,
         all_violations.join("\n"),

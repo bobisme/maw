@@ -121,6 +121,24 @@ sim-open-latest-harness harness:
 sg1-production-tier:
   cargo test --features assurance --test dst_production_tier -- --nocapture
 
+# sg1-production-tier-faults: the FAULTED production-code DST tier (bn-2byw).
+# Same seed-generated op streams as sg1-production-tier, but every step the
+# generator marks with a `FaultSpec::Failpoint` is executed via a
+# `--features failpoints` `maw` binary with `MAW_FP=<name>=abort`, crashing the
+# op mid-flight (the realistic "mid-op kill"). After EVERY op the SG1 oracles
+# judge the post-crash repo: maw's merge-state recovery must keep it coherent
+# and lose no committed work. A violation here is a candidate REAL maw bug.
+#
+# The faulted test is `#[ignore]`d so the default gate (`just check`) never pays
+# its cold failpoints-binary build / per-op crashing processes; it runs only
+# here via `--ignored`. The test builds + locates its own failpoints-enabled
+# `maw` (separate target dir), so the recipe needs no `--features failpoints`.
+# Knobs: DST_TRACES (seeds, default 16), DST_STEPS (steps/seed, default 24 —
+# the same green window as sg1-production-tier, so any violation is fault-induced).
+sg1-production-tier-faults:
+  cargo test --features assurance --test dst_production_tier \
+    dst_production_tier_survives_faults -- --ignored --nocapture
+
 # sg1-per-commit: bounded SG1 sweep — corpus replay + small random
 # budget (default 64 seeds × 32 steps). Hard wall-clock cap 8 min.
 # Hard-fails on ANY oracle violation (release-blocking).
