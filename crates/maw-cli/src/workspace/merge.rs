@@ -1284,6 +1284,14 @@ pub struct CheckResult {
     pub stale: bool,
     pub workspace: CheckWorkspaceInfo,
     pub description: String,
+    /// Number of commits on the target branch that are NOT in the maw epoch
+    /// (out-of-maw commits made directly on trunk, e.g. a plain `git commit`
+    /// or `git pull`). The epoch ref lags the branch tip by this many commits.
+    /// The real merge absorbs them automatically, but `--check` surfaces the
+    /// count so the divergence isn't silent (bn-1huu). `0` when the epoch is
+    /// at the branch tip or the relationship isn't a clean fast-forward.
+    #[serde(default)]
+    pub trunk_ahead: u32,
 }
 
 /// Workspace info included in check result.
@@ -1291,6 +1299,38 @@ pub struct CheckResult {
 pub struct CheckWorkspaceInfo {
     pub name: String,
     pub change_id: String,
+}
+
+/// Count commits on the target branch that are ahead of the maw epoch — i.e.
+/// out-of-maw commits made directly on trunk that left `refs/manifold/epoch/current`
+/// lagging the branch tip (bn-1huu). Best-effort: returns `0` on any read/parse
+/// failure (never blocks the check), and only counts when the epoch is a strict
+/// ancestor of the branch tip (a clean fast-forward — the absorb case); a forked
+/// or unrelated epoch is not "N ahead".
+fn trunk_commits_ahead_of_epoch(root: &Path, branch_tip: &maw_core::model::types::GitOid) -> u32 {
+    let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(root) else {
+        return 0;
+    };
+    if epoch_oid.as_str() == branch_tip.as_str() {
+        return 0;
+    }
+    let Ok(repo) = super::ff_absorb::open_repo(root) else {
+        return 0;
+    };
+    let (Ok(epoch_git), Ok(branch_git)) = (
+        epoch_oid.as_str().parse::<maw_git::GitOid>(),
+        branch_tip.as_str().parse::<maw_git::GitOid>(),
+    ) else {
+        return 0;
+    };
+    // Only the clean fast-forward case (epoch strictly behind branch) is a
+    // meaningful "trunk is N ahead" — that's exactly what the merge absorbs.
+    match super::ff_absorb::is_strict_ancestor(&repo, &epoch_git, &branch_git) {
+        Ok(true) => repo
+            .count_commits_between(epoch_git, branch_git)
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -> CheckResult {
@@ -1316,6 +1356,7 @@ pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -
             change_id: String::new(),
         },
         description: String::new(),
+        trunk_ahead: 0,
     }
 }
 
@@ -1562,6 +1603,15 @@ fn check_merge_result_for_target(
         change_id: String::new(),
     };
 
+    // bn-1huu: detect out-of-maw commits on trunk (epoch ref lagging the
+    // branch tip). Only meaningful when this merge advances the epoch
+    // (default-branch merge); change-branch merges don't track the epoch.
+    let trunk_ahead = if target_updates_epoch {
+        trunk_commits_ahead_of_epoch(&root, &branch_before_oid)
+    } else {
+        0
+    };
+
     if is_stale {
         return Ok(CheckResult {
             ready: false,
@@ -1569,6 +1619,7 @@ fn check_merge_result_for_target(
             stale: true,
             workspace: ws_info,
             description: String::new(),
+            trunk_ahead,
         });
     }
 
@@ -1594,6 +1645,7 @@ fn check_merge_result_for_target(
             stale: false,
             workspace: ws_info,
             description: String::new(),
+            trunk_ahead,
         });
     }
 
@@ -1657,6 +1709,7 @@ fn check_merge_result_for_target(
                         stale: false,
                         workspace: ws_info,
                         description: String::new(),
+                        trunk_ahead,
                     })
                 }
                 Err(e) => Ok(CheckResult {
@@ -1671,6 +1724,7 @@ fn check_merge_result_for_target(
                     stale: false,
                     workspace: ws_info,
                     description: String::new(),
+                    trunk_ahead,
                 }),
             }
         }
@@ -1686,6 +1740,7 @@ fn check_merge_result_for_target(
             stale: false,
             workspace: ws_info,
             description: String::new(),
+            trunk_ahead,
         }),
     }
 }
@@ -1702,6 +1757,21 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                 println!("  Workspace: {}", result.workspace.name);
                 if !result.description.is_empty() {
                     println!("  Description: {}", result.description);
+                }
+                if result.trunk_ahead > 0 {
+                    // bn-1huu: the epoch lags the branch tip by out-of-maw
+                    // commits (a direct `git commit`/`git pull` on trunk).
+                    // The merge absorbs them automatically, but surface the
+                    // divergence so it isn't silent, and offer to reconcile
+                    // the epoch first.
+                    let n = result.trunk_ahead;
+                    let plural = if n == 1 { "" } else { "s" };
+                    println!(
+                        "  NOTE: trunk has {n} commit{plural} not made through maw; the epoch is behind the branch tip."
+                    );
+                    println!(
+                        "  The merge will absorb them into the epoch. To reconcile first: maw epoch sync"
+                    );
                 }
             } else if result.stale {
                 println!(

@@ -469,3 +469,62 @@ fn ff_absorb_blocks_when_target_has_dirty_edits_to_ff_path() {
         "should list default as the blocking workspace.\nstderr: {stderr}"
     );
 }
+
+/// bn-1huu: `maw ws merge --check` must surface out-of-maw commits on trunk
+/// (the epoch ref lagging the branch tip) instead of a silent "[OK] Ready to
+/// merge", and advise `maw epoch sync`. The real merge absorbs them, but the
+/// dry-run should not hide the divergence.
+#[test]
+fn check_surfaces_out_of_maw_trunk_commits_and_advises_epoch_sync() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.modify_file("alice", "src/lib.rs", "// lib\n// alice\n");
+
+    // Baseline: epoch == branch tip → ready, no divergence note.
+    let clean = repo.maw_ok(&["ws", "merge", "alice", "--into", "default", "--check"]);
+    assert!(
+        clean.contains("[OK] Ready to merge"),
+        "clean check:\n{clean}"
+    );
+    assert!(
+        !clean.contains("not made through maw"),
+        "no divergence note when epoch == tip:\n{clean}"
+    );
+
+    // Two direct (out-of-maw) commits on trunk; epoch now lags by 2.
+    push_two_commits_ahead(
+        &repo,
+        &[
+            ("docs/README.md", "# README\n\nupd1\n"),
+            ("docs/CHANGES.md", "changes\n"),
+        ],
+        &["docs: upd1", "docs: changes"],
+    );
+
+    // Still mergeable, but the NOTE surfaces the divergence and advises sync.
+    let text = repo.maw_ok(&["ws", "merge", "alice", "--into", "default", "--check"]);
+    assert!(
+        text.contains("[OK] Ready to merge"),
+        "diverged check:\n{text}"
+    );
+    assert!(
+        text.contains("trunk has 2 commits not made through maw"),
+        "should name the 2 out-of-maw trunk commits:\n{text}"
+    );
+    assert!(
+        text.contains("maw epoch sync"),
+        "should advise `maw epoch sync`:\n{text}"
+    );
+
+    // JSON surfaces trunk_ahead for machine consumers (pretty-printed).
+    let json = repo.maw_ok(&[
+        "ws", "merge", "alice", "--into", "default", "--check", "--format", "json",
+    ]);
+    let compact: String = json.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("\"trunk_ahead\":2"),
+        "JSON should carry trunk_ahead=2:\n{json}"
+    );
+}
