@@ -88,7 +88,7 @@ use maw_core::refs;
 /// Layout-aware "does workspace `<name>` exist on disk?" predicate.
 ///
 /// Pre-T3.2 this was `repo_root.join("ws").join(name).exists()` everywhere
-/// in oracle_b. T3.3 (bn-3kkl) migrates to the consolidated layout where
+/// in `oracle_b`. T3.3 (bn-3kkl) migrates to the consolidated layout where
 /// workspaces live under `.maw/workspaces/<name>/`; the privileged
 /// "default" workspace IS the repo root itself. This helper centralizes
 /// that lookup so the migrated repo passes the oracle without re-writing

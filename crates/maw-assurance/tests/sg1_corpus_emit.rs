@@ -130,7 +130,7 @@ fn emit_bn_cm63_corpus_entry() {
         matches!(verdict, StepVerdict::OracleB(_)),
         "bn-cm63 plant must trip Oracle B; got {verdict:?}"
     );
-    let report = shrink(&plan, &planted, verdict.clone());
+    let report = shrink(&plan, &planted, verdict);
     let mut entry = ShrinkerCorpusEntry::from_report(&report, &planted);
     // Override the generic shrinker description with the load-bearing
     // human-readable context for this permanent regression seed.
@@ -279,7 +279,7 @@ fn emit_lost_commits_corpus_entry() {
         matches!(verdict, StepVerdict::OracleA(_)),
         "lost-commits plant must trip Oracle A; got {verdict:?}"
     );
-    let report = shrink(&plan, &planted, verdict.clone());
+    let report = shrink(&plan, &planted, verdict);
     let mut entry = ShrinkerCorpusEntry::from_report(&report, &planted);
     entry.expected = "known_violation".to_string();
     entry.description = format!(

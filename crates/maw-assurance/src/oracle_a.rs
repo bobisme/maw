@@ -670,6 +670,16 @@ fn ls_tree_blobs(repo_root: &Path, tip: &str) -> Result<Vec<String>, AssuranceVi
 
 #[cfg(test)]
 mod tests {
+    // Test-code conveniences, matching the crate's other test modules
+    // (see `in_proc.rs` / `shrinker.rs`): `unwrap()` is idiomatic in tests,
+    // helpers are declared after setup statements, and assert messages keep
+    // their explicit format args / doc comments.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::items_after_statements,
+        clippy::uninlined_format_args,
+        clippy::doc_markdown
+    )]
     use super::*;
     use crate::oracle::{WorkspaceStatus, capture_state};
     use std::fs;

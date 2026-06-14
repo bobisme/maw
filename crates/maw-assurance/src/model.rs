@@ -20,7 +20,7 @@
     clippy::too_many_lines
 )]
 
-use stateright::*;
+use stateright::{Model, Property};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ pub struct MergeModel {
 
 impl MergeModel {
     /// Create a new model with the given workspace names.
-    pub fn new(workspace_names: Vec<String>) -> Self {
+    pub const fn new(workspace_names: Vec<String>) -> Self {
         Self {
             workspace_names,
             initial_epoch: 1, // abstract OID for the pre-merge epoch
@@ -240,23 +240,21 @@ impl Model for MergeModel {
                 // In cleanup, we can capture recovery refs and destroy workspaces.
                 // Offer capture for workspaces that haven't been captured yet.
                 for name in &self.workspace_names {
-                    if !state.recovery_captured.contains(name) {
-                        if let Some(ws) = state.workspaces.get(name) {
-                            if ws.exists {
-                                actions.push(Action::CaptureRecovery(name.clone()));
-                            }
-                        }
+                    if !state.recovery_captured.contains(name)
+                        && let Some(ws) = state.workspaces.get(name)
+                        && ws.exists
+                    {
+                        actions.push(Action::CaptureRecovery(name.clone()));
                     }
                 }
 
                 // Offer destroy for workspaces that exist and have recovery captured.
                 for name in &self.workspace_names {
-                    if state.recovery_captured.contains(name) {
-                        if let Some(ws) = state.workspaces.get(name) {
-                            if ws.exists {
-                                actions.push(Action::DestroyWorkspace(name.clone()));
-                            }
-                        }
+                    if state.recovery_captured.contains(name)
+                        && let Some(ws) = state.workspaces.get(name)
+                        && ws.exists
+                    {
+                        actions.push(Action::DestroyWorkspace(name.clone()));
                     }
                 }
 
@@ -277,12 +275,16 @@ impl Model for MergeModel {
                 actions.push(Action::Recover);
             }
 
+            // Distinct phases with distinct (empty) action sets, kept as
+            // separate arms so the model documents each phase's semantics.
+            #[allow(clippy::match_same_arms)]
             Phase::Recovering => {
                 // Recovery dispatches based on what phase the merge-state
                 // file records, which we model as returning to the
                 // appropriate phase. The recover action handles this.
             }
 
+            #[allow(clippy::match_same_arms)]
             Phase::Complete | Phase::Aborted => {
                 // Terminal states — no further actions.
             }
@@ -307,6 +309,10 @@ impl Model for MergeModel {
                 s.phase = Phase::Validate;
             }
 
+            // Distinct merge events (validation failure vs. explicit abort)
+            // that share the same safe-abort transition; kept as separate
+            // arms so each event stays explicit in the model.
+            #[allow(clippy::match_same_arms)]
             Action::ValidateFail => {
                 s.phase = Phase::Aborted;
                 s.merge_state_on_disk = false;
@@ -349,6 +355,7 @@ impl Model for MergeModel {
                 }
             }
 
+            #[allow(clippy::match_same_arms)]
             Action::Abort => {
                 s.phase = Phase::Aborted;
                 s.merge_state_on_disk = false;
@@ -370,7 +377,15 @@ impl Model for MergeModel {
                 }
 
                 // Determine recovery based on ref state (models the logic
-                // in recover_partial_commit).
+                // in recover_partial_commit). Each branch compares the
+                // per-state refs (`s.epoch_ref`/`s.branch_ref`) against either
+                // the candidate OID (`s.candidate`) or the model's invariant
+                // pre-merge epoch constant (`self.initial_epoch`). The mixing
+                // of `s.*` and `self.*` is deliberate — `self` is the model
+                // (no `branch_ref` field); the clippy "suspicious operators"
+                // suggestion to use `self.branch_ref` is a false positive and
+                // would not even compile.
+                #[allow(clippy::suspicious_operation_groupings)]
                 if s.epoch_ref == s.candidate && s.branch_ref == s.candidate {
                     // Both refs moved — already committed. Go to cleanup.
                     s.phase = Phase::Cleanup;
@@ -381,20 +396,12 @@ impl Model for MergeModel {
                     s.phase = Phase::Cleanup;
                 } else if s.epoch_ref == self.initial_epoch && s.branch_ref == self.initial_epoch {
                     // Neither ref moved. Pre-commit crash.
-                    // If we were in Prepare or Build, abort safely.
-                    // If we were in Validate, re-run validation.
-                    // We model this conservatively: if candidate was set
-                    // (we reached Build) and refs haven't moved, we can
-                    // abort safely.
-                    if s.candidate == 0 {
-                        // Crashed during Prepare before Build
-                        s.phase = Phase::Aborted;
-                        s.merge_state_on_disk = false;
-                    } else {
-                        // Crashed during Build or Validate — abort pre-commit.
-                        s.phase = Phase::Aborted;
-                        s.merge_state_on_disk = false;
-                    }
+                    // Whether we crashed during Prepare (before Build, so
+                    // `s.candidate == 0`) or during Build/Validate, the refs
+                    // never advanced, so the safe recovery is identical: abort
+                    // pre-commit and drop the on-disk merge state.
+                    s.phase = Phase::Aborted;
+                    s.merge_state_on_disk = false;
                 } else {
                     // Inconsistent ref state — model as abort with error.
                     s.phase = Phase::Aborted;

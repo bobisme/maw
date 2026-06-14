@@ -566,7 +566,7 @@ impl InProcDriver {
         let mut dedup: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for line in mktree_input.lines().rev() {
-            let parts: Vec<&str> = line.splitn(3, |c| c == ' ' || c == '\t').collect();
+            let parts: Vec<&str> = line.splitn(3, [' ', '\t']).collect();
             if parts.len() < 3 {
                 continue;
             }

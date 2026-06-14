@@ -112,7 +112,7 @@ struct Liveness {
 
 /// Short human-readable name for an op (for oracle-violation context strings).
 #[cfg(feature = "assurance")]
-fn op_name(op: &Op) -> &'static str {
+const fn op_name(op: &Op) -> &'static str {
     match op {
         Op::WsCreate { .. } => "ws_create",
         Op::EditFiles { .. } => "edit_files",
@@ -391,6 +391,10 @@ fn dst_production_tier_no_work_lost() {
     // production-code op-step floor; this tier is the production-code analog of
     // the in-proc volume soak, so its evidence is reported the same way.
     let n_trials = live.ops_attempted;
+    // n_trials is a trial COUNT; the f64 widening for the Wilson 95% bound is
+    // exact for any realistic soak volume and harmless for a confidence bound
+    // (matches the in-proc soak's own cast_precision_loss allow).
+    #[allow(clippy::cast_precision_loss)]
     let wilson_ub = if n_trials > 0 {
         3.8416_f64 / n_trials as f64
     } else {

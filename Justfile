@@ -191,6 +191,16 @@ sg1-faithful-clippy:
   cargo clippy --workspace --all-targets -- -D warnings
   cargo clippy -p maw-cli --features failpoints --all-targets -- -D warnings
 
+# sg1-assurance-clippy: the default `just clippy` only covers default
+# features, so the maw-assurance feature build (oracles/stateright + the
+# root `assurance` feature) can drift `-D warnings`-dirty unnoticed. The
+# bn-2byw production-code DST tier (`tests/dst_production_tier.rs`) runs
+# under `--features assurance`, so this recipe keeps BOTH feature-clippy
+# passes clean going forward (bn-1r1y).
+sg1-assurance-clippy:
+  cargo clippy -p maw-assurance --features oracles --all-targets -- -D warnings
+  cargo clippy --features assurance --all-targets -- -D warnings
+
 # sg1-faithful-build: produces the failpoints-enabled binary so the
 # nightly soak (and any out-of-band chaos campaign) can spawn the real
 # maw with `fp!()` call sites live. Default release stays clean &
