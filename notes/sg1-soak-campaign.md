@@ -166,6 +166,15 @@ artifact reviewable):
   `tests/rebase_never_abandon_bn_20sa.rs`, the always-loud guards, and the
   field dogfooding that found it — **not** by this soak. See
   `sg1-dst-architecture.md` §7.1 for the full trace.
+  - **UPDATE (bn-2byw):** a *separate* production-code DST tier now exists
+    (`tests/dst_production_tier.rs`, `just sg1-production-tier`) that DOES
+    drive the real `maw` binary over the same op-stream and runs the
+    authoritative `oracle_a`/`oracle_b` after every op. So the production
+    code path now has authoritative-oracle coverage — but at a *bounded*
+    op-step count, with **no fault injection and no `Advance`/concurrency
+    yet** (so this campaign's 1e8 figure remains in-proc-*model* evidence;
+    the production tier is complementary, not a substitute). See
+    `sg1-dst-architecture.md` §7.1.1.
 
 ---
 
@@ -478,6 +487,12 @@ SG1 published soak — v1.0 release-gate evidence (1e8 floor)
     by tests/{advance_orphan_regression_bn_8flz,rebase_never_abandon_bn_20sa}.rs
     + always-loud guards + field dogfooding. See §1.3 and
     sg1-dst-architecture.md §7.1.
+    COMPLEMENT (bn-2byw): a separate production-code tier
+    (tests/dst_production_tier.rs) drives the REAL maw binary over the same
+    op-stream with the authoritative oracle_a/oracle_b after every op —
+    authoritative-oracle coverage of the real code path, but at a bounded
+    op-step count with no faults/Advance/concurrency yet. Publish its
+    op-step count + Wilson UB ALONGSIDE this row, not folded into the 1e8.
 ```
 
 ### 7.2 Asymptotic stretch row (amends §7.1 if/when reached)

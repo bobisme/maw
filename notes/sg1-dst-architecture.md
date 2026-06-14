@@ -454,6 +454,41 @@ model an interleaved multi-process `set_head` race. This is **not** a v1.0
 blocker given the regression-test + guard coverage above; it is the path to
 a *higher-confidence* soak. Tracked as **bn-2byw** (follow-up to bn-13g1).
 
+### 7.1.1 UPDATE (bn-2byw): a complementary production-code tier now exists
+
+The gap above is now **partially closed by a different mechanism** than
+rewriting the in-proc volume driver. Rather than perturb the bn-2yzz campaign,
+a **separate production-code DST tier** was added —
+`tests/dst_production_tier.rs` (root crate, `--features assurance`, run via
+`just sg1-production-tier`). It drives the **real `maw` binary** (via
+`TestRepo`, real per-workspace worktrees) over the SAME `maw-scenario`
+op-stream the in-proc soak uses, and after **every** op runs the
+**authoritative** oracles (`oracle_a` content-reachability + `oracle_b`
+state-coherence — NOT the demoted `oracle::check_all` proxies). So unlike the
+in-proc volume tier, this one executes maw's real CLI / merge-engine /
+workspace HEAD-movement code.
+
+What it **does** cover now (increment 1 + 2): real `ws create` / edit / commit
+/ merge (with real sibling auto-rebase on epoch advance) / sync / destroy /
+recover, oracle-checked per op; a non-vacuity guard (Oracle A must witness
+`>0` committed blobs — added after this tier caught a real
+`capture_state` worktree-HEAD-blindness bug that had made it silently
+vacuous); and Wilson-95%-UB accrual reporting (the same `≈3.8416/N` rule
+§7.1's campaign uses), so it is a production-code analog of the volume floor.
+
+What it does **not** yet cover (honest scope): no fault injection on this tier
+yet (op-stream only — `PlannedStep.fault` is ignored); no `Advance` op in the
+shared generator (kept out to avoid perturbing the bn-2yzz seed→plan stream;
+the `ws advance` orphan vector retains its dedicated regression coverage,
+`tests/advance_orphan_regression_bn_8flz.rs`, plus the
+`FP_REBASE_BEFORE_SETHEAD` interleaving site advance routes through); no
+multi-process `set_head` race (single sequential driver); and it accrues a
+*bounded* op-step budget, not yet a published 1e8-class floor. So the §0 / §7.1
+caveat is **relaxed but not retired**: the soak *campaign's* 1e8 number is
+still in-proc-model evidence, but the Prime Invariant now ALSO has
+authoritative-oracle coverage of the real code path, just at a smaller op-step
+count and without faults/concurrency yet.
+
 ---
 
 ## 8. Enumerated remaining SG1 tasks + proposed order

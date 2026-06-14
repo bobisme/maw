@@ -339,16 +339,34 @@ fn dst_production_tier_no_work_lost() {
         }
     }
 
+    // Accrual + statistical reporting (mirrors the bn-2yzz in-proc floor's
+    // rule). Each op-step is one oracle TRIAL (capture_state + Oracle A
+    // check_step + Oracle B check). With X=0 observed violations over N
+    // trials, the one-sided Wilson 95% upper bound on the per-op-step
+    // violation rate is ≈ z²/N = 3.8416/N (z=1.96; the X=0 closed form). This
+    // is the SAME discipline the SG1 soak campaign publishes (every "0/N" cell
+    // reports its Wilson UB). Raise DST_TRACES / DST_STEPS to accrue toward a
+    // production-code op-step floor; this tier is the production-code analog of
+    // the in-proc volume soak, so its evidence is reported the same way.
+    let n_trials = live.ops_attempted;
+    let wilson_ub = if n_trials > 0 {
+        3.8416_f64 / n_trials as f64
+    } else {
+        1.0
+    };
     eprintln!(
         "dst-production-tier: ran {} op-steps across {count} seeds ({} steps/seed); \
          {} ops succeeded, {} workspaces created, {} epoch advances, \
-         {} Oracle-A witness blobs",
+         {} Oracle-A witness blobs; 0 violations over N={} trials \
+         (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
         n_steps,
         live.ops_succeeded,
         live.ws_created,
         live.epoch_advances,
         live.oracle_a_witnesses,
+        n_trials,
+        wilson_ub,
     );
 
     // ----- Liveness guard: the test must not be vacuously green. -----
