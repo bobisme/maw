@@ -2,6 +2,22 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.6 — crash-safe merge + the production-code trust instrument (2026-06-16)
+
+Sixth dogfood pre-release. The theme is closing the gap between what the SG1 release-gate *claims* and what it *exercises*. The 1e8 soak drives a deterministic **model** of maw's git-object effects — it never runs maw's real merge / HEAD-movement code. This release adds a second, complementary DST tier that drives the **real `maw` binary** through the same Prime-Invariant oracles, and building it immediately paid off: it surfaced (and this release fixes) a genuine merge crash-recovery bug, on top of other merge/status correctness fixes.
+
+**Crash-safety & merge correctness (real-code fixes)**
+- **Merge is now crash-coherent at every commit-phase point (bn-38vw).** A crash during `maw ws merge` *between* the ref-advancing epoch CAS (the point of no return) and the separate merge-state journal write left the journal incoherent (`phase=commit`, `epoch_after` unrecorded) with no on-demand self-heal — recoverable only by a later unrelated merge. The merge now journals `epoch_after` **before** the CAS (pure reordering; the ref advance is a single atomic transaction), so a crash at any commit-phase point leaves coherent state. No committed work is ever lost (it never was) and no incoherent merge-state can dangle.
+- **`maw ws merge --check` surfaces out-of-maw trunk divergence (bn-1huu).** Direct commits made to the branch outside maw (a stale epoch) are now detected and reported by `--check` before the merge, instead of surfacing as a confusing failure later.
+- **`maw --status-bar` enumerates workspaces layout-awarely (bn-3k38).** The status bar now finds agent workspaces correctly under the consolidated layout.
+
+**The production-code DST trust tier (the SG1 instrument matures)**
+- **The soak's coverage is now scoped honestly (bn-13g1).** Documented precisely what the in-proc 1e8 soak does and does *not* exercise — it model-checks the ref/content invariants of a hand-written model of maw's git effects under fault injection; it does not run maw's production merge/HEAD-movement code.
+- **New production-code DST tier (bn-2byw).** Drives the real `maw` binary over seed-generated op streams and runs the authoritative content-reachability (Oracle A) + state-coherence (Oracle B) oracles after **every** op — covering real `ws create`/edit/commit/merge (with sibling auto-rebase)/sync/destroy/recover/**advance**, plus **mid-op crashes** (fault injection) and the **cross-process rebase lock** (a real two-process test). Runs deep-clean. Carries non-vacuity guards so it can never silently stop seeing committed content.
+- **Bugs the tier found while being built — all fixed this release:** a latent assurance bug where the oracle's state capture couldn't read a real linked-worktree's HEAD (so it was silently blind to committed-ahead work); the bn-38vw merge bug above; and an oracle-completeness gap (bn-3g6o) where content preserved inside maw's conflict-marker rewrites was misreported as lost.
+- **Deterministic interleaving primitive (bn-3ny7, bn-2byw).** A spike proved the orphaned-commit "race" is a deterministic state bug, not a timing race; the resulting in-process interleaving failpoint closed a previously-unexercised never-abandon CAS-guard test gap (bn-20sa).
+- **maw-assurance feature build is clippy-clean (bn-1r1y)**, with a dedicated `sg1-assurance-clippy` gate.
+
 ## v1.0.0-pre.5 — orphaned-commit class closed at the source (2026-06-13)
 
 Fifth dogfood pre-release. A field report from real multi-workspace dogfooding ("sigil") — a worker reported committing, but the commit had vanished, work left uncommitted on disk — turned out to be a **Prime-Invariant violation**: maw could silently abandon a committed workspace commit during a concurrent epoch advance, with zero diagnostics. Forensics proved the commit was real and orphaned by maw (and the incident then reproduced live in maw's own repo mid-investigation). The fix closes the whole class.
