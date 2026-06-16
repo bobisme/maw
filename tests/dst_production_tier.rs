@@ -67,17 +67,9 @@
 //! ```
 //!
 //! Knobs: `DST_TRACES` (seed count, default 16), `DST_STEPS` (steps per seed,
-//! default 24).
-//!
-//! KNOWN DEPTH CEILING (bn-3g6o): at higher `DST_STEPS` (~≥27) the run can hit
-//! a current Oracle A frontier GAP — when an epoch-bumping merge auto-rebases a
-//! committed sibling into a *conflict*, maw rewrites the blob into a
-//! conflict-marker blob (content preserved verbatim in the markers + sidecars,
-//! Prime Invariant intact), but Oracle A only scans tree-reachable blob OIDs
-//! and reports a false G1 "work-loss". This is an oracle-completeness gap, NOT
-//! a maw bug (proven: `maw ws recover` shows the ws live-with-conflicts and the
-//! content is resolvable). A **deep** published production-code floor is blocked
-//! on bn-3g6o; the default 16×24 budget stays clean.
+//! default 24). Deep runs are clean: e.g. `DST_TRACES=64 DST_STEPS=80` →
+//! 5120 op-steps, 0 violations (the depth ceiling that needed bn-3g6o — Oracle
+//! A recognizing content preserved inside conflict-marker rewrites — is fixed).
 
 mod manifold_common;
 

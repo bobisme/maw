@@ -170,12 +170,16 @@ artifact reviewable):
     (`tests/dst_production_tier.rs`, `just sg1-production-tier`) that DOES
     drive the real `maw` binary over the same op-stream and runs the
     authoritative `oracle_a`/`oracle_b` after every op. So the production
-    code path now has authoritative-oracle coverage — including the real
-    `ws advance` committed-ahead path (bn-8flz, via a gated `Advance` op that
-    leaves the default soak profile byte-identical) — but at a *bounded*
-    op-step count, with **no fault injection yet and no multi-process race**
-    (the latter is covered separately by a two-process flock test). So this
-    campaign's 1e8 figure remains in-proc-*model* evidence; the production
+    code path now has authoritative-oracle coverage — the real `ws advance`
+    committed-ahead path (bn-8flz, via a gated `Advance` op that leaves the
+    default soak profile byte-identical), **real merge + mid-op crashes**
+    (fault injection, `MAW_FP=<site>=abort`), and the cross-process rebase lock
+    (a separate two-process flock test). It runs **deep clean** (DST_STEPS=80 →
+    5120 op-steps, 0 violations) after fixing bn-38vw (merge journals
+    `epoch_after` before the CAS) and bn-3g6o (Oracle A recognizes content in
+    conflict-marker rewrites). It accrues at a *bounded* op-step count (subprocess
+    tier), so this campaign's 1e8 figure remains in-proc-*model* evidence
+    (volume); the production
     tier is complementary, not a substitute. See `sg1-dst-architecture.md`
     §7.1.1.
 
@@ -494,9 +498,11 @@ SG1 published soak — v1.0 release-gate evidence (1e8 floor)
     COMPLEMENT (bn-2byw): a separate production-code tier
     (tests/dst_production_tier.rs) drives the REAL maw binary over the same
     op-stream with the authoritative oracle_a/oracle_b after every op —
-    authoritative-oracle coverage of the real code path, but at a bounded
-    op-step count with no faults/Advance/concurrency yet. Publish its
-    op-step count + Wilson UB ALONGSIDE this row, not folded into the 1e8.
+    covering real merge/auto-rebase/advance, mid-op crashes (fault injection),
+    and the cross-process rebase lock (flock test). Runs deep clean
+    (DST_STEPS=80 → 5120 op-steps, 0 violations). Bounded op-step count
+    (subprocess tier), so publish its op-step count + Wilson UB ALONGSIDE this
+    row, NOT folded into the in-proc 1e8.
 ```
 
 ### 7.2 Asymptotic stretch row (amends §7.1 if/when reached)

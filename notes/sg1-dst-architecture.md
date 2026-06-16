@@ -483,30 +483,34 @@ successful `ws advance` ops. Plus Wilson-95%-UB accrual reporting (the same
 `≈3.8416/N` rule §7.1's campaign uses), so it is a production-code analog of
 the volume floor.
 
-**Fault injection** is now wired as a separate `#[ignore]`d variant
+**Fault injection** is wired as a separate `#[ignore]`d variant
 (`dst_production_tier_survives_faults`, `just sg1-production-tier-faults`): it
 arms `PlannedStep.fault` → `MAW_FP=<site>=abort` on a `--features failpoints`
 binary, crashing ops mid-flight, and runs the oracles on the post-crash state.
-It already earned its keep — it found **bn-38vw**: a crash between the merge
-epoch-CAS and the `epoch_after` journal leaves a dangling merge-state that
-Oracle B flags and that has no on-demand self-heal (recoverable, no work lost —
-Oracle A stays green). That reproducer is intentionally RED until bn-38vw is
-resolved. **Multi-process `set_head` race** is covered by the two-process flock
-test (step 3).
+It earned its keep — it found **bn-38vw**: a crash between the merge epoch-CAS
+and the `epoch_after` journal left a dangling merge-state Oracle B flagged.
+**Fixed** (bn-38vw): `epoch_after` is now journaled *before* the ref-advancing
+CAS, so the merge-state is coherent at every crash point (Oracle A always green
+= no work lost; Oracle B now green too). The faulted variant passes.
+**Multi-process `set_head` race** is covered by the two-process flock test
+(step 3).
 
-What it does **not** yet cover (honest scope): a **deep** published op-step
-floor is blocked on **bn-3g6o** — an Oracle A *frontier gap* (it doesn't
-recognize content preserved inside conflict-marker rewrites when an
-epoch-bumping merge auto-rebases a committed sibling into a conflict), which
-false-positives a G1 at ~≥27 steps/seed. This is an oracle-completeness gap,
-NOT a maw work-loss bug (content is resolvable; `maw ws recover` confirms the
-ws is live-with-conflicts). The default 16×24 budget is clean; a meaningful
-deep floor awaits bn-3g6o. So the §0 / §7.1 caveat is **relaxed but not
-retired**: the soak *campaign's* 1e8 number is still in-proc-model evidence,
-but the Prime Invariant now ALSO has authoritative-oracle coverage of the real
-code path — including real `set_head`/auto-rebase/advance and (separately)
-mid-op crashes — just at a smaller op-step count, and with the two oracle/maw
-follow-ups above tracked.
+The tier also exposed and we **fixed** an oracle-completeness gap, **bn-3g6o**:
+maw's conflict-as-data model preserves committed content by *rewriting* it into
+conflict-marker blobs (each auto-rebase of an unresolved conflicted sibling
+re-wraps the prior content; repeated rebases nest the markers), so an
+OID-reachability oracle saw the original OID disappear and false-positived a G1.
+Oracle A now rescues such a witness if the OID is pinned in a workspace's
+conflict sidecar OR its bytes survive verbatim inside a reachable conflict-marker
+blob (handles arbitrary nesting; bounded to marker blobs so a genuine loss still
+fires). With both fixes the tier runs **deep clean**: `DST_TRACES=64
+DST_STEPS=80` → 5120 op-steps, 0 violations (was 23/64 failing).
+
+So the §0 / §7.1 caveat is **relaxed but not retired**: the soak *campaign's*
+1e8 number is still in-proc-model evidence (volume), but the Prime Invariant now
+ALSO has authoritative-oracle coverage of the real code path — real
+`set_head`/auto-rebase/advance, real merge, and mid-op crashes — clean to the
+depths tested, just at a smaller op-step count than the in-proc volume floor.
 
 ---
 
