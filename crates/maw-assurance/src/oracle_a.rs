@@ -54,6 +54,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use maw_core::model::layout::LayoutFlavor;
+
 use crate::oracle::{AssuranceState, AssuranceViolation};
 
 // ---------------------------------------------------------------------------
@@ -238,17 +240,68 @@ impl OracleA {
             // halts the run anyway.
             did_full_rescan = true;
             self.full_rescan_reachable(&frontier)?;
+            // bn-3g6o: a witnessed blob may be unreachable from any *tree* of
+            // the frontier yet still be PRESERVED by maw's conflict-as-data
+            // model. We rescue such blobs via two checks, computed lazily and
+            // ONLY inside this rare lazy-confirm block (the soak fast path
+            // pays nothing):
+            //
+            //   (a) **Sidecar OID match** (fast, precise). maw's sibling
+            //       auto-rebase rewrites a committed blob into a diff3-marker
+            //       blob (a new OID); the ORIGINAL blob OID is pinned in the
+            //       workspace's conflict sidecars (`rebase-conflicts.json`
+            //       base/ours/theirs + `conflict-tree.json` side
+            //       `content`/`base_content`). Recoverable via
+            //       `maw ws recover` ⇒ not lost.
+            //
+            //   (b) **Content containment in a marker blob** (general). A
+            //       workspace conflicted on a still-unresolved file can be
+            //       auto-rebased AGAIN on a later epoch bump, which wraps the
+            //       PREVIOUS marker blob inside NEW markers. After N such
+            //       rebases the original OID is buried N levels deep and is in
+            //       NO sidecar (the sidecar only ever names the immediately-
+            //       prior side OIDs). But the original bytes survive VERBATIM
+            //       inside the (nested) marker blob at every depth. So: read
+            //       the otherwise-lost witnessed blob's raw bytes (the object
+            //       still exists, just unreachable) and check whether those
+            //       bytes appear as a substring of any frontier-reachable blob
+            //       THAT IS ITSELF A CONFLICT-MARKER BLOB. Bounding to marker
+            //       blobs (not arbitrary blobs) avoids masking a real loss via
+            //       coincidental substring match and matches the exact
+            //       preservation mechanism.
+            //
+            // A blob in NEITHER a frontier tree, NOR any extant-ws sidecar,
+            // NOR any reachable marker blob is genuinely lost → G1 fires.
+            let mut conflict_preserved: Option<HashSet<String>> = None;
+            let mut marker_blobs: Option<Vec<Vec<u8>>> = None;
             for (blob, origin) in &self.witnesses {
-                if !self.reachable_blobs.contains(blob) {
-                    violation = Some(AssuranceViolation::ReachabilityLost {
-                        oid: blob.clone(),
-                        previous_ref: format!(
-                            "oracle-a/W: blob authored by ws:{} at step {} (tip {})",
-                            origin.ws, origin.step, &origin.tip
-                        ),
-                    });
-                    break;
+                if self.reachable_blobs.contains(blob) {
+                    continue;
                 }
+                // (a) sidecar OID match.
+                let preserved = conflict_preserved
+                    .get_or_insert_with(|| collect_conflict_sidecar_blobs(&self.repo_root, state));
+                if preserved.contains(blob) {
+                    continue;
+                }
+                // (b) content containment in a reachable marker blob (covers
+                // arbitrarily-deep nested marker-wrapping).
+                if let Some(bytes) = read_blob_bytes(&self.repo_root, blob) {
+                    let markers = marker_blobs.get_or_insert_with(|| {
+                        reachable_marker_blob_bytes(&self.repo_root, &self.reachable_blobs)
+                    });
+                    if markers.iter().any(|m| contains_subslice(m, &bytes)) {
+                        continue;
+                    }
+                }
+                violation = Some(AssuranceViolation::ReachabilityLost {
+                    oid: blob.clone(),
+                    previous_ref: format!(
+                        "oracle-a/W: blob authored by ws:{} at step {} (tip {})",
+                        origin.ws, origin.step, &origin.tip
+                    ),
+                });
+                break;
             }
         }
 
@@ -662,6 +715,161 @@ fn ls_tree_blobs(repo_root: &Path, tip: &str) -> Result<Vec<String>, AssuranceVi
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Conflict-sidecar blob harvest (bn-3g6o) — NOT a git primitive
+// ---------------------------------------------------------------------------
+
+/// Collect every blob OID recorded as a conflict side in the conflict
+/// sidecars of every **extant** workspace.
+///
+/// bn-3g6o: when maw's sibling auto-rebase turns a committed blob into a
+/// diff3-marker blob, the original blob OID stops being tree-reachable (it is
+/// now wrapped in markers under a fresh OID) but is recorded verbatim in the
+/// workspace's sidecars and the content is recoverable. Those original OIDs
+/// must count as preserved so Oracle A does not false-positive a G1 loss.
+///
+/// We read two sidecars per extant workspace, both under the layout-aware
+/// manifold dir's `artifacts/ws/<name>/`:
+///   * `rebase-conflicts.json` — `conflicts[].{base,ours,theirs}` (each a
+///     bare 40-hex OID and/or `"blob:<oid>"`).
+///   * `conflict-tree.json` — `conflicts.*.{base, sides[].content,
+///     sides[].base_content}` and `clean.*.oid` (bare 40-hex).
+///
+/// Parsing is **defensive**: a missing or malformed file contributes nothing
+/// and never panics. We walk the parsed JSON generically (any string value
+/// that normalizes to a 40-hex OID is collected), so this is robust to schema
+/// drift in either sidecar and cannot itself mask a genuine loss — a blob
+/// that is in no frontier tree AND no sidecar still fires G1.
+fn collect_conflict_sidecar_blobs(repo_root: &Path, state: &AssuranceState) -> HashSet<String> {
+    let manifold = LayoutFlavor::detect_with_env(repo_root).manifold_dir(repo_root);
+    let mut out = HashSet::new();
+    for (ws_name, status) in &state.workspaces {
+        // Only extant workspaces preserve content via their sidecars; a
+        // destroyed workspace's content must live on a recovery ref (handled
+        // by the frontier), not a stale sidecar.
+        if !status.exists {
+            continue;
+        }
+        let ws_dir = manifold.join("artifacts").join("ws").join(ws_name);
+        for sidecar in ["rebase-conflicts.json", "conflict-tree.json"] {
+            let path = ws_dir.join(sidecar);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            harvest_oids_from_json(&value, &mut out);
+        }
+    }
+    out
+}
+
+/// Recursively walk a JSON value, collecting every string that normalizes to
+/// a 40-hex git blob OID. Strips a leading `"blob:"` (the rebase-conflicts
+/// sidecar records `base`/`ours`/`theirs` as `"blob:<oid>"`); bare 40-hex is
+/// also accepted (the structured conflict-tree sidecar). bn-3g6o.
+fn harvest_oids_from_json(value: &serde_json::Value, out: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            let normalized = s.strip_prefix("blob:").unwrap_or(s);
+            if is_hex_oid(normalized) {
+                out.insert(normalized.to_owned());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                harvest_oids_from_json(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                harvest_oids_from_json(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True iff `s` is a full 40-char lowercase-or-uppercase SHA-1 hex OID.
+fn is_hex_oid(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+// ---------------------------------------------------------------------------
+// Content-containment fallback (bn-3g6o) — INDEPENDENT VERIFIER CARVEOUT
+// ---------------------------------------------------------------------------
+
+/// maw's diff3 conflict-marker sentinels. A blob is a "conflict-marker blob"
+/// iff it contains both the open and close marker sequences. (Matching just
+/// the 7-char marker runs is sufficient and avoids coupling to maw's exact
+/// label text, which varies by side name and nesting depth.)
+const CONFLICT_MARKER_OPEN: &[u8] = b"<<<<<<<";
+const CONFLICT_MARKER_CLOSE: &[u8] = b">>>>>>>";
+
+/// Read a git object's raw bytes by OID via `git cat-file blob <oid>`.
+///
+/// Returns `None` if the object cannot be read (genuinely gone, not a blob,
+/// or plumbing failure) — the caller then falls through to declaring loss.
+/// Used ONLY in the rare lazy-confirm path (bn-3g6o content-containment).
+///
+/// TODO(gix): assurance carveout — see [`rev_list_objects`].
+fn read_blob_bytes(repo_root: &Path, oid: &str) -> Option<Vec<u8>> {
+    let output = Command::new("git")
+        .args(["cat-file", "blob", oid])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+/// Raw bytes of every frontier-reachable blob that bears maw conflict markers.
+///
+/// We only ever test witnessed-content containment against *marker* blobs
+/// (bn-3g6o §(b)): the preservation mechanism is "original bytes survive
+/// verbatim inside the markers", possibly nested. Restricting to
+/// marker-bearing blobs prevents a coincidental substring match against an
+/// ordinary file from masking a genuine loss.
+///
+/// `reachable` is the full reachable-object set (commits/trees/blobs); we
+/// probe each with `git cat-file blob` and keep only those that (1) are blobs
+/// and (2) contain both marker sentinels. Non-blob OIDs simply fail the
+/// `cat-file blob` read and are skipped. Computed at most once per
+/// lazy-confirm step.
+fn reachable_marker_blob_bytes(repo_root: &Path, reachable: &HashSet<String>) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for oid in reachable {
+        let Some(bytes) = read_blob_bytes(repo_root, oid) else {
+            continue;
+        };
+        if contains_subslice(&bytes, CONFLICT_MARKER_OPEN)
+            && contains_subslice(&bytes, CONFLICT_MARKER_CLOSE)
+        {
+            out.push(bytes);
+        }
+    }
+    out
+}
+
+/// True iff `needle` appears as a contiguous subslice of `haystack`.
+///
+/// Empty needle is vacuously contained (a witnessed empty blob is trivially
+/// present in any marker blob — and an empty original is not "lost" content).
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,5 +1520,267 @@ mod tests {
         );
         // And the included keys are the expected categories.
         assert!(f.values().any(|v| v == &head));
+    }
+
+    // -----------------------------------------------------------------------
+    // (7) bn-3g6o — a witnessed blob rewritten into a CONFLICT marker blob by
+    // sibling auto-rebase is NOT lost: its original OID survives in the
+    // workspace's conflict sidecars. Oracle A must NOT fire. Negative
+    // control: a blob in NO ref AND NO sidecar still fires.
+    // -----------------------------------------------------------------------
+
+    /// Plant a `rebase-conflicts.json` sidecar for `ws_name` recording the
+    /// given side OIDs (mixing the bare-40-hex and `blob:<oid>` forms the
+    /// real engine emits), at the same layout-aware path Oracle A reads.
+    fn write_rebase_conflicts_sidecar(root: &Path, ws_name: &str, base: &str, theirs: &str) {
+        let dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .manifold_dir(root)
+            .join("artifacts")
+            .join("ws")
+            .join(ws_name);
+        fs::create_dir_all(&dir).unwrap();
+        // base as bare 40-hex, theirs with the `blob:` prefix — exercise both
+        // normalization paths in one fixture.
+        let json = format!(
+            r#"{{"conflicts":[{{"path":"shared.txt","original_commit":"{base}","base":"{base}","ours":"{base}","theirs":"blob:{theirs}"}}],"rebase_from":"{base}","rebase_to":"{base}"}}"#
+        );
+        fs::write(dir.join("rebase-conflicts.json"), json).unwrap();
+    }
+
+    #[test]
+    fn conflict_sidecar_blob_is_preserved_not_lost_bn_3g6o() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let head = git_capture(root, &["rev-parse", "HEAD"]);
+
+        // Workspace 'sib' authors a unique blob and is witnessed.
+        git(root, &["update-ref", "refs/manifold/epoch/ws/sib", &head]);
+        let sib_blob = commit_file(root, "refs/manifold/ws/sib", "shared.txt", "sib-original");
+        let sib_tip = git_capture(root, &["rev-parse", "refs/manifold/ws/sib"]);
+
+        let mut oracle = OracleA::new(root);
+
+        // Step 0: 'sib' exists; its original blob is witnessed.
+        let state0 = make_state(root, &[("sib", &sib_tip, false, true)]);
+        let r0 = oracle.check_step(&state0, 0).unwrap();
+        assert!(r0.violation.is_none(), "step 0 should be clean");
+        assert!(
+            oracle.witnesses.contains_key(&sib_blob),
+            "sib's original blob {sib_blob} should be witnessed"
+        );
+
+        // Step 1: sibling auto-rebase REWROTE sib's HEAD onto the new epoch
+        // (a fresh commit chain, NOT a child of the old sib commit), so the
+        // old commit — and hence the original `sib_blob` — drops out of the
+        // frontier entirely. The original bytes now live wrapped in conflict
+        // markers under a new (marker) blob OID; maw records the ORIGINAL
+        // OID in the conflict sidecar. The original blob is therefore
+        // tree-unreachable but preserved → Oracle A must NOT fire.
+        //
+        // We reset the ws ref to a brand-new commit rooted at `head` (no link
+        // to the old sib commit) whose tree holds only the marker blob, and
+        // drop the per-ws epoch ref. That makes `sib_blob` genuinely
+        // tree-unreachable from every frontier root.
+        git(root, &["update-ref", "-d", "refs/manifold/ws/sib"]);
+        let _marker_blob = commit_file(
+            root,
+            "refs/manifold/ws/sib",
+            "shared.txt",
+            "<<<<<<< epoch\nepoch-side\n=======\nsib-original\n>>>>>>> sib (workspace changes)\n",
+        );
+        let new_tip = git_capture(root, &["rev-parse", "refs/manifold/ws/sib"]);
+        git(root, &["update-ref", "-d", "refs/manifold/epoch/ws/sib"]);
+        write_rebase_conflicts_sidecar(root, "sib", &head, &sib_blob);
+
+        let state1 = make_state(root, &[("sib", &new_tip, false, true)]);
+        let r1 = oracle.check_step(&state1, 1).unwrap();
+        // Sanity: the original blob really is tree-unreachable now (so this
+        // test would fire WITHOUT the bn-3g6o sidecar carveout).
+        assert!(
+            !oracle.reachable_blobs.contains(&sib_blob),
+            "precondition: sib's original blob must be tree-unreachable for \
+             this test to be meaningful"
+        );
+        assert!(
+            r1.violation.is_none(),
+            "bn-3g6o: a blob preserved as a conflict side in an extant \
+             workspace's sidecar must NOT trip Oracle A — got: {:?}",
+            r1.violation
+        );
+    }
+
+    #[test]
+    fn truly_lost_blob_still_fires_with_no_sidecar_bn_3g6o() {
+        // Negative control for bn-3g6o: same shape, but the workspace is
+        // destroyed (not extant) with NO recovery ref and NO sidecar. The
+        // sidecar carveout must NOT rescue it — G1 still fires.
+        let dir = setup_repo();
+        let root = dir.path();
+        let head = git_capture(root, &["rev-parse", "HEAD"]);
+
+        git(root, &["update-ref", "refs/manifold/epoch/ws/gone", &head]);
+        let gone_blob = commit_file(root, "refs/manifold/ws/gone", "g.txt", "gone-unique");
+        let gone_tip = git_capture(root, &["rev-parse", "refs/manifold/ws/gone"]);
+
+        let mut oracle = OracleA::new(root);
+
+        let state0 = make_state(root, &[("gone", &gone_tip, false, true)]);
+        let r0 = oracle.check_step(&state0, 0).unwrap();
+        assert!(r0.violation.is_none());
+        assert!(oracle.witnesses.contains_key(&gone_blob));
+
+        // Destroy the workspace: drop all its refs, no recovery, no sidecar.
+        git(root, &["update-ref", "-d", "refs/manifold/ws/gone"]);
+        git(root, &["update-ref", "-d", "refs/manifold/epoch/ws/gone"]);
+        let state1 = make_state(root, &[]);
+        let r1 = oracle.check_step(&state1, 1).unwrap();
+        let v = r1
+            .violation
+            .as_ref()
+            .expect("truly-lost blob (no ref, no sidecar) MUST still trip Oracle A");
+        assert!(format!("{v}").contains(&gone_blob[..12]));
+    }
+
+    #[test]
+    fn stale_sidecar_of_destroyed_ws_does_not_rescue_bn_3g6o() {
+        // bn-3g6o edge: a sidecar exists on disk but its workspace is NOT
+        // extant (destroyed). Such content's survival is the frontier's job
+        // (recovery ref), not a stale sidecar — so the destroyed-ws sidecar
+        // must contribute nothing and G1 still fires.
+        let dir = setup_repo();
+        let root = dir.path();
+        let head = git_capture(root, &["rev-parse", "HEAD"]);
+
+        git(root, &["update-ref", "refs/manifold/epoch/ws/dead", &head]);
+        let dead_blob = commit_file(root, "refs/manifold/ws/dead", "d.txt", "dead-unique");
+        let dead_tip = git_capture(root, &["rev-parse", "refs/manifold/ws/dead"]);
+
+        let mut oracle = OracleA::new(root);
+        let state0 = make_state(root, &[("dead", &dead_tip, false, true)]);
+        assert!(oracle.check_step(&state0, 0).unwrap().violation.is_none());
+        assert!(oracle.witnesses.contains_key(&dead_blob));
+
+        // Plant a sidecar recording dead_blob, then destroy the ws (refs gone,
+        // not extant). The sidecar must NOT count because the ws is gone.
+        write_rebase_conflicts_sidecar(root, "dead", &head, &dead_blob);
+        git(root, &["update-ref", "-d", "refs/manifold/ws/dead"]);
+        git(root, &["update-ref", "-d", "refs/manifold/epoch/ws/dead"]);
+        let state1 = make_state(root, &[]);
+        let r1 = oracle.check_step(&state1, 1).unwrap();
+        assert!(
+            r1.violation.is_some(),
+            "stale sidecar of a destroyed workspace must NOT rescue a lost blob"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // (8) bn-3g6o — NESTED marker-wrapping (content-containment fallback).
+    // A workspace conflicted on an unresolved file is auto-rebased AGAIN; the
+    // FIRST marker blob is wrapped in NEW markers. The original OID is now
+    // buried two levels deep and is in NO sidecar — but its bytes survive
+    // verbatim inside the nested marker blob. Content-containment must rescue
+    // it. Control: bytes NOT in any marker blob → still fires.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nested_marker_wrapped_blob_is_preserved_not_lost_bn_3g6o() {
+        let dir = setup_repo();
+        let root = dir.path();
+        let head = git_capture(root, &["rev-parse", "HEAD"]);
+
+        // 'ws1' authors a distinctive original blob; witnessed at step 0.
+        git(root, &["update-ref", "refs/manifold/epoch/ws/ws1", &head]);
+        let original = "ORIGINAL-UNIQUE-CONTENT-2cae72-marker\n";
+        let orig_blob = commit_file(root, "refs/manifold/ws/ws1", "shared.txt", original);
+        let tip0 = git_capture(root, &["rev-parse", "refs/manifold/ws/ws1"]);
+
+        let mut oracle = OracleA::new(root);
+        let state0 = make_state(root, &[("ws1", &tip0, false, true)]);
+        assert!(oracle.check_step(&state0, 0).unwrap().violation.is_none());
+        assert!(
+            oracle.witnesses.contains_key(&orig_blob),
+            "original blob {orig_blob} must be witnessed"
+        );
+
+        // Step 1: FIRST auto-rebase wraps the original in markers. We rewrite
+        // ws1's HEAD onto a fresh chain so the original commit/blob drops out
+        // of the frontier. Sidecar (if present) would name `orig_blob` here —
+        // but we deliberately write NO sidecar to force the content path.
+        let marker_v1 = format!(
+            "<<<<<<< epoch\nepoch-side-a\n=======\n{original}>>>>>>> ws1 (workspace changes)\n"
+        );
+        git(root, &["update-ref", "-d", "refs/manifold/ws/ws1"]);
+        let _b1 = commit_file(root, "refs/manifold/ws/ws1", "shared.txt", &marker_v1);
+        let tip1 = git_capture(root, &["rev-parse", "refs/manifold/ws/ws1"]);
+        git(root, &["update-ref", "-d", "refs/manifold/epoch/ws/ws1"]);
+
+        // Step 2: SECOND auto-rebase wraps the FIRST marker blob in NEW
+        // markers. The original OID is now buried two levels deep and is in
+        // no sidecar. Its bytes still appear verbatim inside this blob.
+        let marker_v2 = format!(
+            "<<<<<<< epoch\nepoch-side-b\n=======\n{marker_v1}>>>>>>> ws1 (workspace changes)\n"
+        );
+        git(root, &["update-ref", "-d", "refs/manifold/ws/ws1"]);
+        let _b2 = commit_file(root, "refs/manifold/ws/ws1", "shared.txt", &marker_v2);
+        let tip2 = git_capture(root, &["rev-parse", "refs/manifold/ws/ws1"]);
+        // No sidecar written at all → only content-containment can rescue.
+
+        let _ = tip1;
+        let state2 = make_state(root, &[("ws1", &tip2, false, true)]);
+        let r2 = oracle.check_step(&state2, 2).unwrap();
+        // Precondition: the original blob is genuinely tree-unreachable.
+        assert!(
+            !oracle.reachable_blobs.contains(&orig_blob),
+            "precondition: original blob must be tree-unreachable"
+        );
+        assert!(
+            r2.violation.is_none(),
+            "bn-3g6o: original bytes nested inside a reachable marker blob \
+             (2 levels deep, no sidecar) must be rescued by content-containment \
+             — got: {:?}",
+            r2.violation
+        );
+    }
+
+    #[test]
+    fn content_not_in_any_marker_blob_still_fires_bn_3g6o() {
+        // Control for the content-containment path: a marker blob IS reachable
+        // (so the marker scan runs), but the lost witnessed blob's bytes are
+        // NOT contained in it. Must STILL fire.
+        let dir = setup_repo();
+        let root = dir.path();
+        let head = git_capture(root, &["rev-parse", "HEAD"]);
+
+        git(root, &["update-ref", "refs/manifold/epoch/ws/ws1", &head]);
+        let lost = "TRULY-LOST-BYTES-not-in-any-marker\n";
+        let lost_blob = commit_file(root, "refs/manifold/ws/ws1", "shared.txt", lost);
+        let tip0 = git_capture(root, &["rev-parse", "refs/manifold/ws/ws1"]);
+
+        let mut oracle = OracleA::new(root);
+        let state0 = make_state(root, &[("ws1", &tip0, false, true)]);
+        assert!(oracle.check_step(&state0, 0).unwrap().violation.is_none());
+        assert!(oracle.witnesses.contains_key(&lost_blob));
+
+        // Rewrite ws1 onto a marker blob whose markers wrap UNRELATED content
+        // (not `lost`). The original blob drops out of the frontier and its
+        // bytes appear in NO reachable marker blob.
+        let unrelated_marker =
+            "<<<<<<< epoch\nepoch-x\n=======\nws-y-different\n>>>>>>> ws1 (workspace changes)\n";
+        git(root, &["update-ref", "-d", "refs/manifold/ws/ws1"]);
+        let _b = commit_file(root, "refs/manifold/ws/ws1", "shared.txt", unrelated_marker);
+        let tip1 = git_capture(root, &["rev-parse", "refs/manifold/ws/ws1"]);
+        git(root, &["update-ref", "-d", "refs/manifold/epoch/ws/ws1"]);
+
+        let state1 = make_state(root, &[("ws1", &tip1, false, true)]);
+        let r1 = oracle.check_step(&state1, 1).unwrap();
+        assert!(
+            !oracle.reachable_blobs.contains(&lost_blob),
+            "precondition: lost blob must be tree-unreachable"
+        );
+        let v = r1.violation.as_ref().expect(
+            "bn-3g6o: bytes contained in NO reachable marker blob (and no \
+             sidecar, no ref) MUST still trip Oracle A",
+        );
+        assert!(format!("{v}").contains(&lost_blob[..12]));
     }
 }
