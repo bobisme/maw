@@ -4313,6 +4313,33 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Advance merge-state to Commit phase
     advance_merge_state(&manifold_dir, MergePhase::Commit)?;
 
+    // bn-38vw: record `epoch_after` into the merge-state journal BEFORE the
+    // ref-advancing CAS — not after. The candidate (= the new epoch commit
+    // OID) was already built in BUILD and validated in VALIDATE, so it is a
+    // durable commit object regardless of where the refs currently point.
+    //
+    // Recording it here closes a crash window: previously `epoch_after` was
+    // written only AFTER the CAS, so a crash between the CAS (refs advanced —
+    // the point of no return) and the journal write left merge-state in
+    // `phase=commit` with `epoch_after=None`. Oracle B flags that incoherent
+    // shape ("past the point-of-no-return but epoch_after is not recorded")
+    // and nothing self-healed it on demand.
+    //
+    // Journal coherence at EVERY post-build crash point now holds:
+    //   * crash AFTER this write, BEFORE the CAS  → phase=commit, refs at old
+    //     epoch, epoch_after=candidate. Oracle B only checks epoch_after
+    //     resolves to a commit (it does). Recovery (`CheckCommit` →
+    //     `recover_partial_commit_with_branch_base`) reads the LIVE refs, sees
+    //     NotCommitted, and the caller aborts — no work to orphan (nothing was
+    //     committed; the candidate is reachable from no ref but is a transient
+    //     build artifact, identical to the pre-fix pre-CAS crash).
+    //   * crash AFTER the CAS → refs advanced + epoch_after=candidate.
+    //     Recovery converges forward idempotently to AlreadyCommitted /
+    //     FinalizedMainRef.
+    // The candidate OID written here is identical to the value the post-CAS
+    // path used, so this is a pure reordering: no new value is journaled.
+    record_epoch_after(&manifold_dir, &build_output.candidate)?;
+
     let epoch_before_oid = merge_base_epoch.oid().clone();
     // Pre-flight: verify the branch hasn't diverged from the target head
     // captured before PREPARE. If direct commits were made to the branch
@@ -4433,8 +4460,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         }
     }
 
-    // Record epoch_after in merge-state
-    record_epoch_after(&manifold_dir, &build_output.candidate)?;
+    // bn-38vw: `epoch_after` is now journaled BEFORE the CAS above (see the
+    // comment at the start of Phase 4), so the merge-state is coherent at
+    // every post-build crash point. No post-CAS write is needed here — the
+    // refs and the journal already agree once the CAS has committed.
 
     // Record merge operations in source workspace histories.
     for warning in

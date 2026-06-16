@@ -1460,6 +1460,57 @@ mod tests {
         assert!(path.exists());
     }
 
+    /// bn-38vw: `epoch_after` is now journaled BEFORE the ref-advancing CAS,
+    /// so a crash anywhere in the COMMIT phase (refs old OR refs advanced)
+    /// leaves a COHERENT merge-state: phase past the point-of-no-return AND
+    /// `epoch_after` recorded. This is the shape Oracle B requires — the old
+    /// "phase=commit but epoch_after=None" window can no longer exist.
+    ///
+    /// Both crash points reload to the same journal shape: the only thing
+    /// that differs across them is the live ref value (checked by the
+    /// commit-recovery path), not the journal. Recovery dispatch for COMMIT
+    /// stays `CheckCommit` (inspect the live refs and converge forward
+    /// idempotently to `epoch_after`), and the state file is preserved.
+    #[test]
+    fn bn_38vw_commit_phase_records_epoch_after_before_cas() {
+        let dir = tempfile::tempdir().expect("operation should succeed");
+        let path = MergeStateFile::default_path(dir.path());
+
+        // Reproduce the post-fix write order: advance to Commit, then record
+        // epoch_after, THEN (conceptually) perform the ref CAS. We persist at
+        // the pre-CAS crash point: phase=Commit, epoch_after already set.
+        let epoch_after = EpochId::new(&"c".repeat(40)).expect("operation should succeed");
+        let mut state = state_in_phase(MergePhase::Commit);
+        state.epoch_candidate = Some(test_oid());
+        state.epoch_after = Some(epoch_after.clone());
+        state.write_atomic(&path).expect("operation should succeed");
+
+        // Crash AFTER epoch_after journaled, BEFORE the CAS (refs still old).
+        // The reloaded journal is already coherent: past-PONR with epoch_after.
+        let pre_cas = MergeStateFile::read(&path).expect("operation should succeed");
+        assert_eq!(pre_cas.phase, MergePhase::Commit);
+        assert_eq!(
+            pre_cas.epoch_after.as_ref(),
+            Some(&epoch_after),
+            "epoch_after must be recorded before the CAS so no past-PONR \
+             state is ever missing it (Oracle B coherence)"
+        );
+        // Recovery for COMMIT inspects the live refs and converges forward.
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
+        assert_eq!(outcome, RecoveryOutcome::CheckCommit);
+        assert!(path.exists(), "merge-state preserved for ref inspection");
+
+        // Crash AFTER the CAS (refs advanced): the journal is unchanged —
+        // still phase=Commit with epoch_after set — so recovery behaves
+        // identically and converges to "already committed" against the refs.
+        let post_cas = MergeStateFile::read(&path).expect("operation should succeed");
+        assert_eq!(post_cas.phase, MergePhase::Commit);
+        assert_eq!(post_cas.epoch_after.as_ref(), Some(&epoch_after));
+        let outcome = recover_from_merge_state(&path).expect("operation should succeed");
+        assert_eq!(outcome, RecoveryOutcome::CheckCommit);
+        assert!(path.exists());
+    }
+
     #[test]
     fn recovery_validate_requests_rerun_and_keeps_state_file() {
         let dir = tempfile::tempdir().expect("operation should succeed");

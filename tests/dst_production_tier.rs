@@ -701,17 +701,16 @@ fn dst_production_tier_no_work_lost() {
 /// A real oracle violation here is a candidate REAL maw recovery/work-loss bug:
 /// the test is left RED with the seed + op + fault + violation, never suppressed.
 ///
-/// KNOWN RED (bn-38vw): this test currently FAILS by design — it reproduces a
-/// real finding. Under `FP_COMMIT_BETWEEN_CAS_OPS=abort` mid-merge, Oracle A
-/// (no-work-lost) stays GREEN, but Oracle B fires `MergeStateBadEpoch`
-/// (epoch advanced past the point-of-no-return before `epoch_after` was
-/// journaled) and nothing self-heals it on demand. It is a recoverable
-/// coherence transient, not work loss. The test stays RED — NOT suppressed —
-/// until bn-38vw is resolved (maw self-heal / atomic journal), at which point
-/// it goes green.
+/// bn-38vw RESOLVED: previously this reproduced a real finding — under
+/// `FP_COMMIT_BETWEEN_CAS_OPS=abort` mid-merge, Oracle A (no-work-lost) stayed
+/// GREEN but Oracle B fired `MergeStateBadEpoch` (epoch advanced past the
+/// point-of-no-return before `epoch_after` was journaled). The fix records
+/// `epoch_after` into the merge-state journal BEFORE the ref-advancing CAS, so
+/// the journal is coherent at every post-build crash point. This test now
+/// PASSES; it remains `#[ignore]` solely for its weight (see above).
 #[cfg(feature = "assurance")]
 #[test]
-#[ignore = "KNOWN-RED reproducer for bn-38vw (Oracle B post-crash epoch_after); also heavyweight (builds a --features failpoints maw binary). Run via just sg1-production-tier-faults"]
+#[ignore = "heavyweight: builds a --features failpoints maw binary and runs every faulted op as a separate crashing process. Run via just sg1-production-tier-faults"]
 fn dst_production_tier_survives_faults() {
     let count = env_count("DST_TRACES", 16);
     // Same 24-step window as the unfaulted `dst_production_tier_no_work_lost`
