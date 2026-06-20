@@ -1143,14 +1143,25 @@ pub struct BrownfieldInitResult {
     pub dirty_files_at_root: Vec<PathBuf>,
     /// Count of root project entries moved into `ws/default/`.
     pub cleaned_root_files: usize,
+    /// `true` if the repo was initialized into (or already is) the consolidated
+    /// `.maw/` layout — root stays the live checkout, no bare conversion, no
+    /// file move. `false` for the legacy v2 `ws/` bare layout.
+    pub consolidated: bool,
 }
 
 impl fmt::Display for BrownfieldInitResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let layout_label = if self.consolidated {
+            "consolidated (.maw/)"
+        } else {
+            "legacy v2 (ws/)"
+        };
+
         if self.already_initialized {
             writeln!(f, "Manifold already initialized.")?;
             writeln!(f)?;
             writeln!(f, "  Root:      {}", self.repo_root.display())?;
+            writeln!(f, "  Layout:    {layout_label}")?;
             writeln!(f, "  Workspace: {}/", self.default_workspace.display())?;
             writeln!(f, "  Epoch₀:    {}", &self.epoch0.as_str()[..12])?;
             if let Some(prev) = &self.epoch_resynced_from {
@@ -1167,7 +1178,15 @@ impl fmt::Display for BrownfieldInitResult {
         writeln!(f, "Manifold initialized for existing repository!")?;
         writeln!(f)?;
         writeln!(f, "  Root:      {}", self.repo_root.display())?;
-        writeln!(f, "  Workspace: {}/", self.default_workspace.display())?;
+        writeln!(f, "  Layout:    {layout_label}")?;
+        if self.consolidated {
+            writeln!(
+                f,
+                "  Checkout:  root (files stay in place — no restructure)"
+            )?;
+        } else {
+            writeln!(f, "  Workspace: {}/", self.default_workspace.display())?;
+        }
         if let Some(branch) = &self.head_branch {
             writeln!(f, "  Branch:    {branch}")?;
         } else {
@@ -1190,7 +1209,18 @@ impl fmt::Display for BrownfieldInitResult {
         }
         writeln!(f)?;
         writeln!(f, "Next steps:")?;
-        writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
+        if self.consolidated {
+            writeln!(
+                f,
+                "  Edit files at the repo root (it is the default workspace)."
+            )?;
+            writeln!(
+                f,
+                "  A `.gitignore` entry for /.maw/ was written — commit it: git add .gitignore && git commit"
+            )?;
+        } else {
+            writeln!(f, "  Workspace path: {}/", self.default_workspace.display())?;
+        }
         writeln!(
             f,
             "  maw ws create --from main <agent-name>    # create agent workspace"
@@ -1260,12 +1290,56 @@ pub fn run_with(opts: &InitRunOptions) -> anyhow::Result<()> {
     let want_legacy = opts.legacy_ws_layout || legacy_env;
 
     if git_dir.exists() {
-        // Brownfield init currently always produces the v2 layout; the
-        // v2→consolidated transition is T3.3 (`maw migrate`). This keeps
-        // existing v2 repos working without any surprise on-disk move.
-        let result = brownfield_init(&root, &BrownfieldInitOptions::default())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        println!("{result}");
+        // Brownfield. The repo may already be a maw repo (re-run / `edict init`),
+        // an existing v2 maw repo, or a plain git repo not yet under maw.
+        // Detect which BEFORE doing anything destructive (bn-2itc).
+        let is_consolidated = root
+            .join(layout::MAW_DIR)
+            .join(layout::MAW_MANIFOLD_SUBDIR)
+            .is_dir();
+        let is_v2_maw = root.join(layout::MANIFOLD_DIR).is_dir()
+            || root
+                .join(layout::V2_WORKSPACES_DIR)
+                .join("default")
+                .is_dir()
+            || root.join(REPO_GIT_DIR).is_dir();
+
+        if is_consolidated {
+            // Already consolidated → idempotent no-op. A second `maw init` must
+            // NEVER re-restructure a consolidated repo back to v2 (the bn-2itc
+            // bug: brownfield idempotency used to key only on `ws/default/`,
+            // which a consolidated repo lacks, so it re-ran the full v2
+            // restructure and clobbered the layout).
+            let result = brownfield_consolidated_init(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{result}");
+            if want_legacy {
+                eprintln!(
+                    "NOTE: --legacy-ws / MAW_LAYOUT=v2 ignored — this repo is already \
+                     initialized as the consolidated (.maw/) layout. maw does not \
+                     downgrade an existing repo to the legacy v2 layout."
+                );
+            }
+        } else if is_v2_maw {
+            // Existing legacy v2 maw repo → keep it on v2 (repair / no-op via
+            // brownfield_init's own idempotency). Use `maw migrate` to move to
+            // consolidated.
+            let result = brownfield_init(&root, &BrownfieldInitOptions::default())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{result}");
+        } else if want_legacy {
+            // Fresh existing git repo, user explicitly opted into legacy v2
+            // (bare root + ws/default/ + file move).
+            let result = brownfield_init(&root, &BrownfieldInitOptions::default())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{result}");
+        } else {
+            // Fresh existing git repo, default → consolidated. Non-destructive:
+            // root stays the live checkout, nothing is moved, .git stays normal
+            // (bn-2itc issue B — the old default produced the *invasive* v2
+            // layout, which moved every file into ws/default/).
+            let result = brownfield_consolidated_init(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{result}");
+        }
     } else {
         let init_opts = if want_legacy {
             InitOptions::v2_legacy()
@@ -1406,6 +1480,7 @@ pub fn brownfield_init(
             already_initialized: true,
             dirty_files_at_root: Vec::new(),
             cleaned_root_files: cleaned_count,
+            consolidated: false,
         });
     }
 
@@ -1474,6 +1549,94 @@ pub fn brownfield_init(
         already_initialized: false,
         dirty_files_at_root: dirty_files,
         cleaned_root_files: cleaned_count,
+        consolidated: false,
+    })
+}
+
+/// Initialize Manifold into an existing git repository **without restructuring
+/// it** — the consolidated `.maw/` layout (bn-2itc).
+///
+/// Unlike [`brownfield_init`] (which converts the repo to a bare `repo.git`
+/// topology and moves every project file into `ws/default/`), this keeps the
+/// existing normal `.git/` and leaves every file where it is. The repo root
+/// *is* the default workspace. The only on-disk additions are the `.maw/`
+/// admin tree and a `/.maw/` entry appended to the root `.gitignore`.
+///
+/// This is the gentle path used for:
+/// - a fresh existing repo where the user did not ask for the legacy layout, and
+/// - an **idempotent re-run** of `maw init` on a repo that is already
+///   consolidated (the bug behind bn-2itc: a second `maw init` — e.g. via
+///   `edict init` — must NOT re-restructure a consolidated repo into v2).
+///
+/// # Errors
+/// Returns [`BrownfieldInitError`] if `.git` is missing/invalid, HEAD is unborn,
+/// or admin-tree / ref setup fails.
+pub fn brownfield_consolidated_init(
+    root: &Path,
+) -> Result<BrownfieldInitResult, BrownfieldInitError> {
+    let root = std::fs::canonicalize(root)?;
+
+    // 1. Verify it is a real git repo.
+    let git_dir = root.join(".git");
+    if !git_dir.exists() {
+        return Err(BrownfieldInitError::NotAGitRepo { path: git_dir });
+    }
+    bf_verify_git_repo(&root)?;
+
+    // Already consolidated? Then this whole call is an idempotent repair/no-op
+    // and we must not touch the user's files or layout.
+    let already_initialized =
+        layout::LayoutFlavor::detect(&root) == layout::LayoutFlavor::ConsolidatedMawDir;
+
+    // 2. epoch₀ = current HEAD (preserves all existing history).
+    let epoch0 = bf_get_head_oid(&root)?;
+    let head_branch = bf_detect_head_branch(&root);
+    if head_branch.is_none() && !already_initialized {
+        eprintln!(
+            "WARNING: HEAD is detached. Epoch₀ set to the current detached HEAD ({}).",
+            &epoch0.as_str()[..12]
+        );
+        eprintln!("  To attach HEAD to a branch after init, run: git checkout -b <branch-name>");
+    }
+
+    // 3. Create/repair the `.maw/` admin tree (manifold/, workspaces/, cache/,
+    //    .maw/.gitignore, config.toml). Idempotent.
+    layout::init_manifold_layout(&root, layout::LayoutFlavor::ConsolidatedMawDir)
+        .map_err(BrownfieldInitError::Layout)?;
+
+    // 4. Ensure the root `.gitignore` ignores `/.maw/` (and siblings) so the
+    //    admin tree is not reported as untracked and the merge engine's
+    //    checkout never deletes it. Working-tree change only — not committed,
+    //    matching `maw migrate`'s finalize step.
+    ensure_consolidated_root_gitignore(&root).map_err(|e| match e {
+        InitError::Io(io) => BrownfieldInitError::Io(io),
+        other => BrownfieldInitError::GitCommand {
+            command: "write consolidated .gitignore".to_owned(),
+            stderr: other.to_string(),
+            exit_code: None,
+        },
+    })?;
+
+    // 5. Point the manifold refs at HEAD (idempotent: a re-run just re-asserts
+    //    the same OID; if the epoch ref drifted behind the branch we resync it).
+    let epoch_resynced_from = match manifold_refs::read_epoch_current(&root) {
+        Ok(Some(prev)) if prev.as_str() != epoch0.as_str() => EpochId::new(prev.as_str()).ok(),
+        _ => None,
+    };
+    bf_set_epoch_ref(&root, &epoch0)?;
+    bf_set_default_workspace_ref(&root, &epoch0)?;
+
+    Ok(BrownfieldInitResult {
+        repo_root: root.clone(),
+        // Consolidated: the root checkout IS the default workspace.
+        default_workspace: root,
+        epoch0,
+        epoch_resynced_from,
+        head_branch,
+        already_initialized,
+        dirty_files_at_root: Vec::new(),
+        cleaned_root_files: 0,
+        consolidated: true,
     })
 }
 
@@ -2361,6 +2524,79 @@ mod brownfield_tests {
         assert!(root.join(".manifold/config.toml").is_file());
     }
 
+    // ---- bn-2itc: brownfield consolidated init (non-destructive) ----
+
+    #[test]
+    fn brownfield_consolidated_is_non_destructive() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let head = setup_existing_repo(root);
+
+        let result =
+            brownfield_consolidated_init(root).expect("consolidated brownfield should succeed");
+
+        // Consolidated markers present.
+        assert!(result.consolidated);
+        assert!(root.join(".maw/manifold").is_dir());
+        assert_eq!(
+            layout::LayoutFlavor::detect(root),
+            layout::LayoutFlavor::ConsolidatedMawDir
+        );
+
+        // NON-destructive: .git stays a normal dir, files stay at root, no
+        // bare repo.git and no ws/ tree.
+        assert!(root.join(".git").is_dir(), ".git must stay a normal dir");
+        assert!(root.join("README.md").is_file(), "files stay at root");
+        assert!(root.join("src/lib.rs").is_file(), "files stay at root");
+        assert!(!root.join("ws").exists(), "no ws/ tree in consolidated");
+        assert!(!root.join("repo.git").exists(), "no bare repo.git");
+
+        // Root IS the default workspace; epoch₀ = HEAD.
+        assert_eq!(
+            result.default_workspace,
+            std::fs::canonicalize(root).expect("canonicalize root")
+        );
+        assert_eq!(result.epoch0, head);
+        assert!(!result.already_initialized);
+
+        // .gitignore ignores the admin tree.
+        let gi = fs::read_to_string(root.join(".gitignore")).expect("gitignore");
+        assert!(gi.contains("/.maw/"), ".gitignore must ignore /.maw/");
+    }
+
+    #[test]
+    fn brownfield_consolidated_is_idempotent_no_restructure() {
+        // The bn-2itc bug: a second `maw init` on an already-consolidated repo
+        // used to re-run the v2 restructure (because idempotency keyed only on
+        // ws/default/, which consolidated repos lack). Re-running the
+        // consolidated path must be an idempotent no-op.
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        setup_existing_repo(root);
+
+        brownfield_consolidated_init(root).expect("first init");
+        let second = brownfield_consolidated_init(root).expect("second init");
+
+        assert!(second.already_initialized, "re-run is a no-op");
+        assert!(second.consolidated);
+        // Layout untouched: still consolidated, still a normal .git, no v2 cruft.
+        assert_eq!(
+            layout::LayoutFlavor::detect(root),
+            layout::LayoutFlavor::ConsolidatedMawDir
+        );
+        assert!(root.join(".git").is_dir());
+        assert!(!root.join("ws").exists(), "must not restructure to v2");
+        assert!(!root.join("repo.git").exists(), "must not go bare");
+        assert!(root.join("README.md").is_file(), "files must not move");
+    }
+
+    #[test]
+    fn brownfield_consolidated_rejects_missing_git() {
+        let dir = tempdir().expect("tempdir");
+        let err = brownfield_consolidated_init(dir.path()).expect_err("no .git -> error");
+        assert!(matches!(err, BrownfieldInitError::NotAGitRepo { .. }));
+    }
+
     #[test]
     fn brownfield_sets_epoch_ref_to_head() {
         let dir = tempdir().expect("operation should succeed");
@@ -2651,6 +2887,7 @@ mod brownfield_tests {
             already_initialized: false,
             dirty_files_at_root: Vec::new(),
             cleaned_root_files: 5,
+            consolidated: false,
         };
         let s = format!("{result}");
         assert!(s.contains("Manifold initialized for existing repository"));
@@ -2674,6 +2911,7 @@ mod brownfield_tests {
             already_initialized: true,
             dirty_files_at_root: Vec::new(),
             cleaned_root_files: 0,
+            consolidated: false,
         };
         let s = format!("{result}");
         assert!(s.contains("already initialized"));

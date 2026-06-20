@@ -119,19 +119,27 @@ enum Commands {
 
     /// Initialize maw in the current repository
     ///
-    /// Greenfield init defaults to the consolidated `.maw/` layout (root is
-    /// a normal checkout, `.maw/workspaces/<name>/` for agents). Pass
-    /// `--legacy-ws` (or set `MAW_LAYOUT=v2`) to use the legacy v2 layout
-    /// (bare root + `ws/default/` + `ws/<name>/`). Brownfield init on an
-    /// existing repo preserves whichever layout is already on disk; an
-    /// existing git repo with NO maw layout yet produces the legacy v2 bare
-    /// layout (it will not silently restructure your repo). Run
-    /// `maw migrate` (T3.3) to move a v2 repo to the consolidated layout.
+    /// Defaults to the consolidated `.maw/` layout for BOTH new and existing
+    /// repos (root is a normal checkout, `.maw/workspaces/<name>/` for agents).
+    /// On an existing repo this is non-destructive: the root stays the live
+    /// checkout, no files are moved, and `.git/` stays a normal directory — it
+    /// only adds `.maw/` and a `/.maw/` `.gitignore` entry.
     ///
-    /// Safe to run multiple times.
+    /// Pass `--legacy-ws` (or set `MAW_LAYOUT=v2`) to use the legacy v2 bare
+    /// layout (bare root + `ws/default/` + `ws/<name>/`); on an existing repo
+    /// this DOES restructure — it converts `.git/` to bare and moves your
+    /// files into `ws/default/`. `--legacy-ws` is ignored on a repo that is
+    /// already consolidated (maw won't downgrade an existing layout).
+    ///
+    /// Existing maw repos keep whatever layout they already have. Run
+    /// `maw migrate` to move a v2 repo to the consolidated layout.
+    ///
+    /// Safe to run multiple times (idempotent — a re-run never restructures an
+    /// already-initialized repo).
     Init {
-        /// Use the legacy v2 `ws/` layout instead of the consolidated `.maw/`
-        /// layout (greenfield init only).
+        /// Use the legacy v2 `ws/` bare layout instead of the consolidated
+        /// `.maw/` layout. On an existing repo this moves files into
+        /// `ws/default/`; ignored if the repo is already consolidated.
         #[arg(long = "legacy-ws", alias = "v2")]
         legacy_ws: bool,
     },
