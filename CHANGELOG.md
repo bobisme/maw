@@ -2,6 +2,16 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.7 — `maw init` no longer restructures an existing repo (2026-06-20)
+
+Seventh dogfood pre-release. A focused fix for a layout-safety bug found while dogfooding `maw init` on an existing repo.
+
+**`maw init` is layout-aware and non-destructive on existing repos (bn-2itc)**
+- **A second `maw init` no longer re-restructures a consolidated repo back to v2.** The brownfield idempotency check keyed only on `ws/default/` existing — which a consolidated repo lacks — so a re-run (e.g. via `edict init`, which invokes `maw init`) thought the repo was uninitialized and re-ran the full v2 restructure: converting `.git/` to bare, creating `ws/default/`, and moving every project file into it. `maw init` now detects the on-disk layout before acting, and a re-run on a consolidated repo is an idempotent no-op.
+- **Brownfield init defaults to the consolidated layout, non-destructively.** On a fresh existing git repo, `maw init` now produces the consolidated `.maw/` layout *without restructuring*: the root stays the live checkout, `.git/` stays a normal directory, no files are moved — it only adds `.maw/` and a `/.maw/` `.gitignore` entry, with `epoch₀ = HEAD`. The old default produced the *invasive* legacy v2 bare layout (bare conversion + moving every file into `ws/default/`).
+- **`--legacy-ws` opts into the v2 bare layout explicitly** and is honored on a fresh repo; on a repo that is already consolidated it is ignored with a NOTE (maw will not downgrade an existing layout). Existing v2 repos stay v2 — run `maw migrate` to move them to consolidated.
+- `maw init` output now reports the resulting layout, and `maw init --help` documents the consolidated brownfield default.
+
 ## v1.0.0-pre.6 — crash-safe merge + the production-code trust instrument (2026-06-16)
 
 Sixth dogfood pre-release. The theme is closing the gap between what the SG1 release-gate *claims* and what it *exercises*. The 1e8 soak drives a deterministic **model** of maw's git-object effects — it never runs maw's real merge / HEAD-movement code. This release adds a second, complementary DST tier that drives the **real `maw` binary** through the same Prime-Invariant oracles, and building it immediately paid off: it surfaced (and this release fixes) a genuine merge crash-recovery bug, on top of other merge/status correctness fixes.
