@@ -635,7 +635,8 @@ fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
             name: "dangling snapshots".to_string(),
             status: "warn".to_string(),
             message: format!(
-                "dangling snapshots: {} recovery ref(s) from crashed or completed merges",
+                "dangling snapshots: {} orphaned recovery snapshot(s) (recovery refs left by \
+                 crashed or completed merges, with no destroy record)",
                 dangling.len()
             ),
             fix: Some(
@@ -720,8 +721,10 @@ fn check_abandoned_with_snapshot(root: Option<&Path>) -> DoctorCheck {
         name,
         status: "warn".to_string(),
         message: format!(
-            "abandoned-with-snapshot: {} destroyed workspace(s) with pinned recovery \
-             snapshot(s): {preview_str}{suffix}",
+            "abandoned-with-snapshot: {} destroyed workspace(s) retain a recovery snapshot \
+             (these are destroy records — the `maw ws recover` audit trail; expected after \
+             `ws destroy`, no work is lost). Counts records, not refs, so `maw gc \
+             --recovery-snapshots` does not reduce it: {preview_str}{suffix}",
             abandoned.len()
         ),
         fix: Some(format!(

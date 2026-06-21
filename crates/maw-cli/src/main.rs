@@ -306,32 +306,43 @@ enum Commands {
 
     /// Garbage-collect unreferenced epoch snapshots and stale refs
     ///
+    /// Two artifacts to keep straight:
+    ///   - recovery snapshot: the pinned commit (a `refs/manifold/recovery/*`
+    ///     ref) holding a destroyed workspace's content.
+    ///   - destroy record: the `maw ws recover` audit entry pointing at it.
+    ///
+    /// This command only touches refs — it never removes destroy records, so
+    /// the `maw doctor` "abandoned-with-snapshot" count (which counts records)
+    /// is unaffected by it.
+    ///
     /// Without flags: removes `.manifold/epochs/e-<oid>` directories that
     /// are no longer referenced by any active workspace, and prunes
     /// dangling `refs/manifold/head/*` oplog head refs for workspaces that
     /// no longer exist (this clears the `maw doctor` "stale head refs"
     /// warning). Head refs owned by a live in-flight merge are preserved.
     ///
-    /// With --refs: additionally sweeps old `refs/manifold/recovery/*`
-    /// refs whose commits are older than --older-than days (default: 30).
+    /// With --recovery-snapshots: additionally removes old recovery snapshots
+    /// whose commits are older than --older-than days (default: 30). Newer
+    /// snapshots are kept.
     ///
     /// Examples:
-    ///   maw gc                    # epoch GC + dangling head-ref cleanup
-    ///   maw gc --dry-run          # preview the above
-    ///   maw gc --refs             # also sweep old recovery refs
-    ///   maw gc --refs --dry-run   # preview ref cleanup
-    ///   maw gc --refs --older-than 7  # delete recovery refs older than 7 days
+    ///   maw gc                              # epoch GC + dangling head-ref cleanup
+    ///   maw gc --dry-run                    # preview the above
+    ///   maw gc --recovery-snapshots         # also remove old recovery snapshots
+    ///   maw gc --recovery-snapshots --dry-run        # preview snapshot cleanup
+    ///   maw gc --recovery-snapshots --older-than 7   # remove snapshots older than 7 days
     #[command(verbatim_doc_comment)]
     Gc {
         /// Preview removals without deleting anything
         #[arg(long)]
         dry_run: bool,
 
-        /// Also clean up stale manifold refs (head + recovery)
-        #[arg(long)]
-        refs: bool,
+        /// Also remove recovery snapshots older than --older-than days
+        /// (does not touch destroy records). `--refs` is a deprecated alias.
+        #[arg(long = "recovery-snapshots", alias = "refs")]
+        recovery_snapshots: bool,
 
-        /// For recovery refs: delete if older than this many days (default: 30)
+        /// For recovery snapshots: remove if older than this many days (default: 30)
         #[arg(long, default_value = "30")]
         older_than: u64,
     },
@@ -507,17 +518,17 @@ fn main() {
         },
         Commands::Gc {
             dry_run,
-            refs,
+            recovery_snapshots,
             older_than,
         } => workspace::repo_root().and_then(|root| {
             epoch_gc::run_cli(&root, dry_run)?;
-            if refs {
+            if recovery_snapshots {
                 ref_gc::run_cli(&root, older_than, dry_run)?;
             } else {
                 // bn-cm63: plain `maw gc` self-heals dangling oplog head refs
                 // (e.g. leaked by a destroy-vs-merge race) so the documented
                 // cleanup actually clears the `maw doctor` warning. The
-                // recovery-ref age sweep stays exclusive to `maw gc --refs`.
+                // recovery-ref age sweep stays exclusive to `maw gc --recovery-snapshots`.
                 ref_gc::run_head_refs_cli(&root, dry_run)?;
             }
             Ok(())

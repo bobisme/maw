@@ -28,8 +28,10 @@ use maw_core::refs;
 pub struct RefGcReport {
     /// Number of stale head refs deleted.
     pub head_refs_deleted: usize,
-    /// Number of old recovery refs deleted.
+    /// Number of old recovery snapshots (recovery refs) deleted.
     pub recovery_refs_deleted: usize,
+    /// Number of recovery snapshots kept (newer than the age threshold).
+    pub recovery_refs_kept: usize,
     /// Names of stale head refs that were deleted (workspace names).
     pub stale_head_names: Vec<String>,
     /// Recovery ref names that were deleted.
@@ -107,7 +109,7 @@ fn live_merge_source_names(root: &Path) -> std::collections::HashSet<String> {
 /// and the workspace is not a source of a *live* in-flight merge.
 ///
 /// Extracted so plain `maw gc` can self-heal leaked head refs (bn-cm63)
-/// without also running the recovery-ref age sweep that only `maw gc --refs`
+/// without also running the recovery-ref age sweep that only `maw gc --recovery-snapshots`
 /// should perform.
 fn prune_dangling_head_refs(
     repo: &maw_git::GixRepo,
@@ -161,7 +163,7 @@ fn prune_dangling_head_refs(
 ///
 /// This is what plain `maw gc` runs so the documented cleanup path actually
 /// clears the `maw doctor` "stale head refs" warning, and so already-leaked
-/// or legacy dangling head refs self-heal (bn-cm63). `maw gc --refs` still
+/// or legacy dangling head refs self-heal (bn-cm63). `maw gc --recovery-snapshots` still
 /// additionally sweeps old recovery refs via [`run`].
 ///
 /// # Errors
@@ -250,6 +252,7 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
             }
             Some(_) | None => {
                 // Recent enough or unknown commit time — keep conservatively.
+                report.recovery_refs_kept += 1;
             }
         }
     }
@@ -266,7 +269,7 @@ fn get_commit_timestamp(repo: &maw_git::GixRepo, oid: maw_git::GitOid) -> Option
     u64::try_from(info.committer_time).ok()
 }
 
-/// CLI entry point for `maw gc --refs`.
+/// CLI entry point for `maw gc --recovery-snapshots`.
 #[allow(clippy::missing_errors_doc)]
 pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
     let report = run(root, older_than_days, dry_run)?;
@@ -289,19 +292,31 @@ pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
         }
         if !report.deleted_recovery_refs.is_empty() {
             println!(
-                "  Would delete {} recovery ref(s) older than {older_than_days} day(s):",
-                report.recovery_refs_deleted
+                "  Would delete {} recovery snapshot(s) older than {older_than_days} day(s) \
+                 ({} newer kept):",
+                report.recovery_refs_deleted, report.recovery_refs_kept
             );
             for r in &report.deleted_recovery_refs {
                 println!("    {r}");
             }
         }
-        println!("To apply: maw gc --refs");
+        println!("To apply: maw gc --recovery-snapshots");
     } else {
         println!(
-            "Cleaned {} head ref(s), {} recovery ref(s)",
-            report.head_refs_deleted, report.recovery_refs_deleted
+            "Pruned {} stale head ref(s); removed {} recovery snapshot(s) older than \
+             {older_than_days} day(s) ({} newer kept).",
+            report.head_refs_deleted, report.recovery_refs_deleted, report.recovery_refs_kept
         );
+        if report.recovery_refs_deleted > 0 {
+            // The destroy records (the `maw ws recover` audit trail) are a
+            // separate artifact and are intentionally NOT removed here — only
+            // the snapshot's ref pin is. Be explicit so the count in
+            // `maw doctor` (which counts destroy records) is not surprising.
+            println!(
+                "  Note: destroy records are kept (they remain listable via `maw ws recover`); \
+                 only the recovery-snapshot pins were removed."
+            );
+        }
     }
 
     Ok(())
