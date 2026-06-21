@@ -1682,7 +1682,11 @@ mod tests {
     }
 
     fn commit_in_default_workspace(root: &Path, message: &str, content: &str) {
-        let default_ws = root.join("ws/default");
+        // Layout-aware: the default workspace is `ws/default` under v2 but the
+        // repo root itself under the consolidated layout (now the `maw init`
+        // brownfield default — bn-2itc).
+        let default_ws = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .default_target_path(root, "default");
         fs::write(default_ws.join("README.md"), content).expect("write default readme");
         run_git(&default_ws, &["add", "README.md"]);
         run_git(&default_ws, &["commit", "-m", message]);
@@ -1783,9 +1787,13 @@ exit 1
                 Some("ch-create")
             );
 
+            // Layout-aware: agent workspaces live at `ws/<name>` under v2 but
+            // `.maw/workspaces/<name>` under the consolidated layout (bn-2itc).
+            let primary_ws = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+                .workspace_path(root, "create-ws");
             assert!(
-                root.join("ws/create-ws").exists(),
-                "primary workspace exists"
+                primary_ws.exists(),
+                "primary workspace exists at {primary_ws:?}"
             );
         });
     }
