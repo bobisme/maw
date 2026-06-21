@@ -2,6 +2,19 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.8 — recovery-GC vocabulary clarity + green suite (2026-06-21)
+
+Eighth dogfood pre-release. A small clarity pass on the recovery/GC CLI vocabulary, plus a test fix for a stale assertion left by pre.7's brownfield-init change.
+
+**Clearer recovery-snapshot vs destroy-record vocabulary (bn-8rp9)**
+- The recovery subsystem has two distinct artifacts that the CLI described inconsistently: a *recovery snapshot* (the pinned `refs/manifold/recovery/*` commit holding a destroyed workspace's content) and a *destroy record* (the `maw ws recover` audit entry). Running `maw gc --refs` to clear the `maw doctor` "abandoned-with-snapshot" warning did nothing, because that warning counts records while `gc` sweeps refs.
+- Renamed `maw gc --refs` → **`maw gc --recovery-snapshots`** (the old `--refs` is kept as a hidden, deprecated alias). The sweep output now uses the "recovery snapshot" noun, prints the age threshold and the removed-vs-kept counts, and notes that destroy records are intentionally kept.
+- `maw gc --help` now opens with a two-noun glossary and states the command only touches refs.
+- `maw doctor` messages reworded for consistency: "dangling snapshots" now reads "orphaned recovery snapshot(s)", and the "abandoned-with-snapshot" message explains it counts destroy records (expected after `ws destroy`, no work lost) and is not reduced by `maw gc --recovery-snapshots`.
+
+**Test fix (pre.7 follow-up)**
+- Three `changes` unit tests hardcoded the legacy v2 `ws/` workspace paths and broke when pre.7 made brownfield `maw init` default to the consolidated layout. They are now layout-aware. No product-code change — pre.7's behavior was correct; only the stale test assertions needed updating.
+
 ## v1.0.0-pre.7 — `maw init` no longer restructures an existing repo (2026-06-20)
 
 Seventh dogfood pre-release. A focused fix for a layout-safety bug found while dogfooding `maw init` on an existing repo.
