@@ -404,3 +404,71 @@ fn status_bar_counts_workspaces_in_consolidated_layout() {
         "status bar should count the 2 non-default workspaces; got: {bar:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-2jez: `maw ws list` shows the default workspace in consolidated layout
+// ---------------------------------------------------------------------------
+
+/// In the consolidated layout the default workspace IS the repo root, which
+/// lives outside `.maw/workspaces/` and so is not returned by the backend's
+/// worktree enumeration. `maw ws list` must still show `default` (it always
+/// exists) — and an otherwise-empty repo must NOT report "No workspaces
+/// found". Regression: it previously printed "No workspaces found".
+#[test]
+fn ws_list_includes_default_in_empty_consolidated_repo() {
+    let dir = init_consolidated();
+    let root = dir.path();
+
+    let stdout = maw_ok(root, &["ws", "list"]);
+    assert!(
+        stdout.contains("default"),
+        "ws list must show the default workspace in consolidated layout; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("No workspaces found"),
+        "consolidated repo with a default workspace must not report 'No workspaces found'; got: {stdout:?}"
+    );
+}
+
+/// With agent workspaces present, `maw ws list` shows `default` first and then
+/// the agents (a single `default`, not duplicated), and the JSON form includes
+/// the default entry.
+#[test]
+fn ws_list_shows_default_then_agents_in_consolidated() {
+    let dir = init_consolidated();
+    let root = dir.path();
+
+    maw_ok(root, &["ws", "create", "alice", "--from", "main"]);
+
+    let stdout = maw_ok(root, &["ws", "list"]);
+    let default_pos = stdout.find("default");
+    let alice_pos = stdout.find("alice");
+    assert!(
+        default_pos.is_some() && alice_pos.is_some(),
+        "ws list must show both default and alice; got: {stdout:?}"
+    );
+    assert!(
+        default_pos < alice_pos,
+        "default must sort before agent workspaces; got: {stdout:?}"
+    );
+    assert_eq!(
+        stdout.matches("default").count(),
+        1,
+        "default must appear exactly once (not duplicated); got: {stdout:?}"
+    );
+
+    // JSON form includes the default entry too.
+    let json = maw_ok(root, &["ws", "list", "--json"]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json).expect("ws list --json is valid JSON");
+    let names: Vec<&str> = parsed["workspaces"]
+        .as_array()
+        .expect("workspaces array")
+        .iter()
+        .filter_map(|w| w["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"default"),
+        "ws list --json must include the default workspace; got names: {names:?}"
+    );
+}

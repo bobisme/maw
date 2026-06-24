@@ -119,13 +119,77 @@ pub struct AdviceDetails {
     pub(crate) fix: String,
 }
 
+/// Synthesize the default-workspace entry for the consolidated layout.
+///
+/// In the consolidated layout the default workspace is the repo root itself,
+/// which lives outside `.maw/workspaces/` and is therefore not returned by
+/// [`WorkspaceBackend::list`]. Prepend a synthetic [`WorkspaceInfo`] so
+/// `maw ws list` always shows `default` (it always exists), matching v2 and
+/// `maw status`.
+///
+/// No-op when: the layout is v2 (the backend already lists `ws/default`), a
+/// `default` entry is already present, or the current epoch cannot be read.
+fn inject_consolidated_default(
+    root: &std::path::Path,
+    workspaces: &mut Vec<maw_core::model::types::WorkspaceInfo>,
+) {
+    use maw_core::model::layout::LayoutFlavor;
+    use maw_core::model::types::{EpochId, WorkspaceId, WorkspaceInfo, WorkspaceMode};
+
+    if LayoutFlavor::detect_with_env(root) != LayoutFlavor::ConsolidatedMawDir {
+        return;
+    }
+    if workspaces
+        .iter()
+        .any(|w| w.id.as_str() == DEFAULT_WORKSPACE)
+    {
+        return;
+    }
+    let Ok(Some(epoch_oid)) = maw_core::refs::read_epoch_current(root) else {
+        return;
+    };
+    let (Ok(epoch), Ok(id)) = (
+        EpochId::new(epoch_oid.as_str()),
+        WorkspaceId::new(DEFAULT_WORKSPACE),
+    ) else {
+        return;
+    };
+
+    workspaces.insert(
+        0,
+        WorkspaceInfo {
+            id,
+            path: LayoutFlavor::ConsolidatedMawDir.default_target_path(root, DEFAULT_WORKSPACE),
+            epoch,
+            // The display layer renders `is_default` rows as "active" and skips
+            // lifecycle/stale classification (see the mapping below), so these
+            // are presentation-neutral placeholders for the root checkout.
+            state: WorkspaceState::Active,
+            mode: WorkspaceMode::Persistent,
+            commits_ahead: 0,
+        },
+    );
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "list command combines data collection, optional checks, and rendering"
 )]
 pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
     let backend = get_backend()?;
-    let backend_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut backend_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Read metadata for all workspaces to get mode (ephemeral/persistent).
+    let root = repo_root()?;
+
+    // bn-2jez: in the consolidated layout the default workspace IS the repo
+    // root, which lives outside `.maw/workspaces/` and so is never enumerated
+    // by `WorkspaceBackend::list` (the v2 default at `ws/default/` WAS, because
+    // it sat under `ws/`). Synthesize it here so `maw ws list` always shows
+    // `default` — it always exists — mirroring `maw status`. No-op under v2
+    // (the backend already lists it) or if a `default` entry is already
+    // present.
+    inject_consolidated_default(&root, &mut backend_workspaces);
 
     if backend_workspaces.is_empty() {
         match format {
@@ -140,9 +204,6 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
         }
         return Ok(());
     }
-
-    // Read metadata for all workspaces to get mode (ephemeral/persistent).
-    let root = repo_root()?;
 
     // If --check requested, run merge checks for workspaces with pending commits.
     let merge_checks: HashMap<String, MergeCheckSummary> = if check {
