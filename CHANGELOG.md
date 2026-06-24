@@ -2,6 +2,14 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.9 — `maw ws list` shows the default workspace again (2026-06-24)
+
+Ninth dogfood pre-release. A focused fix for a consolidated-layout list regression.
+
+**`maw ws list` / `maw ls` shows the default workspace in the consolidated layout (bn-2jez)**
+- In the consolidated layout the default workspace *is* the repo root, which lives outside `.maw/workspaces/`. The workspace backend only enumerates worktrees under that directory, so the default was silently filtered out — `maw ws list` (and its `maw ls` alias) stopped showing `default`, and an otherwise-empty repo reported the misleading "No workspaces found". (The legacy v2 layout was unaffected because its default lived at `ws/default/`.)
+- `maw ws list` now synthesizes the default entry in the consolidated layout, so it always appears (sorted first), in both the text and `--json` output, mirroring `maw status`. The fix is confined to the list command — the workspace backend's enumeration (used by sync, status, gc, diff, the TUI, etc.) is unchanged.
+
 ## v1.0.0-pre.8 — recovery-GC vocabulary clarity + green suite (2026-06-21)
 
 Eighth dogfood pre-release. A small clarity pass on the recovery/GC CLI vocabulary, plus a test fix for a stale assertion left by pre.7's brownfield-init change.
