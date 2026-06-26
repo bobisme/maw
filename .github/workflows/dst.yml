@@ -28,6 +28,14 @@ on:
       - main
   workflow_dispatch:
 
+# Cancel superseded runs on the same branch/PR so rapid pushes (e.g. a merge
+# followed seconds later by a release version-bump) don't stack full DST builds
+# and burn Actions minutes. The newest commit is a descendant, so its green run
+# covers the cancelled one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ---------------------------------------------------------------------
   # SG3 subset pre-reg freshness gate (bn-iux4).
@@ -125,6 +133,8 @@ jobs:
   legacy-sim:
     name: Legacy DST sweep (workflow + action harnesses)
     runs-on: ubuntu-latest
+    # Backstop so a hung sim never rides GitHub's default 360-min cap.
+    timeout-minutes: 15
     env:
       DST_ARTIFACT_DIR: /tmp/maw-dst-artifacts
       WORKFLOW_DST_TRACES: "12"

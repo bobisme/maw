@@ -5,19 +5,30 @@ on:
     tags:
       - 'v*'
 
+# Serialize publishes so two tag pushes never race to crates.io. Never cancel
+# an in-flight publish (a half-done publish leaves the registry inconsistent) —
+# queue instead.
+concurrency:
+  group: publish-crates-io
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Backstop; `cargo publish --verify` rebuilds each crate so a cold run is
+    # build-bound. Well under this cap in practice.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build maw binary for integration harnesses
-        run: cargo build -p maw-cli --bin maw
-
-      - name: Run tests
-        run: cargo test
+      # Note: no separate build/test step here. This commit was already gated
+      # by the per-commit DST workflow on its push to main (and `just check`
+      # locally before the release), and `cargo publish --verify` below
+      # recompiles every crate — so a full `cargo test` at publish time is
+      # redundant. Dropping it keeps tag-publish runs build-bound, not
+      # test-bound.
 
       - name: Publish crates to crates.io
         run: |
@@ -40,19 +51,25 @@ jobs:
           }
 
           # Dependency order:
-          #   maw-lfs     (no workspace deps)
-          #   maw-git     (depends on maw-lfs)
-          #   maw-core    (depends on maw-git)
-          #   maw-assurance (no workspace deps; optional dep of root)
+          #   maw-lfs       (no workspace deps)
+          #   maw-git       (depends on maw-lfs)
+          #   maw-core      (depends on maw-git)
+          #   maw-scenario  (no workspace deps; required by maw-assurance's
+          #                  scenario/fault-injection/oracles features —
+          #                  must be on crates.io BEFORE maw-assurance or its
+          #                  publish-verify fails "no matching package")
+          #   maw-assurance (optional deps: maw-core + maw-scenario)
           #   maw-workspaces (root; depends on all of the above)
           # maw-cli has publish = false (binary crate, installed via source).
-          # maw-tui is not currently published.
+          # maw-tui and the maw-bench* crates are not currently published.
           cargo publish -p maw-lfs
           wait_for_crate maw-lfs "$VERSION"
           cargo publish -p maw-git
           wait_for_crate maw-git "$VERSION"
           cargo publish -p maw-core
           wait_for_crate maw-core "$VERSION"
+          cargo publish -p maw-scenario
+          wait_for_crate maw-scenario "$VERSION"
           cargo publish -p maw-assurance
           wait_for_crate maw-assurance "$VERSION"
           cargo publish -p maw-workspaces

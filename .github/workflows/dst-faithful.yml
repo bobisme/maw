@@ -22,6 +22,12 @@ on:
       - main
   workflow_dispatch:
 
+# Cancel superseded runs on the same branch/PR (see dst.yml) so back-to-back
+# pushes don't stack failpoints clippy + release builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   failpoints-clippy:
     name: Faithful-binary clippy (--features failpoints)
