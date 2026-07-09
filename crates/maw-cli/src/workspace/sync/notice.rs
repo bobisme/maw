@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::auto_rebase::OverlapHint;
+
 /// File name of the notice inside `artifacts/ws/<name>/`.
 const NOTICE_FILE: &str = "auto-rebase-notice.json";
 
@@ -35,6 +37,12 @@ pub struct AutoRebaseNotice {
     /// Whether the files on disk were synchronized to the rebased HEAD.
     /// `false` means refs advanced but the worktree update was skipped.
     pub worktree_updated: bool,
+    /// bn-2cvx: semantic-risk hint — set when the epoch range this
+    /// workspace was rebased over touches at least one path the workspace
+    /// itself also touches. `None` when there was no overlap (or it could
+    /// not be computed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<OverlapHint>,
 }
 
 /// Path of the notice file for `ws_name` (layout-aware).
@@ -73,6 +81,10 @@ pub fn write_notice(root: &Path, ws_name: &str, notice: &AutoRebaseNotice) {
             conflicts: notice.conflicts.max(prev.conflicts),
             worktree_updated: notice.worktree_updated,
             new_epoch: notice.new_epoch.clone(),
+            // bn-2cvx: keep the latest rebase's overlap hint — it describes
+            // the paths touched by the epoch range just replayed over,
+            // which is only meaningful relative to the newest rebase.
+            overlap: notice.overlap.clone(),
         },
         None => notice.clone(),
     };
@@ -157,6 +169,20 @@ pub fn render_notice(ws_name: &str, notice: &AutoRebaseNotice) -> String {
     if notice.conflicts > 0 {
         let _ = write!(msg, " Resolve conflicts: maw ws resolve {ws_name} --list");
     }
+    // bn-2cvx: semantic-risk hint — textually clean does not mean safe.
+    if let Some(overlap) = &notice.overlap
+        && overlap.count > 0
+    {
+        let _ = write!(
+            msg,
+            "\n  This rebase also touched {} file(s) this workspace touches — re-run its tests before merging",
+            overlap.count
+        );
+        if !overlap.sample_paths.is_empty() {
+            let _ = write!(msg, ": {}", overlap.sample_paths.join(", "));
+        }
+        msg.push('.');
+    }
     msg
 }
 
@@ -180,6 +206,7 @@ mod tests {
             replayed: 2,
             conflicts: 0,
             worktree_updated: true,
+            overlap: None,
         }
     }
 
@@ -243,6 +270,7 @@ mod tests {
             replayed: 3,
             conflicts: 0,
             worktree_updated: true,
+            overlap: None,
         };
         write_notice(tmp.path(), "sib", &second);
         let taken = take_notice(tmp.path(), "sib").expect("notice");
@@ -250,5 +278,43 @@ mod tests {
         assert_eq!(taken.new_epoch, "c".repeat(40), "latest new_epoch kept");
         assert_eq!(taken.merge_sources, vec!["merger", "other"]);
         assert_eq!(taken.replayed, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // bn-2cvx: overlap hint carried in the notice JSON + rendering.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_notice_with_overlap_mentions_hint_and_paths() {
+        let mut n = sample();
+        n.overlap = Some(OverlapHint {
+            count: 2,
+            sample_paths: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+        });
+        let msg = render_notice("sib", &n);
+        assert!(msg.contains("2 file(s) this workspace touches"));
+        assert!(msg.contains("re-run its tests before merging"));
+        assert!(msg.contains("src/lib.rs"));
+        assert!(msg.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn render_notice_without_overlap_omits_hint() {
+        let msg = render_notice("sib", &sample());
+        assert!(!msg.contains("re-run its tests before merging"));
+    }
+
+    #[test]
+    fn write_then_take_round_trips_overlap_hint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join(".manifold")).expect("mkdir");
+        let mut n = sample();
+        n.overlap = Some(OverlapHint {
+            count: 1,
+            sample_paths: vec!["shared.txt".to_string()],
+        });
+        write_notice(tmp.path(), "sib", &n);
+        let taken = take_notice(tmp.path(), "sib").expect("notice should exist");
+        assert_eq!(taken.overlap, n.overlap);
     }
 }

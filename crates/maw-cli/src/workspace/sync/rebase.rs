@@ -277,6 +277,21 @@ pub(super) fn rebase_workspace_run(
         };
     }
 
+    // bn-mq6j: conflict-summary lines must be unmissable — prefixed with
+    // "WARNING:" and duplicated to stderr so the signal survives
+    // stdout-swallowing wrappers (agents that pipe/capture only stdout, or
+    // truncate long stdout logs). Respects `opts.print` like `say!` so the
+    // sibling auto-rebase path (print: false) stays silent.
+    macro_rules! warn_line {
+        ($($arg:tt)*) => {{
+            let msg = format!($($arg)*);
+            say!("WARNING: {msg}");
+            if opts.print {
+                eprintln!("WARNING: {msg}");
+            }
+        }};
+    }
+
     // Serialize concurrent rebases on the same workspace (bn-1d1g). Without
     // this, two racing `maw ws sync --rebase <ws>` processes both rewrite
     // HEAD / the worktree and the loser aborts mid-pipeline with an internal
@@ -945,17 +960,17 @@ pub(super) fn rebase_workspace_run(
 
         say!();
         if sanity_flagged_steps > 0 {
-            say!(
+            warn_line!(
                 "Rebase complete: {replayed} commit(s) replayed, \
                  {conflicted_steps} with conflicts ({sanity_flagged_steps} sanity-flagged).",
             );
         } else {
-            say!(
+            warn_line!(
                 "Rebase complete: {replayed} commit(s) replayed, \
                  {conflicted_steps} with conflicts.",
             );
         }
-        say!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
+        warn_line!("Workspace '{ws_name}' has {conflict_count} unresolved conflict(s).");
         if opts.print {
             print_conflict_guidance(ws_name);
         }
@@ -974,7 +989,7 @@ pub(super) fn rebase_workspace_run(
             Ok(residual) if residual.is_conflicted() => {
                 effective_conflicts = residual.conflict_count();
                 say!();
-                say!(
+                warn_line!(
                     "Rebase complete: {replayed} commit(s) replayed, but \
                      {effective_conflicts} unresolved conflict(s) from an earlier \
                      rebase are still committed in this workspace:"
@@ -982,6 +997,7 @@ pub(super) fn rebase_workspace_run(
                 if opts.print {
                     for path in residual.unresolved_paths() {
                         println!("  - {}", path.display());
+                        eprintln!("  - {}", path.display());
                     }
                     print_conflict_guidance(ws_name);
                 }
@@ -1021,8 +1037,8 @@ pub(super) fn rebase_workspace_run(
                 );
                 say!();
                 say!("Rebase complete: {replayed} commit(s) replayed.");
-                say!(
-                    "WARNING: could not verify conflict state ({e}); \
+                warn_line!(
+                    "could not verify conflict state ({e}); \
                      run `maw ws resolve {ws_name} --list` to confirm."
                 );
             }

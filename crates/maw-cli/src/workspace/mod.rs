@@ -817,6 +817,16 @@ pub enum WorkspaceCommands {
         /// backward compatibility; will be removed in a future version.
         #[arg(long, conflicts_with = "no_rebase", hide = true)]
         rebase: bool,
+
+        /// Output format: text, json, or pretty. JSON includes conflict
+        /// counts and paths so agents can mechanically detect
+        /// committed-conflict state without scraping text output.
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
     },
 
     /// Show operation history for a workspace
@@ -1587,13 +1597,16 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             all,
             no_rebase,
             rebase,
+            format,
+            json,
         } => {
             if rebase {
                 eprintln!(
                     "note: --rebase is now the default; flag will be removed in a future version"
                 );
             }
-            sync::sync(name.as_deref(), all, no_rebase)
+            let fmt = OutputFormat::with_json_flag(format, json).unwrap_or(OutputFormat::Text);
+            sync::sync(name.as_deref(), all, no_rebase, fmt)
         }
         WorkspaceCommands::History {
             name,

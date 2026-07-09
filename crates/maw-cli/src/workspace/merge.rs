@@ -188,6 +188,11 @@ pub struct MergeSuccessOutput {
     pub next: String,
     /// Structured guidance for agents (warnings, follow-up actions).
     pub advice: Vec<MergeAdvice>,
+    /// bn-mq6j: names of sibling workspaces that ended this merge's
+    /// auto-rebase pass in a conflicted state. Empty when auto-rebase was
+    /// disabled, found no siblings to rebase, or none of them conflicted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sibling_conflicts: Vec<String>,
 }
 
 /// Structured advice entry for merge JSON output.
@@ -4542,6 +4547,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // skip-rules → call the rebase core (no worktree mutation) → record a
     // result line.
     // -----------------------------------------------------------------------
+    // bn-mq6j: names of siblings that ended this auto-rebase pass in a
+    // conflicted state, surfaced again in the merge's own final summary
+    // (text NOTE line + JSON `sibling_conflicts`) so it isn't buried in the
+    // middle of the merge output.
+    let mut sibling_conflict_names: Vec<String> = Vec::new();
     if target_updates_epoch {
         let manifold_config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
             .bootstrap_config_path(&root);
@@ -4561,12 +4571,25 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 textln!();
                 textln!("AUTO-REBASE: replaying sibling workspaces onto new epoch...");
                 for report in &reports {
-                    textln!("  {} — {}", report.name, report.result.describe());
+                    textln!(
+                        "  {} — {}",
+                        report.name,
+                        report.result.describe(&report.name)
+                    );
                 }
             }
             for report in &reports {
-                if let super::sync::auto_rebase::SiblingResult::Failed { reason } = &report.result {
-                    tracing::warn!(workspace = %report.name, error = %reason, "sibling auto-rebase failed");
+                match &report.result {
+                    super::sync::auto_rebase::SiblingResult::Failed { reason } => {
+                        tracing::warn!(workspace = %report.name, error = %reason, "sibling auto-rebase failed");
+                    }
+                    super::sync::auto_rebase::SiblingResult::RebasedWithConflicts { .. }
+                    | super::sync::auto_rebase::SiblingResult::RebasedWithConflictsRefsOnly {
+                        ..
+                    } => {
+                        sibling_conflict_names.push(report.name.clone());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4720,11 +4743,19 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             message: format!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", ")),
             next: next_command,
             advice: vec![],
+            sibling_conflicts: sibling_conflict_names.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
         textln!();
         textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
+        if !sibling_conflict_names.is_empty() {
+            textln!(
+                "NOTE: {} sibling workspace(s) now have conflicts: {}",
+                sibling_conflict_names.len(),
+                sibling_conflict_names.join(", ")
+            );
+        }
         textln!();
         if let Some(change_id) = target_change_id {
             textln!("Next: open or update PR for this change:");
@@ -6635,6 +6666,7 @@ mod tests {
             message: "Merged to manifold: adopt work from alice".to_string(),
             next: "maw push".to_string(),
             advice: vec![],
+            sibling_conflicts: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
@@ -6653,6 +6685,33 @@ mod tests {
         assert_eq!(parsed["next"], "maw push");
         assert_eq!(parsed["unique_count"], 3);
         assert!(parsed["advice"].is_array());
+        // sibling_conflicts is skip_serializing_if empty — must not appear.
+        assert!(parsed.get("sibling_conflicts").is_none());
+    }
+
+    #[test]
+    fn merge_success_output_includes_sibling_conflicts_when_present() {
+        let output = MergeSuccessOutput {
+            status: "success".to_string(),
+            workspaces: vec!["alice".to_string()],
+            branch: "manifold".to_string(),
+            epoch: "a".repeat(40),
+            unique_count: 1,
+            shared_count: 0,
+            resolved_count: 0,
+            conflict_count: 0,
+            conflicts: vec![],
+            message: "Merged to manifold: adopt work from alice".to_string(),
+            next: "maw push".to_string(),
+            advice: vec![],
+            sibling_conflicts: vec!["bob".to_string()],
+        };
+
+        let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("operation should succeed");
+        assert_eq!(parsed["sibling_conflicts"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["sibling_conflicts"][0], "bob");
     }
 
     #[test]

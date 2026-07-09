@@ -9,11 +9,14 @@ pub(crate) mod sanity;
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
 use tracing::instrument;
 
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::types::WorkspaceId;
 use maw_core::refs as manifold_refs;
+
+use crate::format::OutputFormat;
 
 use super::{MawConfig, get_backend, repo_root};
 
@@ -66,19 +69,69 @@ fn report_cleared_stale_sidecar(
     }
 }
 
+/// Structured, machine-parseable result of a `maw ws sync` invocation (bn-mq6j item 4).
+///
+/// Enough for an agent to mechanically detect committed-conflict state
+/// without scraping text output — the jj-style conflicts-are-data model
+/// means sync always exits 0, even when it leaves the workspace conflicted,
+/// so `conflict_count` / `conflicted_paths` are the machine-readable
+/// substitute for a non-zero exit code.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SyncJsonOutput {
+    /// Workspace that was synced (or would have been, for skip/refuse cases).
+    pub workspace: String,
+    /// One of: `no_epoch`, `not_found`, `default_skip`, `up_to_date`,
+    /// `residual_conflicts`, `refused_data_loss`, `cross_target_skip`,
+    /// `rebased`, `synced`, `error`.
+    pub action: String,
+    /// Whether the workspace was behind the current epoch before this sync.
+    pub stale: bool,
+    /// Number of commits replayed onto the new epoch (0 unless `action ==
+    /// "rebased"`).
+    pub replayed: usize,
+    /// Number of unresolved conflict-as-data entries in the workspace after
+    /// this sync (including conflicts that predate this run).
+    pub conflict_count: usize,
+    /// Paths carrying unresolved conflict markers, if any.
+    pub conflicted_paths: Vec<String>,
+    /// Human-readable summary of what happened.
+    pub message: String,
+}
+
+fn print_sync_json(output: &SyncJsonOutput) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(output)?);
+    Ok(())
+}
+
 #[instrument]
 /// # Errors
 ///
 /// Returns an error if workspace synchronization fails.
-#[expect(
-    clippy::too_many_lines,
-    reason = "sync handles multiple staleness/conflict paths; factoring them out would obscure the control flow"
-)]
-pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
+pub fn sync(name: Option<&str>, all: bool, no_rebase: bool, format: OutputFormat) -> Result<()> {
+    if format == OutputFormat::Json {
+        return if all {
+            sync_all_json(no_rebase)
+        } else {
+            let output = build_sync_json(name, no_rebase)?;
+            print_sync_json(&output)
+        };
+    }
+
     if all {
         return sync_all(no_rebase);
     }
 
+    sync_one_text(name, no_rebase)
+}
+
+/// Sync a single workspace, printing plain-text progress (the historical
+/// `maw ws sync <name>` behavior). Split out of [`sync`] so the JSON path
+/// (`build_sync_json`) can share none of this printing.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sync handles multiple staleness/conflict paths; factoring them out would obscure the control flow"
+)]
+fn sync_one_text(name: Option<&str>, no_rebase: bool) -> Result<()> {
     let root = repo_root()?;
     let backend = get_backend()?;
 
@@ -136,14 +189,22 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
         if let Some(ref state) = conflict_state
             && state.is_conflicted()
         {
+            // bn-mq6j: loud, unmissable — WARNING-prefixed and duplicated to
+            // stderr so this doesn't blend into ordinary stdout noise.
             let n = state.conflict_count();
-            println!(
-                "Workspace '{workspace_name}' is up to date, but has {n} unresolved conflict(s):"
+            let header = format!(
+                "WARNING: Workspace '{workspace_name}' is up to date, but has {n} unresolved conflict(s):"
             );
+            println!("{header}");
+            eprintln!("{header}");
             for path in state.unresolved_paths() {
-                println!("  - {}", path.display());
+                let line = format!("  - {}", path.display());
+                println!("{line}");
+                eprintln!("{line}");
             }
-            println!("  Resolve: maw ws resolve {workspace_name} --list");
+            let footer = format!("  Resolve: maw ws resolve {workspace_name} --list");
+            println!("{footer}");
+            eprintln!("{footer}");
             return Ok(());
         }
         println!("Workspace '{workspace_name}' is up to date.");
@@ -227,6 +288,232 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool) -> Result<()> {
     println!();
     println!("Workspace synced successfully.");
 
+    Ok(())
+}
+
+/// Sync a single workspace and return a [`SyncJsonOutput`] instead of
+/// printing text. Shared by `ws sync --format json` (prints one object) and
+/// `ws sync --all --format json` (collects one per stale workspace).
+///
+/// Mirrors [`sync_one_text`]'s branches exactly, but every rebase runs with
+/// `RebaseRunOptions { print: false, .. }` so no stray text lands on
+/// stdout/stderr ahead of the JSON payload.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors sync_one_text's staleness/conflict branches 1:1; factoring them out would obscure the parity between the text and JSON paths"
+)]
+fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput> {
+    let root = repo_root()?;
+    let backend = get_backend()?;
+
+    let current_epoch = manifold_refs::read_epoch_current(&root)
+        .map_err(|e| anyhow::anyhow!("Failed to read current epoch: {e}"))?;
+
+    let Some(current_epoch) = current_epoch else {
+        return Ok(SyncJsonOutput {
+            action: "no_epoch".to_string(),
+            message: "No epoch ref set. Run `maw init` first.".to_string(),
+            ..Default::default()
+        });
+    };
+
+    let workspace_name = name.map_or_else(
+        || {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
+            workspace_name_from_cwd(&root, &cwd)
+        },
+        ToString::to_string,
+    );
+    let ws_id = WorkspaceId::new(&workspace_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if is_default_workspace(&workspace_name) {
+        let branch = MawConfig::load(&root)
+            .map_or_else(|_| "main".to_string(), |cfg| cfg.branch().to_string());
+        return Ok(SyncJsonOutput {
+            workspace: workspace_name.clone(),
+            action: "default_skip".to_string(),
+            message: format!(
+                "Workspace '{workspace_name}' is the default branch workspace (tracks '{branch}'); detached-epoch sync skipped."
+            ),
+            ..Default::default()
+        });
+    }
+
+    if !backend.exists(&ws_id) {
+        return Ok(SyncJsonOutput {
+            workspace: workspace_name.clone(),
+            action: "not_found".to_string(),
+            message: format!("Workspace '{workspace_name}' not found."),
+            ..Default::default()
+        });
+    }
+
+    // bn-1abp: still consume any pending auto-rebase notice — it prints to
+    // stderr only, so it never corrupts the JSON payload on stdout.
+    notice::print_notice_if_any(&root, &workspace_name);
+
+    let ws_status = backend.status(&ws_id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
+        .workspace_path(&root, &workspace_name);
+
+    // bn-8zqz: verify (and, as a side effect, clear stale) conflict metadata
+    // against reality, same as the text path.
+    let conflict_state =
+        super::conflict_state::effective_conflict_state(&root, &workspace_name, &ws_path).ok();
+
+    if !ws_status.is_stale {
+        if let Some(ref state) = conflict_state
+            && state.is_conflicted()
+        {
+            return Ok(SyncJsonOutput {
+                workspace: workspace_name.clone(),
+                action: "residual_conflicts".to_string(),
+                stale: false,
+                conflict_count: state.conflict_count(),
+                conflicted_paths: state
+                    .unresolved_paths()
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect(),
+                message: format!(
+                    "Workspace '{workspace_name}' is up to date, but has {} unresolved conflict(s).",
+                    state.conflict_count()
+                ),
+                ..Default::default()
+            });
+        }
+        return Ok(SyncJsonOutput {
+            workspace: workspace_name.clone(),
+            action: "up_to_date".to_string(),
+            message: format!("Workspace '{workspace_name}' is up to date."),
+            ..Default::default()
+        });
+    }
+
+    match committed_ahead_of_epoch(&ws_path, &ws_status.base_epoch) {
+        None => {
+            return Ok(SyncJsonOutput {
+                workspace: workspace_name.clone(),
+                action: "refused_data_loss".to_string(),
+                stale: true,
+                message: format!(
+                    "Could not determine committed work for '{workspace_name}' (git failed); refusing to sync to avoid data loss."
+                ),
+                ..Default::default()
+            });
+        }
+        Some(ahead) if ahead > 0 => {
+            if no_rebase {
+                anyhow::bail!(
+                    "Workspace '{workspace_name}' has {ahead} committed commit(s) ahead of epoch; \
+                     --no-rebase would discard committed work.\n  \
+                     Run `maw ws sync {workspace_name}` (default rebases) to replay them onto the \
+                     new epoch, or destroy and recreate the workspace if you really want to drop \
+                     these commits."
+                );
+            }
+            let outcome = rebase::rebase_workspace_run(
+                &root,
+                &workspace_name,
+                ws_status.base_epoch.as_str(),
+                current_epoch.as_str(),
+                &ws_path,
+                ahead,
+                rebase::RebaseRunOptions {
+                    print: false,
+                    ..Default::default()
+                },
+                "sync",
+            )?;
+            let final_state =
+                super::conflict_state::effective_conflict_state(&root, &workspace_name, &ws_path)
+                    .ok();
+            let (conflict_count, conflicted_paths) = final_state.map_or_else(
+                || (outcome.conflicts, Vec::new()),
+                |s| {
+                    (
+                        s.conflict_count(),
+                        s.unresolved_paths()
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect(),
+                    )
+                },
+            );
+            return Ok(SyncJsonOutput {
+                workspace: workspace_name,
+                action: "rebased".to_string(),
+                stale: true,
+                replayed: outcome.replayed,
+                conflict_count,
+                conflicted_paths,
+                message: if conflict_count > 0 {
+                    format!(
+                        "{} commit(s) replayed, {conflict_count} unresolved conflict(s) committed in this workspace.",
+                        outcome.replayed
+                    )
+                } else {
+                    format!("{} commit(s) replayed cleanly.", outcome.replayed)
+                },
+            });
+        }
+        Some(_) => {}
+    }
+
+    if let Some(active_change) = cross_target_sync_risk(
+        &root,
+        &workspace_name,
+        ws_status.base_epoch.as_str(),
+        current_epoch.as_str(),
+    )? {
+        return Ok(SyncJsonOutput {
+            workspace: workspace_name.clone(),
+            action: "cross_target_skip".to_string(),
+            stale: true,
+            message: format!(
+                "Workspace '{workspace_name}' is behind current epoch, but that epoch tracks active change '{}' ({}) not yet on trunk.",
+                active_change.change_id, active_change.change_branch
+            ),
+            ..Default::default()
+        });
+    }
+
+    sync_worktree_to_epoch(&root, &workspace_name, current_epoch.as_str(), None)?;
+
+    Ok(SyncJsonOutput {
+        workspace: workspace_name.clone(),
+        action: "synced".to_string(),
+        stale: true,
+        message: format!("Workspace '{workspace_name}' synced successfully."),
+        ..Default::default()
+    })
+}
+
+/// `ws sync --all --format json`: one [`SyncJsonOutput`] per stale
+/// non-default workspace, emitted as a JSON array.
+fn sync_all_json(no_rebase: bool) -> Result<()> {
+    let backend = get_backend()?;
+
+    let workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut results: Vec<SyncJsonOutput> = Vec::new();
+
+    for ws in &workspaces {
+        let name = ws.id.as_str();
+        if !ws.state.is_stale() || is_default_workspace(name) {
+            continue;
+        }
+        match build_sync_json(Some(name), no_rebase) {
+            Ok(output) => results.push(output),
+            Err(e) => results.push(SyncJsonOutput {
+                workspace: name.to_string(),
+                action: "error".to_string(),
+                message: e.to_string(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }
 
