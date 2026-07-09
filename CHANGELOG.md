@@ -2,6 +2,38 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.10 — trunk dirt is never lost + multi-agent signal clarity (2026-07-09)
+
+Tenth dogfood pre-release. Resolves the mess multi-agent field report (bn-38nz) end to end: one data-loss-class fix at the merge/trunk boundary, plus a sweep of conflict-signaling and output-clarity improvements for orchestrated agent workflows.
+
+**Merge can no longer silently clobber uncommitted tracked trunk files (bn-1xmk)**
+- The trunk preserve-and-replay cycle in `maw ws merge` had three silent failure modes that could restore an uncommitted tracked file at the repo root to its committed content — the reported incident wiped a session's append-only `.bones/events` journal that no workspace had touched.
+- A **durable recovery snapshot** (`refs/manifold/recovery/default/<ts>`) is now pinned before the trunk checkout whenever the trunk has uncommitted tracked changes. It survives a clean replay and is visible in `maw ws recover` as a pinned row.
+- Dirty trunk files whose committed content changed across the merge (including via absorbed out-of-maw commits) now replay through the **driver-aware 3-way merge** — `merge=union` journals keep both the merged commits and the uncommitted appends — instead of a bare stash apply that could resolve to the committed side.
+- `git stash create` returning nothing on a dirty tree now errors loudly instead of being treated as "clean" (mirrors the bn-3mpx destroy-path fix).
+- A **post-replay fidelity check** verifies every pre-merge-dirty file whose committed content the merge did not change ends up byte-for-byte intact; on mismatch it self-repairs from an in-memory pre-merge capture and prints the exact `maw ws recover` command.
+- Merges announce `preserving N uncommitted trunk file(s) across merge (recovery snapshot pinned)`, and `maw ws merge --check` lists dirty trunk files informationally (never blocking).
+
+**Conflicted syncs are unmistakable (bn-mq6j)**
+- `maw ws sync` conflict summaries (new and residual committed conflicts) are now `WARNING:`-prefixed and duplicated to stderr. Exit code stays 0 — conflicts are data, not errors.
+- Sibling auto-rebase results with conflicts render as a distinct `CONFLICT:` line with the exact `maw ws resolve` command, and the merge summary lists any siblings left conflicted.
+- **`maw ws sync --format json`** (and `--json`) added: workspace, action, commits replayed, conflict count, and conflicted paths — mechanical detection for agents.
+
+**Auto-rebase semantic-risk hint (bn-2cvx)**
+- When a sibling is auto-rebased over epoch commits touching files that sibling also touches, the merge output line and the workspace's auto-rebase notice now append: "replayed over commits touching N file(s) this workspace also touches — re-run its tests before merging" (with a capped sample of paths in the notice JSON).
+
+**`ws resolve --keep union` (bn-nmu7)**
+- New resolution mode for the common "two workers each added a line to the same list" conflict: like `--keep both`, but conflicted hunks get a per-hunk **line union with cross-side dedup and stable order** (ours' order first, theirs-only lines appended in their original order). Binary / N>2 / no-base cases fall back exactly like `--keep both`.
+
+**Clearer conflict-gate message for leftover headers (bn-1etl)**
+- When a committed file was hand-resolved (markers gone) but still begins with the maw conflict header, the merge gate now says exactly that — delete the leading `#` header lines, commit, re-run — instead of the tamper-flavored placeholder message. Both cases remain hard-blocking and not bypassable by `--force`.
+
+**Output & UX (bn-3eew, bn-1kop, bn-1aey)**
+- `maw ws merge --check`'s epoch-drift note is now informational when the drift is a safe fast-forward ("will be absorbed automatically when you merge") and only warns on blocked or truly diverged states; the drift classification rides in the check's JSON output.
+- Merge success ends with a stable, grep-able sentinel: `[OK] merged <ws> into <branch> @ <sha>`.
+- `maw ws list --help` documents the full lifecycle-state vocabulary (`clean`, `stale`, `conflicted`, `committed-unintegrated`, …) and mentions `--format json`.
+- Destroying a workspace (directly or via `merge --destroy`) while your shell's cwd is inside it now prints a note telling you to `cd` back to the project root; a failed cwd lookup hints that the directory may have been deleted.
+
 ## v1.0.0-pre.9 — `maw ws list` shows the default workspace again (2026-06-24)
 
 Ninth dogfood pre-release. A focused fix for a consolidated-layout list regression.
