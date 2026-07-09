@@ -303,6 +303,33 @@ pub fn is_tool_placeholder_blob(content: &[u8]) -> bool {
         .any(|p| content.starts_with(p))
 }
 
+/// Return `true` if `content` still contains a diff3 conflict-marker line
+/// (`<<<<<<<` at the very start of a line) anywhere in the blob.
+///
+/// Used by the Gate 2 tripwire (bn-28d1) to distinguish two shapes of
+/// "tool-authored placeholder blob in HEAD" once [`is_tool_placeholder_blob`]
+/// has already matched (bn-1etl):
+///
+/// * markers still present — the file is a genuine unresolved conflict
+///   (or a tampered sidecar): the existing tamper-flavored refusal applies.
+/// * markers gone but the header (`# structured conflict at …` / `# base
+///   blob: …` / `# side … blob: …` / `# BINARY CONFLICT at …`) remains — the
+///   user hand-resolved the `<<<<<<<` markers and simply forgot to delete
+///   the leading `#` header lines before committing. The gate must still
+///   refuse (those header lines are not valid source), but the message
+///   should point at the exact fix instead of implying tampering.
+///
+/// A line only counts if it starts with the marker byte-exactly, matching
+/// the scan the rest of the marker-gate machinery (`find_conflicted_files`)
+/// uses — a marker sequence appearing mid-line (e.g. inside a string
+/// literal) is not a real diff3 marker.
+#[must_use]
+pub fn placeholder_blob_has_markers(content: &[u8]) -> bool {
+    content
+        .split(|&b| b == b'\n')
+        .any(|line| line.starts_with(b"<<<<<<<"))
+}
+
 /// Best-effort "is this blob text?" heuristic.
 ///
 /// Used to decide whether we can safely inline content inside conflict

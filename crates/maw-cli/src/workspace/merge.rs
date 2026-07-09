@@ -2909,27 +2909,120 @@ fn assert_sources_clean_for_merge(
         // Gate 2 (bn-28d1): tool-authored placeholder blobs in HEAD. Not
         // bypassable by --force — committing such a blob into the target
         // branch would corrupt it.
+        //
+        // bn-1etl: split the flagged paths into "still has conflict markers"
+        // (genuine unresolved conflict / tampered sidecar — keep the
+        // tamper-flavored message) vs "header-only leftover" (the user
+        // hand-resolved the `<<<<<<<` markers but forgot to delete the
+        // leading `#` header lines before committing — point at that exact
+        // fix instead). Both remain hard-blocking and not bypassable by
+        // --force.
         if !state.placeholder_paths.is_empty() {
-            let file_list = state
-                .placeholder_paths
-                .iter()
-                .map(|p| format!("  - {}", p.display()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!(
-                "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
-                 tool-authored conflict placeholders:\n\
-                 {file_list}\n  \
-                 Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                 Possible cause: the conflict sidecar was deleted or corrupted. \
-                 This check cannot be bypassed by --force because merging placeholder \
-                 blobs would corrupt the target branch.",
-                state.placeholder_paths.len()
-            );
+            let (marker_paths, header_only_paths) =
+                classify_placeholder_paths(root, ws_path, &state.placeholder_paths);
+
+            if !marker_paths.is_empty() {
+                let file_list = marker_paths
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!(
+                    "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
+                     tool-authored conflict placeholders:\n\
+                     {file_list}\n  \
+                     Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                     Possible cause: the conflict sidecar was deleted or corrupted. \
+                     This check cannot be bypassed by --force because merging placeholder \
+                     blobs would corrupt the target branch.",
+                    marker_paths.len()
+                );
+            }
+
+            if !header_only_paths.is_empty() {
+                let file_list = header_only_paths
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!(
+                    "Workspace '{ws_name}' has {} path(s) that appear manually resolved \
+                     but still begin with the maw conflict header:\n\
+                     {file_list}\n  \
+                     Delete the leading '#' header lines (\"# structured conflict at ...\", \
+                     \"# base blob: ...\", \"# side ... blob: ...\", or \"# BINARY CONFLICT \
+                     at ...\"), commit, and re-run the merge.\n  \
+                     This check cannot be bypassed by --force because merging a blob that \
+                     still carries the maw conflict header would corrupt the target branch.",
+                    header_only_paths.len()
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bn-1etl: Gate 2 message classification
+// ---------------------------------------------------------------------------
+
+/// Classify each of `placeholder_paths` (already known to start with a
+/// [`maw_core::merge::materialize::TOOL_PLACEHOLDER_PREFIXES`] entry — see
+/// [`find_tool_placeholder_blobs`]) into two buckets, by re-reading the full
+/// blob at the workspace's current HEAD and checking whether it still
+/// contains a `<<<<<<<` conflict-marker line:
+///
+/// * `.0` — markers still present (or the blob could not be re-verified):
+///   genuine unresolved conflict / tampered sidecar.
+/// * `.1` — markers gone, only the header comment lines remain: the user
+///   hand-resolved the conflict but forgot to delete the header.
+///
+/// Fails closed: if HEAD cannot be resolved, the repo cannot be opened, or a
+/// specific blob cannot be re-read, the affected path(s) are placed in the
+/// marker bucket (`.0`) rather than silently downgrading to the softer
+/// message — a classification bug must never weaken the tripwire.
+fn classify_placeholder_paths(
+    root: &Path,
+    ws_path: &Path,
+    placeholder_paths: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let classified: Option<Vec<(PathBuf, bool)>> = (|| {
+        let head_oid_str = resolve_workspace_head_oid(ws_path).ok()?;
+        let head_oid: maw_git::GitOid = head_oid_str.parse().ok()?;
+        let repo = maw_git::GixRepo::open(root).ok()?;
+        let entries = placeholder_paths
+            .iter()
+            .map(|p| {
+                let has_markers = repo
+                    .read_blob_at_path(head_oid, &p.to_string_lossy())
+                    .ok()
+                    .flatten()
+                    .is_none_or(|(_, _, content)| {
+                        maw_core::merge::materialize::placeholder_blob_has_markers(&content)
+                    });
+                (p.clone(), has_markers)
+            })
+            .collect::<Vec<_>>();
+        Some(entries)
+    })();
+
+    let Some(classified) = classified else {
+        // Could not verify anything (HEAD unresolved / repo unreadable) —
+        // fail closed: every path stays in the tamper-flavored bucket.
+        return (placeholder_paths.to_vec(), Vec::new());
+    };
+
+    let mut marker_paths = Vec::new();
+    let mut header_only_paths = Vec::new();
+    for (path, has_markers) in classified {
+        if has_markers {
+            marker_paths.push(path);
+        } else {
+            header_only_paths.push(path);
+        }
+    }
+    (marker_paths, header_only_paths)
 }
 
 // ---------------------------------------------------------------------------
