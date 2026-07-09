@@ -2,6 +2,19 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.11 — FF-absorb is ref-faithful to siblings (2026-07-09)
+
+Eleventh dogfood pre-release. Closes a second data-loss-class field report from mess (bn-rah2), hit on pre.10 but latent since ~v0.60.8.
+
+**FF-absorb no longer orphans committed-ahead sibling workspaces (bn-rah2)**
+- When a merge absorbed out-of-maw trunk commits (the epoch-behind fast-forward case), the absorb loop reset every path-disjoint sibling workspace's worktree HEAD to the absorbed tip with a raw HEAD-file write. For a sibling with committed work that silently orphaned its commit: HEAD back at base, the work demoted to uncommitted/untracked changes, no output, and the next `maw ws sync` refusing with "uncommitted changes" — a state that invited destroying reviewed work. The safety predicate only checked touched-path overlap, never committed-ahead-ness.
+- The absorb now classifies each sibling first: **committed-ahead + clean** siblings are **replayed onto the absorbed epoch through the guarded rebase path** (HEAD lands at the rebased commits — work stays committed, tree stays clean, the next `ws sync` reports up to date); **committed-ahead + dirty** siblings **block the absorb before any ref moves**, with the usual `maw epoch sync` guidance; **dirty-only** siblings fast-forward as before with their edits preserved. Replays run before the epoch ref advances, so a failure aborts the absorb cleanly — no sibling is ever left half-moved.
+- The absorb is now loud: one NOTE line per affected sibling ("replayed N commit(s) onto absorbed epoch" / "fast-forwarded to absorbed epoch") alongside the aggregate "Absorbed N upstream commit(s)".
+- Both raw HEAD-file writes in the absorb path (sibling and merge-target) were retired in favor of a guarded, reflog-writing native `set_head` primitive — restoring the single-choke-point invariant for HEAD movement (bn-8flz) at the one site it had missed.
+
+**`ws sync` refusals name the offending paths (bn-3rst)**
+- "Workspace has uncommitted changes that would be lost by sync" (and the rebase-path and auto-sync-skip variants) now list the dirty files with status letters, capped at 10 with an "…and N more" tail. An operator can now tell orphaned work from junk scratch at a glance. (The reported `.git/info/exclude` issue did not reproduce — maw's dirty check already honors gitignore/exclude exactly like `git status`.)
+
 ## v1.0.0-pre.10 — trunk dirt is never lost + multi-agent signal clarity (2026-07-09)
 
 Tenth dogfood pre-release. Resolves the mess multi-agent field report (bn-38nz) end to end: one data-loss-class fix at the merge/trunk boundary, plus a sweep of conflict-signaling and output-clarity improvements for orchestrated agent workflows.
