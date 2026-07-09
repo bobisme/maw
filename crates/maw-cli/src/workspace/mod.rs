@@ -621,6 +621,21 @@ pub enum WorkspaceCommands {
     /// - Epoch (base commit) and staleness state
     /// - Whether the workspace is stale (behind current epoch)
     /// - Path to the workspace directory
+    ///
+    /// Lifecycle state vocabulary (text: `[lifecycle:<slug>]` tag; JSON:
+    /// `lifecycle_state` field, paired with a `fix_command`):
+    ///   missing                  worktree dir gone from disk; check `maw ws recover <name>`
+    ///   conflicted                unresolved rebase conflict markers; `maw ws resolve <name> --list`
+    ///   stale                     base epoch behind current; `maw ws sync <name>` (or `advance` if persistent)
+    ///   committed-unintegrated    commits ahead of epoch, not yet merged; `maw ws merge <name> --into default --check`
+    ///   dirty-uncommitted         uncommitted edits in the working tree; commit or stash first
+    ///   abandoned-with-snapshot   destroyed with committed work pinned; `maw ws recover <name> --to <name>-restored`
+    ///   clean                     up to date, nothing to integrate; safe to destroy or leave idle
+    ///   integrated                previously merged work, now present at the current epoch
+    ///
+    /// Use --format json for machine-readable output, including the
+    /// `lifecycle_state` / `fix_command` fields above.
+    #[command(verbatim_doc_comment)]
     List {
         /// Show detailed information
         #[arg(short, long)]

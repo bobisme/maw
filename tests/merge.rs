@@ -26,7 +26,7 @@ fn basic_merge_destroy_two_workspaces() {
     repo.add_file("alice", "alice.txt", "Alice's work\n");
     repo.add_file("bob", "bob.txt", "Bob's work\n");
 
-    repo.maw_ok(&[
+    let stdout = repo.maw_ok(&[
         "ws",
         "merge",
         "alice",
@@ -49,6 +49,38 @@ fn basic_merge_destroy_two_workspaces() {
     assert!(names.contains(&"default".to_owned()));
     assert!(!names.contains(&"alice".to_owned()));
     assert!(!names.contains(&"bob".to_owned()));
+
+    // bn-1kop: a stable, grep-friendly sentinel line closes text-mode merge
+    // output — "[OK] merged <ws1>[, <ws2>...] into <branch> @ <short-sha>".
+    // Unlike the free-text "Merged to ..." line above it (which interpolates
+    // the user-supplied commit message), this line has a fixed shape an
+    // agent or script can match on without parsing prose.
+    let sentinel_line = stdout
+        .lines()
+        .find(|l| l.starts_with("[OK] merged "))
+        .unwrap_or_else(|| panic!("stdout should contain an [OK] merged sentinel line:\n{stdout}"));
+    assert!(
+        sentinel_line.contains("alice") && sentinel_line.contains("bob"),
+        "sentinel should list both merged workspaces: {sentinel_line}"
+    );
+    assert!(
+        sentinel_line.contains(" into main @ "),
+        "sentinel should name the target branch: {sentinel_line}"
+    );
+    let short_sha = sentinel_line
+        .rsplit('@')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default();
+    assert_eq!(
+        short_sha.len(),
+        12,
+        "sentinel should end with a 12-char short SHA: {sentinel_line}"
+    );
+    assert!(
+        short_sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "sentinel short SHA should be hex: {sentinel_line}"
+    );
 }
 
 #[test]
@@ -1941,5 +1973,53 @@ fn merge_empty_workspace_json_output() {
         payload["status"].as_str(),
         Some("empty"),
         "JSON status should be 'empty', got: {payload}"
+    );
+}
+
+/// bn-1kop: `maw ws list --help` must document the lifecycle state
+/// vocabulary (the kebab-case slugs `LifecycleState` classifies workspaces
+/// into) so an agent reading `--help` learns the vocabulary without having
+/// to read source or trigger each state and guess. Also confirms
+/// `--format json` is visible in the help text — a prior field report
+/// missed that the flag exists.
+#[test]
+fn ws_list_help_documents_lifecycle_state_vocabulary_and_json_format() {
+    let repo = TestRepo::new();
+    let help = repo.maw_ok(&["ws", "list", "--help"]);
+
+    for slug in [
+        "missing",
+        "conflicted",
+        "stale",
+        "committed-unintegrated",
+        "dirty-uncommitted",
+        "abandoned-with-snapshot",
+        "clean",
+        "integrated",
+    ] {
+        assert!(
+            help.contains(slug),
+            "ws list --help should document lifecycle slug '{slug}':\n{help}"
+        );
+    }
+
+    assert!(
+        help.contains("--format") && help.contains("json"),
+        "ws list --help should mention --format json:\n{help}"
+    );
+}
+
+/// bn-1kop: `maw ws merge --help` should keep `--format json` visible —
+/// asserted directly since a prior field report missed the flag's
+/// existence despite it being load-bearing for structured merge/conflict
+/// output.
+#[test]
+fn ws_merge_help_documents_format_json() {
+    let repo = TestRepo::new();
+    let help = repo.maw_ok(&["ws", "merge", "--help"]);
+
+    assert!(
+        help.contains("--format") && help.contains("json"),
+        "ws merge --help should mention --format json:\n{help}"
     );
 }

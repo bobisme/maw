@@ -470,12 +470,15 @@ fn ff_absorb_blocks_when_target_has_dirty_edits_to_ff_path() {
     );
 }
 
-/// bn-1huu: `maw ws merge --check` must surface out-of-maw commits on trunk
-/// (the epoch ref lagging the branch tip) instead of a silent "[OK] Ready to
-/// merge", and advise `maw epoch sync`. The real merge absorbs them, but the
-/// dry-run should not hide the divergence.
+/// bn-1huu / bn-3eew: `maw ws merge --check` must surface out-of-maw commits
+/// on trunk (the epoch ref lagging the branch tip) instead of a silent "[OK]
+/// Ready to merge". When the drift is a safe fast-forward that no in-flight
+/// workspace's touched paths overlap (`ff-absorbable`), the real merge
+/// already auto-absorbs it (bn-11ip) — so `--check` must say so
+/// *informationally*, with no scolding and no `maw epoch sync` command,
+/// instead of the old blanket warning.
 #[test]
-fn check_surfaces_out_of_maw_trunk_commits_and_advises_epoch_sync() {
+fn check_surfaces_ff_absorbable_trunk_drift_informationally() {
     let repo = TestRepo::new();
     repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
 
@@ -489,11 +492,12 @@ fn check_surfaces_out_of_maw_trunk_commits_and_advises_epoch_sync() {
         "clean check:\n{clean}"
     );
     assert!(
-        !clean.contains("not made through maw"),
+        !clean.contains("not made through maw") && !clean.contains("ahead of the epoch"),
         "no divergence note when epoch == tip:\n{clean}"
     );
 
-    // Two direct (out-of-maw) commits on trunk; epoch now lags by 2.
+    // Two direct (out-of-maw) commits on trunk, touching paths alice never
+    // touches. Epoch now lags by 2, but the FF range is safe to absorb.
     push_two_commits_ahead(
         &repo,
         &[
@@ -503,22 +507,29 @@ fn check_surfaces_out_of_maw_trunk_commits_and_advises_epoch_sync() {
         &["docs: upd1", "docs: changes"],
     );
 
-    // Still mergeable, but the NOTE surfaces the divergence and advises sync.
+    // Still mergeable. The NOTE surfaces the drift but stays informational:
+    // no "not made through maw" scolding, no `maw epoch sync` advice.
     let text = repo.maw_ok(&["ws", "merge", "alice", "--into", "default", "--check"]);
     assert!(
         text.contains("[OK] Ready to merge"),
-        "diverged check:\n{text}"
+        "ff-absorbable check:\n{text}"
     );
     assert!(
-        text.contains("trunk has 2 commits not made through maw"),
-        "should name the 2 out-of-maw trunk commits:\n{text}"
+        text.contains("trunk is 2 commits ahead of the epoch")
+            && text.contains("will be absorbed automatically when you merge"),
+        "should use the informational ff-absorbable wording:\n{text}"
     );
     assert!(
-        text.contains("maw epoch sync"),
-        "should advise `maw epoch sync`:\n{text}"
+        !text.contains("not made through maw"),
+        "ff-absorbable NOTE must not use the old scolding wording:\n{text}"
+    );
+    assert!(
+        !text.contains("maw epoch sync"),
+        "ff-absorbable NOTE must not advise `maw epoch sync` — it's automatic:\n{text}"
     );
 
-    // JSON surfaces trunk_ahead for machine consumers (pretty-printed).
+    // JSON surfaces trunk_ahead and the drift_classification for machine
+    // consumers (pretty-printed).
     let json = repo.maw_ok(&[
         "ws", "merge", "alice", "--into", "default", "--check", "--format", "json",
     ]);
@@ -526,5 +537,63 @@ fn check_surfaces_out_of_maw_trunk_commits_and_advises_epoch_sync() {
     assert!(
         compact.contains("\"trunk_ahead\":2"),
         "JSON should carry trunk_ahead=2:\n{json}"
+    );
+    assert!(
+        compact.contains("\"drift_classification\":\"ff-absorbable\""),
+        "JSON should classify the drift as ff-absorbable:\n{json}"
+    );
+}
+
+/// bn-3eew: when the FF range on trunk overlaps a path an in-flight
+/// workspace has touched (`ff-blocked`), `--check` must keep a real warning
+/// — auto-advancing the epoch here would silently move the diff3 base under
+/// that workspace — and point at `maw epoch sync` / `maw doctor --repair`.
+#[test]
+fn check_surfaces_ff_blocked_trunk_drift_as_a_warning() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n")]);
+
+    // Alice edits the same file the branch will advance out-of-maw.
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.modify_file("alice", "src/lib.rs", "// lib\n// alice\n");
+
+    // Direct commit on main touches src/lib.rs — overlaps with alice, so the
+    // FF range can't be safely auto-advanced while alice is in flight.
+    push_branch_ahead(
+        &repo,
+        "src/lib.rs",
+        "// lib\n// upstream\n",
+        "feat: upstream edit",
+    );
+
+    let text = repo.maw_ok(&["ws", "merge", "alice", "--into", "default", "--check"]);
+    assert!(
+        text.contains("WARNING: trunk is 1 commit ahead of the epoch"),
+        "ff-blocked check should warn, not just note:\n{text}"
+    );
+    assert!(
+        text.contains("in-flight workspace touches the same paths"),
+        "should name why auto-advance is unsafe:\n{text}"
+    );
+    assert!(
+        text.contains("maw epoch sync") || text.contains("maw doctor --repair"),
+        "should point at a reconcile command:\n{text}"
+    );
+    assert!(
+        !text.contains("will be absorbed automatically"),
+        "ff-blocked must not use the informational ff-absorbable wording:\n{text}"
+    );
+
+    let json = repo.maw_ok(&[
+        "ws", "merge", "alice", "--into", "default", "--check", "--format", "json",
+    ]);
+    let compact: String = json.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("\"trunk_ahead\":1"),
+        "JSON should carry trunk_ahead=1:\n{json}"
+    );
+    assert!(
+        compact.contains("\"drift_classification\":\"ff-blocked\""),
+        "JSON should classify the drift as ff-blocked:\n{json}"
     );
 }

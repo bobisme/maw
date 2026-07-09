@@ -1303,6 +1303,17 @@ pub struct CheckResult {
     /// snapshot) is not a silent surprise (bn-1xmk).
     #[serde(default)]
     pub dirty_trunk_files: Vec<String>,
+    /// Epoch-vs-branch drift classification (kebab-case slug: `in-sync`,
+    /// `ff-absorbable`, `ff-blocked`, `diverged`), computed via
+    /// [`super::epoch_drift::classify_drift`] when this check would update
+    /// the epoch. `None` when the check doesn't touch the epoch (a
+    /// change-branch target) or classification wasn't available (e.g. the
+    /// epoch ref is unset). Drives the `--check` NOTE wording (bn-3eew):
+    /// `ff-absorbable` is informational (the merge auto-absorbs it safely);
+    /// `ff-blocked` / `diverged` are a real warning pointing at
+    /// `maw epoch sync` / `maw doctor --repair`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_classification: Option<String>,
 }
 
 /// Workspace info included in check result.
@@ -1369,6 +1380,7 @@ pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -
         description: String::new(),
         trunk_ahead: 0,
         dirty_trunk_files: Vec::new(),
+        drift_classification: None,
     }
 }
 
@@ -1646,6 +1658,20 @@ fn check_merge_result_for_target(
         0
     };
 
+    // bn-3eew: classify epoch/branch drift so --check can distinguish
+    // "safe, will auto-absorb" from "needs coordination" instead of always
+    // printing the same scolding NOTE. Best-effort: any classification
+    // failure (or a check that doesn't touch the epoch) leaves this `None`,
+    // and the text renderer falls back to the original neutral wording.
+    let drift_classification = if target_updates_epoch {
+        super::epoch_drift::classify_drift(&root, target_branch, &backend)
+            .ok()
+            .flatten()
+            .map(|report| report.kind.slug().replace('_', "-"))
+    } else {
+        None
+    };
+
     // bn-1xmk: surface (informational, never blocking) any uncommitted tracked
     // files in the trunk/default workspace. A dirty-trunk merge preserves and
     // replays these and pins a recovery snapshot; listing them here makes that
@@ -1665,6 +1691,7 @@ fn check_merge_result_for_target(
             description: String::new(),
             trunk_ahead,
             dirty_trunk_files,
+            drift_classification,
         });
     }
 
@@ -1692,6 +1719,7 @@ fn check_merge_result_for_target(
             description: String::new(),
             trunk_ahead,
             dirty_trunk_files,
+            drift_classification,
         });
     }
 
@@ -1757,6 +1785,7 @@ fn check_merge_result_for_target(
                         description: String::new(),
                         trunk_ahead,
                         dirty_trunk_files,
+                        drift_classification,
                     })
                 }
                 Err(e) => Ok(CheckResult {
@@ -1773,6 +1802,7 @@ fn check_merge_result_for_target(
                     description: String::new(),
                     trunk_ahead,
                     dirty_trunk_files,
+                    drift_classification,
                 }),
             }
         }
@@ -1790,6 +1820,7 @@ fn check_merge_result_for_target(
             description: String::new(),
             trunk_ahead,
             dirty_trunk_files,
+            drift_classification,
         }),
     }
 }
@@ -1812,19 +1843,45 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                     println!("  Description: {}", result.description);
                 }
                 if result.trunk_ahead > 0 {
-                    // bn-1huu: the epoch lags the branch tip by out-of-maw
-                    // commits (a direct `git commit`/`git pull` on trunk).
-                    // The merge absorbs them automatically, but surface the
-                    // divergence so it isn't silent, and offer to reconcile
-                    // the epoch first.
+                    // bn-1huu / bn-3eew: the epoch lags the branch tip by
+                    // out-of-maw commits (a direct `git commit`/`git pull`
+                    // on trunk). Real merges already auto-absorb this when
+                    // it's a safe fast-forward (`merge.auto_absorb_ff`,
+                    // default true). Match the tone to that reality instead
+                    // of always scolding: `ff-absorbable` is purely
+                    // informational (nothing for the agent to do); anything
+                    // else (`ff-blocked`, or classification unavailable) is
+                    // a real warning that needs coordination before the
+                    // epoch can safely move.
                     let n = result.trunk_ahead;
                     let plural = if n == 1 { "" } else { "s" };
-                    println!(
-                        "  NOTE: trunk has {n} commit{plural} not made through maw; the epoch is behind the branch tip."
-                    );
-                    println!(
-                        "  The merge will absorb them into the epoch. To reconcile first: maw epoch sync"
-                    );
+                    match result.drift_classification.as_deref() {
+                        Some("ff-absorbable") => {
+                            println!(
+                                "  NOTE: trunk is {n} commit{plural} ahead of the epoch (will be absorbed automatically when you merge)."
+                            );
+                        }
+                        Some("ff-blocked") => {
+                            println!(
+                                "  WARNING: trunk is {n} commit{plural} ahead of the epoch, but an in-flight workspace touches the same paths — the epoch can't auto-advance safely."
+                            );
+                            println!(
+                                "  To reconcile: resolve or merge the blocking workspace(s) first, then retry. Or force it: maw epoch sync / maw doctor --repair"
+                            );
+                        }
+                        _ => {
+                            // `diverged`, or classification unavailable
+                            // (e.g. epoch ref unset, read error): fall back
+                            // to the original neutral-but-cautious wording
+                            // rather than guessing a tone.
+                            println!(
+                                "  NOTE: trunk has {n} commit{plural} not made through maw; the epoch is behind the branch tip."
+                            );
+                            println!(
+                                "  The merge will absorb them into the epoch. To reconcile first: maw epoch sync"
+                            );
+                        }
+                    }
                 }
             } else if result.stale {
                 println!(
@@ -4860,6 +4917,16 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             textln!("Next: push branch to remote:");
             textln!("  git push origin {branch}");
         }
+        // bn-1kop: stable, grep-friendly sentinel line. Everything above is
+        // free text (the commit message is user-supplied); this final line
+        // is a fixed format an agent or script can match on without parsing
+        // prose. JSON output already has an unambiguous `status: "success"`
+        // field (MergeSuccessOutput) — this is the text-mode equivalent.
+        textln!(
+            "[OK] merged {} into {branch} @ {}",
+            ws_to_merge.join(", "),
+            &build_output.candidate.as_str()[..12]
+        );
     }
 
     Ok(())

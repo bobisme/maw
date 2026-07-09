@@ -80,9 +80,10 @@ pub enum EpochDriftKind {
 
 impl EpochDriftKind {
     /// Short slug for serialization and tests. Pinned so JSON consumers
-    /// can rely on stable strings.
+    /// can rely on stable strings. Also used by `ws merge --check`'s NOTE
+    /// wording (bn-3eew), which kebab-cases it for the `CheckResult`
+    /// `drift_classification` field.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn slug(self) -> &'static str {
         match self {
             Self::InSync => "in_sync",
