@@ -858,6 +858,10 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
     // still exists on disk.
     maw::fp!("FP_DESTROY_BEFORE_DELETE")?;
 
+    // bn-1aey: capture this BEFORE deletion — once the workspace directory
+    // is gone, std::env::current_dir() can itself start failing.
+    let cwd_was_inside = super::cwd_is_inside(&path);
+
     backend
         .destroy(&ws_id)
         .map_err(|e| anyhow::anyhow!("Failed to destroy workspace: {e}"))?;
@@ -894,6 +898,13 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
         }
     } else {
         println!("Workspace '{name}' destroyed.");
+    }
+
+    if cwd_was_inside {
+        eprintln!(
+            "note: your current directory was inside workspace '{name}' which was just \
+             destroyed — cd back to the project root before running more commands."
+        );
     }
 
     Ok(())

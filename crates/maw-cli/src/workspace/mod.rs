@@ -1940,11 +1940,43 @@ pub fn get_backend() -> Result<AnyBackend> {
     })
 }
 
+/// Returns `true` if `candidate` is `container` or a descendant of it, after
+/// canonicalizing both (handles symlinks/`..`). Pure and side-effect-free —
+/// unit-testable without touching the process's actual working directory.
+fn path_is_within(container: &std::path::Path, candidate: &std::path::Path) -> bool {
+    let container_canon = container
+        .canonicalize()
+        .unwrap_or_else(|_| container.to_path_buf());
+    let candidate_canon = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.to_path_buf());
+    candidate_canon.starts_with(&container_canon)
+}
+
+/// Returns `true` if the process's current working directory is inside
+/// `ws_path` (canonicalized comparison, handles symlinks/`..`).
+///
+/// Must be called BEFORE the workspace directory is deleted — once the
+/// directory is gone, `std::env::current_dir()` can itself start failing
+/// (bn-1aey / bn-38nz item 6). If `current_dir()` fails for any reason we
+/// conservatively return `false` rather than propagate an error: this check
+/// is advisory (it only gates a warning), never a reason to block destroy.
+pub(crate) fn cwd_is_inside(ws_path: &std::path::Path) -> bool {
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    path_is_within(ws_path, &cwd)
+}
+
 /// Ensure CWD is the repo root. Mutation commands must run from root
 /// to avoid agent confusion about which workspace context they're in.
 fn ensure_repo_root() -> Result<PathBuf> {
     let root = repo_root()?;
-    let cwd = std::env::current_dir().context("Could not determine current directory")?;
+    let cwd = std::env::current_dir().context(
+        "Could not determine current directory \
+         (current directory may have been deleted, e.g. by a workspace destroy — \
+         cd to the project root and retry)",
+    )?;
 
     // Canonicalize both for reliable comparison (handles symlinks, ..)
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
@@ -2121,11 +2153,70 @@ fn edit_merge_message(workspaces: &[String]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{metadata, resolve_merge_target};
+    use super::{metadata, path_is_within, resolve_merge_target};
     use crate::changes::store::{
         ChangeGit, ChangeRecord, ChangeSource, ChangeState, ChangeWorkspaces, ChangesStore,
     };
     use tempfile::tempdir;
+
+    // -----------------------------------------------------------------------
+    // bn-1aey: path_is_within (destroy-cwd-warning containment helper)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn path_is_within_true_for_direct_child() {
+        let dir = tempdir().expect("operation should succeed");
+        let container = dir.path().join("ws");
+        let child = container.join("sub").join("deep");
+        std::fs::create_dir_all(&child).expect("operation should succeed");
+
+        assert!(path_is_within(&container, &child));
+    }
+
+    #[test]
+    fn path_is_within_true_for_equal_paths() {
+        let dir = tempdir().expect("operation should succeed");
+        let container = dir.path().join("ws");
+        std::fs::create_dir_all(&container).expect("operation should succeed");
+
+        assert!(path_is_within(&container, &container));
+    }
+
+    #[test]
+    fn path_is_within_false_for_sibling() {
+        let dir = tempdir().expect("operation should succeed");
+        let container = dir.path().join("ws-a");
+        let sibling = dir.path().join("ws-b");
+        std::fs::create_dir_all(&container).expect("operation should succeed");
+        std::fs::create_dir_all(&sibling).expect("operation should succeed");
+
+        assert!(!path_is_within(&container, &sibling));
+    }
+
+    #[test]
+    fn path_is_within_false_for_parent_of_container() {
+        // The repo root is never "within" a workspace subdirectory of itself.
+        let dir = tempdir().expect("operation should succeed");
+        let container = dir.path().join("ws").join("bn-1aey");
+        std::fs::create_dir_all(&container).expect("operation should succeed");
+
+        assert!(!path_is_within(&container, dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_is_within_resolves_symlinks() {
+        let dir = tempdir().expect("operation should succeed");
+        let real_ws = dir.path().join("real-ws");
+        std::fs::create_dir_all(&real_ws).expect("operation should succeed");
+        let link = dir.path().join("link-to-ws");
+        std::os::unix::fs::symlink(&real_ws, &link).expect("operation should succeed");
+
+        // Candidate reached via the symlink still canonicalizes into the
+        // same real directory as the container.
+        assert!(path_is_within(&real_ws, &link));
+        assert!(path_is_within(&link, &real_ws));
+    }
 
     fn sample_change(change_id: &str, branch: &str, primary: &str) -> ChangeRecord {
         ChangeRecord {

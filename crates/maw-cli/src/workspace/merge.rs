@@ -5829,6 +5829,12 @@ fn handle_post_merge_destroy(
         // still exists on disk.
         maw::fp!("FP_CLEANUP_AFTER_CAPTURE")?;
 
+        // bn-1aey: capture this BEFORE deletion — once the workspace
+        // directory is gone, std::env::current_dir() can itself start
+        // failing. Reuses the canonical_ws already computed by the C4
+        // root-guard above.
+        let cwd_was_inside = super::cwd_is_inside(&canonical_ws);
+
         // --- Step 4: Destroy the workspace ---
         match backend.destroy(&ws_id) {
             Ok(()) => {
@@ -5841,6 +5847,13 @@ fn handle_post_merge_destroy(
                     } else {
                         println!("    Destroyed: {ws_name}");
                     }
+                }
+                if cwd_was_inside {
+                    eprintln!(
+                        "note: your current directory was inside workspace '{ws_name}' which \
+                         was just destroyed — cd back to the project root before running more \
+                         commands."
+                    );
                 }
             }
             Err(e) => eprintln!("    WARNING: Failed to destroy {ws_name}: {e}"),
