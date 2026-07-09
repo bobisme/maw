@@ -535,10 +535,19 @@ pub fn snapshot_working_copy(
     let stash_oid = if let Some(oid) = stash_result {
         oid.to_string()
     } else {
-        // Shouldn't happen since we checked status, but be defensive.
+        // The working tree was dirty (status is non-empty above) yet
+        // `stash_create` refused to produce a commit. Returning `Ok(None)`
+        // here would tell the caller "genuinely clean" and it would proceed
+        // to overwrite the dirty tree with the merge result — silent data
+        // loss. Mirror bn-3mpx's `capture_before_destroy` fix: surface an
+        // error so the caller preserves the dirt (its in-memory pre-merge
+        // repair path) instead of treating ambiguity as clean (bn-1xmk).
         let _ = repo.unstage_all();
         tracing::warn!("stash_create returned None despite dirty status");
-        return Ok(None);
+        bail!(
+            "snapshot aborted to avoid silent data loss: the working tree is \
+             dirty but `git stash create` produced no snapshot commit"
+        );
     };
 
     // Step 4: Pin to durable ref (crash-safe).
@@ -700,13 +709,29 @@ pub fn replay_snapshot_with_merge_protection(
     let stash_paths = stash_changed_paths(ws_path, &snapshot.oid)?;
 
     // Step 2: Compute overlap.
+    //
+    // A stash path "overlaps" the merge — and therefore needs a driver-aware
+    // 3-way merge rather than a bare `stash_apply` — when EITHER:
+    //   (a) the merge engine resolved it (`resolved_paths`), OR
+    //   (b) its committed content actually changed between the anchor epoch and
+    //       the post-merge epoch, even if no merged workspace touched it (e.g.
+    //       out-of-maw commits absorbed into trunk).
+    //
+    // Case (b) is the bn-1xmk data-loss class: a dirty trunk file such as an
+    // append-only `merge=union` journal, restored via `stash_apply`, bypasses
+    // the merge driver and can silently resolve to the committed side, dropping
+    // the user's uncommitted appends. Routing it through the driver-aware 3-way
+    // below (which honors `merge=union`) preserves both sides.
     let resolved_set: std::collections::HashSet<&Path> = resolved_paths
         .iter()
         .map(std::path::PathBuf::as_path)
         .collect();
     let overlapping: Vec<PathBuf> = stash_paths
         .iter()
-        .filter(|p| resolved_set.contains(p.as_path()))
+        .filter(|p| {
+            resolved_set.contains(p.as_path())
+                || committed_content_changed(ws_path, anchor_epoch, epoch_after, p)
+        })
         .cloned()
         .collect();
 
@@ -1084,6 +1109,27 @@ fn stash_changed_paths(ws_path: &Path, stash_oid: &str) -> Result<Vec<PathBuf>> 
 fn read_file_at_commit(ws_path: &Path, commit: &str, path: &Path) -> Option<Vec<u8>> {
     let repo = maw_git::GixRepo::open(ws_path).ok()?;
     repo.read_file_at_commit(commit, path).ok()?
+}
+
+/// Whether a path's committed content differs between two commits.
+///
+/// Used to decide whether a dirty stash path needs a driver-aware 3-way merge
+/// on replay: if the merge changed the file's committed content (even via
+/// absorbed out-of-maw commits, so it never appears in `resolved_paths`), a
+/// bare `stash_apply` would bypass merge drivers and can silently drop the
+/// user's uncommitted edits (bn-1xmk). On any read error we conservatively
+/// report "changed" so the safe 3-way path runs.
+fn committed_content_changed(ws_path: &Path, before: &str, after: &str, path: &Path) -> bool {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return true;
+    };
+    let a = repo.read_file_at_commit(before, path);
+    let b = repo.read_file_at_commit(after, path);
+    match (a, b) {
+        (Ok(a), Ok(b)) => a != b,
+        // Read failure — prefer the safe (driver-aware) path.
+        _ => true,
+    }
 }
 
 /// Write diff3-style conflict markers for a file.

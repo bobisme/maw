@@ -1292,6 +1292,12 @@ pub struct CheckResult {
     /// at the branch tip or the relationship isn't a clean fast-forward.
     #[serde(default)]
     pub trunk_ahead: u32,
+    /// Uncommitted tracked files in the trunk/default workspace at check time.
+    /// Informational only — never blocks the merge. Surfaced so a dirty-trunk
+    /// merge (which preserves and replays these files, pinning a recovery
+    /// snapshot) is not a silent surprise (bn-1xmk).
+    #[serde(default)]
+    pub dirty_trunk_files: Vec<String>,
 }
 
 /// Workspace info included in check result.
@@ -1357,6 +1363,7 @@ pub fn json_not_ready_result(workspaces: &[String], reason: impl Into<String>) -
         },
         description: String::new(),
         trunk_ahead: 0,
+        dirty_trunk_files: Vec::new(),
     }
 }
 
@@ -1527,6 +1534,28 @@ pub fn check_merge_result(workspaces: &[String]) -> Result<CheckResult> {
     check_merge_result_for_target(workspaces, &default_ws, &default_branch, None, true, false)
 }
 
+/// List uncommitted *tracked* file changes in a workspace (modified/added/
+/// deleted/renamed — not untracked), excluding admin/git trees. Best-effort:
+/// returns empty on any error. Feeds `merge --check`'s informational
+/// dirty-trunk reporting (bn-1xmk).
+fn list_dirty_trunk_tracked_files(ws_path: &Path) -> Vec<String> {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return Vec::new();
+    };
+    let Ok(entries) = repo.status_head_to_worktree() else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter(|e| !matches!(e.status, maw_git::FileStatus::Untracked))
+        .map(|e| e.path)
+        .filter(|p| {
+            let first = p.split('/').next().unwrap_or("");
+            !matches!(first, ".maw" | "repo.git" | ".manifold" | ".git")
+        })
+        .collect()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "merge check path mirrors the prepare/build pipeline for diagnostics"
@@ -1612,6 +1641,16 @@ fn check_merge_result_for_target(
         0
     };
 
+    // bn-1xmk: surface (informational, never blocking) any uncommitted tracked
+    // files in the trunk/default workspace. A dirty-trunk merge preserves and
+    // replays these and pins a recovery snapshot; listing them here makes that
+    // non-silent.
+    let dirty_trunk_files = WorkspaceId::new(default_ws)
+        .ok()
+        .map(|id| backend.workspace_path(&id))
+        .map(|p| list_dirty_trunk_tracked_files(&p))
+        .unwrap_or_default();
+
     if is_stale {
         return Ok(CheckResult {
             ready: false,
@@ -1620,6 +1659,7 @@ fn check_merge_result_for_target(
             workspace: ws_info,
             description: String::new(),
             trunk_ahead,
+            dirty_trunk_files,
         });
     }
 
@@ -1646,6 +1686,7 @@ fn check_merge_result_for_target(
             workspace: ws_info,
             description: String::new(),
             trunk_ahead,
+            dirty_trunk_files,
         });
     }
 
@@ -1710,6 +1751,7 @@ fn check_merge_result_for_target(
                         workspace: ws_info,
                         description: String::new(),
                         trunk_ahead,
+                        dirty_trunk_files,
                     })
                 }
                 Err(e) => Ok(CheckResult {
@@ -1725,6 +1767,7 @@ fn check_merge_result_for_target(
                     workspace: ws_info,
                     description: String::new(),
                     trunk_ahead,
+                    dirty_trunk_files,
                 }),
             }
         }
@@ -1741,11 +1784,16 @@ fn check_merge_result_for_target(
             workspace: ws_info,
             description: String::new(),
             trunk_ahead,
+            dirty_trunk_files,
         }),
     }
 }
 
 /// Output the check result in the requested format.
+#[expect(
+    clippy::single_match_else,
+    reason = "JSON vs. human rendering reads clearly as a match; the human arm is long"
+)]
 fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => {
@@ -1803,6 +1851,20 @@ fn output_check_result(result: &CheckResult, format: OutputFormat) -> Result<()>
                         };
                         println!("  C {}{loc}{sides}: {}", c.path, c.reason);
                     }
+                }
+            }
+
+            // bn-1xmk: informational dirty-trunk notice (never blocking). The
+            // merge will preserve and replay these files and pin a recovery
+            // snapshot; surfacing them here removes the surprise.
+            if !result.dirty_trunk_files.is_empty() {
+                let n = result.dirty_trunk_files.len();
+                let plural = if n == 1 { "" } else { "s" };
+                println!(
+                    "  NOTE: {n} uncommitted tracked trunk file{plural} will be preserved and replayed across the merge (a recovery snapshot is pinned):"
+                );
+                for f in &result.dirty_trunk_files {
+                    println!("    {f}");
                 }
             }
         }
@@ -5333,8 +5395,8 @@ fn update_default_workspace(
     source_workspace_names: &[String],
 ) -> Result<()> {
     use super::working_copy::{
-        SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot,
-        replay_snapshot_with_merge_protection, snapshot_working_copy,
+        SnapshotReplayResult, checkout_to, cleanup_snapshot, replay_snapshot_with_merge_protection,
+        snapshot_working_copy,
     };
 
     let record_workspace_epoch = || {
@@ -5450,19 +5512,65 @@ fn update_default_workspace(
         }
     }
 
+    // bn-1xmk: capture the trunk's uncommitted content in MEMORY before any
+    // snapshot/checkout touches the tree. HEAD is now anchored at `anchor_epoch`
+    // and the index is reset to it, so this is the true set of user edits
+    // relative to the workspace's own base. This map is the authoritative user
+    // state and the ultimate backstop for the post-replay fidelity repair
+    // below — it does not depend on `git stash create` succeeding.
+    let pre_merge_dirty = capture_pre_merge_dirty(default_ws_path);
+    if !pre_merge_dirty.is_empty() {
+        // Visibility: one loud line so a dirty-trunk merge is never silent.
+        eprintln!(
+            "  preserving {} uncommitted trunk file(s) across merge (recovery snapshot pinned)",
+            pre_merge_dirty.len()
+        );
+    }
+
+    // Durable recovery ref (bn-1xmk): pinned under refs/manifold/recovery/<ws>/
+    // so `maw ws recover` lists it as a "pinned" row. Kept even on a clean
+    // replay (subject to normal gc), unlike the ephemeral snapshot ref which is
+    // deleted on clean replay and is invisible to recover.
+    let mut durable_recovery_ref: Option<String> = None;
+
     // Step 1: SNAPSHOT — capture dirty state if any.
     let snapshot = match snapshot_working_copy(default_ws_path, repo_root, ws_name) {
         Ok(snap) => snap,
         Err(e) => {
-            // Snapshot failed — fall back to force checkout. The COMMIT
-            // already succeeded so we must not abort.
+            // Snapshot failed. The COMMIT already succeeded so we must not
+            // abort, but we also must not silently lose the user's edits.
+            // Pin a durable recovery ref from the in-memory pre-merge content
+            // (item a: the stash-None-despite-dirty case now surfaces here),
+            // then force-checkout and repair committed-unchanged files from
+            // memory so an untouched dirty trunk file survives byte-for-byte.
             eprintln!("  WARNING: snapshot_working_copy failed: {e:#}");
-            eprintln!("  Falling back to force checkout (uncommitted changes may be lost)...");
+            durable_recovery_ref =
+                pin_pre_merge_recovery_ref(repo_root, ws_name, &anchor_epoch, &pre_merge_dirty);
+            eprintln!("  Falling back to force checkout (recovering trunk edits from memory)...");
             force_checkout_fallback(default_ws_path, ws_name, branch, text_mode);
+            lfs_post_checkout(default_ws_path, epoch_after);
+            verify_trunk_replay_fidelity(
+                default_ws_path,
+                ws_name,
+                &pre_merge_dirty,
+                &anchor_epoch,
+                epoch_after,
+                durable_recovery_ref.as_deref(),
+            );
             record_workspace_epoch();
             return Ok(());
         }
     };
+
+    // Pin the durable recovery ref from the ephemeral snapshot's commit (the
+    // ADMIN-safe stash built by `snapshot_working_copy`) so recovery survives a
+    // clean replay too.
+    if let Some(snap) = &snapshot {
+        durable_recovery_ref =
+            pin_recovery_ref_from_oid(repo_root, ws_name, &snap.oid).or_else(|| {
+                pin_pre_merge_recovery_ref(repo_root, ws_name, &anchor_epoch, &pre_merge_dirty)
+            });
+    }
 
     // Step 2: CHECKOUT — switch to the branch (tree is clean after snapshot).
     if let Err(e) = checkout_to(default_ws_path, branch, Some(branch)) {
@@ -5495,20 +5603,22 @@ fn update_default_workspace(
         return Ok(());
     };
 
-    let used_merge_protection = !resolved_paths.is_empty();
-    let replay_result = if used_merge_protection {
-        replay_snapshot_with_merge_protection(
-            default_ws_path,
-            &snapshot,
-            resolved_paths,
-            &anchor_epoch,
-            epoch_after,
-            source_workspace_names,
-            ws_name,
-        )
-    } else {
-        replay_snapshot(default_ws_path, &snapshot)
-    };
+    // Always route through the merge-protection replay when there is a
+    // snapshot. It self-delegates to the plain `replay_snapshot` when nothing
+    // overlaps, and otherwise runs driver-aware 3-way merges. This closes the
+    // mode-(b) gap where a dirty trunk file whose committed content changed
+    // (e.g. absorbed out-of-maw commits) was restored by a bare `stash_apply`
+    // that bypassed `merge=union` drivers (bn-1xmk).
+    let used_merge_protection = true;
+    let replay_result = replay_snapshot_with_merge_protection(
+        default_ws_path,
+        &snapshot,
+        resolved_paths,
+        &anchor_epoch,
+        epoch_after,
+        source_workspace_names,
+        ws_name,
+    );
 
     match replay_result {
         Ok(SnapshotReplayResult::Clean) => {
@@ -5613,6 +5723,21 @@ fn update_default_workspace(
         }
     }
 
+    // bn-1xmk: post-replay fidelity verification. For every trunk file that was
+    // uncommitted-dirty before the merge AND whose committed content the merge
+    // did NOT change, the user's uncommitted version is the sole authority and
+    // must be present on disk byte-for-byte. If the replay produced anything
+    // else (the events-journal clobber class), repair it from the in-memory
+    // pre-merge content and print a loud, actionable recovery pointer.
+    verify_trunk_replay_fidelity(
+        default_ws_path,
+        ws_name,
+        &pre_merge_dirty,
+        &anchor_epoch,
+        epoch_after,
+        durable_recovery_ref.as_deref(),
+    );
+
     record_workspace_epoch();
 
     Ok(())
@@ -5653,6 +5778,203 @@ fn force_checkout_fallback(ws_path: &Path, ws_name: &str, branch: &str, text_mod
                 ws_name,
                 ws_path.display(),
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bn-1xmk: durable trunk-snapshot + honest replay helpers
+// ---------------------------------------------------------------------------
+
+/// Capture the trunk's uncommitted content in memory (path -> bytes, or `None`
+/// for a path the user deleted). Read against the *current* HEAD, which the
+/// caller has already anchored at the workspace's base epoch, so this is the
+/// true set of user edits relative to that base. Best-effort: on any read
+/// failure the offending path is skipped rather than aborting the merge (the
+/// COMMIT has already succeeded).
+fn capture_pre_merge_dirty(ws_path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return Vec::new();
+    };
+    let Ok(entries) = repo.status_head_to_worktree() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let rel = PathBuf::from(&entry.path);
+        // Never treat admin/git trees as recoverable user content.
+        if rel
+            .components()
+            .next()
+            .and_then(|c| c.as_os_str().to_str())
+            .is_some_and(|first| matches!(first, ".maw" | "repo.git" | ".manifold" | ".git"))
+        {
+            continue;
+        }
+        let full = ws_path.join(&rel);
+        let bytes = if full.is_file() {
+            std::fs::read(&full).ok()
+        } else {
+            None
+        };
+        out.push((rel, bytes));
+    }
+    out
+}
+
+/// Pin a durable recovery ref pointing at an existing commit/stash OID under
+/// `refs/manifold/recovery/<ws>/<ts>` so `maw ws recover` surfaces it as a
+/// pinned row. Returns the ref name on success. Best-effort: logs and returns
+/// `None` on failure.
+fn pin_recovery_ref_from_oid(repo_root: &Path, ws_name: &str, oid: &str) -> Option<String> {
+    let git_oid = match GitOid::new(oid) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("bn-1xmk: invalid snapshot OID '{oid}' for recovery pin: {e}");
+            return None;
+        }
+    };
+    let ref_name = super::capture::recovery_ref(ws_name, &super::now_timestamp_iso8601_precise());
+    match maw_core::refs::write_ref(repo_root, &ref_name, &git_oid) {
+        Ok(()) => {
+            tracing::info!(ref_name = %ref_name, oid = %oid, "bn-1xmk: pinned durable trunk recovery ref");
+            Some(ref_name)
+        }
+        Err(e) => {
+            tracing::warn!("bn-1xmk: failed to pin durable recovery ref '{ref_name}': {e}");
+            None
+        }
+    }
+}
+
+/// Pin a durable recovery ref built from in-memory pre-merge content, for the
+/// case where `snapshot_working_copy` could not produce a stash commit (item a).
+/// Applies the user's dirty blobs onto the anchor-epoch tree and commits it, so
+/// the edits are recoverable even when `git stash create` refused. Best-effort:
+/// returns `None` on any failure.
+fn pin_pre_merge_recovery_ref(
+    repo_root: &Path,
+    ws_name: &str,
+    anchor_epoch: &str,
+    pre_merge_dirty: &[(PathBuf, Option<Vec<u8>>)],
+) -> Option<String> {
+    if pre_merge_dirty.is_empty() {
+        return None;
+    }
+    let repo = maw_git::GixRepo::open(repo_root).ok()?;
+    let base_tree = repo
+        .rev_parse(anchor_epoch)
+        .ok()
+        .and_then(|c| repo.read_commit(c).ok())
+        .map(|c| c.tree_oid)?;
+
+    let mut edits: Vec<maw_git::TreeEdit> = Vec::new();
+    for (path, bytes) in pre_merge_dirty {
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        match bytes {
+            Some(bytes) => {
+                if let Ok(blob) = repo.write_blob(bytes) {
+                    edits.push(maw_git::TreeEdit::Upsert {
+                        path: path_str,
+                        mode: maw_git::EntryMode::Blob,
+                        oid: blob,
+                    });
+                }
+            }
+            None => edits.push(maw_git::TreeEdit::Remove { path: path_str }),
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let tree = repo.edit_tree(base_tree, &edits).ok()?;
+    let anchor_oid = repo.rev_parse(anchor_epoch).ok()?;
+    let commit = repo
+        .create_commit(
+            tree,
+            &[anchor_oid],
+            "bn-1xmk: pre-merge trunk snapshot (in-memory recovery)",
+            None,
+        )
+        .ok()?;
+    pin_recovery_ref_from_oid(repo_root, ws_name, &commit.to_string())
+}
+
+/// Post-replay fidelity check: every pre-merge-dirty trunk path whose committed
+/// content the merge did NOT change must end up with exactly the user's
+/// uncommitted bytes on disk. On any mismatch, repair from memory and print a
+/// loud, actionable recovery pointer. This is the guard that turns the
+/// events-journal silent-clobber class into an impossible-to-miss, self-healing
+/// event (bn-1xmk).
+fn verify_trunk_replay_fidelity(
+    ws_path: &Path,
+    ws_name: &str,
+    pre_merge_dirty: &[(PathBuf, Option<Vec<u8>>)],
+    anchor_epoch: &str,
+    epoch_after: &str,
+    recovery_ref: Option<&str>,
+) {
+    let Ok(repo) = maw_git::GixRepo::open(ws_path) else {
+        return;
+    };
+    for (path, pre_bytes) in pre_merge_dirty {
+        // Only files the merge left committed-unchanged are unambiguously owned
+        // by the user's uncommitted edits. If the merge changed the committed
+        // content, the driver-aware 3-way replay owns the outcome.
+        let committed_anchor = repo.read_file_at_commit(anchor_epoch, path).ok().flatten();
+        let committed_after = repo.read_file_at_commit(epoch_after, path).ok().flatten();
+        if committed_anchor != committed_after {
+            continue;
+        }
+
+        let full = ws_path.join(path);
+        let final_bytes = if full.is_file() {
+            std::fs::read(&full).ok()
+        } else {
+            None
+        };
+        let matches = match (pre_bytes, &final_bytes) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        if matches {
+            continue;
+        }
+
+        // Data-loss detected — repair from the authoritative in-memory content.
+        let repaired = pre_bytes.as_ref().map_or_else(
+            || !full.is_file() || std::fs::remove_file(&full).is_ok(),
+            |bytes| {
+                if let Some(parent) = full.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&full, bytes).is_ok()
+            },
+        );
+
+        eprintln!();
+        eprintln!(
+            "  WARNING (bn-1xmk): replay did not reproduce your uncommitted edits to '{}'.",
+            path.display()
+        );
+        if repaired {
+            eprintln!("  Your version was restored from the in-memory pre-merge snapshot.");
+        } else {
+            eprintln!("  Automatic repair FAILED — recover it manually (see below).");
+        }
+        match recovery_ref {
+            Some(r) => {
+                eprintln!("  Recovery ref: {r}");
+                eprintln!("  Inspect:  maw ws recover {ws_name}");
+                eprintln!(
+                    "  Restore:  maw ws recover --ref {r} --restore-file {}",
+                    path.display()
+                );
+            }
+            None => {
+                eprintln!("  Inspect recovery snapshots: maw ws recover {ws_name}");
+            }
         }
     }
 }
