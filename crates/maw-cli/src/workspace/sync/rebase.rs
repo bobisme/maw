@@ -1064,6 +1064,7 @@ fn print_conflict_guidance(ws_name: &str) {
     println!("  maw ws resolve {ws_name} --keep epoch            # keep epoch version");
     println!("  maw ws resolve {ws_name} --keep {ws_name}    # keep workspace version");
     println!("  maw ws resolve {ws_name} --keep both             # keep both sides");
+    println!("  maw ws resolve {ws_name} --keep union            # keep both sides, deduped");
     println!();
     // bn-6xpz: since bn-8zqz, any reader (merge --check, resolve --list,
     // ws conflicts) auto-clears stale conflict metadata after a manual

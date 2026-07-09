@@ -20,6 +20,12 @@
 //! * `--keep <ws-name>` — pick the side whose `workspace == <ws-name>`.
 //! * `--keep both` — concatenate all sides in their sidecar-declared order,
 //!   separated by a newline when needed. No markers emitted.
+//! * `--keep union` — like `--keep both`, but with per-hunk line dedup and
+//!   stable ordering: within each conflicting hunk, `ours`' lines come first
+//!   (verbatim, including internal duplicates), followed by `theirs`' lines
+//!   that don't already appear among `ours`' lines for that hunk. Falls back
+//!   to the same legacy blob-concat as `--keep both` for binary content, N>2
+//!   sides, or `AddAdd` conflicts with no base OID (bn-nmu7).
 //! * `PATH=NAME` forms — resolve one path only.
 //!
 //! Per-atom resolution (`--atom <id>`) is **deferred**. A file-wide `--keep`
@@ -234,6 +240,14 @@ pub fn list_conflicts(
         }
     }
 
+    print_resolve_hint(workspace);
+
+    Ok(())
+}
+
+/// Print the "To resolve:" `--keep` option summary shared by the `--list`
+/// text output above.
+fn print_resolve_hint(workspace: &str) {
     println!();
     println!("To resolve:");
     println!("  maw ws resolve {workspace} --keep epoch            # keep epoch version");
@@ -243,8 +257,9 @@ pub fn list_conflicts(
     println!(
         "  maw ws resolve {workspace} --keep both             # keep all sides (concatenated)"
     );
-
-    Ok(())
+    println!(
+        "  maw ws resolve {workspace} --keep union            # keep all sides (deduped, ours-first)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +492,11 @@ enum ResolveKind {
     /// bn-1nwn: `--keep both` via per-hunk 3-way union merge — both sides'
     /// conflicting lines are included (no markers), clean regions merged.
     ThreeWayUnion,
+    /// bn-nmu7: `--keep union` via per-hunk 3-way union merge with line-level
+    /// dedup — like `ThreeWayUnion` but within each conflicting hunk, lines
+    /// present on both sides appear once (at their `ours` position) and
+    /// `theirs`-only lines keep their relative order.
+    ThreeWayUnionDedup,
     /// Sidecar lacked `base_content` for the picked side — fell back to
     /// blob-replace and emitted a warning.
     LegacyBlobReplaceWarned,
@@ -582,12 +602,21 @@ fn apply_decision(
     workspace: &str,
     sanity_cfg: PostMergeSanityConfig,
 ) -> Result<PathOutcome> {
-    if target == "both" {
-        // bn-2pry: ModifyDelete has no meaningful "both" — the deleter side
-        // carries the *pre-delete* blob OID (the base content) in its
-        // `content` field, so a naive concat would silently resurrect the
-        // base bytes under the "keep both" banner. Treat `--keep both` on
-        // a modify/delete as an alias for keeping only the modifier's
+    if target == "both" || target == "union" {
+        // bn-nmu7: `--keep union` is `--keep both` with per-hunk line dedup
+        // and stable ordering (ours' hunk-relative order first, then
+        // theirs-only lines) applied to the genuinely conflicting regions
+        // only. It shares every code path with `--keep both` below — the
+        // dedup pass is applied as a post-processing step on the driver
+        // output (see `union_dedup_conflict_markers`) instead of using
+        // gix's dumb-concat `ResolveWithUnion` driver.
+        let dedup = target == "union";
+
+        // bn-2pry: ModifyDelete has no meaningful "both"/"union" — the
+        // deleter side carries the *pre-delete* blob OID (the base content)
+        // in its `content` field, so a naive concat would silently
+        // resurrect the base bytes under the "keep both"/"keep union"
+        // banner. Treat both as an alias for keeping only the modifier's
         // content (the deletion is effectively declined). Document the
         // choice in the skipped reason carried back to the caller so the
         // CLI can surface it.
@@ -608,11 +637,12 @@ fn apply_decision(
             });
         }
 
-        // bn-1nwn: `--keep both` on a 2-sided Content conflict with a base
-        // OID uses a per-hunk 3-way union merge so that non-overlapping edits
-        // from each side are preserved and conflicting hunks include both
-        // sides' lines (no markers). Fall back to the legacy blob-concat for
-        // N>2 sides, binary content, AddAdd (no base OID), or missing base.
+        // bn-1nwn / bn-nmu7: `--keep both` / `--keep union` on a 2-sided
+        // Content conflict with a base OID uses a per-hunk 3-way union merge
+        // so that non-overlapping edits from each side are preserved and
+        // conflicting hunks include both sides' lines (no markers). Fall
+        // back to the legacy blob-concat for N>2 sides, binary content,
+        // AddAdd (no base OID), or missing base.
         //
         // bn-1mn0: use effective_base_oid so reconstructed sidecars (where
         // only the side-level base_content was populated, or only the
@@ -654,37 +684,57 @@ fn apply_decision(
 
             // Per-hunk union only makes sense for text files.
             if looks_text(&base_bytes) && looks_text(&epoch_bytes) && looks_text(&ws_bytes) {
-                let resolved = maw_git::merge::merge_text_with_style(
-                    &base_bytes,
-                    &epoch_bytes,
-                    &ws_bytes,
-                    EPOCH_LABEL,
-                    "base",
-                    ws_side.workspace.as_str(),
-                    maw_git::merge::ConflictResolution::Union,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "--keep both union merge failed for {}: {e}",
-                        rel_path.display()
+                let bytes = if dedup {
+                    // bn-nmu7: run the diff3-style merge (clean regions
+                    // merged untouched; genuine conflicts left as marker
+                    // blocks) then rewrite each marker block in place with
+                    // deduped, stably-ordered union content.
+                    union_dedup_merge(
+                        &base_bytes,
+                        &epoch_bytes,
+                        &ws_bytes,
+                        EPOCH_LABEL,
+                        "base",
+                        ws_side.workspace.as_str(),
                     )
-                })?;
-                let bytes = match resolved {
-                    maw_git::merge::MergeResult::Clean(b)
-                    | maw_git::merge::MergeResult::Conflict(b) => b,
+                    .map_err(|e| {
+                        anyhow::anyhow!("--keep union merge failed for {}: {e}", rel_path.display())
+                    })?
+                } else {
+                    let resolved = maw_git::merge::merge_text_with_style(
+                        &base_bytes,
+                        &epoch_bytes,
+                        &ws_bytes,
+                        EPOCH_LABEL,
+                        "base",
+                        ws_side.workspace.as_str(),
+                        maw_git::merge::ConflictResolution::Union,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "--keep both union merge failed for {}: {e}",
+                            rel_path.display()
+                        )
+                    })?;
+                    match resolved {
+                        maw_git::merge::MergeResult::Clean(b)
+                        | maw_git::merge::MergeResult::Conflict(b) => b,
+                    }
                 };
                 // bn-c5ui: run post-merge sanity check before surfacing the
                 // result. The file is still written (the user asked for it;
                 // non-code files legitimately trip AST checks) but the caller
                 // suppresses auto-commit when sanity_failure is Some(_).
                 //
-                // For `--keep both` (union mode) the size-delta check is
+                // For `--keep both` / `--keep union` the size-delta check is
                 // suppressed: the union intentionally includes content from
                 // BOTH sides, so the output is by design larger than either
                 // input alone — triggering the size-ratio formula even for
-                // legitimate union merges. Only the AST check (language-aware,
-                // only fires when both inputs parse cleanly but merged does
-                // not) is meaningful for union outputs.
+                // legitimate union merges (the dedup pass shrinks this vs.
+                // plain concat, but can still exceed either single side).
+                // Only the AST check (language-aware, only fires when both
+                // inputs parse cleanly but merged does not) is meaningful
+                // for union outputs.
                 let union_cfg = PostMergeSanityConfig {
                     size_ratio_max: f64::INFINITY,
                 };
@@ -701,7 +751,11 @@ fn apply_decision(
                     bytes,
                     // Union of multiple sides is never a valid symlink target.
                     mode: None,
-                    kind: ResolveKind::ThreeWayUnion,
+                    kind: if dedup {
+                        ResolveKind::ThreeWayUnionDedup
+                    } else {
+                        ResolveKind::ThreeWayUnion
+                    },
                     sanity_failure,
                 });
             }
@@ -726,10 +780,15 @@ fn apply_decision(
             }
         {
             eprintln!(
-                "warning: --keep both is using legacy blob-concat semantics for {}; \
+                "warning: --keep {target} is using legacy blob-concat semantics for {}; \
                  no merge-base OID is available so non-overlapping edits may be \
-                 duplicated or dropped. Verify with: maw exec {workspace} -- git diff HEAD~1 -- {}",
+                 duplicated or dropped{}. Verify with: maw exec {workspace} -- git diff HEAD~1 -- {}",
                 rel_path.display(),
+                if dedup {
+                    " (no line dedup is applied on this fallback path)"
+                } else {
+                    ""
+                },
                 rel_path.display(),
             );
         }
@@ -1127,6 +1186,159 @@ fn apply_decision(
     }
 }
 
+// ---------------------------------------------------------------------------
+// `--keep union` — per-hunk line dedup (bn-nmu7)
+// ---------------------------------------------------------------------------
+
+/// Run a diff3-style 3-way merge and rewrite each conflicting hunk's marker
+/// block with a deduped, stably-ordered union of its two sides.
+///
+/// Cleanly-merged regions (non-overlapping edits automatically combined by
+/// the 3-way merge) are left byte-for-byte untouched — only text inside
+/// `<<<<<<< ours_label` / `||||||| base_label` / `=======` / `>>>>>>>
+/// theirs_label` marker blocks is rewritten.
+///
+/// Within each conflicting hunk:
+/// * `ours`' lines are kept verbatim, in their original order, including any
+///   internal duplicates (a side is never deduped against itself).
+/// * `theirs`' lines are appended in their original relative order, skipping
+///   any line whose exact content already appears among `ours`' lines for
+///   that hunk (cross-side dedup only — a `theirs`-only duplicate line is
+///   preserved).
+///
+/// Lines that only one side kept from `base` (i.e. the other side deleted
+/// them) are never resurrected: each side's block already reflects that
+/// side's own post-edit content for the region, not `base`.
+///
+/// # Errors
+/// Returns an error if the underlying 3-way merge backend fails.
+fn union_dedup_merge(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    ours_label: &str,
+    base_label: &str,
+    theirs_label: &str,
+) -> Result<Vec<u8>> {
+    let merged = maw_git::merge::merge_text_with_style(
+        base,
+        ours,
+        theirs,
+        ours_label,
+        base_label,
+        theirs_label,
+        maw_git::merge::ConflictResolution::Diff3,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let bytes = match merged {
+        // No conflicting hunks at all — nothing to dedup, pass through.
+        maw_git::merge::MergeResult::Clean(b) => return Ok(b),
+        maw_git::merge::MergeResult::Conflict(b) => b,
+    };
+    Ok(dedup_conflict_markers(
+        &bytes,
+        ours_label,
+        base_label,
+        theirs_label,
+    ))
+}
+
+/// Rewrite diff3-style conflict marker blocks in `text` with a deduped union
+/// of each block's `ours` and `theirs` lines. Text outside marker blocks is
+/// copied through unchanged.
+///
+/// The marker format matches gix's built-in text driver in `Diff3` style
+/// (see `maw_git::merge::merge_text_with_style`):
+/// ```text
+/// <<<<<<< {ours_label}
+/// ...ours lines...
+/// ||||||| {base_label}
+/// ...base lines (ignored)...
+/// =======
+/// ...theirs lines...
+/// >>>>>>> {theirs_label}
+/// ```
+fn dedup_conflict_markers(
+    bytes: &[u8],
+    ours_label: &str,
+    base_label: &str,
+    theirs_label: &str,
+) -> Vec<u8> {
+    let ours_marker = format!("<<<<<<< {ours_label}");
+    let base_marker = format!("||||||| {base_label}");
+    let sep_marker = "=======";
+    let theirs_marker = format!(">>>>>>> {theirs_label}");
+
+    let ends_with_nl = bytes.last() == Some(&b'\n');
+    let body = if ends_with_nl {
+        &bytes[..bytes.len() - 1]
+    } else {
+        bytes
+    };
+    let lines: Vec<&[u8]> = if body.is_empty() {
+        Vec::new()
+    } else {
+        body.split(|&b| b == b'\n').collect()
+    };
+
+    let mut out_lines: Vec<&[u8]> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i] == ours_marker.as_bytes() {
+            i += 1;
+            let mut ours_lines: Vec<&[u8]> = Vec::new();
+            while i < lines.len() && lines[i] != base_marker.as_bytes() {
+                ours_lines.push(lines[i]);
+                i += 1;
+            }
+            // Skip the base marker line and its (unused) content.
+            if i < lines.len() && lines[i] == base_marker.as_bytes() {
+                i += 1;
+                while i < lines.len() && lines[i] != sep_marker.as_bytes() {
+                    i += 1;
+                }
+            }
+            // Skip the separator.
+            if i < lines.len() && lines[i] == sep_marker.as_bytes() {
+                i += 1;
+            }
+            let mut theirs_lines: Vec<&[u8]> = Vec::new();
+            while i < lines.len() && lines[i] != theirs_marker.as_bytes() {
+                theirs_lines.push(lines[i]);
+                i += 1;
+            }
+            // Skip the theirs marker.
+            if i < lines.len() && lines[i] == theirs_marker.as_bytes() {
+                i += 1;
+            }
+
+            let ours_set: std::collections::HashSet<&[u8]> = ours_lines.iter().copied().collect();
+            out_lines.extend(ours_lines.iter().copied());
+            out_lines.extend(
+                theirs_lines
+                    .iter()
+                    .copied()
+                    .filter(|line| !ours_set.contains(line)),
+            );
+        } else {
+            out_lines.push(lines[i]);
+            i += 1;
+        }
+    }
+
+    let mut out = Vec::with_capacity(bytes.len());
+    for (idx, line) in out_lines.iter().enumerate() {
+        if idx > 0 {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(line);
+    }
+    if ends_with_nl {
+        out.push(b'\n');
+    }
+    out
+}
+
 /// Apply `PathOutcome` to the worktree at `ws_path.join(rel)`.
 ///
 /// Returns `Ok((true, kind, sanity_failure))` when the worktree was updated,
@@ -1420,6 +1632,7 @@ pub fn run_structured(
              \n    maw ws resolve {workspace} --keep epoch              # keep epoch side\n\
              \n    maw ws resolve {workspace} --keep <ws-name>          # keep specific workspace\n\
              \n    maw ws resolve {workspace} --keep both               # keep all sides\n\
+             \n    maw ws resolve {workspace} --keep union              # keep all sides, deduped\n\
              \n    maw ws resolve {workspace} --keep PATH=<name>        # resolve one file\n\
              \n    maw ws resolve {workspace} --list                    # list conflicts"
         );
@@ -1482,6 +1695,8 @@ pub fn run_structured(
     // bn-1nwn: track paths resolved via per-hunk epoch-wins or union merge.
     let mut three_way_epoch_wins = Vec::<PathBuf>::new();
     let mut three_way_union = Vec::<PathBuf>::new();
+    // bn-nmu7: track paths resolved via per-hunk union merge with line dedup.
+    let mut three_way_union_dedup = Vec::<PathBuf>::new();
     let mut skipped = Vec::<(PathBuf, String)>::new();
     // bn-c5ui: paths whose driver-produced output failed the post-merge sanity
     // check. The file is still written but auto-commit is suppressed for the
@@ -1537,6 +1752,9 @@ pub fn run_structured(
                                 three_way_epoch_wins.push(rel.clone());
                             }
                             ResolveKind::ThreeWayUnion => three_way_union.push(rel.clone()),
+                            ResolveKind::ThreeWayUnionDedup => {
+                                three_way_union_dedup.push(rel.clone());
+                            }
                             ResolveKind::BlobReplace | ResolveKind::LegacyBlobReplaceWarned => {}
                         }
                     }
@@ -1711,6 +1929,11 @@ pub fn run_structured(
             } else if three_way_union.contains(p) {
                 println!(
                     "  resolved: {} (kept both sides in conflicted hunk(s); preserved cleanly-merged changes from both sides)",
+                    p.display()
+                );
+            } else if three_way_union_dedup.contains(p) {
+                println!(
+                    "  resolved: {} (kept both sides in conflicted hunk(s), deduped identical lines; preserved cleanly-merged changes from both sides)",
                     p.display()
                 );
             } else {

@@ -1254,8 +1254,10 @@ pub enum WorkspaceCommands {
     ///   PATH=NAME         resolve one file to NAME's version
     ///
     /// NAME can be a workspace name, the special value "epoch" (the side
-    /// introduced by rebase), or the special value "both" which concatenates
-    /// all sides (keeping all content).
+    /// introduced by rebase), the special value "both" which concatenates
+    /// all sides (keeping all content), or the special value "union" which
+    /// is like "both" but with per-hunk line dedup and stable ordering
+    /// (ours' lines first, then theirs' lines that aren't already present).
     ///
     /// Multiple --keep flags can be combined for per-file resolution.
     /// Per-block resolution via `cf-N=NAME` is not currently supported.
@@ -1268,6 +1270,7 @@ pub enum WorkspaceCommands {
     ///   maw ws resolve default --keep bn-2sc3                  # resolve all to merged version
     ///   maw ws resolve default --keep default                  # resolve all to local edits
     ///   maw ws resolve default --keep both                     # keep both sides concatenated
+    ///   maw ws resolve default --keep union                    # keep both sides, deduped
     ///   maw ws resolve default --keep src/main.rs=bn-2sc3      # resolve one file
     #[command(verbatim_doc_comment)]
     Resolve {
