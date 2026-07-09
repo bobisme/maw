@@ -21,8 +21,8 @@ use crate::format::OutputFormat;
 use super::{MawConfig, get_backend, repo_root};
 
 use checks::{
-    SyncOutcome, committed_ahead_of_epoch, is_default_workspace, sync_worktree_to_epoch,
-    workspace_has_uncommitted_changes, workspace_name_from_cwd,
+    SyncOutcome, committed_ahead_of_epoch, dirty_status_entries, format_dirty_paths,
+    is_default_workspace, sync_worktree_to_epoch, workspace_name_from_cwd,
 };
 use cross_target::cross_target_sync_risk;
 use rebase::rebase_workspace;
@@ -876,14 +876,15 @@ pub fn auto_sync_if_stale(name: &str, _path: &Path) -> Result<()> {
 
     // Safety: don't auto-sync over uncommitted changes — warn and let the
     // command run against the stale workspace instead of blocking it entirely.
-    let is_dirty = workspace_has_uncommitted_changes(&ws_path).unwrap_or(false);
-    if is_dirty {
+    let dirty_entries = dirty_status_entries(&ws_path).unwrap_or_default();
+    if !dirty_entries.is_empty() {
         drop(lock);
         if claim_stale_warning_slot() {
             eprintln!(
                 "WARNING: Workspace '{name}' is behind the current epoch, but has uncommitted changes. \
                  Skipping auto-sync to preserve uncommitted work."
             );
+            eprintln!("{}", format_dirty_paths(&dirty_entries));
             eprintln!("  Commit or stash changes, then run: maw ws sync {name}");
         }
         return Ok(());

@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use maw_core::model::types::{BaseEpoch, WorkspaceId};
 use maw_core::refs as manifold_refs;
 use maw_git::GitRepo as _;
+use maw_git::types::{FileStatus, StatusEntry};
 
 use crate::workspace::DEFAULT_WORKSPACE;
 
@@ -72,21 +73,62 @@ pub fn committed_ahead_of_epoch(ws_path: &Path, base: &BaseEpoch) -> Option<u32>
 }
 
 pub(super) fn workspace_has_uncommitted_changes(ws_path: &Path) -> Result<bool> {
+    Ok(!dirty_status_entries(ws_path)?.is_empty())
+}
+
+/// Return the dirty [`StatusEntry`] set (HEAD→worktree, including staged
+/// changes) for the workspace at `ws_path`.
+///
+/// This is the same status computation [`workspace_has_uncommitted_changes`]
+/// uses to decide whether to refuse — exposed separately so refusal sites
+/// can name the offending paths instead of just reporting "dirty" (bn-3rst).
+///
+/// See [`workspace_has_uncommitted_changes`] for why HEAD→worktree (not
+/// index→worktree) is required here (bn-pfh7 class).
+pub(super) fn dirty_status_entries(ws_path: &Path) -> Result<Vec<StatusEntry>> {
     let repo = maw_git::GixRepo::open(ws_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    // HEAD→worktree, including *staged* changes — the true `git status
-    // --porcelain` set. The plain `status()` is index→worktree only, so a
-    // `git add`-ed file whose worktree copy still equals the staged blob is
-    // invisible to it; this is the data-loss gate before `git checkout
-    // --detach <epoch>`, so under-reporting here lets sync clobber/orphan
-    // staged work (bn-pfh7 class — Prime Invariant: no staged work is lost).
-    let entries = repo
-        .status_head_to_worktree()
-        .map_err(|e| anyhow::anyhow!("status failed in {}: {e}", ws_path.display()))?;
-    if !entries.is_empty() {
-        return Ok(true);
+    repo.status_head_to_worktree()
+        .map_err(|e| anyhow::anyhow!("status failed in {}: {e}", ws_path.display()))
+}
+
+/// Maximum number of dirty paths listed verbatim in a refusal message before
+/// falling back to a "...and N more" summary line.
+const MAX_DIRTY_PATHS_SHOWN: usize = 10;
+
+const fn status_letter(status: FileStatus) -> &'static str {
+    match status {
+        FileStatus::Modified => "M",
+        FileStatus::Added => "A",
+        FileStatus::Deleted => "D",
+        FileStatus::Untracked => "??",
+        FileStatus::Renamed => "R",
     }
-    Ok(false)
+}
+
+/// Render a capped, human-readable list of dirty paths for refusal messages:
+/// up to [`MAX_DIRTY_PATHS_SHOWN`] entries, one per line prefixed with a
+/// git-style status letter (`M`/`A`/`D`/`??`/`R`), followed by an
+/// `...and N more` summary line if the set was truncated.
+///
+/// Returns an empty string for an empty slice so callers can splice the
+/// result directly into a message without a conditional blank line.
+pub(super) fn format_dirty_paths(entries: &[StatusEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<String> = entries
+        .iter()
+        .take(MAX_DIRTY_PATHS_SHOWN)
+        .map(|e| format!("  {} {}", status_letter(e.status), e.path))
+        .collect();
+    if entries.len() > MAX_DIRTY_PATHS_SHOWN {
+        lines.push(format!(
+            "  ...and {} more",
+            entries.len() - MAX_DIRTY_PATHS_SHOWN
+        ));
+    }
+    lines.join("\n")
 }
 
 /// Return the list of commit OID hex strings reachable from `head_oid` but
@@ -186,15 +228,17 @@ fn sync_worktree_to_epoch_inner(
     // Safety: refuse to sync if the workspace has any uncommitted changes.
     // `git checkout --detach` can clobber staged/unstaged tracked edits, and
     // untracked files may become orphaned or conflict with the new tree.
-    let is_dirty = workspace_has_uncommitted_changes(&ws_path).map_err(|e| {
+    let dirty_entries = dirty_status_entries(&ws_path).map_err(|e| {
         anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}")
     })?;
 
-    if is_dirty {
+    if !dirty_entries.is_empty() {
         bail!(
             "Workspace '{ws_name}' has uncommitted changes that would be lost by sync. \
-             Commit or stash first.\n  \
+             Commit or stash first.\n\
+             {}\n  \
              Check: git -C {} status",
+            format_dirty_paths(&dirty_entries),
             ws_path.display()
         );
     }
@@ -727,5 +771,125 @@ mod tests {
             head_after, head_before,
             "HEAD must not change when failpoint fires"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-3rst: sync refusal names the offending dirty paths.
+    // -----------------------------------------------------------------------
+
+    // bn-3rst: a dirty workspace (one modified tracked file + one untracked
+    // file) must have both paths named in the sync refusal, with the correct
+    // status letter for each.
+    #[test]
+    fn sync_refusal_names_dirty_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let epoch0 = init_maw_repo(root);
+
+        let ws_path = create_ws_test(root, "feat", &epoch0);
+
+        // Modify a tracked file (present since init_maw_repo commits
+        // .gitignore) and add an untracked scratch file.
+        std::fs::write(ws_path.join(".gitignore"), "ws/\n.manifold/\nextra\n")
+            .expect("modify .gitignore");
+        std::fs::write(ws_path.join("scratch.txt"), "untracked\n").expect("write scratch.txt");
+
+        let result = sync_worktree_to_epoch(root, "feat", &epoch0, None);
+        let err = result.expect_err("sync must refuse on a dirty workspace");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("Workspace 'feat' has uncommitted changes that would be lost by sync."),
+            "expected refusal message, got: {msg}"
+        );
+        assert!(
+            msg.contains("M .gitignore"),
+            "expected modified tracked path with 'M' marker, got: {msg}"
+        );
+        // Note: `status_head_to_worktree` is HEAD-relative, not
+        // index-relative, so a new untracked file surfaces as `Added` (`A`)
+        // rather than `FileStatus::Untracked` (`??`) — it doesn't exist in
+        // HEAD either way (see the dead-`FileStatus::Untracked` note in
+        // init.rs). `format_dirty_paths` still maps `Untracked` to `??` for
+        // any caller that does produce it (e.g. `status.rs`'s index-relative
+        // view), covered separately by `format_dirty_paths_lists_entries_under_cap`.
+        assert!(
+            msg.contains("A scratch.txt"),
+            "expected untracked path with 'A' marker (HEAD-relative status), got: {msg}"
+        );
+    }
+
+    // bn-3rst: format_dirty_paths lists every entry, one per line with its
+    // status letter, when the set is at or under the cap.
+    #[test]
+    fn format_dirty_paths_lists_entries_under_cap() {
+        let entries = vec![
+            StatusEntry {
+                path: "src/a.rs".to_string(),
+                status: FileStatus::Modified,
+            },
+            StatusEntry {
+                path: "src/b.rs".to_string(),
+                status: FileStatus::Added,
+            },
+            StatusEntry {
+                path: "src/c.rs".to_string(),
+                status: FileStatus::Deleted,
+            },
+            StatusEntry {
+                path: "src/d.rs".to_string(),
+                status: FileStatus::Untracked,
+            },
+            StatusEntry {
+                path: "src/e.rs".to_string(),
+                status: FileStatus::Renamed,
+            },
+        ];
+
+        let formatted = format_dirty_paths(&entries);
+
+        assert_eq!(
+            formatted,
+            "  M src/a.rs\n  A src/b.rs\n  D src/c.rs\n  ?? src/d.rs\n  R src/e.rs"
+        );
+        assert!(
+            !formatted.contains("more"),
+            "no truncation expected under the cap, got: {formatted}"
+        );
+    }
+
+    // bn-3rst: when the dirty set exceeds MAX_DIRTY_PATHS_SHOWN, only the
+    // first N are listed verbatim and the rest are summarized.
+    #[test]
+    fn format_dirty_paths_truncates_over_cap() {
+        let entries: Vec<StatusEntry> = (0..13)
+            .map(|i| StatusEntry {
+                path: format!("file{i}.txt"),
+                status: FileStatus::Modified,
+            })
+            .collect();
+
+        let formatted = format_dirty_paths(&entries);
+        let lines: Vec<&str> = formatted.lines().collect();
+
+        assert_eq!(
+            lines.len(),
+            MAX_DIRTY_PATHS_SHOWN + 1,
+            "expected {MAX_DIRTY_PATHS_SHOWN} listed paths + 1 summary line, got: {formatted}"
+        );
+        for (i, line) in lines.iter().enumerate().take(MAX_DIRTY_PATHS_SHOWN) {
+            assert!(
+                line.contains(&format!("file{i}.txt")),
+                "expected file{i}.txt in line {i}, got: {formatted}"
+            );
+        }
+        assert_eq!(lines[MAX_DIRTY_PATHS_SHOWN], "  ...and 3 more");
+    }
+
+    // bn-3rst: an empty dirty set formats to an empty string so callers can
+    // splice it into a message without a stray blank line.
+    #[test]
+    fn format_dirty_paths_empty_for_no_entries() {
+        assert_eq!(format_dirty_paths(&[]), "");
     }
 }

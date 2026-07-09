@@ -60,7 +60,8 @@ use maw_git::merge::{MergeResult, merge_text};
 use maw_git::{self as git, GitRepo, TreeEdit};
 
 use super::checks::{
-    sync_worktree_to_epoch, sync_worktree_to_epoch_quiet, workspace_has_uncommitted_changes,
+    dirty_status_entries, format_dirty_paths, sync_worktree_to_epoch, sync_worktree_to_epoch_quiet,
+    workspace_has_uncommitted_changes,
 };
 use super::lock::WorkspaceRebaseLock;
 
@@ -328,15 +329,17 @@ pub(super) fn rebase_workspace_run(
     };
 
     // Safety: refuse to rebase if the workspace has uncommitted changes.
-    let is_dirty = workspace_has_uncommitted_changes(ws_path).map_err(|e| {
+    let dirty_entries = dirty_status_entries(ws_path).map_err(|e| {
         anyhow::anyhow!("Failed to check dirty state for workspace '{ws_name}': {e}")
     })?;
 
-    if is_dirty {
+    if !dirty_entries.is_empty() {
         bail!(
             "Workspace '{ws_name}' has uncommitted changes that would be lost by rebase. \
-             Commit or stash first.\n  \
+             Commit or stash first.\n\
+             {}\n  \
              Check: git -C {} status",
+            format_dirty_paths(&dirty_entries),
             ws_path.display()
         );
     }
