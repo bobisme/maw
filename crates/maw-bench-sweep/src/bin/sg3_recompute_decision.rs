@@ -1,15 +1,18 @@
+// Bin lint waivers — mirror sg2-friction-list / sg2-report.
+#![allow(clippy::too_many_lines)]
+
 //! `sg3-recompute-decision` — offline SG3 verdict recomputation.
 //!
 //! bn-27ai (2026-05-27): the 2026-05-26 SG3 rerun reported R6 NO-GO
 //! at C2-T0 because of a 3-layer metric-pipeline defect (see
 //! `notes/sg3-no-go-rootcause-v2.md`). This binary loads the committed
-//! per-arm BenchRun artifacts, runs them through the **fixed** metric
+//! per-arm `BenchRun` artifacts, runs them through the **fixed** metric
 //! pipeline (Fix A.1 = `is_maw_arm` recognises `maw@<flavor>`;
 //! Fix A.2 = task-aware recover suppression; Fix A.3 = raw
 //! per-replicate sum in `sum_proxy`), and writes a fresh decision.json
 //! plus a Markdown delta report.
 //!
-//! No new LLM runs. No fresh BenchRuns. Pure offline math against
+//! No new LLM runs. No fresh `BenchRuns`. Pure offline math against
 //! the artifacts already committed under
 //! `notes/eval-real-2026-05-27/sg3-rerun/`.
 //!
@@ -35,6 +38,7 @@
 //! - `delta.md`      — side-by-side old-vs-new diff per rule.
 //! - `summary.json`  — machine-readable summary of the delta.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -140,33 +144,25 @@ fn main() -> ExitCode {
         let (cell_old, cell_new) = (
             cond.split_once('-').and_then(|(c, t)| {
                 old_summary.cell(ARM_OLD, c, t).map(|cell| {
-                    let total = cell
-                        .sum
-                        .get("work_redone_turns")
-                        .map(|v| match v {
-                            maw_bench_metrics::MetricValue::Count { n } => *n,
-                            maw_bench_metrics::MetricValue::DurationMs { ms } => *ms,
-                            maw_bench_metrics::MetricValue::UsdCents { cents } => *cents,
-                            maw_bench_metrics::MetricValue::Infinite => u64::MAX,
-                            maw_bench_metrics::MetricValue::Unavailable => 0,
-                        })
-                        .unwrap_or(0);
+                    let total = cell.sum.get("work_redone_turns").map_or(0, |v| match v {
+                        maw_bench_metrics::MetricValue::Count { n } => *n,
+                        maw_bench_metrics::MetricValue::DurationMs { ms } => *ms,
+                        maw_bench_metrics::MetricValue::UsdCents { cents } => *cents,
+                        maw_bench_metrics::MetricValue::Infinite => u64::MAX,
+                        maw_bench_metrics::MetricValue::Unavailable => 0,
+                    });
                     (cell.n, total)
                 })
             }),
             cond.split_once('-').and_then(|(c, t)| {
                 new_summary.cell(ARM_NEW, c, t).map(|cell| {
-                    let total = cell
-                        .sum
-                        .get("work_redone_turns")
-                        .map(|v| match v {
-                            maw_bench_metrics::MetricValue::Count { n } => *n,
-                            maw_bench_metrics::MetricValue::DurationMs { ms } => *ms,
-                            maw_bench_metrics::MetricValue::UsdCents { cents } => *cents,
-                            maw_bench_metrics::MetricValue::Infinite => u64::MAX,
-                            maw_bench_metrics::MetricValue::Unavailable => 0,
-                        })
-                        .unwrap_or(0);
+                    let total = cell.sum.get("work_redone_turns").map_or(0, |v| match v {
+                        maw_bench_metrics::MetricValue::Count { n } => *n,
+                        maw_bench_metrics::MetricValue::DurationMs { ms } => *ms,
+                        maw_bench_metrics::MetricValue::UsdCents { cents } => *cents,
+                        maw_bench_metrics::MetricValue::Infinite => u64::MAX,
+                        maw_bench_metrics::MetricValue::Unavailable => 0,
+                    });
                     (cell.n, total)
                 })
             }),
@@ -225,7 +221,7 @@ fn render_delta(
 ) -> String {
     let mut s = String::new();
     s.push_str("# SG3 Recomputed Decision — bn-27ai Fix A.1/A.2/A.3\n\n");
-    s.push_str(&format!("Source artifacts: `{}`\n\n", rerun_dir.display()));
+    let _ = writeln!(s, "Source artifacts: `{}`\n", rerun_dir.display());
     s.push_str(
         "Recomputed offline against the committed 2026-05-27 BenchRun \
          set using the **fixed** metric pipeline:\n\n\
@@ -243,7 +239,7 @@ fn render_delta(
          integer-truncated 1-bit median deltas into N×-amplified \
          totals).\n\n",
     );
-    s.push_str(&format!("## Verdict\n\n**{}**\n\n", decision.label()));
+    let _ = writeln!(s, "## Verdict\n\n**{}**\n", decision.label());
     match decision {
         Decision::Go { .. } => {
             s.push_str(
@@ -258,10 +254,11 @@ fn render_delta(
             by_amount,
             ..
         } => {
-            s.push_str(&format!(
+            let _ = writeln!(
+                s,
                 "Regression: **{regression_rule}** / **{regression_metric}**\n\n\
-                 By amount: {by_amount}\n\n",
-            ));
+                 By amount: {by_amount}\n",
+            );
         }
     }
 
@@ -271,9 +268,10 @@ fn render_delta(
     for (cell, n_str, sum_old, sum_new) in per_cell {
         let delta = i64::try_from(*sum_new).unwrap_or(i64::MAX)
             - i64::try_from(*sum_old).unwrap_or(i64::MAX);
-        s.push_str(&format!(
-            "| {cell} | {n_str} | {sum_old} | {sum_new} | {delta:+} |\n"
-        ));
+        let _ = writeln!(
+            s,
+            "| {cell} | {n_str} | {sum_old} | {sum_new} | {delta:+} |"
+        );
     }
     s.push_str(
         "\nPre-fix the same data emitted R6 C2-T0 as `total(new) = 10, \
@@ -283,8 +281,7 @@ fn render_delta(
 
     s.push_str("\n## Per-rule evidence\n\n");
     let evidence = match decision {
-        Decision::Go { evidence } => evidence,
-        Decision::NoGo { evidence, .. } => evidence,
+        Decision::Go { evidence } | Decision::NoGo { evidence, .. } => evidence,
     };
     s.push_str("| rule | cell | metric | old | new | status |\n");
     s.push_str("|------|------|--------|----:|----:|--------|\n");

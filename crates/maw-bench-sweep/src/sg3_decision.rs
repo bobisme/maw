@@ -288,7 +288,7 @@ pub fn decide_go_no_go(
         Decision::NoGo {
             regression_rule: f.rule_id.clone(),
             regression_metric: f.metric.clone(),
-            by_amount: f.rationale.clone(),
+            by_amount: f.rationale,
             evidence,
         }
     }
@@ -581,12 +581,10 @@ fn eval_r6(
     };
     // §3.5 ties go to old: new ≤ old PASSES (PassEquivalent on
     // exact equality); new > old FAILS.
-    let status = if new_total < old_total {
-        RuleStatus::PassImproved
-    } else if new_total == old_total {
-        RuleStatus::PassEquivalent
-    } else {
-        RuleStatus::Fail
+    let status = match new_total.cmp(&old_total) {
+        std::cmp::Ordering::Less => RuleStatus::PassImproved,
+        std::cmp::Ordering::Equal => RuleStatus::PassEquivalent,
+        std::cmp::Ordering::Greater => RuleStatus::Fail,
     };
     let rationale = format!(
         "total(new) = {new_total}, total(old) = {old_total}; §3.1 R6 = no net increase \
@@ -702,16 +700,13 @@ fn median_ratio_status(
 }
 
 fn median_or_zero(cell: &CellAggregate, name: &str) -> u64 {
-    cell.median
-        .get(name)
-        .map(|v| match v {
-            MetricValue::Count { n } => *n,
-            MetricValue::DurationMs { ms } => *ms,
-            MetricValue::UsdCents { cents } => *cents,
-            MetricValue::Infinite => u64::MAX,
-            MetricValue::Unavailable => 0,
-        })
-        .unwrap_or(0)
+    cell.median.get(name).map_or(0, |v| match v {
+        MetricValue::Count { n } => *n,
+        MetricValue::DurationMs { ms } => *ms,
+        MetricValue::UsdCents { cents } => *cents,
+        MetricValue::Infinite => u64::MAX,
+        MetricValue::Unavailable => 0,
+    })
 }
 
 /// Per-cell "total" used by R6 (interventions).
@@ -1164,8 +1159,7 @@ mod tests {
         // and locate the C2-T0 row to inspect the totals.
         let d = decide_go_no_go(&old, &new, None, PrereggedBars::default());
         let evidence = match &d {
-            Decision::Go { evidence } => evidence,
-            Decision::NoGo { evidence, .. } => evidence,
+            Decision::Go { evidence } | Decision::NoGo { evidence, .. } => evidence,
         };
         let r6_c2 = evidence
             .rules

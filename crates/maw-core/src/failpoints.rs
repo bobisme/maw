@@ -546,7 +546,7 @@ mod tests {
                 ]
             );
             for (_, a) in &v {
-                assert_eq!(a.clone_dur(), Some(Duration::from_millis(5000)));
+                assert_eq!(a.clone_dur(), Some(Duration::from_secs(5)));
             }
         }
 
@@ -584,7 +584,7 @@ mod tests {
         impl FailpointAction {
             fn clone_dur(&self) -> Option<Duration> {
                 match self {
-                    FailpointAction::Sleep(d) => Some(*d),
+                    Self::Sleep(d) => Some(*d),
                     _ => None,
                 }
             }

@@ -4,6 +4,7 @@
 #![allow(clippy::expect_used)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
+#![allow(clippy::doc_markdown)]
 
 //! T3.5 / `bn-1uzn` pilot end-to-end test.
 //!

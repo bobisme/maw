@@ -635,7 +635,7 @@ fn render_md_unattributed(out: &mut String, report: &DeltaReport) {
     );
     match report.unattributed.growth_pct() {
         None => {
-            let _ = writeln!(out, "- Growth: _undefined (baseline = 0)_",);
+            let _ = writeln!(out, "- Growth: _undefined (baseline = 0)_");
         }
         Some(g) => {
             let blocker = if report.unattributed.blocks_sg4() {

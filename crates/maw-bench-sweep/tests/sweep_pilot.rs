@@ -4,6 +4,7 @@
 #![allow(clippy::expect_used)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
+#![allow(clippy::doc_markdown)]
 
 //! End-to-end pilot test: drive the pilot grid, aggregate, render.
 //! Mirrors the bone's "Pilot end-to-end" acceptance test.
@@ -105,9 +106,9 @@ fn pilot_is_deterministic_given_pinned_clock_and_base_seed() {
 
 /// bn-205s: drive the spectrum_grid end-to-end (the same call path
 /// `sg2-sweep-pilot --grid=spectrum` exercises). Asserts the full
-/// §5.1 10-cell schedule is materialized (5 T0 cells across C0..C4
-/// + 5 T1..T5 chaos overlays at C2) and every cell is represented in
-/// the per-arm aggregate, so the spectrum table renders the full grid.
+/// §5.1 10-cell schedule is materialized (5 T0 cells across C0..C4,
+/// plus 5 T1..T5 chaos overlays at C2) and every cell is represented
+/// in the per-arm aggregate, so the spectrum table renders the full grid.
 #[test]
 fn spectrum_grid_drives_ten_cells_end_to_end() {
     let tmp = tempfile::tempdir().expect("tempdir");

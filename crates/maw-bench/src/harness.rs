@@ -156,6 +156,7 @@ impl<S: Substrate, A: AgentBackend> BenchHarness<S, A> {
     /// set up the substrate; cannot encode/persist JSON). Agent errors
     /// and substrate-incoherence errors land in the returned [`BenchRun`]
     /// via the verdict / OracleB summary.
+    #[allow(clippy::too_many_lines)]
     pub fn run(
         &mut self,
         plan: &ScenarioPlan,

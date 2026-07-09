@@ -512,7 +512,7 @@ mod tests {
             .expect("driver")
             .with_plan_steps(2)
             .with_pinned_clock(1000, 2000)
-            .with_agent_config(Some(custom.clone()));
+            .with_agent_config(Some(custom));
 
         let grid = SweepGrid {
             cells: vec![SweepCell {

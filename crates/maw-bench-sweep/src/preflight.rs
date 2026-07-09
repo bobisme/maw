@@ -103,10 +103,7 @@ fn parse_maw_version(line: &str) -> Option<(u32, u32, u32)> {
     // Tolerate either `maw 0.61.0` (current) or a bare `0.61.0`.
     let candidate = trimmed.strip_prefix("maw ").unwrap_or(trimmed);
     // Drop any trailing whitespace / +metadata / pre-release tags.
-    let core = candidate
-        .split(|c: char| c == ' ' || c == '-' || c == '+')
-        .next()
-        .unwrap_or(candidate);
+    let core = candidate.split([' ', '-', '+']).next().unwrap_or(candidate);
     let mut parts = core.split('.');
     let major = parts.next()?.parse::<u32>().ok()?;
     let minor = parts.next()?.parse::<u32>().ok()?;

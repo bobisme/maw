@@ -132,8 +132,7 @@ fn smoke_lists_files_and_finishes() {
                 tc.args_json.len(),
                 tc.result_truncated
                     .as_ref()
-                    .map(|s| s.len().to_string())
-                    .unwrap_or_else(|| "none".into()),
+                    .map_or_else(|| "none".into(), |s| s.len().to_string()),
             );
         }
     }

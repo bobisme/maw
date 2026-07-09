@@ -162,7 +162,7 @@ fn render_cell_block(
             let lo = fmt_metric(c, metric, "min");
             let med = fmt_metric(c, metric, "median");
             let hi = fmt_metric(c, metric, "max");
-            let _ = writeln!(out, "      {arm:<24}  med={med:<10}  range=({lo}..{hi})",);
+            let _ = writeln!(out, "      {arm:<24}  med={med:<10}  range=({lo}..{hi})");
         }
     }
     out.push('\n');
@@ -231,6 +231,7 @@ fn arm_order(summary: &SweepSummary, opts: &SpectrumReportOptions) -> Vec<String
 /// shape is fixed here so the publication shape is review-able
 /// before the campaign starts.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn render_crossover_doc(summary: &SweepSummary, opts: &SpectrumReportOptions) -> String {
     let mut out = String::new();
     let _ = writeln!(

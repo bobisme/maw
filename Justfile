@@ -219,6 +219,18 @@ sg1-assurance-clippy:
   cargo clippy -p maw-assurance --features oracles --all-targets -- -D warnings
   cargo clippy --features assurance --all-targets -- -D warnings
 
+# sg2-bench-clippy: the default `just clippy` only covers default features,
+# so the SG2 benchmark-harness crates (maw-bench, maw-bench-sweep,
+# maw-bench-metrics, maw-bench-adapters — all gated behind their own
+# `bench` feature so the default zero-feature build stays lean) can drift
+# `-D warnings`-dirty unnoticed. bn-1nmh: this rotted silently for a whole
+# release cycle (a non-exhaustive `Op` match went unnoticed because no CI
+# job ever compiled `--features bench`). Invoked by
+# `.github/workflows/dst-faithful.yml` so a future missing match arm (or
+# any other feature-gated lint regression) fails CI instead of rotting.
+sg2-bench-clippy:
+  cargo clippy --workspace --all-targets --features bench -- -D warnings
+
 # sg1-faithful-build: produces the failpoints-enabled binary so the
 # nightly soak (and any out-of-band chaos campaign) can spawn the real
 # maw with `fp!()` call sites live. Default release stays clean &

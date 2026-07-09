@@ -4,6 +4,7 @@
 #![allow(clippy::missing_const_for_fn)]
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::cast_precision_loss)]
+#![allow(clippy::too_many_lines)]
 
 //! `sg3-layout-eval` — the T3.5 SG3 layout-eval harness (`bn-1uzn`).
 //!
@@ -79,7 +80,6 @@
 //! - `2` — invalid arguments.
 //! - `3` — pipeline error (driver, aggregate, decide).
 
-use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -208,8 +208,8 @@ fn parse_args() -> Result<Args, String> {
 
     if pilot {
         // Pilot defaults override (per bone HARD RULE: ≤ 60s wall).
-        n_a = n_a.min(3).max(2);
-        n_b = n_b.min(3).max(2);
+        n_a = n_a.clamp(2, 3);
+        n_b = n_b.clamp(2, 3);
     }
 
     // Pairing checks.
@@ -276,10 +276,10 @@ fn main() -> ExitCode {
         let _ = maw_bench_sweep::check_maw_failpoints_advisory();
     }
 
-    let dir = match args.artifact_dir.clone() {
-        Some(d) => d,
-        None => env::temp_dir().join(format!("sg3-layout-eval-{}", std::process::id())),
-    };
+    let dir = args
+        .artifact_dir
+        .clone()
+        .unwrap_or_else(|| env::temp_dir().join(format!("sg3-layout-eval-{}", std::process::id())));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("artifact dir setup: {e}");
         return ExitCode::from(3);
@@ -297,12 +297,13 @@ fn main() -> ExitCode {
         args.n_b,
         args.pilot,
         args.backend.as_str(),
-        args.substrate_override
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_else(|| match args.backend {
+        args.substrate_override.map_or_else(
+            || match args.backend {
                 BackendChoice::Mock => "noop (auto)".to_string(),
                 BackendChoice::Claude => "per-layout maw (auto)".to_string(),
-            }),
+            },
+            |s| s.as_str().to_string()
+        ),
         if args.chaos { "on" } else { "off" },
     );
 
@@ -391,11 +392,11 @@ fn main() -> ExitCode {
     // Emit verdict to stdout (and optionally to file).
     let json = serde_json::to_string_pretty(&decision).expect("serialize decision");
     println!("{json}");
-    if let Some(path) = args.decision_json.as_ref() {
-        if let Err(e) = std::fs::write(path, &json) {
-            eprintln!("write --decision-json {}: {e}", path.display());
-            return ExitCode::from(3);
-        }
+    if let Some(path) = args.decision_json.as_ref()
+        && let Err(e) = std::fs::write(path, &json)
+    {
+        eprintln!("write --decision-json {}: {e}", path.display());
+        return ExitCode::from(3);
     }
 
     eprintln!("sg3-layout-eval: verdict = {}", decision.label());
@@ -429,6 +430,7 @@ fn resolve_substrate_for_arm(args: &Args, arm: &str) -> SubstrateChoice {
 
 /// Drive one arm's subset (SUB-A + SUB-B). Returns total cost for the
 /// arm (sum of per-run `cost_usd`).
+#[allow(clippy::too_many_arguments)]
 fn run_arm(
     arm: &str,
     n_a: u32,
@@ -525,7 +527,7 @@ fn plant_r1_loss(arm_dir: &Path, cell: &SweepCell) -> Result<(), String> {
     let cell_dir = arm_dir.join(format!("{}-{}", cell.condition.id, cell.t_class.as_str()));
     let mut entries: Vec<_> = std::fs::read_dir(&cell_dir)
         .map_err(|e| format!("read {}: {e}", cell_dir.display()))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
         .collect();
     entries.sort_by_key(std::fs::DirEntry::path);
@@ -565,11 +567,4 @@ fn arm_dir(base: &Path, arm: &str) -> PathBuf {
         })
         .collect();
     base.join(safe)
-}
-
-// Suppress dead-code on this BTreeMap import (used inside parse_args
-// indirectly via the env iter); kept to mirror the lib's import shape.
-#[allow(dead_code)]
-fn _unused_btreemap() -> BTreeMap<(), ()> {
-    BTreeMap::new()
 }

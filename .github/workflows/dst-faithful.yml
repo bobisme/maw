@@ -14,6 +14,15 @@ name: SG1 Faithful-Binary Build + Clippy
 # This workflow runs the second one (the first is already covered by the
 # main CI / `just clippy` gate). It also builds the failpoints release
 # binary so a green run guarantees the faithful tier is deployable.
+#
+# bn-1nmh: also runs the `--features bench` clippy pass (the SG2
+# benchmark-harness crates: maw-bench, maw-bench-sweep, maw-bench-metrics,
+# maw-bench-adapters). That feature build previously had NO CI coverage —
+# the default `cargo build`/`clippy` never turns `bench` on — so a
+# non-exhaustive match on `Op` after `Op::Advance` was added rotted
+# unnoticed for a whole release cycle. This job already runs on every PR +
+# push to main, so the bench-feature clippy pass rides along here rather
+# than standing up a new workflow.
 
 on:
   pull_request:
@@ -44,6 +53,11 @@ jobs:
       # Runs BOTH clippy invocations per bn-2ors (default + failpoints).
       - name: Clippy (default + failpoints)
         run: just sg1-faithful-clippy
+
+      # bn-1nmh: SG2 benchmark-harness feature build (kept cheap — clippy
+      # only, not the (heavier, real-LLM-capable) bench test suite).
+      - name: Clippy (--features bench)
+        run: just sg2-bench-clippy
 
       # Build the failpoints release binary so the faithful tier is
       # deployable (the nightly soak's faithful-binary step expects this

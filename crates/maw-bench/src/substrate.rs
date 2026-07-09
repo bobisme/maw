@@ -132,7 +132,7 @@ impl SubstrateHandle {
     /// by adapters that don't materialize a shim — the new
     /// `agent_extra_env` field defaults to empty.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         label: SubstrateLabel,
         workspace_root: PathBuf,
         repo_root: PathBuf,

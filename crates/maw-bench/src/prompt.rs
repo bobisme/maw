@@ -132,6 +132,14 @@ fn task_battery_from_plan(plan: &ScenarioPlan) -> Vec<String> {
                     ws.0
                 ));
             }
+            Op::Advance { ws } => {
+                tasks.push(format!(
+                    "Advance workspace `{}` onto the latest default branch, \
+                     replaying its already-committed work on top rather than \
+                     discarding it.",
+                    ws.0
+                ));
+            }
             Op::Destroy { ws, force } => {
                 let force_note = if *force {
                     " (force even if it has uncommitted work)"
@@ -179,7 +187,11 @@ pub fn prompt_sha256_hex(prompt: &str) -> String {
 // `a..h` and the 64-entry round-constant table `K`. The short names map
 // 1:1 to the spec and are universally recognised; renaming them would
 // hurt readability without buying defect prevention.
-#[allow(clippy::many_single_char_names, clippy::items_after_statements)]
+#[allow(
+    clippy::many_single_char_names,
+    clippy::items_after_statements,
+    clippy::too_many_lines
+)]
 fn sha256(message: &[u8]) -> [u8; 32] {
     // Initial hash values (FIPS 180-4 §5.3.3).
     let mut h: [u32; 8] = [

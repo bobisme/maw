@@ -61,9 +61,9 @@
 #![allow(clippy::too_long_first_doc_paragraph)]
 #![cfg(feature = "bench")]
 #![deny(rust_2018_idioms)]
-// Per-lint waivers — mirror the maw-bench-metrics rationale.
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::too_long_first_doc_paragraph)]
+// Per-lint waivers — mirror the maw-bench-metrics rationale. `doc_markdown`
+// and `too_long_first_doc_paragraph` are already allowed above (before the
+// `cfg(feature = "bench")` gate) so they aren't repeated here.
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::must_use_candidate)]

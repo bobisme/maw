@@ -2,6 +2,7 @@
 // CLI shim).
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::too_many_lines)]
 
 //! `sg2-sweep-pilot` — harness-only validation pilot for the SG2
 //! sweep driver + aggregator + crossover analysis.
