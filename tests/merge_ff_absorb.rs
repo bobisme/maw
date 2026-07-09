@@ -597,3 +597,283 @@ fn check_surfaces_ff_blocked_trunk_drift_as_a_warning() {
         "JSON should classify the drift as ff-blocked:\n{json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// bn-rah2: sibling HEAD preservation during FF absorb
+// ---------------------------------------------------------------------------
+
+/// bn-rah2 post-merge sibling invariant. Encodes the Prime Invariant ("no
+/// committed work is ever lost") for a sibling workspace that sat adjacent to
+/// a merge which absorbed out-of-maw trunk commits:
+///
+/// * `clean_before => clean_after` — a sibling that was clean must stay clean
+///   (the field bug left the work as untracked/uncommitted cruft).
+/// * every file the sibling had **committed** before is still committed
+///   (byte-identical) in its post-merge HEAD tree — whether its HEAD stayed
+///   put or was rebased onto the advanced epoch.
+fn assert_sibling_work_preserved(
+    repo: &TestRepo,
+    name: &str,
+    clean_before: bool,
+    committed_files: &[(&str, &str)],
+) {
+    if clean_before {
+        let status = repo.git_in_workspace(name, &["status", "--short"]);
+        assert!(
+            status.trim().is_empty(),
+            "sibling '{name}' was clean before the merge but is dirty after \
+             (work leaked out of its commit):\n{status}"
+        );
+    }
+    for (path, content) in committed_files {
+        let got = repo.git_in_workspace(name, &["show", &format!("HEAD:{path}")]);
+        assert_eq!(
+            &got, content,
+            "sibling '{name}': committed file '{path}' not preserved byte-identically \
+             in its post-merge HEAD tree"
+        );
+    }
+}
+
+/// Regression test for bn-rah2: merging workspace A with --destroy when the
+/// branch has direct commits ahead of epoch must REPLAY sibling workspace B's
+/// committed work onto the absorbed epoch — never raw-reset its HEAD. Before
+/// the fix, the FF-absorb wrote the branch OID straight to every sibling's
+/// HEAD file, orphaning their committed work and leaving it as untracked
+/// worktree cruft (`maw ws sync` then hard-failed with "uncommitted changes").
+#[test]
+fn ff_absorb_replays_committed_ahead_sibling() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    // Two workspaces with committed work on disjoint files, both one commit
+    // ahead of the same epoch.
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    repo.add_file("alice", "src/alice.rs", "// alice\n");
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "feat: alice's work"]);
+
+    repo.add_file("bob", "src/bob.rs", "// bob\n");
+    repo.git_in_workspace("bob", &["add", "-A"]);
+    repo.git_in_workspace("bob", &["commit", "-m", "feat: bob's work"]);
+    let bob_head_before = repo
+        .git_in_workspace("bob", &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    // Push the branch ahead with a docs-only commit (disjoint from both
+    // workspaces): the FF-absorb scenario.
+    push_branch_ahead(
+        &repo,
+        "docs/README.md",
+        "# README\n\nupdated by direct commit\n",
+        "docs: direct commit outside maw",
+    );
+
+    let bob_clean_before = repo
+        .git_in_workspace("bob", &["status", "--short"])
+        .trim()
+        .is_empty();
+    assert!(bob_clean_before, "bob should be clean before merge");
+
+    // Merge alice with --destroy. The FF absorb runs first, then the merge.
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "feat: merge alice",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "merge should succeed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The absorb emits a per-sibling NOTE naming bob's replay (loudness).
+    assert!(
+        stderr.contains("bob: replayed"),
+        "absorb output should name bob's replay.\nstderr: {stderr}"
+    );
+
+    let bob_head_after = repo
+        .git_in_workspace("bob", &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let base_epoch = repo.epoch0().to_owned();
+
+    // bob was REBASED: HEAD moved to a new commit (not the orphaned original,
+    // not the base epoch, not the absorbed branch tip).
+    assert_ne!(
+        bob_head_after, base_epoch,
+        "bob's HEAD must not sit at epoch₀ — that would orphan his work"
+    );
+    assert_ne!(
+        bob_head_after, bob_head_before,
+        "bob's HEAD should have advanced to a rebased commit onto the absorbed epoch"
+    );
+
+    // Prime Invariant: bob's work survives as COMMITTED content, clean tree.
+    assert_sibling_work_preserved(
+        &repo,
+        "bob",
+        bob_clean_before,
+        &[("src/bob.rs", "// bob\n")],
+    );
+
+    // And bob now sits on top of the integrated epoch (alice's work is visible
+    // in his HEAD tree — proof he was rebased forward, not merely left alone).
+    assert_eq!(
+        repo.git_in_workspace("bob", &["show", "HEAD:src/alice.rs"]),
+        "// alice\n",
+        "bob should be rebased onto the epoch that already integrated alice's work"
+    );
+
+    // The very next protocol step (`maw ws sync bob`) must report up to date,
+    // NOT the pre-fix "has uncommitted changes that would be lost by sync".
+    let sync = repo.maw_raw(&["ws", "sync", "bob"]);
+    let sync_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&sync.stdout),
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    assert!(
+        sync.status.success() && sync_out.contains("up to date"),
+        "`maw ws sync bob` should report up to date after an adjacent absorb.\n{sync_out}"
+    );
+}
+
+/// A sibling that is DIRTY-only (uncommitted edit on a path disjoint from the
+/// FF range, HEAD still at its base epoch) must still absorb cleanly: the FF
+/// materializes the absorbed paths and preserves the uncommitted edit. This
+/// is the control the committed-ahead replay must not regress.
+#[test]
+fn ff_absorb_preserves_dirty_only_sibling_edits() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    repo.add_file("alice", "src/alice.rs", "// alice\n");
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "feat: alice's work"]);
+
+    // bob has an UNCOMMITTED edit on a disjoint path (no commit → HEAD stays
+    // at the base epoch).
+    repo.add_file("bob", "src/bob_scratch.rs", "// bob scratch WIP\n");
+    let bob_dirty_before = repo.git_in_workspace("bob", &["status", "--short"]);
+    assert!(
+        bob_dirty_before.contains("bob_scratch.rs"),
+        "bob should be dirty before merge: {bob_dirty_before}"
+    );
+
+    push_branch_ahead(
+        &repo,
+        "docs/README.md",
+        "# README\n\nupdated by direct commit\n",
+        "docs: direct commit outside maw",
+    );
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "feat: merge alice",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "merge should succeed with a dirty-only sibling.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // bob's uncommitted edit must survive intact.
+    assert_eq!(
+        repo.read_file("bob", "src/bob_scratch.rs").as_deref(),
+        Some("// bob scratch WIP\n"),
+        "bob's uncommitted edit must be preserved across the absorb"
+    );
+    assert!(
+        repo.git_in_workspace("bob", &["status", "--short"])
+            .contains("bob_scratch.rs"),
+        "bob's edit should still be uncommitted after the absorb"
+    );
+}
+
+/// A sibling that is BOTH committed-ahead AND dirty cannot be replayed (rebase
+/// refuses a dirty worktree). The absorb must block the whole merge with the
+/// epoch-sync guidance — and leave the sibling's HEAD and the epoch untouched
+/// (no half-moved state).
+#[test]
+fn ff_absorb_blocks_on_committed_ahead_dirty_sibling() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    repo.add_file("alice", "src/alice.rs", "// alice\n");
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "feat: alice's work"]);
+
+    // bob: committed work AND an additional uncommitted edit (both disjoint
+    // from the FF docs path).
+    repo.add_file("bob", "src/bob.rs", "// bob\n");
+    repo.git_in_workspace("bob", &["add", "-A"]);
+    repo.git_in_workspace("bob", &["commit", "-m", "feat: bob's work"]);
+    repo.add_file("bob", "src/bob_scratch.rs", "// bob scratch WIP\n");
+    let bob_head_before = repo
+        .git_in_workspace("bob", &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let epoch_before = repo.current_epoch();
+
+    push_branch_ahead(
+        &repo,
+        "docs/README.md",
+        "# README\n\nupdated by direct commit\n",
+        "docs: direct commit outside maw",
+    );
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "feat: merge alice",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !out.status.success(),
+        "merge must be blocked by a committed-ahead + dirty sibling.\n{combined}"
+    );
+    assert!(
+        combined.contains("diverged") && combined.contains("bob"),
+        "block message should surface divergence and name bob.\n{combined}"
+    );
+
+    // No half-moved state: bob's HEAD and the epoch are untouched.
+    let bob_head_after = repo
+        .git_in_workspace("bob", &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        bob_head_after, bob_head_before,
+        "a blocked absorb must not move bob's HEAD"
+    );
+    assert_eq!(
+        repo.current_epoch(),
+        epoch_before,
+        "a blocked absorb must not advance the epoch"
+    );
+}

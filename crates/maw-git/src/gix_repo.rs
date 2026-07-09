@@ -497,6 +497,25 @@ impl GixRepo {
         crate::checkout_impl::checkout_detach(self, oid, workdir)
     }
 
+    /// Move detached HEAD to `oid` **without touching the working tree**.
+    ///
+    /// Atomic HEAD write (temp file + rename) plus a reflog entry (bn-20sa),
+    /// exactly like [`checkout_detach`] but omitting the `checkout_tree`
+    /// materialisation. Used by the FF-absorb path (bn-rah2), which has
+    /// already materialised the desired worktree state by hand and only needs
+    /// the guarded, reflog-writing HEAD move — retiring the raw
+    /// `std::fs::write(HEAD)` that left no trail and bypassed the bn-8flz
+    /// "no HEAD movement outside guarded native primitives" invariant.
+    ///
+    /// Uncommitted edits in the worktree survive (the index is left as-is;
+    /// callers that need it reset call [`GixRepo::unstage_all`] afterwards).
+    ///
+    /// # Errors
+    /// Returns a `GitError` if the HEAD file cannot be written.
+    pub fn set_head_detached(&self, oid: GitOid) -> Result<(), GitError> {
+        crate::checkout_impl::set_head(self, oid)
+    }
+
     /// Point HEAD at `<branch>` and update the worktree to match.
     ///
     /// Equivalent to `git checkout <branch>` but fully native:

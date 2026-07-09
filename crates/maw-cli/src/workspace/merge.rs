@@ -3286,36 +3286,165 @@ fn reconcile_epoch_with_branch(
             let count = repo
                 .walk_commits(epoch_git, branch_git, false)
                 .map_or(0, |walk| walk.len());
-            maw_core::refs::write_epoch_current(root, branch_oid)
-                .map_err(|e| anyhow::anyhow!("failed to advance epoch ref: {e}"))?;
+            // bn-rah2: classify every non-target sibling BEFORE mutating any
+            // state. A sibling with COMMITTED work ahead of its base epoch
+            // must be REPLAYED onto the absorbed tip via the same guarded
+            // rebase the sibling auto-rebase uses — the old code raw-reset its
+            // HEAD to `branch_oid`, orphaning the work commit and leaving its
+            // files as untracked worktree cruft (data-loss class). Siblings
+            // whose HEAD is still at their base epoch (clean, or dirty with
+            // edits the safety predicate already proved disjoint from the FF
+            // range) take the FF-materialize path. A sibling that is BOTH
+            // committed-ahead AND dirty cannot be replayed (rebase refuses a
+            // dirty worktree) — it blocks the whole absorb so the merge prints
+            // the epoch-sync guidance rather than half-moving anything.
+            #[allow(clippy::items_after_statements)]
+            enum SiblingPlan {
+                FastForward { dirty: bool },
+                Replay { base_epoch: String },
+            }
+            #[allow(clippy::items_after_statements)]
+            struct SiblingClass {
+                name: String,
+                ws_path: PathBuf,
+                plan: SiblingPlan,
+            }
 
-            // Safety predicate guarantees no in-flight workspace has touched
-            // a file in the FF range. To keep
-            // `is_stale = base_epoch == current_epoch` consistent, bump each
-            // workspace's per-workspace epoch ref to the new tip; otherwise
-            // the next gate (`stale_merge_sources`) would block the merge we
-            // just unblocked.
-            //
-            // Each workspace's worktree also needs to be FF'd for the
-            // absorbed paths only — the merge engine snapshots dirty files
-            // by diffing the worktree against the *current* epoch, and a
-            // workspace that still holds the pre-absorb content for an FF
-            // path would look like it is "reverting" the upstream change.
-            // The predicate makes this safe: dirty paths (if any) are
-            // disjoint from `ff_paths`, so per-path `git checkout` cannot
-            // clobber local edits.
+            let mut classes: Vec<SiblingClass> = Vec::new();
+            let mut blocked: Vec<String> = Vec::new();
             for ws in &ws_touched {
-                let epoch_ref = maw_core::refs::workspace_epoch_ref(&ws.name);
-                if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
-                    tracing::warn!(
-                        workspace = %ws.name,
-                        error = %e,
-                        "failed to advance workspace epoch ref after FF absorb"
-                    );
+                // The merge target (default) has dedicated handling below
+                // (`sync_target_worktree_to_epoch`). It only appears in
+                // `ws_touched` when dirty; never treat it as a sibling.
+                if ws.name == target_workspace_name {
+                    continue;
                 }
                 let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
                     .workspace_path(root, &ws.name);
-                sync_ff_paths_in_worktree(&ws_path, &ws.name, branch_oid, &ff_paths);
+
+                // Base epoch: the sibling's recorded per-workspace epoch (its
+                // commits are `base_epoch..HEAD`). Fall back to the global
+                // pre-absorb epoch if the ref is missing.
+                let base_epoch =
+                    maw_core::refs::read_ref(root, &maw_core::refs::workspace_epoch_ref(&ws.name))
+                        .ok()
+                        .flatten()
+                        .map_or_else(|| epoch_oid.as_str().to_owned(), |o| o.as_str().to_owned());
+
+                // Already synced to the absorbed tip — nothing to do.
+                if base_epoch == branch_oid.as_str() {
+                    continue;
+                }
+
+                let head = maw_git::GixRepo::open(&ws_path)
+                    .ok()
+                    .and_then(|r| r.rev_parse_opt("HEAD").ok().flatten())
+                    .map(|h| h.to_string());
+                let dirty = !dirty_paths_in_workspace(&ws_path).is_empty();
+
+                match head {
+                    // Committed-ahead: HEAD advanced past the base epoch.
+                    Some(h) if h != base_epoch => {
+                        if dirty {
+                            // Cannot replay a dirty worktree; block the absorb.
+                            blocked.push(ws.name.clone());
+                        } else {
+                            classes.push(SiblingClass {
+                                name: ws.name.clone(),
+                                ws_path,
+                                plan: SiblingPlan::Replay { base_epoch },
+                            });
+                        }
+                    }
+                    // HEAD at base epoch (or unreadable — fall back to the
+                    // non-destructive FF path, which preserves the worktree).
+                    _ => {
+                        classes.push(SiblingClass {
+                            name: ws.name.clone(),
+                            ws_path,
+                            plan: SiblingPlan::FastForward { dirty },
+                        });
+                    }
+                }
+            }
+
+            // A committed-ahead + dirty sibling blocks the absorb. Bail BEFORE
+            // any ref/HEAD mutation so nothing is left half-moved.
+            if !blocked.is_empty() {
+                return bail_diverged(&blocked);
+            }
+
+            let mut notes: Vec<String> = Vec::new();
+            let trigger = format!(
+                "absorb:ff({}..{})",
+                &epoch_oid.as_str()[..12],
+                &branch_oid.as_str()[..12]
+            );
+
+            // Replay committed-ahead siblings FIRST, before advancing the
+            // global epoch. A replay failure aborts the absorb cleanly: the
+            // global epoch is still untouched and every already-replayed
+            // sibling is in a coherent rebased state (its own epoch ref and
+            // HEAD both landed on the absorbed tip), so a merge retry simply
+            // sees them up to date. No sibling is ever left half-moved.
+            for c in &classes {
+                if let SiblingPlan::Replay { base_epoch } = &c.plan {
+                    match super::sync::rebase::rebase_sibling_for_absorb(
+                        root,
+                        &c.name,
+                        base_epoch,
+                        branch_oid.as_str(),
+                        &c.ws_path,
+                        0, // header count only (suppressed: print = false)
+                        &trigger,
+                    ) {
+                        Ok(outcome) => notes.push(format!(
+                            "  {}: replayed {} commit(s) onto absorbed epoch",
+                            c.name, outcome.replayed
+                        )),
+                        Err(e) => {
+                            tracing::warn!(
+                                workspace = %c.name,
+                                error = %e,
+                                "FF absorb: sibling replay failed; aborting absorb"
+                            );
+                            return bail_diverged(std::slice::from_ref(&c.name));
+                        }
+                    }
+                }
+            }
+
+            // All risky work done — now commit the epoch advance.
+            maw_core::refs::write_epoch_current(root, branch_oid)
+                .map_err(|e| anyhow::anyhow!("failed to advance epoch ref: {e}"))?;
+
+            // FF-path siblings: advance the per-workspace epoch ref to the new
+            // tip (keeps `is_stale = base_epoch == current_epoch` consistent so
+            // the next gate doesn't re-block the merge we just unblocked) and
+            // materialize the absorbed paths into the worktree. The predicate
+            // proved any dirty paths are disjoint from `ff_paths`, so this
+            // cannot clobber local edits; the HEAD move now goes through the
+            // guarded `set_head` primitive (bn-8flz invariant).
+            for c in &classes {
+                if let SiblingPlan::FastForward { dirty } = c.plan {
+                    let epoch_ref = maw_core::refs::workspace_epoch_ref(&c.name);
+                    if let Err(e) = maw_core::refs::write_ref(root, &epoch_ref, branch_oid) {
+                        tracing::warn!(
+                            workspace = %c.name,
+                            error = %e,
+                            "failed to advance workspace epoch ref after FF absorb"
+                        );
+                    }
+                    sync_ff_paths_in_worktree(&c.ws_path, &c.name, branch_oid, &ff_paths);
+                    notes.push(if dirty {
+                        format!(
+                            "  {}: fast-forwarded to absorbed epoch (uncommitted edits preserved)",
+                            c.name
+                        )
+                    } else {
+                        format!("  {}: fast-forwarded to absorbed epoch", c.name)
+                    });
+                }
             }
 
             // Also advance the target's per-workspace epoch ref. Otherwise
@@ -3352,6 +3481,9 @@ fn reconcile_epoch_with_branch(
                 &epoch_oid.as_str()[..12],
                 &branch_oid.as_str()[..12]
             );
+            for note in &notes {
+                eprintln!("{note}");
+            }
             Ok(FfReconcile::Absorbed {
                 new_epoch: branch_oid.clone(),
                 count,
@@ -3600,14 +3732,13 @@ fn sync_ff_paths_in_worktree(
     }
 
     // Move HEAD to the new epoch without touching the working tree (so
-    // uncommitted edits in disjoint paths survive). Mirrors the ANCHOR
-    // step of `update_default_workspace`: write the raw OID to the
-    // worktree's HEAD file directly, then unstage_all() to align the index.
-    let head_path = ws_repo.git_dir().join("HEAD");
-    if let Err(e) = std::fs::write(&head_path, format!("{oid}\n")) {
+    // uncommitted edits in disjoint paths survive), then align the index.
+    // bn-rah2: the guarded native `set_head` primitive (atomic write +
+    // reflog) replaces the old raw `std::fs::write(HEAD)` — no production
+    // HEAD movement outside guarded native primitives (bn-8flz).
+    if let Err(e) = ws_repo.set_head_detached(target_git) {
         tracing::warn!(
             workspace = %ws_name,
-            path = %head_path.display(),
             error = %e,
             "failed to detach worktree HEAD during FF absorb"
         );
@@ -3761,12 +3892,13 @@ fn sync_target_worktree_to_epoch(
             }
         }
     }
-    // Move HEAD and align the index with the new HEAD.
-    let head_path = ws_repo.git_dir().join("HEAD");
-    if let Err(e) = std::fs::write(&head_path, format!("{oid}\n")) {
+    // Move HEAD and align the index with the new HEAD. bn-rah2: guarded
+    // native `set_head` (atomic write + reflog) replaces the raw
+    // `std::fs::write(HEAD)` — no production HEAD movement outside guarded
+    // native primitives (bn-8flz).
+    if let Err(e) = ws_repo.set_head_detached(target_git) {
         tracing::warn!(
             workspace = %target_workspace_name,
-            path = %head_path.display(),
             error = %e,
             "FF absorb (target): failed to write HEAD"
         );

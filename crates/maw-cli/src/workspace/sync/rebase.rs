@@ -248,6 +248,47 @@ pub fn rebase_workspace(
     .map(|_| ())
 }
 
+/// FF-absorb sibling replay (bn-rah2).
+///
+/// When `maw ws merge` absorbs out-of-maw trunk commits into the epoch, every
+/// non-target sibling that has *committed* work ahead of the epoch must be
+/// replayed onto the absorbed tip through the SAME guarded rebase machinery
+/// the sibling auto-rebase uses — never raw-reset. This wrapper exposes
+/// [`rebase_workspace_run`] (which is `pub(super)`) to the `merge` module with
+/// the absorb-appropriate options: silent (`print: false`, the merge prints
+/// its own per-sibling NOTE), worktree-synced, self-locking, and strict
+/// (`continue_past_worktree_failure: false`) so any failure surfaces as `Err`
+/// and lets the caller abort the absorb cleanly rather than leave a
+/// half-moved sibling.
+///
+/// Returns the structured [`RebaseOutcome`] so the caller can report the
+/// replayed-commit count.
+pub fn rebase_sibling_for_absorb(
+    root: &Path,
+    ws_name: &str,
+    old_epoch: &str,
+    new_epoch: &str,
+    ws_path: &Path,
+    ahead_count: u32,
+    trigger: &str,
+) -> Result<RebaseOutcome> {
+    rebase_workspace_run(
+        root,
+        ws_name,
+        old_epoch,
+        new_epoch,
+        ws_path,
+        ahead_count,
+        RebaseRunOptions {
+            print: false,
+            mutate_worktree: true,
+            acquire_lock: true,
+            continue_past_worktree_failure: false,
+        },
+        trigger,
+    )
+}
+
 /// Core rebase routine. Returns a structured [`RebaseOutcome`] so callers
 /// that don't want the full stdout flow (sibling auto-rebase) can summarize
 /// the result themselves.
