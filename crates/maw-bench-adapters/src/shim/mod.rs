@@ -230,9 +230,9 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let m = fs::metadata(&git).unwrap().permissions().mode();
-            assert!(m & 0o111 != 0, "git shim not executable (mode={m:o})");
+            assert_ne!(m & 0o111, 0, "git shim not executable (mode={m:o})");
             let m = fs::metadata(&jj).unwrap().permissions().mode();
-            assert!(m & 0o111 != 0, "jj shim not executable (mode={m:o})");
+            assert_ne!(m & 0o111, 0, "jj shim not executable (mode={m:o})");
         }
     }
 

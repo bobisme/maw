@@ -42,7 +42,7 @@ fn zero_event_cell_renders_lower_zero_and_nontrivial_upper() {
     let cell = s.cell("maw", "C0", "T0").unwrap();
     assert_eq!(cell.work_lost_rate_ci.k, 0);
     assert_eq!(cell.work_lost_rate_ci.n, 20);
-    assert!(cell.work_lost_rate_ci.lower == 0.0);
+    assert_eq!(cell.work_lost_rate_ci.lower, 0.0);
     assert!(cell.work_lost_rate_ci.upper > 0.10);
     assert!(cell.work_lost_rate_ci.upper < 0.25);
 }

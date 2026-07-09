@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn journal_phase_ordering_is_monotonic() {
-        assert!(JournalPhase::Start as u8 == 0);
+        assert_eq!(JournalPhase::Start as u8, 0);
         assert!((JournalPhase::PreflightDone as u8) < (JournalPhase::PreserveDone as u8));
         assert!((JournalPhase::PreserveDone as u8) < (JournalPhase::RelocateDone as u8));
         assert!((JournalPhase::RelocateDone as u8) < (JournalPhase::UnBareDone as u8));
