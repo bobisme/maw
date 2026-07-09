@@ -634,7 +634,9 @@ pub enum WorkspaceCommands {
     ///   integrated                previously merged work, now present at the current epoch
     ///
     /// Use --format json for machine-readable output, including the
-    /// `lifecycle_state` / `fix_command` fields above.
+    /// `lifecycle_state` / `fix_command` fields above. Use --names for a
+    /// bare list of workspace names, one per line, for piping into other
+    /// commands (e.g. `maw ws list --names | xargs -n1 maw ws sync`).
     #[command(verbatim_doc_comment)]
     List {
         /// Show detailed information
@@ -661,6 +663,16 @@ pub enum WorkspaceCommands {
         /// Shorthand for --format json
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+
+        /// Print only workspace names, one per line, no decoration
+        ///
+        /// Bare names suitable for piping into other commands, e.g.
+        /// `maw ws list --names | xargs -n1 maw ws sync`. Includes `default`
+        /// (it always exists and appears in every other list view); commands
+        /// that can't act on `default` already refuse it themselves.
+        /// Cannot be combined with --format/--json.
+        #[arg(long, conflicts_with_all = ["format", "json"])]
+        names: bool,
     },
 
     /// Alias for 'list'
@@ -674,6 +686,8 @@ pub enum WorkspaceCommands {
         format: Option<OutputFormat>,
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+        #[arg(long, conflicts_with_all = ["format", "json"])]
+        names: bool,
     },
 
     /// Show status of current workspace and all agent work
@@ -1551,17 +1565,25 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             check,
             format,
             json,
+            names,
         }
         | WorkspaceCommands::Ls {
             verbose,
             check,
             format,
             json,
-        } => list::list(
-            verbose,
-            check,
-            OutputFormat::resolve(OutputFormat::with_json_flag(format, json)),
-        ),
+            names,
+        } => {
+            if names {
+                list::list_names()
+            } else {
+                list::list(
+                    verbose,
+                    check,
+                    OutputFormat::resolve(OutputFormat::with_json_flag(format, json)),
+                )
+            }
+        }
         WorkspaceCommands::Status { format, json } => status::status(OutputFormat::resolve(
             OutputFormat::with_json_flag(format, json),
         )),

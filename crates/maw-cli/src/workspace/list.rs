@@ -447,6 +447,42 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// Print bare workspace names, one per line, nothing else (`maw ws list
+/// --names`).
+///
+/// Designed for piping into other commands, e.g.
+/// `maw ws list --names | xargs -n1 maw ws sync`. Shares the same workspace
+/// enumeration and `default`-injection logic as [`list`] (bn-2jez) so the
+/// name set always matches `--format json`'s `workspaces[].name` — `default`
+/// is included because it always exists and appears in every other list
+/// view; commands that can't act on it (e.g. `maw ws destroy default`)
+/// already refuse it themselves, so it's safe to include here rather than
+/// carving out a special case that would disagree with `--format json`.
+pub fn list_names() -> Result<()> {
+    let backend = get_backend()?;
+    let mut backend_workspaces = backend.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let root = repo_root()?;
+    inject_consolidated_default(&root, &mut backend_workspaces);
+
+    let mut names: Vec<&str> = backend_workspaces.iter().map(|ws| ws.id.as_str()).collect();
+    // Sort: default first, then alphabetical — matches the ordering `list()`
+    // uses for text/pretty/json output.
+    names.sort_by(
+        |a, b| match (*a == DEFAULT_WORKSPACE, *b == DEFAULT_WORKSPACE) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.cmp(b),
+        },
+    );
+
+    for name in names {
+        println!("{name}");
+    }
+
+    Ok(())
+}
+
 /// Whether this workspace has unresolved rebase conflict markers in its HEAD
 /// (bn-2l00). This is the single classification predicate shared by every
 /// `ws list` render path; it is derived from `rebase_conflicts`, which is

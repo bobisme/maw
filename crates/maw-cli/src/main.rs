@@ -85,7 +85,11 @@ enum Commands {
 
     /// Alias for 'maw ws list'
     #[command(hide = true, name = "ls")]
-    Ls,
+    Ls {
+        /// Print only workspace names, one per line, no decoration
+        #[arg(long)]
+        names: bool,
+    },
 
     /// Print the absolute path of a workspace (recipe for `cd`)
     ///
@@ -480,11 +484,12 @@ fn main() {
             println!("{}", path.display());
         }),
         Commands::Workspace(cmd) => workspace::run(cmd),
-        Commands::Ls => workspace::run(workspace::WorkspaceCommands::List {
+        Commands::Ls { names } => workspace::run(workspace::WorkspaceCommands::List {
             verbose: false,
             check: false,
             format: None,
             json: false,
+            names,
         }),
         Commands::Agents(ref cmd) => agents::run(cmd),
         Commands::Changes(ref cmd) => changes::run(cmd),
