@@ -146,7 +146,9 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
     checks.push(check_root_bare(root.as_deref()));
     checks.push(check_ghost_working_copy(root.as_deref()));
     checks.push(check_dangling_snapshots(root.as_deref()));
-    checks.push(check_abandoned_with_snapshot(root.as_deref()));
+    let (abandoned, unpinned) = check_destroy_records(root.as_deref());
+    checks.push(abandoned);
+    checks.push(unpinned);
     checks.push(check_stale_head_refs(root.as_deref()));
     checks.push(check_merge_state(root.as_deref()));
     if repair {
@@ -674,27 +676,62 @@ fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
 /// Status is `warn` (not `fail`) because the data is preserved by the
 /// Prime Invariant — this is a *prompt to drain the mergeback queue*,
 /// not a corruption signal.
-fn check_abandoned_with_snapshot(root: Option<&Path>) -> DoctorCheck {
-    let name = "abandoned-with-snapshot".to_string();
+///
+/// Returns two checks that share one classification pass (bn-3uou):
+/// - `abandoned-with-snapshot`: destroyed workspaces whose recovery snapshot
+///   ref is still present (recoverable; drain the mergeback queue).
+/// - `destroy-record-unpinned`: destroyed workspaces whose destroy record
+///   claims a recovery snapshot whose ref is gone (desynced — a later
+///   `git gc --prune` could drop the object). Kept distinct so a swept-ref
+///   state is surfaced rather than silently inflating the first count.
+fn check_destroy_records(root: Option<&Path>) -> (DoctorCheck, DoctorCheck) {
+    let abandoned_name = "abandoned-with-snapshot".to_string();
+    let unpinned_name = "destroy-record-unpinned".to_string();
+
+    let unknown = |name: String, reason: &str| DoctorCheck {
+        name: name.clone(),
+        status: "ok".to_string(),
+        message: format!("{name}: could not check ({reason})"),
+        fix: None,
+    };
+
     let Some(root) = root else {
-        return DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: "abandoned-with-snapshot: could not check (no root)".to_string(),
-            fix: None,
-        };
+        return (
+            unknown(abandoned_name, "no root"),
+            unknown(unpinned_name, "no root"),
+        );
     };
 
-    let Ok(abandoned) = workspace::destroy_record::list_destroyed_workspaces(root) else {
-        return DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: "abandoned-with-snapshot: could not check (read error)".to_string(),
-            fix: None,
-        };
+    let Ok(pinning) = workspace::recover::classify_destroyed_workspaces(root) else {
+        return (
+            unknown(abandoned_name, "read error"),
+            unknown(unpinned_name, "read error"),
+        );
     };
 
-    if abandoned.is_empty() {
+    (
+        abandoned_with_snapshot_check(abandoned_name, &pinning.pinned),
+        destroy_record_unpinned_check(unpinned_name, &pinning.unpinned),
+    )
+}
+
+/// Join up to three names as a `a, b, c (+N more)` preview.
+fn preview_names(names: &[String]) -> String {
+    let head = names
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > 3 {
+        format!("{head} (+{} more)", names.len() - 3)
+    } else {
+        head
+    }
+}
+
+fn abandoned_with_snapshot_check(name: String, pinned: &[String]) -> DoctorCheck {
+    if pinned.is_empty() {
         return DoctorCheck {
             name,
             status: "ok".to_string(),
@@ -703,33 +740,53 @@ fn check_abandoned_with_snapshot(root: Option<&Path>) -> DoctorCheck {
         };
     }
 
-    // Emit the first three names as a sample so the agent can act
-    // without a separate `maw ws recover` call to discover them.
-    let preview: Vec<&String> = abandoned.iter().take(3).collect();
-    let preview_str = preview
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if abandoned.len() > 3 {
-        format!(" (+{} more)", abandoned.len() - 3)
-    } else {
-        String::new()
-    };
-    let first = abandoned.first().expect("non-empty checked above");
+    let first = pinned.first().expect("non-empty checked above");
     DoctorCheck {
         name,
         status: "warn".to_string(),
         message: format!(
             "abandoned-with-snapshot: {} destroyed workspace(s) retain a recovery snapshot \
-             (these are destroy records — the `maw ws recover` audit trail; expected after \
-             `ws destroy`, no work is lost). Counts records, not refs, so `maw gc \
-             --recovery-snapshots` does not reduce it: {preview_str}{suffix}",
-            abandoned.len()
+             (destroy records with a still-pinned `refs/manifold/recovery/...` — the \
+             `maw ws recover` audit trail; expected after `ws destroy`, no work is lost): {}",
+            pinned.len(),
+            preview_names(pinned)
         ),
         fix: Some(format!(
-            "Review: maw ws recover  |  Restore one: maw ws recover {first} --to {first}-restored"
+            "Restore one: maw ws recover {first} --to {first}-restored  |  Prune old ones \
+             (ref + record together): maw gc --recovery-snapshots --dry-run, then maw gc \
+             --recovery-snapshots"
         )),
+    }
+}
+
+fn destroy_record_unpinned_check(name: String, unpinned: &[String]) -> DoctorCheck {
+    if unpinned.is_empty() {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "destroy-record-unpinned: none".to_string(),
+            fix: None,
+        };
+    }
+
+    DoctorCheck {
+        name,
+        status: "warn".to_string(),
+        message: format!(
+            "destroy-record-unpinned: {} destroyed workspace(s) have a destroy record that \
+             claims a recovery snapshot whose ref is already gone (swept by an older `maw gc \
+             --refs`, or manually deleted). The snapshot object is unpinned and a future \
+             `git gc --prune` may drop it: {}",
+            unpinned.len(),
+            preview_names(unpinned)
+        ),
+        fix: Some(
+            "Prune desynced records older than 30 days: maw gc --recovery-snapshots (preview \
+             with --dry-run). CAUTION: --older-than 0 drains them all, but ALSO sweeps every \
+             still-pinned recovery snapshot and its record — recently destroyed workspaces \
+             become unrecoverable."
+                .to_string(),
+        ),
     }
 }
 

@@ -310,14 +310,12 @@ enum Commands {
 
     /// Garbage-collect unreferenced epoch snapshots and stale refs
     ///
-    /// Two artifacts to keep straight:
+    /// Two artifacts to keep straight, always pruned together:
     ///   - recovery snapshot: the pinned commit (a `refs/manifold/recovery/*`
-    ///     ref) holding a destroyed workspace's content.
-    ///   - destroy record: the `maw ws recover` audit entry pointing at it.
-    ///
-    /// This command only touches refs — it never removes destroy records, so
-    /// the `maw doctor` "abandoned-with-snapshot" count (which counts records)
-    /// is unaffected by it.
+    ///     ref) holding a destroyed workspace's content. The ref is what stops
+    ///     `git gc` from dropping the snapshot object.
+    ///   - destroy record: the `maw ws recover` audit entry pointing at it
+    ///     (`.maw/manifold/artifacts/ws/<name>/destroy/`).
     ///
     /// Without flags: removes `.manifold/epochs/e-<oid>` directories that
     /// are no longer referenced by any active workspace, and prunes
@@ -326,23 +324,30 @@ enum Commands {
     /// warning). Head refs owned by a live in-flight merge are preserved.
     ///
     /// With --recovery-snapshots: additionally removes old recovery snapshots
-    /// whose commits are older than --older-than days (default: 30). Newer
-    /// snapshots are kept.
+    /// whose commits are older than --older-than days (default: 30), AND prunes
+    /// each destroyed workspace's matching destroy record in lockstep so the
+    /// two never disagree (a swept ref never leaves a record claiming an
+    /// unpinned snapshot). Records whose recovery ref was already swept by an
+    /// older `maw gc --refs` are cleaned up too when older than --older-than.
+    /// This is what makes `maw doctor`'s "abandoned-with-snapshot" count
+    /// actually drop. Newer snapshots (and records for live workspaces) are
+    /// kept.
     ///
     /// Examples:
     ///   maw gc                              # epoch GC + dangling head-ref cleanup
     ///   maw gc --dry-run                    # preview the above
-    ///   maw gc --recovery-snapshots         # also remove old recovery snapshots
+    ///   maw gc --recovery-snapshots         # remove old snapshots + their records
     ///   maw gc --recovery-snapshots --dry-run        # preview snapshot cleanup
     ///   maw gc --recovery-snapshots --older-than 7   # remove snapshots older than 7 days
+    ///   maw gc --recovery-snapshots --older-than 0   # drain the whole recover queue
     #[command(verbatim_doc_comment)]
     Gc {
         /// Preview removals without deleting anything
         #[arg(long)]
         dry_run: bool,
 
-        /// Also remove recovery snapshots older than --older-than days
-        /// (does not touch destroy records). `--refs` is a deprecated alias.
+        /// Also remove recovery snapshots older than --older-than days, pruning
+        /// each one's destroy record in lockstep. `--refs` is a deprecated alias.
         #[arg(long = "recovery-snapshots", alias = "refs")]
         recovery_snapshots: bool,
 

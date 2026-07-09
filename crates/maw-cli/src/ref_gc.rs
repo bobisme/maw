@@ -15,6 +15,7 @@
 //! Recovery refs are deleted if they are older than a configurable threshold
 //! (default: 30 days), based on the commit timestamp of the referenced commit.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,8 @@ use anyhow::{Context, Result};
 use maw_git::GitRepo as _;
 
 use maw_core::refs;
+
+use crate::workspace::destroy_record;
 
 /// Result of a ref GC pass.
 #[derive(Debug, Default)]
@@ -36,6 +39,11 @@ pub struct RefGcReport {
     pub stale_head_names: Vec<String>,
     /// Recovery ref names that were deleted.
     pub deleted_recovery_refs: Vec<String>,
+    /// Number of destroy records pruned in lockstep with their recovery refs
+    /// (or because their recovery ref was already gone). See [`run`].
+    pub destroy_records_deleted: usize,
+    /// `(workspace, record filename)` of every destroy record pruned.
+    pub deleted_destroy_records: Vec<(String, String)>,
 }
 
 /// Count stale head refs (refs for workspaces that no longer exist).
@@ -207,11 +215,22 @@ pub fn run_head_refs_cli(root: &Path, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run ref GC: delete stale head refs and old recovery refs.
+/// Run ref GC: delete stale head refs and old recovery refs, and keep destroy
+/// records coherent with the recovery refs they claim (bn-3uou).
 ///
 /// - Head refs are deleted if `ws/<name>/` does not exist.
 /// - Recovery refs are deleted if the commit they reference is older than
 ///   `older_than_days` days (default: 30).
+/// - Destroy records (the `maw ws recover` audit trail under
+///   `.maw/manifold/artifacts/ws/<name>/destroy/`) are pruned in lockstep so
+///   the system never lands in the incoherent "record claims a snapshot whose
+///   recovery ref was swept" state that a later `git gc --prune` would turn
+///   into a dangling pointer. A record is pruned when, for a workspace that no
+///   longer exists, either its recovery ref is being swept in this same pass,
+///   or its recovery ref is already gone (a prior sweep / manual delete) and
+///   the record itself is older than `older_than_days`. Records for
+///   still-existing workspaces, and `none`-mode records that never pinned a
+///   snapshot, are never touched.
 ///
 /// If `dry_run` is true, nothing is deleted but the report shows what would be.
 #[allow(clippy::missing_errors_doc)]
@@ -229,6 +248,13 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
     let recovery_refs = repo
         .list_refs(recovery_prefix)
         .map_err(|e| anyhow::anyhow!("list_refs failed for recovery refs: {e}"))?;
+
+    // Every recovery ref that currently exists, captured before deletion so the
+    // record-pruning pass can tell "kept (recent pin)" from "already gone".
+    let existing_recovery_refs: HashSet<String> = recovery_refs
+        .iter()
+        .map(|(name, _)| name.as_str().to_string())
+        .collect();
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -257,7 +283,84 @@ pub fn run(root: &Path, older_than_days: u64, dry_run: bool) -> Result<RefGcRepo
         }
     }
 
+    // --- Destroy records (coherence with recovery refs) ---
+    let swept_recovery_refs: HashSet<String> =
+        report.deleted_recovery_refs.iter().cloned().collect();
+    prune_desynced_destroy_records(
+        root,
+        &existing_recovery_refs,
+        &swept_recovery_refs,
+        cutoff,
+        dry_run,
+        &mut report,
+    )?;
+
     Ok(report)
+}
+
+/// Prune destroy records so they stay coherent with recovery refs.
+///
+/// Driven by two ref-name sets from the recovery-ref pass:
+/// - `existing_recovery_refs`: every recovery ref that existed at the start of
+///   this GC (before any deletion).
+/// - `swept_recovery_refs`: the subset being deleted in this pass.
+///
+/// For each destroyed workspace (directory gone) and each of its records that
+/// claims a recovery ref:
+/// - claimed ref is being swept now → prune the record in lockstep;
+/// - claimed ref still exists and is not being swept → keep (recent pin);
+/// - claimed ref is already gone → the record is desynced; prune it when it is
+///   older than the cutoff.
+///
+/// `none`-mode records (no snapshot pinned) and records for still-existing
+/// workspaces are never touched.
+fn prune_desynced_destroy_records(
+    root: &Path,
+    existing_recovery_refs: &HashSet<String>,
+    swept_recovery_refs: &HashSet<String>,
+    cutoff: u64,
+    dry_run: bool,
+    report: &mut RefGcReport,
+) -> Result<()> {
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+
+    for ws in destroy_record::list_destroyed_workspaces(root)? {
+        // Never touch records for a workspace that currently exists.
+        if flavor.workspace_path(root, &ws).exists() {
+            continue;
+        }
+        for filename in destroy_record::list_record_files(root, &ws)? {
+            let Ok(record) = destroy_record::read_record(root, &ws, &filename) else {
+                continue;
+            };
+            let Some(claimed) = record.recovery_ref() else {
+                // `none`-mode record: no snapshot, pure audit trail. Leave it.
+                continue;
+            };
+            let prune = if swept_recovery_refs.contains(claimed) {
+                // Ref is being swept in this pass — prune the record too so no
+                // unpinned-but-claimed state is ever created.
+                true
+            } else if existing_recovery_refs.contains(claimed) {
+                // Ref still pinned and newer than the cutoff — keep both.
+                false
+            } else {
+                // Ref already gone (prior sweep / manual delete): the record is
+                // desynced. Age-gate its removal by the record's own timestamp.
+                record
+                    .destroyed_at_epoch_secs()
+                    .is_some_and(|ts| ts <= cutoff)
+            };
+            if prune {
+                if !dry_run {
+                    destroy_record::remove_record(root, &ws, &filename)?;
+                }
+                report.destroy_records_deleted += 1;
+                report.deleted_destroy_records.push((ws.clone(), filename));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Get the commit timestamp (committer date as unix epoch seconds) for a given OID.
@@ -274,7 +377,10 @@ fn get_commit_timestamp(repo: &maw_git::GixRepo, oid: maw_git::GitOid) -> Option
 pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
     let report = run(root, older_than_days, dry_run)?;
 
-    if report.head_refs_deleted == 0 && report.recovery_refs_deleted == 0 {
+    if report.head_refs_deleted == 0
+        && report.recovery_refs_deleted == 0
+        && report.destroy_records_deleted == 0
+    {
         println!("No stale refs found. Nothing to clean up.");
         return Ok(());
     }
@@ -300,23 +406,30 @@ pub fn run_cli(root: &Path, older_than_days: u64, dry_run: bool) -> Result<()> {
                 println!("    {r}");
             }
         }
+        if !report.deleted_destroy_records.is_empty() {
+            println!(
+                "  Would prune {} destroy record(s) whose recovery snapshot is (or is being) \
+                 removed:",
+                report.destroy_records_deleted
+            );
+            for (ws, file) in &report.deleted_destroy_records {
+                println!("    {ws}/{file}");
+            }
+        }
         println!("To apply: maw gc --recovery-snapshots");
     } else {
+        // Recovery refs (the snapshot pins) and destroy records (the
+        // `maw ws recover` audit trail) are pruned together so they never
+        // disagree — this is what lets `maw doctor`'s abandoned-with-snapshot
+        // count actually drop after a GC.
         println!(
-            "Pruned {} stale head ref(s); removed {} recovery snapshot(s) older than \
-             {older_than_days} day(s) ({} newer kept).",
-            report.head_refs_deleted, report.recovery_refs_deleted, report.recovery_refs_kept
+            "Pruned {} stale head ref(s); removed {} recovery snapshot(s) and {} destroy \
+             record(s) older than {older_than_days} day(s) ({} newer snapshot(s) kept).",
+            report.head_refs_deleted,
+            report.recovery_refs_deleted,
+            report.destroy_records_deleted,
+            report.recovery_refs_kept
         );
-        if report.recovery_refs_deleted > 0 {
-            // The destroy records (the `maw ws recover` audit trail) are a
-            // separate artifact and are intentionally NOT removed here — only
-            // the snapshot's ref pin is. Be explicit so the count in
-            // `maw doctor` (which counts destroy records) is not surprising.
-            println!(
-                "  Note: destroy records are kept (they remain listable via `maw ws recover`); \
-                 only the recovery-snapshot pins were removed."
-            );
-        }
     }
 
     Ok(())
@@ -642,5 +755,182 @@ mod tests {
         let report = run_head_refs_only(root, false).expect("run head refs");
         assert_eq!(report.head_refs_deleted, 1);
         assert_eq!(report.stale_head_names, vec!["ghost"]);
+    }
+
+    // --- bn-3uou: destroy-record coherence with recovery refs ---
+
+    use crate::workspace::capture::{CaptureMode, CaptureResult};
+    use crate::workspace::destroy_record::{self, DestroyReason, DestroyRecord, RecordCaptureMode};
+
+    /// Create a destroyed-workspace pair (recovery ref + matching destroy
+    /// record) pinned at `oid`. The record is written "now" via the real
+    /// writer so its `snapshot_ref` is exactly the ref we created.
+    fn seed_destroyed_with_ref(root: &Path, ws: &str, oid: &str, ref_ts: &str) -> String {
+        let git_oid = maw_core::model::types::GitOid::new(oid).expect("oid");
+        let ref_name = format!("refs/manifold/recovery/{ws}/{ref_ts}");
+        refs::write_ref(root, &ref_name, &git_oid).expect("write recovery ref");
+        let capture = CaptureResult {
+            commit_oid: git_oid.clone(),
+            pinned_ref: ref_name.clone(),
+            dirty_paths: vec!["draft.txt".to_string()],
+            mode: CaptureMode::WorktreeCapture,
+        };
+        let base = maw_core::model::types::EpochId::new(&"a".repeat(40)).expect("epoch");
+        destroy_record::write_destroy_record(
+            root,
+            ws,
+            &base,
+            &git_oid,
+            Some(&capture),
+            DestroyReason::Destroy,
+        )
+        .expect("write destroy record");
+        ref_name
+    }
+
+    /// Write a destroy record whose claimed recovery ref does NOT exist (the
+    /// desynced / already-swept state), with a caller-chosen `destroyed_at`.
+    fn seed_orphaned_record(root: &Path, ws: &str, destroyed_at: &str) {
+        let rec = DestroyRecord {
+            workspace_id: ws.to_string(),
+            destroyed_at: destroyed_at.to_string(),
+            final_head: "b".repeat(40),
+            final_head_ref: None,
+            snapshot_oid: Some("c".repeat(40)),
+            snapshot_ref: Some(format!("refs/manifold/recovery/{ws}/gone-forever")),
+            capture_mode: RecordCaptureMode::DirtySnapshot,
+            dirty_files: vec![],
+            base_epoch: "a".repeat(40),
+            destroy_reason: DestroyReason::Destroy,
+            tool_version: "test".to_string(),
+        };
+        let dir = destroy_record::destroy_dir(root, ws);
+        fs::create_dir_all(&dir).expect("create destroy dir");
+        let fname = format!("{}.json", destroyed_at.replace(':', "-"));
+        fs::write(
+            dir.join(&fname),
+            serde_json::to_string_pretty(&rec).expect("serialize record"),
+        )
+        .expect("write record file");
+    }
+
+    #[test]
+    fn gc_prunes_record_when_recovery_ref_is_swept() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        let ref_name = seed_destroyed_with_ref(root, "alice", &oid, "20260101-000000");
+
+        // older_than 0 → the (now-dated) commit is at/older than the cutoff,
+        // so the ref is swept AND its record pruned in lockstep.
+        let report = run(root, 0, false).expect("run gc");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert_eq!(report.destroy_records_deleted, 1);
+
+        assert!(
+            refs::read_ref(root, &ref_name).expect("read ref").is_none(),
+            "recovery ref must be swept"
+        );
+        assert!(
+            destroy_record::list_record_files(root, "alice")
+                .expect("list")
+                .is_empty(),
+            "destroy record must be pruned in lockstep with its ref"
+        );
+    }
+
+    #[test]
+    fn gc_keeps_record_when_recovery_ref_is_recent() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        seed_destroyed_with_ref(root, "bob", &oid, "20260101-000000");
+
+        // older_than 30 → the just-created commit is newer than the cutoff,
+        // so both the ref and its record are kept.
+        let report = run(root, 30, false).expect("run gc");
+        assert_eq!(report.recovery_refs_deleted, 0);
+        assert_eq!(report.destroy_records_deleted, 0);
+        assert_eq!(
+            destroy_record::list_record_files(root, "bob")
+                .expect("list")
+                .len(),
+            1,
+            "recent record must be kept"
+        );
+    }
+
+    #[test]
+    fn gc_does_not_touch_records_for_live_workspace() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+
+        // A LIVE workspace directory exists AND has an orphaned old record.
+        fs::create_dir_all(root.join("ws/carol")).expect("mk ws dir");
+        seed_orphaned_record(root, "carol", "2020-01-01T00:00:00.000000000Z");
+
+        let report = run(root, 0, false).expect("run gc");
+        assert_eq!(
+            report.destroy_records_deleted, 0,
+            "records for a still-existing workspace must never be pruned"
+        );
+        assert_eq!(
+            destroy_record::list_record_files(root, "carol")
+                .expect("list")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn gc_prunes_old_orphaned_record_but_keeps_recent_one() {
+        let (dir, _oid) = setup_repo();
+        let root = dir.path();
+
+        // Two destroyed (dir-gone) workspaces, each with a record whose
+        // recovery ref is already gone (the Defect-B residue). One is old,
+        // one is fresh.
+        seed_orphaned_record(root, "old-ws", "2020-01-01T00:00:00.000000000Z");
+        seed_orphaned_record(
+            root,
+            "fresh-ws",
+            &crate::workspace::now_timestamp_iso8601_precise(),
+        );
+
+        let report = run(root, 30, false).expect("run gc");
+        assert_eq!(
+            report.destroy_records_deleted, 1,
+            "only the old orphaned record should be age-gated for pruning"
+        );
+        assert!(
+            destroy_record::list_record_files(root, "old-ws")
+                .expect("list")
+                .is_empty(),
+            "old orphaned record pruned"
+        );
+        assert_eq!(
+            destroy_record::list_record_files(root, "fresh-ws")
+                .expect("list")
+                .len(),
+            1,
+            "fresh orphaned record kept (age gate protects it)"
+        );
+    }
+
+    #[test]
+    fn gc_dry_run_reports_but_does_not_prune_records() {
+        let (dir, oid) = setup_repo();
+        let root = dir.path();
+        seed_destroyed_with_ref(root, "dave", &oid, "20260101-000000");
+
+        let report = run(root, 0, true).expect("dry run");
+        assert_eq!(report.recovery_refs_deleted, 1);
+        assert_eq!(report.destroy_records_deleted, 1);
+        // Nothing actually removed.
+        assert_eq!(
+            destroy_record::list_record_files(root, "dave")
+                .expect("list")
+                .len(),
+            1,
+            "dry run must not delete records"
+        );
     }
 }

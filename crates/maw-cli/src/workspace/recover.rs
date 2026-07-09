@@ -1763,6 +1763,78 @@ pub fn cleanup_dangling_snapshots(root: &Path, all: bool) -> Result<Vec<Dangling
     Ok(removed)
 }
 
+/// Classification of destroyed workspaces by recovery-snapshot pinning state,
+/// used by `maw doctor` (bn-3uou).
+pub struct DestroyPinning {
+    /// Destroyed workspaces whose claimed recovery snapshot ref is still
+    /// present — recoverable; the "abandoned-with-snapshot" queue.
+    pub pinned: Vec<String>,
+    /// Destroyed workspaces that claim a recovery snapshot whose ref is gone
+    /// (swept by GC / manually deleted) — desynced; the snapshot object is at
+    /// risk from a future `git gc --prune`.
+    pub unpinned: Vec<String>,
+}
+
+/// Partition destroyed workspaces into "still pinned" vs "desynced (record
+/// claims a snapshot whose ref is gone)".
+///
+/// A workspace is only classified if it no longer exists on disk. Workspaces
+/// whose every destroy record is `none`-mode (no snapshot was ever pinned)
+/// appear in neither bucket — they carry no snapshot to lose.
+///
+/// # Errors
+///
+/// Returns an error if the repository cannot be opened or records cannot be
+/// read.
+pub fn classify_destroyed_workspaces(root: &Path) -> Result<DestroyPinning> {
+    let flavor = maw_core::model::layout::LayoutFlavor::detect_with_env(root);
+    let default_ws = flavor.default_target_path(root, "default");
+    let git_cwd = if default_ws.exists() {
+        default_ws
+    } else {
+        root.to_path_buf()
+    };
+
+    let existing: HashSet<String> = list_recovery_refs(&git_cwd)?
+        .into_iter()
+        .map(|r| r.ref_name)
+        .collect();
+
+    let mut pinned = Vec::new();
+    let mut unpinned = Vec::new();
+
+    for ws in destroy_record::list_destroyed_workspaces(root)? {
+        // A re-created workspace with the same name is active work, not an
+        // abandoned destroyed workspace — skip it.
+        if flavor.workspace_path(root, &ws).exists() {
+            continue;
+        }
+        let mut claims_snapshot = false;
+        let mut has_live_pin = false;
+        for f in destroy_record::list_record_files(root, &ws)? {
+            let Ok(rec) = destroy_record::read_record(root, &ws, &f) else {
+                continue;
+            };
+            if let Some(rf) = rec.recovery_ref() {
+                claims_snapshot = true;
+                if existing.contains(rf) {
+                    has_live_pin = true;
+                    break;
+                }
+            }
+        }
+        if has_live_pin {
+            pinned.push(ws);
+        } else if claims_snapshot {
+            unpinned.push(ws);
+        }
+    }
+
+    pinned.sort();
+    unpinned.sort();
+    Ok(DestroyPinning { pinned, unpinned })
+}
+
 /// Run `maw ws recover --gc` — list or clean up dangling snapshot refs.
 pub fn gc(all: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
     let root = repo_root()?;

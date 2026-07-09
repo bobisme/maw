@@ -49,6 +49,28 @@ pub struct DestroyRecord {
     pub tool_version: String,
 }
 
+impl DestroyRecord {
+    /// The recovery ref that pins this record's snapshot, if any.
+    ///
+    /// `dirty_snapshot` captures store the pin in `snapshot_ref`;
+    /// `head_only` captures store it in `final_head_ref`. `none`-mode
+    /// records have no snapshot and thus no pinning ref.
+    #[must_use]
+    pub fn recovery_ref(&self) -> Option<&str> {
+        self.snapshot_ref
+            .as_deref()
+            .or(self.final_head_ref.as_deref())
+    }
+
+    /// Parse `destroyed_at` (ISO-8601 UTC, e.g. `2026-03-07T00:05:47.278Z`)
+    /// into Unix epoch seconds. Returns `None` if the timestamp is
+    /// malformed. Used to age-gate destroy-record pruning.
+    #[must_use]
+    pub fn destroyed_at_epoch_secs(&self) -> Option<u64> {
+        parse_iso8601_utc_secs(&self.destroyed_at)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LatestPointer {
     pub record: String,
@@ -288,6 +310,119 @@ pub fn read_latest_record(root: &Path, workspace_name: &str) -> Result<Option<De
     }
 
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Prune API — used by `maw gc --recovery-snapshots` to keep destroy records
+// coherent with recovery refs (bn-3uou).
+// ---------------------------------------------------------------------------
+
+/// Remove a single timestamped destroy record and keep `latest.json`
+/// coherent.
+///
+/// If `latest.json` pointed at (or has gone stale relative to) the removed
+/// record, it is repointed at the newest surviving record. When the last
+/// record for a workspace is removed, `latest.json` and the now-empty
+/// `destroy/` (and parent `ws/<name>/`) directories are removed too so the
+/// workspace stops being reported as an abandoned destroyed workspace.
+///
+/// Returns `true` if a record file was actually removed.
+///
+/// # Errors
+///
+/// Returns an error if filesystem operations fail.
+pub fn remove_record(root: &Path, workspace_name: &str, filename: &str) -> Result<bool> {
+    let dir = destroy_dir(root, workspace_name);
+    let record_path = dir.join(filename);
+    if !record_path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&record_path)
+        .with_context(|| format!("remove destroy record {}", record_path.display()))?;
+
+    // Recompute latest.json from the surviving timestamped records.
+    let survivors = list_record_files(root, workspace_name)?;
+    let latest_path = dir.join("latest.json");
+    if let Some(newest) = survivors.last() {
+        // Repoint latest.json at the newest surviving record if it was
+        // pointing at the record we just removed (or is missing/stale).
+        let repoint = match read_latest_pointer(root, workspace_name)? {
+            Some(p) => p.record == filename || !survivors.contains(&p.record),
+            None => true,
+        };
+        if repoint {
+            let record = read_record(root, workspace_name, newest)?;
+            let latest = LatestPointer {
+                record: newest.clone(),
+                destroyed_at: record.destroyed_at,
+            };
+            write_json_atomic(&latest_path, &latest)?;
+        }
+    } else {
+        // No records remain — drop latest.json and the now-empty dirs.
+        if latest_path.exists() {
+            fs::remove_file(&latest_path)
+                .with_context(|| format!("remove {}", latest_path.display()))?;
+        }
+        // `remove_dir` only succeeds when the directory is empty, so this is
+        // a safe best-effort tidy-up: leftover sibling files keep the dir.
+        let _ = fs::remove_dir(&dir);
+        if let Some(ws_parent) = dir.parent() {
+            let _ = fs::remove_dir(ws_parent);
+        }
+    }
+    Ok(true)
+}
+
+/// Parse an ISO-8601 UTC timestamp (`YYYY-MM-DDThh:mm:ss[.fraction][Z]`) into
+/// Unix epoch seconds. Returns `None` if the fixed-width layout is malformed.
+///
+/// Timestamps are always emitted by [`super::now_timestamp_iso8601_precise`]
+/// in this exact zero-padded UTC form, so a bespoke parser avoids pulling in
+/// a date-time dependency.
+fn parse_iso8601_utc_secs(ts: &str) -> Option<u64> {
+    let bytes = ts.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let year: i64 = ts.get(0..4)?.parse().ok()?;
+    let month: i64 = ts.get(5..7)?.parse().ok()?;
+    let day: i64 = ts.get(8..10)?.parse().ok()?;
+    let hour: u64 = ts.get(11..13)?.parse().ok()?;
+    let min: u64 = ts.get(14..16)?.parse().ok()?;
+    let sec: u64 = ts.get(17..19)?.parse().ok()?;
+    if hour >= 24 || min >= 60 || sec >= 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    days.checked_mul(86_400)?
+        .checked_add(hour * 3_600 + min * 60 + sec)
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (the inverse of
+/// `days_to_ymd` in the parent module; Howard Hinnant's `days_from_civil`).
+/// Returns `None` for out-of-range months/days or pre-epoch dates (we only
+/// ever handle post-2020 destroy timestamps).
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<u64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days).ok()
 }
 
 #[cfg(test)]
@@ -705,5 +840,127 @@ mod tests {
             10,
             "expected 10 distinct destroy records, got: {records:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-3uou: recovery_ref accessor, timestamp parsing, and remove_record
+    // (latest.json coherence on partial prune).
+    // -----------------------------------------------------------------------
+
+    fn record_with_refs(snapshot_ref: Option<&str>, final_head_ref: Option<&str>) -> DestroyRecord {
+        DestroyRecord {
+            workspace_id: "ws".to_owned(),
+            destroyed_at: "2026-03-07T00:05:47.278Z".to_owned(),
+            final_head: "b".repeat(40),
+            final_head_ref: final_head_ref.map(str::to_owned),
+            snapshot_oid: snapshot_ref.map(|_| "c".repeat(40)),
+            snapshot_ref: snapshot_ref.map(str::to_owned),
+            capture_mode: RecordCaptureMode::DirtySnapshot,
+            dirty_files: vec![],
+            base_epoch: "a".repeat(40),
+            destroy_reason: DestroyReason::Destroy,
+            tool_version: "test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn recovery_ref_prefers_snapshot_then_final_head() {
+        assert_eq!(
+            record_with_refs(Some("refs/manifold/recovery/ws/snap"), None).recovery_ref(),
+            Some("refs/manifold/recovery/ws/snap")
+        );
+        assert_eq!(
+            record_with_refs(None, Some("refs/manifold/recovery/ws/head")).recovery_ref(),
+            Some("refs/manifold/recovery/ws/head")
+        );
+        assert_eq!(record_with_refs(None, None).recovery_ref(), None);
+    }
+
+    #[test]
+    fn destroyed_at_epoch_secs_parses_iso8601() {
+        // 2026-03-07T00:05:47Z — verified against a reference epoch value.
+        let rec = record_with_refs(None, None);
+        assert_eq!(rec.destroyed_at_epoch_secs(), Some(1_772_841_947));
+
+        // A malformed timestamp yields None (no panic).
+        let mut bad = record_with_refs(None, None);
+        bad.destroyed_at = "not-a-timestamp".to_owned();
+        assert_eq!(bad.destroyed_at_epoch_secs(), None);
+
+        // Epoch zero.
+        let mut zero = record_with_refs(None, None);
+        zero.destroyed_at = "1970-01-01T00:00:00Z".to_owned();
+        assert_eq!(zero.destroyed_at_epoch_secs(), Some(0));
+    }
+
+    #[test]
+    fn remove_record_repoints_latest_json_on_partial_prune() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let root = dir.path();
+        let ws = "multi";
+        let base = EpochId::new(&"a".repeat(40)).expect("epoch");
+        let h1 = GitOid::new(&"1".repeat(40)).expect("oid");
+        let h2 = GitOid::new(&"2".repeat(40)).expect("oid");
+
+        // Two records; latest.json points at the second (newest).
+        write_destroy_record(root, ws, &base, &h1, None, DestroyReason::Destroy).expect("r1");
+        write_destroy_record(root, ws, &base, &h2, None, DestroyReason::Destroy).expect("r2");
+        let files = list_record_files(root, ws).expect("list");
+        assert_eq!(files.len(), 2);
+        let newest = files[1].clone();
+
+        // Remove the NEWEST record (the one latest.json points at). latest.json
+        // must repoint at the surviving (older) record, not dangle.
+        let removed = remove_record(root, ws, &newest).expect("remove");
+        assert!(removed);
+        let survivors = list_record_files(root, ws).expect("list");
+        assert_eq!(survivors.len(), 1);
+        let pointer = read_latest_pointer(root, ws)
+            .expect("read latest")
+            .expect("latest present");
+        assert_eq!(
+            pointer.record, survivors[0],
+            "latest.json must repoint at the surviving record"
+        );
+        // And it resolves to a real record.
+        assert!(read_record(root, ws, &pointer.record).is_ok());
+    }
+
+    #[test]
+    fn remove_record_drops_dir_when_last_record_removed() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let root = dir.path();
+        let ws = "solo";
+        let base = EpochId::new(&"a".repeat(40)).expect("epoch");
+        let head = GitOid::new(&"b".repeat(40)).expect("oid");
+        write_destroy_record(root, ws, &base, &head, None, DestroyReason::Destroy).expect("r");
+
+        let files = list_record_files(root, ws).expect("list");
+        assert_eq!(files.len(), 1);
+        assert!(remove_record(root, ws, &files[0]).expect("remove"));
+
+        // No records, no latest.json, and the workspace is no longer counted
+        // as a destroyed workspace.
+        assert!(
+            list_record_files(root, ws).expect("list").is_empty(),
+            "no records remain"
+        );
+        assert!(
+            !destroy_dir(root, ws).join("latest.json").exists(),
+            "latest.json removed with the last record"
+        );
+        assert!(
+            !list_destroyed_workspaces(root)
+                .expect("list ws")
+                .contains(&ws.to_owned()),
+            "workspace no longer reported as destroyed once its last record is pruned"
+        );
+    }
+
+    #[test]
+    fn remove_record_is_noop_for_missing_file() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let root = dir.path();
+        assert!(!remove_record(root, "ghost", "nope.json").expect("noop"));
     }
 }
