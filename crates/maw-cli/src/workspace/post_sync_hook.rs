@@ -26,6 +26,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -201,14 +204,20 @@ struct HookRun {
 /// Run one `sh -c <cmd>` in `cwd`, capturing combined stdout+stderr, killing
 /// it (and flagging `timed_out`) if it exceeds `timeout`.
 fn run_one_with_timeout(cmd: &str, cwd: &Path, timeout: Duration) -> HookRun {
-    let mut child = match Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .args(["-c", cmd])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // A hook can spawn descendants which inherit stdout/stderr. Give the hook
+    // its own process group so a timeout can close the entire command tree;
+    // otherwise the reader threads below block until surviving children exit.
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             return HookRun {
@@ -233,7 +242,7 @@ fn run_one_with_timeout(cmd: &str, cwd: &Path, timeout: Duration) -> HookRun {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    kill_hook_tree(&mut child);
                     let _ = child.wait();
                     timed_out = true;
                     break -1;
@@ -258,6 +267,23 @@ fn run_one_with_timeout(cmd: &str, cwd: &Path, timeout: Duration) -> HookRun {
         timed_out,
         output,
     }
+}
+
+fn kill_hook_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The child is the process-group leader because `process_group(0)` was
+        // set before spawn. A negative PID targets every process in the group.
+        let group = format!("-{}", child.id());
+        let killed = Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .status()
+            .is_ok_and(|status| status.success());
+        if killed {
+            return;
+        }
+    }
+    let _ = child.kill();
 }
 
 fn read_all_lossy(reader: Option<impl Read>) -> String {
@@ -343,6 +369,20 @@ mod tests {
         let run = run_one_with_timeout("sleep 5", dir.path(), Duration::from_secs(1));
         assert!(run.timed_out, "expected timeout flag");
         assert_eq!(run.exit_code, -1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_descendants_that_keep_output_pipes_open() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let started = Instant::now();
+        let run = run_one_with_timeout("sleep 3 & wait", dir.path(), Duration::from_millis(100));
+        assert!(run.timed_out, "expected timeout flag");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timeout waited for a surviving descendant: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

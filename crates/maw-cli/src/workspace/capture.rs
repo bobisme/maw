@@ -137,11 +137,11 @@ pub fn capture_before_destroy(
 /// detached commit pinned under `refs/manifold/recovery/<ws>/clean-<ts>`
 /// (bn-auu5).
 ///
-/// The paths are force-staged (`git add -f`) so that gitignore'd files removed
-/// via `--ignored` are captured too — `git add -A` alone would skip them and
-/// break the recovery guarantee. `git stash create` then builds a commit whose
-/// tree contains those blobs without moving HEAD or the stash list, and the
-/// index is reset afterward.
+/// The paths are force-staged (`git add -f`) in a temporary index so that
+/// gitignore'd files removed via `--ignored` are captured too — `git add -A`
+/// alone would skip them and break the recovery guarantee. `git stash create`
+/// then builds a commit whose tree contains those blobs without moving HEAD,
+/// the stash list, or the caller's real index.
 ///
 /// # Fail-safe (Prime Invariant)
 ///
@@ -161,27 +161,22 @@ pub fn capture_before_clean(
         return Ok(None);
     }
 
-    // Force-stage exactly the paths being removed so ignored files are captured.
-    stage_paths_force(ws_path, paths)?;
+    // Use an alternate index initialized from HEAD. Staging in the real index
+    // and resetting it afterward destroys any staged work the caller already
+    // had, even though `maw ws clean` promises not to touch tracked state.
+    let temp_dir = tempfile::tempdir().context("failed to create clean-capture temp directory")?;
+    let temp_index = temp_dir.path().join("index");
+    initialize_temporary_index(ws_path, &temp_index)?;
+    stage_paths_force(ws_path, paths, &temp_index)?;
 
-    let repo = maw_git::GixRepo::open(ws_path)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
-    let stash_result = repo.stash_create().map_err(|e| {
-        warn_on_reset_failure(ws_path, "clean-capture-stash-create-failure");
-        anyhow::anyhow!("git stash create failed during clean capture: {e}")
-    })?;
-
-    // Restore the index regardless of outcome.
-    warn_on_reset_failure(ws_path, "clean-capture-restore-index");
-
-    let Some(stash_git_oid) = stash_result else {
+    let stash_result = stash_create_with_index(ws_path, &temp_index)?;
+    let Some(stash_oid_str) = stash_result else {
         return Err(anyhow::anyhow!(
             "clean aborted to avoid data loss: files were selected for removal \
              but `git stash create` produced no snapshot commit (paths = {paths:?})"
         ));
     };
 
-    let stash_oid_str = stash_git_oid.to_string();
     let commit_oid =
         GitOid::new(&stash_oid_str).map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
 
@@ -209,15 +204,36 @@ pub fn capture_before_clean(
     }))
 }
 
-/// Force-stage an explicit set of paths (`git add -f -- <paths>`), so ignored
-/// files are included. Used by [`capture_before_clean`].
-fn stage_paths_force(ws_path: &Path, paths: &[String]) -> Result<()> {
+/// Initialize an alternate index from `HEAD`, leaving the workspace's real
+/// index untouched.
+fn initialize_temporary_index(ws_path: &Path, index_path: &Path) -> Result<()> {
+    let out = Command::new("git")
+        .args(["read-tree", "HEAD"])
+        .env("GIT_INDEX_FILE", index_path)
+        .current_dir(ws_path)
+        .output()
+        .context("failed to initialize temporary index for clean capture")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "git read-tree failed during clean capture: {}",
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Force-stage an explicit set of paths (`git add -f -- <paths>`) in an
+/// alternate index, so ignored files are included without changing the
+/// caller's staging state.
+fn stage_paths_force(ws_path: &Path, paths: &[String], index_path: &Path) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.arg("add").arg("-f").arg("--");
     for p in paths {
         cmd.arg(p);
     }
     let out = cmd
+        .env("GIT_INDEX_FILE", index_path)
         .current_dir(ws_path)
         .output()
         .context("failed to run git add -f for clean capture")?;
@@ -226,6 +242,28 @@ fn stage_paths_force(ws_path: &Path, paths: &[String]) -> Result<()> {
         bail!("git add -f failed during clean capture: {}", stderr.trim());
     }
     Ok(())
+}
+
+/// Create a detached stash commit using `index_path` instead of the caller's
+/// real index. `git stash create` prints the commit OID and does not update the
+/// stash list.
+fn stash_create_with_index(ws_path: &Path, index_path: &Path) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["stash", "create"])
+        .env("GIT_INDEX_FILE", index_path)
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git stash create for clean capture")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "git stash create failed during clean capture: {}",
+            stderr.trim()
+        );
+    }
+    let oid = String::from_utf8(out.stdout).context("git stash create returned a non-UTF-8 OID")?;
+    let oid = oid.trim();
+    Ok((!oid.is_empty()).then(|| oid.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +895,53 @@ mod tests {
             staged.stdout.is_empty(),
             "capture must leave the index clean, staged: {}",
             String::from_utf8_lossy(&staged.stdout)
+        );
+    }
+
+    #[test]
+    fn capture_before_clean_preserves_existing_staged_changes() {
+        let (_dir, root, _oid) = setup_repo();
+
+        fs::write(root.join("tracked.txt"), "base\n").expect("write tracked file");
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&root)
+            .output()
+            .expect("add tracked file");
+        Command::new("git")
+            .args(["commit", "-m", "add tracked file"])
+            .current_dir(&root)
+            .output()
+            .expect("commit tracked file");
+
+        fs::write(root.join("tracked.txt"), "staged user work\n").expect("modify tracked file");
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&root)
+            .output()
+            .expect("stage user work");
+        fs::write(root.join("scratch.tmp"), "scratch\n").expect("write scratch file");
+
+        let before = Command::new("git")
+            .args(["diff", "--cached", "--binary"])
+            .current_dir(&root)
+            .output()
+            .expect("read staged diff before capture")
+            .stdout;
+
+        capture_before_clean(&root, "feat", &["scratch.tmp".to_string()])
+            .expect("capture succeeds")
+            .expect("snapshot created");
+
+        let after = Command::new("git")
+            .args(["diff", "--cached", "--binary"])
+            .current_dir(&root)
+            .output()
+            .expect("read staged diff after capture")
+            .stdout;
+        assert_eq!(
+            after, before,
+            "clean capture must preserve the caller's index byte-for-byte"
         );
     }
 
