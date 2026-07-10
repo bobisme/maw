@@ -38,6 +38,7 @@ pub(crate) mod metadata;
 mod names;
 pub(crate) mod oplog_runtime;
 mod overlap;
+pub(crate) mod post_sync_hook;
 mod prune;
 pub(crate) mod recover;
 pub(crate) mod resolve;
@@ -167,7 +168,7 @@ impl RepoConfig {
 }
 
 /// Hook configuration for running commands before/after operations
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct HooksConfig {
     /// Commands to run before merge. Merge aborts if any command fails (non-zero exit).
     #[serde(default)]
@@ -175,6 +176,39 @@ pub struct HooksConfig {
     /// Commands to run after merge. Warnings are shown on failure but don't abort.
     #[serde(default)]
     pub(crate) post_merge: Vec<String>,
+    /// bn-1lhb: commands run inside a workspace after ANY successful sync/
+    /// auto-rebase replay (direct `ws sync --rebase`, merge-triggered sibling
+    /// auto-rebase, and FF-absorb sibling replays). jj model: a non-zero exit
+    /// is a SIGNAL only — it never blocks or rolls back the sync/merge and
+    /// never changes its exit code. The pass/fail is persisted per workspace
+    /// and surfaced in `ws list`/`ws status` and the triggering merge summary.
+    /// Example: `post_sync = ["cargo check --workspace"]`.
+    #[serde(default)]
+    pub(crate) post_sync: Vec<String>,
+    /// bn-1lhb: per-hook wall-clock timeout in seconds. A hook that exceeds it
+    /// is killed and recorded as failed (`timed_out`), so a hung hook can never
+    /// wedge a merge. Applies to `post_sync` hooks.
+    #[serde(default = "HooksConfig::default_hook_timeout_seconds")]
+    pub(crate) hook_timeout_seconds: u64,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            pre_merge: Vec::new(),
+            post_merge: Vec::new(),
+            post_sync: Vec::new(),
+            hook_timeout_seconds: Self::default_hook_timeout_seconds(),
+        }
+    }
+}
+
+impl HooksConfig {
+    /// Generous default so an ordinary `cargo check` never trips the timeout,
+    /// while still bounding a genuinely hung hook.
+    const fn default_hook_timeout_seconds() -> u64 {
+        300
+    }
 }
 
 /// Merge-specific configuration
@@ -237,6 +271,16 @@ impl MawConfig {
     #[must_use]
     pub const fn invariant_audit(&self) -> bool {
         self.invariant.audit
+    }
+
+    /// bn-1lhb: configured post-sync hook commands (empty = feature off).
+    pub(crate) fn post_sync_hooks(&self) -> &[String] {
+        &self.hooks.post_sync
+    }
+
+    /// bn-1lhb: per-hook wall-clock timeout in seconds (default 300).
+    pub(crate) const fn hook_timeout_seconds(&self) -> u64 {
+        self.hooks.hook_timeout_seconds
     }
 }
 
@@ -905,6 +949,19 @@ pub enum WorkspaceCommands {
     ///
     /// Pass --no-rebase to refuse the sync if the workspace has commits
     /// ahead — the workspace is left untouched (no destructive reset).
+    ///
+    /// POST-SYNC HOOK: configure `post_sync` under the `hooks` table in
+    /// `.maw.toml` to run an optional per-workspace command inside the
+    /// workspace after any successful sync/auto-rebase replay — direct sync,
+    /// merge-triggered sibling auto-rebase, and FF-absorb replays. A
+    /// textually-clean replay can still fail to compile when a merged sibling
+    /// reworked an API; the hook catches that at rebase time. For example set
+    /// `post_sync` to run `cargo check --workspace`. A non-zero exit is a
+    /// SIGNAL only — it never blocks or changes the sync/merge exit code (jj
+    /// model). The last result is persisted per workspace and shown as a
+    /// `hook:FAIL` marker in `maw ws list` / `maw ws status` and as a NOTE in
+    /// the triggering merge summary. Tune the per-hook kill timeout with
+    /// `hook_timeout_seconds` (default 300).
     Sync {
         /// Name of the workspace to sync (defaults to current workspace)
         name: Option<String>,

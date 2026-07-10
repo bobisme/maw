@@ -176,6 +176,21 @@ impl SiblingResult {
             Self::Failed { reason } => format!("failed: {reason}"),
         }
     }
+
+    /// bn-1lhb: whether this sibling actually had commits replayed / its
+    /// worktree advanced onto the new epoch — the condition under which the
+    /// post-sync hook runs. Skips ("up to date", "in use", "dirty", "in
+    /// progress") and hard failures did not touch the worktree, so no hook.
+    #[must_use]
+    pub const fn replay_happened(&self) -> bool {
+        matches!(
+            self,
+            Self::RebasedClean { .. }
+                | Self::RebasedCleanRefsOnly { .. }
+                | Self::RebasedWithConflicts { .. }
+                | Self::RebasedWithConflictsRefsOnly { .. }
+        )
+    }
 }
 
 /// Per-sibling outcome row reported to the caller.
@@ -183,6 +198,11 @@ impl SiblingResult {
 pub struct SiblingReport {
     pub name: String,
     pub result: SiblingResult,
+    /// bn-1lhb: post-sync hook outcome for this sibling, present only when a
+    /// `post_sync` hook was configured AND this sibling was actually replayed.
+    /// The merge summary surfaces failures as NOTE lines and the merge JSON
+    /// carries `{ran, exit_code, timed_out}` per sibling.
+    pub post_sync_hook: Option<super::super::post_sync_hook::PostSyncHookSummary>,
 }
 
 /// Rebase every sibling workspace onto `new_epoch`.
@@ -240,14 +260,26 @@ pub fn auto_rebase_siblings<B: WorkspaceBackend>(
             reports.push(SiblingReport {
                 name: name.to_string(),
                 result: SiblingResult::SkippedInProgress,
+                post_sync_hook: None,
             });
             continue;
         }
 
         let result = rebase_one_sibling(root, backend, name, new_epoch, merge_sources);
+        // bn-1lhb: run the post-sync hook whenever this sibling was actually
+        // replayed onto the new epoch. Signal only — a hook failure never
+        // changes the parent merge's exit code, it's persisted + surfaced.
+        let post_sync_hook = if result.replay_happened() {
+            let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+                .workspace_path(root, name);
+            super::super::post_sync_hook::run_post_sync_hooks(root, name, &ws_path, new_epoch)
+        } else {
+            None
+        };
         reports.push(SiblingReport {
             name: name.to_string(),
             result,
+            post_sync_hook,
         });
     }
 

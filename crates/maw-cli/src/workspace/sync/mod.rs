@@ -96,6 +96,12 @@ pub struct SyncJsonOutput {
     pub conflicted_paths: Vec<String>,
     /// Human-readable summary of what happened.
     pub message: String,
+    /// bn-1lhb: post-sync hook outcome, present only when a `post_sync` hook
+    /// was configured and this sync actually replayed/advanced the workspace.
+    /// `{ran, exit_code, timed_out}`; jj model — a failure here never changes
+    /// the sync's own exit code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_sync_hook: Option<super::post_sync_hook::PostSyncHookSummary>,
 }
 
 fn print_sync_json(output: &SyncJsonOutput) -> Result<()> {
@@ -267,7 +273,7 @@ fn sync_one_text(name: Option<&str>, no_rebase: bool) -> Result<()> {
                      these commits."
                 );
             }
-            return rebase_workspace(
+            rebase_workspace(
                 &root,
                 &workspace_name,
                 ws_status.base_epoch.as_str(),
@@ -275,7 +281,11 @@ fn sync_one_text(name: Option<&str>, no_rebase: bool) -> Result<()> {
                 &ws_path,
                 ahead,
                 "sync",
-            );
+            )?;
+            // bn-1lhb: a replay just happened — run the post-sync hook (signal
+            // only; never changes this command's Ok exit).
+            run_post_sync_and_report_text(&root, &workspace_name, &ws_path, current_epoch.as_str());
+            return Ok(());
         }
         Some(_) => {}
     }
@@ -316,7 +326,39 @@ fn sync_one_text(name: Option<&str>, no_rebase: bool) -> Result<()> {
     println!();
     println!("Workspace synced successfully.");
 
+    // bn-1lhb: an FF-sync advanced this workspace onto the new epoch (the
+    // merged sibling's changes just landed in the worktree) — run the hook.
+    run_post_sync_and_report_text(&root, &workspace_name, &ws_path, current_epoch.as_str());
+
     Ok(())
+}
+
+/// bn-1lhb: run the configured post-sync hook after a real replay/advance and
+/// print a NOTE (stdout + stderr) when it failed. No-op when no hook is
+/// configured. Never returns an error — the hook is signal-only and must not
+/// change the sync command's exit status (jj model).
+fn run_post_sync_and_report_text(root: &Path, ws_name: &str, ws_path: &Path, epoch: &str) {
+    let Some(summary) = super::post_sync_hook::run_post_sync_hooks(root, ws_name, ws_path, epoch)
+    else {
+        return;
+    };
+    if summary.failed() {
+        let detail = post_sync_failure_detail(&summary);
+        let msg = format!(
+            "NOTE: post-sync hook failed ({detail}) for '{ws_name}' — see maw ws status {ws_name}"
+        );
+        println!("{msg}");
+        eprintln!("{msg}");
+    }
+}
+
+/// bn-1lhb: render `exit N` / `timed out` for a failed post-sync hook summary.
+fn post_sync_failure_detail(summary: &super::post_sync_hook::PostSyncHookSummary) -> String {
+    if summary.timed_out {
+        "timed out".to_string()
+    } else {
+        format!("exit {}", summary.exit_code.unwrap_or(-1))
+    }
 }
 
 /// Sync a single workspace and return a [`SyncJsonOutput`] instead of
@@ -468,6 +510,13 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
                     )
                 },
             );
+            // bn-1lhb: a replay happened — run the post-sync hook (signal only).
+            let post_sync_hook = super::post_sync_hook::run_post_sync_hooks(
+                &root,
+                &workspace_name,
+                &ws_path,
+                current_epoch.as_str(),
+            );
             return Ok(SyncJsonOutput {
                 workspace: workspace_name,
                 action: "rebased".to_string(),
@@ -483,6 +532,7 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
                 } else {
                     format!("{} commit(s) replayed cleanly.", outcome.replayed)
                 },
+                post_sync_hook,
             });
         }
         Some(_) => {}
@@ -508,11 +558,19 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
 
     sync_worktree_to_epoch(&root, &workspace_name, current_epoch.as_str(), None)?;
 
+    // bn-1lhb: FF-sync advanced this workspace — run the post-sync hook.
+    let post_sync_hook = super::post_sync_hook::run_post_sync_hooks(
+        &root,
+        &workspace_name,
+        &ws_path,
+        current_epoch.as_str(),
+    );
     Ok(SyncJsonOutput {
         workspace: workspace_name.clone(),
         action: "synced".to_string(),
         stale: true,
         message: format!("Workspace '{workspace_name}' synced successfully."),
+        post_sync_hook,
         ..Default::default()
     })
 }
@@ -648,12 +706,18 @@ fn sync_all(no_rebase: bool) -> Result<()> {
                 ahead,
                 "sync-all",
             ) {
-                Ok(()) => rebased += 1,
+                Ok(()) => {
+                    rebased += 1;
+                    run_post_sync_and_report_text(&root, name, &ws_path, current_epoch.as_str());
+                }
                 Err(e) => errors.push(format!("{name}: {e}")),
             }
         } else {
             match sync_worktree_to_epoch(&root, name, current_epoch.as_str(), None) {
-                Ok(_) => synced += 1,
+                Ok(_) => {
+                    synced += 1;
+                    run_post_sync_and_report_text(&root, name, &ws_path, current_epoch.as_str());
+                }
                 Err(e) => errors.push(format!("{name}: {e}")),
             }
         }

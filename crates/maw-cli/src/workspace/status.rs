@@ -82,6 +82,12 @@ pub struct WorkspaceEntry {
     /// lists — keeps the agent's first attempt the right one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fix_command: Option<String>,
+    /// bn-1lhb: last-known `post_sync` hook result for this workspace. Present
+    /// only when a hook has run at least once. Mirrors
+    /// `WorkspaceInfo::post_sync_hook` from `maw ws list` so both discovery
+    /// surfaces agree. Read-only — never re-runs the hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) post_sync_hook: Option<super::post_sync_hook::PostSyncHookInfo>,
 }
 
 #[expect(
@@ -269,6 +275,12 @@ pub fn status(format: OutputFormat) -> Result<()> {
                 commits_ahead: commits_ahead_field,
                 behind_epochs: behind,
                 fix_command,
+                // bn-1lhb: default workspace never runs post_sync hooks.
+                post_sync_hook: if is_default {
+                    None
+                } else {
+                    super::post_sync_hook::latest_info(&root, ws.id.as_str())
+                },
             }
         })
         .collect();
@@ -332,6 +344,10 @@ fn detect_current_workspace(root: &Path) -> Option<String> {
 }
 
 /// Print status in compact text format (agent-friendly)
+#[expect(
+    clippy::too_many_lines,
+    reason = "status text renderer aggregates all workspace markers (incl. bn-1lhb post-sync hook) in one routine"
+)]
 fn print_status_text(
     current_ws: &str,
     is_stale: bool,
@@ -398,14 +414,22 @@ fn print_status_text(
             .lifecycle_state
             .map(|state| format!(" [lifecycle:{}]", state.slug()))
             .unwrap_or_default();
+        // bn-1lhb: post-sync hook failure marker, matching `ws list`'s
+        // `hook:FAIL` token so both surfaces carry the same signal.
+        let hook_marker = if ws.post_sync_hook.as_ref().is_some_and(|h| h.failed) {
+            " [hook:FAIL]"
+        } else {
+            ""
+        };
         println!(
-            "  {}  epoch:{}{}{}{}{}{}",
+            "  {}  epoch:{}{}{}{}{}{}{}",
             ws.name,
             ws.epoch,
             stale_marker,
             conflict_marker,
             mode_marker,
             lifecycle_marker,
+            hook_marker,
             default_marker
         );
         // bn-242l: paste-able fix command on its own line for any
@@ -414,6 +438,17 @@ fn print_status_text(
         // copy from either output surface.
         if let Some(fix) = ws.fix_command.as_deref() {
             println!("    Fix: {fix}");
+        }
+        // bn-1lhb: post-sync hook failure detail line.
+        if let Some(hook) = ws.post_sync_hook.as_ref().filter(|h| h.failed) {
+            let detail = if hook.timed_out {
+                "timed out".to_string()
+            } else {
+                format!("exit {}", hook.exit_code)
+            };
+            println!(
+                "    post-sync hook FAILED ({detail}) — the last sync/rebase left this workspace not building."
+            );
         }
     }
 

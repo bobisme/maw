@@ -70,6 +70,12 @@ pub struct WorkspaceInfo {
     /// or `ws status`. Absent for `clean`/`integrated`/default workspaces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fix_command: Option<String>,
+    /// bn-1lhb: last-known `post_sync` hook result for this workspace, read
+    /// from `.maw/manifold/artifacts/ws/<name>/postsync.json`. Present only
+    /// when a hook has run at least once. `failed = true` renders a `hook:FAIL`
+    /// marker + fix hint. Read-only — never re-runs the hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) post_sync_hook: Option<super::post_sync_hook::PostSyncHookInfo>,
 }
 
 /// Compact merge-check result for ws list output.
@@ -364,6 +370,13 @@ pub fn list(verbose: bool, check: bool, format: OutputFormat) -> Result<()> {
                 missing,
                 lifecycle_state,
                 fix_command,
+                // bn-1lhb: default workspace never runs post_sync hooks (trunk
+                // has its own post_merge); read the last result for the rest.
+                post_sync_hook: if is_default {
+                    None
+                } else {
+                    super::post_sync_hook::latest_info(&root, &name)
+                },
                 name,
             }
         })
@@ -533,7 +546,16 @@ fn text_annotation(ws: &WorkspaceInfo, check_annotation: Option<&str>) -> String
     } else {
         String::new()
     };
-    format!("{base}{lifecycle_tag}")
+    // bn-1lhb: append a `hook:FAIL` marker when the workspace's last post-sync
+    // hook failed. The token is literally present so a scraping agent can match
+    // it; the actionable fix line is printed separately by `print_list_text`.
+    let hook_tag = ws
+        .post_sync_hook
+        .as_ref()
+        .filter(|h| h.failed)
+        .map(|_| " hook:FAIL".to_string())
+        .unwrap_or_default();
+    format!("{base}{lifecycle_tag}{hook_tag}")
 }
 
 /// Print workspace list in minimal text format (agent-friendly).
@@ -610,6 +632,34 @@ fn print_list_text(
                 "  Fix: maw ws resolve {} --list, then --keep <side>",
                 ws.name
             );
+        }
+    }
+
+    // bn-1lhb: name each workspace whose last post-sync hook failed, with the
+    // stored log path so the reader can inspect what broke at rebase time.
+    let hook_failed: Vec<&WorkspaceInfo> = workspaces
+        .iter()
+        .filter(|ws| ws.post_sync_hook.as_ref().is_some_and(|h| h.failed))
+        .collect();
+    if !hook_failed.is_empty() {
+        println!();
+        for ws in &hook_failed {
+            let detail = ws
+                .post_sync_hook
+                .as_ref()
+                .map(|h| {
+                    if h.timed_out {
+                        "timed out".to_string()
+                    } else {
+                        format!("exit {}", h.exit_code)
+                    }
+                })
+                .unwrap_or_default();
+            println!(
+                "Post-sync hook FAILED ({detail}) in {} — the last sync/rebase left it not building.",
+                ws.name
+            );
+            println!("  Inspect: maw ws status {}", ws.name);
         }
     }
 }
@@ -742,6 +792,24 @@ fn print_list_pretty(
             let msg = format!(
                 "{} unresolved rebase conflict(s) — resolve before merge: maw ws resolve {} --list",
                 ws.rebase_conflicts, ws.name
+            );
+            if use_color {
+                println!("    \x1b[31m{msg}\x1b[0m");
+            } else {
+                println!("    {msg}");
+            }
+        }
+
+        // bn-1lhb: post-sync hook failure line.
+        if let Some(hook) = ws.post_sync_hook.as_ref().filter(|h| h.failed) {
+            let detail = if hook.timed_out {
+                "timed out".to_string()
+            } else {
+                format!("exit {}", hook.exit_code)
+            };
+            let msg = format!(
+                "post-sync hook FAILED ({detail}) — inspect: maw ws status {}",
+                ws.name
             );
             if use_color {
                 println!("    \x1b[31m{msg}\x1b[0m");
@@ -1048,6 +1116,7 @@ mod tests {
             missing: false,
             lifecycle_state: Some(lifecycle_state),
             fix_command,
+            post_sync_hook: None,
         }
     }
 

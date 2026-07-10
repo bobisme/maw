@@ -197,6 +197,27 @@ pub struct MergeSuccessOutput {
     /// Omitted when the audit is disabled (`invariant.audit = false`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invariant: Option<super::invariant_audit::AuditReport>,
+    /// bn-1lhb: per-sibling `post_sync` hook outcomes for siblings replayed by
+    /// this merge's auto-rebase pass. Empty when no `post_sync` hook is
+    /// configured or no sibling was replayed. Additive per bn-20fp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_sync_hooks: Vec<SiblingPostSyncHook>,
+}
+
+/// bn-1lhb: one sibling's post-sync hook result in `maw ws merge --format
+/// json`. `{workspace, ran, exit_code, timed_out}` — deliberately simple and
+/// additive so the bn-20fp merge-JSON completeness bone can fold it in.
+#[derive(Debug, Clone, Serialize)]
+pub struct SiblingPostSyncHook {
+    /// Sibling workspace the hook ran in.
+    pub workspace: String,
+    /// Always `true` — an entry is only emitted when the hook actually ran.
+    pub ran: bool,
+    /// Exit code of the determining command (`-1` on timeout / no code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether the hook timed out.
+    pub timed_out: bool,
 }
 
 /// Structured advice entry for merge JSON output.
@@ -3470,10 +3491,33 @@ fn reconcile_epoch_with_branch(
                         0, // header count only (suppressed: print = false)
                         &trigger,
                     ) {
-                        Ok(outcome) => notes.push(format!(
-                            "  {}: replayed {} commit(s) onto absorbed epoch",
-                            c.name, outcome.replayed
-                        )),
+                        Ok(outcome) => {
+                            notes.push(format!(
+                                "  {}: replayed {} commit(s) onto absorbed epoch",
+                                c.name, outcome.replayed
+                            ));
+                            // bn-1lhb: run the post-sync hook for this
+                            // FF-absorbed sibling. Signal only — a failure never
+                            // aborts the absorb (the replay already succeeded);
+                            // it's persisted and reported as a NOTE.
+                            if let Some(hook) = super::post_sync_hook::run_post_sync_hooks(
+                                root,
+                                &c.name,
+                                &c.ws_path,
+                                branch_oid.as_str(),
+                            ) && hook.failed()
+                            {
+                                let detail = if hook.timed_out {
+                                    "timed out".to_string()
+                                } else {
+                                    format!("exit {}", hook.exit_code.unwrap_or(-1))
+                                };
+                                notes.push(format!(
+                                    "  {}: post-sync hook failed ({detail}) — see maw ws status {}",
+                                    c.name, c.name
+                                ));
+                            }
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 workspace = %c.name,
@@ -4947,6 +4991,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // (text NOTE line + JSON `sibling_conflicts`) so it isn't buried in the
     // middle of the merge output.
     let mut sibling_conflict_names: Vec<String> = Vec::new();
+    // bn-1lhb: per-sibling post-sync hook outcomes from this auto-rebase pass,
+    // surfaced in the final merge summary (text NOTE lines + JSON
+    // `post_sync_hooks`) so a compile break at rebase time is flagged here, not
+    // minutes later at pre-merge test time.
+    let mut sibling_hook_results: Vec<SiblingPostSyncHook> = Vec::new();
     if target_updates_epoch {
         let manifold_config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
             .bootstrap_config_path(&root);
@@ -4985,6 +5034,14 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                         sibling_conflict_names.push(report.name.clone());
                     }
                     _ => {}
+                }
+                if let Some(hook) = &report.post_sync_hook {
+                    sibling_hook_results.push(SiblingPostSyncHook {
+                        workspace: report.name.clone(),
+                        ran: hook.ran,
+                        exit_code: hook.exit_code,
+                        timed_out: hook.timed_out,
+                    });
                 }
             }
         }
@@ -5157,6 +5214,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             advice: vec![],
             sibling_conflicts: sibling_conflict_names.clone(),
             invariant: Some(invariant_report.clone()),
+            post_sync_hooks: sibling_hook_results.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
@@ -5168,6 +5226,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 sibling_conflict_names.len(),
                 sibling_conflict_names.join(", ")
             );
+        }
+        // bn-1lhb: surface failed post-sync hooks as per-sibling NOTE lines
+        // (printed before the INVARIANT proof line below). A textually-clean
+        // replay that no longer compiles is flagged here, at rebase time.
+        for hook in &sibling_hook_results {
+            if hook.timed_out || hook.exit_code.is_some_and(|c| c != 0) {
+                let detail = if hook.timed_out {
+                    "timed out".to_string()
+                } else {
+                    format!("exit {}", hook.exit_code.unwrap_or(-1))
+                };
+                textln!(
+                    "NOTE: {}: post-sync hook failed ({detail}) — see maw ws status {}",
+                    hook.workspace,
+                    hook.workspace
+                );
+            }
         }
         textln!();
         if let Some(change_id) = target_change_id {
@@ -7106,6 +7181,7 @@ mod tests {
             advice: vec![],
             sibling_conflicts: vec![],
             invariant: None,
+            post_sync_hooks: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
@@ -7145,6 +7221,7 @@ mod tests {
             advice: vec![],
             sibling_conflicts: vec!["bob".to_string()],
             invariant: None,
+            post_sync_hooks: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
