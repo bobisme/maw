@@ -298,7 +298,7 @@ impl OracleA {
                     oid: blob.clone(),
                     previous_ref: format!(
                         "oracle-a/W: blob authored by ws:{} at step {} (tip {})",
-                        origin.ws, origin.step, &origin.tip
+                        origin.ws, origin.step, origin.tip
                     ),
                 });
                 break;
