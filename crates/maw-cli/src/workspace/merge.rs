@@ -3001,18 +3001,52 @@ fn assert_sources_clean_for_merge(
             }
 
             if !header_only_paths.is_empty() {
+                // bn-drk3: quote the ACTUAL header-comment prefix each file
+                // used rather than assuming legacy `#` — a conflicted `.rs`
+                // file's leftover header uses `//`, for example. When every
+                // offending file happens to share one prefix (by far the
+                // common case: legacy workspaces, or one extension per
+                // conflict batch) the message stays byte-identical to the
+                // pre-bn-drk3 wording for the `#` case.
+                let unique_prefixes: std::collections::BTreeSet<&str> = header_only_paths
+                    .iter()
+                    .map(|(_, prefix)| *prefix)
+                    .collect();
+                let mixed = unique_prefixes.len() > 1;
+
                 let file_list = header_only_paths
                     .iter()
-                    .map(|p| format!("  - {}", p.display()))
+                    .map(|(p, prefix)| {
+                        if mixed {
+                            format!("  - {} (header prefix: '{prefix}')", p.display())
+                        } else {
+                            format!("  - {}", p.display())
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
+
+                let fix_hint = if mixed {
+                    "Delete the leading header-comment lines shown above for each file — \
+                     each uses its own comment syntax (\"<prefix> structured conflict at \
+                     ...\", \"<prefix> base blob: ...\", \"<prefix> side ... blob: ...\", or \
+                     \"<prefix> BINARY CONFLICT at ...\", where <prefix> is that file's own \
+                     header prefix)"
+                        .to_owned()
+                } else {
+                    let prefix = unique_prefixes.into_iter().next().unwrap_or("#");
+                    format!(
+                        "Delete the leading '{prefix}' header lines (\"{prefix} structured \
+                         conflict at ...\", \"{prefix} base blob: ...\", \"{prefix} side ... \
+                         blob: ...\", or \"{prefix} BINARY CONFLICT at ...\")"
+                    )
+                };
+
                 bail!(
                     "Workspace '{ws_name}' has {} path(s) that appear manually resolved \
                      but still begin with the maw conflict header:\n\
                      {file_list}\n  \
-                     Delete the leading '#' header lines (\"# structured conflict at ...\", \
-                     \"# base blob: ...\", \"# side ... blob: ...\", or \"# BINARY CONFLICT \
-                     at ...\"), commit, and re-run the merge.\n  \
+                     {fix_hint}, commit, and re-run the merge.\n  \
                      This check cannot be bypassed by --force because merging a blob that \
                      still carries the maw conflict header would corrupt the target branch.",
                     header_only_paths.len()
@@ -3037,7 +3071,10 @@ fn assert_sources_clean_for_merge(
 /// * `.0` — markers still present (or the blob could not be re-verified):
 ///   genuine unresolved conflict / tampered sidecar.
 /// * `.1` — markers gone, only the header comment lines remain: the user
-///   hand-resolved the conflict but forgot to delete the header.
+///   hand-resolved the conflict but forgot to delete the header. Each entry
+///   also carries the *actual* header-comment token (`#`, `//`, or `--`;
+///   bn-drk3) the blob used, so the caller's message can quote the fix that
+///   matches that file's own comment syntax instead of assuming legacy `#`.
 ///
 /// Fails closed: if HEAD cannot be resolved, the repo cannot be opened, or a
 /// specific blob cannot be re-read, the affected path(s) are placed in the
@@ -3047,22 +3084,30 @@ fn classify_placeholder_paths(
     root: &Path,
     ws_path: &Path,
     placeholder_paths: &[PathBuf],
-) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let classified: Option<Vec<(PathBuf, bool)>> = (|| {
+) -> (Vec<PathBuf>, Vec<(PathBuf, &'static str)>) {
+    let classified: Option<Vec<(PathBuf, bool, &'static str)>> = (|| {
         let head_oid_str = resolve_workspace_head_oid(ws_path).ok()?;
         let head_oid: maw_git::GitOid = head_oid_str.parse().ok()?;
         let repo = maw_git::GixRepo::open(root).ok()?;
         let entries = placeholder_paths
             .iter()
             .map(|p| {
-                let has_markers = repo
+                let blob = repo
                     .read_blob_at_path(head_oid, &p.to_string_lossy())
                     .ok()
-                    .flatten()
-                    .is_none_or(|(_, _, content)| {
-                        maw_core::merge::materialize::placeholder_blob_has_markers(&content)
-                    });
-                (p.clone(), has_markers)
+                    .flatten();
+                let (has_markers, prefix) = match &blob {
+                    Some((_, _, content)) => (
+                        maw_core::merge::materialize::placeholder_blob_has_markers(content),
+                        maw_core::merge::materialize::header_prefix_of_blob(content).unwrap_or("#"),
+                    ),
+                    // Could not re-read this specific blob — fail closed
+                    // (marker bucket) with the legacy prefix as a harmless
+                    // default; `has_markers = true` routes it away from the
+                    // header-only message entirely.
+                    None => (true, "#"),
+                };
+                (p.clone(), has_markers, prefix)
             })
             .collect::<Vec<_>>();
         Some(entries)
@@ -3076,11 +3121,11 @@ fn classify_placeholder_paths(
 
     let mut marker_paths = Vec::new();
     let mut header_only_paths = Vec::new();
-    for (path, has_markers) in classified {
+    for (path, has_markers, prefix) in classified {
         if has_markers {
             marker_paths.push(path);
         } else {
-            header_only_paths.push(path);
+            header_only_paths.push((path, prefix));
         }
     }
     (marker_paths, header_only_paths)

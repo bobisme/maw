@@ -48,7 +48,7 @@ enum ReconstructionResult {
 ///
 /// # Supported header formats
 ///
-/// **Text conflict** (first line: `# structured conflict at <path>`):
+/// **Text conflict** (first line: `<prefix> structured conflict at <path>`):
 /// ```text
 /// # structured conflict at src/foo.rs
 /// # base blob: <oid>          ← optional (absent for add/add)
@@ -56,7 +56,7 @@ enum ReconstructionResult {
 /// # side <ws> blob: <oid>
 /// ```
 ///
-/// **Binary conflict** (first line: `# BINARY CONFLICT at <path>`):
+/// **Binary conflict** (first line: `<prefix> BINARY CONFLICT at <path>`):
 /// ```text
 /// # BINARY CONFLICT at src/img.png — inlined markers would corrupt the file.
 /// # Pick a side with: maw ws resolve <workspace> --keep <side-name>
@@ -69,6 +69,20 @@ enum ReconstructionResult {
 /// # modifier: <name> @ <oid>
 /// # deleter:  <name> @ <oid>
 /// ```
+///
+/// `<prefix>` is one of [`maw_core::merge::materialize::HEADER_PREFIXES`]
+/// (`#`, `//`, or `--`) — bn-drk3 made the structured-conflict and
+/// binary-conflict headers comment-syntax-aware based on the conflicted
+/// file's extension (e.g. `.rs` gets `//` so a conflicted Rust file's first
+/// line stays legal source instead of producing a mystery rustc syntax
+/// error — see bn-1m4d item 2). Whichever prefix the header's first line
+/// used is also the prefix its continuation lines (`base blob:`, `side …
+/// blob:`) use, since materialize.rs picks the prefix once per file and
+/// applies it consistently. Workspaces created before bn-drk3 — and any
+/// conflict at an extension the map still sends to `#` — keep using the
+/// legacy `#` form forever; this parser accepts all three prefixes for both
+/// the structured and binary forms. The modify/delete form is unaffected by
+/// bn-drk3 and always uses `#` (out of scope — see bn-drk3 for rationale).
 ///
 /// # Safety
 ///
@@ -147,22 +161,37 @@ fn try_reconstruct_sidecar_from_placeholders(
         // Parse the first line to determine conflict kind.
         let first_line = content.lines().next().unwrap_or("");
 
-        if first_line.starts_with("# structured conflict at ")
-            || first_line.starts_with("# add/add conflict at ")
-        {
+        // bn-drk3: the structured-conflict and BINARY-CONFLICT headers are
+        // comment-syntax-aware — the prefix depends on the conflicted
+        // file's extension (see `header_prefix_for`). Detect which of the
+        // known prefixes THIS file's header actually used so the
+        // continuation-line parsing below strips the same one; legacy
+        // workspaces (and any extension the map still sends to `#`) keep
+        // working because `#` is always tried. `# add/add conflict at` and
+        // `# modify/delete conflict at` are unaffected by bn-drk3 and stay
+        // `#`-only.
+        let structured_prefix = maw_core::merge::materialize::HEADER_PREFIXES
+            .iter()
+            .find(|p| first_line.starts_with(&format!("{p} structured conflict at ")))
+            .copied();
+        let is_add_add = first_line.starts_with("# add/add conflict at ");
+
+        if let Some(prefix) = structured_prefix.or_else(|| is_add_add.then_some("#")) {
             // Text conflict or add/add: parse base blob and side blobs.
             let mut base_oid: Option<GitOid> = None;
             let mut sides: Vec<ConflictSide> = Vec::new();
+            let base_blob_marker = format!("{prefix} base blob: ");
+            let side_marker = format!("{prefix} side ");
 
             for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("# base blob: ") {
+                if let Some(rest) = line.strip_prefix(base_blob_marker.as_str()) {
                     let oid_str = rest.trim();
                     match verify_oid_exists(oid_str, &repo, rel_path) {
                         Ok(oid) => base_oid = Some(oid),
                         Err(msg) => return ReconstructionResult::ParseFailure(msg),
                     }
-                } else if let Some(rest) = line.strip_prefix("# side ") {
-                    // Format: `# side <ws-name> blob: <oid>`
+                } else if let Some(rest) = line.strip_prefix(side_marker.as_str()) {
+                    // Format: `<prefix> side <ws-name> blob: <oid>`
                     if let Some((ws_part, oid_part)) = rest.split_once(" blob: ") {
                         let ws_name = ws_part.trim().to_owned();
                         let oid_str = oid_part.trim();
@@ -183,7 +212,7 @@ fn try_reconstruct_sidecar_from_placeholders(
                             Err(msg) => return ReconstructionResult::ParseFailure(msg),
                         }
                     }
-                    // Lines like `# side: <ws>  @  <oid>` are binary format — handled below.
+                    // Lines like `<prefix> side: <ws>  @  <oid>` are binary format — handled below.
                 }
                 // Stop reading past the blank separator line.
                 if line.is_empty() {
@@ -200,7 +229,7 @@ fn try_reconstruct_sidecar_from_placeholders(
                 ));
             }
 
-            let conflict = if first_line.starts_with("# add/add conflict at ") {
+            let conflict = if is_add_add {
                 Conflict::AddAdd {
                     path: rel_path.clone(),
                     sides,
@@ -216,13 +245,17 @@ fn try_reconstruct_sidecar_from_placeholders(
             };
             tree.conflicts.insert(rel_path.clone(), conflict);
             file_id_counter += 1;
-        } else if first_line.starts_with("# BINARY CONFLICT at ") {
-            // Binary conflict: parse `# side: <ws>  @  <oid>` lines.
+        } else if let Some(prefix) = maw_core::merge::materialize::HEADER_PREFIXES
+            .iter()
+            .find(|p| first_line.starts_with(&format!("{p} BINARY CONFLICT at ")))
+        {
+            // Binary conflict: parse `<prefix> side: <ws>  @  <oid>` lines.
             let mut sides: Vec<ConflictSide> = Vec::new();
+            let side_marker = format!("{prefix} side: ");
 
             for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("# side: ") {
-                    // Format: `# side: <ws-name>  @  <oid>`
+                if let Some(rest) = line.strip_prefix(side_marker.as_str()) {
+                    // Format: `<prefix> side: <ws-name>  @  <oid>`
                     if let Some((ws_part, oid_part)) = rest.split_once("  @  ") {
                         let ws_name = ws_part.trim().to_owned();
                         let oid_str = oid_part.trim();
@@ -319,7 +352,8 @@ fn try_reconstruct_sidecar_from_placeholders(
         } else {
             return ReconstructionResult::ParseFailure(format!(
                 "placeholder at {} has an unrecognized header: {:?}\n  \
-                 (expected '# structured conflict at', '# BINARY CONFLICT at', \
+                 (expected '<#|//|--> structured conflict at', \
+                 '<#|//|--> BINARY CONFLICT at', '# add/add conflict at', \
                  or '# modify/delete conflict at')",
                 rel_path.display(),
                 first_line

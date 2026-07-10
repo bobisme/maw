@@ -260,6 +260,71 @@ const MARKER_BASE: &str = "||||||| base";
 const MARKER_SEP: &str = "=======";
 
 // ---------------------------------------------------------------------------
+// Comment-syntax-aware header prefixes (bn-drk3)
+// ---------------------------------------------------------------------------
+
+/// Every line-comment token `maw` itself may emit at the start of a
+/// structured/binary-conflict placeholder header line.
+///
+/// This is the codomain of [`header_prefix_for`] and the set
+/// [`TOOL_PLACEHOLDER_PREFIXES`] is built from. Anything `header_prefix_for`
+/// can return must appear here — the merge gate tripwire, `maw ws resolve`
+/// reconstruction, and Gate 2's leftover-header classification all key off
+/// this list to stay comment-prefix-agnostic.
+pub const HEADER_PREFIXES: &[&str] = &["#", "//", "--"];
+
+/// Return the line-comment prefix to use for a structured-conflict /
+/// binary-conflict placeholder header, chosen from the conflicted file's
+/// extension (bn-drk3).
+///
+/// # Background
+///
+/// Every placeholder header `maw` writes used to unconditionally start with
+/// `#` (a Python/shell/YAML/TOML comment). For a file whose native comment
+/// syntax is something else — Rust, C-family, Go, Java, JS/TS — a `#` first
+/// line is not legal source, so the *first* compiler-visible signal on a
+/// conflicted `.rs` file was a mystery syntax error at line 1 ("expected one
+/// of '!' or '[', found 'structured'") instead of the `<<<<<<<` marker
+/// block, which rustc explains clearly. See bn-1m4d item 2 / bn-drk3.
+///
+/// # Extension map
+///
+/// Deliberately small and conservative — this is a readability nicety, not a
+/// general comment-syntax database. No attempt is made at block-comment
+/// syntax (`.md`/`.html` deliberately stay `#`; a stray `#` line in
+/// Markdown/HTML is harmless prose, which is exactly why those extensions
+/// don't need this fix):
+///
+/// * `//` — `.rs`, `.js`, `.ts`, `.c`, `.h`, `.cpp`, `.go`, `.java`
+/// * `--` — `.sql`, `.lua`
+/// * `#`  — everything else, including the previously-`#`-commented
+///   `.py`/`.sh`/`.toml`/`.yaml`/`.yml`/`.rb` (unchanged) and any unknown or
+///   missing extension.
+#[must_use]
+pub fn header_prefix_for(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs" | "js" | "ts" | "c" | "h" | "cpp" | "go" | "java") => "//",
+        Some("sql" | "lua") => "--",
+        _ => "#",
+    }
+}
+
+/// Return the header-comment token (one of [`HEADER_PREFIXES`]) that
+/// `content` begins with, if any [`TOOL_PLACEHOLDER_PREFIXES`] entry
+/// matches. `None` if `content` is not a recognised placeholder blob.
+///
+/// Used by Gate 2 (`maw-cli/src/workspace/merge.rs`) to quote the *actual*
+/// prefix a leftover-header file used in its refusal message, rather than
+/// assuming legacy `#` (bn-drk3).
+#[must_use]
+pub fn header_prefix_of_blob(content: &[u8]) -> Option<&'static str> {
+    HEADER_PREFIXES
+        .iter()
+        .find(|p| content.starts_with(format!("{p} ").as_bytes()))
+        .copied()
+}
+
+// ---------------------------------------------------------------------------
 // Tool-authored placeholder byte prefixes (bn-28d1)
 // ---------------------------------------------------------------------------
 
@@ -270,10 +335,16 @@ const MARKER_SEP: &str = "=======";
 /// projecting an unresolved [`Conflict`](crate::model::conflict::Conflict) into
 /// a committable blob:
 ///
-/// * `# structured conflict at <path>\n` — first line of the text-conflict
-///   stub produced by `render_text_content_conflict`.
-/// * `# BINARY CONFLICT at <path> — …\n` — first line of the binary-conflict
-///   stub produced by `render_binary_content_conflict`.
+/// * `<prefix> structured conflict at <path>\n` — first line of the
+///   text-conflict stub produced by `render_content_conflict`.
+/// * `<prefix> BINARY CONFLICT at <path> — …\n` — first line of the
+///   binary-conflict stub produced by `render_binary_content_conflict`.
+///
+/// where `<prefix>` is whatever [`header_prefix_for`] returns for the
+/// conflicted path — historically always `#`, now comment-syntax-aware
+/// (bn-drk3). Every [`HEADER_PREFIXES`] entry is listed here for both
+/// conflict kinds so legacy `#`-form headers (written before bn-drk3, or for
+/// extensions the map still sends to `#`) keep matching forever.
 ///
 /// Legitimate source code never starts with these exact byte sequences. The
 /// merge gate cross-checks HEAD-tree blobs against this list as a
@@ -285,9 +356,16 @@ const MARKER_SEP: &str = "=======";
 /// **Important**: this list is intentionally small and prefix-only. Do NOT
 /// add generic marker patterns like `<<<<<<<` — that's exactly the false
 /// positive that bn-m6ad fixed. If materialize grows a new placeholder
-/// variant, update this list to match.
-pub const TOOL_PLACEHOLDER_PREFIXES: &[&[u8]] =
-    &[b"# structured conflict at ", b"# BINARY CONFLICT at "];
+/// variant, update this list (and [`HEADER_PREFIXES`] if it's a new comment
+/// token) to match.
+pub const TOOL_PLACEHOLDER_PREFIXES: &[&[u8]] = &[
+    b"# structured conflict at ",
+    b"// structured conflict at ",
+    b"-- structured conflict at ",
+    b"# BINARY CONFLICT at ",
+    b"// BINARY CONFLICT at ",
+    b"-- BINARY CONFLICT at ",
+];
 
 /// Return `true` if `content` starts with any byte sequence in
 /// [`TOOL_PLACEHOLDER_PREFIXES`].
@@ -475,22 +553,32 @@ fn render_content_conflict(
     // marker lines, so comment lines here are ignored by both.
     //
     // The first line is a TOOL_PLACEHOLDER_PREFIXES tripwire (bn-28d1) the
-    // merge gate depends on — keep it byte-exact.
-    out.extend_from_slice(format!("# structured conflict at {}\n", path.display()).as_bytes());
+    // merge gate depends on — keep it byte-exact. The comment token itself
+    // is chosen per-extension (bn-drk3) so e.g. a conflicted `.rs` file gets
+    // a legal `//` first line instead of a mystery syntax error; every
+    // continuation header line below uses the SAME token so `maw ws
+    // resolve`'s reconstruction parser can strip a single consistent
+    // prefix.
+    let prefix = header_prefix_for(path);
+    out.extend_from_slice(
+        format!("{prefix} structured conflict at {}\n", path.display()).as_bytes(),
+    );
     if !atoms.is_empty() {
-        out.extend_from_slice(b"# atoms:\n");
+        out.extend_from_slice(format!("{prefix} atoms:\n").as_bytes());
         for atom in atoms {
-            out.extend_from_slice(format!("#   - {}\n", atom.summary()).as_bytes());
+            out.extend_from_slice(format!("{prefix}   - {}\n", atom.summary()).as_bytes());
         }
     }
     // Mechanical-reconstruction info (bn-36zz): with these OIDs a resolver
     // can redo the merge without parsing markers, e.g.
     //   git cat-file blob <oid> > base/ours/theirs && git merge-file ...
     if let Some(b) = base {
-        out.extend_from_slice(format!("# base blob: {b}\n").as_bytes());
+        out.extend_from_slice(format!("{prefix} base blob: {b}\n").as_bytes());
     }
     for s in sides {
-        out.extend_from_slice(format!("# side {} blob: {}\n", s.workspace, s.content).as_bytes());
+        out.extend_from_slice(
+            format!("{prefix} side {} blob: {}\n", s.workspace, s.content).as_bytes(),
+        );
     }
     out.push(b'\n');
 
@@ -621,18 +709,24 @@ fn render_binary_content_conflict(
     sides: &[ConflictSide],
     side_bytes: &[Vec<u8>],
 ) -> Vec<u8> {
+    // bn-drk3: same per-extension comment token as the text-conflict header
+    // (`render_content_conflict`) — see `header_prefix_for` for rationale.
+    let prefix = header_prefix_for(path);
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(
         format!(
-            "# BINARY CONFLICT at {} — inlined markers would corrupt the file.\n",
+            "{prefix} BINARY CONFLICT at {} — inlined markers would corrupt the file.\n",
             path.display()
         )
         .as_bytes(),
     );
-    out.extend_from_slice(b"# Pick a side with: maw ws resolve <workspace> --keep <side-name>\n");
+    out.extend_from_slice(
+        format!("{prefix} Pick a side with: maw ws resolve <workspace> --keep <side-name>\n")
+            .as_bytes(),
+    );
     for side in sides {
         out.extend_from_slice(
-            format!("# side: {}  @  {}\n", side.workspace, side.content).as_bytes(),
+            format!("{prefix} side: {}  @  {}\n", side.workspace, side.content).as_bytes(),
         );
     }
     out.push(b'\n');
@@ -660,7 +754,7 @@ fn render_binary_content_conflict(
     // content, not a merge.
     out.extend_from_slice(
         format!(
-            "\n# ----- verbatim bytes of side `{}` below (chosen arbitrarily) -----\n",
+            "\n{prefix} ----- verbatim bytes of side `{}` below (chosen arbitrarily) -----\n",
             first.workspace
         )
         .as_bytes(),
@@ -1228,6 +1322,109 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // bn-drk3: header_prefix_for extension table
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn header_prefix_for_known_slash_slash_extensions() {
+        for ext in ["rs", "js", "ts", "c", "h", "cpp", "go", "java"] {
+            let path = PathBuf::from(format!("src/thing.{ext}"));
+            assert_eq!(
+                header_prefix_for(&path),
+                "//",
+                "extension .{ext} should map to `//`"
+            );
+        }
+    }
+
+    #[test]
+    fn header_prefix_for_known_dash_dash_extensions() {
+        for ext in ["sql", "lua"] {
+            let path = PathBuf::from(format!("src/thing.{ext}"));
+            assert_eq!(
+                header_prefix_for(&path),
+                "--",
+                "extension .{ext} should map to `--`"
+            );
+        }
+    }
+
+    #[test]
+    fn header_prefix_for_unchanged_hash_extensions() {
+        // Extensions the DESIGN explicitly calls out as staying `#`
+        // (unchanged from legacy behavior).
+        for ext in ["py", "sh", "toml", "yaml", "yml", "rb"] {
+            let path = PathBuf::from(format!("src/thing.{ext}"));
+            assert_eq!(
+                header_prefix_for(&path),
+                "#",
+                "extension .{ext} should stay `#`"
+            );
+        }
+    }
+
+    #[test]
+    fn header_prefix_for_unknown_and_missing_extensions_default_to_hash() {
+        for path in [
+            PathBuf::from("README"),
+            PathBuf::from("data.bin"),
+            PathBuf::from("notes.md"),
+            PathBuf::from("page.html"),
+            PathBuf::from("archive.tar.gz"),
+            PathBuf::from(".gitignore"),
+        ] {
+            assert_eq!(
+                header_prefix_for(&path),
+                "#",
+                "unknown/missing extension should default to `#`: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn header_prefix_of_blob_round_trips_every_known_prefix() {
+        for &prefix in HEADER_PREFIXES {
+            let text = format!("{prefix} structured conflict at foo.rs\n");
+            assert_eq!(
+                header_prefix_of_blob(text.as_bytes()),
+                Some(prefix),
+                "should detect prefix `{prefix}` from a structured-conflict header"
+            );
+            let binary = format!("{prefix} BINARY CONFLICT at foo.bin\n");
+            assert_eq!(
+                header_prefix_of_blob(binary.as_bytes()),
+                Some(prefix),
+                "should detect prefix `{prefix}` from a binary-conflict header"
+            );
+        }
+        assert_eq!(
+            header_prefix_of_blob(b"fn main() {}\n"),
+            None,
+            "ordinary source content is not a placeholder header"
+        );
+    }
+
+    #[test]
+    fn tool_placeholder_prefixes_cover_every_header_prefix_x_kind() {
+        // Every combination of HEADER_PREFIXES x {structured, binary} must
+        // be present, so the bn-28d1 tripwire and Gate 2 recognise every
+        // form materialize.rs can emit, including legacy `#`.
+        for &prefix in HEADER_PREFIXES {
+            let structured = format!("{prefix} structured conflict at ");
+            assert!(
+                TOOL_PLACEHOLDER_PREFIXES.contains(&structured.as_bytes()),
+                "TOOL_PLACEHOLDER_PREFIXES missing structured-conflict form for `{prefix}`"
+            );
+            let binary = format!("{prefix} BINARY CONFLICT at ");
+            assert!(
+                TOOL_PLACEHOLDER_PREFIXES.contains(&binary.as_bytes()),
+                "TOOL_PLACEHOLDER_PREFIXES missing BINARY CONFLICT form for `{prefix}`"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // materialize
     // -----------------------------------------------------------------------
 
@@ -1469,6 +1666,57 @@ mod tests {
         assert!(
             head.contains("BINARY CONFLICT"),
             "binary-conflict banner expected in header; got head:\n{head}"
+        );
+        // "assets/logo.png" has an unrecognised extension (bn-drk3) — the
+        // banner must keep using the legacy `#` prefix, unchanged.
+        assert!(
+            head.starts_with("# BINARY CONFLICT"),
+            "unknown extension must keep the legacy `#` prefix; got head:\n{head}"
+        );
+    }
+
+    /// bn-drk3: the binary-conflict banner is comment-prefix-aware too — a
+    /// binary blob conflicted at a known `.sql` path gets the `--` prefix,
+    /// not `#`.
+    #[test]
+    fn materialize_binary_conflict_uses_known_extension_prefix() {
+        let fx = Fx::new();
+        let binary = b"\x00\x01\x02BINDATA".to_vec();
+        let epoch_oid = fx.blob(&binary);
+        let mut ws_bytes = binary;
+        ws_bytes.push(0xffu8);
+        let ws_oid = fx.blob(&ws_bytes);
+
+        let mut tree = ConflictTree::new(epoch());
+        tree.conflicts.insert(
+            PathBuf::from("db/seed.sql"),
+            Conflict::Content {
+                path: PathBuf::from("db/seed.sql"),
+                file_id: FileId::new(8),
+                base: None,
+                sides: vec![side("epoch", epoch_oid), side("feature", ws_oid)],
+                atoms: vec![],
+            },
+        );
+        let out = materialize(&tree, fx.repo.as_ref()).expect("operation should succeed");
+        let content = match out
+            .entries
+            .get(&PathBuf::from("db/seed.sql"))
+            .expect("operation should succeed")
+        {
+            FinalEntry::Rendered { content, .. } => content.clone(),
+            FinalEntry::Clean { .. } => panic!("expected rendered"),
+        };
+        let head = std::str::from_utf8(
+            &content[..content
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(content.len())],
+        )
+        .unwrap_or("");
+        assert!(
+            head.starts_with("-- BINARY CONFLICT at db/seed.sql"),
+            "`.sql` binary conflict must use the `--` comment prefix; got head:\n{head}"
         );
     }
 
@@ -1787,23 +2035,40 @@ mod tests {
         let text = std::str::from_utf8(&content).expect("operation should succeed");
 
         // Tripwire header line (bn-28d1) must stay byte-exact and first.
+        // bn-drk3: `.rs` is a known extension, so the header uses `//` (a
+        // legal Rust comment) instead of the legacy `#` — this is exactly
+        // the fix for the bn-1m4d item 2 field incident (a `#` first line
+        // produced a mystery rustc syntax error on a conflicted .rs file).
         assert!(
-            text.starts_with("# structured conflict at src/big.rs\n"),
-            "tripwire header must be the first line; got:\n{text}"
+            text.starts_with("// structured conflict at src/big.rs\n"),
+            "tripwire header must be the first line, using the `.rs` `//` comment prefix; \
+             got:\n{text}"
         );
-        // Atoms lines kept.
-        assert!(text.contains("# atoms:\n"), "atoms header missing:\n{text}");
-        // Blob OIDs for mechanical reconstruction.
+        // First line must be a syntactically legal Rust line comment.
         assert!(
-            text.contains(&format!("# base blob: {base_oid}\n")),
+            text.lines().next().is_some_and(|l| l.starts_with("//")),
+            "first line must be a legal Rust `//` comment; got:\n{text}"
+        );
+        // Atoms lines kept, same `//` prefix.
+        assert!(
+            text.contains("// atoms:\n"),
+            "atoms header missing:\n{text}"
+        );
+        assert!(
+            !text.contains("# atoms:\n"),
+            "legacy `#`-prefixed atoms header must not appear for a `.rs` path; got:\n{text}"
+        );
+        // Blob OIDs for mechanical reconstruction, same `//` prefix.
+        assert!(
+            text.contains(&format!("// base blob: {base_oid}\n")),
             "base blob OID missing from header; got:\n{text}"
         );
         assert!(
-            text.contains(&format!("# side epoch blob: {epoch_oid}\n")),
+            text.contains(&format!("// side epoch blob: {epoch_oid}\n")),
             "epoch side blob OID missing from header; got:\n{text}"
         );
         assert!(
-            text.contains(&format!("# side feature blob: {ws_oid}\n")),
+            text.contains(&format!("// side feature blob: {ws_oid}\n")),
             "feature side blob OID missing from header; got:\n{text}"
         );
 

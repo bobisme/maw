@@ -450,6 +450,133 @@ fn text_placeholder_deleted_sidecar_reconstructs_and_resolves() {
 }
 
 // ---------------------------------------------------------------------------
+// bn-drk3: comment-syntax-aware headers — end-to-end via a real auto-rebase
+// conflict on a `.rs` file, plus reconstruction from the `//`-form header.
+// ---------------------------------------------------------------------------
+
+/// Same shape as [`setup_committed_conflict_via_auto_rebase`] but conflicts
+/// on a `.rs` path — exercises the exact bn-1m4d item 2 field incident shape
+/// (a rebase-committed conflict placeholder inside a Rust source file).
+fn setup_committed_rs_conflict_via_auto_rebase(repo: &TestRepo) {
+    repo.seed_files(&[("src/lib.rs", "fn shared() -> i32 {\n    1\n}\n")]);
+
+    repo.maw_ok(&["ws", "create", "a"]);
+    repo.maw_ok(&["ws", "create", "b"]);
+    repo.add_file("a", "src/lib.rs", "fn shared() -> i32 {\n    2\n}\n");
+    repo.git_in_workspace("a", &["commit", "-aqm", "a-change"]);
+    repo.add_file("b", "src/lib.rs", "fn shared() -> i32 {\n    3\n}\n");
+    repo.git_in_workspace("b", &["commit", "-aqm", "b-change"]);
+
+    repo.maw_ok(&[
+        "ws",
+        "merge",
+        "a",
+        "--into",
+        "default",
+        "--message",
+        "merge a",
+    ]);
+
+    let sidecar = repo
+        .read_conflict_tree_sidecar("b")
+        .expect("auto-rebase should write conflict-tree.json for 'b'");
+    let conflicts = sidecar
+        .get("conflicts")
+        .and_then(|v| v.as_object())
+        .expect("sidecar should have a conflicts object");
+    assert!(
+        !conflicts.is_empty(),
+        "precondition: auto-rebase must record a conflict for 'b'"
+    );
+}
+
+/// bn-drk3 / bn-1m4d item 2: a real auto-rebase conflict committed into a
+/// `.rs` file must produce a `//`-prefixed header — the exact fix for the
+/// field incident where a `#` first line produced a mystery rustc syntax
+/// error ("expected one of '!' or '[', found 'structured'") instead of the
+/// `<<<<<<<` marker block, which rustc explains clearly.
+#[test]
+fn auto_rebase_conflict_on_rs_file_uses_slash_slash_header() {
+    let repo = TestRepo::new();
+    setup_committed_rs_conflict_via_auto_rebase(&repo);
+
+    let on_disk = repo
+        .read_file_bytes("b", "src/lib.rs")
+        .expect("conflicted src/lib.rs must exist in the workspace worktree");
+    let first_line = on_disk
+        .split(|&b| b == b'\n')
+        .next()
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .unwrap_or_default();
+
+    assert!(
+        first_line.starts_with("// structured conflict at"),
+        "a conflicted .rs file's first line must be a legal Rust `//` comment \
+         (bn-drk3 / bn-1m4d item 2), not the legacy `#`; got: {first_line:?}"
+    );
+    assert!(
+        !first_line.starts_with('#'),
+        "must not regress to the legacy `#` prefix for a known .rs extension; got: {first_line:?}"
+    );
+
+    // `resolve --list` must agree the conflict exists (readers stay in sync).
+    let resolve = repo.maw_ok(&["ws", "resolve", "b", "--list"]);
+    assert!(
+        resolve.contains("src/lib.rs"),
+        "resolve --list must show the conflicted path; got:\n{resolve}"
+    );
+}
+
+/// bn-drk3: reconstruction (bn-39i8) must accept the `//`-form header just
+/// as it always has the legacy `#` form — a `.rs` conflict whose sidecars
+/// were deleted must still reconstruct from the `//`-prefixed placeholder.
+#[test]
+fn rs_placeholder_slash_slash_header_deleted_sidecar_reconstructs_and_resolves() {
+    let repo = TestRepo::new();
+    setup_committed_rs_conflict_via_auto_rebase(&repo);
+
+    let sidecar_dir = repo.root().join(".manifold/artifacts/ws/b");
+    let sidecar_path = sidecar_dir.join("conflict-tree.json");
+    let _ = std::fs::remove_file(&sidecar_path);
+    let _ = std::fs::remove_file(sidecar_dir.join("rebase-conflicts.json"));
+    assert!(
+        repo.read_conflict_tree_sidecar("b").is_none(),
+        "precondition: sidecar must be gone"
+    );
+
+    // Precondition: the placeholder blob really is `//`-prefixed.
+    let on_disk = repo
+        .read_file_bytes("b", "src/lib.rs")
+        .expect("conflicted src/lib.rs must exist");
+    assert!(
+        on_disk.starts_with(b"// structured conflict at "),
+        "precondition: HEAD blob must carry the `//`-prefixed placeholder header"
+    );
+
+    let resolve = repo.maw_ok(&["ws", "resolve", "b", "--list"]);
+    assert!(
+        resolve.contains("src/lib.rs"),
+        "resolve --list must reconstruct from the `//`-form header; got:\n{resolve}"
+    );
+    assert!(
+        repo.read_conflict_tree_sidecar("b").is_some(),
+        "reconstructed sidecar must be readable as a valid ConflictTree"
+    );
+
+    let keep = repo.maw_ok(&["ws", "resolve", "b", "--keep", "epoch"]);
+    assert!(
+        keep.contains("resolved") || keep.contains("Reconstructed") || !keep.contains("error"),
+        "resolve --keep epoch must succeed after reconstruction; got:\n{keep}"
+    );
+
+    let check2 = repo.maw_ok(&["ws", "merge", "b", "--into", "default", "--check"]);
+    assert!(
+        check2.contains("Ready to merge"),
+        "workspace must be mergeable after resolving the reconstructed conflict; got:\n{check2}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (b-bn-39i8) binary-format placeholder: reconstructs, --keep <ws> resolves
 // ---------------------------------------------------------------------------
 

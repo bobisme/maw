@@ -189,6 +189,74 @@ fn merge_check_header_only_leftover_shares_the_targeted_message() {
 }
 
 // ---------------------------------------------------------------------------
+// bn-drk3: comment-syntax-aware header prefix — the leftover-header message
+// quotes the ACTUAL prefix a known-extension file used (`//` for `.rs`),
+// not the legacy `#`.
+// ---------------------------------------------------------------------------
+
+/// Same shape as [`header_only_leftover_content`] but using the `//` prefix
+/// bn-drk3's `header_prefix_for` picks for a `.rs` path — a leftover
+/// header-only `.rs` file after bn-drk3.
+fn header_only_leftover_content_rs(path: &str) -> String {
+    format!(
+        "// structured conflict at {path}\n\
+         // base blob: 0000000000000000000000000000000000000000\n\
+         // side epoch blob: 1111111111111111111111111111111111111111\n\
+         // side feat blob: 2222222222222222222222222222222222222222\n\
+         \n\
+         fn resolved() {{}}\n"
+    )
+}
+
+#[test]
+fn merge_gate2_header_only_leftover_quotes_slash_slash_prefix_for_rs_file() {
+    let repo = TestRepo::new();
+    let rel_path = "conflicted.rs";
+    commit_placeholder_blob(
+        &repo,
+        "feat",
+        rel_path,
+        &header_only_leftover_content_rs(rel_path),
+    );
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "feat",
+        "--into",
+        "default",
+        "--destroy",
+        "--message",
+        "should fail",
+    ]);
+    assert!(
+        !out.status.success(),
+        "merge must refuse a header-only leftover blob\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(rel_path),
+        "error should name the file '{rel_path}'; got: {stderr}"
+    );
+    // bn-drk3: the fix hint must quote `//`, not the legacy `#` — this is
+    // the file's own comment syntax, so the guidance is directly usable.
+    assert!(
+        stderr.contains("Delete the leading '//' header lines"),
+        "error should quote the `//` prefix this .rs file actually used; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("// structured conflict at"),
+        "error should quote the `//`-prefixed header form; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Delete the leading '#' header lines"),
+        "error must not assume the legacy `#` prefix for a `.rs` leftover header; got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // bn-1etl: markers still present keeps the original tamper-flavored message
 // ---------------------------------------------------------------------------
 
