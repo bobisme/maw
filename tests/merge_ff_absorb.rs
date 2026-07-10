@@ -700,6 +700,17 @@ fn ff_absorb_replays_committed_ahead_sibling() {
         "absorb output should name bob's replay.\nstderr: {stderr}"
     );
 
+    // bn-2rnq: the Prime-Invariant auditor proves bob's committed work survived
+    // the absorb+replay — one sibling verified, no violation.
+    assert!(
+        stderr.contains("INVARIANT: verified 1 sibling workspace(s)"),
+        "auditor should print the one-line proof for the replayed sibling.\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("INVARIANT VIOLATION"),
+        "a faithful replay must NOT trip the auditor.\nstderr: {stderr}"
+    );
+
     let bob_head_after = repo
         .git_in_workspace("bob", &["rev-parse", "HEAD"])
         .trim()
@@ -875,5 +886,158 @@ fn ff_absorb_blocks_on_committed_ahead_dirty_sibling() {
         repo.current_epoch(),
         epoch_before,
         "a blocked absorb must not advance the epoch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bn-2rnq: Prime-Invariant runtime auditor
+// ---------------------------------------------------------------------------
+
+/// Deliberately reintroduce the bn-rah2 data-loss bug via the test-only fault
+/// hook (`MAW_INVARIANT_FAULT=ff-absorb-skip-replay`, which raw-resets a
+/// committed-ahead sibling's HEAD to the absorbed tip instead of replaying it)
+/// and prove the runtime auditor catches it: loud violation block, a pinned
+/// recovery ref, a nonzero exit, and the orphaned commit is recoverable.
+#[test]
+fn invariant_auditor_catches_orphaned_sibling_on_ff_absorb() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    // alice contributes UNCOMMITTED work — she is a dirty-only sibling in the
+    // absorb (fast-forward path, untouched by the fault) and a real merge source
+    // (so the merge is non-trivial and reaches the success-path audit).
+    repo.add_file("alice", "src/alice.rs", "// alice\n");
+
+    // bob has COMMITTED work ahead of the epoch — the fault will orphan it.
+    repo.add_file("bob", "src/bob.rs", "// bob\n");
+    repo.git_in_workspace("bob", &["add", "-A"]);
+    repo.git_in_workspace("bob", &["commit", "-m", "feat: bob's work"]);
+    let bob_head_before = repo
+        .git_in_workspace("bob", &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    push_branch_ahead(
+        &repo,
+        "docs/README.md",
+        "# README\n\ndirect commit\n",
+        "docs: direct commit outside maw",
+    );
+
+    // Merge alice with the fault injected — the absorb skips bob's replay,
+    // orphaning his commit exactly as the shipped bn-rah2 regression did.
+    let out = repo.maw_raw_env(
+        &[
+            "ws",
+            "merge",
+            "alice",
+            "--destroy",
+            "--message",
+            "feat: merge alice",
+        ],
+        &[("MAW_INVARIANT_FAULT", "ff-absorb-skip-replay")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    // Nonzero exit — the auditor refuses to declare success over lost work.
+    assert!(
+        !out.status.success(),
+        "auditor must fail the command on an orphaned sibling.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Loud, actionable violation block naming bob and his orphaned commit.
+    assert!(
+        stderr.contains("INVARIANT VIOLATION"),
+        "auditor must print the violation block.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("bob") && stderr.contains(&bob_head_before),
+        "violation block must name bob and his orphaned commit OID.\nstderr: {stderr}"
+    );
+
+    // A recovery ref was pinned at bob's orphaned HEAD, and the block prints the
+    // exact copy-pasteable recover command.
+    assert!(
+        stderr.contains("maw ws recover --ref refs/manifold/recovery/bob/invariant-"),
+        "violation block must print the recover command.\nstderr: {stderr}"
+    );
+    let pinned = git_ok(
+        repo.root(),
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/manifold/recovery/bob/",
+        ],
+    );
+    assert!(
+        pinned.lines().any(|oid| oid.trim() == bob_head_before),
+        "a recovery ref must point at bob's orphaned commit {bob_head_before}.\nrefs:\n{pinned}"
+    );
+}
+
+/// With `invariant.audit = false` the auditor is fully inert: no proof line, and
+/// (critically) no behavior change — a normal absorb+replay still succeeds. This
+/// is the escape hatch for perf-sensitive giant repos.
+#[test]
+fn invariant_auditor_disabled_by_config_is_silent() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    // Disable the auditor via .maw.toml at the repo root.
+    std::fs::write(
+        repo.root().join(".maw.toml"),
+        "[invariant]\naudit = false\n",
+    )
+    .expect("write .maw.toml");
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.maw_ok(&["ws", "create", "bob"]);
+
+    repo.add_file("bob", "src/bob.rs", "// bob\n");
+    repo.git_in_workspace("bob", &["add", "-A"]);
+    repo.git_in_workspace("bob", &["commit", "-m", "feat: bob's work"]);
+
+    repo.add_file("alice", "src/alice.rs", "// alice\n");
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "feat: alice's work"]);
+
+    push_branch_ahead(
+        &repo,
+        "docs/README.md",
+        "# README\n\ndirect commit\n",
+        "docs: direct commit outside maw",
+    );
+
+    let out = repo.maw_raw(&[
+        "ws",
+        "merge",
+        "alice",
+        "--destroy",
+        "--message",
+        "feat: merge alice",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        out.status.success(),
+        "merge should still succeed.\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("INVARIANT:"),
+        "disabled auditor must print no proof line.\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("INVARIANT VIOLATION"),
+        "disabled auditor must print no violation block.\nstderr: {stderr}"
+    );
+    // Behavior unchanged: bob's committed work is still preserved by the replay.
+    assert_eq!(
+        repo.git_in_workspace("bob", &["show", "HEAD:src/bob.rs"]),
+        "// bob\n",
+        "disabling the auditor must not change merge behavior"
     );
 }

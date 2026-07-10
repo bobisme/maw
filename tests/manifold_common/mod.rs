@@ -739,6 +739,29 @@ impl TestRepo {
             .expect("failed to execute maw")
     }
 
+    /// Run the `maw` binary with the same argument rewriting as [`Self::maw_raw`]
+    /// but with extra environment variables set ONLY on the child process (never
+    /// on the shared test-process env). Used to drive the bn-2rnq Prime-Invariant
+    /// auditor's test fault-injection hook without racing sibling tests.
+    pub fn maw_raw_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        let mut adjusted: Vec<&str> = args.to_vec();
+        let is_ws_merge = adjusted.len() >= 2
+            && (adjusted[0] == "ws" || adjusted[0] == "workspace")
+            && adjusted[1] == "merge";
+        let has_into_target = adjusted.contains(&"--into");
+        if is_ws_merge && !has_into_target {
+            adjusted.insert(2, "--into");
+            adjusted.insert(3, "default");
+        }
+
+        let mut cmd = Command::new(maw_bin());
+        cmd.args(&adjusted).current_dir(&self.root);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("failed to execute maw")
+    }
+
     /// Run `maw` and assert it succeeds. Returns stdout as a string.
     ///
     /// # Panics

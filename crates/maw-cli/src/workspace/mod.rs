@@ -29,6 +29,7 @@ mod diff;
 pub(crate) mod epoch_drift;
 pub(crate) mod ff_absorb;
 mod history;
+pub(crate) mod invariant_audit;
 pub(crate) mod lifecycle;
 mod list;
 mod merge;
@@ -77,6 +78,8 @@ pub struct MawConfig {
     repo: RepoConfig,
     #[serde(default)]
     lock: LockConfig,
+    #[serde(default)]
+    invariant: InvariantConfig,
 }
 
 /// Repo-level epoch lock configuration (bn-13rc, `[lock]` in `.maw.toml`).
@@ -103,6 +106,32 @@ impl Default for LockConfig {
 impl LockConfig {
     const fn default_wait_seconds() -> u64 {
         10
+    }
+}
+
+/// Prime-Invariant runtime auditor configuration (bn-2rnq, `[invariant]` in
+/// `.maw.toml`).
+#[derive(Debug, Deserialize)]
+struct InvariantConfig {
+    /// If true (default), every epoch mutation runs the post-mutation sibling
+    /// reachability audit and prints its one-line proof. Escape hatch for
+    /// perf-sensitive giant repos — the audit is cheap (ref reads + merge-bases)
+    /// so this should rarely be needed.
+    #[serde(default = "InvariantConfig::default_audit")]
+    audit: bool,
+}
+
+impl Default for InvariantConfig {
+    fn default() -> Self {
+        Self {
+            audit: Self::default_audit(),
+        }
+    }
+}
+
+impl InvariantConfig {
+    const fn default_audit() -> bool {
+        true
     }
 }
 
@@ -201,6 +230,12 @@ impl MawConfig {
     #[must_use]
     pub const fn lock_wait_seconds(&self) -> u64 {
         self.lock.wait_seconds
+    }
+
+    /// Whether the Prime-Invariant runtime auditor is enabled (bn-2rnq).
+    #[must_use]
+    pub const fn invariant_audit(&self) -> bool {
+        self.invariant.audit
     }
 }
 

@@ -114,26 +114,42 @@ pub fn sync(name: Option<&str>, all: bool, no_rebase: bool, format: OutputFormat
     // deeper in the pipeline. `--no-rebase` is status-only (read-only) and must
     // NOT take the lock. Held via RAII across the whole (possibly multi-ws)
     // operation.
-    let _epoch_lock = if no_rebase {
+    // bn-2rnq: hold the lock AND the pre-mutation sibling snapshot together for
+    // the rebasing path. `--no-rebase` is read-only — no lock, no audit.
+    let audit_ctx = if no_rebase {
         None
     } else {
         let root = repo_root()?;
-        Some(crate::epoch_lock::EpochLock::acquire(&root, "ws sync")?)
+        let lock = crate::epoch_lock::EpochLock::acquire(&root, "ws sync")?;
+        let pre = super::invariant_audit::capture(&root);
+        Some((root, lock, pre))
     };
+
+    // Run the sync itself, then — before returning — verify no sibling's
+    // committed work was orphaned. The dispatch prints its own output; the audit
+    // adds the one-line proof to stderr and fails on a violation.
     if format == OutputFormat::Json {
-        return if all {
-            sync_all_json(no_rebase)
+        if all {
+            sync_all_json(no_rebase)?;
         } else {
             let output = build_sync_json(name, no_rebase)?;
-            print_sync_json(&output)
-        };
+            print_sync_json(&output)?;
+        }
+    } else if all {
+        sync_all(no_rebase)?;
+    } else {
+        sync_one_text(name, no_rebase)?;
     }
 
-    if all {
-        return sync_all(no_rebase);
+    if let Some((root, _lock, pre)) = &audit_ctx {
+        // For a single-workspace sync the named workspace is the operand; for
+        // `--all` every workspace is rebased, so there are no excluded operands
+        // and the audit verifies each captured workspace was preserved.
+        let subjects: Vec<&str> = name.filter(|_| !all).into_iter().collect();
+        super::invariant_audit::finish(root, pre, &subjects, "ws sync")?;
     }
 
-    sync_one_text(name, no_rebase)
+    Ok(())
 }
 
 /// Sync a single workspace, printing plain-text progress (the historical

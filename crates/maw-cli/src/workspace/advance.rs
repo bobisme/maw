@@ -62,6 +62,10 @@ pub struct AdvanceResult {
     pub conflicts: Vec<AdvanceConflict>,
     /// Human-readable summary message.
     pub message: String,
+    /// bn-2rnq: Prime-Invariant audit result. Omitted when the audit is
+    /// disabled (`invariant.audit = false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invariant: Option<super::invariant_audit::AuditReport>,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +94,8 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
     // committed-ahead work) replays through the guarded rebase path — take the
     // repo-level epoch lock first, held until this function returns.
     let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "ws advance")?;
+    // bn-2rnq: snapshot sibling HEADs before rebasing this workspace.
+    let invariant_pre = super::invariant_audit::capture(&root);
     let ws_path = workspace_path(name)?;
 
     if !ws_path.exists() {
@@ -144,6 +150,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
 
     // Already up to date?
     if old_epoch == current_epoch.as_str() {
+        let report = super::invariant_audit::finish(&root, &invariant_pre, &[name], "ws advance")?;
         if format == OutputFormat::Json {
             let result = AdvanceResult {
                 workspace: name.to_owned(),
@@ -152,6 +159,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
                 success: true,
                 conflicts: vec![],
                 message: format!("Workspace '{name}' is already at the current epoch."),
+                invariant: Some(report),
             };
             println!("{}", format.serialize(&result)?);
         } else {
@@ -213,6 +221,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         .with_context(|| format!("Failed to rebase workspace '{name}' onto new epoch"))?;
 
         // Epoch ref is updated by rebase_workspace_run. Emit a success result.
+        let report = super::invariant_audit::finish(&root, &invariant_pre, &[name], "ws advance")?;
         let message = format!(
             "Workspace '{name}' advanced (with rebase) from epoch {old_short}... to {new_short}... successfully."
         );
@@ -223,6 +232,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
             success: true,
             conflicts: vec![],
             message,
+            invariant: Some(report),
         };
         match format {
             OutputFormat::Json => println!("{}", format.serialize(&result)?),
@@ -314,6 +324,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         )
     };
 
+    let report = super::invariant_audit::finish(&root, &invariant_pre, &[name], "ws advance")?;
     let result = AdvanceResult {
         workspace: name.to_owned(),
         old_epoch: old_epoch.clone(),
@@ -321,6 +332,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         success,
         conflicts,
         message,
+        invariant: Some(report),
     };
 
     match format {
@@ -421,6 +433,7 @@ mod tests {
             success: true,
             conflicts: vec![],
             message: "Advanced successfully.".to_owned(),
+            invariant: None,
         };
         let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"success\":true"));
@@ -439,6 +452,7 @@ mod tests {
                 conflict_type: "content".to_owned(),
             }],
             message: "Conflicts detected.".to_owned(),
+            invariant: None,
         };
         let json = serde_json::to_string(&r).expect("operation should succeed");
         assert!(json.contains("\"success\":false"));

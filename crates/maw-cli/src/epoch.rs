@@ -22,6 +22,8 @@ pub fn sync() -> Result<()> {
     // bn-13rc: epoch sync rewrites refs/manifold/epoch/current and the default
     // workspace baseline — serialize it against every other epoch mutator.
     let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "epoch sync")?;
+    // bn-2rnq: snapshot sibling HEADs before the epoch advance.
+    let invariant_pre = crate::workspace::invariant_audit::capture(&root);
     let config = MawConfig::load(&root).unwrap_or_default();
     let branch = config.branch();
     let branch_ref = format!("refs/heads/{branch}");
@@ -49,6 +51,12 @@ pub fn sync() -> Result<()> {
             "Epoch is already in sync with '{branch}' at {}.",
             &epoch_oid.as_str()[..12]
         );
+        crate::workspace::invariant_audit::finish(
+            &root,
+            &invariant_pre,
+            &[config.default_workspace()],
+            "epoch sync",
+        )?;
         return Ok(());
     }
 
@@ -80,6 +88,9 @@ pub fn sync() -> Result<()> {
         &epoch_oid.as_str()[..12],
         &branch_oid.as_str()[..12],
     );
+
+    // bn-2rnq: verify the epoch advance orphaned no sibling's committed work.
+    crate::workspace::invariant_audit::finish(&root, &invariant_pre, &[default_ws], "epoch sync")?;
 
     Ok(())
 }

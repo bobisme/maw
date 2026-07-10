@@ -193,6 +193,10 @@ pub struct MergeSuccessOutput {
     /// disabled, found no siblings to rebase, or none of them conflicted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sibling_conflicts: Vec<String>,
+    /// bn-2rnq: Prime-Invariant audit result — `{ siblings_checked, orphaned }`.
+    /// Omitted when the audit is disabled (`invariant.audit = false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invariant: Option<super::invariant_audit::AuditReport>,
 }
 
 /// Structured advice entry for merge JSON output.
@@ -3389,6 +3393,29 @@ fn reconcile_epoch_with_branch(
             // sees them up to date. No sibling is ever left half-moved.
             for c in &classes {
                 if let SiblingPlan::Replay { base_epoch } = &c.plan {
+                    // bn-2rnq TEST-ONLY fault injection. When
+                    // MAW_INVARIANT_FAULT=ff-absorb-skip-replay is set, reproduce
+                    // the exact bn-rah2 data-loss bug: skip the guarded replay and
+                    // raw-move the committed-ahead sibling's HEAD to the absorbed
+                    // tip, orphaning its commit. This exists solely to prove the
+                    // Prime-Invariant auditor catches a reintroduced regression.
+                    // Compiled out of release binaries (debug_assertions gate):
+                    // an env-triggered loss injector must never ship live.
+                    if cfg!(debug_assertions)
+                        && std::env::var("MAW_INVARIANT_FAULT").as_deref()
+                            == Ok("ff-absorb-skip-replay")
+                    {
+                        if let Ok(repo) = maw_git::GixRepo::open(&c.ws_path) {
+                            let _ = repo.checkout_detach(branch_git, &c.ws_path);
+                        }
+                        let _ = maw_core::refs::write_ref(
+                            root,
+                            &maw_core::refs::workspace_epoch_ref(&c.name),
+                            branch_oid,
+                        );
+                        notes.push(format!("  {}: [FAULT] skipped replay (test)", c.name));
+                        continue;
+                    }
                     match super::sync::rebase::rebase_sibling_for_absorb(
                         root,
                         &c.name,
@@ -4030,6 +4057,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // Epoch lock FIRST; the sibling auto-rebase takes per-workspace locks under
     // it (see epoch_lock ordering rule). `--check`/`--plan` never reach here.
     let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "ws merge")?;
+    // bn-2rnq: snapshot every sibling's committed HEAD BEFORE any epoch mutation
+    // (FF-absorb reconcile, PREPARE→COMMIT, sibling auto-rebase). We are inside
+    // the epoch lock, so no sibling can move under us between here and the audit.
+    let invariant_pre = super::invariant_audit::capture(&root);
     let maw_config = MawConfig::load(&root)?;
     let default_ws = target_workspace;
     let into_target = target_change_id.unwrap_or(default_ws);
@@ -4248,6 +4279,21 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         && build_output.conflicts.is_empty()
     {
         abort_merge(&manifold_dir, "empty merge (no changes)");
+
+        // bn-2rnq: even a no-op merge may have run the FF-absorb reconcile, which
+        // is the exact bn-rah2 orphaning surface — audit before returning.
+        let mut invariant_subjects: Vec<&str> = ws_to_merge.iter().map(String::as_str).collect();
+        invariant_subjects.push(default_ws);
+        let invariant_report =
+            super::invariant_audit::audit(&root, &invariant_pre, &invariant_subjects, "ws merge");
+        if invariant_report.is_violation() {
+            invariant_report.emit_violation_block();
+            bail!(
+                "Prime-Invariant violation: {} sibling workspace(s) would lose committed work (see recovery refs above).",
+                invariant_report.orphaned.len()
+            );
+        }
+        invariant_report.emit_proof_line();
 
         let ws_list = ws_to_merge.join(", ");
 
@@ -5033,6 +5079,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         build_output.candidate.as_str(),
     );
 
+    // bn-2rnq: Prime-Invariant post-mutation audit. The merge target and its
+    // sources are the operation's direct operands (their HEADs move by design;
+    // destroyed sources are pinned by destroy records) — every OTHER workspace
+    // is a sibling whose committed work must have survived. On a violation, pin
+    // recovery refs, print the block, and exit nonzero WITHOUT the success line.
+    let mut invariant_subjects: Vec<&str> = ws_to_merge.iter().map(String::as_str).collect();
+    invariant_subjects.push(default_ws);
+    let invariant_report =
+        super::invariant_audit::audit(&root, &invariant_pre, &invariant_subjects, "ws merge");
+    if invariant_report.is_violation() {
+        invariant_report.emit_violation_block();
+        bail!(
+            "Prime-Invariant violation: {} sibling workspace(s) would lose committed work (see recovery refs above).",
+            invariant_report.orphaned.len()
+        );
+    }
+
     if format == OutputFormat::Json {
         let success = MergeSuccessOutput {
             status: "success".to_string(),
@@ -5048,6 +5111,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             next: next_command,
             advice: vec![],
             sibling_conflicts: sibling_conflict_names.clone(),
+            invariant: Some(invariant_report.clone()),
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
@@ -5082,6 +5146,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             &build_output.candidate.as_str()[..12]
         );
     }
+
+    // bn-2rnq: one-line proof to stderr (both text and JSON modes). No-op when
+    // the audit is disabled; the JSON body already carries the structured field.
+    invariant_report.emit_proof_line();
 
     Ok(())
 }
@@ -6992,6 +7060,7 @@ mod tests {
             next: "maw push".to_string(),
             advice: vec![],
             sibling_conflicts: vec![],
+            invariant: None,
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
@@ -7030,6 +7099,7 @@ mod tests {
             next: "maw push".to_string(),
             advice: vec![],
             sibling_conflicts: vec!["bob".to_string()],
+            invariant: None,
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
