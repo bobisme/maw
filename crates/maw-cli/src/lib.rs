@@ -20,6 +20,7 @@ pub mod init;
 pub mod lfs_push;
 pub mod merge_cmd;
 pub mod migrate;
+pub mod ops_log;
 pub mod push;
 pub mod ref_gc;
 pub mod release;
@@ -29,6 +30,7 @@ pub mod tldr;
 pub mod transport;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod undo;
 pub mod upgrade;
 pub mod vocab_hints;
 pub mod workspace;

@@ -4823,9 +4823,23 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // refs and the journal already agree once the CAS has committed.
 
     // Record merge operations in source workspace histories.
-    for warning in
-        record_merge_operations(&root, &sources, &merge_base_epoch, &build_output.candidate)
-    {
+    //
+    // bn-117s: the merge op is also recorded on the TARGET (default) workspace
+    // (passed separately so it does NOT appear in the Merge payload's `sources`
+    // list). The default workspace's oplog head ref is never deleted by
+    // `--destroy` (only source workspaces are destroyed), so the default oplog
+    // is the durable spine of repo-level epoch history that `maw ops log` /
+    // `maw undo` read: after `maw ws merge X --destroy` deletes
+    // `refs/manifold/head/X`, the merge would otherwise be discoverable only
+    // through X's now-dangling head ref.
+    let merge_target_id = WorkspaceId::new(default_ws).ok();
+    for warning in record_merge_operations(
+        &root,
+        &sources,
+        merge_target_id.as_ref(),
+        &merge_base_epoch,
+        &build_output.candidate,
+    ) {
         tracing::warn!("{warning}");
     }
 
@@ -5115,6 +5129,7 @@ fn record_snapshot_operations<B: WorkspaceBackend>(
 fn record_merge_operations(
     root: &Path,
     sources: &[WorkspaceId],
+    target: Option<&WorkspaceId>,
     epoch_before: &EpochId,
     epoch_after: &GitOid,
 ) -> Vec<String> {
@@ -5131,7 +5146,17 @@ fn record_merge_operations(
         }
     };
 
-    for ws_id in sources {
+    // Record on every source workspace plus the (non-source) target workspace,
+    // but the Merge payload's `sources` field always lists only the true
+    // sources (bn-117s).
+    let mut recorded: Vec<WorkspaceId> = sources.to_vec();
+    if let Some(target_id) = target
+        && !recorded.contains(target_id)
+    {
+        recorded.push(target_id.clone());
+    }
+
+    for ws_id in &recorded {
         let head = match ensure_workspace_oplog_head(root, ws_id, epoch_before) {
             Ok(head) => head,
             Err(e) => {

@@ -15,6 +15,7 @@ use maw_cli::fsck;
 use maw_cli::init;
 use maw_cli::merge_cmd;
 use maw_cli::migrate;
+use maw_cli::ops_log;
 use maw_cli::push;
 use maw_cli::ref_gc;
 use maw_cli::release;
@@ -24,6 +25,7 @@ use maw_cli::tldr;
 use maw_cli::transport;
 #[cfg(feature = "tui")]
 use maw_cli::tui;
+use maw_cli::undo;
 use maw_cli::upgrade;
 use maw_cli::vocab_hints;
 use maw_cli::workspace;
@@ -419,6 +421,50 @@ enum Commands {
     #[command(subcommand, verbatim_doc_comment)]
     Merge(merge_cmd::MergeCommands),
 
+    /// Reverse the last epoch mutation (repo-level oplog undo)
+    ///
+    /// `maw undo` reverses the most recent `maw ws merge`: it moves the epoch
+    /// and branch back to before the merge, restores the destroyed source
+    /// workspaces from their recovery snapshots, and rewinds the trunk (any
+    /// uncommitted trunk edits are preserved). The undone merge result stays
+    /// reachable under `refs/manifold/recovery/undo/<ts>`, so `maw undo` after
+    /// `maw undo` is a redo — the toggle round-trips.
+    ///
+    /// It refuses (with an exact reason and fix) when the epoch advanced since
+    /// the merge, the branch diverged, or a consumed workspace was re-created;
+    /// a merge already pushed to origin needs --force.
+    ///
+    /// Examples:
+    ///   maw undo                # undo the last epoch mutation
+    ///   maw undo --dry-run      # show the plan without acting
+    ///   maw undo <op-id>        # undo a specific merge (id from `maw ops log`)
+    #[command(verbatim_doc_comment)]
+    Undo {
+        /// Operation id to undo (as shown by `maw ops log`). Defaults to the
+        /// most recent epoch mutation.
+        op_id: Option<String>,
+
+        /// Show the plan (and any refusals) without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Proceed even when the merge was already pushed to origin.
+        #[arg(long)]
+        force: bool,
+
+        /// Output format: text, json, pretty (auto-detected from TTY)
+        #[arg(long)]
+        format: Option<format::OutputFormat>,
+    },
+
+    /// Inspect repo-level operation history
+    ///
+    /// `maw ops log` prints a time-ordered, repo-wide view of operations across
+    /// every workspace op log (merges, creates, snapshots, undos), one line
+    /// each with a stable id you can pass to `maw undo <op-id>`.
+    #[command(subcommand)]
+    Ops(OpsCommands),
+
     /// Quick reference: the common maw commands, grouped by task.
     ///
     /// A short, copy-pasteable cheat-sheet of affirmative usage — the
@@ -427,6 +473,21 @@ enum Commands {
     /// `maw --help`. `crib` is a hidden alias (the former name).
     #[command(alias = "crib")]
     Tldr,
+}
+
+/// Subcommands under `maw ops`.
+#[derive(Subcommand)]
+enum OpsCommands {
+    /// Repo-level, time-ordered operation log across all workspaces
+    Log {
+        /// Output format: text, json, pretty (auto-detected from TTY)
+        #[arg(long)]
+        format: Option<format::OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -600,6 +661,15 @@ fn main() {
             Ok(())
         }
         Commands::Merge(ref cmd) => merge_cmd::run(cmd),
+        Commands::Undo {
+            op_id,
+            dry_run,
+            force,
+            format,
+        } => undo::run(op_id.as_deref(), dry_run, force, format),
+        Commands::Ops(OpsCommands::Log { format, json }) => {
+            ops_log::run(format::OutputFormat::with_json_flag(format, json))
+        }
         Commands::Tldr => tldr::run(),
     };
 

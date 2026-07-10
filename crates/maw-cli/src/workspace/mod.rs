@@ -34,7 +34,7 @@ mod list;
 mod merge;
 pub(crate) mod metadata;
 mod names;
-mod oplog_runtime;
+pub(crate) mod oplog_runtime;
 mod overlap;
 mod prune;
 pub(crate) mod recover;
