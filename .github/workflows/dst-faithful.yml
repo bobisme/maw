@@ -23,6 +23,11 @@ name: SG1 Faithful-Binary Build + Clippy
 # unnoticed for a whole release cycle. This job already runs on every PR +
 # push to main, so the bench-feature clippy pass rides along here rather
 # than standing up a new workflow.
+#
+# bn-1n2b: also runs `sg1-assurance-clippy` (the maw-assurance
+# oracles/stateright feature build + the root `assurance` feature). Same
+# defect class as bn-1nmh: defined in the Justfile, commented as "a
+# dedicated gate", but wired into NO workflow until now.
 
 on:
   pull_request:
@@ -58,6 +63,12 @@ jobs:
       # only, not the (heavier, real-LLM-capable) bench test suite).
       - name: Clippy (--features bench)
         run: just sg2-bench-clippy
+
+      # bn-1n2b: maw-assurance oracles/stateright feature build + the root
+      # `assurance` feature (kept cheap — clippy only). Was previously
+      # unwired (see bn-1n2b).
+      - name: Clippy (assurance features)
+        run: just sg1-assurance-clippy
 
       # Build the failpoints release binary so the faithful tier is
       # deployable (the nightly soak's faithful-binary step expects this

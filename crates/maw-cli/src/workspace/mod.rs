@@ -957,8 +957,8 @@ pub enum WorkspaceCommands {
     /// textually-clean replay can still fail to compile when a merged sibling
     /// reworked an API; the hook catches that at rebase time. For example set
     /// `post_sync` to run `cargo check --workspace`. A non-zero exit is a
-    /// SIGNAL only — it never blocks or changes the sync/merge exit code (jj
-    /// model). The last result is persisted per workspace and shown as a
+    /// SIGNAL only — it never blocks or changes the sync/merge exit code.
+    /// The last result is persisted per workspace and shown as a
     /// `hook:FAIL` marker in `maw ws list` / `maw ws status` and as a NOTE in
     /// the triggering merge summary. Tune the per-hook kill timeout with
     /// `hook_timeout_seconds` (default 300).

@@ -1,3 +1,32 @@
+# -----------------------------------------------------------------------------
+# CI lane-wiring convention (bn-1n2b).
+#
+# GOAL: it must be impossible for a defined CI *gate* recipe to silently stop
+# running. bn-1nmh: the `--features bench` build rotted for a full release
+# cycle because no workflow compiled it. The SAME day we found
+# `sg1-assurance-clippy` had the identical defect — defined, commented as
+# "a dedicated gate", wired into NO workflow.
+#
+# CONVENTION: any Justfile recipe whose name matches `*-clippy` or `*-check`
+# (a hyphenated suffix — bare `clippy`/`check` don't count, see below) is a
+# "gate recipe" and MUST be either:
+#   (a) referenced by `just <recipe-name>` from at least one file under
+#       `.github/workflows/*.yml` ("wired"), OR
+#   (b) opted out with a `# ci: local-only` marker comment directly above
+#       the recipe, with a one-line reason ("local-only-marked").
+#
+# tests/ci_lane_wiring.rs enforces this via textual grep — it fails and
+# NAMES the offending recipe if a `*-clippy`/`*-check` recipe is neither
+# wired nor marked ("orphan").
+#
+# Why the narrow `*-clippy`/`*-check` suffix (not bare `clippy`/`check`/
+# `test`/`build`/...): this repo intentionally has NO general build+test+
+# lint CI workflow (see dst.yml/dst-faithful.yml/publish.yml — only DST,
+# faithful-binary clippy, and crates.io publish are automated; `just check`
+# is a LOCAL pre-merge convention run by developers/workers, not a CI job).
+# The convention targets the class of bug bn-1nmh found: a feature-gated
+# lint pass that LOOKS like a CI gate (dedicated recipe, "gate" language in
+# its own comment) but was never actually wired in.
 default:
   just --list
 
@@ -7,6 +36,12 @@ build:
 fmt:
   cargo fmt --all
 
+# ci: local-only — no general CI workflow runs `cargo fmt --check` today (see
+# the lane-wiring convention note above); formatting is enforced by local
+# `just check` / worker discipline, not automation. bn-1n2b audit found this
+# gap; wiring a real fmt-check workflow step is a reasonable follow-up but is
+# out of scope for the lane-wiring bones (which target the bn-1nmh-shaped
+# "defined gate, never runs" defect, not "add new CI").
 fmt-check:
   cargo fmt --all -- --check
 
@@ -22,8 +57,24 @@ clippy:
 build-bin:
   cargo build -p maw-cli
 
+# bn-1q7x: `cargo test` above only runs the root `maw-workspaces` package —
+# crates/maw-cli/tests/ (undo_cli.rs from bn-117s, epoch_lock_cli.rs from
+# bn-13rc) and the maw-cli lib unit tests never ran in `just check` or CI.
+# Extending the recipe (vs. relocating the two integration files to the root
+# tests/ dir) covers every FUTURE maw-cli test automatically, not just these
+# two — same silent-rot class as bn-1nmh/bn-1n2b.
+#
+# `--test-threads=1`: wiring this in surfaced a genuine flaky-under-parallel-
+# execution issue in the maw-cli lib unit tests that exercise flock-based
+# locking (epoch_lock.rs, workspace/sync/lock.rs) — ~20-30% failure rate at
+# default parallelism on a heavily loaded box, 0 failures in 10+ runs at
+# `--test-threads=1`. Root cause not identified (suspected rustix/flock()
+# behavior under many-thread syscall contention); tracked for follow-up
+# investigation. Serializing costs ~10s wall and keeps the gate trustworthy
+# today rather than shipping a coin-flip-red CI step.
 test: build-bin
   cargo test
+  cargo test -p maw-cli -- --test-threads=1
 
 install:
   cargo install --locked --path crates/maw-cli
@@ -34,6 +85,9 @@ install:
 dst-fast:
   cargo test --features assurance --test dst_harness -- --ignored dst_g1 dst_g2 dst_g3 dst_g4 dst_determinism
 
+# ci: local-only — pre-release manual gate (run by the release checklist, not
+# per-commit/PR automation); no workflow invokes it today. See
+# notes/assurance/completion-summary.md ("just formal-check | pre-release").
 # formal-check: Stateright model checking (pre-release)
 formal-check:
   cargo test --features assurance --test formal_model -- --ignored
