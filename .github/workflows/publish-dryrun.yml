@@ -1,0 +1,58 @@
+name: Publish dry-run (PR)
+
+# bn-1obp: catch a broken publish chain or version skew in PR CI, BEFORE a tag
+# exists — the crates.io chain was silently broken from pre.6→pre.10 (missing
+# maw-scenario, version skew), only surfacing on tag-publish day.
+#
+# Two cheap, network-light checks run on every PR that touches a manifest:
+#   1. `just release-preflight` — deterministic version-consistency gate
+#      (workspace + every internal path-dep string + Cargo.lock). A skewed
+#      string fails here, naming the offending file.
+#   2. `just release-publish-dryrun` — `cargo publish --dry-run --no-verify`
+#      over the SAME crate chain as publish.yml. `--no-verify` because at a
+#      not-yet-released version the sibling crates aren't on crates.io yet, so
+#      the verify build can't resolve them; the dry-run still validates each
+#      manifest, the publish metadata, and the version requirements (an
+#      unsatisfiable path-dep requirement fails cargo's resolver here).
+#
+# This does NOT change publish.yml's real chain semantics.
+
+on:
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/publish-dryrun.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/publish-dryrun.yml'
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR so back-to-back pushes don't
+# stack dry-run builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-dryrun:
+    name: Version preflight + cargo publish --dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+
+      # Deterministic version-consistency gate (fails naming the file on skew).
+      - name: Release preflight (version consistency)
+        run: just release-preflight
+
+      # Same chain as publish.yml, dry-run only.
+      - name: cargo publish --dry-run (publish chain)
+        run: just release-publish-dryrun

@@ -24,6 +24,7 @@ pub mod ops_log;
 pub mod push;
 pub mod ref_gc;
 pub mod release;
+pub mod release_prepare;
 pub mod status;
 pub mod telemetry;
 pub mod tldr;

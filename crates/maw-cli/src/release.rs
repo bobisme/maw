@@ -1,17 +1,44 @@
 use anyhow::{Result, bail};
-use clap::Args;
+use clap::{Args, Subcommand};
 use maw_git::GitRepo as _;
 
+use crate::release_prepare::{PreflightArgs, PrepareArgs, run_preflight, run_prepare};
 use crate::transport::carveout;
 use crate::workspace::{MawConfig, git_cwd, repo_root};
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct ReleaseArgs {
+    /// Release sub-step (`prepare` / `preflight`). Omit for the bare tag+push.
+    #[command(subcommand)]
+    pub command: Option<ReleaseCommand>,
+
     /// Version tag to create (e.g., v0.30.1)
     ///
+    /// Bare form: tag & push a release whose version bump is already committed.
     /// Must start with 'v' followed by a semver-like version.
-    /// Creates a git tag and pushes to origin.
-    pub tag: String,
+    #[arg(value_name = "TAG")]
+    pub tag: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum ReleaseCommand {
+    /// Prepare a release: lockstep version bump + Cargo.lock + CHANGELOG scaffold (uncommitted)
+    ///
+    /// Bumps the workspace version and every internal path-dep version string
+    /// across all Cargo.tomls, regenerates Cargo.lock, and scaffolds a
+    /// CHANGELOG section header. Leaves everything uncommitted for review.
+    /// Idempotent; refuses on a dirty tree (outside its own edit surface).
+    #[command(verbatim_doc_comment)]
+    Prepare(PrepareArgs),
+
+    /// Check release readiness without mutating anything
+    ///
+    /// Verifies version consistency (workspace + internal path-deps +
+    /// Cargo.lock), that the CHANGELOG has the target section, and that the
+    /// tree is clean. Also runs in PR CI (`just release-preflight`).
+    #[command(verbatim_doc_comment)]
+    Preflight(PreflightArgs),
 }
 
 /// Tag and push a release in one step.
@@ -28,7 +55,20 @@ pub struct ReleaseArgs {
 ///
 /// Returns an error if release validation or git operations fail.
 pub fn run(args: &ReleaseArgs) -> Result<()> {
-    let tag = &args.tag;
+    match &args.command {
+        Some(ReleaseCommand::Prepare(a)) => return run_prepare(a),
+        Some(ReleaseCommand::Preflight(a)) => return run_preflight(a),
+        None => {}
+    }
+
+    let tag = args.tag.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing release tag\n  \
+             Usage: maw release <vX.Y.Z>          (tag & push a committed bump)\n         \
+             maw release prepare <vX.Y.Z>  (lockstep bump + CHANGELOG, uncommitted)\n         \
+             maw release preflight [vX.Y.Z] (check release readiness)"
+        )
+    })?;
 
     // Validate tag format
     if !tag.starts_with('v') {

@@ -717,3 +717,26 @@ sg3-layout-eval-pilot:
   echo "sg3-layout-eval-pilot: ALL CHECKS PASSED"
   echo "  decision-logic JSONs at /tmp/sg3-pilot-go.json /tmp/sg3-pilot-nogo.json"
   echo "  see notes/sg3-go-no-go.md for the go/no-go writeup template"
+
+# --- Release automation (bn-1obp) -------------------------------------------
+
+# Release-readiness gate: version consistency (workspace + internal path-deps +
+# Cargo.lock), CHANGELOG section, clean tree. Read-only; does NOT run the test
+# suite. Referenced by .github/workflows/publish-dryrun.yml.
+# ci: referenced by publish-dryrun.yml
+release-preflight *args:
+    cargo run --quiet -p maw-cli -- release preflight {{args}}
+
+# Publish dry-run over the SAME crate chain as publish.yml, with --no-verify
+# (siblings aren't on crates.io at a not-yet-released version, so the --verify
+# build can't resolve them). Catches manifest rot and up-skew before tag day.
+# Referenced by .github/workflows/publish-dryrun.yml.
+# ci: referenced by publish-dryrun.yml
+release-publish-dryrun:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for crate in maw-lfs maw-git maw-core maw-scenario maw-assurance maw-workspaces; do
+      echo "::group::cargo publish --dry-run -p $crate"
+      cargo publish --dry-run --no-verify -p "$crate"
+      echo "::endgroup::"
+    done

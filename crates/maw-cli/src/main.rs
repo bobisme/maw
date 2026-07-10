@@ -320,18 +320,24 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Pull(transport::PullArgs),
 
-    /// Tag and push a release
+    /// Prepare, check, tag, and push a release
     ///
-    /// One command to replace the manual release sequence:
-    ///   1. Advance branch bookmark to @- (your version bump commit)
-    ///   2. Push branch to origin
-    ///   3. Create and push git tag
-    ///   4. Push tag to origin
+    /// Subcommands:
+    ///   maw release prepare vX.Y.Z    Lockstep version bump + Cargo.lock regen
+    ///                                 + CHANGELOG scaffold. Uncommitted; idempotent.
+    ///   maw release preflight [vX.Y.Z] Check version consistency, CHANGELOG,
+    ///                                 clean tree. Read-only. Also runs in PR CI.
+    ///   maw release vX.Y.Z            Tag & push a committed bump:
+    ///                                   1. Advance branch to @- (bump commit)
+    ///                                   2. Push branch to origin
+    ///                                   3. Create and push git tag
     ///
-    /// Usage: maw release v0.30.0
-    ///
-    /// Assumes your version bump is already committed. Run this after:
-    ///   <edit version> && git commit -m "chore: bump to vX.Y.Z"
+    /// Typical flow:
+    ///   maw release prepare v1.0.0   # bump; then edit CHANGELOG.md
+    ///   just check                   # verify green
+    ///   git commit -am "chore(release): bump to 1.0.0 + CHANGELOG"
+    ///   maw release preflight v1.0.0 # gate
+    ///   maw release v1.0.0           # tag & push
     #[command(verbatim_doc_comment)]
     Release(release::ReleaseArgs),
 

@@ -414,14 +414,33 @@ All commands support JSON output with `--format json` for parsing. If a command 
 
 ### Release Instructions
 
-- Bump the version of all crates
-- Regenerate the Cargo.lock
-- Add notes to CHANGELOG.md
-- If the README.md references the version, update it.
-- Commit
-- Tag and push: `maw release vX.Y.Z`
-- use `gh release create vX.Y.Z --notes "..."`
-- Install locally: `maw exec default -- just install`
+The mechanical bump is automated by `maw release prepare` (bn-1obp). One command
++ review, then tag:
+
+1. **Prepare** (lockstep version bump across every Cargo.toml — workspace version
+   *and* all internal path-dep `version = "…"` strings — plus Cargo.lock regen and
+   a CHANGELOG section scaffold). Leaves everything uncommitted; idempotent:
+   ```
+   maw release prepare vX.Y.Z
+   ```
+2. **Write the notes**: edit the scaffolded `## vX.Y.Z` section in CHANGELOG.md
+   (content is human-written; prepare only creates the header). Update README.md
+   if prepare warned about a stale version reference.
+3. **Verify**: `just check` must be green (prepare does NOT run the suite).
+4. **Commit**: `git commit -am "chore(release): bump to X.Y.Z + CHANGELOG"`
+5. **Preflight** (version consistency + CHANGELOG + clean tree):
+   ```
+   maw release preflight vX.Y.Z
+   ```
+6. **Tag and push**: `maw release vX.Y.Z`
+7. `gh release create vX.Y.Z --prerelease --notes-file <file>`
+8. Install locally: `maw exec default -- just install`; then `maw epoch sync`.
+
+Version skew (a hand-edited path-dep string that drifts from the workspace
+version) is caught by `maw release preflight` and by the **publish-dryrun** CI
+workflow (`just release-preflight` + `just release-publish-dryrun`, the same
+`cargo publish --dry-run` chain as `publish.yml`) on every PR touching a
+manifest — so a broken publish chain fails before a tag exists.
 
 ### Identity
 
