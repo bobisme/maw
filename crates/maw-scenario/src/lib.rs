@@ -319,6 +319,52 @@ pub enum Op {
         /// Target workspace.
         ws: WsId,
     },
+    /// A commit made **directly on trunk** (the default workspace's branch)
+    /// **outside of maw** — i.e. a plain `git commit` on `main` in the repo
+    /// root, not routed through `maw ws merge`. This is the exact arming
+    /// condition for the FF-absorb / `reconcile_epoch_with_branch` path
+    /// (bn-11ip / bn-rah2): it advances the branch ahead of
+    /// `refs/manifold/epoch/current`, so the next merge must absorb the drift.
+    ///
+    /// Only generated when a profile sets `escape_weight > 0` (see
+    /// [`ConditionProfile::with_escape_weight`]); the default soak profile
+    /// keeps it 0, so the default-profile seed→plan byte stream (the bn-2yzz
+    /// campaign) is unchanged.
+    OutOfMawCommit {
+        /// Seed-derived files committed on trunk, in canonical (path-sorted)
+        /// order. Paths may overlap with workspace-touched `shared/*` paths
+        /// (per `overlapping_edit_rate`) to exercise the FF-range-vs-sibling
+        /// path-overlap classification, or be trunk-private (disjoint).
+        files: Vec<FileEdit>,
+        /// Seed-derived commit message.
+        msg: Seeded,
+    },
+    /// An **uncommitted** modification to a tracked file in the default
+    /// workspace (the repo root). Models the bn-1xmk killer case: a dirty
+    /// tracked trunk file riding through a subsequent merge's
+    /// preserve-and-replay, whose committed content may change under it.
+    ///
+    /// Gated on `escape_weight > 0` (see [`Op::OutOfMawCommit`]).
+    DirtyTrunkWrite {
+        /// Seed-derived edits written (but not committed) into the default
+        /// workspace's working tree, in canonical (path-sorted) order.
+        files: Vec<FileEdit>,
+    },
+    /// Run `maw gc`, optionally the recovery-snapshot age sweep
+    /// (`--recovery-snapshots --older-than <older_than_days>`). Models the
+    /// destroy-record ↔ recovery-ref lifecycle (bn-3uou): the sweep must keep
+    /// destroy records coherent with the recovery refs they claim.
+    ///
+    /// Gated on `escape_weight > 0` (see [`Op::OutOfMawCommit`]).
+    Gc {
+        /// `true` ⇒ `maw gc --recovery-snapshots` (also age-sweeps recovery
+        /// refs and prunes desynced destroy records). `false` ⇒ plain
+        /// `maw gc` (epoch GC + dangling head-ref self-heal only).
+        recovery_snapshots: bool,
+        /// Age threshold in days for the recovery-snapshot sweep. `0` drains
+        /// the whole recover queue (the most hostile setting for bn-3uou).
+        older_than_days: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +397,18 @@ pub struct ConditionProfile {
     /// in `choose_op` (WsCreate=6 … EditFiles=18).
     #[serde(default)]
     pub advance_weight: u32,
+    /// Selection weight for the **2026-07 escape-path ops** (bn-2bcx):
+    /// [`Op::OutOfMawCommit`], [`Op::DirtyTrunkWrite`], and [`Op::Gc`]. **0 by
+    /// default**, which keeps all three out of the chooser entirely so the
+    /// default-profile seed→plan byte stream (the bn-2yzz in-proc campaign) is
+    /// unchanged. Set `> 0` (via
+    /// [`with_escape_weight`](Self::with_escape_weight)) on drivers that want
+    /// escape-path coverage — the production-code DST tier enables it so the
+    /// real FF-absorb / dirty-trunk-replay / gc-recover lifecycle is exercised.
+    /// Kept low relative to the core op weights in `choose_op` so the fast tier
+    /// stays within budget; the soak profile turns it up.
+    #[serde(default)]
+    pub escape_weight: u32,
 }
 
 impl ConditionProfile {
@@ -370,6 +428,7 @@ impl ConditionProfile {
             overlapping_edit_rate: overlapping_edit_rate.clamp(0.0, 1.0),
             stale_workspace_rate: stale_workspace_rate.clamp(0.0, 1.0),
             advance_weight: 0,
+            escape_weight: 0,
         }
     }
 
@@ -379,6 +438,16 @@ impl ConditionProfile {
     #[must_use]
     pub const fn with_advance_weight(mut self, w: u32) -> Self {
         self.advance_weight = w;
+        self
+    }
+
+    /// Return a copy of this profile with the escape-path op selection weight
+    /// (bn-2bcx: `OutOfMawCommit` / `DirtyTrunkWrite` / `Gc`) set to `w`.
+    /// `w = 0` leaves the chooser's op set — and therefore the seed→plan byte
+    /// stream — identical to a profile without the escape ops.
+    #[must_use]
+    pub const fn with_escape_weight(mut self, w: u32) -> Self {
+        self.escape_weight = w;
         self
     }
 }
@@ -586,6 +655,198 @@ pub fn generate_plan(seed: u64, profile: &ConditionProfile, n_steps: usize) -> S
 }
 
 // ---------------------------------------------------------------------------
+// bn-2bcx: named deterministic regression scenarios for the 2026-07 escapes
+// ---------------------------------------------------------------------------
+
+/// Sentinel seed tagging the [`bn_rah2_regression_plan`] (FF-absorb orphaned
+/// committed-ahead sibling). Not a generator seed — the plan is hand-built and
+/// driven verbatim — but pinned so downstream corpus/replay tooling has a
+/// stable identifier. The nibble tag `2BCC` reads "bn-2bcc-ish escape".
+pub const BN_RAH2_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0001;
+
+/// Sentinel seed tagging the [`bn_1xmk_regression_plan`] (dirty-trunk file
+/// clobbered by preserve-and-replay). See [`BN_RAH2_REGRESSION_SEED`].
+pub const BN_1XMK_REGRESSION_SEED: u64 = 0x2BCC_0000_0000_0002;
+
+/// Build a `PlannedStep` with a monotonic seed-independent clock derived from
+/// the step index (regression plans are hand-built, so the clock is a simple
+/// deterministic ramp off `GIT_TIME_BASE`).
+fn regression_step(index: usize, op: Op) -> PlannedStep {
+    // Regression plans are short and hand-built; the clock is a simple ramp.
+    let bump = i64::try_from(index).unwrap_or(i64::MAX);
+    PlannedStep {
+        index,
+        op,
+        fault: FaultSpec::None,
+        git_time: GIT_TIME_BASE.saturating_add(bump),
+    }
+}
+
+/// Convenience: a single seed-stable [`FileEdit`].
+fn edit(path: &str, content: &str) -> FileEdit {
+    FileEdit {
+        path: path.to_owned(),
+        content: content.to_owned(),
+    }
+}
+
+/// The **bn-rah2** incident shape as a named, deterministic regression plan.
+///
+/// Reproduces the exact FF-absorb data-loss trigger: a workspace with
+/// **committed-ahead** work exists as a sibling when an **out-of-maw trunk
+/// commit** (disjoint paths) is absorbed by a subsequent merge. The buggy
+/// code raw-reset the sibling's HEAD to the absorbed branch tip, orphaning
+/// the sibling's commit; the fix (68abe479) replays it. The
+/// `SiblingRefFaithfulness` oracle asserts the sibling's committed HEAD stays
+/// reachable across the absorbing merge.
+///
+/// Steps:
+/// 0. create `ws-sibling` (persistent), from main
+/// 1. edit a sibling-private file
+/// 2. commit it → `ws-sibling` is now committed-ahead of its base epoch
+/// 3. out-of-maw commit on trunk (disjoint `trunk/*` paths) → arms FF-absorb
+/// 4. create `ws-merge`, from main
+/// 5. edit a `ws-merge` file
+/// 6. commit `ws-merge`
+/// 7. merge `ws-merge` into default → `reconcile_epoch_with_branch` must
+///    absorb the trunk drift AND replay (not orphan) `ws-sibling`.
+#[must_use]
+pub fn bn_rah2_regression_plan() -> ScenarioPlan {
+    let sibling = WsId("ws-sibling".to_owned());
+    let merge_ws = WsId("ws-merge".to_owned());
+    let steps = vec![
+        regression_step(
+            0,
+            Op::WsCreate {
+                ws: sibling.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            1,
+            Op::EditFiles {
+                ws: sibling.clone(),
+                files: vec![edit("sibling/work.txt", "sibling committed-ahead work\n")],
+            },
+        ),
+        regression_step(
+            2,
+            Op::Commit {
+                ws: sibling,
+                msg: Seeded("sibling: committed-ahead work (bn-rah2)".to_owned()),
+            },
+        ),
+        regression_step(
+            3,
+            Op::OutOfMawCommit {
+                files: vec![edit("trunk/out.txt", "out-of-maw trunk commit (bn-rah2)\n")],
+                msg: Seeded("out-of-maw trunk commit (bn-rah2)".to_owned()),
+            },
+        ),
+        regression_step(
+            4,
+            Op::WsCreate {
+                ws: merge_ws.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            5,
+            Op::EditFiles {
+                ws: merge_ws.clone(),
+                files: vec![edit("merge/feature.txt", "mergeable feature\n")],
+            },
+        ),
+        regression_step(
+            6,
+            Op::Commit {
+                ws: merge_ws.clone(),
+                msg: Seeded("merge-ws: feature".to_owned()),
+            },
+        ),
+        regression_step(
+            7,
+            Op::Merge {
+                srcs: vec![merge_ws],
+                into: Target::Default,
+                destroy: false,
+            },
+        ),
+    ];
+    ScenarioPlan {
+        seed: BN_RAH2_REGRESSION_SEED,
+        profile: ConditionProfile::default().with_escape_weight(1),
+        steps,
+    }
+}
+
+/// The **bn-1xmk** incident shape as a named, deterministic regression plan.
+///
+/// Reproduces trunk preserve-and-replay clobbering an uncommitted tracked
+/// trunk file whose committed content changes via a merge: a workspace commits
+/// a change to `shared/hot.txt`, the default workspace then has **uncommitted**
+/// edits to that same tracked path, and the workspace is merged into default —
+/// the merge's preserve-and-replay must not lose the dirty trunk bytes. The
+/// `TrunkDirtyPreservation` oracle asserts the dirty bytes survive (or are
+/// surfaced in a recovery ref).
+///
+/// Steps:
+/// 0. create `ws-a`, from main
+/// 1. edit `shared/hot.txt` in `ws-a`
+/// 2. commit `ws-a` (so the merge changes `shared/hot.txt`'s committed content)
+/// 3. dirty-trunk write to the same `shared/hot.txt` in the default workspace
+/// 4. merge `ws-a` into default → preserve-and-replay must keep the dirty bytes.
+#[must_use]
+pub fn bn_1xmk_regression_plan() -> ScenarioPlan {
+    let ws_a = WsId("ws-a".to_owned());
+    let steps = vec![
+        regression_step(
+            0,
+            Op::WsCreate {
+                ws: ws_a.clone(),
+                from: BaseRef::Main,
+            },
+        ),
+        regression_step(
+            1,
+            Op::EditFiles {
+                ws: ws_a.clone(),
+                files: vec![edit("shared/hot.txt", "ws-a committed change to hot\n")],
+            },
+        ),
+        regression_step(
+            2,
+            Op::Commit {
+                ws: ws_a.clone(),
+                msg: Seeded("ws-a: change shared/hot.txt".to_owned()),
+            },
+        ),
+        regression_step(
+            3,
+            Op::DirtyTrunkWrite {
+                files: vec![edit(
+                    "shared/hot.txt",
+                    "UNCOMMITTED dirty trunk bytes (bn-1xmk)\n",
+                )],
+            },
+        ),
+        regression_step(
+            4,
+            Op::Merge {
+                srcs: vec![ws_a],
+                into: Target::Default,
+                destroy: false,
+            },
+        ),
+    ];
+    ScenarioPlan {
+        seed: BN_1XMK_REGRESSION_SEED,
+        profile: ConditionProfile::default().with_escape_weight(1),
+        steps,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Abstract model — minimum state to keep ops valid + reach hostile interleavings
 // ---------------------------------------------------------------------------
 
@@ -717,6 +978,15 @@ enum OpKind {
     /// Advance a workspace onto the current epoch (gated on
     /// `profile.advance_weight > 0`; never ranked otherwise).
     Advance,
+    /// Commit directly on trunk outside maw — arms FF-absorb (bn-rah2). Gated
+    /// on `profile.escape_weight > 0`; never ranked otherwise.
+    OutOfMawCommit,
+    /// Uncommitted write to a tracked trunk file (bn-1xmk). Gated on
+    /// `profile.escape_weight > 0`; never ranked otherwise.
+    DirtyTrunkWrite,
+    /// Run `maw gc` (optionally the recovery-snapshot sweep; bn-3uou). Gated
+    /// on `profile.escape_weight > 0`; never ranked otherwise.
+    Gc,
     /// Special: emit a destroy of a live merge source (bn-cm63 class).
     DestroyLiveMergeSource,
 }
@@ -756,6 +1026,15 @@ fn choose_op(rng: &mut StdRng, model: &mut AbstractModel, profile: &ConditionPro
     if profile.advance_weight > 0 {
         kinds.push((OpKind::Advance, profile.advance_weight));
     }
+    // bn-2bcx: the three 2026-07 escape-path ops are appended ONLY when
+    // `escape_weight > 0`. Like `Advance`, for the default soak profile
+    // (weight 0) the slice — and therefore the whole seed→plan byte stream —
+    // is unchanged.
+    if profile.escape_weight > 0 {
+        kinds.push((OpKind::OutOfMawCommit, profile.escape_weight));
+        kinds.push((OpKind::DirtyTrunkWrite, profile.escape_weight));
+        kinds.push((OpKind::Gc, profile.escape_weight));
+    }
     let mut desired = weighted_choice(rng, &kinds);
 
     // Validity narrowing: if the desired op isn't legal right now, fall back
@@ -789,12 +1068,17 @@ const fn next_kind_fallback(k: OpKind) -> OpKind {
         OpKind::Commit => OpKind::Sync,
         OpKind::Sync => OpKind::Destroy,
         OpKind::Destroy => OpKind::Recover,
-        // `Advance` shares `Recover`'s fallback target (WsCreate). It is a spur
-        // INTO the cycle, not part of it: no existing kind falls back to it, so
-        // the historical 8-kind fallback chains are byte-identical. Advance is
-        // reachable only when directly desired (`advance_weight > 0`); from
-        // there it joins the normal cycle at WsCreate.
-        OpKind::Recover | OpKind::Advance => OpKind::WsCreate,
+        // `Advance` and the bn-2bcx escape ops share `Recover`'s fallback
+        // target (WsCreate). They are spurs INTO the cycle, not part of it: no
+        // existing kind falls back to them, so the historical 8-kind fallback
+        // chains are byte-identical. They are reachable only when directly
+        // desired (`advance_weight` / `escape_weight > 0`); from there they
+        // join the normal cycle at WsCreate.
+        OpKind::Recover
+        | OpKind::Advance
+        | OpKind::OutOfMawCommit
+        | OpKind::DirtyTrunkWrite
+        | OpKind::Gc => OpKind::WsCreate,
         OpKind::WsCreate => OpKind::EditFiles,
         OpKind::EditFiles => OpKind::DestroyLiveMergeSource,
     }
@@ -917,6 +1201,55 @@ fn try_emit(
             let ws = pick_from(rng, &candidates)?;
             Some(Op::Advance { ws })
         }
+        OpKind::OutOfMawCommit => {
+            // A trunk commit is always model-valid (the default workspace
+            // always exists). 1..=2 files, each either a `shared/*` path that
+            // overlaps a workspace-touched path (per `overlapping_edit_rate` —
+            // the FF-range-vs-sibling overlap case) or a trunk-private path.
+            let n: usize = rng.random_range(1..=2);
+            let mut files = Vec::with_capacity(n);
+            for i in 0..n {
+                let path = if rng.random_bool(profile.overlapping_edit_rate) {
+                    let slot: u64 = rng.random_range(0..4);
+                    format!("shared/file-{slot}.txt")
+                } else {
+                    format!("trunk/file-{i}.txt")
+                };
+                let blob: u64 = rng.random();
+                let content = format!("trunk-commit\nseed-slot={blob}\nidx={i}\n");
+                files.push(FileEdit { path, content });
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            let msg = Seeded(format!("out-of-maw trunk commit #{}", rng.random::<u32>()));
+            Some(Op::OutOfMawCommit { files, msg })
+        }
+        OpKind::DirtyTrunkWrite => {
+            // Uncommitted write to a tracked trunk file — always valid. Bias
+            // toward `shared/*` paths whose committed content a later merge can
+            // change under the dirty bytes (the bn-1xmk killer shape).
+            let n: usize = rng.random_range(1..=2);
+            let mut files = Vec::with_capacity(n);
+            for i in 0..n {
+                let slot: u64 = rng.random_range(0..4);
+                let path = format!("shared/file-{slot}.txt");
+                let blob: u64 = rng.random();
+                let content = format!("dirty-trunk\nseed-slot={blob}\nidx={i}\n");
+                files.push(FileEdit { path, content });
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            Some(Op::DirtyTrunkWrite { files })
+        }
+        OpKind::Gc => {
+            // gc is always valid. Half the time run the recovery-snapshot
+            // sweep; pick a hostile-ish age threshold (0 drains the queue —
+            // the bn-3uou stressor).
+            let recovery_snapshots = rng.random_bool(0.5);
+            let older_than_days = *[0_u64, 7, 30].choose(rng).expect("non-empty age set");
+            Some(Op::Gc {
+                recovery_snapshots,
+                older_than_days,
+            })
+        }
         OpKind::Recover => {
             let candidates: Vec<WsId> = model.destroyed.iter().cloned().collect();
             let src = pick_from(rng, &candidates)?;
@@ -1004,6 +1337,12 @@ fn apply_to_model(model: &mut AbstractModel, op: &Op) {
                 st.is_stale = false;
             }
         }
+        // bn-2bcx escape ops operate on trunk / global state, not a specific
+        // tracked workspace, so they leave the per-workspace abstract model
+        // untouched (they are always model-valid — see `try_emit`). The driver
+        // materialises their real effect (trunk drift / dirty bytes / gc sweep)
+        // and the new oracles judge it.
+        Op::OutOfMawCommit { .. } | Op::DirtyTrunkWrite { .. } | Op::Gc { .. } => {}
     }
 }
 
@@ -1397,6 +1736,133 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------
+    // bn-2bcx: escape-path op coverage
+    // -------------------------------------------------------------------
+
+    /// The escape weight defaults to 0 and is `#[serde(default)]`, so enabling
+    /// it must be the ONLY thing that introduces the new ops. Critically: a
+    /// default-profile plan (escape_weight = 0) is byte-identical to what it
+    /// was before bn-2bcx — the bn-2yzz campaign's seed→plan stream is
+    /// unchanged. We assert the default plan contains NONE of the escape ops.
+    #[test]
+    fn default_profile_never_emits_escape_ops() {
+        let profile = ConditionProfile::default();
+        assert_eq!(profile.escape_weight, 0, "default escape_weight must be 0");
+        for seed in 0..200_u64 {
+            let plan = generate_plan(profile_seed(seed), &profile, 128).steps;
+            for step in &plan {
+                assert!(
+                    !matches!(
+                        step.op,
+                        Op::OutOfMawCommit { .. } | Op::DirtyTrunkWrite { .. } | Op::Gc { .. }
+                    ),
+                    "default profile emitted an escape op at seed {seed}: {:?}",
+                    step.op
+                );
+            }
+        }
+    }
+
+    /// Enabling `escape_weight` keeps every emitted plan model-valid and does
+    /// actually surface the three new ops across a seed sweep.
+    #[test]
+    fn escape_weight_emits_valid_escape_ops() {
+        let profile = ConditionProfile::default().with_escape_weight(8);
+        let mut saw_commit = false;
+        let mut saw_dirty = false;
+        let mut saw_gc = false;
+        for seed in 0..200_u64 {
+            let plan = generate_plan(seed, &profile, 128);
+            validate_plan_against_model(&plan, seed);
+            for step in &plan.steps {
+                match step.op {
+                    Op::OutOfMawCommit { .. } => saw_commit = true,
+                    Op::DirtyTrunkWrite { .. } => saw_dirty = true,
+                    Op::Gc { .. } => saw_gc = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_commit, "no OutOfMawCommit op emitted across 0..200");
+        assert!(saw_dirty, "no DirtyTrunkWrite op emitted across 0..200");
+        assert!(saw_gc, "no Gc op emitted across 0..200");
+    }
+
+    /// Escape-enabled plans are still byte-identical per (seed, profile).
+    #[test]
+    fn escape_plan_is_byte_identical_for_same_seed() {
+        let profile = ConditionProfile::default().with_escape_weight(8);
+        for seed in [0_u64, 1, 42, 99, u64::MAX] {
+            let a = generate_plan(seed, &profile, 96);
+            let b = generate_plan(seed, &profile, 96);
+            assert_eq!(
+                a.canonical_json().expect("ser a"),
+                b.canonical_json().expect("ser b"),
+                "escape-profile seed {seed} replay diverged",
+            );
+        }
+    }
+
+    /// The bn-rah2 regression plan has the load-bearing shape: a
+    /// committed-ahead sibling, an out-of-maw trunk commit, then a merge that
+    /// must absorb the drift.
+    #[test]
+    fn bn_rah2_regression_plan_has_expected_shape() {
+        let plan = bn_rah2_regression_plan();
+        assert_eq!(plan.seed, BN_RAH2_REGRESSION_SEED);
+        let ops: Vec<&Op> = plan.steps.iter().map(|s| &s.op).collect();
+        // committed-ahead sibling: create + edit + commit of ws-sibling.
+        assert!(matches!(ops[0], Op::WsCreate { ws, .. } if ws.0 == "ws-sibling"));
+        assert!(matches!(ops[2], Op::Commit { ws, .. } if ws.0 == "ws-sibling"));
+        // the arming out-of-maw trunk commit.
+        assert!(ops.iter().any(|o| matches!(o, Op::OutOfMawCommit { .. })));
+        // the absorbing merge is last.
+        assert!(matches!(
+            ops.last().unwrap(),
+            Op::Merge {
+                into: Target::Default,
+                ..
+            }
+        ));
+        // regression plans are self-consistent under the abstract model.
+        validate_plan_against_model(&plan, plan.seed);
+    }
+
+    /// The bn-1xmk regression plan dirties the same tracked trunk path the
+    /// merge changes.
+    #[test]
+    fn bn_1xmk_regression_plan_has_expected_shape() {
+        let plan = bn_1xmk_regression_plan();
+        assert_eq!(plan.seed, BN_1XMK_REGRESSION_SEED);
+        let mut committed_hot = false;
+        let mut dirtied_hot = false;
+        for step in &plan.steps {
+            let hits_hot = |files: &[FileEdit]| files.iter().any(|f| f.path == "shared/hot.txt");
+            match &step.op {
+                Op::EditFiles { files, .. } => committed_hot |= hits_hot(files),
+                Op::DirtyTrunkWrite { files } => dirtied_hot |= hits_hot(files),
+                _ => {}
+            }
+        }
+        assert!(committed_hot, "ws-a must commit a change to shared/hot.txt");
+        assert!(dirtied_hot, "trunk must be dirtied on shared/hot.txt");
+        assert!(matches!(
+            plan.steps.last().unwrap().op,
+            Op::Merge {
+                into: Target::Default,
+                ..
+            }
+        ));
+        validate_plan_against_model(&plan, plan.seed);
+    }
+
+    /// Tiny helper: mixes the loop index into a fixed base so
+    /// `default_profile_never_emits_escape_ops` sweeps a spread of seeds.
+    const fn profile_seed(i: u64) -> u64 {
+        i.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+
     /// T2.1 (bn-4qwp) acceptance — "same seed yields the same scenario
     /// regardless of driver". Because the generator is now the single source
     /// of truth (this crate), the SG1 in-proc driver and the SG2 real-agent
@@ -1518,6 +1984,14 @@ mod tests {
                     "seed {seed} step {index}: Advance on {ws:?} without clean committed work",
                 );
             }
+            Op::OutOfMawCommit { files, .. } | Op::DirtyTrunkWrite { files } => {
+                // Trunk-level ops: always valid; just assert they carry work.
+                assert!(
+                    !files.is_empty(),
+                    "seed {seed} step {index}: trunk op with zero files",
+                );
+            }
+            Op::Gc { .. } => { /* always valid */ }
         }
     }
 

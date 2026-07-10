@@ -154,6 +154,35 @@ fn task_battery_from_plan(plan: &ScenarioPlan) -> Vec<String> {
                     ws.0, to.0
                 ));
             }
+            Op::OutOfMawCommit { files, .. } => {
+                let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+                tasks.push(format!(
+                    "Commit changes DIRECTLY on the default branch (outside the maw merge flow) \
+                     touching: {}. Then a later integration must absorb this drift.",
+                    paths.join(", ")
+                ));
+            }
+            Op::DirtyTrunkWrite { files } => {
+                let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+                tasks.push(format!(
+                    "In the default workspace, make UNCOMMITTED edits to the tracked files: {} \
+                     (leave them uncommitted).",
+                    paths.join(", ")
+                ));
+            }
+            Op::Gc {
+                recovery_snapshots,
+                older_than_days,
+            } => {
+                if *recovery_snapshots {
+                    tasks.push(format!(
+                        "Run garbage collection including the recovery-snapshot sweep \
+                         (removing snapshots older than {older_than_days} day(s))."
+                    ));
+                } else {
+                    tasks.push("Run routine garbage collection on the repository.".to_owned());
+                }
+            }
         }
     }
     tasks

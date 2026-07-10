@@ -463,6 +463,21 @@ impl InProcDriver {
             Op::Sync { ws } | Op::Advance { ws } => self.do_sync(&root, ws),
             Op::Destroy { ws, force: _ } => self.do_destroy(&root, ws, &env),
             Op::Recover { ws, to } => self.do_recover(&root, ws, to, &env),
+            // bn-2bcx escape ops. Only generated when a profile sets
+            // escape_weight > 0; the default in-proc soak profile keeps it 0, so
+            // these arms are inert for the bn-2yzz campaign. The load-bearing
+            // coverage for these ops is the production-code DST tier
+            // (`tests/dst_production_tier.rs`), which drives the REAL maw binary
+            // where the FF-absorb / dirty-trunk / gc-recover code actually lives.
+            Op::OutOfMawCommit { files, msg } => self.do_out_of_maw_commit(&root, files, msg, &env),
+            // The in-proc model has no real default worktree, so an uncommitted
+            // trunk edit has no ref-shape effect to model — the driver that can
+            // exercise it is the production tier.
+            Op::DirtyTrunkWrite { .. } => Ok(()),
+            Op::Gc {
+                recovery_snapshots,
+                older_than_days,
+            } => self.do_gc(&root, *recovery_snapshots, *older_than_days),
         }
     }
 
@@ -660,6 +675,90 @@ impl InProcDriver {
     fn do_sync(&self, _root: &Path, _ws: &WsId) -> std::io::Result<()> {
         // Sync is a no-op at this modelling level (no per-ws epoch
         // staleness representation).
+        Ok(())
+    }
+
+    /// Model an out-of-maw trunk commit: build a commit from `files` on top of
+    /// `refs/heads/main` and advance `main` to it, WITHOUT touching
+    /// `refs/manifold/epoch/current`. This is the FF-absorb arming condition
+    /// (branch ahead of epoch) at the ref-shape level the in-proc model uses.
+    fn do_out_of_maw_commit(
+        &self,
+        root: &Path,
+        files: &[FileEdit],
+        msg: &Seeded,
+        env: &[(String, String)],
+    ) -> std::io::Result<()> {
+        let prev_main = git_capture(root, &["rev-parse", "refs/heads/main"]);
+        let base_tree = git_capture(root, &["rev-parse", &format!("{prev_main}^{{tree}}")]);
+        // Layer the seed-derived blobs onto the base tree via a fresh flat
+        // tree (basename-only, matching do_commit's flattening).
+        let mut mktree_input = String::new();
+        // Preserve the base tree's existing entries by reading it back.
+        let ls = git_capture(root, &["ls-tree", &base_tree]);
+        for line in ls.lines() {
+            mktree_input.push_str(line);
+            mktree_input.push('\n');
+        }
+        for f in files {
+            let blob = git_hash_object_stdin(root, f.content.as_bytes());
+            let basename = std::path::Path::new(&f.path)
+                .file_name()
+                .map_or_else(|| f.path.clone(), |s| s.to_string_lossy().into_owned());
+            mktree_input.push_str(&format!("100644 blob {blob}\t{basename}\n"));
+        }
+        // Dedup by basename (keep last), sort — mktree refuses dups / unsorted.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut dedup: Vec<(String, String)> = Vec::new();
+        for line in mktree_input.lines().rev() {
+            let name = line.rsplit('\t').next().unwrap_or_default().to_string();
+            if !name.is_empty() && seen.insert(name.clone()) {
+                dedup.push((name, line.to_string()));
+            }
+        }
+        dedup.sort_by(|a, b| a.0.cmp(&b.0));
+        let tree_input: String = dedup.iter().map(|(_, l)| format!("{l}\n")).collect();
+        let tree = git_pipe(root, &["mktree"], tree_input.as_bytes());
+        let commit = git_pipe_env(
+            root,
+            &["commit-tree", &tree, "-p", &prev_main, "-m", &msg.0],
+            &[],
+            env,
+        );
+        run_git(root, &["update-ref", "refs/heads/main", &commit])?;
+        // Deliberately DO NOT advance refs/manifold/epoch/current — that is the
+        // whole point: main is now ahead of the epoch (drift to be absorbed).
+        Ok(())
+    }
+
+    /// Model `maw gc`'s recovery-snapshot sweep at the ref-shape level: when
+    /// `recovery_snapshots` and `older_than_days == 0`, drain the recovery-ref
+    /// queue (the most hostile bn-3uou setting). Plain `maw gc` (recovery
+    /// snapshots off) is modelled as a no-op — it only self-heals dangling head
+    /// refs, which the in-proc model never leaks in isolation.
+    fn do_gc(
+        &self,
+        root: &Path,
+        recovery_snapshots: bool,
+        older_than_days: u64,
+    ) -> std::io::Result<()> {
+        if !recovery_snapshots || older_than_days != 0 {
+            // Age-gated sweeps keep recent snapshots; the in-proc model pins
+            // all recovery refs at the same synthetic clock, so only the
+            // drain-everything (older_than 0) case has a modellable effect.
+            return Ok(());
+        }
+        let listing = git_capture(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/manifold/recovery/",
+            ],
+        );
+        for ref_name in listing.lines() {
+            let _ = run_git(root, &["update-ref", "-d", ref_name]);
+        }
         Ok(())
     }
 

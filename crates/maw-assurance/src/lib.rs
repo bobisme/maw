@@ -69,6 +69,16 @@ pub mod oracle_a;
 /// `notes/sg1-dst-architecture.md` §4.2 for the harness integration point.
 #[cfg(feature = "oracles")]
 pub mod oracle_b;
+/// **Escape-path oracles** for the 2026-07 field-report bug classes (bn-2bcx).
+///
+/// Three targeted oracles closing the DST gaps the 2026-07 escapes slipped
+/// through: [`oracle_escape::SiblingRefFaithfulness`] (FF-absorb orphaned
+/// committed-ahead siblings — bn-rah2), [`oracle_escape::TrunkDirtyPreservation`]
+/// (trunk preserve-and-replay clobbered dirty tracked files — bn-1xmk), and
+/// [`oracle_escape::check_record_ref_coherence`] (gc desynced recovery refs from
+/// destroy records — bn-3uou).
+#[cfg(feature = "oracles")]
+pub mod oracle_escape;
 #[cfg(feature = "scenario")]
 pub mod scenario;
 /// **Failing-seed shrinker** for SG1 DST (bn-32k3 / T1.6).

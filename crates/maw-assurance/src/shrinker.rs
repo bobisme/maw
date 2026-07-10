@@ -362,6 +362,12 @@ impl ShrinkerCorpusEntry {
                     workspaces.insert(ws.0.clone());
                     workspaces.insert(to.0.clone());
                 }
+                // bn-2bcx escape ops operate on trunk / global state, not a
+                // named tracked workspace, so they contribute no workspace
+                // names to the shrunk corpus summary.
+                crate::scenario::Op::OutOfMawCommit { .. }
+                | crate::scenario::Op::DirtyTrunkWrite { .. }
+                | crate::scenario::Op::Gc { .. } => {}
             }
         }
         Self {

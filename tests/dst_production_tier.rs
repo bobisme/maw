@@ -82,6 +82,10 @@ use maw::assurance::oracle_a::OracleA;
 #[cfg(feature = "assurance")]
 use maw::assurance::oracle_b;
 #[cfg(feature = "assurance")]
+use maw::assurance::oracle_escape::{
+    SiblingRefFaithfulness, TrunkDirtyPreservation, check_record_ref_coherence,
+};
+#[cfg(feature = "assurance")]
 use maw::assurance::scenario::{BaseRef, ConditionProfile, FaultSpec, Op, Target, generate_plan};
 
 /// Read a `u64` count from `var`, defaulting to `default`.
@@ -178,6 +182,12 @@ struct Liveness {
     /// so the oracle never judged a post-crash repo and a green run is
     /// meaningless.
     faults_injected: u64,
+    /// bn-2bcx: out-of-maw trunk commits made (arms FF-absorb).
+    out_of_maw_commits: u64,
+    /// bn-2bcx: uncommitted dirty-trunk writes performed.
+    dirty_trunk_writes: u64,
+    /// bn-2bcx: successful `maw gc` runs.
+    gc_runs: u64,
 }
 
 /// Short human-readable name for an op (for oracle-violation context strings).
@@ -192,6 +202,9 @@ const fn op_name(op: &Op) -> &'static str {
         Op::Destroy { .. } => "destroy",
         Op::Recover { .. } => "recover",
         Op::Advance { .. } => "advance",
+        Op::OutOfMawCommit { .. } => "out_of_maw_commit",
+        Op::DirtyTrunkWrite { .. } => "dirty_trunk_write",
+        Op::Gc { .. } => "gc",
     }
 }
 
@@ -301,7 +314,138 @@ fn execute_op(repo: &TestRepo, op: &Op) -> bool {
             let out = repo.maw_raw_exact(&["ws", "advance", &ws.0]);
             out.status.success()
         }
+        Op::OutOfMawCommit { files, msg } => {
+            // Advance refs/heads/main with a real commit made ENTIRELY outside
+            // maw (pure git plumbing against a scratch index — no worktree, no
+            // epoch update). This leaves main ahead of
+            // refs/manifold/epoch/current, arming reconcile_epoch_with_branch
+            // (the FF-absorb path, bn-11ip/bn-rah2) for the next merge.
+            out_of_maw_commit(repo, files, &msg.0)
+        }
+        Op::DirtyTrunkWrite { files } => {
+            // Uncommitted writes into the default workspace's working tree.
+            // Not committed, not staged — pure dirty bytes (bn-1xmk). Only
+            // meaningful if the default worktree exists.
+            let default_ws = repo.default_workspace();
+            if default_ws.is_dir() {
+                for fe in files {
+                    let path = default_ws.join(&fe.path);
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&path, &fe.content);
+                }
+            }
+            // Not a maw op; count as no-op for liveness.
+            false
+        }
+        Op::Gc {
+            recovery_snapshots,
+            older_than_days,
+        } => {
+            let older = older_than_days.to_string();
+            let mut args: Vec<&str> = vec!["gc"];
+            if *recovery_snapshots {
+                args.push("--recovery-snapshots");
+                args.push("--older-than");
+                args.push(&older);
+            }
+            let out = repo.maw_raw_exact(&args);
+            out.status.success()
+        }
     }
+}
+
+/// Make a commit directly on `refs/heads/main` outside of maw, via git
+/// plumbing against a throwaway index — no worktree touched, no epoch ref
+/// updated. This is the faithful "someone `git commit`ed on trunk" arming
+/// condition for FF-absorb (`reconcile_epoch_with_branch`).
+///
+/// Returns `true` (a real commit landed) for liveness accounting.
+#[cfg(feature = "assurance")]
+fn out_of_maw_commit(
+    repo: &TestRepo,
+    files: &[maw::assurance::scenario::FileEdit],
+    msg: &str,
+) -> bool {
+    use std::process::Command;
+
+    let root = repo.root();
+    let git = |args: &[&str]| -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git spawn")
+    };
+    let git_env = |args: &[&str], index: &std::path::Path| -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", index)
+            .output()
+            .expect("git spawn")
+    };
+
+    let parent = String::from_utf8_lossy(&git(&["rev-parse", "refs/heads/main"]).stdout)
+        .trim()
+        .to_owned();
+    if parent.is_empty() {
+        return false;
+    }
+
+    // Scratch index seeded from main's tree so the commit is a superset.
+    let index = root
+        .join(".git")
+        .join(format!("dst-oom-index-{}", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let _ = git_env(&["read-tree", "refs/heads/main"], &index);
+
+    for fe in files {
+        // Write the blob, then stage it at the desired path in the scratch index.
+        let mut child = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("git hash-object");
+        {
+            use std::io::Write as _;
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin")
+                .write_all(fe.content.as_bytes())
+                .expect("write blob");
+        }
+        let blob = String::from_utf8_lossy(&child.wait_with_output().expect("hash-object").stdout)
+            .trim()
+            .to_owned();
+        let cacheinfo = format!("100644,{blob},{}", fe.path);
+        let _ = git_env(
+            &["update-index", "--add", "--cacheinfo", &cacheinfo],
+            &index,
+        );
+    }
+
+    let tree = String::from_utf8_lossy(&git_env(&["write-tree"], &index).stdout)
+        .trim()
+        .to_owned();
+    let _ = std::fs::remove_file(&index);
+    if tree.is_empty() {
+        return false;
+    }
+
+    let commit =
+        String::from_utf8_lossy(&git(&["commit-tree", &tree, "-p", &parent, "-m", msg]).stdout)
+            .trim()
+            .to_owned();
+    if commit.is_empty() {
+        return false;
+    }
+    let out = git(&["update-ref", "refs/heads/main", &commit]);
+    out.status.success()
 }
 
 /// Execute one planned op while ARMING a `FaultSpec::Failpoint` as
@@ -413,6 +557,7 @@ const fn merge_target(into: &Target) -> &'static str {
 /// and lose no committed work. Unfaulted ops always take the plain-binary path,
 /// so the failpoints binary is never paid for ops that carry no fault.
 #[cfg(feature = "assurance")]
+#[allow(clippy::too_many_lines)]
 fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness) -> Vec<String> {
     let mut violations = Vec::new();
 
@@ -425,14 +570,29 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
     // seed→plan stream is unaffected (proven by the maw-scenario determinism +
     // corpus tests). This tier regenerates plans each run, so a different
     // byte stream here is fine.
+    // bn-2bcx: enable the escape-path ops (OutOfMawCommit / DirtyTrunkWrite /
+    // Gc) at a LOW weight relative to advance (8) and the core op weights, so
+    // the default (fast) tier stays within budget while still exercising the
+    // FF-absorb / dirty-trunk / gc-recover code. The DEFAULT profile keeps both
+    // weights 0, so the bn-2yzz in-proc campaign's seed→plan stream is
+    // untouched; this tier regenerates plans each run so a different byte
+    // stream here is fine. Soak campaigns raise `DST_ESCAPE_WEIGHT`.
+    let escape_weight = u32::try_from(env_count("DST_ESCAPE_WEIGHT", 3)).unwrap_or(3);
     let plan = generate_plan(
         seed,
-        &ConditionProfile::default().with_advance_weight(8),
+        &ConditionProfile::default()
+            .with_advance_weight(8)
+            .with_escape_weight(escape_weight),
         n_steps,
     );
 
     // Oracle A is incremental: ONE instance per seed/repo, fed every step.
     let mut oracle_a = OracleA::new(repo.root());
+    // bn-2bcx escape oracles: SiblingRefFaithfulness is incremental (one per
+    // seed, fed every step in order); TrunkDirtyPreservation accumulates
+    // recorded dirty writes; RecordRefCoherence is stateless.
+    let mut sibling_oracle = SiblingRefFaithfulness::new();
+    let mut trunk_oracle = TrunkDirtyPreservation::new();
     let mut last_epoch = repo.current_epoch();
 
     for (i, step) in plan.steps.iter().enumerate() {
@@ -469,6 +629,23 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
         }
         if matches!(op, Op::Advance { .. }) && succeeded {
             live.advances_run += 1;
+        }
+        // bn-2bcx escape-op bookkeeping + liveness.
+        match op {
+            Op::OutOfMawCommit { files, .. } => {
+                live.out_of_maw_commits += 1;
+                // A deliberate trunk re-commit supersedes any dirty-write
+                // expectation on the same paths.
+                trunk_oracle.note_trunk_overwrite(files.iter().map(|f| f.path.as_str()));
+            }
+            Op::DirtyTrunkWrite { files } => {
+                live.dirty_trunk_writes += 1;
+                for fe in files {
+                    trunk_oracle.record_dirty(&fe.path, &fe.content);
+                }
+            }
+            Op::Gc { .. } if succeeded => live.gc_runs += 1,
+            _ => {}
         }
 
         // Detect epoch advance (a merge committing into default).
@@ -508,6 +685,29 @@ fn run_seed(seed: u64, n_steps: usize, inject_faults: bool, live: &mut Liveness)
         // Oracle B (stateless state-coherence).
         for v in oracle_b::check(repo.root()) {
             violations.push(format!("seed={seed} step={i} op={name} OracleB: {v:?}"));
+        }
+
+        // --- bn-2bcx escape-path oracles ---
+        // SiblingRefFaithfulness (bn-rah2): a committed-ahead sibling's work
+        // must not be orphaned by an op that did not target it (FF-absorb).
+        for v in sibling_oracle.check_step(repo.root(), op) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} SiblingRefFaithfulness: {v}"
+            ));
+        }
+        // TrunkDirtyPreservation (bn-1xmk): recorded uncommitted trunk bytes
+        // must survive on disk or be surfaced in a recovery ref.
+        for v in trunk_oracle.check(repo.root()) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} TrunkDirtyPreservation: {v}"
+            ));
+        }
+        // RecordRefCoherence (bn-3uou): no destroy record may claim a recovery
+        // ref that does not exist.
+        for v in check_record_ref_coherence(repo.root()) {
+            violations.push(format!(
+                "seed={seed} step={i} op={name} RecordRefCoherence: {v}"
+            ));
         }
     }
 
@@ -577,6 +777,7 @@ fn drive_tier(
         "{label}: ran {} op-steps across {count} seeds ({} steps/seed); \
          {} ops succeeded, {} workspaces created, {} epoch advances, \
          {} Oracle-A witness blobs, {} ws-advances, {} faults injected; \
+         {} out-of-maw-commits, {} dirty-trunk-writes, {} gc-runs (bn-2bcx); \
          {} violations over N={} trials \
          (Wilson 95% UB on per-op-step violation rate = {:.3e})",
         live.ops_attempted,
@@ -587,6 +788,9 @@ fn drive_tier(
         live.oracle_a_witnesses,
         live.advances_run,
         live.faults_injected,
+        live.out_of_maw_commits,
+        live.dirty_trunk_writes,
+        live.gc_runs,
         all_violations.len(),
         n_trials,
         wilson_ub,
@@ -667,6 +871,19 @@ fn dst_production_tier_no_work_lost() {
 
     assert_shared_liveness(&live, count, n_steps);
 
+    // bn-2bcx non-vacuity: the escape ops must actually have been exercised,
+    // otherwise the FF-absorb / dirty-trunk / gc-recover oracles judged nothing
+    // new. With escape_weight=3 over the default 16x24 budget this is
+    // comfortably satisfied; if it ever fails, raise DST_STEPS/DST_TRACES or
+    // DST_ESCAPE_WEIGHT rather than trusting a vacuous pass.
+    assert!(
+        live.out_of_maw_commits + live.dirty_trunk_writes + live.gc_runs > 0,
+        "LIVENESS FAILURE (bn-2bcx): zero escape-path ops (out-of-maw-commit / \
+         dirty-trunk-write / gc) ran across {count} seeds ({} op-steps). The \
+         FF-absorb / dirty-trunk / gc-recover oracles were never exercised.",
+        live.ops_attempted,
+    );
+
     assert!(
         all_violations.is_empty(),
         "Oracle violations across {} failing seed(s) {:?}:\n{}",
@@ -743,5 +960,103 @@ fn dst_production_tier_survives_faults() {
         failing_seeds.len(),
         failing_seeds,
         all_violations.join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bn-2bcx: named regression scenarios for the 2026-07 escapes
+// ---------------------------------------------------------------------------
+
+/// Drive a hand-built regression [`ScenarioPlan`] against a fresh real repo,
+/// running ALL five oracles (Oracle A, Oracle B, and the three bn-2bcx escape
+/// oracles) after every op. Returns the collected violation strings.
+///
+/// This is the acceptance harness for the escape-path oracles: it drives the
+/// REAL maw binary over the exact incident shapes, so reverting a fix makes the
+/// corresponding oracle turn red here within the plan's bounded step count.
+#[cfg(feature = "assurance")]
+fn drive_regression_plan(plan: &maw::assurance::scenario::ScenarioPlan) -> Vec<String> {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("base.txt", "base content\n")]);
+
+    let mut oracle_a = OracleA::new(repo.root());
+    let mut sibling_oracle = SiblingRefFaithfulness::new();
+    let mut trunk_oracle = TrunkDirtyPreservation::new();
+    let mut violations = Vec::new();
+
+    for (i, step) in plan.steps.iter().enumerate() {
+        let op = &step.op;
+        let name = op_name(op);
+        let _succeeded = execute_op(&repo, op);
+
+        match op {
+            Op::OutOfMawCommit { files, .. } => {
+                trunk_oracle.note_trunk_overwrite(files.iter().map(|f| f.path.as_str()));
+            }
+            Op::DirtyTrunkWrite { files } => {
+                for fe in files {
+                    trunk_oracle.record_dirty(&fe.path, &fe.content);
+                }
+            }
+            _ => {}
+        }
+
+        let state = match capture_oracle_state(repo.root()) {
+            Ok(s) => s,
+            Err(err) => {
+                violations.push(format!("step={i} op={name}: capture_state failed: {err}"));
+                continue;
+            }
+        };
+        if let Ok(report) = oracle_a.check_step(&state, i)
+            && let Some(v) = report.violation
+        {
+            violations.push(format!("step={i} op={name} OracleA: {v}"));
+        }
+        for v in oracle_b::check(repo.root()) {
+            violations.push(format!("step={i} op={name} OracleB: {v:?}"));
+        }
+        for v in sibling_oracle.check_step(repo.root(), op) {
+            violations.push(format!("step={i} op={name} SiblingRefFaithfulness: {v}"));
+        }
+        for v in trunk_oracle.check(repo.root()) {
+            violations.push(format!("step={i} op={name} TrunkDirtyPreservation: {v}"));
+        }
+        for v in check_record_ref_coherence(repo.root()) {
+            violations.push(format!("step={i} op={name} RecordRefCoherence: {v}"));
+        }
+    }
+    violations
+}
+
+/// The bn-rah2 regression scenario (FF-absorb orphaned committed-ahead
+/// sibling) must be GREEN under all oracles with the fix (68abe479) in place.
+///
+/// This is the acceptance proof: locally reverting the bn-rah2 sibling-replay
+/// classification in `reconcile_epoch_with_branch` turns this RED via
+/// `SiblingRefFaithfulness` within the plan's bounded step count.
+#[cfg(feature = "assurance")]
+#[test]
+fn bn_rah2_regression_is_green() {
+    let plan = maw::assurance::scenario::bn_rah2_regression_plan();
+    let violations = drive_regression_plan(&plan);
+    assert!(
+        violations.is_empty(),
+        "bn-rah2 regression must be clean with the fix in place; oracle violations:\n{}",
+        violations.join("\n"),
+    );
+}
+
+/// The bn-1xmk regression scenario (dirty tracked trunk file clobbered by
+/// preserve-and-replay) must be GREEN under all oracles with the fix in place.
+#[cfg(feature = "assurance")]
+#[test]
+fn bn_1xmk_regression_is_green() {
+    let plan = maw::assurance::scenario::bn_1xmk_regression_plan();
+    let violations = drive_regression_plan(&plan);
+    assert!(
+        violations.is_empty(),
+        "bn-1xmk regression must be clean with the fix in place; oracle violations:\n{}",
+        violations.join("\n"),
     );
 }
