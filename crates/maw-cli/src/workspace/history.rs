@@ -89,8 +89,8 @@ pub fn history(name: &str, limit: usize, format: Option<OutputFormat>) -> Result
     let root = repo_root()?;
 
     // Try op log first (reads refs/manifold/head/<name> chain via read APIs)
-    match fetch_oplog_history(&root, &ws_id, limit) {
-        Ok(operations) if !operations.is_empty() => {
+    match fetch_oplog_history(&root, &ws_id, limit)? {
+        operations if !operations.is_empty() => {
             print_oplog_history(name, &operations, limit, format)?;
         }
         _ => {
