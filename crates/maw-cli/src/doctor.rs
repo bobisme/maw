@@ -5,7 +5,6 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::format::OutputFormat;
-use crate::ref_gc;
 use crate::workspace;
 
 // ---------------------------------------------------------------------------
@@ -144,13 +143,21 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
     checks.push(check_default_workspace(root.as_deref()));
     checks.push(check_lfs(root.as_deref()));
     checks.push(check_root_bare(root.as_deref()));
-    checks.push(check_ghost_working_copy(root.as_deref()));
-    checks.push(check_dangling_snapshots(root.as_deref()));
-    let (abandoned, unpinned) = check_destroy_records(root.as_deref());
-    checks.push(abandoned);
-    checks.push(unpinned);
-    checks.push(check_stale_head_refs(root.as_deref()));
-    checks.push(check_merge_state(root.as_deref()));
+    // State-coherence checks (ghost-working-copy, dangling-snapshots,
+    // abandoned-with-snapshot, destroy-record-unpinned, stale-head-refs,
+    // merge-state) are backed by the shared fsck invariant catalog so the
+    // logic lives once (bn-1uot). Doctor runs only the fast `in_doctor`
+    // subset; `maw fsck` runs the whole catalog.
+    if let Some(root) = root.as_deref() {
+        for delegation in crate::fsck::doctor_delegations(root) {
+            checks.push(DoctorCheck {
+                name: delegation.name,
+                status: delegation.status,
+                message: delegation.message,
+                fix: delegation.fix,
+            });
+        }
+    }
     if repair {
         // Try the auto-advance BEFORE the drift check so the check reflects
         // the post-repair state. Push a repair receipt so the user sees
@@ -556,34 +563,6 @@ fn check_root_bare(root: Option<&Path>) -> DoctorCheck {
 
 const BARE_ROOT_ALLOWED: &[&str] = &[".git", ".manifold", ".maw", "repo.git", "ws"];
 
-fn check_ghost_working_copy(root: Option<&Path>) -> DoctorCheck {
-    let Some(root) = root else {
-        return DoctorCheck {
-            name: "legacy jj metadata".to_string(),
-            status: "ok".to_string(),
-            message: "legacy jj metadata: could not check (no root)".to_string(),
-            fix: None,
-        };
-    };
-
-    let ghost_wc = root.join(".jj").join("working_copy");
-    if ghost_wc.exists() {
-        DoctorCheck {
-            name: "legacy jj metadata".to_string(),
-            status: "warn".to_string(),
-            message: "legacy jj metadata: .jj/working_copy/ exists at repo root".to_string(),
-            fix: Some("Migration cleanup: rm -rf .jj/working_copy/".to_string()),
-        }
-    } else {
-        DoctorCheck {
-            name: "legacy jj metadata".to_string(),
-            status: "ok".to_string(),
-            message: "legacy jj metadata: none".to_string(),
-            fix: None,
-        }
-    }
-}
-
 #[must_use]
 pub fn stray_root_entries(root: &Path) -> Vec<String> {
     // Layout-aware: in the consolidated `.maw/` layout the repo root IS the
@@ -615,317 +594,6 @@ pub fn stray_root_entries(root: &Path) -> Vec<String> {
             }
         })
         .collect()
-}
-
-fn check_dangling_snapshots(root: Option<&Path>) -> DoctorCheck {
-    let Some(root) = root else {
-        return DoctorCheck {
-            name: "dangling snapshots".to_string(),
-            status: "ok".to_string(),
-            message: "dangling snapshots: could not check (no root)".to_string(),
-            fix: None,
-        };
-    };
-
-    match workspace::recover::find_dangling_snapshots(root) {
-        Ok(dangling) if dangling.is_empty() => DoctorCheck {
-            name: "dangling snapshots".to_string(),
-            status: "ok".to_string(),
-            message: "dangling snapshots: none".to_string(),
-            fix: None,
-        },
-        Ok(dangling) => DoctorCheck {
-            name: "dangling snapshots".to_string(),
-            status: "warn".to_string(),
-            message: format!(
-                "dangling snapshots: {} orphaned recovery snapshot(s) (recovery refs left by \
-                 crashed or completed merges, with no destroy record)",
-                dangling.len()
-            ),
-            fix: Some(
-                "Fix: maw ws recover --gc --dry-run  (preview), then: maw ws recover --gc"
-                    .to_string(),
-            ),
-        },
-        Err(_) => DoctorCheck {
-            name: "dangling snapshots".to_string(),
-            status: "ok".to_string(),
-            message: "dangling snapshots: could not check (git error)".to_string(),
-            fix: None,
-        },
-    }
-}
-
-/// SG4 / bn-29fi (destroy-prevention): surface workspaces whose
-/// destroy-record + recovery snapshot is still on disk, distinct from
-/// the "dangling snapshots" check (which targets ref-only leakage from
-/// crashed merges).
-///
-/// Why this check exists:
-/// - `dangling snapshots` warns when a `refs/manifold/recovery/...`
-///   ref has no owning destroy-record (clean-up garbage).
-/// - This check warns when destroyed workspaces have **valid** destroy
-///   records that the agent may have forgotten about — the
-///   "abandoned-with-snapshot" state from the safe-cleanup vocabulary.
-///
-/// The destroy-prevention impact is upstream: an agent who runs
-/// `maw doctor` and sees "3 abandoned-with-snapshot workspace(s)" is
-/// far more likely to `maw ws recover` the queued work BEFORE
-/// destroying yet another workspace it will later need to recover.
-/// Naming the queue makes it actionable.
-///
-/// Status is `warn` (not `fail`) because the data is preserved by the
-/// Prime Invariant — this is a *prompt to drain the mergeback queue*,
-/// not a corruption signal.
-///
-/// Returns two checks that share one classification pass (bn-3uou):
-/// - `abandoned-with-snapshot`: destroyed workspaces whose recovery snapshot
-///   ref is still present (recoverable; drain the mergeback queue).
-/// - `destroy-record-unpinned`: destroyed workspaces whose destroy record
-///   claims a recovery snapshot whose ref is gone (desynced — a later
-///   `git gc --prune` could drop the object). Kept distinct so a swept-ref
-///   state is surfaced rather than silently inflating the first count.
-fn check_destroy_records(root: Option<&Path>) -> (DoctorCheck, DoctorCheck) {
-    let abandoned_name = "abandoned-with-snapshot".to_string();
-    let unpinned_name = "destroy-record-unpinned".to_string();
-
-    let unknown = |name: String, reason: &str| DoctorCheck {
-        name: name.clone(),
-        status: "ok".to_string(),
-        message: format!("{name}: could not check ({reason})"),
-        fix: None,
-    };
-
-    let Some(root) = root else {
-        return (
-            unknown(abandoned_name, "no root"),
-            unknown(unpinned_name, "no root"),
-        );
-    };
-
-    let Ok(pinning) = workspace::recover::classify_destroyed_workspaces(root) else {
-        return (
-            unknown(abandoned_name, "read error"),
-            unknown(unpinned_name, "read error"),
-        );
-    };
-
-    (
-        abandoned_with_snapshot_check(abandoned_name, &pinning.pinned),
-        destroy_record_unpinned_check(unpinned_name, &pinning.unpinned),
-    )
-}
-
-/// Join up to three names as a `a, b, c (+N more)` preview.
-fn preview_names(names: &[String]) -> String {
-    let head = names
-        .iter()
-        .take(3)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    if names.len() > 3 {
-        format!("{head} (+{} more)", names.len() - 3)
-    } else {
-        head
-    }
-}
-
-fn abandoned_with_snapshot_check(name: String, pinned: &[String]) -> DoctorCheck {
-    if pinned.is_empty() {
-        return DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: "abandoned-with-snapshot: no queued recovery snapshots".to_string(),
-            fix: None,
-        };
-    }
-
-    let first = pinned.first().expect("non-empty checked above");
-    DoctorCheck {
-        name,
-        status: "warn".to_string(),
-        message: format!(
-            "abandoned-with-snapshot: {} destroyed workspace(s) retain a recovery snapshot \
-             (destroy records with a still-pinned `refs/manifold/recovery/...` — the \
-             `maw ws recover` audit trail; expected after `ws destroy`, no work is lost): {}",
-            pinned.len(),
-            preview_names(pinned)
-        ),
-        fix: Some(format!(
-            "Restore one: maw ws recover {first} --to {first}-restored  |  Prune old ones \
-             (ref + record together): maw gc --recovery-snapshots --dry-run, then maw gc \
-             --recovery-snapshots"
-        )),
-    }
-}
-
-fn destroy_record_unpinned_check(name: String, unpinned: &[String]) -> DoctorCheck {
-    if unpinned.is_empty() {
-        return DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: "destroy-record-unpinned: none".to_string(),
-            fix: None,
-        };
-    }
-
-    DoctorCheck {
-        name,
-        status: "warn".to_string(),
-        message: format!(
-            "destroy-record-unpinned: {} destroyed workspace(s) have a destroy record that \
-             claims a recovery snapshot whose ref is already gone (swept by an older `maw gc \
-             --refs`, or manually deleted). The snapshot object is unpinned and a future \
-             `git gc --prune` may drop it: {}",
-            unpinned.len(),
-            preview_names(unpinned)
-        ),
-        fix: Some(
-            "Prune desynced records older than 30 days: maw gc --recovery-snapshots (preview \
-             with --dry-run). CAUTION: --older-than 0 drains them all, but ALSO sweeps every \
-             still-pinned recovery snapshot and its record — recently destroyed workspaces \
-             become unrecoverable."
-                .to_string(),
-        ),
-    }
-}
-
-/// Detect an orphaned / stuck merge-state file (bn-2wyh).
-///
-/// A killed / OOM'd / panicked / Ctrl-C'd `maw ws merge` leaves
-/// `.manifold/merge-state.json` behind, which then blocks every future
-/// merge with "merge already in progress". `maw doctor` must surface this
-/// (it previously reported "All checks passed!" while merges were wedged)
-/// and print the exact recovery command.
-fn check_merge_state(root: Option<&Path>) -> DoctorCheck {
-    use maw_core::merge_state::{
-        DEFAULT_STALE_AFTER_SECS, MergeStateError, MergeStateFile, Staleness,
-    };
-
-    let name = "merge-state".to_string();
-    let recovery_fix = "Fix: maw ws merge --abort".to_string();
-
-    let Some(root) = root else {
-        return DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: "merge-state: could not check (no root)".to_string(),
-            fix: None,
-        };
-    };
-
-    let state_path = MergeStateFile::default_path(
-        &maw_core::model::layout::LayoutFlavor::detect_with_env(root).manifold_dir(root),
-    );
-    let state = match MergeStateFile::read(&state_path) {
-        Err(MergeStateError::NotFound(_)) => {
-            return DoctorCheck {
-                name,
-                status: "ok".to_string(),
-                message: "merge-state: no merge in progress".to_string(),
-                fix: None,
-            };
-        }
-        Err(e) => {
-            // A corrupt merge-state file also wedges merges.
-            return DoctorCheck {
-                name,
-                status: "fail".to_string(),
-                message: format!("merge-state: file present but unreadable ({e})"),
-                fix: Some(recovery_fix),
-            };
-        }
-        Ok(s) => s,
-    };
-
-    if state.phase.is_terminal() {
-        // A terminal state still on disk is leftover but harmless to clear.
-        return DoctorCheck {
-            name,
-            status: "warn".to_string(),
-            message: format!(
-                "merge-state: leftover terminal state (phase: {})",
-                state.phase
-            ),
-            fix: Some(recovery_fix),
-        };
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    match state.staleness(now, DEFAULT_STALE_AFTER_SECS) {
-        Staleness::Live => DoctorCheck {
-            name,
-            status: "ok".to_string(),
-            message: format!(
-                "merge-state: a merge is actively running (phase: {}, pid: {})",
-                state.phase,
-                state
-                    .owner_pid
-                    .map_or_else(|| "?".to_string(), |p| p.to_string())
-            ),
-            fix: None,
-        },
-        Staleness::Orphaned => DoctorCheck {
-            name,
-            status: "fail".to_string(),
-            message: format!(
-                "merge-state: ORPHANED merge-state from an interrupted merge \
-                 (phase: {}, owner process is gone). This blocks ALL future merges.",
-                state.phase
-            ),
-            fix: Some(recovery_fix),
-        },
-        Staleness::Indeterminate => DoctorCheck {
-            name,
-            status: "warn".to_string(),
-            message: format!(
-                "merge-state: merge-state present (phase: {}) but owner liveness \
-                 could not be confirmed. If no merge is running it is orphaned and \
-                 blocks all future merges.",
-                state.phase
-            ),
-            fix: Some(recovery_fix),
-        },
-    }
-}
-
-fn check_stale_head_refs(root: Option<&Path>) -> DoctorCheck {
-    let Some(root) = root else {
-        return DoctorCheck {
-            name: "stale head refs".to_string(),
-            status: "ok".to_string(),
-            message: "stale head refs: could not check (no root)".to_string(),
-            fix: None,
-        };
-    };
-
-    match ref_gc::count_stale_head_refs(root) {
-        Ok(0) => DoctorCheck {
-            name: "stale head refs".to_string(),
-            status: "ok".to_string(),
-            message: "stale head refs: none".to_string(),
-            fix: None,
-        },
-        Ok(count) => DoctorCheck {
-            name: "stale head refs".to_string(),
-            status: "warn".to_string(),
-            message: format!(
-                "stale head refs: found {count} head ref(s) for non-existent workspaces"
-            ),
-            fix: Some("Run: maw gc".to_string()),
-        },
-        Err(_) => DoctorCheck {
-            name: "stale head refs".to_string(),
-            status: "ok".to_string(),
-            message: "stale head refs: could not check (git error)".to_string(),
-            fix: None,
-        },
-    }
 }
 
 /// Report the repo-level epoch lock state (bn-13rc). Informational only —

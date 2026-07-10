@@ -119,6 +119,20 @@ assert_file_contains() {  # <file> <pattern> <label>
   fi
 }
 
+assert_fsck_clean() {  # <dir> <label>
+  # Deep-verify manifold state (bn-1uot). fsck exits 0 clean, 1 warn-only
+  # (dangling snapshots / drain-the-recover-queue — expected mid-sim), or 2
+  # on corruption. Only exit 2 is a hard failure here; warn-only is a note.
+  local dir="$1" label="$2"
+  local out rc
+  out="$(cd "$dir" && "$MAW" fsck 2>&1)" && rc=0 || rc=$?
+  case "$rc" in
+    0) ok "$label: fsck clean (all invariants held)" ;;
+    1) warn "$label: fsck warn-only (exit 1) — no corruption" ;;
+    *) bad "$label: fsck reports corruption (exit $rc):\n$out" ;;
+  esac
+}
+
 assert_file_absent() {  # <file> <label>
   [[ ! -e "$1" ]] && ok "$2" || bad "$2 (still present: $1)"
 }
@@ -153,6 +167,7 @@ scn_greenfield() {
   assert_not_bare "$sb" "greenfield"
   assert_consolidated_shape "$sb" "greenfield"
   assert_git_intact "$sb" "greenfield"
+  assert_fsck_clean "$sb" "greenfield"
 }
 
 # =============================================================================
@@ -200,6 +215,7 @@ scn_lifecycle() {
   assert_file_contains "$sb/shared.txt" "BOB"   "lifecycle: bob's edit landed at root"
   assert_recovery_ref  "$sb" bob "lifecycle: bob recovery ref pinned"
   assert_no_markers_at_root "$sb" "lifecycle: no conflict markers leaked to root"
+  assert_fsck_clean "$sb" "lifecycle"
 }
 
 # =============================================================================
@@ -228,6 +244,7 @@ scn_recover() {
   assert_file_contains "$sb/.maw/workspaces/carol2/precious.rs" "precious" \
     "recover: precious work restored into carol2 (Prime Invariant)"
   assert_git_intact "$sb" "recover/post-restore"
+  assert_fsck_clean "$sb" "recover"
 }
 
 # =============================================================================
@@ -317,6 +334,7 @@ scn_post_migrate_merge() {
   assert_consolidated_shape "$sb" "post-migrate-merge"
   assert_file_contains "$sb/eve.rs" "fn eve" "post-migrate-merge: eve's work landed at root"
   assert_recovery_ref "$sb" eve "post-migrate-merge: eve recovery ref pinned"
+  assert_fsck_clean "$sb" "post-migrate-merge"
 }
 
 # ---- driver -----------------------------------------------------------------

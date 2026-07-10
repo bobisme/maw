@@ -11,6 +11,7 @@ use maw_cli::epoch_gc;
 use maw_cli::epoch_lock;
 use maw_cli::exec;
 use maw_cli::format;
+use maw_cli::fsck;
 use maw_cli::init;
 use maw_cli::merge_cmd;
 use maw_cli::migrate;
@@ -167,6 +168,38 @@ enum Commands {
         /// equivalent). Skipped issues are reported as before.
         #[arg(long)]
         repair: bool,
+    },
+
+    /// Deep-verify all manifold state against the invariant catalog
+    ///
+    /// Where `maw doctor` is a fast interactive health triage, `maw fsck`
+    /// exhaustively checks every cross-artifact invariant: refs point at real
+    /// objects of the right kind, registered workspaces agree with their
+    /// worktrees, destroy records stay coherent with their recovery refs, the
+    /// oplog parses, no stale merge-state blocks merges, and the epoch is an
+    /// ancestor of the configured branch.
+    ///
+    /// Exit codes: 0 clean, 1 warn-only violations, 2 corruption.
+    ///
+    /// With --repair, only provably-safe, non-destructive fixes are applied
+    /// (re-pin a recovery ref to a still-existing OID, remove a stale
+    /// merge-state whose owner is gone). Destructive cleanup stays in `maw gc`.
+    Fsck {
+        /// Output format: text, json, pretty (auto-detected from TTY)
+        #[arg(long)]
+        format: Option<format::OutputFormat>,
+
+        /// Shorthand for --format json (includes `fsck_schema`)
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+
+        /// Apply provably-safe, non-destructive repairs
+        #[arg(long)]
+        repair: bool,
+
+        /// With --repair: report what would be repaired without changing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Launch the terminal UI
@@ -517,6 +550,16 @@ fn main() {
             json,
             repair,
         } => doctor::run_with_repair(format::OutputFormat::with_json_flag(format, json), repair),
+        Commands::Fsck {
+            format,
+            json,
+            repair,
+            dry_run,
+        } => fsck::run(
+            format::OutputFormat::with_json_flag(format, json),
+            repair,
+            dry_run,
+        ),
         #[cfg(feature = "tui")]
         Commands::Ui => tui::run(),
         Commands::Status(ref cmd) => status::run(cmd),

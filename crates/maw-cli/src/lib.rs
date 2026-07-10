@@ -14,6 +14,7 @@ pub mod epoch_lock;
 pub mod error;
 pub mod exec;
 pub mod format;
+pub mod fsck;
 pub mod init;
 #[cfg(feature = "lfs")]
 pub mod lfs_push;
