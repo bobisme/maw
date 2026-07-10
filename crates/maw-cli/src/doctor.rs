@@ -160,6 +160,7 @@ pub fn run_with_repair(format: Option<OutputFormat>, repair: bool) -> Result<()>
         }
     }
     checks.push(check_epoch_drift(root.as_deref()));
+    checks.push(check_epoch_lock(root.as_deref()));
     checks.push(check_git_head());
 
     let all_ok = checks.iter().all(|c| c.status == "ok");
@@ -924,6 +925,42 @@ fn check_stale_head_refs(root: Option<&Path>) -> DoctorCheck {
             message: "stale head refs: could not check (git error)".to_string(),
             fix: None,
         },
+    }
+}
+
+/// Report the repo-level epoch lock state (bn-13rc). Informational only —
+/// always `ok`. Names who currently holds the single-writer epoch lock (if
+/// anyone) so an operator can see why a mutation might be waiting, and
+/// distinguishes a live holder from stale metadata left by a crashed process
+/// (the flock, not the file content, is ground truth).
+fn check_epoch_lock(root: Option<&Path>) -> DoctorCheck {
+    let name = "epoch-lock".to_string();
+    let Some(root) = root else {
+        return DoctorCheck {
+            name,
+            status: "ok".to_string(),
+            message: "epoch-lock: could not check (no root)".to_string(),
+            fix: None,
+        };
+    };
+
+    let status = crate::epoch_lock::inspect(root);
+    let message = if status.held {
+        let who = status
+            .holder
+            .map_or_else(|| "an unknown process".to_string(), |h| h.describe());
+        format!("epoch-lock: held by {who}")
+    } else if let Some(prev) = status.holder {
+        format!("epoch-lock: free (last held by {})", prev.describe())
+    } else {
+        "epoch-lock: free".to_string()
+    };
+
+    DoctorCheck {
+        name,
+        status: "ok".to_string(),
+        message,
+        fix: None,
     }
 }
 

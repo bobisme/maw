@@ -1216,54 +1216,56 @@ fn concurrent_rebase_races_are_serialized() {
     let success_a = out_a.status.success();
     let success_b = out_b.status.success();
 
-    // Exactly one must succeed and exactly one must fail. If both succeed
-    // the lock isn't actually serializing (they may have interleaved in a
-    // data-racing way that happened not to corrupt this time). If both
-    // fail we've regressed the happy path.
-    let succeeded = usize::from(success_a) + usize::from(success_b);
-    assert_eq!(
-        succeeded,
-        1,
-        "expected exactly one rebase to succeed, got {succeeded}\n\
-         a.status={:?} a.stdout={:?} a.stderr={:?}\n\
-         b.status={:?} b.stdout={:?} b.stderr={:?}",
+    let stdout_a = String::from_utf8_lossy(&out_a.stdout).into_owned();
+    let stdout_b = String::from_utf8_lossy(&out_b.stdout).into_owned();
+    let stderr_a = String::from_utf8_lossy(&out_a.stderr).into_owned();
+    let stderr_b = String::from_utf8_lossy(&out_b.stderr).into_owned();
+
+    // bn-13rc: the repo-level epoch lock now serializes the two syncs at the
+    // top of `ws sync` — BEFORE either contends the per-workspace rebase lock.
+    // The second invocation *waits* on the epoch lock (default policy), and by
+    // the time it acquires it the first has already rebased `feat`, so it
+    // observes the work already done and also exits cleanly. Both therefore
+    // SUCCEED (serialize-and-succeed), superseding the bn-1d1g fail-fast where
+    // the loser aborted with "Another rebase is in progress". The per-workspace
+    // lock still guards the deeper replay (and the best-effort auto-sync path);
+    // it is simply never contended once the epoch lock has serialized the two.
+    assert!(
+        success_a && success_b,
+        "both serialized syncs must succeed under epoch-lock serialization\n\
+         a.status={:?} a.stdout={stdout_a:?} a.stderr={stderr_a:?}\n\
+         b.status={:?} b.stdout={stdout_b:?} b.stderr={stderr_b:?}",
         out_a.status,
-        String::from_utf8_lossy(&out_a.stdout),
-        String::from_utf8_lossy(&out_a.stderr),
         out_b.status,
-        String::from_utf8_lossy(&out_b.stdout),
-        String::from_utf8_lossy(&out_b.stderr),
     );
 
-    // The loser's stderr/stdout must carry the friendly lock-contention
-    // message, not an internal-looking git error.
-    let loser_stderr = if success_a {
-        String::from_utf8_lossy(&out_b.stderr).into_owned()
-    } else {
-        String::from_utf8_lossy(&out_a.stderr).into_owned()
-    };
-    let loser_stdout = if success_a {
-        String::from_utf8_lossy(&out_b.stdout).into_owned()
-    } else {
-        String::from_utf8_lossy(&out_a.stdout).into_owned()
-    };
-    let loser_combined = format!("{loser_stdout}\n{loser_stderr}");
-    assert!(
-        loser_combined.contains("Another rebase is in progress"),
-        "loser must emit the friendly lock-contention message, got:\nstdout: {loser_stdout}\nstderr: {loser_stderr}"
+    // Exactly one process performed the actual replay; the other, running
+    // strictly after it under the lock, found `feat` already up to date. If
+    // BOTH replayed, the epoch lock failed to serialize them.
+    let replays = usize::from(stdout_a.contains("Rebasing workspace"))
+        + usize::from(stdout_b.contains("Rebasing workspace"));
+    assert_eq!(
+        replays, 1,
+        "exactly one sync should perform the rebase under serialization, got {replays}\n\
+         a.stdout={stdout_a:?}\nb.stdout={stdout_b:?}",
     );
 
-    // Internal git errors must NOT leak out of the loser. If `set_head` or
-    // `checkout_tree` surfaces in either stream, the workspace was half-
-    // rebased and the lock didn't do its job.
-    assert!(
-        !loser_combined.contains("set_head failed"),
-        "loser leaked an internal git error, lock did not serialize:\n{loser_combined}"
-    );
-    assert!(
-        !loser_combined.contains("checkout_tree failed"),
-        "loser leaked an internal git error, lock did not serialize:\n{loser_combined}"
-    );
+    // Neither stream may leak an internal git error. If `set_head` or
+    // `checkout_tree` surfaces, the workspace was half-rebased and the lock
+    // did not do its job.
+    for combined in [
+        format!("{stdout_a}\n{stderr_a}"),
+        format!("{stdout_b}\n{stderr_b}"),
+    ] {
+        assert!(
+            !combined.contains("set_head failed"),
+            "leaked an internal git error, lock did not serialize:\n{combined}"
+        );
+        assert!(
+            !combined.contains("checkout_tree failed"),
+            "leaked an internal git error, lock did not serialize:\n{combined}"
+        );
+    }
 
     // After both racers settle, a third rebase must succeed (or report
     // "up to date" if the first racer already finished the work). Either

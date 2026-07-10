@@ -8,6 +8,7 @@ use maw_cli::changes;
 use maw_cli::doctor;
 use maw_cli::epoch;
 use maw_cli::epoch_gc;
+use maw_cli::epoch_lock;
 use maw_cli::exec;
 use maw_cli::format;
 use maw_cli::init;
@@ -531,6 +532,14 @@ fn main() {
             recovery_snapshots,
             older_than,
         } => workspace::repo_root().and_then(|root| {
+            // bn-13rc: the gc sweep prunes epoch/recovery refs and records —
+            // hold the repo-level epoch lock across all phases. A dry run only
+            // reports, so it stays lock-free (read-only).
+            let _epoch_lock = if dry_run {
+                None
+            } else {
+                Some(epoch_lock::EpochLock::acquire(&root, "gc")?)
+            };
             epoch_gc::run_cli(&root, dry_run)?;
             if recovery_snapshots {
                 ref_gc::run_cli(&root, older_than, dry_run)?;
@@ -556,6 +565,13 @@ fn main() {
         // without printing an error message (the child command already printed its own).
         if let Some(exit_err) = e.downcast_ref::<exec::ExitCodeError>() {
             std::process::exit(exit_err.0);
+        }
+        // bn-13rc: epoch-lock contention already printed a self-contained
+        // who-holds-it message; exit with a distinct code (EX_TEMPFAIL) so
+        // orchestration scripts can recognise "busy, retry later" without a
+        // second generic "Error:" line.
+        if e.downcast_ref::<epoch_lock::EpochLockBusy>().is_some() {
+            std::process::exit(epoch_lock::EPOCH_LOCK_BUSY_EXIT_CODE);
         }
         eprintln!("Error: {e}");
         std::process::exit(1);

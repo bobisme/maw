@@ -756,6 +756,13 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
     // merge does (mirrors prepare.rs / bn-2wyh staleness handling).
     guard_destroy_against_inflight_merge(&root, name)?;
 
+    // bn-13rc: destroy pins recovery refs and writes a destroy record — shared
+    // epoch/recovery state. Take the repo-level epoch lock for the mutation.
+    // Acquired AFTER the in-flight-merge guard so a same-workspace live merge
+    // still fast-fails with the "being merged" message (bn-cm63) rather than
+    // blocking on the lock; unrelated concurrent mutations serialize here.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "ws destroy")?;
+
     let backend = get_backend()?;
     let ws_id =
         WorkspaceId::new(name).map_err(|e| anyhow::anyhow!("Invalid workspace name: {e}"))?;

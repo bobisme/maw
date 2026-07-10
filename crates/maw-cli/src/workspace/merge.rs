@@ -4022,6 +4022,14 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
 
     let root = repo_root()?;
+    // bn-13rc: hold the repo-level epoch lock for the WHOLE merge — the
+    // FF-absorb reconcile below, PREPARE→BUILD→COMMIT, sibling auto-rebase, and
+    // cleanup all read-modify-write shared epoch state. Acquired here (before
+    // reconcile_epoch_with_branch, which mutates the epoch even under
+    // --dry-run's FF-absorb path) and held via RAII until the function returns.
+    // Epoch lock FIRST; the sibling auto-rebase takes per-workspace locks under
+    // it (see epoch_lock ordering rule). `--check`/`--plan` never reach here.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "ws merge")?;
     let maw_config = MawConfig::load(&root)?;
     let default_ws = target_workspace;
     let into_target = target_change_id.unwrap_or(default_ws);

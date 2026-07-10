@@ -108,6 +108,18 @@ fn print_sync_json(output: &SyncJsonOutput) -> Result<()> {
 ///
 /// Returns an error if workspace synchronization fails.
 pub fn sync(name: Option<&str>, all: bool, no_rebase: bool, format: OutputFormat) -> Result<()> {
+    // bn-13rc: a rebasing sync mutates the workspace HEAD/worktree against the
+    // current epoch. Acquire the repo-level epoch lock FIRST (ordering rule in
+    // `crate::epoch_lock`), then let the per-workspace rebase lock be taken
+    // deeper in the pipeline. `--no-rebase` is status-only (read-only) and must
+    // NOT take the lock. Held via RAII across the whole (possibly multi-ws)
+    // operation.
+    let _epoch_lock = if no_rebase {
+        None
+    } else {
+        let root = repo_root()?;
+        Some(crate::epoch_lock::EpochLock::acquire(&root, "ws sync")?)
+    };
     if format == OutputFormat::Json {
         return if all {
             sync_all_json(no_rebase)

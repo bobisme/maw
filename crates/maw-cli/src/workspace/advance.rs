@@ -86,6 +86,10 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
     }
 
     let root = repo_root()?;
+    // bn-13rc: advance rewrites the per-workspace epoch ref and (for
+    // committed-ahead work) replays through the guarded rebase path — take the
+    // repo-level epoch lock first, held until this function returns.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "ws advance")?;
     let ws_path = workspace_path(name)?;
 
     if !ws_path.exists() {

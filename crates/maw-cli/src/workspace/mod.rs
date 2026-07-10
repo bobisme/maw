@@ -75,6 +75,35 @@ pub struct MawConfig {
     hooks: HooksConfig,
     #[serde(default)]
     repo: RepoConfig,
+    #[serde(default)]
+    lock: LockConfig,
+}
+
+/// Repo-level epoch lock configuration (bn-13rc, `[lock]` in `.maw.toml`).
+#[derive(Debug, Deserialize)]
+struct LockConfig {
+    /// If true, epoch mutations fail immediately on contention (distinct exit
+    /// code) instead of waiting. For orchestrators that prefer to retry.
+    #[serde(default)]
+    no_wait: bool,
+    /// Seconds to wait for a contended epoch lock before giving up.
+    #[serde(default = "LockConfig::default_wait_seconds")]
+    wait_seconds: u64,
+}
+
+impl Default for LockConfig {
+    fn default() -> Self {
+        Self {
+            no_wait: false,
+            wait_seconds: Self::default_wait_seconds(),
+        }
+    }
+}
+
+impl LockConfig {
+    const fn default_wait_seconds() -> u64 {
+        10
+    }
 }
 
 /// Repository configuration
@@ -160,6 +189,18 @@ impl MawConfig {
     #[must_use]
     pub fn default_workspace(&self) -> &str {
         &self.repo.default_workspace
+    }
+
+    /// Whether epoch-lock contention should fail immediately (bn-13rc).
+    #[must_use]
+    pub const fn lock_no_wait(&self) -> bool {
+        self.lock.no_wait
+    }
+
+    /// Seconds to wait for a contended epoch lock before giving up (bn-13rc).
+    #[must_use]
+    pub const fn lock_wait_seconds(&self) -> u64 {
+        self.lock.wait_seconds
     }
 }
 

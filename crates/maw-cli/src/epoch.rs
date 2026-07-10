@@ -19,6 +19,9 @@ use maw_core::refs as manifold_refs;
 /// Returns an error if the epoch cannot be synchronized with repository state.
 pub fn sync() -> Result<()> {
     let root = repo_root()?;
+    // bn-13rc: epoch sync rewrites refs/manifold/epoch/current and the default
+    // workspace baseline — serialize it against every other epoch mutator.
+    let _epoch_lock = crate::epoch_lock::EpochLock::acquire(&root, "epoch sync")?;
     let config = MawConfig::load(&root).unwrap_or_default();
     let branch = config.branch();
     let branch_ref = format!("refs/heads/{branch}");
