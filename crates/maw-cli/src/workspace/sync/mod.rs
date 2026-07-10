@@ -93,7 +93,18 @@ pub struct SyncJsonOutput {
     /// this sync (including conflicts that predate this run).
     pub conflict_count: usize,
     /// Paths carrying unresolved conflict markers, if any.
+    ///
+    /// bn-20fp naming note: the merge sibling schema calls the equivalent field
+    /// `conflict_files`; this pre-existing `conflicted_paths` name is retained
+    /// for stability (bn-mq6j contract). New fields added below (`overlap_hint`)
+    /// DO match the merge sibling schema's names.
     pub conflicted_paths: Vec<String>,
+    /// bn-2cvx / bn-20fp: semantic-risk hint `{count, sample_paths}` when this
+    /// sync's replay rode over paths the workspace itself also touches. Same
+    /// field name and shape as the merge sibling entry's `overlap_hint`. Absent
+    /// unless `action == "rebased"` and an overlap was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_hint: Option<auto_rebase::OverlapHint>,
     /// Human-readable summary of what happened.
     pub message: String,
     /// bn-1lhb: post-sync hook outcome, present only when a `post_sync` hook
@@ -482,6 +493,16 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
                      these commits."
                 );
             }
+            // bn-20fp: compute the bn-2cvx overlap hint BEFORE the rebase
+            // mutates the workspace — same field the merge sibling entry
+            // carries, for schema consistency.
+            let overlap_hint = auto_rebase::compute_overlap_hint(
+                &root,
+                &backend,
+                &ws_id,
+                &ws_status,
+                current_epoch.as_str(),
+            );
             let outcome = rebase::rebase_workspace_run(
                 &root,
                 &workspace_name,
@@ -532,6 +553,7 @@ fn build_sync_json(name: Option<&str>, no_rebase: bool) -> Result<SyncJsonOutput
                 } else {
                     format!("{} commit(s) replayed cleanly.", outcome.replayed)
                 },
+                overlap_hint,
                 post_sync_hook,
             });
         }

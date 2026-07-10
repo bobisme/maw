@@ -876,38 +876,64 @@ pub fn destroy(name: &str, confirm: bool, force: bool, format: Option<OutputForm
     // Clean up workspace metadata (best-effort; don't fail destroy if missing).
     let _ = metadata::delete(&root, name);
 
+    // bn-20fp: resolve the output format once so the standalone-destroy success
+    // path can emit a machine-readable object (with `cwd_destroyed`) instead of
+    // always printing text. `format` was previously only consulted on the
+    // refusal path.
+    let fmt = OutputFormat::resolve(format);
+    let text_mode = fmt != OutputFormat::Json;
+    // Recovery refs pinned by this destroy (force + snapshot), for the JSON.
+    let mut pinned_refs: Vec<String> = Vec::new();
+
     if force {
         if let Some(ref capture) = capture_result {
-            let short_oid = &capture.commit_oid.as_str()[..12];
-            println!("Snapshot saved: {short_oid}");
-            println!("  State: abandoned-with-snapshot (lifecycle vocabulary, bn-29fi).");
-            println!("  Recover (inspect):       maw ws recover {name}");
-            // bn-29fi mergeback queue cue: when force-destroy left
-            // committed work behind, the agent's next safe action is
-            // recover-into-new-ws-then-merge. Naming the two-step
-            // sequence eliminates the discovery cost that drives
-            // `ws_recover_invoked` cluster turns.
-            println!(
-                "  Recover + merge (full):  maw ws recover {name} --to {name}-restored \
-                 && maw ws merge {name}-restored --into default --destroy"
-            );
-            println!("Workspace '{name}' destroyed.");
-            // Emit full recovery surface contract
-            super::capture::emit_recovery_surface(
-                name,
-                capture,
-                artifact_path_result.as_deref().ok(),
-                false, // no merge commit — standalone destroy
-                true,  // destroy operation succeeded
-            );
-        } else {
+            pinned_refs.push(capture.pinned_ref.clone());
+            if text_mode {
+                let short_oid = &capture.commit_oid.as_str()[..12];
+                println!("Snapshot saved: {short_oid}");
+                println!("  State: abandoned-with-snapshot (lifecycle vocabulary, bn-29fi).");
+                println!("  Recover (inspect):       maw ws recover {name}");
+                // bn-29fi mergeback queue cue: when force-destroy left
+                // committed work behind, the agent's next safe action is
+                // recover-into-new-ws-then-merge. Naming the two-step
+                // sequence eliminates the discovery cost that drives
+                // `ws_recover_invoked` cluster turns.
+                println!(
+                    "  Recover + merge (full):  maw ws recover {name} --to {name}-restored \
+                     && maw ws merge {name}-restored --into default --destroy"
+                );
+                println!("Workspace '{name}' destroyed.");
+                // Emit full recovery surface contract
+                super::capture::emit_recovery_surface(
+                    name,
+                    capture,
+                    artifact_path_result.as_deref().ok(),
+                    false, // no merge commit — standalone destroy
+                    true,  // destroy operation succeeded
+                );
+            }
+        } else if text_mode {
             println!("Workspace '{name}' destroyed. (nothing to snapshot)");
         }
-    } else {
+    } else if text_mode {
         println!("Workspace '{name}' destroyed.");
     }
 
-    if cwd_was_inside {
+    if fmt == OutputFormat::Json {
+        // bn-20fp (item 4): the machine-readable equivalent of the tail-visible
+        // destroy-cwd warning — `cwd_destroyed` so a text-scraping orchestrator
+        // that switched to JSON never loses the signal.
+        let output = serde_json::json!({
+            "status": "destroyed",
+            "workspace": name,
+            "cwd_destroyed": cwd_was_inside,
+            "recovery": { "pinned_refs": pinned_refs },
+            "message": format!("Workspace '{name}' destroyed."),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if cwd_was_inside {
+        // bn-1aey / bn-20fp: in text mode this warning is already the final
+        // line of output — keep it last so tail/grep-based scrapers see it.
         eprintln!(
             "note: your current directory was inside workspace '{name}' which was just \
              destroyed — cd back to the project root before running more commands."

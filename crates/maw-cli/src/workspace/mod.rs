@@ -578,11 +578,11 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Output format (text|json|pretty). Consumed by both
-        /// `--dry-run` (preview payload) and by the refusal renderer
-        /// when destroy refuses (bn-c6l3 / bn-voy5 — structured
-        /// `DestroyRefusal` JSON when `json` is selected). For a clean
-        /// workspace destroy that succeeds, the format is unused.
+        /// Output format (text|json|pretty). Consumed by `--dry-run` (preview
+        /// payload), the refusal renderer when destroy refuses (bn-c6l3 /
+        /// bn-voy5 — structured `DestroyRefusal` JSON), and — bn-20fp — a
+        /// successful destroy, which emits `{status, workspace, cwd_destroyed,
+        /// recovery: {pinned_refs[]}, message}` when `json` is selected.
         #[arg(long)]
         format: Option<OutputFormat>,
     },
@@ -1290,6 +1290,32 @@ pub enum WorkspaceCommands {
     ///   maw ws merge alice --into default --format json         # structured result
     ///   maw ws merge alice bob --into default --resolve cf-k7mx=alice --resolve cf-r3np=bob
     ///   maw ws merge alice bob --into default --resolve-all=alice
+    ///
+    /// --format json (success) — STABLE CONTRACT. One object per merge with, at least:
+    ///   status            "success"
+    ///   merged_sha        new epoch commit OID (== epoch == epoch_after)
+    ///   branch            branch updated
+    ///   epoch_before      epoch OID before the merge (the merge base)
+    ///   epoch_after       epoch OID after the merge
+    ///   sources[]         source workspaces merged (== workspaces)
+    ///   destroyed[]       workspaces destroyed by --destroy
+    ///   siblings[]        per-sibling auto-rebase rows: {name, action
+    ///                     (replayed|conflicted|up_to_date|skipped_dirty|
+    ///                     skipped_in_progress|skipped_in_use|failed),
+    ///                     replayed_commits, conflicted, conflict_files[],
+    ///                     overlap_hint {count, sample_paths}, post_sync_hook
+    ///                     {ran, exit_code, timed_out}, reason}
+    ///   warnings[]        every NOTE/WARNING the text path prints
+    ///   invariant         Prime-Invariant audit {siblings_checked, orphaned[]}
+    ///   cwd_destroyed      true if the caller's cwd was inside a destroyed workspace
+    ///   recovery          {pinned_refs[]} recovery refs pinned during the merge
+    /// The text path ends with the byte-stable `[OK] merged <ws> into <branch> @ <sha12>`
+    /// sentinel, a `(machine-readable: maw ws merge --format json)` hint, and — only
+    /// when the cwd was destroyed — the destroy-cwd note as the final line.
+    // bn-20fp: the JSON-contract block above lists snake_case field names as
+    // plain text on purpose — this is verbatim --help output, so backticks
+    // would render literally to the user. Suppress doc_markdown for this item.
+    #[allow(clippy::doc_markdown)]
     #[command(verbatim_doc_comment)]
     Merge {
         /// Workspace names to merge

@@ -199,9 +199,85 @@ pub struct MergeSuccessOutput {
     pub invariant: Option<super::invariant_audit::AuditReport>,
     /// bn-1lhb: per-sibling `post_sync` hook outcomes for siblings replayed by
     /// this merge's auto-rebase pass. Empty when no `post_sync` hook is
-    /// configured or no sibling was replayed. Additive per bn-20fp.
+    /// configured or no sibling was replayed.
+    ///
+    /// bn-20fp: RETAINED for backward compatibility (a flat, sibling-agnostic
+    /// list). The authoritative per-sibling location is `siblings[].post_sync_hook`
+    /// — this top-level field carries the same entries, folded up, so existing
+    /// consumers keep working.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_sync_hooks: Vec<SiblingPostSyncHook>,
+    /// bn-20fp: the new-epoch commit OID this merge produced. Same value as
+    /// `epoch` / `epoch_after`; named `merged_sha` for orchestrators that key
+    /// on the merge commit rather than the epoch concept.
+    pub merged_sha: String,
+    /// bn-20fp: the epoch OID before this merge (the merge base).
+    pub epoch_before: String,
+    /// bn-20fp: the epoch OID after this merge (== `merged_sha` == `epoch`).
+    pub epoch_after: String,
+    /// bn-20fp: source workspaces merged (same list as `workspaces`, named
+    /// `sources` for orchestrators that distinguish sources from the target).
+    pub sources: Vec<String>,
+    /// bn-20fp: workspaces destroyed by this merge (`--destroy`). Empty when
+    /// `--destroy` was not passed or nothing was destroyed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destroyed: Vec<String>,
+    /// bn-20fp: full per-sibling auto-rebase outcomes — the rich rows an
+    /// orchestrator loses when it greps the text output for `[OK]`. Empty when
+    /// auto-rebase was disabled or found no siblings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub siblings: Vec<SiblingMergeJson>,
+    /// bn-20fp: every WARNING/NOTE the text path prints (dirty-trunk
+    /// preservation, absorbed trunk commits, conflicted siblings, failed
+    /// post-sync hooks). Empty when the merge was fully quiet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// bn-20fp (item 4): `true` when the caller's cwd was inside a workspace
+    /// that this merge destroyed — the tail-visible destroy-cwd signal in
+    /// machine-readable form.
+    pub cwd_destroyed: bool,
+    /// bn-20fp: recovery refs pinned during this merge (e.g. destroy snapshots).
+    pub recovery: MergeRecoveryJson,
+}
+
+/// bn-20fp: one sibling's full auto-rebase outcome in `maw ws merge --format
+/// json`. Nests the bn-1lhb `post_sync_hook` and the bn-2cvx `overlap_hint`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SiblingMergeJson {
+    /// Sibling workspace name.
+    pub name: String,
+    /// Outcome tag. One of: `replayed`, `conflicted`, `up_to_date`,
+    /// `skipped_dirty`, `skipped_in_progress`, `skipped_in_use`, `failed`.
+    pub action: &'static str,
+    /// Number of commits replayed onto the new epoch (0 for skips / up-to-date).
+    pub replayed_commits: usize,
+    /// `true` when the replay left conflict-as-data markers in the sibling.
+    pub conflicted: bool,
+    /// Paths carrying unresolved conflict markers after the replay (best-effort;
+    /// empty unless `conflicted`). Field-name-consistent intent with sync's
+    /// `conflicted_paths` (see the module note on the naming divergence).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflict_files: Vec<String>,
+    /// bn-2cvx semantic-risk hint: `{count, sample_paths}` when the replay rode
+    /// over paths the sibling itself also touches. Absent when there is no
+    /// overlap or the sibling was not replayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_hint: Option<super::sync::auto_rebase::OverlapHint>,
+    /// bn-1lhb post-sync hook result for this sibling, present only when a hook
+    /// was configured AND this sibling was replayed. `{ran, exit_code, timed_out}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_sync_hook: Option<SiblingPostSyncHook>,
+    /// Short diagnostic for `failed` / refs-only outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// bn-20fp: recovery refs pinned during a merge.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MergeRecoveryJson {
+    /// Recovery refs pinned during this merge (destroy snapshots, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_refs: Vec<String>,
 }
 
 /// bn-1lhb: one sibling's post-sync hook result in `maw ws merge --format
@@ -4240,6 +4316,15 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // the same oplog under the consolidated `.maw/manifold/`.
     emit_integration_started(&manifold_dir, &ws_to_merge, into_target, false);
     let default_ws_path = layout_flavor.default_target_path(&root, default_ws);
+    // bn-20fp: snapshot the uncommitted-tracked trunk files BEFORE the merge
+    // mutates anything. bn-1xmk preserves and replays these across the merge
+    // (pinning a recovery snapshot); listing them here lets the merge JSON's
+    // `warnings[]` name exactly what was preserved.
+    let dirty_trunk_preserved: Vec<String> = if default_ws_path.exists() {
+        list_dirty_trunk_tracked_files(&default_ws_path)
+    } else {
+        Vec::new()
+    };
     // In the consolidated layout the privileged target IS the root checkout —
     // there's no `.maw/workspaces/default/` for the backend to inspect, so
     // skip the per-workspace base-epoch probe. The merge engine derives the
@@ -4392,7 +4477,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 textln!();
                 textln!("No changes to merge. Destroying workspace(s): {ws_list}");
             }
-            handle_post_merge_destroy(
+            let destroy_outcome = handle_post_merge_destroy(
                 &ws_to_merge,
                 default_ws,
                 confirm,
@@ -4406,9 +4491,17 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                     "status": "empty",
                     "workspaces": ws_to_merge,
                     "destroyed": true,
+                    "cwd_destroyed": destroy_outcome.cwd_destroyed_ws.is_some(),
                     "message": format!("No changes detected in workspace(s): {ws_list}. Workspace(s) destroyed."),
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
+            } else if let Some(ref ws) = destroy_outcome.cwd_destroyed_ws {
+                // bn-20fp (item 4): tail-visible destroy-cwd warning as the
+                // final line of the empty-merge-destroy path.
+                eprintln!(
+                    "note: your current directory was inside workspace '{ws}' which was just \
+                     destroyed — cd back to the project root before running more commands."
+                );
             }
             return Ok(());
         }
@@ -4996,6 +5089,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     // `post_sync_hooks`) so a compile break at rebase time is flagged here, not
     // minutes later at pre-merge test time.
     let mut sibling_hook_results: Vec<SiblingPostSyncHook> = Vec::new();
+    // bn-20fp: rich per-sibling rows for the merge JSON's `siblings[]`.
+    let mut sibling_json: Vec<SiblingMergeJson> = Vec::new();
     if target_updates_epoch {
         let manifold_config_path = maw_core::model::layout::LayoutFlavor::detect_with_env(&root)
             .bootstrap_config_path(&root);
@@ -5023,6 +5118,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 }
             }
             for report in &reports {
+                sibling_json.push(sibling_report_to_json(&root, report));
                 match &report.result {
                     super::sync::auto_rebase::SiblingResult::Failed { reason } => {
                         tracing::warn!(workspace = %report.name, error = %reason, "sibling auto-rebase failed");
@@ -5124,8 +5220,11 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         }
     }
 
-    // Destroy source workspaces if requested
-    if destroy_after {
+    // Destroy source workspaces if requested. bn-20fp: the outcome carries
+    // `destroyed[]`, `cwd_destroyed`, and pinned recovery refs for the JSON,
+    // and defers the destroy-cwd warning so it can be the tail-visible final
+    // line printed after the sentinel.
+    let destroy_outcome = if destroy_after {
         handle_post_merge_destroy(
             &ws_to_merge,
             default_ws,
@@ -5134,8 +5233,10 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             &root,
             text_mode,
             verbose,
-        )?;
-    }
+        )?
+    } else {
+        PostMergeDestroyOutcome::default()
+    };
 
     // Remove merge-state file
     let merge_state_path = MergeStateFile::default_path(&manifold_dir);
@@ -5198,12 +5299,45 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         );
     }
 
+    // bn-20fp: assemble the machine-readable `warnings[]` — the same NOTE/
+    // WARNING signals the text path prints, so an orchestrator that reads the
+    // JSON never loses them by grepping for `[OK]`.
+    let mut warnings: Vec<String> = Vec::new();
+    if !dirty_trunk_preserved.is_empty() {
+        warnings.push(format!(
+            "{} uncommitted tracked trunk file(s) preserved and replayed across the merge (recovery snapshot pinned): {}",
+            dirty_trunk_preserved.len(),
+            dirty_trunk_preserved.join(", ")
+        ));
+    }
+    if !sibling_conflict_names.is_empty() {
+        warnings.push(format!(
+            "{} sibling workspace(s) now have conflicts: {}",
+            sibling_conflict_names.len(),
+            sibling_conflict_names.join(", ")
+        ));
+    }
+    for hook in &sibling_hook_results {
+        if hook.timed_out || hook.exit_code.is_some_and(|c| c != 0) {
+            let detail = if hook.timed_out {
+                "timed out".to_string()
+            } else {
+                format!("exit {}", hook.exit_code.unwrap_or(-1))
+            };
+            warnings.push(format!(
+                "{}: post-sync hook failed ({detail}) — see maw ws status {}",
+                hook.workspace, hook.workspace
+            ));
+        }
+    }
+
     if format == OutputFormat::Json {
+        let candidate = build_output.candidate.as_str().to_string();
         let success = MergeSuccessOutput {
             status: "success".to_string(),
             workspaces: ws_to_merge.clone(),
             branch: branch.to_string(),
-            epoch: build_output.candidate.as_str().to_string(),
+            epoch: candidate.clone(),
             unique_count: build_output.unique_count,
             shared_count: build_output.shared_count,
             resolved_count: build_output.resolved_count,
@@ -5215,34 +5349,27 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             sibling_conflicts: sibling_conflict_names.clone(),
             invariant: Some(invariant_report.clone()),
             post_sync_hooks: sibling_hook_results.clone(),
+            merged_sha: candidate.clone(),
+            epoch_before: epoch_before_oid.as_str().to_string(),
+            epoch_after: candidate,
+            sources: ws_to_merge.clone(),
+            destroyed: destroy_outcome.destroyed.clone(),
+            siblings: sibling_json,
+            warnings,
+            cwd_destroyed: destroy_outcome.cwd_destroyed_ws.is_some(),
+            recovery: MergeRecoveryJson {
+                pinned_refs: destroy_outcome.pinned_refs.clone(),
+            },
         };
         println!("{}", serde_json::to_string_pretty(&success)?);
     } else {
         textln!();
         textln!("Merged to {branch}: {msg} from {}", ws_to_merge.join(", "));
-        if !sibling_conflict_names.is_empty() {
-            textln!(
-                "NOTE: {} sibling workspace(s) now have conflicts: {}",
-                sibling_conflict_names.len(),
-                sibling_conflict_names.join(", ")
-            );
-        }
-        // bn-1lhb: surface failed post-sync hooks as per-sibling NOTE lines
-        // (printed before the INVARIANT proof line below). A textually-clean
-        // replay that no longer compiles is flagged here, at rebase time.
-        for hook in &sibling_hook_results {
-            if hook.timed_out || hook.exit_code.is_some_and(|c| c != 0) {
-                let detail = if hook.timed_out {
-                    "timed out".to_string()
-                } else {
-                    format!("exit {}", hook.exit_code.unwrap_or(-1))
-                };
-                textln!(
-                    "NOTE: {}: post-sync hook failed ({detail}) — see maw ws status {}",
-                    hook.workspace,
-                    hook.workspace
-                );
-            }
+        // bn-20fp: surface the machine-parseable warnings as NOTE lines so text
+        // and JSON stay in lockstep (dirty-trunk preservation, sibling
+        // conflicts, failed post-sync hooks).
+        for warning in &warnings {
+            textln!("NOTE: {warning}");
         }
         textln!();
         if let Some(change_id) = target_change_id {
@@ -5260,16 +5387,33 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
         // is a fixed format an agent or script can match on without parsing
         // prose. JSON output already has an unambiguous `status: "success"`
         // field (MergeSuccessOutput) — this is the text-mode equivalent.
+        // bn-20fp: the sentinel's bytes are a STABLE CONTRACT — do not change.
         textln!(
             "[OK] merged {} into {branch} @ {}",
             ws_to_merge.join(", "),
             &build_output.candidate.as_str()[..12]
         );
+        // bn-20fp (item 3): discoverability hint — one unobtrusive trailing
+        // line, AFTER the sentinel, telling a text-scraping agent how to get
+        // the fully-structured object at the exact moment it's scraping.
+        textln!("  (machine-readable: maw ws merge --format json)");
     }
 
     // bn-2rnq: one-line proof to stderr (both text and JSON modes). No-op when
     // the audit is disabled; the JSON body already carries the structured field.
     invariant_report.emit_proof_line();
+
+    // bn-20fp (item 4): the destroy-cwd warning is the highest-stakes signal
+    // and the report asked for it to survive tail/grep scraping, so it is the
+    // TRUE final line of output — printed after the sentinel, the json-hint
+    // line, and the invariant proof line. JSON mode carries it as
+    // `cwd_destroyed` instead.
+    if text_mode && let Some(ref ws) = destroy_outcome.cwd_destroyed_ws {
+        eprintln!(
+            "note: your current directory was inside workspace '{ws}' which was just destroyed \
+             — cd back to the project root before running more commands."
+        );
+    }
 
     Ok(())
 }
@@ -6535,6 +6679,109 @@ fn lfs_post_checkout(ws_path: &std::path::Path, target_commit: &str) {
 #[cfg(not(feature = "lfs"))]
 fn lfs_post_checkout(_ws_path: &std::path::Path, _target_commit: &str) {}
 
+/// bn-20fp: convert an auto-rebase [`SiblingReport`] into its rich merge-JSON
+/// row. Conflict-file names are derived best-effort for conflicted siblings via
+/// the same effective-conflict-state helper `ws sync` uses.
+///
+/// [`SiblingReport`]: super::sync::auto_rebase::SiblingReport
+fn sibling_report_to_json(
+    root: &Path,
+    report: &super::sync::auto_rebase::SiblingReport,
+) -> SiblingMergeJson {
+    use super::sync::auto_rebase::SiblingResult;
+
+    let (action, replayed_commits, conflicted, overlap_hint, reason): (
+        &'static str,
+        usize,
+        bool,
+        Option<super::sync::auto_rebase::OverlapHint>,
+        Option<String>,
+    ) = match &report.result {
+        SiblingResult::UpToDate => ("up_to_date", 0, false, None, None),
+        SiblingResult::SkippedInUse => ("skipped_in_use", 0, false, None, None),
+        SiblingResult::SkippedDirty => ("skipped_dirty", 0, false, None, None),
+        SiblingResult::SkippedInProgress => ("skipped_in_progress", 0, false, None, None),
+        SiblingResult::RebasedClean { replayed, overlap } => {
+            ("replayed", *replayed, false, overlap.clone(), None)
+        }
+        SiblingResult::RebasedCleanRefsOnly {
+            replayed,
+            reason,
+            overlap,
+        } => (
+            "replayed",
+            *replayed,
+            false,
+            overlap.clone(),
+            Some(reason.clone()),
+        ),
+        SiblingResult::RebasedWithConflicts {
+            replayed, overlap, ..
+        } => ("conflicted", *replayed, true, overlap.clone(), None),
+        SiblingResult::RebasedWithConflictsRefsOnly {
+            replayed,
+            reason,
+            overlap,
+            ..
+        } => (
+            "conflicted",
+            *replayed,
+            true,
+            overlap.clone(),
+            Some(reason.clone()),
+        ),
+        SiblingResult::Failed { reason } => ("failed", 0, false, None, Some(reason.clone())),
+    };
+
+    let conflict_files = if conflicted {
+        let ws_path = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
+            .workspace_path(root, &report.name);
+        super::conflict_state::effective_conflict_state(root, &report.name, &ws_path)
+            .ok()
+            .map(|s| {
+                s.unresolved_paths()
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let post_sync_hook = report.post_sync_hook.as_ref().map(|h| SiblingPostSyncHook {
+        workspace: report.name.clone(),
+        ran: h.ran,
+        exit_code: h.exit_code,
+        timed_out: h.timed_out,
+    });
+
+    SiblingMergeJson {
+        name: report.name.clone(),
+        action,
+        replayed_commits,
+        conflicted,
+        conflict_files,
+        overlap_hint,
+        post_sync_hook,
+        reason,
+    }
+}
+
+/// bn-20fp: outcome of [`handle_post_merge_destroy`] threaded back to the merge
+/// caller so the final JSON/text output can carry `destroyed[]`, `cwd_destroyed`,
+/// and the pinned recovery refs — and so the destroy-cwd warning can be printed
+/// as the tail-visible final line rather than mid-CLEANUP.
+#[derive(Debug, Default)]
+struct PostMergeDestroyOutcome {
+    /// Workspaces actually destroyed.
+    destroyed: Vec<String>,
+    /// Name of the destroyed workspace the caller's cwd was inside, if any.
+    cwd_destroyed_ws: Option<String>,
+    /// Recovery refs pinned while destroying.
+    pinned_refs: Vec<String>,
+}
+
 /// Handle post-merge workspace destruction with confirmation check.
 #[expect(
     clippy::too_many_lines,
@@ -6548,7 +6795,8 @@ fn handle_post_merge_destroy(
     root: &Path,
     text_mode: bool,
     verbose: bool,
-) -> Result<()> {
+) -> Result<PostMergeDestroyOutcome> {
+    let mut outcome = PostMergeDestroyOutcome::default();
     let ws_to_destroy: Vec<String> = ws_to_merge
         .iter()
         .filter(|ws| ws.as_str() != default_ws)
@@ -6573,7 +6821,7 @@ fn handle_post_merge_destroy(
             if text_mode {
                 println!("Aborted. Workspaces kept. Merge commit still exists.");
             }
-            return Ok(());
+            return Ok(outcome);
         }
     }
 
@@ -6668,6 +6916,9 @@ fn handle_post_merge_destroy(
         maw::fp!("FP_DESTROY_AFTER_RECORD")?;
 
         if let Some(ref c) = capture {
+            // bn-20fp: record the pinned recovery ref for the merge JSON's
+            // `recovery.pinned_refs`.
+            outcome.pinned_refs.push(c.pinned_ref.clone());
             if verbose && text_mode {
                 println!(
                     "    Captured '{ws_name}' state ({mode}) → {ref_name}",
@@ -6705,6 +6956,7 @@ fn handle_post_merge_destroy(
         match backend.destroy(&ws_id) {
             Ok(()) => {
                 maw::fp!("FP_DESTROY_AFTER_DELETE")?;
+                outcome.destroyed.push(ws_name.clone());
                 if text_mode {
                     if capture.is_some() {
                         println!(
@@ -6714,19 +6966,19 @@ fn handle_post_merge_destroy(
                         println!("    Destroyed: {ws_name}");
                     }
                 }
+                // bn-20fp (item 4): do NOT print the destroy-cwd warning here,
+                // mid-CLEANUP — the caller prints it as the true final line
+                // (after the `[OK]` sentinel and the json-hint line) so
+                // tail/grep-based scrapers see the highest-stakes signal.
                 if cwd_was_inside {
-                    eprintln!(
-                        "note: your current directory was inside workspace '{ws_name}' which \
-                         was just destroyed — cd back to the project root before running more \
-                         commands."
-                    );
+                    outcome.cwd_destroyed_ws = Some(ws_name.clone());
                 }
             }
             Err(e) => eprintln!("    WARNING: Failed to destroy {ws_name}: {e}"),
         }
     }
 
-    Ok(())
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -7182,6 +7434,15 @@ mod tests {
             sibling_conflicts: vec![],
             invariant: None,
             post_sync_hooks: vec![],
+            merged_sha: "a".repeat(40),
+            epoch_before: "b".repeat(40),
+            epoch_after: "a".repeat(40),
+            sources: vec!["alice".to_string()],
+            destroyed: vec![],
+            siblings: vec![],
+            warnings: vec![],
+            cwd_destroyed: false,
+            recovery: MergeRecoveryJson::default(),
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
@@ -7202,6 +7463,18 @@ mod tests {
         assert!(parsed["advice"].is_array());
         // sibling_conflicts is skip_serializing_if empty — must not appear.
         assert!(parsed.get("sibling_conflicts").is_none());
+        // bn-20fp: field-stability — the pre-existing keys keep their names,
+        // and the new gap-fill keys are present.
+        assert_eq!(parsed["merged_sha"], "a".repeat(40));
+        assert_eq!(parsed["epoch_after"], parsed["epoch"]);
+        assert_eq!(parsed["epoch_before"], "b".repeat(40));
+        assert_eq!(parsed["sources"][0], "alice");
+        assert_eq!(parsed["cwd_destroyed"], false);
+        assert!(parsed["recovery"].is_object());
+        // Empty additive collections are skip_serializing_if — must not appear.
+        assert!(parsed.get("destroyed").is_none());
+        assert!(parsed.get("siblings").is_none());
+        assert!(parsed.get("warnings").is_none());
     }
 
     #[test]
@@ -7222,6 +7495,27 @@ mod tests {
             sibling_conflicts: vec!["bob".to_string()],
             invariant: None,
             post_sync_hooks: vec![],
+            merged_sha: "a".repeat(40),
+            epoch_before: "b".repeat(40),
+            epoch_after: "a".repeat(40),
+            sources: vec!["alice".to_string()],
+            destroyed: vec![],
+            siblings: vec![SiblingMergeJson {
+                name: "bob".to_string(),
+                action: "conflicted",
+                replayed_commits: 2,
+                conflicted: true,
+                conflict_files: vec!["src/engine.rs".to_string()],
+                overlap_hint: Some(crate::workspace::sync::auto_rebase::OverlapHint {
+                    count: 1,
+                    sample_paths: vec!["src/engine.rs".to_string()],
+                }),
+                post_sync_hook: None,
+                reason: None,
+            }],
+            warnings: vec!["1 sibling workspace(s) now have conflicts: bob".to_string()],
+            cwd_destroyed: false,
+            recovery: MergeRecoveryJson::default(),
         };
 
         let json_str = serde_json::to_string_pretty(&output).expect("operation should succeed");
@@ -7229,6 +7523,15 @@ mod tests {
             serde_json::from_str(&json_str).expect("operation should succeed");
         assert_eq!(parsed["sibling_conflicts"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["sibling_conflicts"][0], "bob");
+        // bn-20fp: the rich per-sibling row carries action + conflict flags +
+        // overlap so an orchestrator never has to grep the text output.
+        assert_eq!(parsed["siblings"][0]["name"], "bob");
+        assert_eq!(parsed["siblings"][0]["action"], "conflicted");
+        assert_eq!(parsed["siblings"][0]["conflicted"], true);
+        assert_eq!(parsed["siblings"][0]["replayed_commits"], 2);
+        assert_eq!(parsed["siblings"][0]["conflict_files"][0], "src/engine.rs");
+        assert_eq!(parsed["siblings"][0]["overlap_hint"]["count"], 1);
+        assert_eq!(parsed["warnings"].as_array().unwrap().len(), 1);
     }
 
     #[test]

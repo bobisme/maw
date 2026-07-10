@@ -439,7 +439,12 @@ fn rebase_one_sibling<B: WorkspaceBackend>(
 ///
 /// Best-effort: any failure (bad OIDs, git errors) yields `None` rather than
 /// failing the rebase — this is an advisory hint, not a safety gate.
-fn compute_overlap_hint<B: WorkspaceBackend>(
+///
+/// bn-20fp: `pub` (matching `OverlapHint`) so `ws sync --format json` can
+/// attach the same hint to its own rebased-workspace output, keeping the sync
+/// and merge sibling schemas consistent. Must be called BEFORE the rebase
+/// mutates the workspace.
+pub fn compute_overlap_hint<B: WorkspaceBackend>(
     root: &Path,
     backend: &B,
     ws_id: &WorkspaceId,
