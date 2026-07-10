@@ -18,6 +18,7 @@ mod advance;
 mod annotate;
 pub(crate) mod capture;
 mod clean;
+mod clean_build;
 pub(crate) mod conflict_state;
 pub(crate) mod create;
 mod create_lock;
@@ -1002,7 +1003,67 @@ pub enum WorkspaceCommands {
         empty: bool,
     },
 
-    /// Clean build artifacts for workspace(s)
+    /// Remove untracked files from a workspace (with a recovery snapshot)
+    ///
+    /// Removes UNTRACKED files (and directories left empty afterward) from a
+    /// workspace. Tracked files — modified or not — are NEVER touched. This is
+    /// a guard-friendly hygiene verb for environments whose safety hooks block
+    /// `rm -rf` / `git clean -f`: a destroy-grade recovery snapshot of the
+    /// files being removed is pinned FIRST (under
+    /// `refs/manifold/recovery/<ws>/clean-<ts>`), so nothing is unrecoverable.
+    /// If the snapshot fails, nothing is deleted.
+    ///
+    /// This is exactly the cure for a sync refusal over untracked scratch: the
+    /// same status source drives both, so `maw ws clean <ws>` then
+    /// `maw ws sync <ws>` succeeds.
+    ///
+    /// The default workspace (the repo root) is cleanable too, but requires
+    /// `--force` since its scratch sits next to real work.
+    ///
+    /// To restore: maw ws recover <ws>            (lists the clean snapshot)
+    ///             maw ws recover --ref <ref> --to <ws>-restored
+    ///
+    /// Examples:
+    ///   maw ws clean alice                    # remove alice's untracked files
+    ///   maw ws clean alice --dry-run          # list what would go; delete nothing
+    ///   maw ws clean alice --paths .test-tmp/ # limit to specific paths/dirs
+    ///   maw ws clean alice --ignored          # also remove gitignore'd files
+    ///   maw ws clean default --force          # clean the repo root
+    ///   maw ws clean alice --format json      # machine-readable result
+    ///
+    /// (To remove `target/` build directories instead, use `maw ws clean-build`.)
+    #[command(verbatim_doc_comment)]
+    Clean {
+        /// Workspace name (defaults to `default` when omitted; `default`
+        /// requires `--force`)
+        name: Option<String>,
+
+        /// Limit removal to these paths/directories (repeatable / comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        paths: Vec<String>,
+
+        /// List what would be removed and exit — deletes nothing, takes no snapshot
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Also remove gitignore'd files (like `git clean -x`; default: keep them)
+        #[arg(long)]
+        ignored: bool,
+
+        /// Required to clean the default workspace (the repo root)
+        #[arg(long)]
+        force: bool,
+
+        /// Output format: text, json, or pretty
+        #[arg(long)]
+        format: Option<OutputFormat>,
+
+        /// Shorthand for --format json
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+    },
+
+    /// Remove `target/` build directories for workspace(s)
     ///
     /// Removes `target/` directories from workspace build contexts to
     /// reclaim disk space. By default, cleans only the default workspace.
@@ -1011,14 +1072,14 @@ pub enum WorkspaceCommands {
     ///
     /// This is equivalent to running `cargo clean` in each workspace,
     /// but removes the build output directory directly for speed and
-    /// reliability.
+    /// reliability. (Formerly `maw ws clean`.)
     ///
     /// Examples:
-    ///   maw ws clean          # clean target/ in ws/default only
-    ///   maw ws clean agent-a   # clean target/ in ws/agent-a only
-    ///   maw ws clean --all    # clean target/ in all workspaces
-    #[command(verbatim_doc_comment)]
-    Clean {
+    ///   maw ws clean-build          # clean target/ in the default workspace only
+    ///   maw ws clean-build agent-a  # clean target/ in agent-a only
+    ///   maw ws clean-build --all    # clean target/ in all workspaces
+    #[command(verbatim_doc_comment, name = "clean-build", alias = "clean-target")]
+    CleanBuild {
         /// Workspace name (defaults to `default` when omitted)
         #[arg(conflicts_with = "all")]
         name: Option<String>,
@@ -1729,7 +1790,19 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
         } => history::history(&name, limit, OutputFormat::with_json_flag(format, json)),
         WorkspaceCommands::Undo { name } => undo::undo(&name),
         WorkspaceCommands::Prune { force, empty } => prune::prune(force, empty),
-        WorkspaceCommands::Clean { name, all } => clean::clean(name, all),
+        WorkspaceCommands::Clean {
+            name,
+            paths,
+            dry_run,
+            ignored,
+            force,
+            format,
+            json,
+        } => {
+            let fmt = OutputFormat::with_json_flag(format, json).unwrap_or(OutputFormat::Text);
+            clean::clean(name, paths, dry_run, ignored, force, fmt)
+        }
+        WorkspaceCommands::CleanBuild { name, all } => clean_build::clean_build(name, all),
         WorkspaceCommands::RepairOplog { name, dry_run } => {
             oplog_runtime::repair_oplog(&name, dry_run)
         }

@@ -35,7 +35,7 @@ use fs4::fs_std::FileExt;
 /// Held for the duration of the critical section. Dropping it (on success,
 /// error, or panic) closes the file descriptor, which releases the advisory
 /// flock held by the kernel.
-pub(super) struct WorkspaceRebaseLock {
+pub struct WorkspaceRebaseLock {
     /// The locked file. Kept alive for the full critical section — when it
     /// drops, the kernel releases the advisory lock.
     _file: File,
@@ -53,7 +53,7 @@ impl WorkspaceRebaseLock {
     ///   should emit a friendly error and exit.
     /// * `Err(...)` — unexpected I/O error (cannot create the lock dir,
     ///   cannot open the lockfile, etc.).
-    pub(super) fn try_acquire(root: &Path, ws_name: &str) -> io::Result<Option<Self>> {
+    pub fn try_acquire(root: &Path, ws_name: &str) -> io::Result<Option<Self>> {
         let lock_dir = maw_core::model::layout::LayoutFlavor::detect_with_env(root)
             .manifold_dir(root)
             .join("locks")

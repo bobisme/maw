@@ -84,7 +84,7 @@ fn ws_clean_removes_target_dirs_for_one_or_all_workspaces() {
     fs::write(agent_target.join("marker"), "agent\n").expect("write agent marker");
 
     // Clean one named workspace.
-    repo.maw_ok(&["ws", "clean", "agent-a"]);
+    repo.maw_ok(&["ws", "clean-build", "agent-a"]);
     assert!(
         !agent_target.exists(),
         "agent workspace target should be removed"
@@ -98,7 +98,7 @@ fn ws_clean_removes_target_dirs_for_one_or_all_workspaces() {
     fs::create_dir_all(&agent_target).expect("recreate agent target");
     fs::create_dir_all(&default_target).expect("recreate default target");
 
-    repo.maw_ok(&["ws", "clean", "--all"]);
+    repo.maw_ok(&["ws", "clean-build", "--all"]);
     assert!(
         !default_target.exists(),
         "default target should be removed with --all"

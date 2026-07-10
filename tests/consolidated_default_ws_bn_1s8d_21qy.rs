@@ -98,7 +98,7 @@ fn ws_clean_default_consolidated_cleans_root_target() {
         .expect("write dummy artifact");
     assert!(target_dir.exists(), "target/ must exist before clean");
 
-    let stdout = maw_ok(root, &["ws", "clean"]);
+    let stdout = maw_ok(root, &["ws", "clean-build"]);
 
     // target/ should be gone
     assert!(
@@ -125,7 +125,7 @@ fn ws_clean_default_consolidated_no_target_ok() {
         std::fs::remove_dir_all(&target_dir).ok();
     }
 
-    let stdout = maw_ok(root, &["ws", "clean"]);
+    let stdout = maw_ok(root, &["ws", "clean-build"]);
     assert!(
         stdout.contains("No target/") || stdout.contains("no target"),
         "expected 'No target/' message, got: {stdout}"
@@ -153,7 +153,7 @@ fn ws_clean_all_consolidated_includes_root() {
     std::fs::create_dir_all(&ws_target).expect("create ws target/");
     std::fs::write(ws_target.join("artifact"), b"data").expect("write ws artifact");
 
-    let stdout = maw_ok(root, &["ws", "clean", "--all"]);
+    let stdout = maw_ok(root, &["ws", "clean-build", "--all"]);
 
     assert!(
         !root_target.exists(),
@@ -176,7 +176,7 @@ fn ws_clean_missing_named_workspace_no_create_hint() {
     let dir = init_consolidated();
     let root = dir.path();
 
-    let stderr = maw_fails(root, &["ws", "clean", "ghost-ws"]);
+    let stderr = maw_fails(root, &["ws", "clean-build", "ghost-ws"]);
     // Must not suggest creating the workspace
     assert!(
         !stderr.contains("maw ws create 'ghost-ws'"),

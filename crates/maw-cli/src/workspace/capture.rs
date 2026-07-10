@@ -50,6 +50,17 @@ pub fn recovery_ref(workspace_name: &str, timestamp: &str) -> String {
     format!("{RECOVERY_PREFIX}{workspace_name}/{safe_ts}")
 }
 
+/// Build the recovery ref name for a `maw ws clean` capture (bn-auu5).
+///
+/// Distinct `clean-<timestamp>` component so clean snapshots are
+/// self-describing in `git for-each-ref refs/manifold/recovery/` and in
+/// `maw ws recover` listings, and never collide with destroy captures.
+#[must_use]
+pub fn clean_recovery_ref(workspace_name: &str, timestamp: &str) -> String {
+    let safe_ts = timestamp.replace(':', "-");
+    format!("{RECOVERY_PREFIX}{workspace_name}/clean-{safe_ts}")
+}
+
 // ---------------------------------------------------------------------------
 // Capture result types
 // ---------------------------------------------------------------------------
@@ -120,6 +131,101 @@ pub fn capture_before_destroy(
 
     // Step 2: capture dirty worktree as a detached commit
     capture_dirty_worktree(ws_path, ws_name, &dirty_paths)
+}
+
+/// Capture the exact set of files a `maw ws clean` is about to delete, as a
+/// detached commit pinned under `refs/manifold/recovery/<ws>/clean-<ts>`
+/// (bn-auu5).
+///
+/// The paths are force-staged (`git add -f`) so that gitignore'd files removed
+/// via `--ignored` are captured too — `git add -A` alone would skip them and
+/// break the recovery guarantee. `git stash create` then builds a commit whose
+/// tree contains those blobs without moving HEAD or the stash list, and the
+/// index is reset afterward.
+///
+/// # Fail-safe (Prime Invariant)
+///
+/// Returns `Err` if staging or stash creation fails, or if `git stash create`
+/// declines to produce a commit despite non-empty input. Callers **must** abort
+/// the deletion on `Err` — nothing must be removed without a recovery point.
+///
+/// Returns `Ok(None)` only when `paths` is empty (caller treats as "nothing to
+/// clean").
+#[instrument(skip_all, fields(workspace = ws_name, paths = paths.len()))]
+pub fn capture_before_clean(
+    ws_path: &Path,
+    ws_name: &str,
+    paths: &[String],
+) -> Result<Option<CaptureResult>> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+
+    // Force-stage exactly the paths being removed so ignored files are captured.
+    stage_paths_force(ws_path, paths)?;
+
+    let repo = maw_git::GixRepo::open(ws_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", ws_path.display()))?;
+    let stash_result = repo.stash_create().map_err(|e| {
+        warn_on_reset_failure(ws_path, "clean-capture-stash-create-failure");
+        anyhow::anyhow!("git stash create failed during clean capture: {e}")
+    })?;
+
+    // Restore the index regardless of outcome.
+    warn_on_reset_failure(ws_path, "clean-capture-restore-index");
+
+    let Some(stash_git_oid) = stash_result else {
+        return Err(anyhow::anyhow!(
+            "clean aborted to avoid data loss: files were selected for removal \
+             but `git stash create` produced no snapshot commit (paths = {paths:?})"
+        ));
+    };
+
+    let stash_oid_str = stash_git_oid.to_string();
+    let commit_oid =
+        GitOid::new(&stash_oid_str).map_err(|e| anyhow::anyhow!("invalid stash OID: {e}"))?;
+
+    // FP: crash after tree/commit creation but before ref pinning.
+    maw::fp!("FP_CLEAN_CAPTURE_BEFORE_PIN")?;
+
+    let timestamp = super::now_timestamp_iso8601_precise();
+    let ref_name = clean_recovery_ref(ws_name, &timestamp);
+    let repo_root = repo_root_from_worktree(ws_path)?;
+    refs::write_ref(&repo_root, &ref_name, &commit_oid)
+        .map_err(|e| anyhow::anyhow!("failed to pin clean recovery ref: {e}"))?;
+
+    tracing::info!(
+        ref_name = %ref_name,
+        oid = %commit_oid,
+        removed_count = paths.len(),
+        "captured clean snapshot before untracked-file removal"
+    );
+
+    Ok(Some(CaptureResult {
+        commit_oid,
+        pinned_ref: ref_name,
+        dirty_paths: paths.to_vec(),
+        mode: CaptureMode::WorktreeCapture,
+    }))
+}
+
+/// Force-stage an explicit set of paths (`git add -f -- <paths>`), so ignored
+/// files are included. Used by [`capture_before_clean`].
+fn stage_paths_force(ws_path: &Path, paths: &[String]) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("add").arg("-f").arg("--");
+    for p in paths {
+        cmd.arg(p);
+    }
+    let out = cmd
+        .current_dir(ws_path)
+        .output()
+        .context("failed to run git add -f for clean capture")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git add -f failed during clean capture: {}", stderr.trim());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +765,99 @@ mod tests {
     fn recovery_ref_format() {
         let r = recovery_ref("alice", "2025-01-15T10:30:00Z");
         assert_eq!(r, "refs/manifold/recovery/alice/2025-01-15T10-30-00Z");
+    }
+
+    #[test]
+    fn clean_recovery_ref_format() {
+        let r = clean_recovery_ref("alice", "2025-01-15T10:30:00Z");
+        assert_eq!(r, "refs/manifold/recovery/alice/clean-2025-01-15T10-30-00Z");
+        assert!(!r.contains(':'), "colons should be sanitized: {r}");
+    }
+
+    // -----------------------------------------------------------------------
+    // bn-auu5: capture_before_clean
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_before_clean_empty_paths_is_none() {
+        let (_dir, root, _oid) = setup_repo();
+        let result = capture_before_clean(&root, "feat", &[]).expect("ok");
+        assert!(result.is_none(), "no paths → nothing to capture");
+    }
+
+    #[test]
+    fn capture_before_clean_pins_clean_ref_and_captures_bytes() {
+        let (_dir, root, _oid) = setup_repo();
+
+        // One plain untracked file and one gitignore'd file.
+        fs::write(root.join(".gitignore"), "*.ign\n").expect("write gitignore");
+        Command::new("git")
+            .args(["add", ".gitignore"])
+            .current_dir(&root)
+            .output()
+            .expect("add gitignore");
+        Command::new("git")
+            .args(["commit", "-m", "gitignore"])
+            .current_dir(&root)
+            .output()
+            .expect("commit");
+
+        fs::write(root.join("scratch.tmp"), "junk-bytes\n").expect("write scratch");
+        fs::write(root.join("build.ign"), "ignored-bytes\n").expect("write ignored");
+
+        let paths = vec!["scratch.tmp".to_string(), "build.ign".to_string()];
+        let capture = capture_before_clean(&root, "feat", &paths)
+            .expect("ok")
+            .expect("some capture");
+
+        assert_eq!(capture.mode, CaptureMode::WorktreeCapture);
+        assert!(
+            capture
+                .pinned_ref
+                .starts_with("refs/manifold/recovery/feat/clean-"),
+            "ref should use the clean- prefix: {}",
+            capture.pinned_ref
+        );
+
+        // The pinned ref resolves and the snapshot tree contains BOTH files,
+        // including the gitignore'd one (force-staged).
+        let ref_oid = refs::read_ref(&root, &capture.pinned_ref).expect("read ref");
+        assert_eq!(ref_oid, Some(capture.commit_oid.clone()));
+
+        let tree = Command::new("git")
+            .args(["ls-tree", "-r", "--name-only", capture.commit_oid.as_str()])
+            .current_dir(&root)
+            .output()
+            .expect("ls-tree");
+        let files = String::from_utf8_lossy(&tree.stdout);
+        assert!(
+            files.contains("scratch.tmp"),
+            "snapshot must contain scratch.tmp: {files}"
+        );
+        assert!(
+            files.contains("build.ign"),
+            "snapshot must contain the gitignore'd file (force-staged): {files}"
+        );
+
+        // Round-trip the exact bytes of the removed file from the snapshot.
+        let show = Command::new("git")
+            .args(["show", &format!("{}:scratch.tmp", capture.commit_oid)])
+            .current_dir(&root)
+            .output()
+            .expect("git show");
+        assert_eq!(String::from_utf8_lossy(&show.stdout), "junk-bytes\n");
+
+        // The index must be restored (no staged leftovers from the capture).
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(&root)
+            .output()
+            .expect("diff cached");
+        assert!(
+            staged.stdout.is_empty(),
+            "capture must leave the index clean, staged: {}",
+            String::from_utf8_lossy(&staged.stdout)
+        );
     }
 
     #[test]

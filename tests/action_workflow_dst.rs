@@ -835,7 +835,7 @@ fn run_action(
                 .map_err(|e| format!("write default target file failed: {e}"))?;
             std::fs::write(&ws_target, "x\n")
                 .map_err(|e| format!("write workspace target file failed: {e}"))?;
-            let clean = repo.maw_ok(&["ws", "clean", "--all"]);
+            let clean = repo.maw_ok(&["ws", "clean-build", "--all"]);
             record_actionable_warnings(&mut state.warnings, &clean, "clean output")?;
             if default_target
                 .parent()

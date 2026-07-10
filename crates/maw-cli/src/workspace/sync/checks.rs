@@ -9,6 +9,13 @@ use maw_git::types::{FileStatus, StatusEntry};
 
 use crate::workspace::DEFAULT_WORKSPACE;
 
+// Re-export the per-workspace rebase lock at crate scope so `maw ws clean`
+// (crate::workspace::clean) can take the SAME lock as sync/rebase without
+// touching the private `sync/mod.rs` module declaration (bn-auu5). The `lock`
+// module is private to `sync`, but `checks` is a sibling within `sync` and so
+// can name it.
+pub use super::lock::WorkspaceRebaseLock;
+
 pub(super) fn is_default_workspace(name: &str) -> bool {
     name == DEFAULT_WORKSPACE
 }
@@ -233,13 +240,28 @@ fn sync_worktree_to_epoch_inner(
     })?;
 
     if !dirty_entries.is_empty() {
+        // bn-auu5: when any of the offending paths are untracked scratch, point
+        // at `maw ws clean` — a guard-friendly, snapshot-backed way to remove
+        // them (mess field report: environment safety hooks block rm/git clean).
+        let has_untracked = dirty_entries
+            .iter()
+            .any(|e| matches!(e.status, FileStatus::Untracked | FileStatus::Added));
+        let clean_hint = if has_untracked {
+            format!(
+                "\n  Untracked scratch can be removed safely (with a recovery snapshot): \
+                 maw ws clean {ws_name}"
+            )
+        } else {
+            String::new()
+        };
         bail!(
             "Workspace '{ws_name}' has uncommitted changes that would be lost by sync. \
              Commit or stash first.\n\
              {}\n  \
-             Check: git -C {} status",
+             Check: git -C {} status{}",
             format_dirty_paths(&dirty_entries),
-            ws_path.display()
+            ws_path.display(),
+            clean_hint,
         );
     }
 
@@ -816,6 +838,39 @@ mod tests {
         assert!(
             msg.contains("A scratch.txt"),
             "expected untracked path with 'A' marker (HEAD-relative status), got: {msg}"
+        );
+        // bn-auu5: untracked scratch present → refusal points at `maw ws clean`.
+        assert!(
+            msg.contains("maw ws clean feat"),
+            "expected `maw ws clean` hint for the untracked subset, got: {msg}"
+        );
+    }
+
+    // bn-auu5: when the ONLY dirty paths are tracked modifications (no
+    // untracked), the refusal must NOT emit the `maw ws clean` hint (clean
+    // wouldn't help — it never touches tracked files).
+    #[test]
+    fn sync_refusal_omits_clean_hint_when_no_untracked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let epoch0 = init_maw_repo(root);
+        let ws_path = create_ws_test(root, "feat", &epoch0);
+
+        // Only a tracked modification, no untracked files.
+        std::fs::write(ws_path.join(".gitignore"), "ws/\n.manifold/\nextra\n")
+            .expect("modify tracked .gitignore");
+
+        let result = sync_worktree_to_epoch(root, "feat", &epoch0, None);
+        let msg = result
+            .expect_err("sync must refuse on a dirty workspace")
+            .to_string();
+        assert!(
+            msg.contains("M .gitignore"),
+            "expected the tracked modification listed, got: {msg}"
+        );
+        assert!(
+            !msg.contains("maw ws clean"),
+            "clean hint must be omitted when there is no untracked subset, got: {msg}"
         );
     }
 
