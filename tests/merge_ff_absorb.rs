@@ -1071,7 +1071,10 @@ fn invariant_auditor_disabled_by_config_is_silent() {
         "--destroy",
         "--message",
         "feat: merge alice",
+        "--format",
+        "json",
     ]);
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("merge JSON output");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
     assert!(
@@ -1085,6 +1088,10 @@ fn invariant_auditor_disabled_by_config_is_silent() {
     assert!(
         !stderr.contains("INVARIANT VIOLATION"),
         "disabled auditor must print no violation block.\nstderr: {stderr}"
+    );
+    assert!(
+        parsed.get("invariant").is_none(),
+        "disabled audit field must be omitted: {parsed}"
     );
     // Behavior unchanged: bob's committed work is still preserved by the replay.
     assert_eq!(

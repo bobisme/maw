@@ -5361,7 +5361,9 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             next: next_command,
             advice: vec![],
             sibling_conflicts: sibling_conflict_names.clone(),
-            invariant: Some(invariant_report.clone()),
+            invariant: invariant_report
+                .is_enabled()
+                .then(|| invariant_report.clone()),
             post_sync_hooks: sibling_hook_results.clone(),
             merged_sha: candidate.clone(),
             epoch_before: epoch_before_oid.as_str().to_string(),
@@ -5414,7 +5416,8 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
     }
 
     // bn-2rnq: one-line proof to stderr (both text and JSON modes). No-op when
-    // the audit is disabled; the JSON body already carries the structured field.
+    // the audit is disabled; when enabled, the JSON body also carries the
+    // structured field.
     invariant_report.emit_proof_line();
 
     // bn-20fp (item 4): the destroy-cwd warning is the highest-stakes signal

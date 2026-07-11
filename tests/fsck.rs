@@ -125,3 +125,29 @@ fn fsck_repair_healthy_is_noop() {
         "--repair must not change refs on a healthy repo"
     );
 }
+
+/// An unreadable merge journal may belong to a live or newer-version maw
+/// process. `--repair` cannot prove it stale, so it must preserve the file and
+/// leave the corruption visible for manual inspection.
+#[test]
+fn fsck_repair_preserves_unreadable_merge_state() {
+    let repo = TestRepo::new();
+    let state_path = repo.root().join(".manifold/merge-state.json");
+    std::fs::write(&state_path, "{ malformed merge state").expect("write malformed state");
+
+    let out = repo.maw_raw(&["fsck", "--repair"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "unreadable merge state must remain an error:\n{stdout}"
+    );
+    assert!(
+        state_path.exists(),
+        "automatic repair must not delete state whose owner cannot be verified"
+    );
+    assert!(
+        stdout.contains("declined") && stdout.contains("could not be proven stale"),
+        "output must explain why automatic repair was refused: {stdout}"
+    );
+}

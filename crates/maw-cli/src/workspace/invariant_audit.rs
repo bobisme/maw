@@ -147,6 +147,16 @@ impl AuditReport {
         !self.orphaned.is_empty()
     }
 
+    /// Whether the audit actually ran.
+    ///
+    /// Structured command outputs use this to omit their optional
+    /// `invariant` field when `[invariant] audit = false`, matching the JSON
+    /// contract instead of serializing a disabled placeholder report.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Emit the single-line success proof to stderr. No-op when the audit was
     /// disabled or a violation was found (the violation block is printed
     /// instead). Kept to ONE line — agents are token-conscious.

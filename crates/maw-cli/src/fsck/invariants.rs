@@ -727,13 +727,21 @@ fn merge_state_status(ctx: &Ctx) -> (Option<Violation>, bool) {
         Err(MergeStateError::NotFound(_)) => return (None, false),
         Err(e) => {
             return (
-                Some(Violation::repairable(
+                Some(Violation::new(
                     format!(
-                        "merge-state file present but unreadable ({e}) — this wedges all merges"
+                        "merge-state file present but unreadable ({e}) — its owner liveness cannot \
+                         be verified"
                     ),
-                    Some("Fix: maw ws merge --abort  (or: maw fsck --repair)".to_string()),
+                    Some(
+                        "Inspect the file and active maw processes; if no merge is running: maw ws \
+                         merge --abort"
+                            .to_string(),
+                    ),
                 )),
-                true,
+                // An unreadable file may still belong to a live merge (or a
+                // newer maw version). Without its owner identity we cannot
+                // prove that deleting it is safe.
+                false,
             );
         }
         Ok(s) => s,
@@ -807,8 +815,8 @@ impl Invariant for MergeStateInvariant {
         }
         if !safe {
             return Ok(vec![
-                "declined: merge-state owner liveness could not be confirmed — not removing (run \
-                 `maw ws merge --abort` if you are sure no merge is running)"
+                "declined: merge-state could not be proven stale — not removing (inspect active \
+                 maw processes, then run `maw ws merge --abort` if no merge is running)"
                     .to_string(),
             ]);
         }
@@ -1394,6 +1402,30 @@ mod tests {
             "got {receipts:?}"
         );
         assert!(path.exists(), "dry-run must not delete");
+    }
+
+    #[test]
+    fn merge_state_repair_declines_unreadable_file() {
+        let (_d, root) = setup();
+        let path = root.join(".manifold/merge-state.json");
+        fs::write(&path, "{ malformed merge state").expect("write malformed state");
+        let inv = MergeStateInvariant;
+
+        let violation = only(inv.check(&ctx(&root)).expect("check"));
+        assert!(
+            !violation.repairable,
+            "unreadable state has no verifiable owner and must require manual recovery"
+        );
+
+        let receipts = inv.repair(&ctx(&root), false).expect("repair");
+        assert!(
+            receipts.iter().any(|r| r.contains("declined")),
+            "got {receipts:?}"
+        );
+        assert!(
+            path.exists(),
+            "automatic repair must preserve unreadable merge state"
+        );
     }
 
     // --- stale-locks ---

@@ -26,6 +26,36 @@ mod manifold_common;
 
 use manifold_common::TestRepo;
 
+/// The optional JSON proof is absent—not a zero-valued placeholder—when the
+/// repository explicitly disables the runtime auditor.
+#[test]
+fn advance_json_omits_invariant_when_audit_disabled() {
+    let repo = TestRepo::new();
+    std::fs::write(
+        repo.root().join(".maw.toml"),
+        "[invariant]\naudit = false\n",
+    )
+    .expect("write .maw.toml");
+    repo.maw_ok(&["ws", "create", "pers-worker", "--persistent"]);
+
+    let out = repo.maw_raw_exact(&["ws", "advance", "pers-worker", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "advance failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("advance JSON output");
+    assert!(
+        parsed.get("invariant").is_none(),
+        "disabled audit field must be omitted: {parsed}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("INVARIANT:"),
+        "disabled auditor must remain silent"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 1. Orphan regression — the primary acceptance test for bn-8flz
 // ---------------------------------------------------------------------------

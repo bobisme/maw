@@ -159,7 +159,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
                 success: true,
                 conflicts: vec![],
                 message: format!("Workspace '{name}' is already at the current epoch."),
-                invariant: Some(report),
+                invariant: report.is_enabled().then_some(report),
             };
             println!("{}", format.serialize(&result)?);
         } else {
@@ -232,7 +232,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
             success: true,
             conflicts: vec![],
             message,
-            invariant: Some(report),
+            invariant: report.is_enabled().then_some(report),
         };
         match format {
             OutputFormat::Json => println!("{}", format.serialize(&result)?),
@@ -332,7 +332,7 @@ pub fn advance(name: &str, format: OutputFormat) -> Result<()> {
         success,
         conflicts,
         message,
-        invariant: Some(report),
+        invariant: report.is_enabled().then_some(report),
     };
 
     match format {
