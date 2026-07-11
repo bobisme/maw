@@ -78,7 +78,10 @@ pub fn clean(
 
     // Resolve the on-disk worktree path (layout-aware).
     let ws_path = if is_default {
-        flavor.default_target_path(&root, DEFAULT_WORKSPACE)
+        // In the legacy layout the configured default workspace need not be
+        // named `default`; passing the constant here silently redirected a
+        // request for that configured workspace to `ws/default`.
+        default_clean_path(flavor, &root, &default_name)
     } else {
         validate_workspace_name(&target)?;
         let p = flavor.workspace_path(&root, &target);
@@ -162,6 +165,10 @@ pub fn clean(
     };
     emit_report(format, &report, "");
     Ok(())
+}
+
+fn default_clean_path(flavor: LayoutFlavor, root: &Path, default_name: &str) -> PathBuf {
+    flavor.default_target_path(root, default_name)
 }
 
 /// List the untracked (and, when `include_ignored`, gitignore'd) files under
@@ -339,6 +346,15 @@ fn emit_report(format: OutputFormat, report: &CleanReport, empty_msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_default_clean_path_honors_configured_name() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            default_clean_path(LayoutFlavor::V2WsRoot, root, "trunk"),
+            root.join("ws/trunk")
+        );
+    }
 
     #[test]
     fn path_matches_filter_exact_and_dir() {
