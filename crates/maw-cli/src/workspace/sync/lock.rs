@@ -90,7 +90,35 @@ impl WorkspaceRebaseLock {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+
+    // Re-acquire the rebase lock, polling until it succeeds or a settling budget
+    // elapses.
+    //
+    // bn-1d22: under parallel `cargo test`, a sibling test's `Command::spawn`
+    // dup()s every open fd — including this test's lockfile fd — across fork().
+    // BSD flock locks live on the open file description shared by those dups, so
+    // a lock this test just released can still read as held until the child execs
+    // (the fd is O_CLOEXEC) a fraction of a millisecond later. That perturbation
+    // is one-directional (a stray fork can only make a free lock look held, never
+    // make a held lock look free), so only "should now re-acquire" observations
+    // need to settle; the "must fail while held" assertions stay immediate.
+    fn acquire_settled(root: &Path, ws_name: &str) -> WorkspaceRebaseLock {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(guard) = WorkspaceRebaseLock::try_acquire(root, ws_name).expect("io error")
+            {
+                return guard;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "post-release rebase-lock acquire never settled within budget"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn acquire_succeeds_on_fresh_workspace() {
@@ -113,10 +141,10 @@ mod tests {
             "second concurrent acquire on the same ws must fail fast"
         );
         drop(first);
-        // After release, a fresh acquire should succeed.
-        let third = WorkspaceRebaseLock::try_acquire(tmp.path(), "feat")
-            .expect("io error")
-            .expect("post-release acquire should succeed");
+        // After release, a fresh acquire should succeed. A sibling test's fork()
+        // can transiently keep our just-closed fd's description open (bn-1d22),
+        // so poll until that window drains rather than demanding it immediately.
+        let third = acquire_settled(tmp.path(), "feat");
         drop(third);
     }
 

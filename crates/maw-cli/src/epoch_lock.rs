@@ -395,6 +395,43 @@ mod tests {
         }
     }
 
+    // bn-1d22: under parallel `cargo test`, a *sibling* test's `Command::spawn`
+    // dup()s every open fd — including this test's lockfile fd — across fork().
+    // BSD `flock` locks live on the open file description shared by those dups,
+    // so a lock this test just released can still read as *held* until the child
+    // execs (the fd is `O_CLOEXEC`) a fraction of a millisecond later. The
+    // perturbation is one-directional: a stray fork can only make a *free* lock
+    // momentarily look held, never make a *held* lock look free. So the
+    // "must fail while genuinely held" assertions stay immediate and exact, while
+    // every "should now be free / should re-acquire" observation is allowed to
+    // settle. `RESETTLE` bounds that settling window (a released lock reappears
+    // free within one fork→exec, i.e. microseconds; the budget is generous only
+    // so a starved scheduler on a loaded box cannot flake it).
+    const RESETTLE: Duration = Duration::from_secs(5);
+
+    /// A [`WaitPolicy`] that briefly waits, used for a *post-release* re-acquire
+    /// that a sibling test's transient fork can momentarily block (bn-1d22).
+    const fn resettle() -> WaitPolicy {
+        WaitPolicy {
+            wait: true,
+            timeout: RESETTLE,
+        }
+    }
+
+    /// Poll [`inspect`] until the lock reads as not held, or [`RESETTLE`] elapses.
+    /// The returned status is asserted on by the caller (so a genuinely-stuck
+    /// lock still fails the test, just after the settling budget).
+    fn wait_until_not_held(root: &Path) -> LockStatus {
+        let deadline = Instant::now() + RESETTLE;
+        loop {
+            let status = inspect(root);
+            if !status.held || Instant::now() >= deadline {
+                return status;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn acquire_succeeds_on_fresh_repo() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -419,9 +456,11 @@ mod tests {
             "contention must surface as EpochLockBusy"
         );
         drop(first);
-        // After release a fresh acquire succeeds.
+        // After release a fresh acquire succeeds. A sibling test's fork() can
+        // transiently keep our just-closed fd's description open (bn-1d22), so
+        // allow the re-acquire to settle rather than demanding it no-wait.
         let third =
-            EpochLock::acquire_with(tmp.path(), "gc", no_wait()).expect("post-release acquire");
+            EpochLock::acquire_with(tmp.path(), "gc", resettle()).expect("post-release acquire");
         drop(third);
     }
 
@@ -453,7 +492,9 @@ mod tests {
         drop(guard);
 
         // After release the flock is gone but the (now stale) metadata remains.
-        let after = inspect(tmp.path());
+        // Poll: a sibling test's fork() can briefly keep the released fd's
+        // description open (bn-1d22); a held lock can never spuriously read free.
+        let after = wait_until_not_held(tmp.path());
         assert!(!after.held, "released lock must read as not held");
         assert!(
             after.holder.is_some(),
@@ -475,10 +516,12 @@ mod tests {
             read_holder(tmp.path()).is_some(),
             "content left behind after release"
         );
-        assert!(!inspect(tmp.path()).held, "stale content is not a lock");
-        // And a fresh acquire still succeeds immediately.
+        // A sibling fork can briefly hold the released fd (bn-1d22); let it settle.
+        let after = wait_until_not_held(tmp.path());
+        assert!(!after.held, "stale content is not a lock");
+        // And a fresh acquire still succeeds (allowed to settle for the same reason).
         let guard =
-            EpochLock::acquire_with(tmp.path(), "gc", no_wait()).expect("acquire over stale");
+            EpochLock::acquire_with(tmp.path(), "gc", resettle()).expect("acquire over stale");
         drop(guard);
     }
 

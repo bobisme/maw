@@ -64,17 +64,22 @@ build-bin:
 # tests/ dir) covers every FUTURE maw-cli test automatically, not just these
 # two — same silent-rot class as bn-1nmh/bn-1n2b.
 #
-# `--test-threads=1`: wiring this in surfaced a genuine flaky-under-parallel-
-# execution issue in the maw-cli lib unit tests that exercise flock-based
-# locking (epoch_lock.rs, workspace/sync/lock.rs) — ~20-30% failure rate at
-# default parallelism on a heavily loaded box, 0 failures in 10+ runs at
-# `--test-threads=1`. Root cause not identified (suspected rustix/flock()
-# behavior under many-thread syscall contention); tracked for follow-up
-# investigation. Serializing costs ~10s wall and keeps the gate trustworthy
-# today rather than shipping a coin-flip-red CI step.
+# History: wiring this in surfaced a ~20-30% flaky-under-parallel failure in the
+# flock unit tests (epoch_lock.rs, workspace/sync/lock.rs), so the recipe used
+# `--test-threads=1` as a crutch. bn-1d22 found the root cause: it is NOT a lock
+# bug and NOT env/timing — it is fd inheritance across fork(). A sibling test's
+# `Command::spawn` dup()s every open fd (including a lock test's flock'd
+# lockfile) across fork; BSD `flock` locks live on the shared open file
+# description, so a just-released lock reads as still-held until the child execs
+# (O_CLOEXEC) microseconds later. The perturbation is one-directional (a stray
+# fork can only make a free lock momentarily look held), so the tests now let
+# their post-release "should be free / should re-acquire" observations settle
+# while keeping the "must fail while held" assertions immediate. With that fix
+# the suite is clean at default parallelism (55+ consecutive green runs, incl.
+# --test-threads=32 stress), so the crutch is gone and parallel testing restored.
 test: build-bin
   cargo test
-  cargo test -p maw-cli -- --test-threads=1
+  cargo test -p maw-cli
 
 install:
   cargo install --locked --path crates/maw-cli
