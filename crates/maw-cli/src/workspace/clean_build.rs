@@ -8,7 +8,9 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use crate::workspace::{DEFAULT_WORKSPACE, get_backend, repo_root, validate_workspace_name};
+use crate::workspace::{
+    DEFAULT_WORKSPACE, MawConfig, get_backend, repo_root, validate_workspace_name,
+};
 use maw_core::backend::WorkspaceBackend;
 use maw_core::model::layout::LayoutFlavor;
 use maw_core::model::types::WorkspaceId;
@@ -19,17 +21,19 @@ pub fn clean_build(name: Option<String>, all: bool) -> Result<()> {
         return clean_all();
     }
 
-    let target = name.unwrap_or_else(|| DEFAULT_WORKSPACE.to_string());
+    let root = repo_root()?;
+    let flavor = LayoutFlavor::detect_with_env(&root);
+    let default_name = MawConfig::load(&root)?.default_workspace().to_owned();
+    let target = name.unwrap_or_else(|| default_name.clone());
+    let is_default = target == DEFAULT_WORKSPACE || target == default_name;
 
     // bn-1s8d: In a consolidated-layout repo the default workspace IS the repo
     // root — it is not tracked in the worktrees-dir backend, so the
     // `backend.exists()` check would always return false and the old code
     // produced a misleading "does not exist / Fix: maw ws create 'default'".
     // Resolve the path layout-aware (same as `git_cwd` / `resolve_workspace_path_for_cd`).
-    if target == DEFAULT_WORKSPACE {
-        let root = repo_root()?;
-        let flavor = LayoutFlavor::detect_with_env(&root);
-        let default_path = flavor.default_target_path(&root, DEFAULT_WORKSPACE);
+    if is_default {
+        let default_path = flavor.default_target_path(&root, &default_name);
         let _ = clean_workspace_path(&target, &default_path)?;
         return Ok(());
     }
@@ -52,13 +56,14 @@ fn clean_all() -> Result<()> {
     // root — not tracked in the worktrees-dir backend. Include it first.
     let root = repo_root()?;
     let flavor = LayoutFlavor::detect_with_env(&root);
+    let default_name = MawConfig::load(&root)?.default_workspace().to_owned();
 
     let mut cleaned = 0usize;
     let mut missing = 0usize;
 
     if flavor == LayoutFlavor::ConsolidatedMawDir {
-        let default_path = flavor.default_target_path(&root, DEFAULT_WORKSPACE);
-        match clean_workspace_path(DEFAULT_WORKSPACE, &default_path) {
+        let default_path = flavor.default_target_path(&root, &default_name);
+        match clean_workspace_path(&default_name, &default_path) {
             Ok(CleanOutcome::Cleaned) => cleaned += 1,
             Ok(CleanOutcome::Missing) => missing += 1,
             Err(err) => {

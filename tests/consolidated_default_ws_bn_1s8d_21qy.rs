@@ -112,6 +112,36 @@ fn ws_clean_default_consolidated_cleans_root_target() {
     );
 }
 
+/// An explicitly named configured default workspace still denotes the repo
+/// root in the consolidated layout; it is not an agent workspace directory.
+#[test]
+fn ws_clean_build_configured_default_consolidated_cleans_root_target() {
+    let dir = init_consolidated();
+    let root = dir.path();
+
+    std::fs::write(
+        root.join(".maw.toml"),
+        "[repo]\nbranch = \"main\"\ndefault_workspace = \"trunk\"\n",
+    )
+    .expect("write custom default workspace config");
+
+    let target_dir = root.join("target");
+    std::fs::create_dir_all(target_dir.join("debug")).expect("create target/debug");
+    std::fs::write(target_dir.join("debug").join("dummy"), b"artifact")
+        .expect("write dummy artifact");
+
+    let stdout = maw_ok(root, &["ws", "clean-build", "trunk"]);
+
+    assert!(
+        !target_dir.exists(),
+        "configured default must clean the repo-root target/\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("workspace 'trunk'"),
+        "output should preserve the configured workspace name: {stdout}"
+    );
+}
+
 /// `maw ws clean` without a target/ in consolidated layout says "No target/"
 /// instead of erroring about a missing workspace.
 #[test]
