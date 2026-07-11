@@ -4250,7 +4250,7 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
                 .bootstrap_config_path(&root),
         )
         .unwrap_or_default();
-        reconcile_epoch_with_branch(
+        let reconcile = reconcile_epoch_with_branch(
             &root,
             branch,
             default_ws,
@@ -4258,6 +4258,20 @@ pub fn merge(workspaces: &[String], opts: &MergeOptions<'_>) -> Result<()> {
             &branch_before_oid,
             manifold_config.merge.auto_absorb_ff,
         )?;
+
+        // FF-absorb is a distinct epoch mutation that happens before the merge
+        // sources become direct operands. Audit it at this boundary so a
+        // source whose committed work was lost during absorb is not hidden by
+        // the final merge audit's source exclusions. This also covers later
+        // early returns such as --dry-run and an empty merge.
+        if matches!(reconcile, FfReconcile::Absorbed { .. }) {
+            super::invariant_audit::finish(
+                &root,
+                &invariant_pre,
+                &[default_ws],
+                "ws merge FF-absorb",
+            )?;
+        }
     }
 
     // Reject merging the default workspace

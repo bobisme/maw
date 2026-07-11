@@ -979,6 +979,58 @@ fn invariant_auditor_catches_orphaned_sibling_on_ff_absorb() {
     );
 }
 
+/// A merge source is only a direct operand after FF-absorb completes. Prove
+/// that the absorb boundary audits it before the final merge audit excludes it.
+#[test]
+fn invariant_auditor_catches_orphaned_source_on_ff_absorb() {
+    let repo = TestRepo::new();
+    repo.seed_files(&[("src/lib.rs", "// lib\n"), ("docs/README.md", "# README\n")]);
+
+    repo.maw_ok(&["ws", "create", "alice"]);
+    repo.add_file("alice", "src/alice.rs", "// alice\n");
+    repo.git_in_workspace("alice", &["add", "-A"]);
+    repo.git_in_workspace("alice", &["commit", "-m", "feat: alice's work"]);
+    let alice_head_before = repo
+        .git_in_workspace("alice", &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    push_branch_ahead(
+        &repo,
+        "docs/README.md",
+        "# README\n\ndirect commit\n",
+        "docs: direct commit outside maw",
+    );
+
+    let out = repo.maw_raw_env(
+        &[
+            "ws",
+            "merge",
+            "alice",
+            "--destroy",
+            "--message",
+            "feat: merge alice",
+        ],
+        &[("MAW_INVARIANT_FAULT", "ff-absorb-skip-replay")],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        !out.status.success(),
+        "auditor must fail when FF-absorb orphans a merge source.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("INVARIANT VIOLATION")
+            && stderr.contains("alice")
+            && stderr.contains(&alice_head_before),
+        "violation must identify the orphaned source commit.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("maw ws recover --ref refs/manifold/recovery/alice/invariant-"),
+        "violation must provide source recovery guidance.\nstderr: {stderr}"
+    );
+}
+
 /// With `invariant.audit = false` the auditor is fully inert: no proof line, and
 /// (critically) no behavior change — a normal absorb+replay still succeeds. This
 /// is the escape hatch for perf-sensitive giant repos.
