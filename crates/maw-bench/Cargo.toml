@@ -49,12 +49,12 @@ bench = [
 claude-backend = ["bench"]
 
 [dependencies]
-maw-scenario = { path = "../maw-scenario", version = "1.0.0-pre.11", optional = true }
+maw-scenario = { path = "../maw-scenario", version = "1.0.0-pre.12", optional = true }
 # The harness's Oracle B integration calls `maw_assurance::oracle_b::check`
 # verbatim — Prime-Invariant coherence (the bn-cm63 class) is a substrate-
 # agnostic invariant and EVERY driver (cheap in-proc and expensive real-
 # agent) must surface it.
-maw-assurance = { path = "../maw-assurance", version = "1.0.0-pre.11", optional = true }
+maw-assurance = { path = "../maw-assurance", version = "1.0.0-pre.12", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 rand = { version = "0.9", optional = true }

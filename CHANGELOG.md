@@ -2,6 +2,40 @@
 
 All notable changes to maw.
 
+## v1.0.0-pre.12 — reliability top-5 + field report 2 + release automation (2026-07-11)
+
+Twelfth dogfood pre-release. The largest batch since pre.1: the "30 ideas → top 5" reliability push, full closure of a second mess field report (bn-1m4d, ~30 workspaces / 147 commits, zero data loss), the release-automation tooling used to cut this very release, and a fresh-eyes sweep across merge, clean, history, and fsck.
+
+**Reliability top-5**
+- **Repo-level epoch lock (bn-13rc).** All epoch mutations (sync, merge, advance, epoch-sync) now serialize on `.maw/manifold/locks/epoch.lock` (fs4 flock, holder JSON metadata, exit 75 `EX_TEMPFAIL` on contention, `[lock]` config + `MAW_LOCK_NO_WAIT`/`MAW_LOCK_WAIT_SECS`). Racing concurrent syncs now serialize and both succeed instead of racing the epoch ref.
+- **`maw fsck` (bn-1uot).** New offline deep state verifier: a 14-invariant catalog covering ref/record/recovery coherence; `maw doctor`'s 6 coherence checks now delegate to it. `--repair` re-pins unpinned recovery refs and clears only provably-orphaned merge-state, exit 0/1/2. A fresh-eyes follow-up (bn-1283) hardened `--repair` to never treat an *unreadable* merge-state as repairable — deleting it could kill a live merge — plus fixed a disabled-audit JSON omission and added an advance-orphan regression test.
+- **Prime-Invariant runtime auditor (bn-2rnq).** Capture/audit brackets now run inside the epoch lock on every merge, sync, advance, and epoch-sync, printing a proof line (`INVARIANT: verified N sibling workspace(s)`) and, on violation, pinning a recovery ref and blocking loudly with a nonzero exit. A fresh-eyes follow-up (bn-lf1d) extended the audit boundary to cover FF-absorb itself, so a source workspace whose committed work is lost during epoch absorption is caught instead of being hidden by the final merge audit's source exclusions.
+- **`maw undo` + `maw ops log` (bn-117s).** Undoes the last epoch-mutating operation (epoch + branch CAS rewind, sources restored from recovery snapshots, dirty trunk byte-preserved), pinning the result at `refs/manifold/recovery/undo/<ts>`; undo-of-undo is redo. Refuses on epoch-advanced/diverged/pushed/workspace-recreated states.
+- **DST escape-path coverage (bn-2bcx).** New out-of-maw-commit / dirty-trunk-write / gc fault classes plus sibling-ref-faithfulness and trunk-dirty-preservation oracles in the production DST tier, proven against a deliberate revert of the bn-rah2 fix (fires at step 7).
+
+**Field report 2 — closed end to end (bn-1m4d)**
+- **`post_sync` hooks (bn-1lhb).** Configured `[hooks] post_sync` commands now run after any sync or auto-rebase replay, signal-only, surfaced as a NOTE in the merge summary and `hook:FAIL` in `ws list`/JSON.
+- **Comment-syntax-aware conflict headers (bn-drk3).** Structured-conflict headers now use the right comment syntax per file type (`//` for `.rs` etc., `--` for `.sql`/`.lua`), with the legacy `#` form still parseable everywhere. (add/add and modify/delete headers remain `#`-only.)
+- **`maw ws clean` (bn-auu5).** New command snapshots before deleting (`refs/manifold/recovery/<ws>/clean-<ts>`), supports `--paths`/`--dry-run`/`--ignored`, and defaults to requiring `--force`. The old `clean` was renamed `clean-build`. Along the way, a real gix bug was found and fixed: linked worktrees only read their own `.git/worktrees/<n>/info/exclude` and missed the common-dir `.git/info/exclude` that git itself honors — `maw-git` status now honors it too. Two fresh-eyes follow-ups hardened this further: `clean` and `clean-build` now honor a configured non-default default-workspace name instead of only matching the literal name `default` (bn-3uiq, bn-ado3), and clean's capture path now stages into a **temporary index** rather than the caller's real index — the old force-stage-then-reset sequence could destroy work the caller had already staged. That same fix also bounds hook process trees: timed-out `post_sync` hooks now run in their own process group so a `SIGKILL` on timeout reaches the whole descendant tree instead of leaking orphans that block the output-reader threads.
+- **Merge JSON completeness (bn-20fp).** `--format json` merge output now includes `merged_sha`, `epochs`, `sources`, `destroyed`, per-sibling `siblings[]` (action + overlap + hook result), `warnings[]`, the invariant result, and `recovery.pinned_refs`/`cwd_destroyed`; text output ends with a sentinel line → JSON hint → destroy-cwd warning, in that fixed order.
+
+**Release automation (bn-1obp) — used to cut this release**
+- **`maw release prepare vX.Y.Z`**: lockstep version bump across every `Cargo.toml` (workspace version + all internal path-dep `version = "…"` strings, ~19 strings), Cargo.lock regen, and a CHANGELOG section scaffold. Idempotent; leaves everything uncommitted for review.
+- **`maw release preflight [vX.Y.Z]`**: read-only gate checking version consistency, CHANGELOG presence, and a clean tree. Also runs in PR CI via the new **publish-dryrun** workflow (paths-filtered on manifest changes): preflight + `cargo publish --dry-run --no-verify` over the full 6-crate publish chain, so a broken publish chain fails on the PR instead of at tag time.
+- The bare `maw release vX.Y.Z` (tag + push) is unchanged. AGENTS.md's release flow now documents prepare → notes → check → commit → preflight → tag.
+
+**CI (bn-1q7x, bn-1n2b)**
+- `just check` now also runs `cargo test -p maw-cli` — previously the `crates/maw-cli/tests/` suite (undo, epoch-lock CLI tests, etc.) and the maw-cli lib unit tests were entirely CI-ungated. Landed serialized (`--test-threads=1`) to dodge the then-unexplained flock flakiness below; the bn-1d22 fix later removed that serialization.
+- `sg1-assurance-clippy` is now wired into `dst-faithful.yml` (it existed but ran in no workflow).
+- New `tests/ci_lane_wiring.rs` meta-test enforces that every `*-clippy`/`*-check` Justfile recipe is either wired into a workflow or explicitly marked `# ci: local-only`, with the convention documented in the Justfile header.
+- **bn-1d22, the flaky-flock-test mystery, is solved:** the intermittent `maw-cli` lock-test failures under parallel execution were never a lock bug or timing race — they were **fork fd-inheritance**: a sibling test's `Command::spawn` dups the flock'd lockfile fd across `fork()`, and since BSD flock lives on the *open file description*, a just-released lock reads as held in the child until it execs or `CLOEXEC` clears the fd (a microseconds-wide window). The fix is one-directional (a free can spuriously look held, never the reverse): tests let post-release observations settle (bounded, 5s) while must-fail-while-held assertions stay immediate. The `--test-threads=1` crutch from pre.11-era CI work is removed — `maw-cli` tests run parallel again (55+ green worker runs, 9/9 lead including a 32-thread stress run).
+
+**Other fixes**
+- **Cleanup lockstep with recovery refs (bn-3uou).** `maw gc --recovery-snapshots` now prunes destroy records in lockstep with recovery refs it removes; `maw doctor` splits `abandoned-with-snapshot` from the new `destroy-record-unpinned`.
+- **Bench-feature rot fixed + `sg2-bench-clippy` CI lane (bn-1nmh).**
+- **`ws list`/`ws ls`/`maw ls --names` (bn-3kiv):** pipeable name-only listing, order matching JSON output.
+- **`maw ws history` no longer hides oplog corruption behind a silent git-log fallback (bn-100i, fresh-eyes).** A corrupt oplog chain now surfaces as an error instead of quietly rendering a shorter, wrong history.
+
 ## v1.0.0-pre.11 — FF-absorb is ref-faithful to siblings (2026-07-09)
 
 Eleventh dogfood pre-release. Closes a second data-loss-class field report from mess (bn-rah2), hit on pre.10 but latent since ~v0.60.8.
