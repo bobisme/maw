@@ -735,13 +735,28 @@ release-preflight *args:
 # Publish dry-run over the SAME crate chain as publish.yml, with --no-verify
 # (siblings aren't on crates.io at a not-yet-released version, so the --verify
 # build can't resolve them). Catches manifest rot and up-skew before tag day.
+#
+# bn-2s4x: `cargo publish --dry-run` still resolves each crate's path+version
+# deps against the live crates.io index when packaging, even with --no-verify.
+# In a lockstep version bump no sibling's new version is live yet (the real
+# publish.yml chain only works because it publishes sequentially, making each
+# sibling live before the next one packages). Patch every in-repo sibling to
+# resolve from its local path instead of the index, so the dry-run validates
+# manifests/version-req syntax without needing an actual publish. A crate not
+# in another crate's dependency graph draws a harmless "patch ... was not
+# used" warning — expected, not a failure.
+#
 # Referenced by .github/workflows/publish-dryrun.yml.
 # ci: referenced by publish-dryrun.yml
 release-publish-dryrun:
     #!/usr/bin/env bash
     set -euo pipefail
+    patch_args=()
+    for crate in maw-lfs maw-git maw-core maw-scenario maw-assurance; do
+      patch_args+=(--config "patch.crates-io.$crate.path=\"crates/$crate\"")
+    done
     for crate in maw-lfs maw-git maw-core maw-scenario maw-assurance maw-workspaces; do
       echo "::group::cargo publish --dry-run -p $crate"
-      cargo publish --dry-run --no-verify -p "$crate"
+      cargo "${patch_args[@]}" publish --dry-run --no-verify -p "$crate"
       echo "::endgroup::"
     done
