@@ -181,3 +181,6 @@
 1783734786665167	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEysBU		item.comment	bn-1283	{"body":"Started in workspace bn-1283"}	blake3:FuaVjBZ3w3qfy3N98Lt26H9NE1WLkM0ZAzQPn5xzo-U
 1783735123075296	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEysRU		item.comment	bn-1283	{"body":"Fresh-eyes review validated two post-pre.11 bugs: fsck --repair deleted unreadable merge-state without proving owner dead; disabled invariant audits still appeared in advance/merge JSON despite omission contract. Fixes and focused regressions pass; running full just check."}	blake3:Ii3SrO9PcUgcmatl3hTemxJnTPwbL_1T_sLt-Qcvu-Y
 1783735859312549	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEyshU		item.move	bn-1283	{"reason":"Completed in workspace bn-1283","state":"done"}	blake3:H-PnTF4g-7x_jyTc3TccgMVzxdHqSePq0aSRTaQk_5g
+1783735956679087	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEysxU		item.move	bn-1d22	{"state":"doing"}	blake3:-rzdsVQvlm9nkYIc8kjnLEflSDkOwu7XV-DVvu0X82Q
+1783735956687532	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEytBU		item.assign	bn-1d22	{"action":"assign","agent":"maw-dev"}	blake3:Umi8ebG840RM30y_bT8kjIhFEhjshScRB5oKrDCi2J4
+1783737951985813	maw-dev	itc:v3:AWKTmSTM_JOSSTQAAAAAQa7Vbfq6qsAAAAEytRU		item.move	bn-1d22	{"state":"done"}	blake3:LKp1J0Z521oZQ-kbTdQl5bCpI5_qx3xd5lBQeGqvqpk
