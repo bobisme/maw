@@ -901,8 +901,29 @@ fn is_pr_merged(record: &store::ChangeRecord) -> bool {
         .is_some_and(|pr| pr.state.eq_ignore_ascii_case("merged"))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override for the `gh` binary `gh_command()` resolves to.
+    /// See `tests::GhBinaryGuard`.
+    static GH_TEST_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Builds a `Command` for the `gh` CLI. Tests can redirect this to a stub
+/// script via `tests::GhBinaryGuard` instead of relying on `$PATH` order to
+/// find a fake `gh` ahead of the real one (bn-efa6).
+fn gh_command() -> Command {
+    #[cfg(test)]
+    {
+        if let Some(path) = GH_TEST_OVERRIDE.with(|cell| cell.borrow().clone()) {
+            return Command::new(path);
+        }
+    }
+    Command::new("gh")
+}
+
 fn gh_pr_view(root: &Path, pr_number: u64) -> Result<GhPrView> {
-    let output = Command::new("gh")
+    let output = gh_command()
         .args([
             "pr",
             "view",
@@ -1129,7 +1150,7 @@ fn push_change_branch(root: &Path, head_branch: &str) -> Result<()> {
 }
 
 fn find_open_pr(root: &Path, head_branch: &str, base_branch: &str) -> Result<Option<GhPrSummary>> {
-    let output = Command::new("gh")
+    let output = gh_command()
         .args([
             "pr",
             "list",
@@ -1157,7 +1178,7 @@ fn find_open_pr(root: &Path, head_branch: &str, base_branch: &str) -> Result<Opt
 }
 
 fn create_pr(root: &Path, head_branch: &str, base_branch: &str, args: &PrArgs) -> Result<()> {
-    let mut command = Command::new("gh");
+    let mut command = gh_command();
     command
         .arg("pr")
         .arg("create")
@@ -1195,7 +1216,7 @@ fn apply_pr_edits(root: &Path, pr_number: u64, args: &PrArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut command = Command::new("gh");
+    let mut command = gh_command();
     command.arg("pr").arg("edit").arg(pr_number.to_string());
     if let Some(title) = &args.title {
         command.arg("--title").arg(title);
@@ -1220,7 +1241,7 @@ fn apply_pr_edits(root: &Path, pr_number: u64, args: &PrArgs) -> Result<()> {
 
 fn apply_pr_draft_toggle(root: &Path, pr: &mut GhPrSummary, args: &PrArgs) -> Result<()> {
     if args.ready && pr.is_draft {
-        let output = Command::new("gh")
+        let output = gh_command()
             .args(["pr", "ready", &pr.number.to_string()])
             .current_dir(root)
             .output()
@@ -1233,7 +1254,7 @@ fn apply_pr_draft_toggle(root: &Path, pr: &mut GhPrSummary, args: &PrArgs) -> Re
     }
 
     if args.draft && !pr.is_draft {
-        let output = Command::new("gh")
+        let output = gh_command()
             .args(["pr", "ready", "--undo", &pr.number.to_string()])
             .current_dir(root)
             .output()
@@ -1562,44 +1583,40 @@ mod tests {
         }
     }
 
+    /// Points `gh_command()` at a stub script for the current thread only.
+    /// The standard test harness gives each `#[test]` fn its own OS thread,
+    /// so a thread-local needs no locking and can't race unrelated tests —
+    /// unlike the old approach of swapping a `gh` binary on disk at a
+    /// hardcoded path, which broke the moment the real `gh` resolved earlier
+    /// on `$PATH` (bn-efa6), and unlike mutating `$PATH` itself via
+    /// `std::env::set_var`, which is unsound across concurrently running
+    /// test threads.
     struct GhBinaryGuard {
-        gh_path: PathBuf,
-        backup_path: Option<PathBuf>,
+        _script_dir: TempDir,
+        previous: Option<PathBuf>,
     }
 
     impl GhBinaryGuard {
         fn install(script: &str) -> Self {
-            let gh_path = PathBuf::from("/home/bob/bin/gh");
-            if let Some(parent) = gh_path.parent() {
-                fs::create_dir_all(parent).expect("create /home/bob/bin");
-            }
-
-            let backup_path = if gh_path.exists() {
-                let backup = PathBuf::from(format!("{}.maw-test-backup", gh_path.display()));
-                fs::rename(&gh_path, &backup).expect("backup existing gh binary");
-                Some(backup)
-            } else {
-                None
-            };
-
+            let script_dir = tempfile::tempdir().expect("tempdir for gh stub");
+            let gh_path = script_dir.path().join("gh");
             fs::write(&gh_path, script).expect("write gh stub");
             let mut perms = fs::metadata(&gh_path).expect("gh metadata").permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&gh_path, perms).expect("chmod gh stub");
 
+            let previous = GH_TEST_OVERRIDE.with(|cell| cell.borrow_mut().replace(gh_path));
+
             Self {
-                gh_path,
-                backup_path,
+                _script_dir: script_dir,
+                previous,
             }
         }
     }
 
     impl Drop for GhBinaryGuard {
         fn drop(&mut self) {
-            let _ = fs::remove_file(&self.gh_path);
-            if let Some(backup) = &self.backup_path {
-                let _ = fs::rename(backup, &self.gh_path);
-            }
+            GH_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = self.previous.take());
         }
     }
 
