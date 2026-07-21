@@ -15,7 +15,7 @@ This project uses **maw** for workspace management, **git** for version control,
 What this means in practice:
 
 1. **`maw ws destroy` refuses to destroy workspaces with unmerged changes** unless `--force` is passed. If `--force` is used, it captures a full recovery snapshot first.
-2. **`maw ws sync` refuses to sync workspaces with committed work** ahead of the epoch. It also refuses if the workspace is dirty.
+2. **`maw ws sync` replays committed work ahead of the epoch onto the new epoch by default** (rebase is the default; the old `--rebase` flag is deprecated/no-op). If a replayed commit conflicts, nothing is discarded: conflict markers are committed into the workspace and it is marked "conflicted" (see Operating Model below). Pass `--no-rebase` to opt into the old refusal behavior instead — the workspace is left untouched, no destructive reset. **`maw ws sync` always refuses if the workspace is dirty** (uncommitted changes would be lost by the checkout), and the refusal lists the offending paths.
 3. **Every destroyed workspace gets a destroy record** with the final HEAD commit, snapshot OID, and pinned recovery ref under `refs/manifold/recovery/<workspace>/`.
 4. **`maw ws recover`** can list, inspect, search, and restore any destroyed workspace's contents.
 
@@ -282,7 +282,7 @@ Maw follows the **jj-style conflict model**: operations succeed even when they p
 
 Concretely:
 
-- **`maw ws sync --rebase`** replays workspace commits onto the new epoch. When a cherry-pick conflicts, the rebase does *not* abort — it labels the conflict markers with meaningful side names (`<<<<<<< epoch (current)` / `>>>>>>> <ws-name> (workspace changes)`), commits the marker-laden file, records structured conflict metadata in `.manifold/artifacts/ws/<name>/rebase-conflicts.json`, and continues to the next commit. The workspace ends in a "conflicted but synced" state, visible in `maw ws status` and `maw ws list`.
+- **`maw ws sync`** replays workspace commits onto the new epoch by default (opt out with `--no-rebase`, which refuses instead of replaying). When a cherry-pick conflicts, the rebase does *not* abort — it labels the conflict markers with meaningful side names (`<<<<<<< epoch (current)` / `>>>>>>> <ws-name> (workspace changes)`), commits the marker-laden file, records structured conflict metadata in `.manifold/artifacts/ws/<name>/rebase-conflicts.json`, and continues to the next commit. The workspace ends in a "conflicted but synced" state, visible in `maw ws status` and `maw ws list`.
 
 - **`maw ws merge`** similarly allows you to merge workspaces even when the merge engine reports logical conflicts — the conflicts surface as structured output (`has_conflicts: true`, per-conflict records with terseid IDs).
 
