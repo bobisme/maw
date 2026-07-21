@@ -423,13 +423,13 @@ fn resolve_merge_target_workspace(root: &Path, workspace: &str) -> Result<MergeT
 pub enum WorkspaceCommands {
     /// Create a new workspace for an agent
     ///
-    /// Creates an isolated workspace in ws/<name>/ using git worktrees.
-    /// Each workspace has its own working copy (a separate view of the
-    /// codebase). All file reads, writes, and edits must use the absolute
-    /// workspace path shown after creation.
+    /// Creates an isolated workspace in .maw/workspaces/<name>/ using git
+    /// worktrees. Each workspace has its own working copy (a separate view
+    /// of the codebase). All file reads, writes, and edits must use the
+    /// absolute workspace path shown after creation.
     ///
     /// After creation:
-    ///   1. Edit files under ws/<name>/ (use absolute paths)
+    ///   1. Edit files under .maw/workspaces/<name>/ (use absolute paths)
     ///   2. Run commands: maw exec <name> -- <command>
     ///   3. Changes are captured automatically during merge
     ///
@@ -604,7 +604,7 @@ pub enum WorkspaceCommands {
     ///
     /// maw pins recovery commits under `refs/manifold/recovery/<workspace>/<timestamp>`.
     /// Destroyed workspaces also write destroy records under
-    /// `.manifold/artifacts/ws/<workspace>/destroy/`.
+    /// `.maw/manifold/artifacts/ws/<workspace>/destroy/`.
     ///
     /// This command supports:
     /// - listing destroyed workspaces (destroy records)
@@ -620,7 +620,7 @@ pub enum WorkspaceCommands {
     ///   maw ws recover alice --search "needle"      # search snapshots for one workspace
     ///   maw ws recover alice --show src/main.rs    # show a file from latest destroy snapshot
     ///   maw ws recover --ref <recovery-ref> --show src/main.rs
-    ///   maw ws recover alice --restore-file src/main.rs   # restore one file into ws/default/
+    ///   maw ws recover alice --restore-file src/main.rs   # restore one file into the default workspace
     ///   maw ws recover alice --to alice-restored   # restore latest destroy snapshot
     ///   maw ws recover alice --into alice-restored # same; --into aliases --to
     ///   maw ws recover --ref <recovery-ref> --to scratch
@@ -1037,7 +1037,7 @@ pub enum WorkspaceCommands {
     /// Clean up orphaned, stale, or empty workspaces
     ///
     /// Detects problematic workspaces:
-    /// - Orphaned: directory exists in ws/ but not tracked as worktree
+    /// - Orphaned: directory exists in the workspace directory but not tracked as worktree
     /// - Missing: git tracks the worktree but the directory is gone
     /// - Empty (with --empty): workspace has no changes
     ///

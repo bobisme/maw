@@ -34,7 +34,8 @@ use maw_cli::workspace;
 ///
 /// maw coordinates multiple AI agents on the same codebase using
 /// Manifold metadata and git worktrees. Each agent gets an isolated
-/// workspace under `ws/<name>/` so edits can happen concurrently.
+/// workspace under `.maw/workspaces/<name>/` so edits can happen
+/// concurrently.
 ///
 /// QUICK START:
 ///
@@ -45,17 +46,13 @@ use maw_cli::workspace;
 ///   maw exec <your-name> -- cargo test
 ///   maw exec <your-name> -- git status
 ///
-///   # Run other tools in your workspace:
-///   maw exec <your-name> -- cargo test
-///   maw exec <your-name> -- br list
-///
 ///   # Check all agent work
 ///   maw ws status
 ///
 /// WORKFLOW:
 ///
 ///   1. Create workspace: maw ws create <name> --from <source>
-///   2. Edit files under ws/<name>/ (use absolute paths)
+///   2. Edit files under .maw/workspaces/<name>/ (use absolute paths)
 ///   3. Save work with git commits in your workspace
 ///   4. Check status: maw ws status
 ///   5. Merge work: maw ws merge <name1> <name2> --into default
@@ -64,6 +61,7 @@ use maw_cli::workspace;
 #[command(name = "maw")]
 #[command(version, about)]
 #[command(propagate_version = true)]
+#[command(verbatim_doc_comment)]
 // `after_help` is attached at runtime in `parse_cli_with_vocab_hints` so
 // `maw --help` shows the same `maw tldr` quick-reference from one source.
 struct Cli {

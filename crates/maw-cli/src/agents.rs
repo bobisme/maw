@@ -42,8 +42,8 @@ fn maw_instructions() -> String {
 ## Multi-Agent Workspaces with maw
 
 This project uses maw for coordinating multiple agents with isolated git workspaces.
-Each agent gets an independent working copy under `ws/<name>/` so edits can happen
-concurrently without stomping each other.
+Each agent gets an independent working copy under `.maw/workspaces/<name>/` so edits
+can happen concurrently without stomping each other.
 
 ### Quick Start
 
@@ -87,7 +87,7 @@ maw exec <name> -- git add -A
 maw exec <name> -- git commit -m "feat: ..."
 ```
 
-`maw exec` runs any command in the workspace directory. Use this instead of `cd ws/<name> && ...` — it works reliably in sandboxed environments where cd doesn't persist.
+`maw exec` runs any command in the workspace directory. Use this instead of `cd .maw/workspaces/<name> && ...` — it works reliably in sandboxed environments where cd doesn't persist.
 
 ### Stale Workspace
 

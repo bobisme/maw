@@ -6377,7 +6377,10 @@ fn update_default_workspace(
             );
             eprintln!();
             eprintln!("  The merge commit is safe — epoch has advanced. These conflicts only");
-            eprintln!("  affect the working copy in ws/{ws_name}/.");
+            eprintln!(
+                "  affect the working copy at {}.",
+                default_ws_path.display()
+            );
             if text_mode {
                 println!(
                     "  {} ({} local-vs-merge conflict(s) — see above to resolve).",
