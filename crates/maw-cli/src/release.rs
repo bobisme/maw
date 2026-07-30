@@ -27,8 +27,14 @@ pub enum ReleaseCommand {
     ///
     /// Bumps the workspace version and every internal path-dep version string
     /// across all Cargo.tomls, regenerates Cargo.lock, and scaffolds a
-    /// CHANGELOG section header. Leaves everything uncommitted for review.
-    /// Idempotent; refuses on a dirty tree (outside its own edit surface).
+    /// CHANGELOG section header matching the file's own heading style.
+    /// Leaves everything uncommitted for review. Idempotent; refuses on a
+    /// dirty tree (outside its own edit surface).
+    ///
+    /// Works with either layout: `[workspace.package] version` inherited by
+    /// members, or `[workspace]` plus a root `[package] version` where members
+    /// pin their own. In the latter, only crates already sharing the root
+    /// version move.
     #[command(verbatim_doc_comment)]
     Prepare(PrepareArgs),
 

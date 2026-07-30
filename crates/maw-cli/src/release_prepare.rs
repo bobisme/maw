@@ -5,16 +5,31 @@
 //! caught in PR CI (via `just release-preflight` + the publish dry-run
 //! workflow) rather than on tag day.
 //!
+//! Two workspace layouts are supported (see [`VersionMode`]):
+//!
+//!   * **Inherited** — `[workspace.package] version = "…"` with members on
+//!     `version.workspace = true`. This is maw's own layout.
+//!   * **Single** — `[workspace]` plus a root `[package] version = "…"`, with
+//!     members free to pin their own versions independently (sigil's layout).
+//!     Only crates already sharing the root version are treated as lockstep
+//!     participants; a member deliberately parked at its own version (an
+//!     unpublished `0.0.0` helper, say) is left alone by both commands.
+//!
 //! `prepare vX.Y.Z`:
-//!   1. Lockstep version bump — the `[workspace.package]` version plus every
-//!      internal path-dep `version = "…"` string across every `Cargo.toml`
-//!      (outside `target/` and `.maw/`). `version.workspace = true` handles the
-//!      crate versions themselves; these path-dep strings do not and have to be
-//!      moved by hand historically (a ~19-string global sed).
+//!   1. Lockstep version bump — the workspace version plus every internal
+//!      path-dep `version = "…"` string across every `Cargo.toml` (outside
+//!      `target/` and `.maw/`). In Inherited mode `version.workspace = true`
+//!      handles the crate versions themselves; these path-dep strings do not
+//!      and had to be moved by hand historically (a ~19-string global sed). In
+//!      Single mode every `[package]` version and path-dep string currently
+//!      equal to the old root version moves in lockstep; anything else is
+//!      treated as deliberate and untouched.
 //!   2. Regenerate `Cargo.lock` (`cargo update --workspace` — the cheap path;
 //!      it rewrites only the workspace members, no external dep churn).
-//!   3. Scaffold a `## vX.Y.Z (YYYY-MM-DD)` CHANGELOG.md header if absent
-//!      (content stays human-written — no notes are generated from commits).
+//!   3. Scaffold a CHANGELOG.md version header if absent, matching that file's
+//!      own heading convention — maw's `## vX.Y.Z (YYYY-MM-DD)` or Keep a
+//!      Changelog's `## [X.Y.Z] — YYYY-MM-DD` (content stays human-written —
+//!      no notes are generated from commits).
 //!   4. Check README.md for stale version references (warn only).
 //!
 //! Everything is left UNCOMMITTED for review. `prepare` is idempotent: a second
@@ -69,7 +84,12 @@ pub struct PreflightArgs {
 /// outside prepare's own edit surface, or a filesystem / `cargo` step fails.
 pub fn run_prepare(args: &PrepareArgs) -> Result<()> {
     let version = normalize_version(&args.version)?;
-    let root = find_workspace_root()?;
+    let ws = find_workspace_root()?;
+    let root = ws.path.clone();
+    // The version being moved away from. In Single mode it identifies which
+    // version strings are lockstep participants, so it has to be read before
+    // anything is rewritten.
+    let old_version = read_workspace_version(&ws)?;
 
     // Refuse on a dirty tree, tolerating only prepare's own edit surface so a
     // re-run after a partial prepare still proceeds.
@@ -93,7 +113,7 @@ pub fn run_prepare(args: &PrepareArgs) -> Result<()> {
     // 1. Lockstep version bump across every Cargo.toml.
     for toml in &tomls {
         let is_root = toml == &root.join("Cargo.toml");
-        bumped += bump_cargo_toml(toml, &version, is_root)?;
+        bumped += bump_cargo_toml(toml, &version, is_root, ws.mode, &old_version)?;
     }
 
     // 2. Regenerate Cargo.lock (workspace members only — cheap, no external
@@ -154,8 +174,9 @@ pub fn run_prepare(args: &PrepareArgs) -> Result<()> {
 /// Returns an error listing every problem found (version skew naming the
 /// offending file, a missing CHANGELOG section, or a dirty tree).
 pub fn run_preflight(args: &PreflightArgs) -> Result<()> {
-    let root = find_workspace_root()?;
-    let workspace_version = read_workspace_version(&root)?;
+    let ws = find_workspace_root()?;
+    let root = ws.path.clone();
+    let workspace_version = read_workspace_version(&ws)?;
 
     // If a target was given, the workspace must already be at it.
     let target = match &args.version {
@@ -174,8 +195,9 @@ pub fn run_preflight(args: &PreflightArgs) -> Result<()> {
         ));
     }
 
-    // Version-consistency: every internal path-dep string == workspace version.
-    for skew in scan_version_skew(&root, &workspace_version)? {
+    // Version-consistency across manifests (what this means depends on mode —
+    // see `scan_version_skew`).
+    for skew in scan_version_skew(&root, &workspace_version, ws.mode)? {
         problems.push(skew);
     }
 
@@ -188,8 +210,9 @@ pub fn run_preflight(args: &PreflightArgs) -> Result<()> {
     let want_section = target.as_ref().unwrap_or(&workspace_version);
     if !changelog_has_section(&root, want_section)? {
         problems.push(format!(
-            "CHANGELOG.md has no `## v{want_section}` section \
-             (run `maw release prepare v{want_section}` to scaffold one)"
+            "CHANGELOG.md has no section for v{want_section} \
+             (a `## v{want_section}` or `## [{want_section}]` heading; \
+             run `maw release prepare v{want_section}` to scaffold one)"
         ));
     }
 
@@ -248,48 +271,149 @@ fn normalize_version(raw: &str) -> Result<String> {
     Ok(v.to_string())
 }
 
-/// Ascend from the current directory to the nearest `Cargo.toml` that declares
-/// `[workspace.package]` — the maw workspace root.
-fn find_workspace_root() -> Result<PathBuf> {
-    let start = std::env::current_dir().context("cannot determine current directory")?;
-    let mut dir = start.as_path();
-    loop {
-        let candidate = dir.join("Cargo.toml");
-        if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).unwrap_or_default();
-            if text.contains("[workspace.package]") {
-                return Ok(dir.to_path_buf());
-            }
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => bail!(
-                "no workspace root found: walked up from {} without finding a Cargo.toml with a \
-                 [workspace.package] section",
-                start.display()
-            ),
+/// How a workspace declares the version a release moves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VersionMode {
+    /// `[workspace.package] version = "…"`, inherited by members through
+    /// `version.workspace = true`. Every member moves in lockstep by
+    /// construction. (maw's own layout.)
+    Inherited,
+    /// `[workspace]` plus a root `[package] version = "…"`. Members declare
+    /// their own versions and need not share the root's.
+    Single,
+}
+
+impl VersionMode {
+    /// The manifest table the workspace version lives in, for error text.
+    const fn version_location(self) -> &'static str {
+        match self {
+            Self::Inherited => "[workspace.package]",
+            Self::Single => "[package]",
         }
     }
 }
 
-/// Read the `version` value from the root `Cargo.toml`'s `[workspace.package]`.
-fn read_workspace_version(root: &Path) -> Result<String> {
-    let path = root.join("Cargo.toml");
+/// A located workspace root and how it declares its version.
+#[derive(Debug)]
+struct WorkspaceRoot {
+    path: PathBuf,
+    mode: VersionMode,
+}
+
+/// Classify a `Cargo.toml` as a workspace root, if it is one.
+///
+/// Returns `None` for a member manifest (no `[workspace]` table) and for a
+/// manifest that parses but declares no usable version. A manifest that fails
+/// to parse is not a root as far as we are concerned — cargo will complain
+/// about it far more usefully than we could.
+fn classify_root(manifest: &Path) -> Option<VersionMode> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let value: toml::Value = text.parse().ok()?;
+    let table = value.as_table()?;
+    let workspace = table.get("workspace")?.as_table()?;
+    if workspace
+        .get("package")
+        .and_then(|p| p.as_table())
+        .and_then(|p| p.get("version"))
+        .and_then(toml::Value::as_str)
+        .is_some()
+    {
+        return Some(VersionMode::Inherited);
+    }
+    if root_package_version(table).is_some() {
+        return Some(VersionMode::Single);
+    }
+    None
+}
+
+/// The `[package] version = "…"` of an already-parsed manifest table.
+fn root_package_version(table: &toml::Table) -> Option<String> {
+    table
+        .get("package")?
+        .as_table()?
+        .get("version")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Ascend from the current directory to the nearest `Cargo.toml` that is a
+/// workspace root — either layout (see [`VersionMode`]).
+///
+/// A manifest with a `[workspace]` table always wins over a manifest that only
+/// has `[package]`: running from inside a member crate must find the enclosing
+/// workspace, not the member. A `[package]`-only manifest is accepted as a
+/// last resort so a standalone single-crate repo still works.
+fn find_workspace_root() -> Result<WorkspaceRoot> {
+    let start = std::env::current_dir().context("cannot determine current directory")?;
+    find_workspace_root_from(&start)
+}
+
+fn find_workspace_root_from(start: &Path) -> Result<WorkspaceRoot> {
+    let mut dir = Some(start);
+    // First `[package]`-only manifest seen on the way up, used only if no
+    // `[workspace]` manifest exists above it.
+    let mut standalone: Option<PathBuf> = None;
+
+    while let Some(current) = dir {
+        let candidate = current.join("Cargo.toml");
+        if candidate.is_file() {
+            if let Some(mode) = classify_root(&candidate) {
+                return Ok(WorkspaceRoot {
+                    path: current.to_path_buf(),
+                    mode,
+                });
+            }
+            if standalone.is_none()
+                && let Ok(text) = std::fs::read_to_string(&candidate)
+                && let Ok(value) = text.parse::<toml::Value>()
+                && let Some(table) = value.as_table()
+                && !table.contains_key("workspace")
+                && root_package_version(table).is_some()
+            {
+                standalone = Some(current.to_path_buf());
+            }
+        }
+        dir = current.parent();
+    }
+
+    if let Some(path) = standalone {
+        return Ok(WorkspaceRoot {
+            path,
+            mode: VersionMode::Single,
+        });
+    }
+
+    bail!(
+        "no cargo workspace root found: walked up from {} without finding a Cargo.toml declaring \
+         a version.\n  \
+         Expected one of:\n    \
+         [workspace.package] version = \"…\"   (members use version.workspace = true)\n    \
+         [workspace] + [package] version = \"…\"  (members pin their own versions)\n  \
+         Run `maw release prepare` from inside the cargo workspace, or add a version to the root \
+         manifest.",
+        start.display()
+    )
+}
+
+/// Read the workspace version from the root `Cargo.toml`, per its mode.
+fn read_workspace_version(root: &WorkspaceRoot) -> Result<String> {
+    let path = root.path.join("Cargo.toml");
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let mut in_ws_pkg = false;
+    let want_section = root.mode.version_location();
+    let mut in_section = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_ws_pkg = trimmed == "[workspace.package]";
+            in_section = trimmed == want_section;
             continue;
         }
-        if in_ws_pkg && let Some(val) = parse_quoted_assignment(trimmed, "version") {
+        if in_section && let Some(val) = parse_quoted_assignment(trimmed, "version") {
             return Ok(val);
         }
     }
     bail!(
-        "no `version = \"…\"` under [workspace.package] in {}",
+        "no `version = \"…\"` under {want_section} in {}",
         path.display()
     )
 }
@@ -329,39 +453,53 @@ fn collect_cargo_tomls(root: &Path) -> Vec<PathBuf> {
 /// Bump one `Cargo.toml` in place. When `is_root`, also set the
 /// `[workspace.package]` version. Returns the number of version strings
 /// changed.
-fn bump_cargo_toml(path: &Path, version: &str, is_root: bool) -> Result<usize> {
+///
+/// In [`VersionMode::Single`] the root version is a `[package]` version like
+/// any member's, so lockstep membership cannot be read off the manifest
+/// structure. It is inferred instead: a `[package]` version or internal
+/// path-dep string whose current value is `old_version` was moving with the
+/// workspace and keeps moving; every other value is deliberate and is left
+/// alone. External dependency versions are never touched in either mode.
+fn bump_cargo_toml(
+    path: &Path,
+    version: &str,
+    is_root: bool,
+    mode: VersionMode,
+    old_version: &str,
+) -> Result<usize> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut changed = 0usize;
-    let mut in_ws_pkg = false;
+    let mut section = String::new();
     let mut out = String::with_capacity(text.len());
 
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_ws_pkg = trimmed == "[workspace.package]";
+            section = trimmed.to_string();
             out.push_str(line);
             out.push('\n');
             continue;
         }
 
-        // Root workspace version line.
-        if is_root
-            && in_ws_pkg
-            && parse_quoted_assignment(trimmed, "version").is_some()
-            && let Some((rewritten, did)) = replace_version_value(line, version)
-        {
-            changed += usize::from(did);
-            out.push_str(&rewritten);
-            out.push('\n');
-            continue;
-        }
-
         // Internal path-dep line: has both `path = "…"` and `version = "…"`.
-        if line.contains("path = \"")
-            && line.contains("version = \"")
-            && let Some((rewritten, did)) = replace_version_value(line, version)
-        {
+        let is_path_dep = line.contains("path = \"") && line.contains("version = \"");
+        let is_bumpable = match mode {
+            VersionMode::Inherited => {
+                let is_ws_version = is_root
+                    && section == "[workspace.package]"
+                    && parse_quoted_assignment(trimmed, "version").is_some();
+                is_ws_version || is_path_dep
+            }
+            VersionMode::Single => {
+                let is_pkg_version =
+                    section == "[package]" && parse_quoted_assignment(trimmed, "version").is_some();
+                (is_pkg_version || is_path_dep)
+                    && extract_version_value(line).as_deref() == Some(old_version)
+            }
+        };
+
+        if is_bumpable && let Some((rewritten, did)) = replace_version_value(line, version) {
             changed += usize::from(did);
             out.push_str(&rewritten);
             out.push('\n');
@@ -447,10 +585,10 @@ fn regenerate_lock(root: &Path, _version: &str) -> Result<bool> {
     Ok(before != after)
 }
 
-/// Every workspace member package in `Cargo.lock` must be pinned at the
+/// Every lockstep workspace member in `Cargo.lock` must be pinned at the
 /// workspace version. Returns a skew message per offender.
 fn scan_lock_skew(root: &Path, version: &str) -> Result<Vec<String>> {
-    let members = workspace_member_names(root)?;
+    let members = lockstep_member_names(root, version)?;
     let lock_path = root.join("Cargo.lock");
     let Ok(text) = std::fs::read_to_string(&lock_path) else {
         return Ok(vec![format!(
@@ -480,36 +618,100 @@ fn scan_lock_skew(root: &Path, version: &str) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// Collect the `[package] name` of every workspace member (each member
-/// `Cargo.toml`'s package name).
-fn workspace_member_names(root: &Path) -> Result<std::collections::HashSet<String>> {
+/// Collect the `[package] name` of every workspace member that moves with the
+/// workspace version — one that inherits it (`version.workspace = true`) or
+/// already declares exactly it.
+///
+/// A member pinned at some other version (an unpublished `0.0.0` helper crate,
+/// say) is deliberately off-lockstep and must not be reported as skew.
+fn lockstep_member_names(root: &Path, version: &str) -> Result<std::collections::HashSet<String>> {
     let mut names = std::collections::HashSet::new();
     for toml in collect_cargo_tomls(root) {
         let text = std::fs::read_to_string(&toml).unwrap_or_default();
-        let mut in_pkg = false;
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_pkg = trimmed == "[package]";
-                continue;
-            }
-            if in_pkg && let Some(name) = parse_quoted_assignment(trimmed, "name") {
-                names.insert(name);
-                break;
-            }
+        let Some(name) = package_field(&text, "name") else {
+            continue;
+        };
+        let lockstep = match package_version_decl(&text) {
+            Some(PackageVersion::Inherited) => true,
+            Some(PackageVersion::Literal(v)) => v == version,
+            None => false,
+        };
+        if lockstep {
+            names.insert(name);
         }
     }
     Ok(names)
+}
+
+/// How a manifest's `[package]` declares its version.
+enum PackageVersion {
+    /// `version.workspace = true`
+    Inherited,
+    /// `version = "…"`
+    Literal(String),
+}
+
+/// Read the `[package]` version declaration out of a manifest's text.
+fn package_version_decl(text: &str) -> Option<PackageVersion> {
+    let mut in_pkg = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_pkg = trimmed == "[package]";
+            continue;
+        }
+        if !in_pkg {
+            continue;
+        }
+        if let Some(v) = parse_quoted_assignment(trimmed, "version") {
+            return Some(PackageVersion::Literal(v));
+        }
+        if trimmed.replace(' ', "") == "version.workspace=true" {
+            return Some(PackageVersion::Inherited);
+        }
+    }
+    None
+}
+
+/// Read a quoted `[package]` field (e.g. `name`) out of a manifest's text.
+fn package_field(text: &str, key: &str) -> Option<String> {
+    let mut in_pkg = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_pkg = trimmed == "[package]";
+            continue;
+        }
+        if in_pkg && let Some(val) = parse_quoted_assignment(trimmed, key) {
+            return Some(val);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
 // Version-skew scan (the preflight core)
 // ---------------------------------------------------------------------------
 
-/// Scan every `Cargo.toml` for internal path-dep `version` strings (and the
-/// root `[workspace.package]` version) that disagree with `version`. Returns a
-/// message naming `file:line` for each offender.
-fn scan_version_skew(root: &Path, version: &str) -> Result<Vec<String>> {
+/// Scan every `Cargo.toml` for version strings that are provably inconsistent.
+///
+/// What counts as inconsistent depends on the layout:
+///
+/// * [`VersionMode::Inherited`] — every member shares the workspace version by
+///   construction, so any internal path-dep string (and the
+///   `[workspace.package]` version itself) that disagrees with it is skew.
+/// * [`VersionMode::Single`] — members hold independent versions, so a
+///   path-dep string disagreeing with the *workspace* version proves nothing.
+///   What it must agree with is the version of the crate it points at; that
+///   mismatch would break `cargo publish` and is the check worth making.
+fn scan_version_skew(root: &Path, version: &str, mode: VersionMode) -> Result<Vec<String>> {
+    match mode {
+        VersionMode::Inherited => scan_version_skew_inherited(root, version),
+        VersionMode::Single => scan_path_dep_target_skew(root),
+    }
+}
+
+fn scan_version_skew_inherited(root: &Path, version: &str) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let root_toml = root.join("Cargo.toml");
     for toml in collect_cargo_tomls(root) {
@@ -550,11 +752,61 @@ fn scan_version_skew(root: &Path, version: &str) -> Result<Vec<String>> {
     Ok(problems)
 }
 
+/// Every internal path-dep `version = "…"` must match the version declared by
+/// the crate at that `path`. Layout-independent, but only used for
+/// [`VersionMode::Single`] — the Inherited scan already subsumes it.
+fn scan_path_dep_target_skew(root: &Path) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
+    for toml in collect_cargo_tomls(root) {
+        let text = std::fs::read_to_string(&toml)
+            .with_context(|| format!("reading {}", toml.display()))?;
+        let rel = toml
+            .strip_prefix(root)
+            .unwrap_or(&toml)
+            .display()
+            .to_string();
+        let Some(dir) = toml.parent() else { continue };
+        for (idx, line) in text.lines().enumerate() {
+            let (Some(dep_path), Some(pinned)) =
+                (extract_path_value(line), extract_version_value(line))
+            else {
+                continue;
+            };
+            let target = dir.join(&dep_path).join("Cargo.toml");
+            let Ok(target_text) = std::fs::read_to_string(&target) else {
+                continue;
+            };
+            // An inheriting target is by definition at the workspace version,
+            // which the caller has already verified.
+            if let Some(PackageVersion::Literal(actual)) = package_version_decl(&target_text)
+                && actual != pinned
+            {
+                problems.push(format!(
+                    "version skew: {rel}:{} path-dep pins \"{pinned}\" but {dep_path} declares \
+                     \"{actual}\"",
+                    idx + 1
+                ));
+            }
+        }
+    }
+    Ok(problems)
+}
+
 /// Extract the first `version = "…"` value on a line.
 fn extract_version_value(line: &str) -> Option<String> {
-    let key = "version = \"";
-    let start = line.find(key)?;
-    let rest = &line[start + key.len()..];
+    extract_quoted_value(line, "version")
+}
+
+/// Extract the first `path = "…"` value on a line.
+fn extract_path_value(line: &str) -> Option<String> {
+    extract_quoted_value(line, "path")
+}
+
+/// Extract the first `{key} = "…"` value anywhere on a line.
+fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key} = \"");
+    let start = line.find(&needle)?;
+    let rest = &line[start + needle.len()..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }
@@ -576,20 +828,104 @@ fn changelog_has_section(root: &Path, version: &str) -> Result<bool> {
     Ok(has_section_header(&text, version))
 }
 
-fn has_section_header(text: &str, version: &str) -> bool {
-    let want = format!("v{version}");
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("## ")
-            && rest.split_whitespace().next() == Some(want.as_str())
-        {
-            return true;
-        }
+/// The version a `## ` heading announces, if any.
+///
+/// Both common conventions are recognised, since maw runs in repos it does not
+/// own: maw's own `## v1.0.0-pre.12 — theme (date)` and Keep a Changelog's
+/// `## [0.27.0] — date — title`. A bare `## 0.27.0` counts too. Non-version
+/// headings (`## [Unreleased]`) yield `None`.
+fn heading_version(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("## ")?;
+    let token = rest.split_whitespace().next()?;
+    let token = token
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .unwrap_or(token);
+    let token = token.strip_prefix('v').unwrap_or(token);
+    // A version starts with a digit; `Unreleased` and friends do not.
+    if token.starts_with(|c: char| c.is_ascii_digit()) {
+        Some(token)
+    } else {
+        None
     }
-    false
 }
 
-/// Insert a `## v{version} (YYYY-MM-DD)` header above the first existing
-/// `## v…` section if absent. Returns whether it added one.
+fn has_section_header(text: &str, version: &str) -> bool {
+    text.lines().any(|l| heading_version(l) == Some(version))
+}
+
+/// Does `s` have the shape `YYYY-MM-DD`?
+fn looks_like_iso_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 3
+        && [4usize, 2, 2]
+            .iter()
+            .zip(&parts)
+            .all(|(want, p)| p.len() == *want && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// How a CHANGELOG writes its version headings, so a scaffolded section looks
+/// like the ones around it rather than importing maw's house style.
+#[derive(Clone, Copy)]
+struct ChangelogStyle {
+    bracketed: bool,
+    v_prefix: bool,
+    dash_date: bool,
+}
+
+impl ChangelogStyle {
+    /// maw's own convention, used when a CHANGELOG has no versioned heading to
+    /// learn from.
+    const MAW: Self = Self {
+        bracketed: false,
+        v_prefix: true,
+        dash_date: false,
+    };
+
+    /// Infer the style from the first versioned heading in `text`.
+    fn detect(text: &str) -> Self {
+        for line in text.lines() {
+            if heading_version(line).is_none() {
+                continue;
+            }
+            let rest = line.strip_prefix("## ").unwrap_or(line);
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            // `— 2026-07-29` is a dash-delimited date; maw's own
+            // `— theme (2026-07-11)` is a dash-delimited *theme* with a
+            // parenthesised date, so the dash alone does not decide it.
+            let after = rest[token.len()..].trim_start();
+            let dash_date = after
+                .strip_prefix(['—', '-'])
+                .map(str::trim_start)
+                .and_then(|s| s.split_whitespace().next())
+                .is_some_and(looks_like_iso_date);
+            return Self {
+                bracketed: token.starts_with('['),
+                v_prefix: token.trim_start_matches('[').starts_with('v'),
+                dash_date,
+            };
+        }
+        Self::MAW
+    }
+
+    fn header(self, version: &str, date: &str) -> String {
+        let v = if self.v_prefix {
+            format!("v{version}")
+        } else {
+            version.to_string()
+        };
+        let v = if self.bracketed { format!("[{v}]") } else { v };
+        if self.dash_date {
+            format!("## {v} — {date}")
+        } else {
+            format!("## {v} ({date})")
+        }
+    }
+}
+
+/// Insert a version header above the first existing versioned section if
+/// absent, matching that CHANGELOG's own heading style. Returns whether it
+/// added one.
 fn scaffold_changelog(root: &Path, version: &str) -> Result<bool> {
     let path = changelog_path(root);
     let text =
@@ -598,14 +934,23 @@ fn scaffold_changelog(root: &Path, version: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let header = format!("## v{version} ({})", today_iso());
+    let header = ChangelogStyle::detect(&text).header(version, &today_iso());
     let block = format!("{header}\n\n<!-- release notes: fill in before tagging -->\n\n");
 
-    // Insert before the first existing `## ` section; else append.
+    // Insert above the newest existing release section, leaving any leading
+    // `## [Unreleased]` where it is. Fall back to the first `## ` heading, then
+    // to appending.
+    let anchor = |line: &str| heading_version(line).is_some();
+    let has_versioned = text.lines().any(anchor);
     let mut out = String::with_capacity(text.len() + block.len());
     let mut inserted = false;
     for line in text.lines() {
-        if !inserted && line.starts_with("## ") {
+        let is_anchor = if has_versioned {
+            anchor(line)
+        } else {
+            line.starts_with("## ")
+        };
+        if !inserted && is_anchor {
             out.push_str(&block);
             inserted = true;
         }
@@ -774,8 +1119,275 @@ mod tests {
     }
 
     #[test]
+    fn keep_a_changelog_headings_are_recognised() {
+        // sigil's convention.
+        let text = "# Changelog\n\n## [Unreleased]\n\n## [0.27.0] — 2026-07-29 — Layout\n";
+        assert!(has_section_header(text, "0.27.0"));
+        assert!(!has_section_header(text, "0.28.0"));
+        // `[Unreleased]` is not a version.
+        assert_eq!(heading_version("## [Unreleased]"), None);
+        // Prefixes still must not false-match.
+        assert!(!has_section_header(
+            "## [1.0.0-pre.1] — x\n",
+            "1.0.0-pre.11"
+        ));
+        // Bare, unbracketed versions count too.
+        assert!(has_section_header("## 2.1.0 (2026-01-01)\n", "2.1.0"));
+    }
+
+    #[test]
+    fn scaffold_matches_the_files_own_heading_style() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("CHANGELOG.md");
+
+        // Keep a Changelog: bracketed, dash date, section goes under
+        // `## [Unreleased]` but above the newest release.
+        std::fs::write(
+            &path,
+            "# Changelog\n\n## [Unreleased]\n\n## [0.27.0] — 2026-07-29 — Layout\n\nnotes\n",
+        )
+        .unwrap();
+        assert!(scaffold_changelog(tmp.path(), "0.28.0").unwrap());
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            out.contains(&format!("## [0.28.0] — {}", today_iso())),
+            "{out}"
+        );
+        let unreleased = out.find("## [Unreleased]").unwrap();
+        let new_section = out.find("## [0.28.0]").unwrap();
+        let previous = out.find("## [0.27.0]").unwrap();
+        assert!(unreleased < new_section && new_section < previous, "{out}");
+        // Idempotent.
+        assert!(!scaffold_changelog(tmp.path(), "0.28.0").unwrap());
+
+        // maw's own style is preserved.
+        std::fs::write(
+            &path,
+            "# Changelog\n\n## v1.0.0-pre.12 — theme (2026-07-11)\n",
+        )
+        .unwrap();
+        assert!(scaffold_changelog(tmp.path(), "1.0.0-pre.13").unwrap());
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            out.contains(&format!("## v1.0.0-pre.13 ({})", today_iso())),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn civil_from_days_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace-layout detection (bn-3oae)
+    // -----------------------------------------------------------------------
+
+    /// Write `contents` to `dir/rel`, creating parent directories.
+    fn write_at(dir: &Path, rel: &str, contents: &str) -> PathBuf {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// maw's own layout: `[workspace.package]` with inheriting members.
+    fn inherited_workspace(root: &Path) {
+        write_at(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n\
+             [workspace.package]\nversion = \"1.0.0-pre.12\"\n",
+        );
+        write_at(
+            root,
+            "crates/maw-git/Cargo.toml",
+            "[package]\nname = \"maw-git\"\nversion.workspace = true\n",
+        );
+        write_at(
+            root,
+            "crates/maw-cli/Cargo.toml",
+            "[package]\nname = \"maw-cli\"\nversion.workspace = true\n\n\
+             [dependencies]\n\
+             maw-git = { path = \"../maw-git\", version = \"1.0.0-pre.12\" }\n\
+             serde = { version = \"1\" }\n",
+        );
+    }
+
+    /// sigil's layout: `[workspace]` + root `[package]`, member off-lockstep.
+    fn single_workspace(root: &Path) {
+        write_at(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\".\", \"crates/sigil-browser\"]\n\n\
+             [package]\nname = \"sigil\"\nversion = \"0.27.0\"\n\n\
+             [dependencies]\n\
+             sigil-browser = { path = \"crates/sigil-browser\" }\n\
+             clap = { version = \"0.27.0\" }\n",
+        );
+        write_at(
+            root,
+            "crates/sigil-browser/Cargo.toml",
+            "[package]\nname = \"sigil-browser\"\nversion = \"0.0.0\"\n",
+        );
+    }
+
+    #[test]
+    fn detects_inherited_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        inherited_workspace(tmp.path());
+        let ws = find_workspace_root_from(tmp.path()).unwrap();
+        assert_eq!(ws.mode, VersionMode::Inherited);
+        assert_eq!(read_workspace_version(&ws).unwrap(), "1.0.0-pre.12");
+    }
+
+    #[test]
+    fn detects_single_version_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        let ws = find_workspace_root_from(tmp.path()).unwrap();
+        assert_eq!(ws.mode, VersionMode::Single);
+        assert_eq!(read_workspace_version(&ws).unwrap(), "0.27.0");
+    }
+
+    #[test]
+    fn ascends_from_member_to_enclosing_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        // A member that pins its own version must not be mistaken for the root.
+        let ws = find_workspace_root_from(&tmp.path().join("crates/sigil-browser")).unwrap();
+        assert_eq!(ws.path, tmp.path());
+        assert_eq!(ws.mode, VersionMode::Single);
+    }
+
+    #[test]
+    fn standalone_crate_is_a_last_resort_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_at(
+            tmp.path(),
+            "Cargo.toml",
+            "[package]\nname = \"solo\"\nversion = \"0.3.0\"\n",
+        );
+        let ws = find_workspace_root_from(tmp.path()).unwrap();
+        assert_eq!(ws.mode, VersionMode::Single);
+        assert_eq!(read_workspace_version(&ws).unwrap(), "0.3.0");
+    }
+
+    #[test]
+    fn commented_out_workspace_package_is_not_a_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_at(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = []\n# [workspace.package]\n# version = \"9.9.9\"\n",
+        );
+        // No version anywhere: not a root, and the walk reports it clearly.
+        let err = find_workspace_root_from(tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no cargo workspace root found"), "{err}");
+        assert!(err.contains("[workspace.package]"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-mode bump / skew semantics (bn-3oae)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_mode_bump_moves_only_lockstep_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        let root = tmp.path();
+
+        let root_toml = root.join("Cargo.toml");
+        let member_toml = root.join("crates/sigil-browser/Cargo.toml");
+        let changed = bump_cargo_toml(&root_toml, "0.28.0", true, VersionMode::Single, "0.27.0")
+            .unwrap()
+            + bump_cargo_toml(&member_toml, "0.28.0", false, VersionMode::Single, "0.27.0")
+                .unwrap();
+        assert_eq!(changed, 1, "only the root package version moves");
+
+        let root_text = std::fs::read_to_string(&root_toml).unwrap();
+        assert!(root_text.contains("version = \"0.28.0\""));
+        // An external dep that happened to sit at the old version is untouched.
+        assert!(
+            root_text.contains("clap = { version = \"0.27.0\" }"),
+            "{root_text}"
+        );
+        // The deliberately off-lockstep member is untouched.
+        let member_text = std::fs::read_to_string(&member_toml).unwrap();
+        assert!(member_text.contains("version = \"0.0.0\""), "{member_text}");
+    }
+
+    #[test]
+    fn single_mode_bump_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        let root_toml = tmp.path().join("Cargo.toml");
+        bump_cargo_toml(&root_toml, "0.28.0", true, VersionMode::Single, "0.27.0").unwrap();
+        let after_first = std::fs::read_to_string(&root_toml).unwrap();
+        // Second run reads the new version as `old` — a no-op.
+        let changed =
+            bump_cargo_toml(&root_toml, "0.28.0", true, VersionMode::Single, "0.28.0").unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(std::fs::read_to_string(&root_toml).unwrap(), after_first);
+    }
+
+    #[test]
+    fn off_lockstep_member_is_not_skew() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        // sigil-browser at 0.0.0 must not be reported against the root version.
+        let members = lockstep_member_names(tmp.path(), "0.27.0").unwrap();
+        assert!(members.contains("sigil"));
+        assert!(!members.contains("sigil-browser"));
+        assert!(
+            scan_version_skew(tmp.path(), "0.27.0", VersionMode::Single)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn single_mode_flags_path_dep_disagreeing_with_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        single_workspace(tmp.path());
+        // Pin the path-dep at a version the target does not declare.
+        write_at(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\".\", \"crates/sigil-browser\"]\n\n\
+             [package]\nname = \"sigil\"\nversion = \"0.27.0\"\n\n\
+             [dependencies]\n\
+             sigil-browser = { path = \"crates/sigil-browser\", version = \"0.1.0\" }\n",
+        );
+        let problems = scan_version_skew(tmp.path(), "0.27.0", VersionMode::Single).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("pins \"0.1.0\""), "{problems:?}");
+        assert!(problems[0].contains("\"0.0.0\""), "{problems:?}");
+    }
+
+    #[test]
+    fn inherited_mode_still_flags_path_dep_skew() {
+        let tmp = tempfile::tempdir().unwrap();
+        inherited_workspace(tmp.path());
+        // Behaviour maw itself depends on: a stale path-dep string is skew.
+        write_at(
+            tmp.path(),
+            "crates/maw-cli/Cargo.toml",
+            "[package]\nname = \"maw-cli\"\nversion.workspace = true\n\n\
+             [dependencies]\n\
+             maw-git = { path = \"../maw-git\", version = \"1.0.0-pre.11\" }\n",
+        );
+        let problems =
+            scan_version_skew(tmp.path(), "1.0.0-pre.12", VersionMode::Inherited).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("internal path-dep"), "{problems:?}");
+        // Inheriting members are lockstep regardless of what they declare.
+        let members = lockstep_member_names(tmp.path(), "1.0.0-pre.12").unwrap();
+        assert!(members.contains("maw-git") && members.contains("maw-cli"));
     }
 }
