@@ -504,6 +504,7 @@ pub fn run(
     workspace: &str,
     paths: &[String],
     keep: &[String],
+    accept_current: bool,
     list: bool,
     format: OutputFormat,
 ) -> Result<()> {
@@ -549,8 +550,17 @@ pub fn run(
     if sidecar_path.exists() {
         match super::resolve_structured::read_conflict_tree_sidecar(&root, workspace) {
             Some(tree) => {
-                return super::resolve_structured::run_structured(
-                    &root, workspace, &ws_path, paths, keep, list, format, tree,
+                return super::resolve_structured::run_structured_with_state(
+                    &root,
+                    workspace,
+                    &ws_path,
+                    paths,
+                    keep,
+                    accept_current,
+                    list,
+                    format,
+                    tree,
+                    &effective.placeholder_paths,
                 )
                 .map(|_| ());
             }
@@ -630,8 +640,17 @@ pub fn run(
                     if let Some(tree) =
                         super::resolve_structured::read_conflict_tree_sidecar(&root, workspace)
                     {
-                        return super::resolve_structured::run_structured(
-                            &root, workspace, &ws_path, paths, keep, list, format, tree,
+                        return super::resolve_structured::run_structured_with_state(
+                            &root,
+                            workspace,
+                            &ws_path,
+                            paths,
+                            keep,
+                            accept_current,
+                            list,
+                            format,
+                            tree,
+                            &effective.placeholder_paths,
                         )
                         .map(|_| ());
                     }
@@ -639,6 +658,17 @@ pub fn run(
                     // the list/bail below as a safety net.
                 }
                 ReconstructionResult::ParseFailure(reason) => {
+                    if accept_current {
+                        return super::resolve_structured::run_accept_current_placeholders(
+                            &root,
+                            workspace,
+                            &ws_path,
+                            paths,
+                            format,
+                            &effective.placeholder_paths,
+                        )
+                        .map(|_| ());
+                    }
                     // Header parsing failed — emit the graceful refusal with
                     // corrected guidance (no deprecated --rebase, no sync
                     // suggestion that can't regenerate the sidecar).
@@ -681,6 +711,13 @@ pub fn run(
 
     if list {
         return list_conflicts(&ws_path, workspace, paths, format);
+    }
+
+    if accept_current {
+        bail!(
+            "Workspace '{workspace}' has no structured conflict metadata to accept.\n  \
+             Check: maw ws resolve {workspace} --list"
+        );
     }
 
     if keep.is_empty() {
@@ -875,7 +912,12 @@ pub fn run(
             println!("Nothing to resolve.");
         }
         if conflicts_cleared {
-            println!("All conflicts resolved — workspace is ready for merge.");
+            println!("All conflict markers resolved.");
+            println!(
+                "IMPORTANT: conflict resolution does not verify the build or tests.\n  \
+                 Next: run the project's checks in workspace '{workspace}'.\n  \
+                 Then: maw ws merge {workspace} --into default --check"
+            );
         } else if !remaining_conflicts.is_empty() {
             println!(
                 "{} file(s) still have conflict markers.",
@@ -1200,7 +1242,7 @@ fn find_genuine_working_copy_conflicts(ws_path: &Path) -> Result<Vec<PathBuf>> {
 /// Set of paths in `ws_path` that differ from HEAD (modified/added/untracked),
 /// i.e. uncommitted working-copy changes. Returns `None` if the repo can't be
 /// opened or status can't be computed.
-fn dirty_paths_vs_head(ws_path: &Path) -> Option<std::collections::BTreeSet<PathBuf>> {
+pub(super) fn dirty_paths_vs_head(ws_path: &Path) -> Option<std::collections::BTreeSet<PathBuf>> {
     let repo = maw_git::GixRepo::open(ws_path).ok()?;
     let mut dirty: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
 

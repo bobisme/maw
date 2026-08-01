@@ -1520,7 +1520,9 @@ pub enum WorkspaceCommands {
     ///
     /// Multiple --keep flags can be combined for per-file resolution.
     /// Per-block resolution via `cf-N=NAME` is not currently supported.
-    /// Use --list to see conflicted files.
+    /// Use --list to see conflicted files. If you resolved a file manually,
+    /// use --accept-current to preserve its current bytes instead of choosing
+    /// a recorded side.
     ///
     /// Examples:
     ///   maw ws resolve default --list                          # list all conflicts
@@ -1531,6 +1533,7 @@ pub enum WorkspaceCommands {
     ///   maw ws resolve default --keep both                     # keep both sides concatenated
     ///   maw ws resolve default --keep union                    # keep both sides, deduped
     ///   maw ws resolve default --keep src/main.rs=bn-2sc3      # resolve one file
+    ///   maw ws resolve default --accept-current -- src/main.rs # accept a manual resolution
     #[command(verbatim_doc_comment)]
     Resolve {
         /// Workspace containing conflicts
@@ -1545,6 +1548,12 @@ pub enum WorkspaceCommands {
         ///   PATH=NAME     — resolve one file
         #[arg(long, conflicts_with = "list")]
         keep: Vec<String>,
+
+        /// Accept the current file contents as the manual resolution.
+        /// Refuses while conflict markers remain. Any validated leading maw
+        /// conflict header is removed; all remaining bytes are preserved.
+        #[arg(long, conflicts_with_all = ["keep", "list"])]
+        accept_current: bool,
 
         /// List conflicted files and blocks (with IDs for per-block resolution)
         #[arg(long)]
@@ -2050,11 +2059,12 @@ pub fn run(cmd: WorkspaceCommands) -> Result<()> {
             workspace,
             paths,
             keep,
+            accept_current,
             list,
             format,
         } => {
             let fmt = OutputFormat::resolve(format);
-            resolve::run(&workspace, &paths, &keep, list, fmt)
+            resolve::run(&workspace, &paths, &keep, accept_current, list, fmt)
         }
     }
 }

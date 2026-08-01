@@ -2670,58 +2670,76 @@ pub fn show_conflicts(workspaces: &[String], format: OutputFormat) -> Result<()>
         return Ok(());
     }
 
-    // Embedded-marker branch: merge engine is clean but at least one
-    // workspace has committed conflict markers in its worktree.
-    if !workspaces_with_markers.is_empty() && !has_conflicts {
+    // Recorded/placeholder conflict state is independently merge-blocking.
+    // Report it even when PREPARE+BUILD also found merge conflicts so this
+    // surface cannot hide one category behind the other (bn-3v9e).
+    if !workspaces_with_markers.is_empty() {
+        let conflicts_with_ids = assign_conflict_ids(&build_output.conflicts);
+        let mut unique_paths: BTreeSet<PathBuf> = build_output
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.path.clone())
+            .collect();
+        for (_, paths) in &workspaces_with_markers {
+            unique_paths.extend(paths.iter().cloned());
+        }
         if format == OutputFormat::Json {
-            let marker_msg = workspaces_with_markers
+            let state_msg = workspaces_with_markers
                 .iter()
                 .map(|(ws, files)| format!("{ws}: {} file(s)", files.len()))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let conflict_jsons: Vec<ConflictJson> = conflicts_with_ids
+                .iter()
+                .map(|conflict| {
+                    conflict_record_to_json_with_id(
+                        &conflict.record,
+                        Some(&conflict.id),
+                        &conflict.atom_ids,
+                    )
+                })
+                .collect();
             let out = ConflictsOutput {
-                status: "embedded_markers".to_string(),
+                status: "conflict_state".to_string(),
                 workspaces: workspaces.to_vec(),
                 has_conflicts: true,
-                conflict_count: workspaces_with_markers.iter().map(|(_, f)| f.len()).sum(),
-                conflicts: vec![],
+                conflict_count: unique_paths.len(),
+                conflicts: conflict_jsons,
                 message: format!(
-                    "Merge engine reports clean, but embedded conflict markers \
-                     detected in workspace HEADs: {marker_msg}"
+                    "Workspace conflict state blocks merge ({state_msg}); the merge engine \
+                     also found {} conflict(s).",
+                    build_output.conflicts.len()
                 ),
                 to_fix: Some(
-                    "Strip markers from the affected files and commit the \
-                     resolution, then retry. See `maw ws resolve <name> --list`."
+                    "Inspect each workspace with `maw ws resolve <name> --list`; use \
+                     `--keep <side>` for untouched placeholders or `--accept-current -- \
+                     PATH` for manual resolutions, then retry."
                         .to_string(),
                 ),
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
-            println!(
-                "WARNING: No merge conflicts detected, BUT the following workspace(s) \
-                 have unresolved conflict markers committed into HEAD (probably from \
-                 a prior `maw ws sync`):"
-            );
-            for (ws_name, marker_files) in &workspaces_with_markers {
+            if has_conflicts {
+                print_conflict_report(&conflicts_with_ids, workspaces, default_ws);
+                println!();
+            }
+            println!("Workspace conflict state also blocks merge:");
+            for (ws_name, conflict_files) in &workspaces_with_markers {
                 println!("  {ws_name}:");
-                for f in marker_files {
-                    println!("    - {}", f.display());
+                for path in conflict_files {
+                    println!("    - {}", path.display());
                 }
             }
             println!();
-            println!(
-                "To fix: open each file, remove the <<<<<<<, =======, and >>>>>>> \
-                 markers (keeping the sides you want), then:"
-            );
             for (ws_name, _) in &workspaces_with_markers {
+                println!("  Check: maw ws resolve {ws_name} --list");
+                println!("  Keep a recorded side: maw ws resolve {ws_name} --keep <side>");
                 println!(
-                    "  maw exec {ws_name} -- git add -A && maw exec {ws_name} -- git commit -m 'resolve conflicts'"
+                    "  Preserve a manual resolution: maw ws resolve {ws_name} --accept-current -- PATH"
                 );
             }
-            println!();
-            println!("Then retry the merge.");
         }
-        bail!("embedded conflict markers detected in workspace HEAD(s)");
+        bail!("workspace conflict state blocks merge");
     }
 
     // Assign terseid IDs to conflicts
@@ -3046,11 +3064,56 @@ fn assert_sources_clean_for_merge(
             );
         }
 
+        let (marker_paths, header_only_paths) = if state.placeholder_paths.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            classify_placeholder_paths(root, ws_path, &state.placeholder_paths)
+        };
+
+        // A header-only placeholder is a manual resolution awaiting explicit
+        // acceptance, not an instruction to choose one recorded side again.
+        // Surface this before the generic recorded-state gate so `--keep`
+        // cannot be suggested for the bn-3v9e data-loss shape.
+        if !header_only_paths.is_empty() {
+            let unique_prefixes: BTreeSet<&str> = header_only_paths
+                .iter()
+                .map(|(_, prefix)| *prefix)
+                .collect();
+            let file_list = header_only_paths
+                .iter()
+                .map(|(path, _)| format!("  - {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let path_args = header_only_paths
+                .iter()
+                .map(|(path, _)| shell_quote_path(path))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let header_fix = if unique_prefixes.len() == 1 {
+                let prefix = unique_prefixes.iter().next().copied().unwrap_or("#");
+                format!(
+                    "Delete the leading '{prefix}' header lines (\"{prefix} structured conflict at ...\" and its metadata lines)"
+                )
+            } else {
+                "Delete the leading maw header lines using each file's displayed comment prefix"
+                    .to_owned()
+            };
+            bail!(
+                "Workspace '{ws_name}' has {} path(s) that appear manually resolved but \
+                 still begin with a validated maw conflict header:\n{file_list}\n  \
+                 {header_fix} while preserving the current content:\n    \
+                 maw ws resolve {ws_name} --accept-current -- {path_args}\n  \
+                 This check cannot be bypassed by --force because merging a maw conflict \
+                 header would corrupt the target branch.",
+                header_only_paths.len()
+            );
+        }
+
         // Gate 1 (bn-m6ad/bn-3pgl/bn-3oau): recorded sidecar conflicts with
         // remaining evidence. Bypassable by --force.
         if !force && !state.recorded_paths.is_empty() {
-            let file_list = state
-                .recorded_paths
+            let unresolved = state.unresolved_paths();
+            let file_list = unresolved
                 .iter()
                 .map(|p| format!("  - {}", p.display()))
                 .collect::<Vec<_>>()
@@ -3060,7 +3123,7 @@ fn assert_sources_clean_for_merge(
                  {file_list}\n  \
                  Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
                  To force merge anyway: maw ws merge {ws_name} --into {into_target} --force",
-                state.recorded_paths.len()
+                unresolved.len()
             );
         }
 
@@ -3075,80 +3138,22 @@ fn assert_sources_clean_for_merge(
         // leading `#` header lines before committing — point at that exact
         // fix instead). Both remain hard-blocking and not bypassable by
         // --force.
-        if !state.placeholder_paths.is_empty() {
-            let (marker_paths, header_only_paths) =
-                classify_placeholder_paths(root, ws_path, &state.placeholder_paths);
-
-            if !marker_paths.is_empty() {
-                let file_list = marker_paths
-                    .iter()
-                    .map(|p| format!("  - {}", p.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                bail!(
-                    "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
-                     tool-authored conflict placeholders:\n\
-                     {file_list}\n  \
-                     Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
-                     Possible cause: the conflict sidecar was deleted or corrupted. \
-                     This check cannot be bypassed by --force because merging placeholder \
-                     blobs would corrupt the target branch.",
-                    marker_paths.len()
-                );
-            }
-
-            if !header_only_paths.is_empty() {
-                // bn-drk3: quote the ACTUAL header-comment prefix each file
-                // used rather than assuming legacy `#` — a conflicted `.rs`
-                // file's leftover header uses `//`, for example. When every
-                // offending file happens to share one prefix (by far the
-                // common case: legacy workspaces, or one extension per
-                // conflict batch) the message stays byte-identical to the
-                // pre-bn-drk3 wording for the `#` case.
-                let unique_prefixes: std::collections::BTreeSet<&str> = header_only_paths
-                    .iter()
-                    .map(|(_, prefix)| *prefix)
-                    .collect();
-                let mixed = unique_prefixes.len() > 1;
-
-                let file_list = header_only_paths
-                    .iter()
-                    .map(|(p, prefix)| {
-                        if mixed {
-                            format!("  - {} (header prefix: '{prefix}')", p.display())
-                        } else {
-                            format!("  - {}", p.display())
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let fix_hint = if mixed {
-                    "Delete the leading header-comment lines shown above for each file — \
-                     each uses its own comment syntax (\"<prefix> structured conflict at \
-                     ...\", \"<prefix> base blob: ...\", \"<prefix> side ... blob: ...\", or \
-                     \"<prefix> BINARY CONFLICT at ...\", where <prefix> is that file's own \
-                     header prefix)"
-                        .to_owned()
-                } else {
-                    let prefix = unique_prefixes.into_iter().next().unwrap_or("#");
-                    format!(
-                        "Delete the leading '{prefix}' header lines (\"{prefix} structured \
-                         conflict at ...\", \"{prefix} base blob: ...\", \"{prefix} side ... \
-                         blob: ...\", or \"{prefix} BINARY CONFLICT at ...\")"
-                    )
-                };
-
-                bail!(
-                    "Workspace '{ws_name}' has {} path(s) that appear manually resolved \
-                     but still begin with the maw conflict header:\n\
-                     {file_list}\n  \
-                     {fix_hint}, commit, and re-run the merge.\n  \
-                     This check cannot be bypassed by --force because merging a blob that \
-                     still carries the maw conflict header would corrupt the target branch.",
-                    header_only_paths.len()
-                );
-            }
+        if !marker_paths.is_empty() {
+            let file_list = marker_paths
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Workspace '{ws_name}' has {} path(s) whose HEAD blob contains \
+                 tool-authored conflict placeholders:\n\
+                 {file_list}\n  \
+                 Resolve them: maw ws resolve {ws_name} --list, then --keep <side>\n  \
+                 Possible cause: the conflict sidecar was deleted or corrupted. \
+                 This check cannot be bypassed by --force because merging placeholder \
+                 blobs would corrupt the target branch.",
+                marker_paths.len()
+            );
         }
     }
 
@@ -3158,6 +3163,23 @@ fn assert_sources_clean_for_merge(
 // ---------------------------------------------------------------------------
 // bn-1etl: Gate 2 message classification
 // ---------------------------------------------------------------------------
+
+fn shell_quote_path(path: &Path) -> String {
+    let value = path.display().to_string();
+    if !value.is_empty()
+        && value.chars().all(|character| {
+            matches!(character,
+                'a'..='z' | 'A'..='Z' | '0'..='9'
+                | '.' | '/' | '-' | '_' | '+' | ',' | '@' | '%'
+                | ':' | '=' | '^'
+            )
+        })
+    {
+        value
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
 
 /// Classify each of `placeholder_paths` (already known to start with a
 /// [`maw_core::merge::materialize::TOOL_PLACEHOLDER_PREFIXES`] entry — see

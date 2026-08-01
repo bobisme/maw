@@ -134,6 +134,24 @@ pub fn delete_rebase_conflicts(root: &Path, ws_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite legacy conflict metadata after stale paths have been pruned.
+/// Empty metadata is removed so every reader observes the same state.
+pub fn write_rebase_conflicts(
+    root: &Path,
+    ws_name: &str,
+    conflicts: &RebaseConflicts,
+) -> Result<()> {
+    if conflicts.conflicts.is_empty() {
+        return delete_rebase_conflicts(root, ws_name);
+    }
+    let path = rebase_conflicts_path(root, ws_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(conflicts)?)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Rebase implementation — routed through maw-core::merge
 // ---------------------------------------------------------------------------

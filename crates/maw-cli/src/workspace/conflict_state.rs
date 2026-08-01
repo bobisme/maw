@@ -72,15 +72,10 @@ impl EffectiveConflictState {
         !self.recorded_paths.is_empty() || !self.placeholder_paths.is_empty()
     }
 
-    /// Number of genuine unresolved conflicts. Recorded (sidecar-backed)
-    /// conflicts take precedence; with no surviving sidecar this falls back
-    /// to the count of placeholder blobs in HEAD.
-    pub const fn conflict_count(&self) -> usize {
-        if self.recorded_paths.is_empty() {
-            self.placeholder_paths.len()
-        } else {
-            self.recorded_paths.len()
-        }
+    /// Number of genuine unresolved conflict paths across both evidence
+    /// sources, sorted and deduplicated.
+    pub fn conflict_count(&self) -> usize {
+        self.unresolved_paths().len()
     }
 
     /// Union of all paths with unresolved conflict evidence (sorted, deduped).
@@ -142,6 +137,32 @@ fn recorded_sidecar_paths(root: &Path, ws_name: &str) -> Vec<PathBuf> {
         return set.into_iter().collect();
     }
     Vec::new()
+}
+
+/// Remove only recorded entries that have no remaining marker or placeholder
+/// evidence. This prevents one unresolved sibling path from keeping already
+/// committed manual resolutions selectable through `ws resolve --keep`.
+fn prune_recorded_sidecars(
+    root: &Path,
+    ws_name: &str,
+    surviving: &BTreeSet<PathBuf>,
+) -> Result<()> {
+    if surviving.is_empty() {
+        return super::resolve_structured::clear_conflict_sidecars(root, ws_name);
+    }
+
+    if let Some(mut tree) = super::resolve_structured::read_conflict_tree_sidecar(root, ws_name) {
+        tree.conflicts.retain(|path, _| surviving.contains(path));
+        return super::resolve_structured::write_conflict_tree_sidecar(root, ws_name, &tree);
+    }
+
+    if let Some(mut legacy) = super::sync::read_rebase_conflicts(root, ws_name) {
+        legacy
+            .conflicts
+            .retain(|conflict| surviving.contains(Path::new(&conflict.path)));
+        return super::sync::rebase::write_rebase_conflicts(root, ws_name, &legacy);
+    }
+    Ok(())
 }
 
 /// Scan the workspace HEAD tree for tool-authored placeholder blobs.
@@ -208,17 +229,27 @@ fn compute(
     let tracked: BTreeSet<PathBuf> = state.recorded_paths.iter().cloned().collect();
     let marker_evidence = super::resolve::find_conflicted_files_filtered(ws_path, Some(&tracked))?;
 
-    let verified_clean = marker_evidence.is_empty()
-        && matches!(&head_scan, Some(placeholders) if placeholders.is_empty());
+    // A failed HEAD scan means we cannot distinguish a committed placeholder
+    // from a committed manual resolution. Fail closed and retain every entry.
+    if let Some(placeholders) = &head_scan {
+        let mut evidence: BTreeSet<PathBuf> = marker_evidence.into_iter().collect();
+        evidence.extend(
+            placeholders
+                .iter()
+                .filter(|path| tracked.contains(*path))
+                .cloned(),
+        );
+        let surviving: BTreeSet<PathBuf> = tracked.intersection(&evidence).cloned().collect();
 
-    if verified_clean {
-        // Manual resolution was committed: the metadata is stale. Clear it
-        // right here (best-effort — a read-only filesystem must not turn a
-        // read path into an error; the state we return is authoritative
-        // either way and the next reader will retry the clear).
-        let _ = super::resolve_structured::clear_conflict_sidecars(root, ws_name);
-        state.recorded_paths.clear();
-        state.cleared_stale_sidecar = true;
+        if surviving.len() < tracked.len() {
+            // Best-effort persistence: read paths still return the verified
+            // state when metadata is read-only, and a later reader retries.
+            let _ = prune_recorded_sidecars(root, ws_name, &surviving);
+            state.recorded_paths = surviving.into_iter().collect();
+            if state.recorded_paths.is_empty() {
+                state.cleared_stale_sidecar = true;
+            }
+        }
     }
 
     Ok(state)

@@ -36,16 +36,16 @@
 //! When the sidecar is absent or unparseable, callers fall back to the legacy
 //! marker-scanning path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
 use maw_core::config::ManifoldConfig;
-use maw_core::merge::materialize::looks_text;
+use maw_core::merge::materialize::{FinalEntry, looks_text, materialize};
 use maw_core::merge::types::ConflictTree;
 use maw_core::model::conflict::{Conflict, ConflictSide, ConflictSideMode};
-use maw_core::model::types::GitOid;
+use maw_core::model::types::{EpochId, GitOid};
 use maw_git::{self as git, GitRepo};
 
 use crate::format::OutputFormat;
@@ -111,7 +111,7 @@ pub fn clear_conflict_sidecars(root: &Path, ws_name: &str) -> Result<()> {
 
 /// Write an updated `ConflictTree` back to the sidecar. If the tree has no
 /// remaining conflicts (and no remaining clean entries), delete the file.
-fn write_conflict_tree_sidecar(root: &Path, ws_name: &str, tree: &ConflictTree) -> Result<()> {
+pub fn write_conflict_tree_sidecar(root: &Path, ws_name: &str, tree: &ConflictTree) -> Result<()> {
     let path = structured_sidecar_path(root, ws_name);
     if tree.conflicts.is_empty() && tree.clean.is_empty() {
         if path.exists() {
@@ -125,6 +125,25 @@ fn write_conflict_tree_sidecar(root: &Path, ws_name: &str, tree: &ConflictTree) 
     }
     let json = serde_json::to_string_pretty(tree)?;
     std::fs::write(&path, json)?;
+    Ok(())
+}
+
+/// Persist a structured sidecar even when its conflict map is empty.
+///
+/// An empty structured sidecar is temporarily useful when an invocation
+/// resolved every structured entry but HEAD still contains a placeholder-only
+/// path. Keeping the schema available lets a later `--accept-current` finish
+/// that path safely instead of falling through to the legacy marker parser.
+fn write_conflict_tree_sidecar_preserving_empty(
+    root: &Path,
+    ws_name: &str,
+    tree: &ConflictTree,
+) -> Result<()> {
+    let path = structured_sidecar_path(root, ws_name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(tree)?)?;
     Ok(())
 }
 
@@ -260,6 +279,611 @@ fn print_resolve_hint(workspace: &str) {
     println!(
         "  maw ws resolve {workspace} --keep union            # keep all sides (deduped, ours-first)"
     );
+    println!(
+        "  maw ws resolve {workspace} --accept-current -- PATH # preserve a manual resolution"
+    );
+}
+
+/// Render `--list` with any placeholder-only paths included in the same
+/// conflict count. Those paths can survive after one structured entry was
+/// resolved manually and its sidecar record became stale.
+#[expect(
+    clippy::too_many_lines,
+    reason = "list output keeps structured, placeholder-only, and manual-current states aligned"
+)]
+fn list_conflicts_with_placeholders(
+    tree: &ConflictTree,
+    workspace: &str,
+    ws_path: &Path,
+    filter_paths: &[String],
+    format: OutputFormat,
+    placeholder_paths: &[PathBuf],
+) -> Result<()> {
+    let recorded: BTreeSet<PathBuf> = tree.conflicts.keys().cloned().collect();
+    let filter: Option<BTreeSet<PathBuf>> = if filter_paths.is_empty() {
+        None
+    } else {
+        Some(filter_paths.iter().map(PathBuf::from).collect())
+    };
+    let placeholder_only: Vec<PathBuf> = placeholder_paths
+        .iter()
+        .filter(|path| !recorded.contains(*path))
+        .filter(|path| filter.as_ref().is_none_or(|paths| paths.contains(*path)))
+        .cloned()
+        .collect();
+
+    let projection = git::GixRepo::open(ws_path)
+        .ok()
+        .and_then(|repo| materialize(tree, &repo).ok());
+    let mut pending_current: BTreeSet<PathBuf> = BTreeSet::new();
+    if let Some(projection) = &projection {
+        for path in tree
+            .conflicts
+            .keys()
+            .filter(|path| filter.as_ref().is_none_or(|paths| paths.contains(*path)))
+        {
+            let Some(FinalEntry::Rendered { content, .. }) = projection.entries.get(path) else {
+                continue;
+            };
+            let current = std::fs::read(ws_path.join(path)).ok();
+            if current.as_deref() != Some(content.as_slice())
+                && current
+                    .as_deref()
+                    .is_none_or(|bytes| !contains_conflict_marker_line(bytes))
+            {
+                pending_current.insert(path.clone());
+            }
+        }
+    }
+    for path in &placeholder_only {
+        let current = std::fs::read(ws_path.join(path)).ok();
+        if current
+            .as_deref()
+            .is_none_or(|bytes| !contains_conflict_marker_line(bytes))
+        {
+            pending_current.insert(path.clone());
+        }
+    }
+
+    if placeholder_only.is_empty() && pending_current.is_empty() {
+        return list_conflicts(tree, workspace, filter_paths, format);
+    }
+
+    let entries: Vec<(&PathBuf, &Conflict)> = tree
+        .conflicts
+        .iter()
+        .filter(|(path, _)| filter.as_ref().is_none_or(|paths| paths.contains(*path)))
+        .collect();
+    let structured_count = entries.len();
+    let total = structured_count + placeholder_only.len();
+    if format == OutputFormat::Json {
+        let conflicts: Vec<String> = entries
+            .iter()
+            .map(|(path, conflict)| {
+                let workspaces = conflict
+                    .workspaces()
+                    .iter()
+                    .map(|workspace| format!("\"{}\"", workspace.replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let atoms = match conflict {
+                    Conflict::Content { atoms, .. } => atoms.len(),
+                    _ => 0,
+                };
+                format!(
+                    r#"{{"path":"{}","shape":"{}","sides":{},"atoms":{atoms},"workspaces":[{workspaces}]}}"#,
+                    path.display(),
+                    conflict.variant_name(),
+                    conflict.side_count()
+                )
+            })
+            .collect();
+        let placeholders: Vec<String> = placeholder_only
+            .iter()
+            .map(|path| {
+                format!(
+                    r#"{{"path":"{}","state":"placeholder_only"}}"#,
+                    path.display()
+                )
+            })
+            .collect();
+        let pending: Vec<String> = pending_current
+            .iter()
+            .map(|path| format!("\"{}\"", path.display()))
+            .collect();
+        println!(
+            r#"{{"workspace":"{workspace}","conflict_count":{total},"structured":true,"recorded_conflict_count":{structured_count},"conflicts":[{}],"placeholder_only":[{}],"pending_current":[{}]}}"#,
+            conflicts.join(","),
+            placeholders.join(","),
+            pending.join(",")
+        );
+        return Ok(());
+    }
+
+    if structured_count > 0 {
+        list_conflicts(tree, workspace, filter_paths, format)?;
+        println!();
+    }
+    if !placeholder_only.is_empty() {
+        println!(
+            "{} additional conflict path(s) remain in committed maw placeholder state:",
+            placeholder_only.len()
+        );
+        for path in &placeholder_only {
+            println!("  {}  [placeholder-only]", path.display());
+        }
+    }
+    if pending_current.is_empty() {
+        println!();
+        println!("To resolve the remaining placeholder:");
+        println!("  maw ws resolve {workspace} --keep <side>");
+    } else {
+        println!("Current content appears manually resolved and awaits explicit acceptance:");
+        for path in &pending_current {
+            println!("  {}", path.display());
+        }
+        println!();
+        println!("To preserve those exact current bytes:");
+        println!(
+            "  {}",
+            accept_current_command(workspace, &pending_current.into_iter().collect::<Vec<_>>())
+        );
+    }
+    Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    let needs_quoting = value.is_empty()
+        || value.chars().any(|c| {
+            !matches!(c,
+                'a'..='z' | 'A'..='Z' | '0'..='9'
+                | '.' | '/' | '-' | '_' | '+' | ',' | '@' | '%'
+                | ':' | '=' | '^'
+            )
+        });
+    if needs_quoting {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    } else {
+        value.to_owned()
+    }
+}
+
+fn accept_current_command(workspace: &str, paths: &[PathBuf]) -> String {
+    let selected = paths
+        .iter()
+        .map(|path| shell_quote(&path.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("maw ws resolve {workspace} --accept-current -- {selected}")
+}
+
+fn contains_conflict_marker_line(content: &[u8]) -> bool {
+    content.split(|byte| *byte == b'\n').any(|line| {
+        line.starts_with(b"<<<<<<<")
+            || line.starts_with(b"|||||||")
+            || line == b"======="
+            || line.starts_with(b">>>>>>>")
+    })
+}
+
+fn first_blank_line_end(content: &[u8]) -> Option<usize> {
+    content
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|position| position + 2)
+}
+
+fn begins_with_known_header(content: &[u8]) -> bool {
+    maw_core::merge::materialize::is_tool_placeholder_blob(content)
+        || content.starts_with(b"# add/add conflict at ")
+        || content.starts_with(b"# modify/delete conflict at ")
+}
+
+fn header_first_line_matches_path(content: &[u8], path: &Path) -> bool {
+    let first_line = content
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let path = path.display();
+    maw_core::merge::materialize::HEADER_PREFIXES
+        .iter()
+        .any(|prefix| {
+            first_line == format!("{prefix} structured conflict at {path}").as_bytes()
+                || first_line.starts_with(format!("{prefix} BINARY CONFLICT at {path} ").as_bytes())
+        })
+        || first_line == format!("# add/add conflict at {path}").as_bytes()
+        || first_line == format!("# modify/delete conflict at {path}").as_bytes()
+}
+
+fn rendered_header(content: &[u8]) -> Result<&[u8]> {
+    if !begins_with_known_header(content) {
+        bail!("materialized conflict does not begin with a recognized maw header");
+    }
+    let end = first_blank_line_end(content)
+        .ok_or_else(|| anyhow::anyhow!("materialized conflict header has no blank separator"))?;
+    Ok(&content[..end])
+}
+
+fn checked_workspace_path(ws_path: &Path, relative: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!(
+            "Refusing unsafe conflict path '{}': paths must be normalized and relative to \
+             the workspace. No files were changed.",
+            relative.display()
+        );
+    }
+
+    let canonical_workspace = ws_path.canonicalize().map_err(|error| {
+        anyhow::anyhow!(
+            "cannot verify workspace path '{}': {error}",
+            ws_path.display()
+        )
+    })?;
+    let absolute = ws_path.join(relative);
+    let mut existing = absolute.as_path();
+    while !existing.exists() {
+        existing = existing.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot find an existing parent for '{}'",
+                absolute.display()
+            )
+        })?;
+    }
+    let canonical_existing = existing.canonicalize().map_err(|error| {
+        anyhow::anyhow!(
+            "cannot verify conflict path '{}': {error}",
+            relative.display()
+        )
+    })?;
+    if !canonical_existing.starts_with(&canonical_workspace) {
+        bail!(
+            "Refusing conflict path '{}' because it resolves outside workspace '{}'. \
+             No files were changed.",
+            relative.display(),
+            ws_path.display()
+        );
+    }
+    Ok(absolute)
+}
+
+fn remaining_conflict_paths(
+    tree: &ConflictTree,
+    placeholder_paths: &[PathBuf],
+    resolved: &[PathBuf],
+) -> BTreeSet<PathBuf> {
+    let resolved: BTreeSet<&PathBuf> = resolved.iter().collect();
+    let mut remaining: BTreeSet<PathBuf> = tree.conflicts.keys().cloned().collect();
+    remaining.extend(
+        placeholder_paths
+            .iter()
+            .filter(|path| !resolved.contains(path))
+            .cloned(),
+    );
+    remaining
+}
+
+/// Refuse a recorded-side `--keep` before touching any file when a selected
+/// path no longer equals the placeholder projection that the sidecar records.
+/// This is the core bn-3v9e guard: hand edits require the explicit
+/// `--accept-current` operation and can never be silently overwritten.
+fn preflight_keep_targets(
+    repo: &dyn GitRepo,
+    workspace: &str,
+    ws_path: &Path,
+    tree: &ConflictTree,
+    target_paths: &[PathBuf],
+) -> Result<()> {
+    let dirty = super::resolve::dirty_paths_vs_head(ws_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot verify whether selected conflict paths contain hand edits.\n  \
+             No files were changed. Check: maw exec {workspace} -- git status --short"
+        )
+    })?;
+    let projection = materialize(tree, repo)
+        .map_err(|error| anyhow::anyhow!("failed to reconstruct conflict placeholders: {error}"))?;
+    let mut changed = Vec::new();
+
+    for path in target_paths {
+        let absolute = checked_workspace_path(ws_path, path)?;
+        let Some(FinalEntry::Rendered { content, .. }) = projection.entries.get(path) else {
+            continue;
+        };
+        let current = std::fs::read(absolute).ok();
+        let is_clean_unresolved_placeholder = current.as_deref().is_some_and(|bytes| {
+            begins_with_known_header(bytes) && contains_conflict_marker_line(bytes)
+        });
+        if dirty.contains(path)
+            || (current.as_deref() != Some(content.as_slice()) && !is_clean_unresolved_placeholder)
+        {
+            changed.push(path.clone());
+        }
+    }
+
+    if !changed.is_empty() {
+        let files = changed
+            .iter()
+            .map(|path| format!("  - {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "Refusing --keep because {} selected conflict path(s) differ from the \
+             recorded maw placeholder:\n{files}\n  \
+             No files were changed. To preserve the current bytes:\n    {}",
+            changed.len(),
+            accept_current_command(workspace, &changed)
+        );
+    }
+    Ok(())
+}
+
+/// Accept the bytes currently present in selected conflicted paths.
+///
+/// Validation is completed for every selected path before the first write or
+/// sidecar mutation. A matching, tool-authored header is removed; otherwise
+/// the current bytes (or current deletion) are preserved exactly.
+#[expect(
+    clippy::too_many_lines,
+    reason = "accept-current performs one atomic validation pass before mutation and reporting"
+)]
+fn run_accept_current(
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    paths: &[String],
+    format: OutputFormat,
+    mut tree: ConflictTree,
+    placeholder_paths: &[PathBuf],
+) -> Result<bool> {
+    let repo = git::GixRepo::open(ws_path).map_err(|error| {
+        anyhow::anyhow!("Failed to open git repo at {}: {error}", ws_path.display())
+    })?;
+    let projection = materialize(&tree, &repo)
+        .map_err(|error| anyhow::anyhow!("failed to reconstruct conflict placeholders: {error}"))?;
+
+    let known: BTreeSet<PathBuf> = tree
+        .conflicts
+        .keys()
+        .chain(placeholder_paths.iter())
+        .cloned()
+        .collect();
+    let targets: BTreeSet<PathBuf> = if paths.is_empty() {
+        known.clone()
+    } else {
+        paths.iter().map(PathBuf::from).collect()
+    };
+    let unknown: Vec<PathBuf> = targets.difference(&known).cloned().collect();
+    if !unknown.is_empty() {
+        let files = unknown
+            .iter()
+            .map(|path| format!("  - {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "Cannot accept current content for path(s) that are not in the effective \
+             conflict state:\n{files}\n  \
+             No files were changed. Check: maw ws resolve {workspace} --list"
+        );
+    }
+    if targets.is_empty() {
+        bail!(
+            "Workspace '{workspace}' has no current conflict paths to accept.\n  \
+             Check: maw ws resolve {workspace} --list"
+        );
+    }
+
+    // (path, replacement). `None` preserves a current deletion; `Some` is
+    // written only when stripping a validated header changes the bytes.
+    let mut planned: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
+    for path in &targets {
+        let absolute = checked_workspace_path(ws_path, path)?;
+        if std::fs::symlink_metadata(&absolute)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!(
+                "Refusing --accept-current for symlink path '{}'. No files were changed.\n  \
+                 Replace the symlink with the intended resolved file, then retry.",
+                path.display()
+            );
+        }
+        let current = match std::fs::read(&absolute) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                bail!(
+                    "Cannot read current conflict path '{}': {error}\n  \
+                     No files were changed.",
+                    path.display()
+                );
+            }
+        };
+
+        let Some(current) = current else {
+            planned.push((path.clone(), None));
+            continue;
+        };
+        if contains_conflict_marker_line(&current) {
+            bail!(
+                "Refusing --accept-current because '{}' still contains conflict-marker \
+                 lines.\n  No files were changed. Resolve the markers, then run:\n    {}",
+                path.display(),
+                accept_current_command(workspace, std::slice::from_ref(path))
+            );
+        }
+
+        let replacement = match projection.entries.get(path) {
+            Some(FinalEntry::Rendered {
+                content: rendered, ..
+            }) => {
+                let expected = rendered_header(rendered)?;
+                if current.starts_with(expected) {
+                    Some(current[expected.len()..].to_vec())
+                } else if begins_with_known_header(&current) {
+                    bail!(
+                        "Refusing --accept-current because the maw header in '{}' does not \
+                         match its recorded conflict metadata.\n  \
+                         No files were changed. Check: maw ws resolve {workspace} --list",
+                        path.display()
+                    );
+                } else {
+                    Some(current)
+                }
+            }
+            _ => {
+                // Placeholder-only state has no surviving conflict record.
+                // Validate its first line against the selected path before
+                // stripping the header; header-free manual content is already
+                // exactly what the user asked us to preserve.
+                if begins_with_known_header(&current) {
+                    if !header_first_line_matches_path(&current, path) {
+                        bail!(
+                            "Refusing --accept-current because the maw header in '{}' names \
+                             a different or malformed conflict path.\n  No files were changed.",
+                            path.display()
+                        );
+                    }
+                    let end = first_blank_line_end(&current).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Refusing --accept-current because the maw header in '{}' has no \
+                             blank separator.\n  No files were changed.",
+                            path.display()
+                        )
+                    })?;
+                    Some(current[end..].to_vec())
+                } else {
+                    Some(current)
+                }
+            }
+        };
+        planned.push((path.clone(), replacement));
+    }
+
+    // Every target is validated. Apply only the header-removal writes that
+    // actually change bytes; header-free manual content remains byte-exact.
+    for (path, replacement) in &planned {
+        if let Some(replacement) = replacement {
+            let absolute = ws_path.join(path);
+            if std::fs::read(&absolute).ok().as_deref() != Some(replacement.as_slice()) {
+                std::fs::write(&absolute, replacement).map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to write accepted path '{}': {error}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        tree.conflicts.remove(path);
+    }
+
+    let accepted: Vec<PathBuf> = planned.iter().map(|(path, _)| path.clone()).collect();
+    let remaining = remaining_conflict_paths(&tree, placeholder_paths, &accepted);
+    if remaining.is_empty() {
+        clear_conflict_sidecars(root, workspace)?;
+    } else if tree.conflicts.is_empty() {
+        write_conflict_tree_sidecar_preserving_empty(root, workspace, &tree)?;
+    } else {
+        write_conflict_tree_sidecar(root, workspace, &tree)?;
+    }
+
+    let auto_commit =
+        auto_commit_resolution(ws_path, workspace, &accepted, AutoCommitKind::AcceptCurrent);
+    let auto_commit_msg = match auto_commit {
+        Ok(message) => message,
+        Err(error) => {
+            tracing::warn!("auto-commit after --accept-current failed in '{workspace}': {error}");
+            eprintln!(
+                "WARNING: auto-commit after --accept-current failed: {error}\n  \
+                 To fix: maw exec {workspace} -- git status --short"
+            );
+            None
+        }
+    };
+
+    if format == OutputFormat::Json {
+        let accepted_json = accepted
+            .iter()
+            .map(|path| format!("\"{}\"", path.display()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let committed = auto_commit_msg
+            .as_ref()
+            .map_or_else(String::new, |sha| format!(r#","auto_committed":"{sha}""#));
+        println!(
+            r#"{{"status":"ok","workspace":"{workspace}","structured":true,"accepted_current":[{accepted_json}],"conflicts_remaining":{}{committed}}}"#,
+            remaining.len()
+        );
+        return Ok(true);
+    }
+
+    for path in &accepted {
+        println!("  accepted current content: {}", path.display());
+    }
+    match &auto_commit_msg {
+        Some(sha) => println!(
+            "\nCurrent resolution committed ({}).",
+            &sha[..sha.len().min(12)]
+        ),
+        None => println!(
+            "\nCurrent resolution recorded; no new commit was created.\n  \
+             Check: maw exec {workspace} -- git status --short"
+        ),
+    }
+    if remaining.is_empty() {
+        println!(
+            "IMPORTANT: conflict resolution does not verify the build or tests.\n  \
+             Next: run the project's checks in workspace '{workspace}'.\n  \
+             Then: maw ws merge {workspace} --into default --check"
+        );
+    } else {
+        println!(
+            "{} conflict path(s) remain.\n  \
+             Next: maw ws resolve {workspace} --list",
+            remaining.len()
+        );
+    }
+    Ok(true)
+}
+
+/// Accept placeholder-only current content when the structured sidecar is
+/// missing and header reconstruction cannot recover it. The effective-state
+/// tripwire has already proven these are maw-authored HEAD placeholders; the
+/// acceptance path still validates each header/path and refuses markers.
+pub(super) fn run_accept_current_placeholders(
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    paths: &[String],
+    format: OutputFormat,
+    placeholder_paths: &[PathBuf],
+) -> Result<bool> {
+    let epoch = maw_core::refs::read_ref(root, &maw_core::refs::workspace_epoch_ref(workspace))?
+        .or(maw_core::refs::read_ref(
+            root,
+            "refs/manifold/epoch/current",
+        )?)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot accept placeholder-only content for '{workspace}': no workspace or current \
+             epoch ref exists.\n  Check: maw doctor"
+            )
+        })?;
+    let base_epoch = EpochId::new(epoch.as_str())
+        .map_err(|error| anyhow::anyhow!("invalid workspace epoch '{epoch}': {error}"))?;
+    run_accept_current(
+        root,
+        workspace,
+        ws_path,
+        paths,
+        format,
+        ConflictTree::new(base_epoch),
+        placeholder_paths,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1605,11 +2229,8 @@ fn collect_epoch_files(
 /// the legacy path). Returns `Ok(false)` only when the caller should still
 /// fall back — currently never, but kept as a signal channel for future
 /// additions.
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "structured resolver keeps path processing and auto-commit reporting together"
-)]
 pub fn run_structured(
     root: &Path,
     workspace: &str,
@@ -1618,22 +2239,99 @@ pub fn run_structured(
     keep: &[String],
     list: bool,
     format: OutputFormat,
+    tree: ConflictTree,
+) -> Result<bool> {
+    run_structured_impl(
+        root,
+        workspace,
+        ws_path,
+        paths,
+        keep,
+        false,
+        list,
+        format,
+        tree,
+        &[],
+        false,
+    )
+}
+
+/// CLI entry point with current-worktree safety and placeholder-state context.
+///
+/// The public [`run_structured`] wrapper remains intentionally lightweight for
+/// low-level unit fixtures that call the resolver directly with synthetic,
+/// uncommitted placeholder files. Real CLI invocations must use this function
+/// so `--keep` cannot overwrite hand edits and `--accept-current` can account
+/// for header-only placeholder paths that are no longer present in the
+/// structured sidecar.
+#[allow(clippy::too_many_arguments)]
+pub fn run_structured_with_state(
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    paths: &[String],
+    keep: &[String],
+    accept_current: bool,
+    list: bool,
+    format: OutputFormat,
+    tree: ConflictTree,
+    placeholder_paths: &[PathBuf],
+) -> Result<bool> {
+    run_structured_impl(
+        root,
+        workspace,
+        ws_path,
+        paths,
+        keep,
+        accept_current,
+        list,
+        format,
+        tree,
+        placeholder_paths,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "structured resolver keeps path processing and auto-commit reporting together"
+)]
+fn run_structured_impl(
+    root: &Path,
+    workspace: &str,
+    ws_path: &Path,
+    paths: &[String],
+    keep: &[String],
+    accept_current: bool,
+    list: bool,
+    format: OutputFormat,
     mut tree: ConflictTree,
+    placeholder_paths: &[PathBuf],
+    protect_current: bool,
 ) -> Result<bool> {
     if list {
-        list_conflicts(&tree, workspace, paths, format)?;
+        list_conflicts_with_placeholders(
+            &tree,
+            workspace,
+            ws_path,
+            paths,
+            format,
+            placeholder_paths,
+        )?;
         return Ok(true);
     }
 
-    if keep.is_empty() {
+    if keep.is_empty() && !accept_current {
         bail!(
-            "Must specify --keep or --list.\n\
+            "Must specify --keep, --accept-current, or --list.\n\
              \n  Examples:\n\
              \n    maw ws resolve {workspace} --keep epoch              # keep epoch side\n\
              \n    maw ws resolve {workspace} --keep <ws-name>          # keep specific workspace\n\
              \n    maw ws resolve {workspace} --keep both               # keep all sides\n\
              \n    maw ws resolve {workspace} --keep union              # keep all sides, deduped\n\
              \n    maw ws resolve {workspace} --keep PATH=<name>        # resolve one file\n\
+             \n    maw ws resolve {workspace} --accept-current -- PATH # accept manual resolution\n\
              \n    maw ws resolve {workspace} --list                    # list conflicts"
         );
     }
@@ -1660,6 +2358,18 @@ pub fn run_structured(
         .map_err(|e| anyhow::anyhow!("Failed to open git repo at {}: {e}", ws_path.display()))?;
     let repo_dyn: &dyn GitRepo = &repo;
 
+    if accept_current {
+        return run_accept_current(
+            root,
+            workspace,
+            ws_path,
+            paths,
+            format,
+            tree,
+            placeholder_paths,
+        );
+    }
+
     // bn-c5ui: load the sanity config the same way rebase does — fail closed
     // (defaults = strict ON, ratio 1.5x) when the config file is absent or
     // unparseable. A missing config is not a licence to skip the check.
@@ -1677,6 +2387,10 @@ pub fn run_structured(
     } else {
         tree.conflicts.keys().cloned().collect()
     };
+
+    if protect_current {
+        preflight_keep_targets(repo_dyn, workspace, ws_path, &tree, &target_paths)?;
+    }
 
     if target_paths.is_empty() {
         if format == OutputFormat::Json {
@@ -1808,16 +2522,18 @@ pub fn run_structured(
         }
     }
 
-    // Persist updated sidecar (or delete if tree is fully empty).
-    write_conflict_tree_sidecar(root, workspace, &tree)?;
+    let remaining_paths = remaining_conflict_paths(&tree, placeholder_paths, &resolved);
 
-    // If the sidecar now has no more conflicts, also sweep the legacy
-    // sidecar so later `find_conflicted_files` runs don't see stale state.
-    if tree.conflicts.is_empty() {
-        let legacy = legacy_sidecar_path(root, workspace);
-        if legacy.exists() {
-            let _ = std::fs::remove_file(&legacy);
-        }
+    // Persist updated state without erasing placeholder-only evidence. A
+    // full resolution clears both schemas; a partial resolution retains an
+    // empty structured schema when that is needed for a later
+    // `--accept-current` invocation.
+    if remaining_paths.is_empty() {
+        clear_conflict_sidecars(root, workspace)?;
+    } else if tree.conflicts.is_empty() {
+        write_conflict_tree_sidecar_preserving_empty(root, workspace, &tree)?;
+    } else {
+        write_conflict_tree_sidecar(root, workspace, &tree)?;
     }
 
     // bn-c5ui: emit loud warnings for any sanity-flagged paths BEFORE the
@@ -1848,8 +2564,8 @@ pub fn run_structured(
     // post-merge sanity check (the user must review flagged files first; a
     // partial commit of the "clean" subset would be confusing).
     let auto_committed =
-        if tree.conflicts.is_empty() && !resolved.is_empty() && sanity_warnings.is_empty() {
-            auto_commit_resolution(ws_path, workspace, &resolved)
+        if remaining_paths.is_empty() && !resolved.is_empty() && sanity_warnings.is_empty() {
+            auto_commit_resolution(ws_path, workspace, &resolved, AutoCommitKind::Keep)
         } else {
             Ok(None)
         };
@@ -1860,6 +2576,10 @@ pub fn run_structured(
             // auto-commit just means the user has to `git commit` manually.
             // Surface the reason so agents can react.
             tracing::warn!("auto-commit after resolve failed in '{workspace}': {e}");
+            eprintln!(
+                "WARNING: auto-commit after conflict resolution failed: {e}\n  \
+                 To fix: maw exec {workspace} -- git status --short"
+            );
             None
         }
     };
@@ -1902,7 +2622,7 @@ pub fn run_structured(
         println!(
             r#"{{"status":"ok","workspace":"{workspace}","structured":true,"resolved":[{}],"conflicts_remaining":{},"skipped":[{}]{}{}}}"#,
             resolved_json.join(","),
-            tree.conflicts.len(),
+            remaining_paths.len(),
             skipped_json.join(","),
             committed_field,
             sanity_field,
@@ -1945,24 +2665,26 @@ pub fn run_structured(
         }
         if resolved.is_empty() && skipped.is_empty() {
             println!("Nothing to resolve.");
-        } else if tree.conflicts.is_empty() {
+        } else if remaining_paths.is_empty() {
             if sanity_warnings.is_empty() {
                 match &auto_commit_msg {
                     Some(sha) => println!(
-                        "\nAll structured conflicts resolved and committed ({}). \
-                         Workspace is ready for merge.",
+                        "\nAll structured conflicts resolved and committed ({}).",
                         &sha[..sha.len().min(12)]
                     ),
                     None if !resolved.is_empty() => println!(
-                        "\nAll structured conflicts resolved — workspace is ready for merge. \
-                         (auto-commit skipped: run `maw exec {workspace} -- git commit` if needed)"
+                        "\nAll structured conflicts resolved. Auto-commit created no commit.\n  \
+                         Check: maw exec {workspace} -- git status --short"
                     ),
                     None => {
-                        println!(
-                            "\nAll structured conflicts resolved — workspace is ready for merge."
-                        );
+                        println!("\nAll structured conflicts resolved.");
                     }
                 }
+                println!(
+                    "IMPORTANT: conflict resolution does not verify the build or tests.\n  \
+                     Next: run the project's checks in workspace '{workspace}'.\n  \
+                     Then: maw ws merge {workspace} --into default --check"
+                );
             } else {
                 // bn-c5ui: at least one resolved path failed the sanity check;
                 // suppress the auto-commit and tell the user exactly what to
@@ -1979,26 +2701,6 @@ pub fn run_structured(
                 // 200 chars). Shell-quote paths that contain spaces or shell
                 // metacharacters so the line is safe to paste verbatim.
                 {
-                    fn shell_quote(s: &str) -> String {
-                        // If the string is non-empty and consists only of
-                        // alphanumerics plus safe punctuation, no quoting needed.
-                        let needs_quoting = s.is_empty()
-                            || s.chars().any(|c| {
-                                !matches!(c,
-                                    'a'..='z' | 'A'..='Z' | '0'..='9'
-                                    | '.' | '/' | '-' | '_' | '+' | ',' | '@' | '%'
-                                    | ':' | '=' | '^' | '~'
-                                )
-                            });
-                        if needs_quoting {
-                            // Single-quote the path; escape any embedded single
-                            // quotes by ending the quote, inserting \', resuming.
-                            format!("'{}'", s.replace('\'', "'\\''"))
-                        } else {
-                            s.to_owned()
-                        }
-                    }
-
                     let quoted_paths: Vec<String> = sanity_warnings
                         .iter()
                         .map(|(p, _)| shell_quote(&p.display().to_string()))
@@ -2024,14 +2726,14 @@ pub fn run_structured(
                 );
             }
         } else {
-            let total_original = tree.conflicts.len() + resolved.len();
+            let total_original = remaining_paths.len() + resolved.len();
             println!(
                 "\n{} of {} conflict(s) resolved, {} remaining. \
                  Run `maw ws resolve {workspace} --list` to continue, \
                  or `maw exec {workspace} -- git commit -m ...` to save progress.",
                 resolved.len(),
                 total_original,
-                tree.conflicts.len(),
+                remaining_paths.len(),
             );
         }
     }
@@ -2057,56 +2759,186 @@ pub fn run_structured(
 // codepath. Migrating requires either porting hook/signing config plumbing
 // into maw-git or accepting that resolve auto-commits skip user hooks —
 // neither is in scope for bn-15wt.
+#[derive(Clone, Copy)]
+enum AutoCommitKind {
+    Keep,
+    AcceptCurrent,
+}
+
+fn stage_resolution_paths(
+    ws_path: &Path,
+    resolved: &[PathBuf],
+    alternate_index: Option<&Path>,
+) -> Result<()> {
+    use std::process::Command;
+
+    let configure_index = |command: &mut Command| {
+        if let Some(index) = alternate_index {
+            command.env("GIT_INDEX_FILE", index);
+        }
+    };
+
+    // Resolve the selected pathspecs to paths already known by this index.
+    // Passing a restored (new) D/F child directly to `git add -u` is an
+    // error, so only feed `-u` the tracked subset returned here.
+    let mut list_tracked = Command::new("git");
+    list_tracked.args(["ls-files", "-z", "--"]);
+    for path in resolved {
+        list_tracked.arg(path);
+    }
+    configure_index(&mut list_tracked);
+    let output = list_tracked
+        .current_dir(ws_path)
+        .output()
+        .map_err(|error| anyhow::anyhow!("git ls-files failed to spawn: {error}"))?;
+    if !output.status.success() {
+        bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let tracked: Vec<PathBuf> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .collect();
+
+    // Stage tracked modifications/deletions without recursively adding
+    // unrelated untracked files beneath a selected D/F collision root.
+    if !tracked.is_empty() {
+        let mut update = Command::new("git");
+        update.args(["add", "-u", "--"]);
+        for path in &tracked {
+            update.arg(path);
+        }
+        configure_index(&mut update);
+        let output = update
+            .current_dir(ws_path)
+            .output()
+            .map_err(|error| anyhow::anyhow!("git add -u failed to spawn: {error}"))?;
+        if !output.status.success() {
+            bail!(
+                "git add -u failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+
+    // Add only exact selected paths that currently exist as files/symlinks.
+    // Restored children are carried as their own resolved paths; directory
+    // roots are skipped so unrelated files beneath them stay untouched.
+    let additions: Vec<&PathBuf> = resolved
+        .iter()
+        .filter(|path| {
+            std::fs::symlink_metadata(ws_path.join(path)).is_ok_and(|metadata| !metadata.is_dir())
+        })
+        .collect();
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let mut add = Command::new("git");
+    add.arg("add").arg("--");
+    for path in additions {
+        add.arg(path);
+    }
+    configure_index(&mut add);
+    let output = add
+        .current_dir(ws_path)
+        .output()
+        .map_err(|error| anyhow::anyhow!("git add failed to spawn: {error}"))?;
+    if !output.status.success() {
+        bail!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn auto_commit_resolution(
     ws_path: &Path,
     workspace: &str,
     resolved: &[PathBuf],
+    kind: AutoCommitKind,
 ) -> Result<Option<String>> {
     use std::process::Command;
 
     // Stage only the paths we actually touched. This is narrower than
     // `git add -A` and avoids pulling in unrelated worktree edits the user
     // might have made alongside the conflict resolution.
-    let mut add = Command::new("git");
-    add.arg("add").arg("--");
-    for p in resolved {
-        add.arg(p);
-    }
-    let add_out = add
-        .current_dir(ws_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!("git add failed to spawn: {e}"))?;
-    if !add_out.status.success() {
-        bail!(
-            "git add failed: {}",
-            String::from_utf8_lossy(&add_out.stderr).trim()
-        );
-    }
+    stage_resolution_paths(ws_path, resolved, None)?;
 
     // If there's nothing staged after the add (e.g. the resolve happened to
     // write the exact same bytes that were already committed), bail out
     // cleanly with `Ok(None)` rather than creating an empty commit.
     let staged = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
+        .args(["diff", "--cached", "--name-only", "-z"])
         .current_dir(ws_path)
-        .status()
+        .output()
         .map_err(|e| anyhow::anyhow!("git diff --cached failed: {e}"))?;
-    if staged.success() {
+    if !staged.status.success() {
+        bail!(
+            "git diff --cached failed: {}",
+            String::from_utf8_lossy(&staged.stderr).trim()
+        );
+    }
+    let has_selected_staged_change = staged
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .any(|staged_path| {
+            resolved
+                .iter()
+                .any(|selected| staged_path.starts_with(selected))
+        });
+    if !has_selected_staged_change {
         // No staged changes — nothing to commit.
         return Ok(None);
     }
 
-    let msg = if resolved.len() == 1 {
-        format!("resolve: {} (bn-gjm8 auto-commit)", resolved[0].display())
-    } else {
-        format!(
+    let msg = match (kind, resolved) {
+        (AutoCommitKind::AcceptCurrent, [path]) => {
+            format!("resolve: accept current content for {}", path.display())
+        }
+        (AutoCommitKind::AcceptCurrent, _) => format!(
+            "resolve: accept current content for {} path(s) in '{workspace}'",
+            resolved.len()
+        ),
+        (AutoCommitKind::Keep, [path]) => {
+            format!("resolve: {} (bn-gjm8 auto-commit)", path.display())
+        }
+        (AutoCommitKind::Keep, _) => format!(
             "resolve: apply structured --keep decisions for {} path(s) in '{workspace}' (bn-gjm8 auto-commit)",
             resolved.len()
-        )
+        ),
     };
+
+    // Commit through an alternate index seeded from HEAD. This isolates the
+    // selected resolution from unrelated staged work and handles D/F
+    // file-to-directory transitions that `git commit -- <path>` rejects.
+    // Normal commit hooks and signing configuration still run.
+    let temp_index_dir = tempfile::tempdir()
+        .map_err(|error| anyhow::anyhow!("failed to create temporary git index: {error}"))?;
+    let temp_index = temp_index_dir.path().join("index");
+    let read_tree = Command::new("git")
+        .args(["read-tree", "HEAD"])
+        .env("GIT_INDEX_FILE", &temp_index)
+        .current_dir(ws_path)
+        .output()
+        .map_err(|error| anyhow::anyhow!("git read-tree failed to spawn: {error}"))?;
+    if !read_tree.status.success() {
+        bail!(
+            "git read-tree failed: {}",
+            String::from_utf8_lossy(&read_tree.stderr).trim()
+        );
+    }
+    stage_resolution_paths(ws_path, resolved, Some(&temp_index))?;
 
     let commit_out = Command::new("git")
         .args(["commit", "-m", &msg])
+        .env("GIT_INDEX_FILE", &temp_index)
         .current_dir(ws_path)
         .output()
         .map_err(|e| anyhow::anyhow!("git commit failed to spawn: {e}"))?;
@@ -2167,6 +2999,40 @@ mod tests {
     /// ordering-key workspace (the label is what's visible in the conflict).
     fn labeled_side(label: &str, ord_ws: &str, c: char) -> ConflictSide {
         ConflictSide::new(label.to_owned(), oid(c), ord(ord_ws))
+    }
+
+    #[test]
+    fn checked_workspace_path_rejects_absolute_and_parent_paths() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+
+        assert!(checked_workspace_path(&workspace, Path::new("src/main.rs")).is_ok());
+        assert!(checked_workspace_path(&workspace, Path::new("../outside.rs")).is_err());
+        assert!(checked_workspace_path(&workspace, temp.path()).is_err());
+    }
+
+    #[test]
+    fn shell_quote_prevents_tilde_expansion_in_suggested_commands() {
+        assert_eq!(shell_quote("~/resolved.txt"), "'~/resolved.txt'");
+        assert_eq!(shell_quote("normal/resolved.txt"), "normal/resolved.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_workspace_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::create_dir(&outside).expect("create outside dir");
+        symlink(&outside, workspace.join("escape")).expect("create symlink");
+
+        let error = checked_workspace_path(&workspace, Path::new("escape/resolved.rs"))
+            .expect_err("symlink must not escape the workspace");
+        assert!(error.to_string().contains("outside workspace"));
     }
 
     #[test]
